@@ -54,6 +54,7 @@ from yoetz.domain.values import (
     timestamp_from_datetime,
     validate_sha256_digest,
 )
+from yoetz.ports.integrations import YOETZ_WORKFLOW_TOOL_NAMES
 from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 
@@ -70,8 +71,11 @@ __all__ = [
     "LocalObservationStore",
     "ObservationOutboxRow",
     "STREAM_MAPPING_VERSION",
+    "YOETZ_OWNED_TOOL_NAMES",
+    "YOETZ_READ_TOOL_NAMES",
     "YOETZ_TOOL_NAMES",
     "observation_dir",
+    "self_observation_deliverable",
     "session_commitment_from_codex_id",
     "workspace_commitment_for_path",
 ]
@@ -136,22 +140,96 @@ _STORE_LOCK_POLL_SECONDS: Final = 0.01
 # treated as healed (#310).
 _STATE_HEADROOM_DIVISOR: Final = 8
 
+# Yoetz's own MCP tools as Codex spells them (bare registry name or the
+# ``mcp__yoetz__`` server prefix). Derived from the one registry tuple so this
+# set cannot drift from the tools the bridge actually serves (#564 found the
+# hand-written predecessor missing ``read_guidance``).
 YOETZ_TOOL_NAMES: Final = frozenset(
-    {
-        "start",
-        "status",
-        "check",
-        "publish_work",
-        "receipt",
-        "respond",
-        "mcp__yoetz__start",
-        "mcp__yoetz__status",
-        "mcp__yoetz__check",
-        "mcp__yoetz__publish_work",
-        "mcp__yoetz__receipt",
-        "mcp__yoetz__respond",
-    }
+    f"{prefix}{name}" for prefix in ("", "mcp__yoetz__") for name in YOETZ_WORKFLOW_TOOL_NAMES
 )
+# Every host spelling of a Yoetz-owned tool: Codex ``mcp__yoetz__``, Claude
+# Code's plugin scope ``mcp__plugin_yoetz_yoetz__`` (host_admission), and the
+# Cursor ``server:tool`` forms for the external and plugin-bundled server names.
+_YOETZ_TOOL_PREFIXES: Final = (
+    "",
+    "mcp__yoetz__",
+    "mcp__plugin_yoetz_yoetz__",
+    "yoetz:",
+    "plugin-yoetz-yoetz:",
+)
+YOETZ_OWNED_TOOL_NAMES: Final = frozenset(
+    f"{prefix}{name}" for prefix in _YOETZ_TOOL_PREFIXES for name in YOETZ_WORKFLOW_TOOL_NAMES
+)
+# Yoetz tools that only read Yoetz's own state. Their result is a projection the
+# service already holds, so a successful call is not distinct evidence.
+_YOETZ_READ_TOOL_BASENAMES: Final = ("status", "receipt", "read_guidance")
+YOETZ_READ_TOOL_NAMES: Final = frozenset(
+    f"{prefix}{name}" for prefix in _YOETZ_TOOL_PREFIXES for name in _YOETZ_READ_TOOL_BASENAMES
+)
+_SELF_OBSERVATION_PHASES: Final = frozenset({"PreToolUse", "PostToolUse"})
+_SUCCESS_RESULT_STATUS: Final = frozenset({"complete", "completed", "ok", "success", "succeeded"})
+
+
+def _explicit_host_failure(structural: Mapping[str, JsonValue]) -> bool:
+    """True when the host stated any failure or denial fact for the call.
+
+    Mirrors the materializer's rule that an explicit failure signal wins over
+    any success signal: ``success=false``, ``denied=true``, a non-zero
+    ``exit_status``, a ``result_status`` outside the closed success vocabulary,
+    or Claude Code's ``PostToolUseFailure`` label. A payload with no outcome
+    fact is not a failure.
+    """
+
+    if structural.get("success") is False or structural.get("denied") is True:
+        return True
+    exit_status = structural.get("exit_status")
+    if type(exit_status) is int and not isinstance(exit_status, bool) and exit_status != 0:
+        return True
+    result_status = structural.get("result_status")
+    if type(result_status) is str and result_status.lower() not in _SUCCESS_RESULT_STATUS:
+        return True
+    return structural.get("action") == "claude_mcp_failure"
+
+
+def self_observation_deliverable(phase: str, structural: Mapping[str, JsonValue]) -> bool:
+    """Decide whether a hook or stream tool observation carries distinct evidence (#564).
+
+    Every Yoetz tool call the agent makes fires host hooks (and lands in the
+    Codex session stream) exactly like any other tool, so Yoetz observing its
+    own ``status``/``respond``/``check`` traffic produced two outbox rows plus a
+    content capture per call, while the same hook process was trying to drain
+    that outbox: the workflow starved its own delivery. The service already
+    holds the authoritative record of every Yoetz-owned call it served, so an
+    observation of one is distinct evidence only when it says something the
+    service cannot know from serving the call:
+
+    - any tool that is not Yoetz-owned: always deliverable (unchanged);
+    - an explicit host failure or denial of a Yoetz-owned call: deliverable,
+      whatever the tool or phase;
+    - the pre-event of a Yoetz-owned call: retained in the local observation
+      store only (pairing bookkeeping is unaffected; a delivered post-event
+      still materializes the action);
+    - the post-event of a Yoetz-owned *read* (``status``, ``receipt``,
+      ``read_guidance``) without a stated failure: retained locally only, the
+      result is a projection of Yoetz's own state;
+    - the post-event of a Yoetz-owned *mutation* (``start``, ``publish_work``,
+      ``check``, ``respond``): deliverable, one row per call.
+
+    The envelope is always ingested into the bounded local store first; this
+    governs only outbox delivery, so nothing is dropped from local evidence.
+    """
+
+    tool = structural.get("tool_name")
+    if type(tool) is not str or tool not in YOETZ_OWNED_TOOL_NAMES:
+        return True
+    if phase not in _SELF_OBSERVATION_PHASES:
+        return True
+    if _explicit_host_failure(structural):
+        return True
+    if phase == "PreToolUse":
+        return False
+    return tool not in YOETZ_READ_TOOL_NAMES
+
 
 _SESSION_DOMAIN: Final = b"yoetz/observation-session/v1\x00"
 

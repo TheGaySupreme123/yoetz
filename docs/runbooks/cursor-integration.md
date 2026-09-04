@@ -335,6 +335,14 @@ in `quarantine_causes`, aggregate `delivery_causes`, and gaps;
 `hook_diagnostics`, while manual and supervisor drains remain visible through status. Neither case
 is repaired by restarting a service that already reports ready.
 
+`afterMCPExecution` of a Yoetz-owned tool follows the shared self-observation policy (issue
+#564): an execution of `status`, `receipt`, or `read_guidance` under any Yoetz server spelling
+(`mcp__yoetz__*`, `yoetz:*`, `plugin-yoetz-yoetz:*`) is ingested into the bounded local store but
+not enqueued for delivery, while `start`, `publish_work`, `check`, and `respond` enqueue one row
+each. Cursor's hook payload states no outcome fact for MCP executions, so a failed Yoetz call is
+indistinguishable from a successful one at this ingress; the service's own record of the call is
+the authority on its outcome. `afterFileEdit` and lifecycle events are unchanged.
+
 Measured on 2026-08-28 with Cursor Agent CLI `2026.08.25-3e8eec8` (payload `cursor_version`;
 `cursor-agent --version` printed `2026.08.11-e8db854`) loading the native plugin through
 `--plugin-dir` in an isolated cell: the plugin-sourced `sessionStart` hook ran with `$PWD` equal to

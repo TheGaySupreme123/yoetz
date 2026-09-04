@@ -160,6 +160,11 @@ yoetz observe status --workspace <exact-worktree> --codex-path <exact-executable
 `hook_lifecycle`, `mapping`, `accepted_envelopes`, `diagnostics`, and `drain` pass separately.
 Passing requires `mapping_present: true`, at least one accepted consented envelope, bounded
 diagnostics with no unexplained failure, a successful drain, and zero unexplained undelivered rows.
+The drain must report `terminal: drained` and `pending_after: 0`; it repeats passes while rows
+resolve and never sleeps, so `retry_pending` is a real cause (read `reasons`), not a timing
+artifact. Expect no outbox rows for the workflow's own `status`/`receipt`/`read_guidance` calls or
+for any Yoetz pre-event (issue #564); a row per `start`/`check`/`respond`/`publish_work` post-event
+is the proportional volume.
 Primary-checkout consent cannot satisfy this cell; the permanent regression fixture is
 `tests/fixtures/codex-dogfood/worktree-without-exact-consent.json`.
 

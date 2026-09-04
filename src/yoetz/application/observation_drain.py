@@ -26,6 +26,7 @@ from yoetz.domain.observation import (
 )
 
 __all__ = [
+    "DEFAULT_OBSERVATION_SWEEP_BUDGET_SECONDS",
     "DEFAULT_OBSERVATION_SWEEP_LIMIT",
     "EXPECTED_OBSERVATION_BACKPRESSURE_REASONS",
     "MAX_CONSECUTIVE_OBSERVATION_REJECTIONS",
@@ -39,6 +40,12 @@ __all__ = [
 ]
 
 DEFAULT_OBSERVATION_SWEEP_LIMIT: Final = 64
+# A sweep yields with its partial summary once it has run this long. The daemon's
+# outer deadline (30s) is a hard stop that discards the summary, so a pass that
+# delivered rows and was then cancelled read as "no progress" and the loop slept
+# the full interval under exactly the backlog that needed it (#564). Yielding
+# under the deadline keeps the progress visible, so the loop re-sweeps at once.
+DEFAULT_OBSERVATION_SWEEP_BUDGET_SECONDS: Final = 20.0
 MAX_CONSECUTIVE_OBSERVATION_REJECTIONS: Final = 128
 # One sweep is sequential, so a single worker would do; the spare capacity only exists so a
 # handful of stranded threads (a deadline expiring against a parked flock) cannot wedge the
@@ -155,11 +162,19 @@ class ObservationOutboxSweeper:
     local: LocalObservationStore
     coordinator: ObservationIngestCoordinator
     limit: int = DEFAULT_OBSERVATION_SWEEP_LIMIT
+    # Wall-clock budget for one pass, measured from its start; ``None`` never
+    # yields on time. Checked between rows, so one slow ingest can still overrun
+    # it: the caller's deadline remains the hard bound.
+    budget_seconds: float | None = None
     _executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if type(self.limit) is not int or isinstance(self.limit, bool) or self.limit < 1:
             raise ValueError("observation_sweep_limit_invalid")
+        if self.budget_seconds is not None and (
+            type(self.budget_seconds) is not float or not self.budget_seconds > 0.0
+        ):
+            raise ValueError("observation_sweep_budget_invalid")
 
     def _off_loop[ResultT](self, call: Callable[[], ResultT]) -> Future[ResultT]:
         """Run one blocking local-store call off the caller's event loop.
@@ -197,6 +212,8 @@ class ObservationOutboxSweeper:
             executor.shutdown(wait=False, cancel_futures=True)
 
     async def sweep(self) -> ObservationDrainSummary:
+        loop = asyncio.get_running_loop()
+        deadline = None if self.budget_seconds is None else loop.time() + self.budget_seconds
         rows = await self._off_loop(self._fair_pending_rows)
         attempted = 0
         acknowledged = 0
@@ -207,6 +224,10 @@ class ObservationOutboxSweeper:
 
         workspaces = tuple(dict.fromkeys(workspace for workspace, _row in rows))
         for workspace in workspaces:
+            if deadline is not None and loop.time() >= deadline:
+                # Budget spent: return what this pass resolved so far. The rows
+                # left are still pending and the next pass selects them fairly.
+                break
             # The lease is a POSIX file lock, which belongs to the open descriptor rather than to
             # the thread that took it, so entering and leaving it from different worker threads is
             # correct and keeps the whole hold off the event loop.
@@ -235,6 +256,8 @@ class ObservationOutboxSweeper:
                 for selected_workspace, row in rows:
                     if selected_workspace != workspace:
                         continue
+                    if deadline is not None and loop.time() >= deadline:
+                        break
                     session_key = (workspace, row.codex_session_id)
                     if session_key in retired_sessions:
                         continue

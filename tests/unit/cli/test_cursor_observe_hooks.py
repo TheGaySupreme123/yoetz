@@ -598,3 +598,48 @@ def test_cursor_lifecycle_identifiers_bind_one_conversation_to_one_session(
     # An unaliased conversation-only event keeps its deterministic fallback.
     assert dispatch("stop", {"conversation_id": "c-solo"}) == 0
     assert observed_sessions[-1] == "cursor:c-solo"
+
+
+def test_cursor_mcp_executions_of_yoetz_tools_follow_the_self_observation_policy(
+    tmp_path: Path,
+) -> None:
+    """#564 on Cursor: a ``status`` execution stays local, a ``respond`` ships one row."""
+
+    store, commitment = _consented_store(tmp_path)
+
+    def hook(tool: str, generation: str) -> None:
+        payload: dict[str, JsonValue] = {
+            "conversation_id": "cursor-self-observation",
+            "cursor_version": "3.17.8",
+            "generation_id": generation,
+            "hook_event_name": "afterMCPExecution",
+            "tool_name": tool,
+            "tool_input": "private arguments",
+            "result_json": "private result",
+            "workspace_roots": [str(tmp_path)],
+        }
+        assert (
+            observe_hooks.handle_cursor_observe(
+                event_name="afterMCPExecution",
+                stdin_bytes=canonical_encode(payload),
+                stdout=io.BytesIO(),
+                workspace=str(tmp_path),
+                _state=tmp_path,
+                skip_service=True,
+            )
+            == 0
+        )
+
+    hook("mcp__yoetz__status", "generation-1")
+    hook("mcp__yoetz__receipt", "generation-2")
+    hook("mcp__yoetz__respond", "generation-3")
+    hook("plugin-yoetz-yoetz:status", "generation-4")
+    hook("plugin-yoetz-yoetz:check", "generation-5")
+
+    rows = store.list_pending_outbox_rows(commitment)
+    assert [row.envelope.structural_payload["tool_name"] for row in rows] == [
+        "mcp__yoetz__respond",
+        "plugin-yoetz-yoetz:check",
+    ]
+    assert all(row.envelope.structural_payload["action"] == "cursor_mcp" for row in rows)
+    assert len(store.list_envelopes(commitment)) == 5

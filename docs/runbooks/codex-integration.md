@@ -328,6 +328,20 @@ bindings as `observation_captured` ledger evidence. Inspection facts and bounded
 separate evidence records. This proves retained byte identity only; it is not an approved check,
 artifact verification, independent reproduction, or permission to send the bytes to a model.
 
+Yoetz's own MCP tools fire these same `PreToolUse`/`PostToolUse` hooks, and the hook process that
+records them also drains the outbox, so the prescribed start/status/check/respond/receipt workflow
+used to feed its own backlog: two rows plus a captured result per `status` read (issue #564). The
+ingress now delivers a Yoetz-owned call only as distinct evidence — an explicit host failure or
+denial in either phase, or the `PostToolUse` of `start`, `publish_work`, `check`, or `respond` —
+and keeps the pre-event of every Yoetz call and the post-event of a non-failed `status`, `receipt`,
+or `read_guidance` in the bounded local store only. Yoetz tool input/output is never captured as
+content. The same policy applies to the legacy spool replay and to the Codex session stream, so
+neither path reintroduces the rows. Ordinary tools are unchanged. To confirm closure converged,
+run `yoetz observe drain --workspace . --json` after the agent stops and require
+`terminal: drained` with `pending_after: 0`; `retry_pending` names the retryable head cause in
+`reasons` (a check barrier's `operation_pending` clears when the check completes), and
+`pass_limit` means a producer is still adding rows.
+
 ### Legacy synchronous-hook latency
 
 Codex versions older than `0.148.0-alpha.6` use a synchronous `hooks spool` command for

@@ -740,3 +740,52 @@ def test_claude_permission_denied_for_any_other_tool_records_nothing(tmp_path: P
         )
         assert stdout.getvalue() == b"{}\n"
     assert not (tmp_path / "observation/hook-diagnostics.jsonl").exists()
+
+
+def test_claude_scoped_yoetz_calls_follow_the_self_observation_policy(tmp_path: Path) -> None:
+    """#564 on Claude Code: reads stay local, mutations and failures ship one row each."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    commitment = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(commitment)
+
+    def hook(raw_event: str, tool: str, call: str) -> None:
+        payload: dict[str, JsonValue] = {
+            "cwd": str(tmp_path),
+            "hook_event_name": raw_event,
+            "session_id": "claude-self-observation",
+            "tool_input": {"secret": "private prompt"},
+            "tool_name": tool,
+            "tool_response": {"content": "private output"},
+            "tool_use_id": call,
+        }
+        assert (
+            observe_hooks.handle_claude_observe(
+                event_name=raw_event,
+                stdin_bytes=canonical_encode(payload),
+                stdout=io.BytesIO(),
+                workspace=str(tmp_path),
+                _state=tmp_path,
+                skip_service=True,
+            )
+            == 0
+        )
+
+    hook("PostToolUse", "mcp__plugin_yoetz_yoetz__status", "claude-status-1")
+    hook("PostToolUse", "mcp__plugin_yoetz_yoetz__receipt", "claude-receipt-1")
+    hook("PostToolUse", "mcp__plugin_yoetz_yoetz__read_guidance", "claude-guidance-1")
+    hook("PostToolUse", "mcp__plugin_yoetz_yoetz__respond", "claude-respond-1")
+    hook("PostToolUse", "mcp__plugin_yoetz_yoetz__check", "claude-check-1")
+    hook("PostToolUseFailure", "mcp__plugin_yoetz_yoetz__status", "claude-status-2")
+
+    rows = store.list_pending_outbox_rows(commitment)
+    assert [
+        (row.envelope.structural_payload["tool_name"], row.envelope.structural_payload["action"])
+        for row in rows
+    ] == [
+        ("mcp__plugin_yoetz_yoetz__respond", "claude_mcp_success"),
+        ("mcp__plugin_yoetz_yoetz__check", "claude_mcp_success"),
+        ("mcp__plugin_yoetz_yoetz__status", "claude_mcp_failure"),
+    ]
+    # Every call remains in the bounded local store as structural-only evidence.
+    assert len(store.list_envelopes(commitment)) == 6

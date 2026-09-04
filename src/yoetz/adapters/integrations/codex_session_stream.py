@@ -25,6 +25,7 @@ from yoetz.adapters.integrations.observation_local import (
     STREAM_MAPPING_VERSION,
     YOETZ_TOOL_NAMES,
     LocalObservationStore,
+    self_observation_deliverable,
 )
 from yoetz.domain.observation import (
     ObservationCursor,
@@ -970,6 +971,17 @@ def should_trigger_stream_reconcile(
     return (current - last_reconcile_mono) >= PERIODIC_RECONCILE_SECONDS
 
 
+def _stream_phase(structural: Mapping[str, JsonValue]) -> str:
+    """Map a rollout tool record to the hook phase the delivery policy speaks."""
+
+    action = structural.get("action")
+    if action in {"function_call", "custom_tool_call"}:
+        return "PreToolUse"
+    if action in {"function_call_output", "custom_tool_call_output"}:
+        return "PostToolUse"
+    return ""
+
+
 def _pair_stream_tool_name(
     envelope: ObservationEnvelope, call_tools: dict[str, str]
 ) -> ObservationEnvelope:
@@ -1094,8 +1106,14 @@ def reconcile_session_stream(
         # Enqueue duplicates too: the local observation row may have committed
         # immediately before an earlier enqueue overflow/crash. This closes the
         # retry hole without growing the outbox because enqueue is idempotent.
+        # A Yoetz-owned call the stream recorded is the same self-observation
+        # the hook already classified: retained locally, delivered only when it
+        # is distinct evidence (#564). The cursor still advances past it.
         if (
-            store.enqueue_outbox(workspace_commitment, codex_session_id, envelope)
+            self_observation_deliverable(
+                _stream_phase(envelope.structural_payload), envelope.structural_payload
+            )
+            and store.enqueue_outbox(workspace_commitment, codex_session_id, envelope)
             == ObservationGapCode.OUTBOX_OVERFLOW.value
         ):
             overflow = True

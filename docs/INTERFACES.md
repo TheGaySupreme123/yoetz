@@ -3152,6 +3152,16 @@ across workspace sessions under a nonblocking per-workspace lease; within one pa
 `mapping_missing` rejection retires that session's remaining rows (stamped with the shared cause),
 and an ended unmapped session is terminally quarantined because no future mapping can deliver it,
 but only after atomically acquiring its lifecycle lock so an attach already in flight wins.
+The service sweeper yields with its partial summary once a pass has run for its 20-second budget,
+under the daemon's 30-second sweep deadline, so rows it resolved license the immediate re-sweep
+instead of being discarded as a deadline timeout. The
+manual `yoetz observe drain` repeats full FIFO passes while the previous pass resolved at least one
+row, bounded by the backlog size at entry, and reports `passes`, `pending_after`, and a closed
+`terminal`: `drained` (nothing pending), `retry_pending` (a pass resolved nothing; `reasons`
+names the retryable heads), `service_unavailable` (no connection; exit 20), or `pass_limit`
+(rows kept resolving until the bound, so a producer is still adding them). `yoetz observe status`
+reports `oldest_pending_receipt`, the receipt time of the oldest pending row, beside
+`last_successful_drain` (issue #564).
 A consented `SessionStart` auto-attaches by sending the service a `start` request in
 `create_or_attach` mode whose selector is the paired identity the start contract requires: the
 canonical workspace locator the hook already bound consent to as `workspace_ref`, and the
@@ -3261,6 +3271,18 @@ executables, Git `--output` / `--ext-diff`, explicit `success=false` or `denied=
 ambiguous shell input stay ordinary observations. Both the pre-event and a successful or
 status-unknown post-event remain in the bounded local observation store but do not append
 task-ledger events. A failed post-event materializes normally.
+
+Yoetz-owned tool observation follows ADR-022 decision 18 (issue #564). The hook ingress for every
+host and the Codex stream reconciler recognize Yoetz's own tools under every host spelling
+(`mcp__yoetz__*`, `mcp__plugin_yoetz_yoetz__*`, `yoetz:*`, `plugin-yoetz-yoetz:*`, and the bare
+registry names), derived from the one registry tuple. Such an envelope is always ingested into the
+bounded local observation store but is enqueued for delivery only as distinct evidence: an explicit
+host failure or denial in either phase, or the post-event of `start`, `publish_work`, `check`, or
+`respond`. The pre-event of every Yoetz-owned call and the post-event of a non-failed `status`,
+`receipt`, or `read_guidance` stay local, and Yoetz-owned tool input/output is never captured as
+content. Local pairing is unaffected, so a delivered post-event carries no `unpaired_event` gap and
+the service materializes its action from the post alone. No coverage gap is recorded: the service
+already holds the authoritative record of every Yoetz-owned call it served.
 
 The local observation state also owns a sparse, one-shot `FrontierMotionNotice` per Codex session:
 `from_sequence`, `to_sequence`, final `head_digest`, and exact accepted observation-record count.
