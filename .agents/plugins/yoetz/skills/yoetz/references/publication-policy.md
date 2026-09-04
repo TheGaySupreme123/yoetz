@@ -108,7 +108,8 @@ their existing contradiction and decision-history meanings.
 ## Declare completion scope in the plan
 
 The effective current plan must distinguish obligations from an intentional empty scope. Normally,
-publish sorted-unique `obligation_refs`. If none apply, set `no_obligations_reason` to exactly one
+publish sorted-unique `obligation_refs` (ascending ASCII, unique members — the same set-order rule
+as `obligation_ids` and every other canonical set field). If none apply, set `no_obligations_reason` to exactly one
 closed value:
 
 - `no_material_change` — the work makes no material change;
@@ -209,6 +210,22 @@ draft carries exactly these seven keys, and nothing else:
 
 The illustrative `event_id` and `occurred_at` above are shape only: mint a real UUIDv4 and use the
 best real time available, exactly as for the schema examples.
+
+### Set-valued reference lists
+
+<a id="set-valued-lists"></a>
+
+Every canonical set field is admitted only when its members are unique and already in ascending
+ASCII order. The kernel does not sort them. JSON Schema `uniqueItems` does not express this order
+rule, so a bridge-side schema hint cannot catch it. Authoring order (the order ids were minted) is
+the usual failure. A rejection names `unsorted_set_field` or `duplicate_set_member` at the owning
+field. A one-element `dry_run` subset is trivially sorted and cannot locate this rule.
+Sort the named field as ASCII bytes and retry; do not reverse-engineer order from a one-member subset.
+
+The rule applies to payload lists including `obligation_refs`, `obligation_ids`,
+`affected_obligation_ids`, `supporting_refs`, `limitation_refs`, `supersedes_claim_refs`,
+`disputes_refs`, and `source_refs`, and to envelope lists `causal_parents`, `evidence_refs`, and
+`artifact_refs`. Publish sorted-unique members; do not rely on the kernel to reorder them.
 
 ### Reference mirrors
 

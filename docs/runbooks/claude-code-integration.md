@@ -164,6 +164,15 @@ The skill name is `/yoetz:yoetz`. The MCP server is `plugin:yoetz:yoetz`, and ca
 `mcp__plugin_yoetz_yoetz__<operation>`. A live proof needs a fresh session and correlated
 `start`/`status` call through that scoped name; a list/details/MCP handshake alone is insufficient.
 
+Claude Code's generic MCP profile (`yoetz mcp serve` without `--host cursor`) delivers
+`structuredContent` for successful tools but only the bounded text `content` for `isError`
+results. Cooperative `EVENT_INVALID` therefore cannot rely on `safe_details` reaching the model.
+Decision for Claude Code (issue #579): supported here — the text summary names frozen
+`reason_code` and JSON-pointer `field` (for example `unsorted_set_field at
+/event_drafts/4/payload/obligation_refs`) within the 512-byte bound, with no caller prose. The
+public message for `unsorted_set_field`/`duplicate_set_member` states the ascending-ASCII rule.
+This is the same token class as the `Repair:` clause (issue #266).
+
 Claim correction uses the shared `publish_work` descriptor and
 `publish-work-request/1.1.0`; Claude hooks do not author or infer claim supersession. A session still
 bound to the older descriptor/control manifest must be reloaded through the normal plugin/service
