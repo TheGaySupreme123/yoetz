@@ -192,9 +192,13 @@ from yoetz.ports.start_catalog import (
 )
 from yoetz.protocol.canonical import JsonValue as CanonicalJsonValue
 from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
-from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id, validate_id
-from yoetz.protocol.models import SemanticReason, SemanticStatus
+from yoetz.protocol.models import (
+    SemanticReason,
+    SemanticStatus,
+    validate_semantic_provenance_binding,
+)
 from yoetz.service.import_publication_authority import ImportPublicationAuthority
 from yoetz.service.vault import ProviderCredentialBinding, provider_credential_profile_binding
 from yoetz.version import build_version_manifest, version_manifest_json
@@ -1881,6 +1885,17 @@ async def _read_semantic_execution(
     return execution, case_id, case_digest
 
 
+def _without_provider_provenance(
+    status: SemanticStatus, reason: SemanticReason
+) -> tuple[SemanticStatus, SemanticReason]:
+    """Keep provenance-free outcomes valid without inventing a provider result."""
+    try:
+        validate_semantic_provenance_binding(status, reason, None, None)
+    except ProtocolValueError:
+        return SemanticStatus.UNAVAILABLE, SemanticReason.RECEIPT_PERSISTENCE_UNKNOWN
+    return status, reason
+
+
 async def _finish_legacy_semantic_job(
     runtime: TaskRuntime,
     frozen: FrozenCase,
@@ -1914,22 +1929,25 @@ async def _finish_legacy_semantic_job(
     assert job is not None
     if wait is not None and wait.job_id == job.job_id and wait.state == "awaiting":
         await ledger.resolve_disclosure_wait(job.job_id)
-    accounting = attempt_accounting_from_rows(
-        job, await ledger.list_semantic_attempts(job.job_id), max_retries=max_retries
-    )
+    attempts = await ledger.list_semantic_attempts(job.job_id)
+    accounting = attempt_accounting_from_rows(job, attempts, max_retries=max_retries)
     if job.state == "succeeded":
         selected = await _recover_selected_evaluation(runtime, job)
         if selected is not None:
             return replace(selected, attempt_accounting=accounting, operation_lease=lease)
     reason = job.terminal_code or SemanticReason.COORDINATOR_FAILURE
-    if reason is SemanticReason.OUTCOME_UNKNOWN:
-        # The durable row preserves uncertainty. The public outcome_unknown pair requires
-        # provider provenance, which this legacy incomplete case cannot honestly reconstruct.
-        reason = SemanticReason.RECEIPT_PERSISTENCE_UNKNOWN
     if reason is SemanticReason.SEMANTIC_COMPLETED:
         reason = SemanticReason.COORDINATOR_FAILURE
+    status = status_for_semantic_reason(reason)
+    for attempt in reversed(attempts):
+        if attempt.result_object_ref is None:
+            continue
+        recovered = await _recover_response_evaluation(runtime, attempt.result_object_ref)
+        if recovered is not None and recovered.status is status and recovered.reason is reason:
+            return replace(recovered, attempt_accounting=accounting, operation_lease=lease)
+    status, reason = _without_provider_provenance(status, reason)
     return FinalSemanticEvaluation(
-        status_for_semantic_reason(reason),
+        status,
         reason,
         attempt_accounting=accounting,
         operation_lease=lease,
@@ -2097,17 +2115,23 @@ async def _recover_selected_evaluation(
 ) -> FinalSemanticEvaluation | None:
     """Load judgment/provenance from the durable selected SEMANTIC_RESPONSE object."""
 
-    from yoetz.domain.findings import semantic_provenance_from_json
     from yoetz.ports.ledger import SemanticJobRecord as _Job
-    from yoetz.ports.semantic import SemanticJudgment
-    from yoetz.protocol.canonical import strict_json_parse
-    from yoetz.protocol.models import SemanticReason, SemanticStatus
 
     if type(job) is not _Job:
         return None
     ref = job.selected_result_object_ref
     if ref is None:
         return None
+    return await _recover_response_evaluation(runtime, ref)
+
+
+async def _recover_response_evaluation(
+    runtime: TaskRuntime, ref: ObjectRef
+) -> FinalSemanticEvaluation | None:
+    from yoetz.domain.findings import semantic_provenance_from_json
+    from yoetz.ports.semantic import SemanticJudgment
+    from yoetz.protocol.canonical import strict_json_parse
+
     try:
         resolved = await runtime.objects.resolve_verified(ref.object_id, ref.envelope_digest)
         payload = b"".join([chunk async for chunk in runtime.objects.open_verified(resolved)])
@@ -2620,6 +2644,8 @@ def _privacy_gated_semantic_evaluator(
                     if status is SemanticStatus.AWAITING_HUMAN:
                         continuation = evaluation.continuation
                 provenance = _with_fallback_origin(provenance, accounting)
+                if provenance is None and status is not SemanticStatus.SUCCEEDED:
+                    status, reason = _without_provider_provenance(status, reason)
                 # Terminal recovery of a succeeded job without a recoverable response object
                 # must not invent a judgment; surface an honest coordinator failure instead.
                 if status is SemanticStatus.SUCCEEDED and (judgment is None or provenance is None):

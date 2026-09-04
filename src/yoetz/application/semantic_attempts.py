@@ -1094,16 +1094,31 @@ async def run_durable_semantic_attempts(
                 attempt_dispatch = dispatch_fallback
             if remaining <= 0.0:
                 # A resumed started attempt must not be sent after its frozen endpoint cutoff.
-                # Preserve the physical ordinal and terminalize it without licensing fallback.
+                # Preserve uncertainty for a prior started attempt unless an exact disclosure
+                # wait proves it had not dispatched. A newly claimed attempt is a known timeout.
+                # Neither outcome licenses a fallback dispatch here.
+                wait = await ledger.load_disclosure_wait(
+                    current_lease.writer_id, current_lease.operation_id
+                )
+                known_undispatched = (
+                    wait is not None
+                    and getattr(wait, "job_id", None) == job.job_id
+                    and getattr(wait, "attempt_id", None) == job.active_attempt_id
+                    and getattr(wait, "state", None) == "awaiting"
+                )
+                uncertain = job.state == "leased" and last is None and not known_undispatched
+                terminal_reason = (
+                    SemanticReason.OUTCOME_UNKNOWN if uncertain else SemanticReason.PROVIDER_TIMEOUT
+                )
                 await ledger.record_attempt_outcome(
-                    handle, AttemptOutcome.FAILED, terminal_code=SemanticReason.PROVIDER_TIMEOUT
+                    handle, AttemptOutcome.FAILED, terminal_code=terminal_reason
                 )
                 await _resolve_disclosure_wait_after_terminal(
                     ledger, current_lease, job.job_id, handle.attempt_id
                 )
                 return build_final(
-                    SemanticStatus.UNAVAILABLE,
-                    SemanticReason.RETRY_BUDGET_EXHAUSTED,
+                    SemanticStatus.UNAVAILABLE if uncertain else SemanticStatus.TIMEOUT,
+                    terminal_reason,
                     None,
                     await _accounting(),
                 )
