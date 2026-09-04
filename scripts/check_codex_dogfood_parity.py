@@ -24,6 +24,11 @@ _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$", re.ASCII)
 _SOURCE_REF = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$", re.ASCII)
 _TOKEN = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)
 _VERSION = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+-]{0,127}$", re.ASCII)
+# Exact Codex releases with a fixture-proven rollout parser profile (mirrors
+# ``codex_capability_cells.CODEX_ROLLOUT_PARSER_PROOFS``; a unit test keeps them equal). The
+# stream facet may be advertised only for one of these; a neighbouring release stays
+# ``unsupported`` even when hooks and MCP work, because parser proof is per exact version.
+ROLLOUT_PARSER_PROVEN_VERSIONS: Final = frozenset({"0.148.0", "0.150.1"})
 
 PREFLIGHT_FACETS: Final = (
     "source_identity",
@@ -555,6 +560,11 @@ def classify_codex_dogfood_report(document: object) -> DogfoodGateResult:
         and facets["session_stream"]["status"] != "unsupported"
     ):
         raise _error("unadvertised_stream_facet_not_unsupported")
+    if (
+        scope["session_stream_advertised"]
+        and identity["codex_version"] not in ROLLOUT_PARSER_PROVEN_VERSIONS
+    ):
+        raise _error("session_stream_scope_unproven_codex_version")
 
     preflight = _aggregate(PREFLIGHT_FACETS, facets)
     required_postflight = _required_postflight(scope)

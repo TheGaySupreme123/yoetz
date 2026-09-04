@@ -369,3 +369,39 @@ def test_cli_preflight_refuses_launch_on_a_failed_required_facet(
     result = json.loads(capsys.readouterr().out)
     assert result["launch_allowed"] is False
     assert result["preflight_outcome"] == "fail"
+
+
+def test_session_stream_scope_requires_exact_parser_proven_codex_version() -> None:
+    from yoetz.adapters.importers.codex_rollout_jsonl import SUPPORTED_ROLLOUT_PROFILES
+    from yoetz.adapters.integrations.codex_capability_cells import (
+        rollout_parser_proven_versions,
+    )
+
+    assert _MODULE.ROLLOUT_PARSER_PROVEN_VERSIONS == frozenset(rollout_parser_proven_versions())
+    assert _MODULE.ROLLOUT_PARSER_PROVEN_VERSIONS == frozenset(SUPPORTED_ROLLOUT_PROFILES)
+
+    for version in ("0.150.1", "0.148.0"):
+        report = _report()
+        cast(dict[str, object], report["identity"])["codex_version"] = version
+        assert classify_codex_dogfood_report(report)["full_outcome"] == "pass"
+
+    # A neighbouring release is never aliased to a proven profile: advertising the stream facet
+    # for it is a scope error, and the only valid posture is explicit ``unsupported``.
+    report = _report()
+    cast(dict[str, object], report["identity"])["codex_version"] = "0.152.1"
+    with pytest.raises(DogfoodGateError, match="session_stream_scope_unproven_codex_version"):
+        classify_codex_dogfood_report(report)
+
+    report = _report()
+    cast(dict[str, object], report["identity"])["codex_version"] = "0.152.1"
+    cast(dict[str, object], report["scope"])["session_stream_advertised"] = False
+    _observed(report)["stream_coverage"] = False
+    _facets(report)["session_stream"] = {
+        "status": "unsupported",
+        "reason": "capability_not_advertised",
+        "evidence_digest": _DIGEST,
+        "next_action": "none",
+    }
+    result = classify_codex_dogfood_report(report)
+    assert result["full_outcome"] == "pass"
+    assert result["unsupported_facets"] == ["session_stream"]
