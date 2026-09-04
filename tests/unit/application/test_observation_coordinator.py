@@ -4522,9 +4522,7 @@ async def test_session_superseded_reroutes_ingest_and_persists_mapping(tmp_path:
         async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
             del args, kwargs
 
-    def _store_superseded_mapping(
-        mapping: LifecycleMapping, *, _state: Path | None = None
-    ) -> None:
+    def _store_superseded_mapping(mapping: LifecycleMapping, *, _state: Path | None = None) -> None:
         del _state
         stored["mapping"] = mapping
 
