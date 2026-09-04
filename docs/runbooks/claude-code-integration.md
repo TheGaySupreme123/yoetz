@@ -243,7 +243,14 @@ fixed remediation never prints the absolute state path. A result obtained from a
 carrier proves only that sandbox cell; unrestricted-terminal behavior needs its own run.
 
 Shared drain terminalization is host-neutral: `ledger_rejected` means the ready service rejected
-one envelope non-retryably, so that row is retained in quarantine and later rows proceed. An
+one envelope non-retryably, so that row is retained in quarantine and later rows proceed. A task
+bundle at schema 9 (bundle migration `0009`) stores `claude_hook` rows; schema 8's source CHECK
+refused them. The SQLite store now classifies deterministic constraint failures as `ledger_rejected`
+(issue #576). Existing task bundles require the explicit [migration procedure](migration-rollback.md);
+upgrading or restarting the service alone does not migrate them, and the new writer refuses an
+unmigrated bundle before observation ingestion. Migration allows valid pending envelopes to store
+unchanged, but delivery still requires a usable session mapping; it does not itself repair a retired
+session route or replay quarantined rows. An
 idempotent repeat of a committed envelope (lost acknowledgement, service restart, or a workflow
 reattach that rotates the mapped Yoetz session) is resolved task-wide and acknowledged, never
 quarantined. A row

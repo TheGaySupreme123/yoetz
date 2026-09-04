@@ -160,15 +160,16 @@ def test_each_migration_family_has_contiguous_versions(installed: _Installed) ->
         "0006",
         "0007",
         "0008",
+        "0009",
     ]
     assert payload["catalog_current"] == 3
-    assert payload["bundle_current"] == 8
+    assert payload["bundle_current"] == 9
 
 
-def test_migration_ddl_contains_no_destructive_statement(installed: _Installed) -> None:
+def test_migration_ddl_contains_only_reviewed_table_rebuilds(installed: _Installed) -> None:
     for family, versions in (
         ("catalog", ("0001", "0002", "0003")),
-        ("bundle", ("0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008")),
+        ("bundle", ("0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009")),
     ):
         for version in versions:
             text = (
@@ -181,6 +182,17 @@ def test_migration_ddl_contains_no_destructive_statement(installed: _Installed) 
                 / f"{version}.sql"
             ).read_text(encoding="utf-8")
             upper = text.upper()
+            if (family, version) == ("bundle", "0009"):
+                # The reviewed CHECK widening copies every row before dropping only these
+                # two originals. Row/identity preservation is exercised by the migration
+                # integration tests; this gate allows no other destructive DDL.
+                for table in ("OBSERVATION_CURSORS", "OBSERVATION_EVENTS"):
+                    copy = f"INSERT INTO {table}_V2 ("
+                    drop = f"DROP TABLE {table};"
+                    rename = f"ALTER TABLE {table}_V2 RENAME TO {table};"
+                    assert upper.count(drop) == 1
+                    assert upper.index(copy) < upper.index(drop) < upper.index(rename)
+                    upper = upper.replace(drop, "", 1)
             for forbidden in (r"DROP\s+TABLE", r"DELETE\s+FROM", r"\bUPDATE\b", r"\bTRUNCATE\b"):
                 assert re.search(forbidden, upper) is None, (family, version, forbidden)
 
@@ -215,7 +227,7 @@ def test_fresh_catalog_and_bundle_initialize_at_current_schema_version(
         "catalog_state": "current",
         "catalog_version": 3,
         "bundle_state": "current",
-        "bundle_version": 8,
+        "bundle_version": 9,
     }
 
 

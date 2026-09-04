@@ -42,7 +42,7 @@ def test_fresh_migrations_install_identified_foreign_key_clean_schemas() -> None
     assert catalog.execute("PRAGMA foreign_key_check").fetchone() is None
 
     assert bundle.execute("PRAGMA application_id").fetchone() == (0x594F4554,)
-    assert bundle.execute("PRAGMA user_version").fetchone() == (8,)
+    assert bundle.execute("PRAGMA user_version").fetchone() == (9,)
     assert bundle.execute("PRAGMA foreign_keys").fetchone() == (1,)
     assert bundle.execute("PRAGMA trusted_schema").fetchone() == (0,)
     assert bundle.execute("PRAGMA foreign_key_check").fetchone() is None
@@ -52,7 +52,7 @@ def test_fresh_migrations_install_identified_foreign_key_clean_schemas() -> None
     ).fetchone() == ("1",)
     assert bundle.execute(
         "SELECT value FROM bundle_meta WHERE key = 'storage_schema_version'"
-    ).fetchone() == ("8",)
+    ).fetchone() == ("9",)
     assert bundle.execute(
         "SELECT 1 FROM sqlite_schema WHERE name = 'observation_consent'"
     ).fetchone() == (1,)
@@ -82,7 +82,7 @@ def test_bundle_run_migrations_applies_0002_from_schema_version_one() -> None:
 
     report = run_migrations(bundle, BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
     assert report.from_version == 1
-    assert report.to_version == 8
+    assert report.to_version == 9
     assert report.applied_versions == (
         "0002",
         "0003",
@@ -91,11 +91,12 @@ def test_bundle_run_migrations_applies_0002_from_schema_version_one() -> None:
         "0006",
         "0007",
         "0008",
+        "0009",
     )
-    assert bundle.execute("PRAGMA user_version").fetchone() == (8,)
+    assert bundle.execute("PRAGMA user_version").fetchone() == (9,)
     assert bundle.execute(
         "SELECT value FROM bundle_meta WHERE key = 'storage_schema_version'"
-    ).fetchone() == ("8",)
+    ).fetchone() == ("9",)
     assert bundle.execute(
         "SELECT 1 FROM sqlite_schema WHERE name = 'observation_consent'"
     ).fetchone() == (1,)
@@ -105,7 +106,7 @@ def test_bundle_migration_0007_preserves_rows_and_widens_all_disposition_checks(
     bundle = apsw.Connection(":memory:")
     bundle.execute("PRAGMA foreign_keys = OFF")
     with bundle:
-        for migration in BUNDLE_MIGRATIONS[:-2]:
+        for migration in BUNDLE_MIGRATIONS[:6]:
             bundle.execute(migration.ddl.decode("utf-8"))
         bundle.execute(
             "INSERT INTO p1_query_findings VALUES ("
@@ -126,7 +127,7 @@ def test_bundle_migration_0007_preserves_rows_and_widens_all_disposition_checks(
             "'fnd_00000000-0000-4000-8000-000000000001', 1, NULL, "
             "'evt_00000000-0000-4000-8000-000000000002', 1, 'rejected', NULL, NULL, 0)"
         )
-        bundle.execute(BUNDLE_MIGRATIONS[-2].ddl.decode("utf-8"))
+        bundle.execute(BUNDLE_MIGRATIONS[6].ddl.decode("utf-8"))
 
     assert bundle.execute("PRAGMA user_version").fetchone() == (7,)
     assert bundle.execute("SELECT disposition FROM p2_query_findings").fetchone() == ("rejected",)

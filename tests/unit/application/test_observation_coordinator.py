@@ -71,6 +71,7 @@ def _envelope(
     tool: str = "shell",
     corr: str = "c1",
     exit_status: int | None = None,
+    source: ObservationSource = ObservationSource.CODEX_HOOK,
 ) -> ObservationEnvelope:
     structural: dict[str, object] = {
         "tool_name": tool,
@@ -83,7 +84,7 @@ def _envelope(
         session_commitment=session,
         event_kind=kind,
         source_identity=identity,
-        source=ObservationSource.CODEX_HOOK,
+        source=source,
         cursor=ObservationCursor(1, 0, ordinal, f"hmac-sha256:{'ab' * 32}", "codex-obs-hook/1.0.0"),
         receipt_time=Timestamp("2026-01-01T00:00:00.000Z"),
         structural_payload=JsonObject(structural),
@@ -4230,6 +4231,70 @@ class _ReattachCell:
 
     def record_count(self) -> int:
         return len(self.ledger._state.records)  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+
+
+# --- issue #576: a deterministic ledger schema rejection is terminal, not service_unavailable ---
+
+
+def _schema_eight_store() -> tuple[object, SqliteObservationStore]:
+    """A task ledger from before migration 0009: its DDL refuses every non-Codex source."""
+
+    import apsw
+
+    from yoetz.adapters.sqlite.migrations import BUNDLE_MIGRATIONS
+
+    db = apsw.Connection(":memory:")
+    db.execute("PRAGMA foreign_keys = ON")
+    db.execute("PRAGMA trusted_schema = OFF")
+    with db:
+        for migration in BUNDLE_MIGRATIONS[:8]:
+            db.execute(migration.ddl.decode())
+    return db, SqliteObservationStore(db)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("source", [ObservationSource.CLAUDE_HOOK, ObservationSource.CURSOR_HOOK])
+async def test_host_hook_row_refused_by_ledger_schema_quarantines_then_delivers_after_migration(
+    tmp_path: Path, source: ObservationSource
+) -> None:
+    """#576: the store's CHECK failure reaches the drain as ledger_rejected, once.
+
+    Before this fix the bare driver exception took the coordinator's catch-all and was
+    projected as retryable service_unavailable, so the FIFO head was retried forever while
+    the service reported ready. After the bundle migrates, the identical envelope delivers.
+    """
+
+    import apsw
+
+    from yoetz.adapters.sqlite.migrations import BUNDLE_MIGRATIONS, run_migrations
+
+    cell = _reattach_fixture(tmp_path, f"host-{source.value}")
+    db, cell.store = _schema_eight_store()
+    envelope = _envelope(session=cell.session, identity=f"hook:{source.value}:1", source=source)
+
+    rejected = await cell.ingest(envelope)
+
+    assert rejected.disposition is ObservationIngestDisposition.REJECTED
+    assert rejected.reason == ObservationGapCode.LEDGER_REJECTED.value
+    decision = route_observation_ingest(rejected)
+    assert decision.action is ObservationDrainAction.QUARANTINE
+    assert decision.reason == ObservationGapCode.LEDGER_REJECTED.value
+    assert cell.operation_count() == 0
+    assert cell.coordinator._storage_corrupt_sessions == set()  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+
+    run_migrations(cast(apsw.Connection, db), BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
+    cell.coordinator = cell.build_coordinator()
+    accepted = await cell.ingest(envelope)
+
+    assert accepted.disposition is ObservationIngestDisposition.ACCEPTED
+    assert route_observation_ingest(accepted).action is ObservationDrainAction.ACKNOWLEDGE
+    assert cell.operation_count() == 1
+    status = await cell.store.status(ObservationStatusQuery(cell.workspace))
+    assert status.source_coverage[source] is True
+    # A host hook claim carries the hook bit, not the Codex session-stream bit.
+    assert cast(apsw.Connection, db).execute(
+        "SELECT DISTINCT source_mask FROM observation_logical_identity"
+    ).fetchall() == [(1,)]
 
 
 _REATTACH_ENVELOPES: dict[str, dict[str, object]] = {

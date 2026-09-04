@@ -2915,8 +2915,12 @@ upgrade candidates from the session that committed them.
 
 Shared closed types:
 
-- `ObservationSource` — exactly `codex_hook | codex_session_stream | cursor_hook`. Hooks are the primary
-  low-latency source; session-stream reconciliation is selective and secondary.
+- `ObservationSource` — exactly `claude_hook | codex_hook | codex_session_stream | cursor_hook`. Hooks
+  are the primary low-latency source; session-stream reconciliation is selective and secondary.
+  Bundle migration `0009` rebuilds the `observation_cursors` and `observation_events` tables so
+  their source CHECK admits that same closed set; a bundle still at schema 8 refuses every
+  non-Codex source at the store, which is why the enum and the DDL are locked together by a test
+  over every member (issue #576).
 - `ObservationEnvelope` — Codex session identity (commitment, never raw path), event kind (exact
   closed identifier from the capability cell, or an opaque unsupported token), stable source
   identity, `ObservationCursor`, receipt time, bounded allowlisted structural payload, content-
@@ -3265,7 +3269,11 @@ gap history remains after recovery, and renewed shedding reactivates it (issue #
 Public ingest failures use their `retryable` contract, not a spelling fallback. A non-retryable
 failure that is not already a narrower terminal class (`dedup_conflict` or
 `observation_storage_corrupt`) becomes `ledger_rejected`; drain and sweep quarantine that one row,
-record the reason once, and continue its lane. Retryable failures keep their current reason and
+record the reason once, and continue its lane. A deterministic write rejection inside the SQLite
+observation store (a CHECK or STRICT type failure, which repeats identically on every retry of the
+same envelope) is raised as non-retryable `invalid_request` and takes that same path, instead of
+escaping as a bare driver exception that the catch-all projected as retryable
+`service_unavailable` while the service was ready (issue #576). Retryable failures keep their current reason and
 scope. A row that reaches 128 consecutive rejections with the same retryable reason is quarantined
 with that reason, so an accidental future catch-all classification cannot create an immortal FIFO
 head. Designed `operation_pending` back-pressure and workspace-global pause/vault/disabled gates
