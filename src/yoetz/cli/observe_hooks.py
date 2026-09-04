@@ -1420,6 +1420,18 @@ async def _try_auto_start(
     return AutoAttachOutcome(mapping, None, recovered=recovered_task_id is not None)
 
 
+def _host_session_matches(
+    session_id: str, harness_id: Literal["claude", "codex", "cursor"]
+) -> bool:
+    """True when the stored host session id belongs to this hook family."""
+
+    if harness_id == "claude":
+        return session_id.startswith(_CLAUDE_SESSION_PREFIX)
+    if harness_id == "cursor":
+        return session_id.startswith(_CURSOR_SESSION_PREFIX)
+    return not session_id.startswith((_CLAUDE_SESSION_PREFIX, _CURSOR_SESSION_PREFIX))
+
+
 def _ended_workspace_recovery_mapping(
     store: LocalObservationStore,
     workspace_commitment: str,
@@ -1439,20 +1451,13 @@ def _ended_workspace_recovery_mapping(
     ):
         return None
 
-    def _same_harness(session_id: str) -> bool:
-        if harness_id == "claude":
-            return session_id.startswith(_CLAUDE_SESSION_PREFIX)
-        if harness_id == "cursor":
-            return session_id.startswith(_CURSOR_SESSION_PREFIX)
-        return not session_id.startswith((_CLAUDE_SESSION_PREFIX, _CURSOR_SESSION_PREFIX))
-
     ended = tuple(
         session_id
         for session_id in bound_sessions
         if session_id != codex_session_id
         and store.codex_session_ended(workspace_commitment, session_id)
         and session_id in unambiguous
-        and _same_harness(session_id)
+        and _host_session_matches(session_id, harness_id)
     )
     valid = tuple(
         mapping
