@@ -377,6 +377,22 @@ def _declared_schema_name(value: JsonValue) -> str | None:
 # the generic "correct the payload" message. Keyed by reason code and, where the rule differs per
 # event family, by the frozen family name. Every character is checked in here: no caller value, no
 # submitted identifier, and no count derived from the rejected request reaches these strings.
+_SET_ORDER_RULE: Final = (
+    "The event batch is invalid. Every set-valued list is admitted only when its members are "
+    "unique and already in ascending ASCII order. JSON Schema uniqueItems does not express "
+    "order. Sort the named field and retry; a one-element dry_run subset cannot demonstrate "
+    "this rule."
+)
+_SET_ORDER_CORRECTIONS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "duplicate_set_member": (
+            "The event batch is invalid. Every set-valued list is admitted only when its "
+            "members are unique and already in ascending ASCII order. Remove the duplicate "
+            "from the named field and retry."
+        ),
+        "unsorted_set_field": _SET_ORDER_RULE,
+    }
+)
 _REF_MIRROR_EVIDENCE_RULE: Final = (
     "The event batch is invalid. The draft envelope evidence_refs must repeat the payload "
     "evidence_refs exactly: the same ids in the same ascending order, or both empty. See "
@@ -415,6 +431,9 @@ _REF_MIRROR_CORRECTIONS: Final[Mapping[str, Mapping[str, str]]] = MappingProxyTy
 def _corrective_message(reason_code: str, schema_name: str | None) -> str | None:
     """Return the checked-in corrective message for one reason code and family, if registered."""
 
+    set_order = _SET_ORDER_CORRECTIONS.get(reason_code)
+    if set_order is not None:
+        return set_order
     families = _REF_MIRROR_CORRECTIONS.get(reason_code)
     if families is None or type(schema_name) is not str:
         return None

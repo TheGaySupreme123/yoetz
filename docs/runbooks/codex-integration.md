@@ -46,6 +46,16 @@ expected Codex version. Codex support is the exact tested set in the packaged ma
 set means no Codex release currently carries automatic-activation support evidence. A version
 string or successful file install never promotes an unprofiled release to supported.
 
+Session-stream (rollout) parsing is a separate, narrower fact. `0.148.0` and `0.150.1` each have
+an exact fixture-proven rollout grammar profile (`codex-rollout-jsonl/<version>/v1`, ADR-005).
+That parser proof is what lets an isolated dogfood run advertise the `session_stream` facet for
+that exact release; it is not host support, and it says nothing about skills, MCP, hooks, or
+activation. Any other release — including a patch neighbour — is refused at the session header as
+`unsupported_format`, keeps its cursor, and reads no further lines; it earns a profile only through
+its own fixtures. Explicit-path recovery uses the same atomic cursor, profile, source identity,
+and tool-pairing frontier as automatic reconciliation, including mapping upgrades and delivery
+backpressure.
+
 ## 3. Status and preview
 
 Always run status first:
@@ -106,6 +116,11 @@ MCP registration is a separate step from skill installation:
 codex mcp get yoetz --json
 codex mcp add yoetz -- yoetz mcp serve
 ```
+
+Codex uses the generic MCP host profile (not `--host cursor`). Decision for Codex (issue #579):
+supported here — the same bounded text `Reason:` clause as Claude Code names frozen `reason_code`
+and `field` on `EVENT_INVALID`, because this host also relies on the privacy-minimized summary
+rather than a full JSON text copy.
 
 Run `codex mcp get yoetz --json` first. A nonzero result does not prove absence: Yoetz follows it
 with `codex mcp list --json` and continues only when that command succeeds with no `yoetz` entry.
@@ -530,8 +545,8 @@ reviewer egress.
 | MCP unavailable | Diagnose through separate MCP configuration/startup steps. |
 | Trigger absent or failed | Use the manual re-grounding procedure; never edit hook configuration through this integration. |
 | `observe status` shows no envelopes for a session | Read `hook_diagnostics.reasons`: `workspace_unresolvable` means the hook's `--workspace` locator could not be canonicalized; `workspace_unconsented` means the session's Git root carries no active consent (a session started in a subdirectory canonicalizes to the same root as the consent, so grant consent at the repository root); `paused` means consent is paused. A successful ingest records no diagnostic, so read `recent_count` together with the envelopes: no new envelopes and a zero `recent_count` means the hooks never reached the ingress or the runtime gate is disabled, not that a binding drop occurred. |
-| `observe status` shows `mapping_present: false` after a consented `SessionStart` | The hook sends `start mode=create_or_attach` with the canonical `--workspace` root as `workspace_ref` and `codex-session:<session_id>` as `external_ref`. On the exact `workspace_task_exists` conflict it retries once with `mode=attach` only if the private local lifecycle store already holds a valid mapping from an earlier Codex session whose `SessionEnd` was received, every other bound session is ended, and the candidate is bound only to this consented workspace. The catalog then requires one mapped task, the selector still active, no sibling task, the matching repository-privacy binding, and no start already pending for that route. The public error reveals no selector; a hard crash without `SessionEnd` remains fail-closed rather than being guessed from age. Otherwise read `hook_diagnostics.reasons` for the typed cause: `auto_attach_workspace_unbound` (no paired request was legal), `auto_attach_request_invalid` (an authoring defect — file it), `auto_attach_conflict` / `auto_attach_refused` (the service answered and declined), `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`, `vault_locked`, `timeout`, `storage_unsafe` / `storage_corrupt`, or `service_unavailable` (the daemon was still starting; `UserPromptSubmit`, `Stop`, and `SessionEnd` retry under the bounded budget and add `auto_attach_retry_failed` beside the cause). An explicit MCP `start` remains the recovery path; for `vault_locked` on a never-initialized install, that `start` returns the typed `vault_initialization_required` continuation below rather than a dead end. |
-| `observe status` shows `ledger_rejected` and `outbox_quarantined` | The service was reachable but rejected one envelope non-retryably. A repeated envelope after a lost acknowledgement, a service restart, or a workflow reattach (a second `start` in the same Codex session) is not such a rejection: its committed operation is resolved task-wide and the row is acknowledged idempotently with no quarantine row, so a `ledger_rejected` row is a genuine conflicting reuse of an event or operation identity. The row is retained under `quarantine_causes`, aggregate `delivery_causes`, and gaps; `pending_delivery_causes` names only rows still in the outbox. Later rows can drain; reclaim only after the underlying defect is understood. A hook-driven attempt also appears in the bounded `hook_diagnostics`, while manual and supervisor drains are represented by status rather than hook activity. Do not restart a ready service. A row is also quarantined after 128 consecutive rejections with the same retryable reason so a catch-all failure cannot block the lane forever; pause, vault, disabled, and designed back-pressure reasons keep their existing recovery behavior. |
+| `observe status` shows `mapping_present: false` after a consented `SessionStart` | The hook sends `start mode=create_or_attach` with the canonical `--workspace` root as `workspace_ref` and `codex-session:<session_id>` as `external_ref`. On the exact `workspace_task_exists` conflict it retries once with `mode=attach` only if the private local lifecycle store already holds a valid mapping from an earlier Codex session whose `SessionEnd` was received, every other bound session is ended, and the candidate is bound only to this consented workspace. The catalog then requires one mapped task, the selector still active, no sibling task, the matching repository-privacy binding, and no start already pending for that route. A successful recovery rewrites every ended same-host predecessor mapping for that task to the rotated session and writer so pending predecessor rows drain on the successor route rather than being quarantined. The public error reveals no selector; a hard crash without `SessionEnd` remains fail-closed rather than being guessed from age. Otherwise read `hook_diagnostics.reasons` for the typed cause: `auto_attach_workspace_unbound` (no paired request was legal), `auto_attach_request_invalid` (an authoring defect — file it), `auto_attach_conflict` / `auto_attach_refused` (the service answered and declined), `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`, `vault_locked`, `timeout`, `storage_unsafe` / `storage_corrupt`, or `service_unavailable` (the daemon was still starting; `UserPromptSubmit`, `Stop`, and `SessionEnd` retry under the bounded budget and add `auto_attach_retry_failed` beside the cause). An explicit MCP `start` remains the recovery path; for `vault_locked` on a never-initialized install, that `start` returns the typed `vault_initialization_required` continuation below rather than a dead end. |
+| `observe status` shows `ledger_rejected` and `outbox_quarantined` | The service was reachable but rejected one envelope non-retryably. A repeated envelope after a lost acknowledgement, a service restart, or a workflow reattach (a second `start` in the same Codex session) is not such a rejection: its committed operation is resolved task-wide and the row is acknowledged idempotently with no quarantine row. A pending row from an ended host session whose task a successor recovered is delivered on the successor route (`session_superseded` is followed) and is also not `ledger_rejected`. A successor binding that cannot be followed quarantines that row as `session_superseded`, not `mapping_missing`. A `ledger_rejected` row is a genuine conflicting reuse of an event or operation identity. The row is retained under `quarantine_causes`, aggregate `delivery_causes`, and gaps; `pending_delivery_causes` names only rows still in the outbox. Later rows can drain; reclaim only after the underlying defect is understood. A hook-driven attempt also appears in the bounded `hook_diagnostics`, while manual and supervisor drains are represented by status rather than hook activity. Do not restart a ready service. A row is also quarantined after 128 consecutive rejections with the same retryable reason so a catch-all failure cannot block the lane forever; pause, vault, disabled, and designed back-pressure reasons keep their existing recovery behavior. |
 | `observe status` exits with `observation_status_failed:<reason>` | The reason names the layer: `workspace_unresolvable` (exit 2) is the locator; `storage_unsafe` (exit 20) is an unsafe state/lock path; `storage_unavailable` (exit 20) is a bounded open, permission, read-only, missing-parent, or lock-acquisition failure; `storage_corrupt` (exit 40) is invalid stored data. The fixed remediation never prints the absolute state path. A sandboxed Codex result proves only that sandbox cell; run and record an unrestricted-terminal comparison separately before making that claim. |
 
 ## 11. Security, privacy, and prohibited actions
@@ -584,6 +599,16 @@ without `YOETZ_ISOLATED_ROOT` (ADR-026) exported to every tested process, the ru
 and any service they spawn resolve the normal singleton, state directory, and storage. Prove the
 mode with `yoetz service isolation --json` before launch; the parity gate's `service_isolation`
 facet fails closed on shared, ambient, or unknown identity.
+
+For the Yoetz-owned external registration, issue #561 makes this propagation a supported product
+contract: an isolated preview displays and digest-binds the exact root, apply uses Codex's native
+`--env YOETZ_ISOLATED_ROOT=<exact-root>`, and status must report
+`isolation_binding=isolated_exact`. Ambient registration stores no environment. A missing or
+different known root requires re-registration; arbitrary environment keys, inherited-variable
+declarations, and malformed roots classify the same-name entry as foreign and are never replaced.
+Before a dogfood model task, use the app-server capture in the parity runbook to launch the real
+registered child and satisfy `mcp_child_isolation`; registration status alone is not child-start
+evidence.
 
 ## Subscription evaluator is a separate Codex role
 

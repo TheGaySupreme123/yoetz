@@ -1446,6 +1446,7 @@ class ServiceDaemon:
                 request, ControlError("internal_error", correlation_id=correlation_id)
             )
         try:
+            protocol_reason = error.safe_details.get("reason_code")
             bound = (
                 error
                 if error.correlation_id is not None
@@ -1458,6 +1459,7 @@ class ServiceDaemon:
                         operation=f"{request.method.value}_public_error",
                         reason=error.code.value.lower(),
                         request_id=_safe_body_request_id(request),
+                        reason_code=protocol_reason if type(protocol_reason) is str else None,
                     )
                 )
             )

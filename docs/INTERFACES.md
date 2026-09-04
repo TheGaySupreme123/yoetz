@@ -149,6 +149,14 @@ admitted-key answer. The same fact is repeated as one bounded sentence in the au
 as a `Repair:` clause on the compatible text summary channel, because MCP hosts are not required
 to surface `structuredContent`.
 
+The same text channel also carries a bounded `Reason:` clause when `safe_details` holds a frozen
+protocol `reason_code`, optionally followed by a JSON-pointer `field` (issue #579). Both tokens are already
+allowlisted structural content; the projector re-gates them and never copies caller prose. Claude
+Code's generic MCP profile delivers only the text `content` for `isError` results, so without this
+clause an `EVENT_INVALID` set-order rejection arrives as a bare code. The native Cursor profile
+repeats the exact canonical JSON wire body in text `content`, which already includes those
+`safe_details`; tests lock both projections.
+
 Every MCP result also carries a bounded ASCII text projection (at most 512 bytes) for hosts that
 drop `structuredContent`. A successful projection includes the first valid returned frontier's
 `sequence` and canonical `head_digest` when both are present. Generic successful operations also
@@ -2977,8 +2985,12 @@ upgrade candidates from the session that committed them.
 
 Shared closed types:
 
-- `ObservationSource` — exactly `codex_hook | codex_session_stream | cursor_hook`. Hooks are the primary
-  low-latency source; session-stream reconciliation is selective and secondary.
+- `ObservationSource` — exactly `claude_hook | codex_hook | codex_session_stream | cursor_hook`. Hooks
+  are the primary low-latency source; session-stream reconciliation is selective and secondary.
+  Bundle migration `0009` rebuilds the `observation_cursors` and `observation_events` tables so
+  their source CHECK admits that same closed set; a bundle still at schema 8 refuses every
+  non-Codex source at the store, which is why the enum and the DDL are locked together by a test
+  over every member (issue #576).
 - `ObservationEnvelope` — Codex session identity (commitment, never raw path), event kind (exact
   closed identifier from the capability cell, or an opaque unsupported token), stable source
   identity, `ObservationCursor`, receipt time, bounded allowlisted structural payload, content-
@@ -2995,8 +3007,10 @@ Shared closed types:
   digest and byte count. Durable redaction/truncation flags preserve weakening without reopening
   the object.
 - `ObservationCursor` — source generation, byte/event position, last source commitment, and
-  mapping version. Codex session-stream cursors use `codex-obs-stream/1.2.0` (rollout JSONL
-  grammar). Cursors are crash-stable and generation-fenced. A private HMAC of the source
+  mapping version. Codex session-stream cursors use `codex-obs-stream/1.3.0` (rollout JSONL
+  grammar, paired with the exact profile id the generation's header admitted; a `1.2.0` or older
+  cursor is mapping-reset and replays from its header rather than inheriting a default profile).
+  Cursors are crash-stable and generation-fenced. A private HMAC of the source
   device/inode detects same-or-larger file replacement across reconcile processes; ordinary safe
   integers retain their numeric encoding and larger filesystem values use a bounded hexadecimal
   representation before canonical encoding. Call-id/tool
@@ -3006,10 +3020,14 @@ Shared closed types:
   rather than selecting a different action family. Rollout privacy filtering parses the valid JSON
   tree first and then redacts decoded string keys and values, preserving structural punctuation;
   any redaction-created duplicate key is rejected instead of silently merging fields.
-- `ObservationGapCode` — closed coverage tokens. `unsupported_event` is an admitted profile with
-  an unrecognized wrapper or item; `unsupported_format` is a wrong surface (exec JSONL, unknown
-  `cli_version`, an absent/unknown `history_mode`, or compressed `rollout-*.jsonl.zst` that the
-  hook pass does not decompress). When exact-session `.jsonl` and `.jsonl.zst` siblings both
+- `ObservationGapCode` — closed coverage tokens. `session_superseded` is a mapped host session
+  whose Yoetz route was retired and whose successor binding could not be followed; it is never
+  `ledger_rejected` and never `mapping_missing` (issue #577). `unsupported_event` is an admitted profile with
+  an unrecognized wrapper or item; `unsupported_format` is a wrong surface (exec JSONL, a
+  `cli_version` without an exact profile in `SUPPORTED_ROLLOUT_PROFILES` — currently `0.148.0`
+  and `0.150.1`, never a semver neighbour — an absent/unknown `history_mode`, or compressed
+  `rollout-*.jsonl.zst` that the hook pass does not decompress). A refused header holds for the
+  whole source generation: bytes are consumed, no event is admitted, and the cursor is kept. When exact-session `.jsonl` and `.jsonl.zst` siblings both
   exist, the admitted uncompressed file wins; compressed-only remains explicitly unsupported.
   Every string semantic type present at `payload.type` and nested `payload.item.type` must belong
   to the admitted profile before a nested item is selected; one known field cannot mask an unknown
@@ -3248,8 +3266,12 @@ timestamp ties. The attach carries that selector plus the new host pair, while t
 handshake carries the canonical workspace for repository privacy. The catalog requires the
 selector to remain active, the task to be the workspace's sole non-quarantined route, and no start
 for that route to be pending. Both calls share one five-second deadline. The response must retain
-the candidate's task ID. A successful recovery records the new mapping and drains its pending rows
-without publishing the intermediate conflict as a diagnostic. With no eligible local selector, or
+the candidate's task ID. A successful recovery records the new mapping, rewrites every ended
+same-host predecessor mapping for that task to the rotated session and writer, and drains pending
+rows without publishing the intermediate conflict as a diagnostic. Predecessor rows still pending
+at rotation follow the `session_superseded` binding on ingest (the current task session and the
+observation writer derived for it) so they are acknowledged on the successor route rather than
+quarantined. With no eligible local selector, or
 when that attach fails, the ordinary typed failure path remains. Every failed attempt records a
 closed hook-diagnostic
 reason instead of a silent absent mapping: `auto_attach_workspace_unbound`,
@@ -3323,7 +3345,20 @@ gap history remains after recovery, and renewed shedding reactivates it (issue #
 Public ingest failures use their `retryable` contract, not a spelling fallback. A non-retryable
 failure that is not already a narrower terminal class (`dedup_conflict` or
 `observation_storage_corrupt`) becomes `ledger_rejected`; drain and sweep quarantine that one row,
-record the reason once, and continue its lane. Retryable failures keep their current reason and
+record the reason once, and continue its lane. `SESSION_NOT_FOUND` with
+`reason_code: session_superseded` is not that class: ingest follows the current binding carried in
+`safe_details` (same task, successor session, observation writer derived for it), persists the
+updated lifecycle mapping on each hop only while holding the lifecycle lock and the stored
+mapping still equals the predecessor, and delivers the row. A busy lock, changed or cleared
+mapping, or persistence failure skips this cache update without blocking successor delivery. A superseded payload that cannot be
+followed (missing or mismatched task/session/writer ids, a hop cycle, or a rotation after the
+route already opened) quarantines that one row as `session_superseded`. It is never
+`ledger_rejected` and never `mapping_missing`: `mapping_missing` would retire an ended host
+session as unmapped and would disappear from current gaps while the mapping file remains.
+A deterministic write rejection inside the SQLite observation store (a CHECK or STRICT type failure, which repeats identically on every retry of the
+same envelope) is raised as non-retryable `invalid_request` and takes the `ledger_rejected` path, instead of
+escaping as a bare driver exception that the catch-all projected as retryable
+`service_unavailable` while the service was ready (issue #576). Retryable failures keep their current reason and
 scope. A row that reaches 128 consecutive rejections with the same retryable reason is quarantined
 with that reason, so an accidental future catch-all classification cannot create an immortal FIFO
 head. Designed `operation_pending` back-pressure and workspace-global pause/vault/disabled gates
@@ -3585,12 +3620,14 @@ optional reported version, `supported|untested` compatibility). Shared names are
 `("yoetz", "mcp", "serve", "--semantic", "off")`),
 `McpRegistrationState` (`absent|yoetz_owned|foreign_present`), `McpRegistrationAction`
 (`register|reregister|unregister|noop`), `McpRegistrationReason` (`confirmation_required|preview_stale|
-harness_unavailable|parse_failed|timeout|registration_failed|foreign_entry_present`),
-`McpRegistrationPreview`, `McpRegistrationObservation`, `McpRegistrationCommand`,
+harness_unavailable|parse_failed|timeout|registration_failed|foreign_entry_present|isolation_invalid`),
+`McpRegistrationPreview` (including the exact proposed `isolated_root` or null),
+`McpRegistrationObservation`, `McpRegistrationCommand`,
 `McpRegistrationResult`, and
-`McpRegistrationError`. `McpRegistrationObservation` carries `harness_id`, `state`, and
-`route_profile` (`policy|strict|null`); `route_profile` is non-null only when the state is
-`yoetz_owned`, because a foreign or absent entry has no Yoetz route to describe.
+`McpRegistrationError`. `McpRegistrationObservation` carries `harness_id`, `state`,
+`route_profile` (`policy|strict|null`), and `isolation_binding`
+(`ambient|isolated_exact|missing|different|null`); route and binding are non-null only when the
+state is `yoetz_owned`, because a foreign or absent entry has no Yoetz route to describe.
 `observe_registration` reads exactly what `status_registration` reads, mutates nothing, and shares
 its `status` diagnostic phase. Each observation starts with `codex mcp get yoetz --json`; because a
 nonzero named lookup is not positive absence, it falls back to bounded `codex mcp list --json`.
@@ -3614,8 +3651,13 @@ serve command, refuse an observed foreign replacement, and treat an already-abse
 `host_remove_not_compare_and_swap`; callers must quiesce concurrent host configuration writers,
 and the port does not claim atomic exclusion inside the final host subprocess window. The same
 positive-absence fallback is required after removal, so a generic failed named lookup never proves
-success. The interactive approval surface prints the exact command, route, warnings, and preview
-digest. The preview binds the exact command and `policy|strict` route profile. The route profile is
+success. The interactive approval surface prints the exact command, route, isolated root, warnings,
+and preview digest. The preview binds the exact command, `policy|strict` route profile, and exact
+ADR-026 isolated root when present. Ambient external registrations carry no environment. Isolated
+external Codex registrations carry exactly one native `--env` pair,
+`YOETZ_ISOLATED_ROOT=<validated-root>`; a missing or different known root is re-registration drift,
+while any arbitrary key, inherited-variable declaration, or malformed root makes the same-name
+entry foreign and preserves it. The route profile is
 explicit input:
 `yoetz setup run` and `yoetz integrate <harness> mcp preview|install` accept
 `--route-profile strict|policy`. Without that input, an existing yoetz-owned registration keeps
@@ -3627,8 +3669,9 @@ is surfaced before mutation: the wizard preview and report carry `route_profile_
 ordinary digest-bound re-registration.
 The setup-wizard
 schema tokens are `yoetz.setup-wizard-marker/1`, `yoetz.setup-wizard-report/1`,
-`yoetz.setup-status/1`, `yoetz.mcp-registration-preview/1`, and
-`yoetz.mcp-unregistration-preview/1`; the marker lives at `state_dir()/setup-wizard.json` via
+`yoetz.setup-status/1`, `yoetz.mcp-registration-preview/1` (ambient) / `2` (isolated), and
+`yoetz.mcp-unregistration-preview/1` (ambient) / `2` (isolated); the marker lives at
+`state_dir()/setup-wizard.json` via
 `config.paths.setup_marker_path`. The CLI surfaces are
 `yoetz setup run|status` and
 `yoetz integrate <harness> mcp status|preview|preview-remove|install|remove` (ADR-012).

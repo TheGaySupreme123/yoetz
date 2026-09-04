@@ -35,6 +35,11 @@ replacement); the generic `update`, `enable`, `disable`, and `export` commands l
 group are Claude Code lifecycles and refuse for Cursor with
 `cursor_plugin_command_unsupported:<command> supported=preview,install,status,remove` (exit 2).
 
+Issue #561 changes only Yoetz-owned external Codex registration. Cursor remains supported through
+its native plugin projection: the exact isolated root is rendered into the test cell's `mcp.json`
+and hook commands and is bound by that artifact's preview digest. Cursor does not consume the Codex
+`mcp add --env` path or its `isolation_binding` status field.
+
 ```text
 yoetz integrate cursor plugin preview \
   --cursor-config-root /exact/testing/home/.cursor \
@@ -110,7 +115,11 @@ an older ambient runtime (control schema 2.1.0) behind a marker-valid then-curre
 bound entry removes PATH from the runtime choice (issue #468). That profile retains
 `structuredContent` and also repeats the exact canonical JSON body in text `content`, because
 pinned Cursor `3.17.x` can otherwise hide structured results from the model. It adds no
-environment or secret field and does not widen the service route. Route recognition accepts a
+environment or secret field and does not widen the service route. Decision for Cursor (issue
+#579): supported here — the `--host cursor` text channel is the exact canonical JSON wire body,
+so `safe_details.reason_code` and `safe_details.field` are already model-visible for
+`EVENT_INVALID`. The generic bounded `Reason:` summary is the Claude Code path; Cursor tests lock
+that the JSON copy still carries those tokens and is not reduced to the weaker summary. Route recognition accepts a
 hand-written bare `yoetz` (external registrations) or a known launcher (this runtime's or the
 installed marker's) with the exact serve arguments; anything else is `foreign`. Raw initialize and
 tools/list prove only runtime registration. Require a correlated model-controlled `start` or
@@ -300,7 +309,9 @@ received, every other bound session is ended, and the candidate is bound only to
 workspace. The catalog also requires one mapped task, the selector still active, no sibling task,
 the matching repository-privacy binding, and no start already pending for that route. The conflict
 reveals no selector, and a hard crash without `sessionEnd` remains fail-closed rather than being
-guessed from age. A failed attempt records its typed cause (`auto_attach_workspace_unbound`,
+guessed from age. A successful recovery also rewrites every ended same-host predecessor mapping for that task to
+the rotated session and writer so pending predecessor rows drain on the successor route
+(`session_superseded` is followed, not quarantined as `ledger_rejected`). A failed attempt records its typed cause (`auto_attach_workspace_unbound`,
 `auto_attach_request_invalid`, `auto_attach_conflict`, `auto_attach_refused`,
 `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`,
 `service_unavailable`, `vault_locked`, `timeout`, `storage_unsafe`, or `storage_corrupt`) in the
@@ -324,10 +335,21 @@ sandboxed Cursor-agent result does not establish unrestricted Cursor-terminal be
 those proof cells separately.
 
 Shared drain terminalization is host-neutral: `ledger_rejected` means the ready service rejected
-one envelope non-retryably, so that row is retained in quarantine and later rows proceed. An
+one envelope non-retryably, so that row is retained in quarantine and later rows proceed. A task
+bundle at schema 9 (bundle migration `0009`) stores `cursor_hook` rows; schema 8's source CHECK
+refused them. The SQLite store now classifies deterministic constraint failures as `ledger_rejected`
+(issue #576). Existing task bundles require the explicit [migration procedure](migration-rollback.md);
+upgrading or restarting the service alone does not migrate them, and the new writer refuses an
+unmigrated bundle before observation ingestion. Migration allows valid pending envelopes to store
+unchanged, but delivery still requires a usable session mapping; it does not itself repair a retired
+session route or replay quarantined rows. An
 idempotent repeat of a committed envelope (lost acknowledgement, service restart, or a workflow
 reattach that rotates the mapped Yoetz session) is resolved task-wide and acknowledged, never
-quarantined. A row
+quarantined. A pending row from an ended host session whose task was recovered by a successor
+session is delivered on the successor route (`session_superseded` is followed). A successor
+binding that cannot be followed quarantines that row as `session_superseded`, not
+`ledger_rejected` or `mapping_missing`.
+A row
 also enters quarantine after 128 consecutive rejections with the same retryable reason, except for
 designed back-pressure and workspace-global pause/vault/disabled gates. Both cases remain visible
 in `quarantine_causes`, aggregate `delivery_causes`, and gaps;

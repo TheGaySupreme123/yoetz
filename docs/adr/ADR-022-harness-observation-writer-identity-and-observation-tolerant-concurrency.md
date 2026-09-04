@@ -1,7 +1,8 @@
 # ADR-022 — Harness observation writer identity and observation-tolerant optimistic concurrency
 
 **Status:** Accepted (2026-08-13), recorded for issues #214–#223 and acknowledged in issue #225.
-**Amended:** 2026-09-04 for issue #560 (task-scoped operation identity across workflow
+**Amended:** 2026-09-04 for issue #577 (pending observation rows follow a superseded session
+binding after ended-session recovery attach); 2026-09-04 for issue #560 (task-scoped operation identity across workflow
 reattach, decision 18); 2026-09-03 for issues #539 (content-bearing committed replay) and #540
 (terminal ingest rejection and retry ceiling); 2026-08-30 for issue #302 (captured observation ledger
 evidence) and issue #331
@@ -13,13 +14,14 @@ maintainer-directed issue #346 incident repairs #350, #351, and
 (delivered frontier-motion high-water); 2026-08-16 for maintainer-approved issue #224; 2026-08-14
 for moderator-approved issue #244 and the reopened issue #216 recurrence.
 **Implemented by:** `src/yoetz/application/observation_materialize.py`,
-`src/yoetz/application/observation_coordinator.py`, `src/yoetz/adapters/memory/ledger.py`,
+`src/yoetz/application/observation_coordinator.py`, `src/yoetz/cli/observe_hooks.py`,
+`src/yoetz/adapters/memory/ledger.py`,
 `src/yoetz/application/publish_work.py`, `src/yoetz/application/receipt.py`,
 `src/yoetz/kernel/policies/observation_advice.py`, `src/yoetz/service/ready_composition.py`, and
 `src/yoetz/adapters/integrations/observation_local.py`.
 **Relates to:** ADR-009, ADR-010, ADR-020, and
 issues #214, #216, #217, #223, #224, #225, #226, #227, #244, #302, #320, #322, #326, #331,
-#445, #539, #540, and #560.
+#445, #539, #540, #560, and #577.
 
 **Proposed amendment for issue #231:** `provider_not_ready` remains bounded local advice, but the
 observation coordinator does not materialize it as an agent-facing finding. Provider readiness is a
@@ -307,6 +309,20 @@ unsupported claims and unbounded duplicate findings.
     committed it, and only from that session. Hook ordinals, session generations, and host session
     commitments are keyed on the host session, not the mapping, so they stay monotonic across a
     reattach.
+19. An ended-host-session recovery attach that rotates the task route does not retire still-pending
+    observation rows of the predecessor (issue #577). `SESSION_NOT_FOUND` with
+    `reason_code: session_superseded` already carries the current task binding; ingest follows that
+    binding, routes with the observation writer derived for the successor session, and persists the
+    updated lifecycle mapping on each hop under its lifecycle lock only if the stored mapping still
+    equals the predecessor. Busy locks, changed or cleared mappings, and persistence failures skip
+    the cache update without blocking successor delivery. The shared hook recovery path also rewrites every ended
+    same-host predecessor mapping for that task in the same pass it stores the successor mapping. A
+    row refused only because its route was retired is never `ledger_rejected`; a superseded payload
+    that cannot be followed (missing or mismatched task/session/writer ids, a hop cycle, or a
+    rotation after the route already opened) quarantines that row as `session_superseded`. That
+    reason is not `mapping_missing`, so ended-unmapped drain terminalization and the status rule
+    that hides `mapping_missing` while a mapping file exists cannot mislabel a mapped retirement.
+    `ledger_rejected` remains the terminal class for content and identity refusals.
 
 ## Security and privacy consequences
 

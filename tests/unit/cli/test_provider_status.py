@@ -880,6 +880,7 @@ def _stub_live_route(
         HarnessId.CODEX,
         McpRegistrationState.YOETZ_OWNED if observed else McpRegistrationState.ABSENT,
         registered if observed else None,
+        "ambient" if observed else None,
     )
 
     monkeypatch.setattr(

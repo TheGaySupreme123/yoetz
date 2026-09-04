@@ -254,7 +254,10 @@ class _RoutePort:
         if self._observe_fails:
             raise McpRegistrationError(McpRegistrationReason.PARSE_FAILED, {})
         return McpRegistrationObservation(
-            binary.harness_id, McpRegistrationState.YOETZ_OWNED, self._profile
+            binary.harness_id,
+            McpRegistrationState.YOETZ_OWNED,
+            self._profile,
+            "ambient",
         )
 
     async def preview_registration(self, binary: HarnessBinary) -> McpRegistrationPreview:
