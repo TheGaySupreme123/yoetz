@@ -564,3 +564,7 @@ to the primary alone rather than disabling a channel both scopes allow. Policy J
 (after the primary cannot serve)". Which endpoint an attempt reaches is decided by ADR-006's closed
 engagement rule; this amendment only makes both destinations exact, approved, receipted, and
 independently revocable.
+
+The fallback binding is carried by privacy-policy schema 1.1.0. The released 1.0.0 schema remains
+byte-identical; current policy readers accept existing 1.0.0 documents and current writers emit
+1.1.0. This wire version change does not alter the canonical domain policy digest.

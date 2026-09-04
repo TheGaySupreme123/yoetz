@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Final, Literal, Protocol
 
 from yoetz.observability.logging import record_unexpected_exception_without_raising
@@ -920,6 +920,9 @@ async def run_durable_semantic_attempts(
     on_lease_renewed: Callable[[OperationLease], None] | None = None,
     fallback: SemanticFallbackPlan | None = None,
     dispatch_fallback: SemanticAttemptDispatch | None = None,
+    primary_deadline: Deadline | None = None,
+    fallback_timeout_seconds: float | None = None,
+    now_utc: Callable[[], datetime] | None = None,
 ) -> object:
     """Run the physical attempt loop for one durable semantic job.
 
@@ -1002,7 +1005,9 @@ async def run_durable_semantic_attempts(
     pending_claim_error: PublicOperationError | None = None
 
     while attempts_completed < budget:
-        if deadline.expired(now_monotonic()):
+        if deadline.expired(now_monotonic()) and not (
+            job.state == "leased" and last is None and pending_claim_error is None
+        ):
             if last is None and pending_claim_error is not None:
                 # Another live owner still has authority over the job. Do not falsify that
                 # recoverable state as a coordinator failure or mutate its active attempt.
@@ -1052,15 +1057,56 @@ async def run_durable_semantic_attempts(
                     before_ordinal=handle.attempt_ordinal,
                 )
                 role = _walk_endpoints(codes_before, fallback).role
-            remaining = deadline.remaining_seconds(now_monotonic())
+            dispatch_deadline = (
+                primary_deadline if role == "primary" and primary_deadline is not None else deadline
+            )
+            if role == "fallback" and fallback_timeout_seconds is not None:
+                if now_utc is None or fallback is None:
+                    raise ValueError("semantic_fallback_clock_missing")
+                rows = await ledger.list_semantic_attempts(job.job_id)
+                first = next(
+                    row
+                    for row in sorted(rows, key=lambda item: item.attempt_ordinal)
+                    if endpoint_role_for_ordinal(rows, fallback, row.attempt_ordinal) == "fallback"
+                )
+                # Claim time is durable across retries, disclosure waits, and service restart.
+                # Missing legacy metadata gets the conservative primary cutoff, never a new
+                # fallback lifetime starting at this replay.
+                cutoff = (
+                    first.started_at + timedelta(seconds=fallback_timeout_seconds)
+                    if first.started_at is not None
+                    else (primary_deadline or deadline).expires_at_utc
+                )
+                cutoff = min(cutoff, deadline.expires_at_utc)
+                remaining = min(
+                    deadline.remaining_seconds(now_monotonic()),
+                    max(0.0, (cutoff - now_utc()).total_seconds()),
+                )
+                dispatch_deadline = Deadline(cutoff, now_monotonic() + remaining)
+            remaining = dispatch_deadline.remaining_seconds(now_monotonic())
             attempt_deadline = Deadline(
-                deadline.expires_at_utc,
+                dispatch_deadline.expires_at_utc,
                 now_monotonic() + remaining,
             )
             attempt_dispatch = dispatch
             if role == "fallback":
                 assert dispatch_fallback is not None  # validated at entry
                 attempt_dispatch = dispatch_fallback
+            if remaining <= 0.0:
+                # A resumed started attempt must not be sent after its frozen endpoint cutoff.
+                # Preserve the physical ordinal and terminalize it without licensing fallback.
+                await ledger.record_attempt_outcome(
+                    handle, AttemptOutcome.FAILED, terminal_code=SemanticReason.PROVIDER_TIMEOUT
+                )
+                await _resolve_disclosure_wait_after_terminal(
+                    ledger, current_lease, job.job_id, handle.attempt_id
+                )
+                return build_final(
+                    SemanticStatus.UNAVAILABLE,
+                    SemanticReason.RETRY_BUDGET_EXHAUSTED,
+                    None,
+                    await _accounting(),
+                )
             evaluation = await attempt_dispatch(handle, attempt_deadline)
         except BaseException as exc:
             # A raise between claim and the terminal write used to unwind past every
@@ -1180,7 +1226,7 @@ async def run_durable_semantic_attempts(
                     reason=evaluation.reason,
                     attempts_completed=role_attempts,
                     max_retries=fallback.endpoint(role).max_retries,
-                    deadline_expired=deadline_expired,
+                    deadline_expired=deadline_expired or attempt_deadline.expired(now_monotonic()),
                     repair_retries_used=repair_retries_used,
                 )
             budget = _total_budget(walk_after, fallback)

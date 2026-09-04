@@ -9,6 +9,8 @@ the primary the fallback stood in for.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
+from datetime import datetime, timedelta
 from typing import cast
 
 import pytest
@@ -31,10 +33,12 @@ from yoetz.domain.findings import (
     SemanticFailureClass,
     SemanticFallbackOrigin,
 )
-from yoetz.domain.privacy import ProviderBinding
+from yoetz.domain.privacy import PrivacyOutcome, PrivacyReason, ProviderBinding
 from yoetz.ports.ledger import FrozenCase
+from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectSource
 from yoetz.ports.runtime import TaskRuntime
 from yoetz.ports.semantic import (
+    Deadline,
     ProviderAttemptProvenance,
     SemanticJudgment,
     SemanticResultInvalid,
@@ -42,6 +46,7 @@ from yoetz.ports.semantic import (
     SemanticResultUnavailable,
 )
 from yoetz.ports.start_catalog import StartCatalogPort
+from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from yoetz.protocol.models import SemanticReason, SemanticStatus
 
 # The single-endpoint harness owns the durable case, route, catalog, and coordinator fakes; this
@@ -163,12 +168,18 @@ def _paired_evaluator(
     runtime: TaskRuntime,
     *,
     primary_resolves: bool = True,
+    clock: FixedClock | None = None,
+    primary_retries: int = 2,
+    fallback_retries: int = 2,
+    fallback_binding: ProviderBinding | None = _FALLBACK,
+    primary_timeout: int = 60,
+    primary_binding: ProviderBinding = _PROVIDER,
 ) -> _Evaluator:
     async def resolve_provider() -> ProviderBinding | None:
-        return _PROVIDER if primary_resolves else None
+        return primary_binding if primary_resolves else None
 
     async def resolve_fallback() -> ProviderBinding | None:
-        return _FALLBACK
+        return fallback_binding
 
     factory = cast(
         "Callable[..., _Evaluator]",
@@ -176,17 +187,17 @@ def _paired_evaluator(
     )
     return factory(
         cast(PrivacyCoordinator, privacy),
-        FixedClock(),
+        clock or FixedClock(),
         _INSTALLATION,
         resolve_provider,
         cast(StartCatalogPort, _Catalog(_route_for(runtime.task_id, runtime.session_id))),
         ready_composition_module.IdPort(),
-        timeout_seconds=60,
-        max_retries=2,
+        timeout_seconds=primary_timeout,
+        max_retries=primary_retries,
         resolve_fallback=resolve_fallback,
         fallback_timeout_seconds=60,
-        fallback_max_retries=2,
-        configured_primary=_PROVIDER,
+        fallback_max_retries=fallback_retries,
+        configured_primary=primary_binding,
     )
 
 
@@ -311,3 +322,195 @@ async def test_unresolvable_primary_is_named_with_zero_attempts_on_fallback_prov
     assert primary is not None
     assert primary.attempted_count == 0
     assert primary.predispatch_reason == "credential_unavailable"
+
+
+class _MovingClock(FixedClock):
+    elapsed = 0.0
+
+    def now_utc(self) -> datetime:
+        return super().now_utc() + timedelta(seconds=self.elapsed)
+
+    def monotonic_seconds(self) -> float:
+        return super().monotonic_seconds() + self.elapsed
+
+
+class _WaitingFallback(_PairedPrivacy):
+    def __init__(self, task_id: str, clock: _MovingClock) -> None:
+        super().__init__(task_id=task_id)
+        self.clock = clock
+        self.budgets: list[float] = []
+
+    async def evaluate_semantic(self, candidate: object, deadline: object) -> object:
+        assert type(deadline) is Deadline
+        self.budgets.append(deadline.remaining_seconds(self.clock.monotonic_seconds()))
+        if getattr(candidate, "provider_binding") == _FALLBACK:
+            self.bindings.append(_FALLBACK)
+            return await _Privacy.evaluate_semantic(self, candidate, deadline)
+        return await super().evaluate_semantic(candidate, deadline)
+
+    async def resume(self, request_id: str, case_digest: str, deadline: object) -> object:
+        assert type(deadline) is Deadline
+        self.budgets.append(deadline.remaining_seconds(self.clock.monotonic_seconds()))
+        return await super().resume(request_id, case_digest, deadline)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("primary_resolves", (True, False))
+@pytest.mark.parametrize("fallback_disappears", (True, False))
+@pytest.mark.parametrize(
+    "adapter_factory", (memory_adapter, sqlite_adapter), ids=("memory", "sqlite")
+)
+async def test_replay_keeps_frozen_readiness_binding_budgets_and_time(
+    primary_resolves: bool,
+    fallback_disappears: bool,
+    adapter_factory: Callable[[object], MemoryLedgerAdapter | SqliteLedger],
+) -> None:
+    adapter = adapter_factory(append_command())
+    clock = _MovingClock()
+    adapter._clock = clock  # pyright: ignore[reportPrivateUsage]
+    frozen, runtime = await _durable_semantic_case(adapter)
+    privacy = _WaitingFallback(runtime.task_id, clock)
+    waiting = await _paired_evaluator(
+        privacy, runtime, primary_resolves=primary_resolves, clock=clock
+    )(frozen, (), runtime)
+    assert waiting.status is SemanticStatus.AWAITING_HUMAN
+    assert waiting.operation_lease is not None
+    primary_count = 2 if primary_resolves else 0
+    assert privacy.bindings == [_PROVIDER] * primary_count + [_FALLBACK]
+    assert privacy.budgets == [60.0] * (primary_count + 1)
+
+    clock.elapsed = 20.0
+    if isinstance(adapter, SqliteLedger):
+        # Rehydrate the exact durable attempt timestamps and encrypted case after restart.
+        restarted = SqliteLedger(
+            db=adapter._db,  # pyright: ignore[reportPrivateUsage]
+            task_id=runtime.task_id,
+            ownership_fence=runtime.fence,
+            clock=clock,
+            ids=adapter._ids,  # pyright: ignore[reportPrivateUsage]
+            objects=adapter._objects,  # pyright: ignore[reportPrivateUsage]
+        )
+        runtime = replace(runtime, ledger=restarted)
+    privacy.resume_terminal = (PrivacyOutcome.HUMAN_DENIED, PrivacyReason.HUMAN_DENIED)
+    changed_binding = ProviderBinding(
+        "changed-provider", "new-model", "new-profile", "2.0.0", "external"
+    )
+    resumed = await _paired_evaluator(
+        privacy,
+        runtime,
+        primary_resolves=not primary_resolves,
+        clock=clock,
+        primary_retries=0,
+        fallback_retries=0,
+        fallback_binding=None if fallback_disappears else changed_binding,
+    )(FrozenCase(frozen.case, waiting.operation_lease), (), runtime)
+
+    assert resumed.status is SemanticStatus.HUMAN_DENIED
+    assert privacy.resume_calls == 1
+    assert privacy.budgets[-1] == 40.0
+    accounting = _accounting(resumed)
+    primary, fallback = accounting.endpoint("primary"), accounting.endpoint("fallback")
+    assert primary is not None and fallback is not None
+    assert primary.attempted_count == primary_count
+    assert fallback.attempted_count == 1
+    assert fallback.provider_id == _FALLBACK.provider_id
+    assert primary.predispatch_reason == (None if primary_resolves else "credential_unavailable")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("primary_retries", (0, 2))
+async def test_primary_full_timeout_preserves_fallback_reservation_without_widening_engagement(
+    primary_retries: int,
+) -> None:
+    clock = _MovingClock()
+    adapter = memory_adapter(append_command())
+    adapter._clock = clock  # pyright: ignore[reportPrivateUsage]
+    frozen, runtime = await _durable_semantic_case(adapter)
+
+    class TimedPrivacy(_PairedPrivacy):
+        async def evaluate_semantic(self, candidate: object, deadline: object) -> object:
+            assert type(deadline) is Deadline
+            if getattr(candidate, "provider_binding") == _PROVIDER:
+                assert deadline.remaining_seconds(clock.monotonic_seconds()) == 10.0
+                clock.elapsed += 10.0
+            else:
+                assert deadline.remaining_seconds(clock.monotonic_seconds()) == 60.0
+            return await super().evaluate_semantic(candidate, deadline)
+
+    privacy = TimedPrivacy(task_id=runtime.task_id)
+    result = await _paired_evaluator(
+        privacy, runtime, clock=clock, primary_retries=primary_retries, primary_timeout=10
+    )(frozen, (), runtime)
+    assert privacy.bindings == ([_PROVIDER, _FALLBACK] if primary_retries == 0 else [_PROVIDER])
+    assert result.status is (
+        SemanticStatus.SUCCEEDED if primary_retries == 0 else SemanticStatus.UNAVAILABLE
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("state", ("succeeded", "awaiting", "uncertain"))
+async def test_legacy_case_recovers_selected_result_or_retires_wait_without_dispatch(
+    state: str,
+) -> None:
+    terminal = state == "succeeded"
+    adapter = memory_adapter(append_command())
+    frozen, runtime = await _durable_semantic_case(adapter)
+    privacy = _WaitingFallback(runtime.task_id, _MovingClock())
+    if terminal:
+        privacy = _PairedPrivacy(task_id=runtime.task_id)
+    evaluator = _paired_evaluator(
+        privacy, runtime, primary_binding=_FALLBACK, fallback_binding=None
+    )
+    original = await evaluator(frozen, (), runtime)
+    assert original.status is (
+        SemanticStatus.SUCCEEDED if terminal else SemanticStatus.AWAITING_HUMAN
+    )
+    assert original.operation_lease is not None
+    job = await adapter.load_semantic_job(frozen.lease.writer_id, frozen.lease.operation_id)
+    assert job is not None
+    resolved = await runtime.objects.resolve_verified(
+        job.case_object_ref.object_id, job.case_object_ref.envelope_digest
+    )
+    payload = b"".join([chunk async for chunk in runtime.objects.open_verified(resolved)])
+    parsed = strict_json_parse(payload)
+    assert type(parsed) is dict
+    body = cast(dict[str, JsonValue], parsed)
+    body["schema"] = "yoetz.semantic-case/1"
+    body.pop("execution")
+    legacy_payload = canonical_encode(body)
+    staged = await runtime.objects.stage(
+        ObjectSource(data=legacy_payload, declared_size=len(legacy_payload)),
+        ObjectMetadata(
+            ObjectKind.SEMANTIC_CASE, "application/json", runtime.task_id, FixedClock().now_utc()
+        ),
+    )
+    legacy_ref = await runtime.objects.finalize(staged)
+    adapter._state.jobs[job.job_id] = replace(job, case_object_ref=legacy_ref)  # pyright: ignore[reportPrivateUsage]
+    if state == "uncertain":
+        adapter._state.disclosure_waits.clear()  # pyright: ignore[reportPrivateUsage]
+    calls_before = cast(int, getattr(privacy, "calls"))
+
+    recovered = await evaluator(FrozenCase(frozen.case, original.operation_lease), (), runtime)
+
+    assert getattr(privacy, "calls") == calls_before
+    expected_status = (
+        SemanticStatus.SUCCEEDED
+        if terminal
+        else SemanticStatus.UNAVAILABLE
+        if state == "uncertain"
+        else SemanticStatus.FAILED
+    )
+    assert recovered.status is expected_status
+    if terminal:
+        assert recovered.judgment == original.judgment
+        assert recovered.provenance == original.provenance
+    else:
+        assert recovered.reason is (
+            SemanticReason.RECEIPT_PERSISTENCE_UNKNOWN
+            if state == "uncertain"
+            else SemanticReason.COORDINATOR_FAILURE
+        )
+    retired = await adapter.load_semantic_job(frozen.lease.writer_id, frozen.lease.operation_id)
+    assert retired is not None and retired.state == ("succeeded" if terminal else "failed")
+    if state == "uncertain":
+        assert retired.terminal_code is SemanticReason.OUTCOME_UNKNOWN

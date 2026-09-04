@@ -259,6 +259,46 @@ def _frozen_schema(
         raise SchemaGenerationError(error_reason, entries=(entry.relative_path,)) from exc
 
 
+def _privacy_policy_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Append fallback authorization without changing the released v1.0 contract."""
+
+    document = _simple_versioned_schema(entry, "privacy/privacy-policy-1.0.0.schema.json", {})
+    properties = cast(dict[str, JsonValue], document["properties"])
+    properties["schema_version"] = {"const": "1.1.0"}
+    definitions = cast(dict[str, dict[str, JsonValue]], document["$defs"])
+    base = definitions["channel_policy_base"]
+    cast(dict[str, JsonValue], base["properties"])["fallback_provider_binding"] = {
+        "$ref": "#/$defs/provider_binding"
+    }
+    fallback_rule: JsonValue = {
+        "if": {"required": ["fallback_provider_binding"]},
+        "then": {
+            "required": ["provider_binding"],
+            "properties": {
+                "provider_binding": {"properties": {"transport": {"const": "external"}}},
+                "fallback_provider_binding": {"properties": {"transport": {"const": "external"}}},
+            },
+        },
+    }
+    cast(list[JsonValue], base["allOf"]).append(fallback_rule)
+    disabled = cast(dict[str, JsonValue], cast(list[JsonValue], base["allOf"])[0])
+    then = cast(dict[str, JsonValue], disabled["then"])
+    then["not"] = {
+        "anyOf": [{"required": ["provider_binding"]}, {"required": ["fallback_provider_binding"]}]
+    }
+    for name in ("crash_diagnostics", "update_checks", "capability_testing", "product_telemetry"):
+        arm = cast(
+            dict[str, JsonValue], cast(list[JsonValue], definitions[name + "_policy"]["allOf"])[1]
+        )
+        arm["not"] = {
+            "anyOf": [
+                {"required": ["provider_binding"]},
+                {"required": ["fallback_provider_binding"]},
+            ]
+        }
+    return document
+
+
 def _frozen_version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Preserve the released v2.0 version report while newer reports append."""
 
@@ -2850,6 +2890,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         lambda: __import__("yoetz.domain.privacy", fromlist=["PrivacyPolicy"]).PrivacyPolicy,
     ),
     _RegistryEntry(
+        "privacy/privacy-policy-1.1.0.schema.json",
+        "privacy-policy",
+        "1.1.0",
+        "request_result",
+        "privacy-policy",
+        lambda: __import__("yoetz.domain.privacy", fromlist=["PrivacyPolicy"]).PrivacyPolicy,
+    ),
+    _RegistryEntry(
         "privacy/setup-wizard-contract-1.0.0.schema.json",
         "setup-wizard-contract",
         "1.0.0",
@@ -3307,6 +3355,7 @@ def build_schema_documents(
 
         assert entry.loader is not None  # narrowed by the pending-check above
         if entry.relative_path in {
+            "privacy/privacy-policy-1.0.0.schema.json",
             "config/yoetz-config-1.0.0.schema.json",
             "config/yoetz-config-1.1.0.schema.json",
             "events/check-recorded-1.0.0.schema.json",
@@ -3411,6 +3460,8 @@ def build_schema_documents(
             normalized = _frozen_version_manifest_schema(entry)
         elif entry.relative_path == "version/version-manifest-2.2.0.schema.json":
             normalized = _version_manifest_schema(entry)
+        elif entry.relative_path == "privacy/privacy-policy-1.1.0.schema.json":
+            normalized = _privacy_policy_v1_1_schema(entry)
         elif entry.relative_path == "privacy/outbound-case-1.1.0.schema.json":
             normalized = _outbound_case_schema(entry)
         else:

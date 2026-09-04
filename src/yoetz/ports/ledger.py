@@ -911,8 +911,11 @@ class SemanticAttemptRecord:
     state: Literal["started", "response_durable", "selected", "failed", "expired", "late"]
     terminal_code: SemanticReason | None
     result_object_ref: ObjectRef | None
+    started_at: datetime | None = None
 
     def __post_init__(self) -> None:
+        if self.started_at is not None:
+            _utc(self.started_at)
         _id(IdKind.SEMANTIC_JOB, self.job_id)
         _id(IdKind.SEMANTIC_ATTEMPT, self.attempt_id)
         _uint(self.attempt_ordinal, positive=True)

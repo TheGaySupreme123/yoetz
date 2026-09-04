@@ -147,6 +147,10 @@ nothing is sent to the fallback before that decision, and nothing else ever beco
 `yoetz privacy setup` shows the same pair before asking, as `Destination` and
 `Fallback destination (after the primary cannot serve)`.
 
+Custom privacy setup asks separately whether to authorize the configured fallback, naming its
+provider and model. Declining keeps the policy bound to the primary alone. Named review recipes
+include the configured pair in the review screen before approval.
+
 ## What semantic review actually sends
 
 When you accept the CLI's recommended `assisted-review` recipe, it shows and confirms a standing

@@ -103,7 +103,7 @@ _APPROVAL_DOMAIN = b"yoetz/privacy-audit/local-approval/v1\x00"
 _AUTHORIZATION_DOMAIN = b"yoetz/privacy-audit/authorization/v1\x00"
 _CURSOR_DOMAIN = b"yoetz/privacy-audit/receipt-cursor/v1\x00"
 
-_PRIVACY_POLICY_WIRE_SCHEMA_VERSION: Final = "1.0.0"
+_PRIVACY_POLICY_WIRE_SCHEMA_VERSION: Final = "1.1.0"
 _WIRE_CHANNEL_ORDER: Final = (
     EgressChannel.CAPABILITY_TESTING,
     EgressChannel.CRASH_DIAGNOSTICS,
@@ -386,10 +386,14 @@ def _policy_from_wire_mapping(source: dict[str, JsonValue]) -> PrivacyPolicy:
     # The frozen schema makes both of these required, and never_send is a const deny list.
     # Treating either as optional would decode an incomplete or future document as a valid
     # 1.0.0 policy, which on this boundary means silently accepting a weaker deny list.
-    if source.get("schema_version") != _PRIVACY_POLICY_WIRE_SCHEMA_VERSION:
+    if source.get("schema_version") not in {"1.0.0", _PRIVACY_POLICY_WIRE_SCHEMA_VERSION}:
         raise ValueError("privacy_policy_row_corrupt")
     channels = source["channel_policies"]
     if type(channels) is not list:
+        raise ValueError("privacy_policy_row_corrupt")
+    if source.get("schema_version") == "1.0.0" and any(
+        "fallback_provider_binding" in _mapping(channel) for channel in channels
+    ):
         raise ValueError("privacy_policy_row_corrupt")
     never_send = source.get("never_send")
     if never_send is None or tuple(_strings(never_send)) != _NEVER_SEND_WIRE:
@@ -436,7 +440,7 @@ def decode_privacy_policy_canonical(data: bytes) -> PrivacyPolicy:
 
 
 def encode_privacy_policy_json(policy: PrivacyPolicy) -> dict[str, JsonValue]:
-    """Encode a privacy policy as the wire ``privacy-policy-1.0.0`` JSON object.
+    """Encode a privacy policy as the wire ``privacy-policy-1.1.0`` JSON object.
 
     Catalog rows stay domain-shaped; ordinary-control / CLI results must match the frozen
     schema (``local_sink_category_ceilings``, const ``never_send``, decimal counters).

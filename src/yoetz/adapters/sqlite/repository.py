@@ -1041,7 +1041,7 @@ class SqliteLedger:
 
             for attempt_row in self._db.execute(
                 "SELECT attempt_id,job_id,attempt_ordinal,provider_request_id,owner_generation,"
-                "lease_owner_id,lease_generation,state,result_object_id,terminal_code "
+                "lease_owner_id,lease_generation,state,result_object_id,terminal_code,started_at "
                 "FROM semantic_attempts WHERE job_id IN ("
                 "SELECT job_id FROM semantic_jobs AS jobs WHERE EXISTS ("
                 "SELECT 1 FROM operations AS operations "
@@ -1060,6 +1060,7 @@ class SqliteLedger:
                     attempt_state,
                     attempt_result_object_id,
                     attempt_terminal_code,
+                    attempt_started_at,
                 ) = attempt_row
                 try:
                     job = self._state.jobs[cast(str, attempt_job_id)]
@@ -1097,6 +1098,7 @@ class SqliteLedger:
                         None
                         if attempt_terminal_code is None
                         else SemanticReason(cast(str, attempt_terminal_code)),
+                        parse_rfc3339_millis(cast(str, attempt_started_at)),
                     )
                 except (KeyError, TypeError, ValueError) as exc:
                     raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
@@ -1307,7 +1309,9 @@ class SqliteLedger:
                     if attempt.result_object_ref is None
                     else attempt.result_object_ref.object_id,
                     None if attempt.terminal_code is None else attempt.terminal_code.value,
-                    now,
+                    now
+                    if attempt.started_at is None
+                    else format_rfc3339_millis(attempt.started_at),
                     now if attempt.state in {"selected", "failed", "expired", "late"} else None,
                 ),
             )

@@ -484,7 +484,7 @@ def test_v23_updates_only_the_status_operation_schema_refs() -> None:
         assert (_ROOT / filename).read_bytes() == _PACKAGE_ROOT.joinpath(filename).read_bytes()
 
 
-def test_v24_updates_only_the_publish_request_and_provenance_result_refs() -> None:
+def test_v24_updates_only_publish_provenance_and_privacy_policy_contracts() -> None:
     request_v23 = cast(
         dict[str, Any],
         strict_json_parse((_ROOT / "control-request-2.3.0.schema.json").read_bytes()),
@@ -509,9 +509,20 @@ def test_v24_updates_only_the_publish_request_and_provenance_result_refs() -> No
     assert "publish-work-request-1.0.0.schema.json" in str(request_v23)
     assert "publish-work-request-1.1.0.schema.json" in str(request_v24)
 
+    policy_ref = "https://schemas.yoetz.dev/0.1/privacy/privacy-policy-1.0.0.schema.json"
+    policy_union = [
+        {"$ref": policy_ref},
+        {"$ref": policy_ref.replace("1.0.0", "1.1.0")},
+    ]
+    assert str(request_v24).count("privacy-policy-1.1.0.schema.json") == 3
+
     def restore_refs(value: object, replacements: tuple[tuple[str, str], ...]) -> None:
         if isinstance(value, dict):
             mapping = cast(dict[str, object], value)
+            if mapping == {"anyOf": policy_union}:
+                mapping.clear()
+                mapping["$ref"] = policy_ref
+                return
             for key, member in mapping.items():
                 if key == "$ref" and isinstance(member, str):
                     for new_ref, old_ref in replacements:
@@ -534,6 +545,7 @@ def test_v24_updates_only_the_publish_request_and_provenance_result_refs() -> No
             ("check-result-1.1.0", "check-result-1.0.0"),
             ("receipt-result-1.1.0", "receipt-result-1.0.0"),
             ("status-result-1.2.0", "status-result-1.1.0"),
+            ("privacy-policy-1.1.0", "privacy-policy-1.0.0"),
         ),
     )
     assert result_v24 == result_v23

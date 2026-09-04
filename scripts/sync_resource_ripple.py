@@ -163,6 +163,15 @@ def _check(repo_root: Path) -> bool:
 
 def _write_pass(repo_root: Path) -> bool:
     steps = (
+        (
+            "generate_schemas.py",
+            "--write",
+            "--only",
+            "privacy/privacy-policy-1.0.0.schema.json",
+            "--only",
+            "privacy/privacy-policy-1.1.0.schema.json",
+        ),
+        ("sync_repository_authority_schemas.py", "--write"),
         # Mirror the reviewed sources into the package tree and recompute the resource-set digest.
         ("verify_resource_manifest.py", "--sync"),
         # Rebind the runtime-support digests to that resource-set digest. This must precede the

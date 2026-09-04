@@ -419,6 +419,25 @@ def _claim_v24_request() -> dict[str, Any]:
         "https://schemas.yoetz.dev/0.1/operations/publish-work-request-1.0.0.schema.json",
         "https://schemas.yoetz.dev/0.1/operations/publish-work-request-1.1.0.schema.json",
     )
+
+    def admit_policy_versions(value: Any) -> None:
+        if isinstance(value, dict):
+            if value.get("$ref") == _PRIVACY_POLICY:
+                value.pop("$ref")
+                value["anyOf"] = [
+                    {"$ref": _PRIVACY_POLICY},
+                    {
+                        "$ref": "https://schemas.yoetz.dev/0.1/privacy/privacy-policy-1.1.0.schema.json"
+                    },
+                ]
+            else:
+                for child in value.values():
+                    admit_policy_versions(child)
+        elif isinstance(value, list):
+            for child in value:
+                admit_policy_versions(child)
+
+    admit_policy_versions(generated)
     return generated
 
 
@@ -434,6 +453,11 @@ def _semantic_provenance_v24_result() -> dict[str, Any]:
             f"https://schemas.yoetz.dev/0.1/operations/{old}.schema.json",
             f"https://schemas.yoetz.dev/0.1/operations/{new}.schema.json",
         )
+    _replace_schema_ref(
+        generated,
+        _PRIVACY_POLICY,
+        "https://schemas.yoetz.dev/0.1/privacy/privacy-policy-1.1.0.schema.json",
+    )
     return generated
 
 

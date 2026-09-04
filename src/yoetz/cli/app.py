@@ -2952,7 +2952,7 @@ def provider_fallback_remove(json_output: _JSON = False) -> None:
     _human_or_json(_semantic_fallback_payload(path, config), json_output=json_output)
     typer.echo(
         "next: the privacy policy still names the removed endpoint until you re-run "
-        "'yoetz privacy setup' (a tightening, no approval ceremony)",
+        "'yoetz privacy setup'; review the resulting policy changes there",
         err=True,
     )
     _finish(0)

@@ -2522,7 +2522,7 @@ admits each member on its own. The policy diff vocabulary gains
 `("channel", "fallback_provider")`, rendered "Fallback provider and model" and ordered right
 after the primary in the Destination group; adding or changing the fallback is a widening,
 removing it a tightening. Intersection keeps a fallback only when both scopes name the
-identical one. The field is appended to `privacy-policy-1.0.0` as optional and emitted only when
+identical one. The field is introduced in `privacy-policy-1.1.0` as optional and emitted only when
 present, so single-endpoint policy digests are unchanged. `PrivacyProfile` governs the
 `llm_inference` row/content rules only; `ReviewContextProfile` can only narrow which case items are
 considered and never grants a category, class, destination, scope, or byte. `local_only` disables
@@ -2616,8 +2616,17 @@ every attempt to the fallback with zero primary attempts. Content-shaped outcome
 `refused`, `semantic_judgment_rejected`), policy/human outcomes, and `outcome_unknown` never
 engage it, and an engaged job never returns to the primary. Each endpoint keeps its own ADR-006
 retry budget (at most two retries) and its own configured timeout; the operation deadline is
-the primary timeout plus the fallback timeout. `endpoint_role_for_ordinal` derives the endpoint
-of every attempt from the durable rows before it, so replay resumes the same endpoint. Each
+the primary timeout plus the fallback timeout. Primary dispatch uses its own frozen cutoff;
+fallback dispatch uses the first fallback attempt's durable `started_at` plus its frozen timeout,
+capped by the overall cutoff. Neither retries nor replay reset these clocks. Time exhaustion alone
+does not bypass the closed engagement rule. The encrypted `yoetz.semantic-case/2` object freezes
+endpoint bindings, initial readiness, retry budgets, and cutoffs. `endpoint_role_for_ordinal` derives
+the endpoint from this frozen plan and durable prior rows, so changed configuration cannot relabel
+an attempt on replay. Legacy terminal cases recover their stored result; a legacy pending case
+without frozen execution authority terminates without dispatch: `coordinator_failure` before
+dispatch or during a disclosure wait. An uncertain started attempt retains `outcome_unknown`
+in its durable row; without reconstructable provider provenance its public gap is
+`receipt_persistence_unknown`. Each
 fallback attempt is a fresh physical attempt with its own authorization, dispatch id, credential
 handle or runtime authority, and privacy receipt; under `confirm_every_request` it needs its own
 foreground decision. `SemanticAttemptAccounting.endpoint_attempts` carries one per-endpoint
@@ -4438,7 +4447,7 @@ facade and are never MCP tools.
 ## 14. Version identities
 
 `version.py` exposes `VersionManifest`: package, protocol (`0.1`), local control protocol (`1.0`),
-privacy-policy schema (`1.0.0`), egress-receipt schema (`1.0.0`), engine (`0.1.0`), policy pack
+privacy-policy schema (`1.1.0`), egress-receipt schema (`1.0.0`), engine (`0.1.0`), policy pack
 versions, projection (`yoetz/0.1.0`), object format (`yoetz-object/1`), storage schema
 (`user_version` bundle 2, catalog 3), Python, APSW/SQLite source ID, MCP SDK, provider adapter
 versions.

@@ -277,7 +277,7 @@ def test_named_recipes_carry_the_configured_fallback_only_when_network_is_on(
 
     for recipe in ("metadata_only", "assisted_review", "expanded_review"):
         answers = privacy_setup._recipe_answers(  # pyright: ignore[reportPrivateUsage]
-            recipe, local_only_policy(), external
+            recipe, local_only_policy(), external, _codex_binding()
         )
         assert answers.network_egress is True
         assert answers.fallback_provider == _codex_binding()
@@ -287,3 +287,42 @@ def test_named_recipes_carry_the_configured_fallback_only_when_network_is_on(
     )
     assert private.network_egress is False
     assert private.fallback_provider is None
+
+
+@pytest.mark.parametrize("approve", [False, True])
+def test_custom_setup_requires_explicit_fallback_consent(
+    monkeypatch: pytest.MonkeyPatch, approve: bool
+) -> None:
+    prompts: list[str] = []
+
+    def confirm(prompt: str, *, default: bool = False) -> bool:
+        prompts.append(prompt)
+        if prompt.startswith("Authorize fallback"):
+            assert default is False
+            return approve
+        return prompt.startswith(("Permit network", "Bind external"))
+
+    monkeypatch.setattr(privacy_setup.typer, "confirm", confirm)
+
+    def prompt(_label: str, *, default: str = "") -> str:
+        return default
+
+    monkeypatch.setattr(privacy_setup.typer, "prompt", prompt)
+    answers = privacy_setup._ask_custom_answers(  # pyright: ignore[reportPrivateUsage]
+        local_only_policy(), _answers().external_provider, None, _codex_binding()
+    )
+    assert answers.fallback_provider == (_codex_binding() if approve else None)
+    assert any("openai-codex/gpt-5.6-sol" in prompt for prompt in prompts)
+
+
+def test_recipe_construction_does_not_load_live_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden() -> None:
+        raise AssertionError("pure recipe construction read live configuration")
+
+    monkeypatch.setattr(privacy_setup, "_configured_fallback_binding", forbidden)
+    answers = privacy_setup._recipe_answers(  # pyright: ignore[reportPrivateUsage]
+        "assisted_review", local_only_policy(), _answers().external_provider
+    )
+    assert answers.fallback_provider is None

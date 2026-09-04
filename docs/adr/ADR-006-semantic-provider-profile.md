@@ -295,12 +295,26 @@ configuration; swapping the primary keeps both bindings and both approvals.
    a job never returns to the primary.
 2. **Per-endpoint budgets.** Each endpoint keeps its own decision-5 retry budget (at most two
    retries) and its own configured timeout; primary failures never spend the fallback's budget.
-   The operation deadline is the primary timeout plus the fallback timeout, so a primary that
-   spends its whole timeout failing still leaves the fallback room to run. A single fallback
+   The overall deadline is the primary timeout plus the fallback timeout; primary dispatches
+   are capped at the frozen primary cutoff, without dividing that timeout among retry slots.
+   After a licensed transition, the fallback's aggregate timeout starts at its first durable
+   attempt claim and is capped by the overall deadline. Retries and disclosure replay do not
+   restart either clock. A single primary timeout that exhausts time but leaves retry slots does
+   not bypass the two-failure/quota/attempt-budget engagement rule; it ends without fallback.
+   A single fallback
    failure keeps its exact reason rather than reading as an exhausted budget it never had.
 3. **Replay-safe endpoint selection.** Which endpoint an attempt uses is a pure function of the
-   durable attempt rows before it, never coordinator memory; crash, restart, and
-   `awaiting_human` replay resume the endpoint the attempt was claimed for.
+   durable attempt rows before it and the immutable execution snapshot in the encrypted
+   `SEMANTIC_CASE` object (`yoetz.semantic-case/2`), never mutable provider readiness. The snapshot
+   binds exact endpoints, initial primary availability, retry budgets, and UTC cutoff times.
+   Crash, restart, and `awaiting_human` replay resume the endpoint the attempt was claimed for;
+   changed configuration cannot reinterpret earlier ordinals. Every attempt still checks current
+   privacy authority for that frozen binding. Legacy terminal cases retain stored-result recovery;
+   pending cases lacking the snapshot terminate without dispatch rather than acquiring a newly
+   configured pairing (`coordinator_failure` before dispatch or during a disclosure wait,
+   an uncertain started attempt retains `outcome_unknown` durably and reports the provenance-free
+   public gap `receipt_persistence_unknown`). The internal attempt projection
+   exposes the existing durable `started_at` timestamp; no storage migration is introduced.
 4. **Every fallback attempt is a fresh physical attempt** under ADR-009: its own privacy
    evaluation against the exact fallback binding, authorization, dispatch identity, credential
    handle or `ExternalRuntimeAuthority`, and privacy receipt. Under `confirm_every_request` it

@@ -267,6 +267,7 @@ class _AttemptState:
     state: str
     result_object_ref: ObjectRef | None = None
     terminal_code: SemanticReason | None = None
+    started_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2228,7 +2229,9 @@ class MemoryLedgerAdapter:
                 lease.frontier,
                 lease.dependency_digest,
             )
-            self._state.attempts[handle.attempt_id] = _AttemptState(handle, "started")
+            self._state.attempts[handle.attempt_id] = _AttemptState(
+                handle, "started", started_at=now
+            )
             self._state.jobs[job_id] = replace(
                 job,
                 state="leased",
@@ -2408,6 +2411,7 @@ class MemoryLedgerAdapter:
                     ),
                     attempt.terminal_code,
                     attempt.result_object_ref,
+                    attempt.started_at,
                 )
                 for attempt in self._state.attempts.values()
                 if attempt.handle.job_id == job_id

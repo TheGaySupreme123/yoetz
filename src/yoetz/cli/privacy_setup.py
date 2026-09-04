@@ -496,23 +496,16 @@ def _agent_defaults(
     return categories, (current.agent_context_data_classes or (DataClass.PUBLIC_STRUCTURAL,))
 
 
-class _FromConfig:
-    """Sentinel: read the declared fallback from config instead of taking a caller's value."""
-
-
-_FROM_CONFIG: Final = _FromConfig()
-
-
 def _recipe_answers(
     recipe: PrivacyRecipe,
     current: PrivacyPolicy,
     external: ProviderBinding | None,
-    fallback: ProviderBinding | None | _FromConfig = _FROM_CONFIG,
+    fallback: ProviderBinding | None = None,
 ) -> PrivacySetupAnswers:
     """Materialize one named recipe into the exact typed answers, asking nothing.
 
     ``fallback`` is the declared fallback destination; callers that already read the config
-    pass it so one setup run reads the pairing exactly once. Left unset, it is read here.
+    pass it explicitly; recipe construction never reads configuration or the environment.
     """
 
     if recipe == "custom":
@@ -550,10 +543,7 @@ def _recipe_answers(
     # A declared fallback is a second dispatch destination under the same requirement, so it
     # must satisfy it too: otherwise every fallback dispatch would be policy-denied exactly when
     # the primary cannot serve, which is the one moment the pairing exists for (#582).
-    declared_fallback = (
-        _configured_fallback_binding() if isinstance(fallback, _FromConfig) else fallback
-    )
-    fallback = declared_fallback if network else None
+    fallback = fallback if network else None
     require_data_use = (
         recipe == "assisted_review"
         and network
@@ -734,7 +724,10 @@ def configured_fallback_binding() -> ProviderBinding | None:
 
 
 def _ask_custom_answers(
-    current: PrivacyPolicy, external: ProviderBinding | None, local: ProviderBinding | None
+    current: PrivacyPolicy,
+    external: ProviderBinding | None,
+    local: ProviderBinding | None,
+    fallback: ProviderBinding | None = None,
 ) -> PrivacySetupAnswers:
     """The only field-level path, grouped into five sections a person can hold in mind.
 
@@ -746,6 +739,7 @@ def _ask_custom_answers(
     network = typer.confirm("Permit network egress at all?", default=False)
     use_provider = False
     require_evidence = False
+    use_fallback = False
     if network:
         provider_label = (
             "none configured" if external is None else f"{external.provider_id}/{external.model_id}"
@@ -753,6 +747,11 @@ def _ask_custom_answers(
         use_provider = typer.confirm(
             f"Bind external semantic review to {provider_label}?", default=external is not None
         )
+        if use_provider and fallback is not None:
+            use_fallback = typer.confirm(
+                f"Authorize fallback semantic review to {fallback.provider_id}/{fallback.model_id}?",
+                default=False,
+            )
         if use_provider:
             require_evidence = typer.confirm(
                 "Require a current eligible provider data-use record?", default=True
@@ -831,6 +830,7 @@ def _ask_custom_answers(
         updates,
         False,
         scope,
+        fallback_provider=fallback if use_fallback else None,
     )
 
 
@@ -1211,7 +1211,7 @@ def _choose_candidate(
     offer_recommended: bool,
     credential_probe_authorized: bool,
     update_checks_override: bool | None,
-    fallback: ProviderBinding | None | _FromConfig = _FROM_CONFIG,
+    fallback: ProviderBinding | None = None,
 ) -> PrivacyPolicy | None:
     """Select the exact candidate policy, or ``None`` when the user declined outright.
 
@@ -1253,7 +1253,7 @@ def _choose_candidate(
         return _confirmed_candidate(
             current,
             replace(
-                _ask_custom_answers(current, external, local),
+                _ask_custom_answers(current, external, local, fallback),
                 credential_probe=credential_probe_authorized,
             ),
             "Use this exact custom privacy policy?",
