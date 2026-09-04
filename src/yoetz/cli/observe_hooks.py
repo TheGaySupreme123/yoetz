@@ -1400,6 +1400,22 @@ async def _try_auto_start(
         store_mapping(mapping, _state=_state)
     except Exception:
         return AutoAttachOutcome(None, "auto_attach_mapping_write_failed")
+    if (
+        recovered_task_id is not None
+        and recovery_mapping is not None
+        and recovery_mapping.codex_session_id != mapping.codex_session_id
+    ):
+        with contextlib.suppress(Exception):
+            store_mapping(
+                mapping_from_start_ids(
+                    codex_session_id=recovery_mapping.codex_session_id,
+                    yoetz_task_id=mapping.yoetz_task_id,
+                    yoetz_session_id=mapping.yoetz_session_id,
+                    yoetz_writer_id=mapping.yoetz_writer_id,
+                    last_frontier=recovery_mapping.last_frontier,
+                ),
+                _state=_state,
+            )
     return AutoAttachOutcome(mapping, None)
 
 
@@ -1450,6 +1466,50 @@ def _ended_workspace_recovery_mapping(
     )
 
 
+def _rewrite_ended_predecessor_mappings(
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    successor: LifecycleMapping,
+    *,
+    harness_id: Literal["claude", "codex", "cursor"],
+    _state: Path | None,
+) -> None:
+    """Point ended same-host mappings at the rotated successor route (#577)."""
+
+    def _same_harness(session_id: str) -> bool:
+        if harness_id == "claude":
+            return session_id.startswith(_CLAUDE_SESSION_PREFIX)
+        if harness_id == "cursor":
+            return session_id.startswith(_CURSOR_SESSION_PREFIX)
+        return not session_id.startswith((_CLAUDE_SESSION_PREFIX, _CURSOR_SESSION_PREFIX))
+
+    for session_id in store.codex_sessions_for_workspace(workspace_commitment):
+        if session_id == successor.codex_session_id:
+            continue
+        if not store.codex_session_ended(workspace_commitment, session_id):
+            continue
+        if not _same_harness(session_id):
+            continue
+        predecessor = load_mapping(session_id, _state=_state)
+        if predecessor is None or predecessor.yoetz_task_id != successor.yoetz_task_id:
+            continue
+        if (
+            predecessor.yoetz_session_id == successor.yoetz_session_id
+            and predecessor.yoetz_writer_id == successor.yoetz_writer_id
+        ):
+            continue
+        store_mapping(
+            mapping_from_start_ids(
+                codex_session_id=predecessor.codex_session_id,
+                yoetz_task_id=successor.yoetz_task_id,
+                yoetz_session_id=successor.yoetz_session_id,
+                yoetz_writer_id=successor.yoetz_writer_id,
+                last_frontier=predecessor.last_frontier,
+            ),
+            _state=_state,
+        )
+
+
 async def _try_workspace_auto_start(
     codex_session_id: str,
     *,
@@ -1488,7 +1548,7 @@ async def _try_workspace_auto_start(
                 _state=_state,
             )
             if refreshed == recovery:
-                return await _try_auto_start(
+                outcome = await _try_auto_start(
                     codex_session_id,
                     _state=_state,
                     harness_id=harness_id,
@@ -1496,6 +1556,16 @@ async def _try_workspace_auto_start(
                     recovery_mapping=refreshed,
                     connect=connect,
                 )
+                if outcome.mapping is not None:
+                    with contextlib.suppress(Exception):
+                        _rewrite_ended_predecessor_mappings(
+                            store,
+                            workspace_commitment,
+                            outcome.mapping,
+                            harness_id=harness_id,
+                            _state=_state,
+                        )
+                return outcome
 
     # A resumed predecessor or changed local state invalidates the capability.
     # Still run the ordinary request so the hook records the service's typed

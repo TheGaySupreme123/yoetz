@@ -2336,6 +2336,7 @@ def test_auto_start_workspace_conflict_reattaches_with_a_known_local_selector(
         yoetz_writer_id=_START_IDS["writer_id"],
         last_frontier="3:sha256:" + "a" * 64,
     )
+    observe_hooks_module.store_mapping(prior, _state=tmp_path)
     client = _WorkspaceConflictThenAttachClient()
     client.created = True
 
@@ -2352,6 +2353,11 @@ def test_auto_start_workspace_conflict_reattaches_with_a_known_local_selector(
     assert outcome.mapping is not None
     assert outcome.mapping.yoetz_task_id == _START_IDS["task_id"]
     assert outcome.mapping.yoetz_session_id == _SUCCESSOR_IDS["session_id"]
+    rewritten = observe_hooks_module.load_mapping(prior.codex_session_id, _state=tmp_path)
+    assert rewritten is not None
+    assert rewritten.yoetz_session_id == _SUCCESSOR_IDS["session_id"]
+    assert rewritten.yoetz_writer_id == _SUCCESSOR_IDS["writer_id"]
+    assert rewritten.last_frontier == prior.last_frontier
     first, second = client.requests
     assert first.mode == "create_or_attach"
     assert first.workspace_ref == str(tmp_path.resolve())
@@ -2596,6 +2602,53 @@ def test_workspace_recovery_does_not_attach_while_predecessor_lock_is_held(
     assert outcome.mapping is None
     assert outcome.reason == "auto_attach_conflict"
     assert [request.mode for request in client.requests] == ["create_or_attach"]
+
+
+def test_recovery_rewrites_every_ended_same_task_predecessor_mapping(tmp_path: Path) -> None:
+    """#577: older ended host sessions follow the rotated successor ids too."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+    older = "codex-ended-a"
+    newer = "codex-ended-b"
+    for session_id in (older, newer):
+        commitment = store.bind_codex_session(workspace, session_id)
+        store.note_session_end(workspace, commitment)
+        observe_hooks_module.store_mapping(
+            observe_hooks_module.mapping_from_start_ids(
+                codex_session_id=session_id,
+                yoetz_task_id=_START_IDS["task_id"],
+                yoetz_session_id=_START_IDS["session_id"],
+                yoetz_writer_id=_START_IDS["writer_id"],
+                last_frontier="3:sha256:" + "a" * 64,
+            ),
+            _state=tmp_path,
+        )
+    client = _WorkspaceConflictThenAttachClient()
+    client.created = True
+
+    outcome = asyncio.run(
+        observe_hooks_module._try_workspace_auto_start(  # pyright: ignore[reportPrivateUsage]
+            "codex-next-1",
+            store=store,
+            workspace_commitment=workspace,
+            workspace_locator=locator,
+            harness_id="codex",
+            _state=tmp_path,
+            connect=cast(observe_hooks_module.HookStartConnector, _connector(client)),
+        )
+    )
+
+    assert outcome.mapping is not None
+    assert outcome.mapping.yoetz_session_id == _SUCCESSOR_IDS["session_id"]
+    for session_id in (older, newer):
+        rewritten = observe_hooks_module.load_mapping(session_id, _state=tmp_path)
+        assert rewritten is not None
+        assert rewritten.yoetz_session_id == _SUCCESSOR_IDS["session_id"]
+        assert rewritten.yoetz_writer_id == _SUCCESSOR_IDS["writer_id"]
+        assert rewritten.last_frontier == "3:sha256:" + "a" * 64
 
 
 def test_session_restart_cannot_clear_ended_state_while_recovery_holds_lock(
@@ -2864,6 +2917,10 @@ def test_fresh_session_reattaches_the_ended_workspace_task_and_drains_without_ma
     assert mapping is not None
     assert mapping.yoetz_task_id == _START_IDS["task_id"]
     assert mapping.yoetz_session_id == _SUCCESSOR_IDS["session_id"]
+    predecessor = observe_hooks_module.load_mapping(first_session, _state=tmp_path)
+    assert predecessor is not None
+    assert predecessor.yoetz_session_id == _SUCCESSOR_IDS["session_id"]
+    assert predecessor.yoetz_writer_id == _SUCCESSOR_IDS["writer_id"]
     assert store.list_pending_outbox_rows(workspace) == ()
     assert _START_IDS["task_id"] in rendered
     assert [request.mode for request in client.requests] == [

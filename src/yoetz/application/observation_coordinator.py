@@ -23,6 +23,7 @@ from yoetz.adapters.git_subject_state import (
 from yoetz.adapters.integrations.codex_lifecycle import (
     LifecycleMapping,
     load_mapping,
+    store_mapping,
     validate_codex_session_id,
 )
 from yoetz.adapters.integrations.observation_local import (
@@ -153,7 +154,7 @@ from yoetz.ports.workspace_inspect import InspectedArtifact
 from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
 from yoetz.protocol.coverage import EvidenceImmutability, PublicationChannel, coverage_for_channel
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
-from yoetz.protocol.ids import IdKind
+from yoetz.protocol.ids import IdKind, is_valid_id
 
 _ADVICE_FINDING_KIND_BY_RULE: Final = MappingProxyType(
     {
@@ -229,8 +230,13 @@ __all__ = [
     "ObservationAdviceHook",
     "ObservationCoordinator",
     "ObservationMappingLoader",
+    "ObservationMappingStorer",
     "build_inspection_excerpt_manifest",
 ]
+
+# One catalog lookup already returns the current task binding. Extra hops cover a
+# rotation that lands between the superseded error and the retry (#577).
+_MAX_SUPERSEDED_ROUTE_HOPS: Final = 4
 
 _INSPECT_EXCERPT_FORMAT: Final = "yoetz.observation-inspect-excerpt/1"
 _MAX_INSPECT_EXCERPT_ARTIFACTS: Final = 16
@@ -315,6 +321,36 @@ class ObservationMappingLoader(Protocol):
     ) -> LifecycleMapping | None: ...
 
 
+class ObservationMappingStorer(Protocol):
+    def __call__(self, mapping: LifecycleMapping, *, _state: Path | None = None) -> None: ...
+
+
+def _session_superseded_binding(
+    error: PublicOperationError, *, expected_task_id: str
+) -> tuple[str, str] | None:
+    """Return successor session/writer ids when the public error carries the current binding."""
+
+    if error.code is not PublicErrorCode.SESSION_NOT_FOUND:
+        return None
+    details = error.safe_details
+    if details.get("reason_code") != "session_superseded":
+        return None
+    task_id = details.get("task_id")
+    session_id = details.get("session_id")
+    writer_id = details.get("writer_id")
+    if (
+        type(task_id) is not str
+        or type(session_id) is not str
+        or type(writer_id) is not str
+        or task_id != expected_task_id
+        or not is_valid_id(IdKind.TASK, task_id)
+        or not is_valid_id(IdKind.SESSION, session_id)
+        or not is_valid_id(IdKind.WRITER, writer_id)
+    ):
+        return None
+    return session_id, writer_id
+
+
 class ObservationAdviceHook(Protocol):
     """Optional post-commit advice hook for the advice/health agent."""
 
@@ -354,6 +390,7 @@ class ObservationCoordinator:
     clock: ClockPort
     ids: IdPort
     mapping_loader: ObservationMappingLoader = load_mapping
+    mapping_storer: ObservationMappingStorer = store_mapping
     state_root: Path | None = None
     advice_hook: ObservationAdviceHook | None = None
     advice_context_builder: ObservationAdviceContextBuilder = field(
@@ -442,22 +479,7 @@ class ObservationCoordinator:
                 continue
             runtime: TaskRuntime | None = None
             try:
-                runtime = await self.runtime.route(
-                    RouteCommand(
-                        session_id=mapping.yoetz_session_id,
-                        writer_id=observation_writer_id(
-                            mapping.yoetz_task_id, mapping.yoetz_session_id
-                        ),
-                        access=RouteAccess.WRITE,
-                        required_capabilities=frozenset(
-                            {
-                                RuntimeCapability.STRUCTURAL_READ,
-                                RuntimeCapability.PAYLOAD_READ,
-                                RuntimeCapability.WRITE,
-                            }
-                        ),
-                    )
-                )
+                runtime, mapping = await self._route_observation_mapping(mapping)
                 store = self._observation_store(runtime)
                 repository = getattr(store, "verification_repository", None)
                 if not callable(repository):
@@ -574,22 +596,7 @@ class ObservationCoordinator:
             runtime: TaskRuntime | None = None
             stage = "runtime_route"
             try:
-                runtime = await self.runtime.route(
-                    RouteCommand(
-                        session_id=mapping.yoetz_session_id,
-                        writer_id=observation_writer_id(
-                            mapping.yoetz_task_id, mapping.yoetz_session_id
-                        ),
-                        access=RouteAccess.WRITE,
-                        required_capabilities=frozenset(
-                            {
-                                RuntimeCapability.STRUCTURAL_READ,
-                                RuntimeCapability.PAYLOAD_READ,
-                                RuntimeCapability.WRITE,
-                            }
-                        ),
-                    )
-                )
+                runtime, mapping = await self._route_observation_mapping(mapping)
                 stage = "store_prepare"
                 store = self._observation_store(runtime)
                 store.grant_consent(workspace, consent.granted_at)
@@ -945,6 +952,15 @@ class ObservationCoordinator:
                         return _reject(ObservationGapCode.DEDUP_CONFLICT.value)
                     self._storage_corrupt_sessions.add(codex_session_id)
                     return _reject(ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value)
+                if (
+                    exc.code is PublicErrorCode.SESSION_NOT_FOUND
+                    and exc.safe_details.get("reason_code") == "session_superseded"
+                ):
+                    # The route was retired by a successor attach. Delivery
+                    # follows the binding when `_route_observation_mapping` can
+                    # parse it; a malformed or task-mismatched payload is a
+                    # stale mapping, not a ledger content refusal (#577).
+                    return _reject(ObservationGapCode.MAPPING_MISSING.value)
                 if not exc.retryable:
                     # Validation and identity rejections are terminal by their
                     # public contract. Calling them service_unavailable made a
@@ -1004,15 +1020,9 @@ class ObservationCoordinator:
                 continue
             runtime: TaskRuntime | None = None
             try:
-                runtime = await self.runtime.route(
-                    RouteCommand(
-                        session_id=mapping.yoetz_session_id,
-                        writer_id=observation_writer_id(
-                            mapping.yoetz_task_id, mapping.yoetz_session_id
-                        ),
-                        access=RouteAccess.WRITE,
-                        required_capabilities=frozenset({RuntimeCapability.WRITE}),
-                    )
+                runtime, mapping = await self._route_observation_mapping(
+                    mapping,
+                    required_capabilities=frozenset({RuntimeCapability.WRITE}),
                 )
                 await self._observation_store(runtime).revoke(command)
                 seen_tasks.add(mapping.yoetz_task_id)
@@ -1039,20 +1049,83 @@ class ObservationCoordinator:
             )
         return store
 
-    async def _route_observation_runtime(self, task_id: str, session_id: str) -> TaskRuntime:
+    async def _route_observation_runtime(
+        self,
+        task_id: str,
+        session_id: str,
+        *,
+        required_capabilities: frozenset[RuntimeCapability] | None = None,
+    ) -> TaskRuntime:
+        capabilities = (
+            frozenset(
+                {
+                    RuntimeCapability.STRUCTURAL_READ,
+                    RuntimeCapability.PAYLOAD_READ,
+                    RuntimeCapability.WRITE,
+                }
+            )
+            if required_capabilities is None
+            else required_capabilities
+        )
         return await self.runtime.route(
             RouteCommand(
                 session_id=session_id,
                 writer_id=observation_writer_id(task_id, session_id),
                 access=RouteAccess.WRITE,
-                required_capabilities=frozenset(
-                    {
-                        RuntimeCapability.STRUCTURAL_READ,
-                        RuntimeCapability.PAYLOAD_READ,
-                        RuntimeCapability.WRITE,
-                    }
-                ),
+                required_capabilities=capabilities,
             )
+        )
+
+    def _persist_successor_mapping(self, mapping: LifecycleMapping) -> None:
+        try:
+            self.mapping_storer(mapping, _state=self.state_root)
+        except Exception:
+            return
+
+    async def _route_observation_mapping(
+        self,
+        mapping: LifecycleMapping,
+        *,
+        required_capabilities: frozenset[RuntimeCapability] | None = None,
+    ) -> tuple[TaskRuntime, LifecycleMapping]:
+        """Route through the current session, following ``session_superseded`` (#577)."""
+
+        current = mapping
+        seen = {mapping.yoetz_session_id}
+        last_error: PublicOperationError | None = None
+        for _ in range(_MAX_SUPERSEDED_ROUTE_HOPS):
+            try:
+                runtime = await self._route_observation_runtime(
+                    current.yoetz_task_id,
+                    current.yoetz_session_id,
+                    required_capabilities=required_capabilities,
+                )
+            except PublicOperationError as error:
+                last_error = error
+                successor = _session_superseded_binding(
+                    error, expected_task_id=current.yoetz_task_id
+                )
+                if successor is None:
+                    raise
+                session_id, writer_id = successor
+                if session_id in seen:
+                    raise
+                seen.add(session_id)
+                current = replace(
+                    current,
+                    yoetz_session_id=session_id,
+                    yoetz_writer_id=writer_id,
+                )
+                continue
+            if current is not mapping:
+                self._persist_successor_mapping(current)
+            return runtime, current
+        if last_error is not None:
+            raise last_error
+        raise PublicOperationError(
+            PublicErrorCode.SESSION_NOT_FOUND,
+            "The requested task attachment was not found.",
+            retryable=False,
         )
 
     async def _note_frontier_motion(

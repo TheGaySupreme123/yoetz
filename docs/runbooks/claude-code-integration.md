@@ -211,7 +211,10 @@ candidate is bound only to this consented workspace. The catalog additionally re
 task, the selector still active, no sibling task, the matching repository-privacy binding, and no
 start already pending for that route. This reuses an already-known session selector; the public
 conflict still discloses no task or session ID, and a hard crash without `SessionEnd` remains
-fail-closed rather than being guessed from age. A failed attempt records its cause as a
+fail-closed rather than being guessed from age. A successful recovery also rewrites the ended
+predecessor's lifecycle mapping to the rotated session and writer. Pending predecessor rows then
+drain on that successor route (`session_superseded` is followed, not quarantined as
+`ledger_rejected`). A failed attempt records its cause as a
 payload-free `hook_diagnostics` reason
 (`auto_attach_workspace_unbound`, `auto_attach_request_invalid`, `auto_attach_conflict`,
 `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
@@ -232,7 +235,9 @@ Shared drain terminalization is host-neutral: `ledger_rejected` means the ready 
 one envelope non-retryably, so that row is retained in quarantine and later rows proceed. An
 idempotent repeat of a committed envelope (lost acknowledgement, service restart, or a workflow
 reattach that rotates the mapped Yoetz session) is resolved task-wide and acknowledged, never
-quarantined. A row
+quarantined. A pending row from an ended host session whose task was recovered by a successor
+session is delivered on the successor route (`session_superseded`); it is not `ledger_rejected`.
+A row
 also enters quarantine after 128 consecutive rejections with the same retryable reason, except for
 designed back-pressure and workspace-global pause/vault/disabled gates. Both cases remain visible
 in `quarantine_causes`, aggregate `delivery_causes`, and gaps;

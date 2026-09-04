@@ -8,6 +8,13 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- Ended-session recovery attach no longer quarantines the predecessor's still-pending observation
+  rows as `ledger_rejected`. Ingest follows `SESSION_NOT_FOUND` / `session_superseded` to the
+  current task binding, persists the updated lifecycle mapping, and the shared Claude/Codex/Cursor
+  hook recovery rewrites ended predecessor mappings so the next drain acknowledges those rows on
+  the successor route. A superseded payload that cannot be followed stays `mapping_missing` rather
+  than looking like a ledger content refusal (issue #577).
+
 - A Codex MCP route that reverts to `strict` between install and session start no longer reports a
   bare `route_semantic_ceiling`. `yoetz integrate codex mcp install` now records the applied route
   in an owner-only state-directory record (no repository or prompt content); `mcp status`, provider

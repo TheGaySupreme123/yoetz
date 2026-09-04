@@ -3178,8 +3178,12 @@ timestamp ties. The attach carries that selector plus the new host pair, while t
 handshake carries the canonical workspace for repository privacy. The catalog requires the
 selector to remain active, the task to be the workspace's sole non-quarantined route, and no start
 for that route to be pending. Both calls share one five-second deadline. The response must retain
-the candidate's task ID. A successful recovery records the new mapping and drains its pending rows
-without publishing the intermediate conflict as a diagnostic. With no eligible local selector, or
+the candidate's task ID. A successful recovery records the new mapping, rewrites every ended
+same-host predecessor mapping for that task to the rotated session and writer, and drains pending
+rows without publishing the intermediate conflict as a diagnostic. Predecessor rows still pending
+at rotation follow the `session_superseded` binding on ingest (the current task session and the
+observation writer derived for it) so they are acknowledged on the successor route rather than
+quarantined. With no eligible local selector, or
 when that attach fails, the ordinary typed failure path remains. Every failed attempt records a
 closed hook-diagnostic
 reason instead of a silent absent mapping: `auto_attach_workspace_unbound`,
@@ -3253,7 +3257,12 @@ gap history remains after recovery, and renewed shedding reactivates it (issue #
 Public ingest failures use their `retryable` contract, not a spelling fallback. A non-retryable
 failure that is not already a narrower terminal class (`dedup_conflict` or
 `observation_storage_corrupt`) becomes `ledger_rejected`; drain and sweep quarantine that one row,
-record the reason once, and continue its lane. Retryable failures keep their current reason and
+record the reason once, and continue its lane. `SESSION_NOT_FOUND` with
+`reason_code: session_superseded` is not that class: ingest follows the current binding carried in
+`safe_details` (same task, successor session, observation writer derived for it), persists the
+updated lifecycle mapping, and delivers the row. A superseded payload that cannot be followed
+(missing or mismatched task/session/writer ids) is `mapping_missing` and stays retryable; it is
+never `ledger_rejected`. Retryable failures keep their current reason and
 scope. A row that reaches 128 consecutive rejections with the same retryable reason is quarantined
 with that reason, so an accidental future catch-all classification cannot create an immortal FIFO
 head. Designed `operation_pending` back-pressure and workspace-global pause/vault/disabled gates
