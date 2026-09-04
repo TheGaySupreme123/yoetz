@@ -2950,7 +2950,9 @@ Shared closed types:
   rather than selecting a different action family. Rollout privacy filtering parses the valid JSON
   tree first and then redacts decoded string keys and values, preserving structural punctuation;
   any redaction-created duplicate key is rejected instead of silently merging fields.
-- `ObservationGapCode` — closed coverage tokens. `unsupported_event` is an admitted profile with
+- `ObservationGapCode` — closed coverage tokens. `session_superseded` is a mapped host session
+  whose Yoetz route was retired and whose successor binding could not be followed; it is never
+  `ledger_rejected` and never `mapping_missing` (issue #577). `unsupported_event` is an admitted profile with
   an unrecognized wrapper or item; `unsupported_format` is a wrong surface (exec JSONL, a
   `cli_version` without an exact profile in `SUPPORTED_ROLLOUT_PROFILES` — currently `0.148.0`
   and `0.150.1`, never a semver neighbour — an absent/unknown `history_mode`, or compressed
@@ -3194,8 +3196,12 @@ timestamp ties. The attach carries that selector plus the new host pair, while t
 handshake carries the canonical workspace for repository privacy. The catalog requires the
 selector to remain active, the task to be the workspace's sole non-quarantined route, and no start
 for that route to be pending. Both calls share one five-second deadline. The response must retain
-the candidate's task ID. A successful recovery records the new mapping and drains its pending rows
-without publishing the intermediate conflict as a diagnostic. With no eligible local selector, or
+the candidate's task ID. A successful recovery records the new mapping, rewrites every ended
+same-host predecessor mapping for that task to the rotated session and writer, and drains pending
+rows without publishing the intermediate conflict as a diagnostic. Predecessor rows still pending
+at rotation follow the `session_superseded` binding on ingest (the current task session and the
+observation writer derived for it) so they are acknowledged on the successor route rather than
+quarantined. With no eligible local selector, or
 when that attach fails, the ordinary typed failure path remains. Every failed attempt records a
 closed hook-diagnostic
 reason instead of a silent absent mapping: `auto_attach_workspace_unbound`,
@@ -3269,9 +3275,18 @@ gap history remains after recovery, and renewed shedding reactivates it (issue #
 Public ingest failures use their `retryable` contract, not a spelling fallback. A non-retryable
 failure that is not already a narrower terminal class (`dedup_conflict` or
 `observation_storage_corrupt`) becomes `ledger_rejected`; drain and sweep quarantine that one row,
-record the reason once, and continue its lane. A deterministic write rejection inside the SQLite
-observation store (a CHECK or STRICT type failure, which repeats identically on every retry of the
-same envelope) is raised as non-retryable `invalid_request` and takes that same path, instead of
+record the reason once, and continue its lane. `SESSION_NOT_FOUND` with
+`reason_code: session_superseded` is not that class: ingest follows the current binding carried in
+`safe_details` (same task, successor session, observation writer derived for it), persists the
+updated lifecycle mapping on each hop only while holding the lifecycle lock and the stored
+mapping still equals the predecessor, and delivers the row. A busy lock, changed or cleared
+mapping, or persistence failure skips this cache update without blocking successor delivery. A superseded payload that cannot be
+followed (missing or mismatched task/session/writer ids, a hop cycle, or a rotation after the
+route already opened) quarantines that one row as `session_superseded`. It is never
+`ledger_rejected` and never `mapping_missing`: `mapping_missing` would retire an ended host
+session as unmapped and would disappear from current gaps while the mapping file remains.
+A deterministic write rejection inside the SQLite observation store (a CHECK or STRICT type failure, which repeats identically on every retry of the
+same envelope) is raised as non-retryable `invalid_request` and takes the `ledger_rejected` path, instead of
 escaping as a bare driver exception that the catch-all projected as retryable
 `service_unavailable` while the service was ready (issue #576). Retryable failures keep their current reason and
 scope. A row that reaches 128 consecutive rejections with the same retryable reason is quarantined

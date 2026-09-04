@@ -216,6 +216,7 @@ class ObservationGapCode(str, Enum):  # noqa: UP042 - exact durable wire enum
     CONSENT_REVOKED = "consent_revoked"
     SOURCE_LAG = "source_lag"
     MAPPING_MISSING = "mapping_missing"
+    SESSION_SUPERSEDED = "session_superseded"
     OUTBOX_OVERFLOW = "outbox_overflow"
     OUTBOX_QUARANTINED = "outbox_quarantined"
     OBSERVATION_STORAGE_CORRUPT = "observation_storage_corrupt"

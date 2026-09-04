@@ -8,6 +8,14 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- Ended-session recovery attach no longer quarantines the predecessor's still-pending observation
+  rows as `ledger_rejected`. Ingest follows `SESSION_NOT_FOUND` / `session_superseded` to the
+  current task binding, persists the updated lifecycle mapping on each hop, and the shared
+  Claude/Codex/Cursor hook recovery rewrites ended predecessor mappings so the next drain
+  acknowledges those rows on the successor route. A superseded payload that cannot be followed
+  quarantines that row as `session_superseded` (visible in `quarantine_causes` even when a mapping
+  file is present) rather than `mapping_missing` or a ledger content refusal (issue #577).
+
 - Claude Code and Cursor hook observation rows now store in the task ledger. Bundle migration
   `0009` rebuilds the observation cursor and envelope tables so their source CHECK admits
   `claude_hook` and `cursor_hook` beside the Codex sources, preserving existing rows; a fresh bundle
@@ -18,6 +26,7 @@ reverse-chronological released versions.
   row every sweep while `service status` reported `ready`. Valid pending Claude or Cursor envelopes
   can store unchanged at schema 9; delivery also requires a usable session mapping. Existing bundles require explicit migration; upgrading the
   binary alone does not migrate task bundles (issue #576).
+
 - Yoetz-owned external Codex MCP registration now preserves ADR-026 isolation across the host
   process boundary. In isolated mode, preview and apply bind only the exact validated
   `YOETZ_ISOLATED_ROOT` through Codex's native `--env`; status reports whether the stored binding

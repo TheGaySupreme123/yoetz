@@ -309,7 +309,9 @@ received, every other bound session is ended, and the candidate is bound only to
 workspace. The catalog also requires one mapped task, the selector still active, no sibling task,
 the matching repository-privacy binding, and no start already pending for that route. The conflict
 reveals no selector, and a hard crash without `sessionEnd` remains fail-closed rather than being
-guessed from age. A failed attempt records its typed cause (`auto_attach_workspace_unbound`,
+guessed from age. A successful recovery also rewrites every ended same-host predecessor mapping for that task to
+the rotated session and writer so pending predecessor rows drain on the successor route
+(`session_superseded` is followed, not quarantined as `ledger_rejected`). A failed attempt records its typed cause (`auto_attach_workspace_unbound`,
 `auto_attach_request_invalid`, `auto_attach_conflict`, `auto_attach_refused`,
 `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`,
 `service_unavailable`, `vault_locked`, `timeout`, `storage_unsafe`, or `storage_corrupt`) in the
@@ -343,7 +345,11 @@ unchanged, but delivery still requires a usable session mapping; it does not its
 session route or replay quarantined rows. An
 idempotent repeat of a committed envelope (lost acknowledgement, service restart, or a workflow
 reattach that rotates the mapped Yoetz session) is resolved task-wide and acknowledged, never
-quarantined. A row
+quarantined. A pending row from an ended host session whose task was recovered by a successor
+session is delivered on the successor route (`session_superseded` is followed). A successor
+binding that cannot be followed quarantines that row as `session_superseded`, not
+`ledger_rejected` or `mapping_missing`.
+A row
 also enters quarantine after 128 consecutive rejections with the same retryable reason, except for
 designed back-pressure and workspace-global pause/vault/disabled gates. Both cases remain visible
 in `quarantine_causes`, aggregate `delivery_causes`, and gaps;
