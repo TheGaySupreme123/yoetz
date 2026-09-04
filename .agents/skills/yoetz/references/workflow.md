@@ -14,7 +14,7 @@ Use Yoetz for material multi-step work, multiple requested outcomes, delegation,
 
 | Operation | How often |
 | --- | --- |
-| `start` | Once per task, before substantive work. On resume (same or fresh conversation), `mode=create_or_attach` with the same `workspace_ref` + `external_ref` pair and no `session_id`; attach selectors are `session_id` or the ref pair, never bare `task_id`. |
+| `start` | Once per task, before substantive work. On resume (same or fresh conversation), `mode=create_or_attach` with the same `workspace_ref` + `external_ref` pair and no `session_id`; attach selectors are `session_id` or the ref pair, never bare `task_id`. When the host's session-start context names a task already mapped to this session, continue it with `mode=attach` and the `session_id` that context names instead of a new pair. |
 | `publish_work` | One batch per material transition, usually one to eight events; a batch admits up to 100, so keep one transition in one batch rather than splitting it. A normal session is a handful of batches, never one per file, tool call, or message. Every set-valued reference list must already be unique and in ascending ASCII order; a one-element dry-run subset cannot demonstrate that kernel rule. |
 | `status` | After resume, compaction, or delegate handoff, and before any completion claim. Not between routine tool calls. |
 | `check` | After publishing the completion claim and its evidence, and again after any material edit or new evidence. A readable response identifying a finding that check returned is not material change; a redacted or unreadable response requires a recheck. Also consider a check when you move between subtasks or phases — after publishing that transition's batch — not only at the completion claim. Choose the mode deliberately: `deterministic_only` is local and fast and catches record-hygiene gaps (stale ledger, digest-only evidence, open obligations) early; reserve semantic review for the claim unless the transition itself warrants it. A check with no new events since the last one adds nothing. |
@@ -94,8 +94,8 @@ On resume, attach to the existing task and read status before reconstructing wor
 
 Convention:
 
-- `workspace_ref` = stable project identity (repository remote URL, or absolute repository root when there is no remote).
-- `external_ref` = stable task identity within that project (branch name, issue reference, or plan slug).
+- `workspace_ref` = the canonical absolute repository root of the working tree you are in (a linked Git worktree is its own root). Never a remote URL: the workspace commitment is keyed on the exact value, so hook observation on Claude Code, Codex, and Cursor auto-attaches with this root and `workspace_task_exists` protects you from a sibling only under the same value. A remote URL or any other spelling is a different workspace and silently creates a sibling task.
+- `external_ref` = stable task identity within that project (branch name, issue reference, or plan slug). A hook-mapped task carries `<host>-session:<host session id>`; do not reproduce that pair. Attach to a host-mapped task with `mode=attach` and the `session_id` the session-start context names.
 
 Same conversation resuming, or a fresh conversation continuing the same work → `mode=create_or_attach` with the same pair and no `session_id`. Sibling work in the same project → `mode=create` with the same `workspace_ref` and a different `external_ref` (do not use `create_or_attach` for a new sibling). Both refs are one-shot redacted values: only installation-keyed HMAC commitments are persisted, so a repository path or remote URL never lands in durable state — do not self-censor into unstable refs.
 

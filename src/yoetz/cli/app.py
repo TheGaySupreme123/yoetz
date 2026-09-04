@@ -731,10 +731,21 @@ def hooks_post_tool_use() -> None:
 
 
 @hooks_app.command("session-start")
-def hooks_session_start() -> None:
+def hooks_session_start(
+    workspace: Annotated[
+        str | None,
+        typer.Option(
+            "--workspace",
+            help=(
+                "Project workspace path for the resume/compact status read (defaults to the "
+                "hook's working directory). Only its private commitment is retained."
+            ),
+        ),
+    ] = None,
+) -> None:
     """Re-ground after SessionStart resume/compact; clear removes mapping."""
 
-    _finish(_hooks_operation("handle_session_start")())
+    _finish(_hooks_operation("handle_session_start")(workspace=workspace))
 
 
 @hooks_app.command("observe")

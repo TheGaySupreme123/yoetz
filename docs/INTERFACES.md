@@ -95,7 +95,12 @@ command tokens `prepare_command` (`yoetz consent prepare vault_initialize`), `re
 `pending_ttl_seconds`, and validated `replay_request_id`; every command value is a closed
 repository literal, so no caller- or service-derived string can steer an agent through these
 keys. `SESSION_NOT_FOUND` with
-`reason_code: session_superseded` carries the current binding for a retired session. The separate
+`reason_code: session_superseded` carries the current binding for a retired session. A
+`SESSION_CONFLICT` raised by the repository fence carries `reason_code:
+repository_identity_required` (the control handshake carried no workspace locator) or
+`repository_identity_mismatch` (the locator resolved to a different repository than the route, or
+the route holds no repository binding); neither discloses a commitment, and a hook uses the reason
+to keep a live mapping out of the `mapping_stale` class (issue #578). The separate
 `workspace_task_exists` conflict deliberately carries no task selector or count: possession of a
 workspace reference alone is not authority to discover or attach another task. A host hook may
 recover from that exact conflict only with a validated selector it already holds in the private
@@ -1562,7 +1567,14 @@ fields. `reserve_or_resume` recomputes/verifies them before idempotency or route
 low-entropy plaintext from leaking through an unkeyed structural request digest. `workspace_ref`
 is the caller-declared project identity and `external_ref` the stable task identity within that project;
 together they are the attach selector when `session_id` is absent (`mode=create_or_attach` or
-`attach` with the pair). An identical pair attaches and rotates to a fresh session/writer; the
+`attach` with the pair). The `workspace_ref_commitment` is a keyed HMAC of the exact caller
+string, so the single-task-per-workspace invariant below holds per spelling, not per repository:
+hook auto-attach on every host commits the canonical absolute repository root (a linked worktree
+is its own root), the packaged guidance and the `start` tool description tell agents to use that
+same root and never a remote URL, and the SessionStart context names the mapped `session_id` and
+`writer_id` so an agent attaches to the hook-mapped task by session selector instead of guessing
+the hook's pair. A differently spelled `workspace_ref` is a distinct workspace and creates a
+sibling without conflict (issue #580). An identical pair attaches and rotates to a fresh session/writer; the
 historical session remains a valid `mode=attach` selector even though ordinary task routing accepts
 only the active session, and a routed request on the retired session receives the typed current
 binding. If the pair is new but the workspace already owns a non-quarantined task,
@@ -3210,10 +3222,26 @@ conflict), `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_map
 `privacy_authority_required`, or the shared `service_unavailable`, `vault_locked`, `timeout`,
 `storage_unsafe`, and `storage_corrupt` tokens. Turn-boundary hooks retry auto-attach under a
 bounded budget and record the same typed cause next to the `auto_attach_retry_failed` path marker
-when no mapping results. A status read against a mapping whose Yoetz session or writer was replaced
-classifies `SESSION_CONFLICT` and `SESSION_NOT_FOUND` as `mapping_stale`, not service unavailability:
-the hook preserves the mapping, tells the agent to call `start mode=attach` with the mapped
-session id, and accepts only that successful `start` result as authority for replacement ids.
+when no mapping results. The resume/compact status read for a mapped session connects through the same consented
+workspace locator as the auto-attach `start` (`yoetz hooks session-start` derives it from
+`--workspace` or, absent that, the hook's own working directory), so the daemon's repository
+fence admits a live mapping (issue #578). A `SESSION_NOT_FOUND` answer (`session_superseded`, whose
+advisory now names the superseding task, session, and writer ids) or a `SESSION_CONFLICT` without a
+fence reason (a replaced writer route) classifies as `mapping_stale`, not service unavailability:
+the hook preserves the mapping, tells the agent to continue with the named ids or to call
+`start mode=attach` with the mapped session id, and accepts only a successful `start` result as
+authority for replacement ids. A `SESSION_CONFLICT` carrying `repository_identity_required` or
+`repository_identity_mismatch` is a live mapping the daemon could not bind to a repository: it
+records `status_workspace_unbound` / `status_workspace_mismatch`, keeps the mapping, and its
+advisory says not to re-attach. The active-mapping context names the task, frontier, `session_id`,
+and `writer_id`, and says to continue the task with `start mode=attach` by that session id rather
+than a new ref pair (issue #580). The scoped `start` post-hook binder admits three host shapes —
+an object carrying `structuredContent` (Codex), a single-text-block content list whose text is the
+strict-JSON result, and a bare JSON string of the structured result (the shape Claude Code 2.1.251
+passes as `tool_response`, captured live 2026-09-04) — and records `start_bind_unparsed`,
+`start_bind_invalid_ids`, or `start_bind_write_failed` when a scoped successful start produced no
+mapping (issue #581). Only an explicit boolean `ok: false` is treated as a refused start and
+records nothing; a missing or non-boolean `ok` records `start_bind_unparsed`.
 `OPERATION_PENDING`, `BUNDLE_BUSY`, and
 `FRONTIER_CONFLICT` are transient status reads; vault and repository-privacy failures retain their
 distinct recovery advisories. `STORAGE_UNSAFE` and `STORAGE_CORRUPT` keep their own advisories

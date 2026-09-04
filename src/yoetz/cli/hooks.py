@@ -5,10 +5,11 @@ from __future__ import annotations
 import contextlib
 import sys
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 from types import MappingProxyType
-from typing import BinaryIO, Final, Protocol, cast
+from typing import BinaryIO, Final, Literal, Protocol, cast
 
 from yoetz import __version__
 from yoetz.adapters.integrations.codex_lifecycle import (
@@ -33,17 +34,22 @@ from yoetz.cli.hook_io import (
 from yoetz.cli.hook_io import (
     stdout_json as _stdout_json,
 )
-from yoetz.ports.control import ControlClientKind, ControlError
+from yoetz.cli.workspace_binding import canonical_workspace_locator
+from yoetz.ports.control import ControlClientKind, ControlError, WorkspaceLocator
 from yoetz.protocol.canonical import JsonValue, strict_json_parse
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode
-from yoetz.protocol.ids import IdKind, new_id
+from yoetz.protocol.ids import IdKind, is_valid_id, new_id
 from yoetz.protocol.models import OperationFailureModel, StatusRequest
 from yoetz.service.client import connect_service
 
 __all__ = [
     "INACTIVE_CONTEXT",
     "YOETZ_START_TOOL_NAMES",
+    "StaleReplacement",
+    "StatusOutcome",
     "bind_start_mapping_from_hook",
+    "bind_start_mapping_outcome",
+    "bound_connector",
     "handle_observe",
     "handle_post_tool_use",
     "handle_session_start",
@@ -60,8 +66,38 @@ class _StatusClient(Protocol):
 
 
 type ServiceConnector = Callable[[ControlClientKind], Awaitable[_StatusClient]]
-type StatusOutcome = tuple[str, LifecycleMapping | None]
 type AsyncRunner = Callable[[Callable[[], Awaitable[object]]], object]
+type StartBindOutcome = Literal[
+    "bound",
+    "skipped",
+    "start_bind_unparsed",
+    "start_bind_invalid_ids",
+    "start_bind_write_failed",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class StaleReplacement:
+    """The current binding the daemon disclosed for a retired session (`session_superseded`)."""
+
+    task_id: str
+    session_id: str
+    writer_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class StatusOutcome:
+    """One hook status read: a closed kind, the refreshed mapping, and any typed replacement.
+
+    ``kind`` is one of active|stale|workspace_unbound|workspace_mismatch|locked|retry|privacy|
+    storage_unsafe|storage_corrupt|unavailable. ``mapping`` is set only for ``active``;
+    ``replacement`` only for a ``stale`` answer that carried the superseding ids.
+    """
+
+    kind: str
+    mapping: LifecycleMapping | None = None
+    replacement: StaleReplacement | None = None
+
 
 _MAX_STDIN_BYTES: Final = 262_144
 _STATUS_DEADLINE_MS: Final = 5_000
@@ -81,13 +117,44 @@ _LOCKED_CONTEXT: Final = (
 )
 
 
-def _stale_mapping_context(mapping: LifecycleMapping) -> str:
+def _stale_mapping_context(
+    mapping: LifecycleMapping, replacement: StaleReplacement | None = None
+) -> str:
+    if replacement is None:
+        return (
+            "Yoetz task mapping for this session is stale: the task was re-started under new "
+            "session and writer ids. The service itself is healthy. Call start with mode=attach "
+            f"and session_id {mapping.yoetz_session_id} (task {mapping.yoetz_task_id}) to "
+            "continue the same task. Do not open a new task with a different external_ref."
+        )
+    # The daemon named the superseding binding (`session_superseded`, #578): an agent that
+    # already holds those ids continues with them; one that does not re-binds by the retired
+    # session selector. Either way the same task continues and no sibling is created.
     return (
         "Yoetz task mapping for this session is stale: the task was re-started under new "
-        "session and writer ids. The service itself is healthy. Call start with mode=attach "
-        f"and session_id {mapping.yoetz_session_id} (task {mapping.yoetz_task_id}) to continue "
-        "the same task. Do not open a new task with a different external_ref."
+        "session and writer ids. The service itself is healthy. The current binding for task "
+        f"{replacement.task_id} is session_id {replacement.session_id} and writer_id "
+        f"{replacement.writer_id}; if you hold those ids, continue with them. Otherwise call "
+        f"start with mode=attach and session_id {mapping.yoetz_session_id} to continue the same "
+        "task. Do not open a new task with a different external_ref."
     )
+
+
+# A resume/compact status read refused by the daemon's repository fence (#578). Both are
+# answered by a healthy service about a live mapping, so neither advisory may steer the agent
+# into a re-attach that would rotate the session and strand pending observation rows.
+_WORKSPACE_UNBOUND_CONTEXT: Final = (
+    "Yoetz could not verify the repository of this mapped session because the hook connected "
+    "without a project workspace (status_workspace_unbound). The mapping is not stale and the "
+    "service is healthy; do not re-attach. Call status from the project directory before "
+    "further material work."
+)
+_WORKSPACE_MISMATCH_CONTEXT: Final = (
+    "Yoetz refused the status read for this mapped session because the hook's workspace "
+    "resolves to a different repository than the mapped task (status_workspace_mismatch). The "
+    "mapping is not stale and the service is healthy; do not re-attach. Call status from the "
+    "task's own repository before further material work."
+)
 
 
 _RETRY_CONTEXT: Final = (
@@ -120,6 +187,11 @@ _STORAGE_CORRUPT_CONTEXT: Final = (
 # The two storage codes keep their own classes because they prescribe opposite
 # next steps (#338): "storage_unsafe" is a fault that may be retried,
 # "storage_corrupt" is invalid data that must not be.
+# `SESSION_CONFLICT` is refined by its closed reason before this table applies (#578): the
+# repository fence's `repository_identity_required` / `repository_identity_mismatch` name a
+# probe the daemon could not bind to a repository, not a replaced session, and classify as
+# `workspace_unbound` / `workspace_mismatch` below. A conflict without such a reason (writer
+# route replaced) and `SESSION_NOT_FOUND` (`session_superseded` or absent) remain `stale`.
 _STATUS_ERROR_CLASSES: Final[Mapping[PublicErrorCode, str]] = MappingProxyType(
     {
         PublicErrorCode.SESSION_NOT_FOUND: "stale",
@@ -149,6 +221,60 @@ _STATUS_ERROR_CLASSES: Final[Mapping[PublicErrorCode, str]] = MappingProxyType(
 )
 if set(_STATUS_ERROR_CLASSES) != set(PublicErrorCode):
     raise RuntimeError("status_error_classes_not_exhaustive")
+
+_FENCE_REASON_CLASSES: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "repository_identity_required": "workspace_unbound",
+        "repository_identity_mismatch": "workspace_mismatch",
+    }
+)
+
+
+def _failure_reason_and_details(
+    failure: OperationFailureModel,
+) -> tuple[str | None, Mapping[str, object] | None]:
+    details = getattr(failure.error, "safe_details", None)
+    if not isinstance(details, Mapping):
+        return None, None
+    typed = cast(Mapping[str, object], details)
+    reason = typed.get("reason_code")
+    return (reason if type(reason) is str else None), typed
+
+
+def _replacement_from_details(details: Mapping[str, object]) -> StaleReplacement | None:
+    task_id = details.get("task_id")
+    session_id = details.get("session_id")
+    writer_id = details.get("writer_id")
+    if type(task_id) is not str or type(session_id) is not str or type(writer_id) is not str:
+        return None
+    if not (
+        is_valid_id(IdKind.TASK, task_id)
+        and is_valid_id(IdKind.SESSION, session_id)
+        and is_valid_id(IdKind.WRITER, writer_id)
+    ):
+        return None
+    return StaleReplacement(task_id=task_id, session_id=session_id, writer_id=writer_id)
+
+
+def _classify_status_failure(failure: OperationFailureModel) -> StatusOutcome:
+    """Map one public status failure to its hook class, refining by closed reason code."""
+
+    kind = _STATUS_ERROR_CLASSES.get(failure.error.code, "unavailable")
+    reason, details = _failure_reason_and_details(failure)
+    if (
+        failure.error.code is PublicErrorCode.SESSION_CONFLICT
+        and reason is not None
+        and reason in _FENCE_REASON_CLASSES
+    ):
+        return StatusOutcome(_FENCE_REASON_CLASSES[reason])
+    if (
+        failure.error.code is PublicErrorCode.SESSION_NOT_FOUND
+        and reason == "session_superseded"
+        and details is not None
+    ):
+        return StatusOutcome("stale", replacement=_replacement_from_details(details))
+    return StatusOutcome(kind)
+
 
 # Transport-level failures, classified over the closed ControlError reason set.
 # Reasons absent here (a future addition) fall back to "unavailable".
@@ -240,22 +366,58 @@ def _as_mapping(value: object) -> Mapping[str, JsonValue] | None:
     return None
 
 
-def _extract_start_success(tool_response: object) -> Mapping[str, JsonValue] | None:
+def _parse_bounded_result_text(text: object) -> Mapping[str, JsonValue] | None:
+    """Parse one bounded strict-JSON object; unwrap a serialized structured result."""
+
+    if type(text) is not str:
+        return None
+    encoded = text.encode("utf-8")
+    if not encoded or len(encoded) > _MAX_STDIN_BYTES:
+        return None
+    try:
+        candidate = _as_mapping(strict_json_parse(encoded))
+    except Exception:
+        return None
+    if candidate is None:
+        return None
+    structured = candidate.get("structuredContent")
+    if structured is None:
+        structured = candidate.get("structured_content")
+    if structured is not None:
+        return _as_mapping(structured)
+    return candidate
+
+
+def _extract_start_result(tool_response: object) -> Mapping[str, JsonValue] | None:
+    """Return the parsed start result object in any admitted host shape, else ``None``.
+
+    Three shapes are admitted, each bounded and inspected transiently:
+
+    1. an object carrying ``structuredContent`` (Codex), or a bare result object;
+    2. a single-text-block content list whose text is the strict-JSON result;
+    3. a bare JSON string of the structured result — the shape Claude Code 2.1.251 passes as
+       ``tool_response`` for MCP tools (captured live 2026-09-04, issue #581); the earlier
+       binder rejected it, so a successful scoped ``start`` never re-bound the session.
+
+    Whether the result is a success is the caller's decision, so a refused ``start`` can be
+    told apart from an unadmitted shape.
+    """
+
     mapping = _as_mapping(tool_response)
     if mapping is not None:
         structured = mapping.get("structuredContent")
         if structured is None:
             structured = mapping.get("structured_content")
-        candidate = _as_mapping(structured) if structured is not None else mapping
-        if candidate is not None and candidate.get("ok") is True:
-            return candidate
+        if structured is not None:
+            return _as_mapping(structured)
+        if "content" not in mapping:
+            return mapping
         content = mapping.get("content")
+    elif type(tool_response) is str:
+        return _parse_bounded_result_text(tool_response)
     else:
         content = tool_response
 
-    # Claude may expose an MCP result as a content-block list instead of the
-    # structuredContent object Codex supplies. Parse only one bounded text
-    # block, then retain only the validated structural start identifiers below.
     if type(content) is not list:
         return None
     content_blocks = cast(list[object], content)
@@ -264,16 +426,7 @@ def _extract_start_success(tool_response: object) -> Mapping[str, JsonValue] | N
     block = _as_mapping(content_blocks[0])
     if block is None or block.get("type") != "text":
         return None
-    text = block.get("text")
-    if type(text) is not str or len(text.encode("utf-8")) > _MAX_STDIN_BYTES:
-        return None
-    try:
-        candidate = _as_mapping(strict_json_parse(text.encode("utf-8")))
-    except Exception:
-        return None
-    if candidate is None or candidate.get("ok") is not True:
-        return None
-    return candidate
+    return _parse_bounded_result_text(block.get("text"))
 
 
 def _frontier_from_start(result: Mapping[str, JsonValue]) -> str | None:
@@ -291,33 +444,78 @@ def _frontier_from_start(result: Mapping[str, JsonValue]) -> str | None:
         return None
 
 
+def bind_start_mapping_outcome(
+    payload: Mapping[str, JsonValue],
+    *,
+    _state: Path | None = None,
+) -> StartBindOutcome:
+    """Persist a validated mapping from one exact successful start hook result.
+
+    The host response is inspected transiently. Only task/session/writer ids and
+    the optional frontier token enter lifecycle storage. ``skipped`` means there
+    was nothing to bind (not a start tool, or a start the service refused); the
+    ``start_bind_*`` outcomes are closed hook-diagnostic reasons for a scoped
+    successful start that produced no mapping (issue #581).
+    """
+
+    tool_name = payload.get("tool_name")
+    if type(tool_name) is not str or tool_name not in YOETZ_START_TOOL_NAMES:
+        return "skipped"
+    try:
+        codex_session_id = validate_codex_session_id(payload.get("session_id"))
+    except ProtocolValueError:
+        return "start_bind_invalid_ids"
+    result = _extract_start_result(payload.get("tool_response"))
+    if result is None:
+        return "start_bind_unparsed"
+    if result.get("ok") is False:
+        return "skipped"
+    if result.get("ok") is not True:
+        return "start_bind_unparsed"
+    task_id = result.get("task_id")
+    session_id = result.get("session_id")
+    writer_id = result.get("writer_id")
+    if type(task_id) is not str or type(session_id) is not str or type(writer_id) is not str:
+        return "start_bind_invalid_ids"
+    try:
+        mapping = mapping_from_start_ids(
+            codex_session_id=codex_session_id,
+            yoetz_task_id=task_id,
+            yoetz_session_id=session_id,
+            yoetz_writer_id=writer_id,
+            last_frontier=_frontier_from_start(result),
+        )
+    except ProtocolValueError, TypeError, ValueError:
+        return "start_bind_invalid_ids"
+    try:
+        store_mapping(mapping, _state=_state)
+    except Exception:
+        return "start_bind_write_failed"
+    return "bound"
+
+
 def bind_start_mapping_from_hook(
     payload: Mapping[str, JsonValue],
     *,
     _state: Path | None = None,
 ) -> bool:
-    """Persist a validated mapping from one exact successful start hook result.
+    """Compatibility wrapper: ``True`` only when a mapping was persisted."""
 
-    The host response is inspected transiently. Only task/session/writer ids and
-    the optional frontier token enter lifecycle storage.
-    """
+    return bind_start_mapping_outcome(payload, _state=_state) == "bound"
 
-    tool_name = payload.get("tool_name")
-    if type(tool_name) is not str or tool_name not in YOETZ_START_TOOL_NAMES:
-        return False
-    codex_session_id = validate_codex_session_id(payload.get("session_id"))
-    success = _extract_start_success(payload.get("tool_response"))
-    if success is None:
-        return False
-    mapping = mapping_from_start_ids(
-        codex_session_id=codex_session_id,
-        yoetz_task_id=cast(str, success.get("task_id")),
-        yoetz_session_id=cast(str, success.get("session_id")),
-        yoetz_writer_id=cast(str, success.get("writer_id")),
-        last_frontier=_frontier_from_start(success),
-    )
-    store_mapping(mapping, _state=_state)
-    return True
+
+def record_start_bind_diagnostic(
+    outcome: StartBindOutcome, event_name: str, *, _state: Path | None
+) -> None:
+    """Record a failed scoped start bind as a payload-free hook diagnostic."""
+
+    if outcome in {"bound", "skipped"}:
+        return
+    from yoetz.cli.hook_diagnostics import record_hook_diagnostic
+
+    _stderr_line(f"hook_start_bind_failed: {outcome}")
+    with contextlib.suppress(Exception):
+        record_hook_diagnostic(outcome, event_name, _state=_state)
 
 
 def handle_post_tool_use(
@@ -334,8 +532,9 @@ def handle_post_tool_use(
             stdin_bytes if stdin_bytes is not None else sys.stdin.buffer.read(_MAX_STDIN_BYTES + 1)
         )
         payload = read_hook_payload(raw)
-        with contextlib.suppress(ProtocolValueError):
-            bind_start_mapping_from_hook(payload, _state=_state)
+        record_start_bind_diagnostic(
+            bind_start_mapping_outcome(payload, _state=_state), "PostToolUse", _state=_state
+        )
         from yoetz.cli.observe_hooks import handle_observe
 
         return handle_observe(
@@ -352,11 +551,24 @@ def handle_post_tool_use(
 
 
 def _active_context(mapping: LifecycleMapping, frontier: str | None) -> str:
+    """Name the mapped task with a selector the guidance recognises (issue #580).
+
+    A bare ``task_id`` is not an attach or status selector, and the hook's own
+    ``workspace_ref``/``external_ref`` pair is never what an agent would guess, so
+    the context carries the mapped session and writer ids and says how to
+    continue the same task instead of creating a sibling.
+    """
+
     token = frontier if frontier is not None else mapping.last_frontier
     frontier_text = token if token is not None else "unknown"
     return (
         f"Yoetz task {mapping.yoetz_task_id} is mapped to this session at frontier "
-        f"{frontier_text}. Call status before further material work."
+        f"{frontier_text} as session_id {mapping.yoetz_session_id} and writer_id "
+        f"{mapping.yoetz_writer_id}. Call status with these ids before further material work. "
+        "To continue this task from your own tools, call start with mode=attach and "
+        f"session_id {mapping.yoetz_session_id}; do not call start with "
+        "mode=create_or_attach and a new workspace_ref/external_ref pair, which creates a "
+        "sibling task."
     )
 
 
@@ -389,39 +601,83 @@ def _status_request(
     )
 
 
+def bound_connector(
+    real: Callable[..., Awaitable[object]], workspace_locator: str | None
+) -> ServiceConnector:
+    """Bind the real service connector to the hook's consented workspace locator.
+
+    The daemon fences every task workflow, status included, to the repository
+    the control handshake named. A hook status read sent without a locator was
+    refused as `SESSION_CONFLICT` for a perfectly live mapping and then reported
+    as `mapping_stale` (issue #578), so every hook status read now carries the
+    same locator `start` does. An unrepresentable locator is sent as none; the
+    daemon then answers with its typed reason instead of the hook guessing.
+    """
+
+    locator: WorkspaceLocator | None
+    try:
+        locator = None if workspace_locator is None else WorkspaceLocator(workspace_locator)
+    except ValueError:
+        locator = None
+
+    async def connect(kind: ControlClientKind) -> _StatusClient:
+        return cast(_StatusClient, await real(kind, workspace_locator=locator))
+
+    return connect
+
+
+def session_workspace_locator(workspace: str | None) -> str | None:
+    """Canonical locator for a hook that names its workspace, else the hook's own cwd.
+
+    Ordinary CLI work is repository-bound from the process cwd; a host runs its
+    lifecycle hooks in the session's working directory, so the same default
+    applies when the rendered hook command carries no `--workspace`.
+    """
+
+    try:
+        return canonical_workspace_locator("." if workspace is None else workspace)
+    except Exception:
+        return None
+
+
 async def _read_status(
     mapping: LifecycleMapping,
     *,
-    connect: ServiceConnector = connect_service,
+    connect: ServiceConnector | None = None,
     actor_id: str = "yoetz:codex-hooks",
+    workspace_locator: str | None = None,
 ) -> StatusOutcome:
-    """Return (context_kind, updated_mapping_or_none).
+    """Read the mapped session's status through a repository-bound connection.
 
-    kind is active|stale|locked|retry|privacy|storage_unsafe|storage_corrupt|unavailable.
+    Without an explicit ``connect`` the real connector is bound to
+    ``workspace_locator`` so the daemon's repository fence can admit the read.
     """
 
     client: _StatusClient | None = None
     try:
-        connected = await connect(ControlClientKind.CLI)
+        connector = (
+            bound_connector(connect_service, workspace_locator) if connect is None else connect
+        )
+        connected = await connector(ControlClientKind.CLI)
         client = connected
         result = await connected.status(
             _status_request(mapping, actor_id=actor_id), deadline_ms=_STATUS_DEADLINE_MS
         )
         branch = getattr(result, "root", result)
         if isinstance(branch, OperationFailureModel):
-            return _STATUS_ERROR_CLASSES.get(branch.error.code, "unavailable"), None
+            return _classify_status_failure(branch)
         head = getattr(branch, "head_frontier", None)
         task_id = getattr(branch, "task_id", None)
         session_id = getattr(branch, "session_id", None)
         writer_id = getattr(branch, "writer_id", None)
         if head is None or type(task_id) is not str or type(session_id) is not str:
-            return "unavailable", None
+            return StatusOutcome("unavailable")
         if type(writer_id) is not str:
-            return "unavailable", None
+            return StatusOutcome("unavailable")
         sequence = getattr(head, "sequence", None)
         digest = getattr(head, "head_digest", None)
         if type(sequence) is not str or type(digest) is not str:
-            return "unavailable", None
+            return StatusOutcome("unavailable")
         frontier = encode_frontier_token(sequence=sequence, head_digest=digest)
         updated = LifecycleMapping(
             mapping_version=mapping.mapping_version,
@@ -431,11 +687,11 @@ async def _read_status(
             yoetz_writer_id=writer_id,
             last_frontier=frontier,
         )
-        return "active", updated
+        return StatusOutcome("active", mapping=updated)
     except ControlError as error:
-        return _CONTROL_ERROR_CLASSES.get(error.reason, "unavailable"), None
+        return StatusOutcome(_CONTROL_ERROR_CLASSES.get(error.reason, "unavailable"))
     except Exception:
-        return "unavailable", None
+        return StatusOutcome("unavailable")
     finally:
         if client is not None:
             try:
@@ -553,10 +809,12 @@ def handle_session_start(
             async def _run() -> StatusOutcome:
                 return await _read_status(
                     mapping,
-                    connect=connect_service if connect is None else connect,
+                    connect=connect,
+                    workspace_locator=session_workspace_locator(workspace),
                 )
 
-            kind, updated = cast(StatusOutcome, runner(_run))
+            outcome = cast(StatusOutcome, runner(_run))
+            kind, updated = outcome.kind, outcome.mapping
             from yoetz.cli.observe_hooks import handle_observe
 
             handle_observe(
@@ -587,7 +845,27 @@ def handle_session_start(
                 with contextlib.suppress(Exception):
                     record_hook_diagnostic("mapping_stale", "SessionStart", _state=_state)
                 _stdout_json(
-                    _context_output("SessionStart", _stale_mapping_context(mapping)), stdout
+                    _context_output(
+                        "SessionStart", _stale_mapping_context(mapping, outcome.replacement)
+                    ),
+                    stdout,
+                )
+                return 0
+            if kind in {"workspace_unbound", "workspace_mismatch"}:
+                from yoetz.cli.hook_diagnostics import record_hook_diagnostic
+
+                # The daemon refused to bind this read to a repository; the mapping
+                # is kept untouched and is deliberately not reported as stale (#578).
+                with contextlib.suppress(Exception):
+                    record_hook_diagnostic(f"status_{kind}", "SessionStart", _state=_state)
+                _stdout_json(
+                    _context_output(
+                        "SessionStart",
+                        _WORKSPACE_UNBOUND_CONTEXT
+                        if kind == "workspace_unbound"
+                        else _WORKSPACE_MISMATCH_CONTEXT,
+                    ),
+                    stdout,
                 )
                 return 0
             if kind == "locked":

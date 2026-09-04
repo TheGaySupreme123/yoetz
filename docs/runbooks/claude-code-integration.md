@@ -286,6 +286,25 @@ none of the response bytes or prose. Confirm `mapping_present: true`, then drain
 rows before claiming hook coverage. Pause, resume, revoke, deduplication, restart, and gap behavior
 require their own evidence.
 
+Claude Code 2.1.251 passes an MCP tool's `tool_response` to `PostToolUse` as one bare JSON string
+of the structured result (captured live on 2026-09-04 with a probe MCP server that returned both a
+text block and `structuredContent`; the text block is dropped). The binder admits that shape next
+to a `structuredContent` object and a single-text-block content list, and a fixture pins it. A
+scoped successful `start` that still binds nothing records `start_bind_unparsed`,
+`start_bind_invalid_ids`, or `start_bind_write_failed` in `hook_diagnostics` (issue #581); a start
+the service refused records nothing. This capture proves the `PostToolUse` shape only; 2.1.251 is
+not added to the evidenced capability-profile table, whose entries mean the whole native contract
+was reviewed. The `PostToolUse` payload carries no `claude_code_version`, so version evidence still
+comes from `SessionStart`.
+
+The `SessionStart` context for a mapped session names the task, its frontier, the mapped
+`session_id` and `writer_id`, and says to continue the task with `start mode=attach` by that
+session id (a bare `task_id` is not a selector the guidance accepts, issue #580). The `resume` and
+`compact` status probe connects with `--workspace "${CLAUDE_PROJECT_DIR}"` as its repository
+locator, so a live mapping answers `active` with a refreshed frontier; a daemon fence refusal
+records `status_workspace_unbound` or `status_workspace_mismatch` and keeps the mapping, and only a
+genuinely replaced session records `mapping_stale` (issue #578).
+
 ## Auto mode and host admission
 
 Claude Code's auto-mode classifier sees the tool name, the request JSON, user messages, and
