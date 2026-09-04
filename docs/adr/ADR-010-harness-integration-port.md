@@ -331,7 +331,9 @@ dedup, structural envelopes, and the current advice snapshot. Migration `0003` o
 encrypted workspace-locator/content references, canonical logical identity claims, exact-digest
 check-policy trust, generation-fenced verification jobs/results, and advice history/delivery state.
 Migration `0004` owns inspection snapshots, workspace→Yoetz-session routing, and session-scoped
-current advice without rewriting `0003`. Repositories own those tables; coordinators do not issue
+current advice without rewriting `0003`. Migration `0009` rebuilds the `0002` cursor and envelope
+tables so their source CHECK admits `claude_hook` and `cursor_hook` beside the Codex sources: the
+domain enum is the closed set and the DDL follows it, never the reverse (issue #576). Repositories own those tables; coordinators do not issue
 private SQL.
 Observation consent is project-level and separate from egress consent. The plaintext local boundary
 records a private workspace commitment, structural outbox/quarantine evidence, and encrypted object
