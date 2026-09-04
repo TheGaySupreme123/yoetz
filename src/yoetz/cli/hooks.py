@@ -468,8 +468,10 @@ def bind_start_mapping_outcome(
     result = _extract_start_result(payload.get("tool_response"))
     if result is None:
         return "start_bind_unparsed"
-    if result.get("ok") is not True:
+    if result.get("ok") is False:
         return "skipped"
+    if result.get("ok") is not True:
+        return "start_bind_unparsed"
     task_id = result.get("task_id")
     session_id = result.get("session_id")
     writer_id = result.get("writer_id")

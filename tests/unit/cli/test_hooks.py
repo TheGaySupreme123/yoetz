@@ -622,6 +622,9 @@ def test_post_tool_use_bare_json_string_start_result_binds(tmp_path: Path) -> No
     ("tool_response", "reason"),
     [
         ("RESPONSE_CANARY", "start_bind_unparsed"),
+        ({}, "start_bind_unparsed"),
+        ({"structuredContent": {"ok": "true"}}, "start_bind_unparsed"),
+        ('{"ok":null}', "start_bind_unparsed"),
         ({"content": "private output"}, "start_bind_unparsed"),
         ([{"type": "text", "text": "not json"}], "start_bind_unparsed"),
         (

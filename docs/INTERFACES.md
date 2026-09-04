@@ -3218,7 +3218,8 @@ an object carrying `structuredContent` (Codex), a single-text-block content list
 strict-JSON result, and a bare JSON string of the structured result (the shape Claude Code 2.1.251
 passes as `tool_response`, captured live 2026-09-04) — and records `start_bind_unparsed`,
 `start_bind_invalid_ids`, or `start_bind_write_failed` when a scoped successful start produced no
-mapping (issue #581); a start the service refused binds nothing and records nothing.
+mapping (issue #581). Only an explicit boolean `ok: false` is treated as a refused start and
+records nothing; a missing or non-boolean `ok` records `start_bind_unparsed`.
 `OPERATION_PENDING`, `BUNDLE_BUSY`, and
 `FRONTIER_CONFLICT` are transient status reads; vault and repository-privacy failures retain their
 distinct recovery advisories. `STORAGE_UNSAFE` and `STORAGE_CORRUPT` keep their own advisories

@@ -211,8 +211,9 @@ def test_claude_live_2_1_251_start_tool_response_binds(
     assert mapping.last_frontier == "1:sha256:" + "a" * 64
 
 
+@pytest.mark.parametrize("tool_response", ["RESPONSE_CANARY", "{}", '{"ok":1}'])
 def test_claude_unbound_start_result_records_typed_diagnostic(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tool_response: str
 ) -> None:
     """A scoped start post-hook that cannot bind leaves a visible, payload-free trace (#581)."""
 
@@ -229,7 +230,7 @@ def test_claude_unbound_start_result_records_typed_diagnostic(
                     "hook_event_name": "PostToolUse",
                     "session_id": "session-unbound",
                     "tool_name": "mcp__plugin_yoetz_yoetz__start",
-                    "tool_response": "RESPONSE_CANARY",
+                    "tool_response": tool_response,
                     "tool_use_id": "tool-unbound",
                 }
             ),
