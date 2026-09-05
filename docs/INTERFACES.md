@@ -3992,35 +3992,50 @@ unpopulated evidence cell.
 It is redacted in representations and never inferred from regular Cursor, `$HOME`, caches, or a
 single installed candidate. The managed destination is `plugins/local/yoetz` below that selected
 root. `CursorPluginArtifact` contains one `PortablePluginPlan`, one sorted member mapping, and one
-artifact digest. Its format is exactly `agent_plugins_1` or `cursor_plugin_native`; one artifact
-never contains both root `plugin.json` and `.cursor-plugin/plugin.json`.
+artifact digest. Native artifacts also carry the validated `YOETZ_ISOLATED_ROOT` binding when the
+invoking runtime is isolated; portable artifacts never carry a host isolation binding. Its format
+is exactly `agent_plugins_1` or `cursor_plugin_native`; one artifact never contains both root
+`plugin.json` and `.cursor-plugin/plugin.json`. The host may still consult the regular shared
+`~/.cursor/plugins/local/yoetz` during discovery when launched with another user-data directory;
+an isolated Cursor home does not prove isolated plugin discovery. The explicit target, child root
+binding, and host discovery observation remain separate proof facets.
 
 `CursorPluginPreview` carries request ID, effective action, before state, exact format, target
 identity digest, current-state digest, artifact digest, preview digest, intended MCP ownership,
-observed `McpOwnershipState`, optional exact route, and sorted warnings. `CursorPluginStatus`
-carries artifact/operation state, detected format, artifact/installed digests, marker validity,
-rollback availability, one `CursorMcpObservation`, one `CursorMcpRuntimeObservation`, one
-`CursorLauncherStatus`, and every independent `PluginProofFacet`.
+observed `McpOwnershipState`, optional exact route, proposed isolated root or null, and sorted
+warnings. `CursorPluginStatus` carries artifact/operation state, detected format,
+artifact/installed digests, marker validity, rollback availability, one `CursorMcpObservation`,
+one `CursorMcpRuntimeObservation`, one `CursorLauncherStatus`, the Cursor-specific isolation
+binding (`ambient|isolated_exact|missing|different|unobserved`), and every independent
+`PluginProofFacet`. `ambient` and `isolated_exact` require both a marker root match and intact
+root-bearing MCP/hook members; a marker alone never proves that the child launch binding remains
+intact. `different` covers a changed root or a root-bearing member whose binding no longer matches.
 `CursorPluginResult` carries request/action/operation, before/after states, format,
 preview/artifact/installed digests, and sorted changed members. Portable artifacts retain marker
 schema `yoetz.cursor-plugin-install/1`. Newly rendered native artifacts use
-`yoetz.cursor-plugin-install/2`, which adds the resolved absolute invoking `yoetz` executable path
+`yoetz.cursor-plugin-install/3`, which adds the resolved absolute invoking `yoetz` executable path
 (never a different ambient-PATH installation when the CLI was invoked by an explicit absolute or
 relative path) to the
-format, renderer/Yoetz versions, hook mapping version, MCP owner/route, artifact digest, exact
-managed inventory, and marker digest. A valid legacy native `/1` marker remains managed but reports
-`modified` against the `/2` desired artifact, so an exact previewed replace or remove remains
-reachable. Neither schema carries a project path, content, credential, transcript, timestamp,
-activation, coverage, or receipt claim.
+format, renderer/Yoetz versions, hook mapping version, MCP owner/route, exact isolated-root
+binding (or null for ambient mode), artifact digest, exact managed inventory, and marker digest.
+A valid legacy native `/1` or `/2` marker remains managed but reports `modified` against the
+current desired artifact when its binding is absent, so an exact previewed replace or remove
+remains reachable. Neither schema carries a project path, content, credential, transcript,
+timestamp, activation, coverage, or receipt claim.
 
 Native hooks **and the plugin-owned `mcp.json`** launch that one recorded launcher (issue #468):
 the MCP entry is `command = launcher[0]`, `args = [*launcher[1:], "mcp", "serve", "--host",
 "cursor"(, "--semantic", "off")]`, never a bare `yoetz` that Cursor's sanitized desktop PATH may
-resolve to another installation. Because the entry is a managed member, its bytes are part of the
-artifact digest and the marker inventory. Route recognition (`observe_cursor_mcp`) accepts an
-exact Yoetz route as a hand-written bare `yoetz` or one of the known launchers — this artifact's
-and the installed marker's — followed by the exact serve arguments; any other command, prefix, or
-key set is `foreign`. `CursorLauncherStatus` reports `artifact_launcher`, `installed_launcher`,
+resolve to another installation. In isolated mode the entry carries exactly
+`env = {"YOETZ_ISOLATED_ROOT": "<validated-root>"}` and every native hook command carries the
+same shell-safe assignment; ambient artifacts omit both. Because these entries are managed
+members, their bytes are part of the artifact digest and marker inventory. Route-shape recognition
+accepts a hand-written bare `yoetz` or one of the known launchers — this artifact's and the
+installed marker's — followed by the exact serve arguments, optionally with that one structurally
+valid environment binding. Lifecycle ownership passes the artifact's exact expected root into the
+same classifier; a different valid root is therefore `foreign` and cannot count as owned or
+admitted. Any other command, prefix, or key set is `foreign`. `CursorLauncherStatus` reports
+`artifact_launcher`, `installed_launcher`,
 `executable` (`matched|drifted|missing|unbound|unobserved`: the installed launcher versus the one
 this runtime would render, and whether it still exists), `mcp_binding`
 (`exact_launcher|ambient_path|absent|foreign|unobserved`: what the installed plugin entry spawns),
@@ -4080,8 +4095,8 @@ a surviving Cursor-helper child on the strict argv is `full_restart_required`, a
 stays `not_observed`. Reload Window is not a sufficient activation proof. SDK precedence is exactly that enum order. A higher-precedence or duplicate
 same-name source cannot create a plugin-managed pass: plugin plus external is `dual`, multiple
 same-class sources are `ambiguous`, and any non-exact same-name entry is `foreign`. Route
-recognition is key-set exact — exactly `command`, `type`, `args` — so an entry carrying any
-additional key such as `env` or `cwd` is foreign however compatible its values look.
+recognition is key-set exact — exactly `command`, `type`, `args`, or those three plus the one
+`env` binding above; arbitrary additional keys such as `cwd` remain foreign.
 
 `CursorSdkBinding` is exactly `typescript|python`. `CursorArtifactIdentity` carries binding,
 package version/digest, bridge protocol exactly `sdk.v1`, and optional bridge digest.
