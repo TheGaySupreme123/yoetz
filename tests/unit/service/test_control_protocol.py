@@ -384,12 +384,14 @@ def test_private_mcp_route_profile_round_trips_only_for_check_and_status() -> No
         method=ControlMethod.CHECK,
         body=check,
         route_profile="strict",
+        host_profile="codex",
     )
 
     parsed = parse_control_request(decode_control_frame(encode_control_frame(request)))
 
     assert isinstance(parsed, ControlCallRequest)
     assert parsed.route_profile == "strict"
+    assert parsed.host_profile == "codex"
     with pytest.raises(ValueError, match="control_route_profile_invalid"):
         ControlCallRequest(
             kind="call",
@@ -400,6 +402,17 @@ def test_private_mcp_route_profile_round_trips_only_for_check_and_status() -> No
             method=ControlMethod.SERVICE_STATUS,
             body=JsonObject({}),
             route_profile="strict",
+        )
+    with pytest.raises(ValueError, match="control_host_profile_invalid"):
+        ControlCallRequest(
+            kind="call",
+            protocol_version="1.0",
+            rpc_id=_rpc_id(12),
+            service_instance_id=_SERVICE_ID,
+            service_generation="1",
+            method=ControlMethod.CHECK,
+            body=check,
+            host_profile="vscode",  # type: ignore[arg-type]
         )
 
 

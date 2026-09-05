@@ -2,8 +2,8 @@
 
 Automates exactly the runbook's manual check-then-add sequence:
 ``codex mcp get yoetz --json`` first, a bounded ``codex mcp list --json``
-fallback when ``get`` fails, and ``codex mcp add yoetz -- yoetz mcp serve`` only
-after absence is positively observed. A foreign same-name entry is never replaced.
+fallback when ``get`` fails, and ``codex mcp add yoetz -- yoetz mcp serve --host codex``
+only after absence is positively observed. A foreign same-name entry is never replaced.
 """
 
 from __future__ import annotations
@@ -20,6 +20,8 @@ from typing import Final, Literal, cast
 from yoetz.config.paths import ISOLATED_ROOT_ENV, PathSafetyError, isolated_root
 from yoetz.domain.values import JsonValue
 from yoetz.ports.harness_mcp import (
+    MCP_LEGACY_SERVE_COMMAND,
+    MCP_LEGACY_STRICT_SERVE_COMMAND,
     MCP_SERVE_COMMAND,
     MCP_SERVER_NAME,
     MCP_STRICT_SERVE_COMMAND,
@@ -45,7 +47,14 @@ _COMMAND_TIMEOUT_SECONDS: Final = 10.0
 _OUTPUT_LIMIT_BYTES: Final = 65_536
 # The registered argv is the only durable evidence of which route the agent actually gets.
 _ROUTE_PROFILE_BY_COMMAND: Final[Mapping[tuple[str, ...], Literal["policy", "strict"]]] = (
-    MappingProxyType({MCP_SERVE_COMMAND: "policy", MCP_STRICT_SERVE_COMMAND: "strict"})
+    MappingProxyType(
+        {
+            MCP_SERVE_COMMAND: "policy",
+            MCP_STRICT_SERVE_COMMAND: "strict",
+            MCP_LEGACY_SERVE_COMMAND: "policy",
+            MCP_LEGACY_STRICT_SERVE_COMMAND: "strict",
+        }
+    )
 )
 
 
@@ -205,7 +214,12 @@ class CodexMcpAdapter:
         entry: Mapping[str, object],
     ) -> tuple[McpRegistrationState, tuple[str, ...] | None, str | None]:
         tokens = _entry_command_tokens(entry)
-        for command in (MCP_STRICT_SERVE_COMMAND, MCP_SERVE_COMMAND):
+        for command in (
+            MCP_STRICT_SERVE_COMMAND,
+            MCP_SERVE_COMMAND,
+            MCP_LEGACY_STRICT_SERVE_COMMAND,
+            MCP_LEGACY_SERVE_COMMAND,
+        ):
             if tokens == command:
                 environment_readable, registered_root = _entry_isolated_root(entry)
                 if not environment_readable:

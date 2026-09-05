@@ -160,13 +160,14 @@ fully quit Cursor.
 ### Applied-route drift decision (issue #537)
 
 Decision for Cursor: not supported here — no additional state-root applied-route record
-at this time. The plugin-managed `mcp.json` entry already binds the route profile (the exact
-serve arguments, including `--semantic off` for strict) and the `/3` marker records the same
-launcher the native hooks use; the live binding and launcher read-backs above remain the
-authority for which route this host serves. A stale serving process shows as
-`executable_mismatch` / `full_restart_required`, not as applied-vs-serving drift. If a
-ceiling check ever needs that distinction on this host, that is a separate design-gated
-change.
+at this time. The plugin-managed `mcp.json` entry already binds the route profile and declares
+`--host cursor` (the exact serve arguments, including `--semantic off` for strict), and the `/3`
+marker records the same launcher the native hooks use; the live binding and launcher read-backs
+above remain the authority for which route this host serves. The explicit Cursor identity also
+prevents the Codex-only applied-route drift comparison from being applied to this host. A stale
+serving process shows as `executable_mismatch` / `full_restart_required`, not as
+applied-vs-serving drift. If a ceiling check ever needs a Cursor-specific applied-route record,
+that is a separate design-gated change.
 
 ## Auto-review and host admission
 

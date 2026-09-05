@@ -31,8 +31,12 @@ __all__ = [
 ]
 
 MCP_SERVER_NAME: Final = "yoetz"
-MCP_SERVE_COMMAND: Final = ("yoetz", "mcp", "serve")
+MCP_SERVE_COMMAND: Final = ("yoetz", "mcp", "serve", "--host", "codex")
 MCP_STRICT_SERVE_COMMAND: Final = (*MCP_SERVE_COMMAND, "--semantic", "off")
+# Registrations created before host identity became explicit remain recognizable for a bounded
+# status/remove/reinstall transition. They are never emitted by a new preview or renderer.
+MCP_LEGACY_SERVE_COMMAND: Final = ("yoetz", "mcp", "serve")
+MCP_LEGACY_STRICT_SERVE_COMMAND: Final = (*MCP_LEGACY_SERVE_COMMAND, "--semantic", "off")
 
 _MAX_PATH_CHARS: Final = 4_096
 _MAX_VERSION_CHARS: Final = 64
@@ -143,7 +147,15 @@ class McpRegistrationPreview:
         expected_command = (
             MCP_STRICT_SERVE_COMMAND if self.route_profile == "strict" else MCP_SERVE_COMMAND
         )
-        if self.route_profile not in {"policy", "strict"} or self.serve_command != expected_command:
+        legacy_command = (
+            MCP_LEGACY_STRICT_SERVE_COMMAND
+            if self.route_profile == "strict"
+            else MCP_LEGACY_SERVE_COMMAND
+        )
+        if self.route_profile not in {"policy", "strict"} or self.serve_command not in {
+            expected_command,
+            legacy_command,
+        }:
             raise _port_error("integration_value_invalid")
         if self.isolated_root is not None and (
             type(self.isolated_root) is not str
