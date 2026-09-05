@@ -1142,8 +1142,7 @@ async def _drain_outbox_leased(
             ) and not store.reconcile_outbox_session_lifecycle(
                 workspace_commitment,
                 row,
-                session_lock_owned=session_lock_owned
-                and row.codex_session_id == codex_session_id,
+                session_lock_owned=session_lock_owned and row.codex_session_id == codex_session_id,
             ):
                 skipped_sessions.add(row.codex_session_id)
                 continue
@@ -1490,9 +1489,7 @@ class _RecoveryScan:
     candidates: tuple[_RecoveryCandidate, ...] = ()
 
 
-def _load_recovery_candidate(
-    session_id: str, *, _state: Path | None
-) -> _RecoveryCandidate | None:
+def _load_recovery_candidate(session_id: str, *, _state: Path | None) -> _RecoveryCandidate | None:
     """Read one valid mapping and the file recency used for recovery ranking."""
 
     mapping = load_mapping(session_id, _state=_state)
@@ -1563,9 +1560,7 @@ def _scan_ended_workspace_recovery(
     )
     if len({candidate.mapping.yoetz_task_id for candidate in candidates}) != 1:
         return _RecoveryScan(None, lifecycles, eligible, candidates)
-    return _RecoveryScan(
-        _latest_mapping(candidates), lifecycles, eligible, candidates
-    )
+    return _RecoveryScan(_latest_mapping(candidates), lifecycles, eligible, candidates)
 
 
 @contextlib.contextmanager
@@ -1859,7 +1854,9 @@ async def _try_workspace_auto_start(
             # Recovery locks the selected predecessor first for compatibility
             # with its existing lifecycle fence, then takes every other
             # candidate in stable order.
-            with acquire_session_lock(recovery.codex_session_id, _state=_state) as predecessor_owned:
+            with acquire_session_lock(
+                recovery.codex_session_id, _state=_state
+            ) as predecessor_owned:
                 if predecessor_owned:
                     with _acquire_recovery_session_locks(
                         scan.eligible_session_ids,
@@ -1885,9 +1882,7 @@ async def _try_workspace_auto_start(
                                         outcome.mapping,
                                         harness_id=harness_id,
                                         _state=_state,
-                                        held_codex_session_ids=frozenset(
-                                            scan.eligible_session_ids
-                                        ),
+                                        held_codex_session_ids=frozenset(scan.eligible_session_ids),
                                         authorized_codex_session_ids=frozenset(
                                             candidate.mapping.codex_session_id
                                             for candidate in scan.candidates
@@ -2259,11 +2254,8 @@ def handle_observe(
                             target_generation = latest.target_generation
                         elif clear_requested and known_session_binding:
                             target_generation += 1
-                        elif (
-                            known_session_binding
-                            and store.codex_session_ended(
-                                workspace_commitment, codex_session_id
-                            )
+                        elif known_session_binding and store.codex_session_ended(
+                            workspace_commitment, codex_session_id
                         ):
                             # The public generation accessor presents legacy
                             # pre-counter state as generation one. A deferred

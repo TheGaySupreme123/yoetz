@@ -909,3 +909,26 @@ def test_queued_start_then_end_does_not_resurrect_a_session(
     assert repeated.codex_session_ended(workspace, session_id)
     assert repeated.current_session_generation(workspace, session_commitment) == 1
     assert len(coordinator.requests) == 2
+
+
+def test_stale_deferred_clear_preserves_newer_generation_mapping(tmp_path: Path) -> None:
+    state, _directory, store, workspace = _workspace_and_store(tmp_path)
+    session_id = "codex-stale-clear"
+    _seed_ended_predecessor(store, workspace, session_id, state=state)
+    commitment = store.session_commitment(session_id)
+    store.begin_session_generation(workspace, commitment)
+    store.record_pending_session_lifecycle(
+        workspace,
+        session_id,
+        commitment,
+        "SessionStart",
+        1,
+        clear_mapping=True,
+    )
+    store.begin_session_generation(workspace, commitment)
+    mapping = observe_hooks_module.load_mapping(session_id, _state=state)
+    assert mapping is not None
+    assert store.reconcile_pending_session_lifecycles(workspace)
+    assert observe_hooks_module.load_mapping(session_id, _state=state) == mapping
+    assert store.list_pending_session_lifecycles(workspace) == ()
+    assert store.current_session_generation(workspace, commitment) == 2

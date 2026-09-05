@@ -237,9 +237,7 @@ def test_workspace_recovery_lock_namespace_rejects_symlink(tmp_path: Path) -> No
         )
 
 
-def test_stale_lock_can_be_broken(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_stale_lock_can_be_broken(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     session_id = "stale-lock"
     lock = tmp_path / "codex-lifecycle"
     lock.mkdir(parents=True, mode=0o700)
@@ -247,6 +245,7 @@ def test_stale_lock_can_be_broken(
     path.write_text("4242:1\n", encoding="ascii")
     old = path.stat().st_mtime - 120
     os.utime(path, (old, old))
+
     def dead(_pid: int, _signal: int) -> None:
         raise ProcessLookupError
 
@@ -276,9 +275,7 @@ def test_stale_lock_with_live_owner_is_not_replaced(
     assert path.read_bytes() == payload
 
 
-def test_stale_lock_takeover_is_serialized(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_stale_lock_takeover_is_serialized(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     session_id = "serialized-stale-lock"
     (tmp_path / "codex-lifecycle").mkdir(parents=True, mode=0o700)
     path = tmp_path / "codex-lifecycle" / f".{session_id}.lock"
@@ -320,3 +317,39 @@ def test_old_lock_owner_does_not_remove_a_replacement(
         path.unlink()
         path.write_bytes(replacement)
     assert path.read_bytes() == replacement
+
+
+def test_pending_mapping_preserves_update_queued_during_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session, task, first_session, first_writer = _ids()
+    first = mapping_from_start_ids(
+        codex_session_id=session,
+        yoetz_task_id=task,
+        yoetz_session_id=first_session,
+        yoetz_writer_id=first_writer,
+        last_frontier=None,
+    )
+    second = mapping_from_start_ids(
+        codex_session_id=session,
+        yoetz_task_id=task,
+        yoetz_session_id=new_id(IdKind.SESSION),
+        yoetz_writer_id=new_id(IdKind.WRITER),
+        last_frontier=None,
+    )
+    original = codex_lifecycle_module.store_mapping
+
+    def interleaved(mapping: LifecycleMapping, *, _state: Path | None = None) -> None:
+        original(mapping, _state=_state)
+        if mapping == first:
+            codex_lifecycle_module.queue_mapping_store(second, _state=_state)
+
+    codex_lifecycle_module.queue_mapping_store(first, _state=tmp_path)
+    monkeypatch.setattr(codex_lifecycle_module, "store_mapping", interleaved)
+    with acquire_session_lock(session, _state=tmp_path) as owned:
+        assert owned
+        assert codex_lifecycle_module.apply_pending_mapping(session, _state=tmp_path)
+        assert load_mapping(session, _state=tmp_path) == first
+        assert codex_lifecycle_module.apply_pending_mapping(session, _state=tmp_path)
+        assert load_mapping(session, _state=tmp_path) == second
+        assert not codex_lifecycle_module.apply_pending_mapping(session, _state=tmp_path)

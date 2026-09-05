@@ -229,8 +229,8 @@ fail-closed rather than being guessed from age. A successful recovery also rewri
 same-host predecessor mapping for that task to the rotated session and writer. Recovery first takes a
 nonblocking workspace reservation, then holds ordered locks for every eligible ended same-host session
 through full candidate revalidation, the service RPC, authorized rewrites, and pruning. The revalidation
-covers unmapped sessions, cross-workspace ownership, mapping identity, and mapping recency; contention
-or changed state falls back to the ordinary request rather than attaching through a stale selector.
+covers unmapped sessions, cross-workspace ownership, mapping identity, and mapping recency; a busy workspace reservation defers with `auto_attach_recovery_busy`, while candidate-lock
+contention or changed state falls back to the ordinary request.
 Pending predecessor rows then
 drain on that successor route (`session_superseded` is followed, not quarantined as
 `ledger_rejected`). A failed attempt records its cause as a

@@ -591,9 +591,8 @@ class PendingSessionLifecycle:
             or not all(0x21 <= ord(char) <= 0x7E for char in self.codex_session_id)
         ):
             raise ProtocolValueError("invalid_event_value_type")
-        if (
-            type(self.session_commitment) is not str
-            or not re.fullmatch(r"hmac-sha256:[0-9a-f]{64}", self.session_commitment)
+        if type(self.session_commitment) is not str or not re.fullmatch(
+            r"hmac-sha256:[0-9a-f]{64}", self.session_commitment
         ):
             raise ProtocolValueError("invalid_commitment")
         if self.event_kind not in {"SessionStart", "SessionEnd"}:
@@ -1247,9 +1246,7 @@ class LocalObservationStore:
             return generation
 
     @staticmethod
-    def _begin_session_generation_state(
-        state: _WorkspaceState, session_commitment: str
-    ) -> int:
+    def _begin_session_generation_state(state: _WorkspaceState, session_commitment: str) -> int:
         """Advance one generation in an already-held workspace state."""
 
         assert state.session_generations is not None
@@ -1304,7 +1301,9 @@ class LocalObservationStore:
 
         with self._lock:
             state = self._load(workspace_commitment)
-            if self._note_session_end_state(state, workspace_commitment, session_commitment, generation):
+            if self._note_session_end_state(
+                state, workspace_commitment, session_commitment, generation
+            ):
                 self._save(workspace_commitment, state)
 
     @staticmethod
@@ -1365,9 +1364,7 @@ class LocalObservationStore:
 
         if type(row) is not ObservationOutboxRow:
             return False
-        pending = self.list_pending_session_lifecycles(
-            workspace_commitment, row.codex_session_id
-        )
+        pending = self.list_pending_session_lifecycles(workspace_commitment, row.codex_session_id)
         if not pending and row.codex_session_id in self.codex_sessions_for_workspace(
             workspace_commitment
         ):
@@ -1381,9 +1378,7 @@ class LocalObservationStore:
             session_lock_owned=session_lock_owned,
         ):
             return False
-        if self.list_pending_session_lifecycles(
-            workspace_commitment, row.codex_session_id
-        ):
+        if self.list_pending_session_lifecycles(workspace_commitment, row.codex_session_id):
             # A foreign owner or stale target remains unresolved. Do not route
             # the row before its explicit lifecycle intent converges.
             return False
@@ -1411,17 +1406,13 @@ class LocalObservationStore:
                         workspace_commitment
                     )
                     if not known:
-                        self.bind_codex_session(
-                            workspace_commitment, row.codex_session_id
-                        )
+                        self.bind_codex_session(workspace_commitment, row.codex_session_id)
                     current_generation = self.current_session_generation(
                         workspace_commitment, session_commitment
                     )
                     event_kind = row.envelope.event_kind
                     source_generation = row.envelope.cursor.source_generation
-                    if event_kind == "SessionEnd" and (
-                        current_generation == source_generation
-                    ):
+                    if event_kind == "SessionEnd" and (current_generation == source_generation):
                         self.note_session_end(
                             workspace_commitment,
                             session_commitment,
@@ -2576,14 +2567,10 @@ class LocalObservationStore:
             clear_mapping,
         )
 
-        pending = self.list_pending_session_lifecycles(
-            workspace_commitment, codex_session_id
-        )
+        pending = self.list_pending_session_lifecycles(workspace_commitment, codex_session_id)
         if not pending:
             return True
-        session_ids = tuple(
-            sorted({intent.codex_session_id for intent in pending}, key=str.encode)
-        )
+        session_ids = tuple(sorted({intent.codex_session_id for intent in pending}, key=str.encode))
         with acquire_workspace_recovery_lock(
             workspace_commitment, _state=self._state_root
         ) as workspace_owned:
@@ -2649,6 +2636,9 @@ class LocalObservationStore:
                         )
                         ended = session in state.ended_sessions
                         if intent.event_kind == "SessionStart":
+                            if generation > intent.target_generation:
+                                # A stale clear has no authority over a later route.
+                                continue
                             if intent.clear_mapping:
                                 clear_mapping(intent.codex_session_id, _state=self._state_root)
                             if generation == intent.target_generation and not ended:

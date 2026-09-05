@@ -644,9 +644,7 @@ def test_session_start_resume_with_missing_mapping_runs_recovery_under_owned_loc
 
     stdout = io.BytesIO()
     code = handle_session_start(
-        stdin_bytes=json.dumps(
-            {"session_id": "codex-resume-next", "source": "resume"}
-        ).encode(),
+        stdin_bytes=json.dumps({"session_id": "codex-resume-next", "source": "resume"}).encode(),
         stdout=stdout,
         _state=tmp_path,
         connect=connect,

@@ -225,9 +225,7 @@ class ObservationOutboxSweeper:
         retired_sessions: set[tuple[str, str]] = set()
 
         workspaces = tuple(
-            dict.fromkeys(
-                (*lifecycle_workspaces, *(workspace for workspace, _row in rows))
-            )
+            dict.fromkeys((*lifecycle_workspaces, *(workspace for workspace, _row in rows)))
         )
         for workspace in workspaces:
             if deadline is not None and loop.time() >= deadline:

@@ -372,11 +372,15 @@ def queue_mapping_clear(codex_session_id: str, *, _state: Path | None = None) ->
 
 
 def _load_pending_mapping_operation(
-    codex_session_id: str, *, _state: Path | None = None
+    codex_session_id: str, *, _state: Path | None = None, claimed_path: Path | None = None
 ) -> tuple[str, LifecycleMapping | None] | None:
     try:
-        path = _pending_mapping_path(codex_session_id, _state=_state)
-        if path.is_symlink() or not path.is_file() or path.stat().st_size > _MAX_PENDING_MAPPING_BYTES:
+        path = claimed_path or _pending_mapping_path(codex_session_id, _state=_state)
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or path.stat().st_size > _MAX_PENDING_MAPPING_BYTES
+        ):
             return None
         raw = strict_json_parse(path.read_bytes())
         if not isinstance(raw, Mapping) or raw.get("schema") != "yoetz.pending-mapping/1":
@@ -398,10 +402,19 @@ def _load_pending_mapping_operation(
 def apply_pending_mapping(codex_session_id: str, *, _state: Path | None = None) -> bool:
     """Apply and remove one queued mapping operation; caller holds the session lock."""
 
-    operation = _load_pending_mapping_operation(codex_session_id, _state=_state)
+    pending = _pending_mapping_path(codex_session_id, _state=_state)
+    path = pending.with_name(pending.name + ".applying")
+    # Only the session-lock owner claims work. Producers replace only `pending`,
+    # so a new update cannot be removed when this claimed operation completes.
+    # A crash leaves the claimed operation available for idempotent replay.
+    if not path.exists() and not path.is_symlink():
+        try:
+            os.replace(pending, path)
+        except FileNotFoundError:
+            return False
+    operation = _load_pending_mapping_operation(codex_session_id, _state=_state, claimed_path=path)
     if operation is None:
         return False
-    path = _pending_mapping_path(codex_session_id, _state=_state)
     kind, mapping = operation
     if kind == "clear":
         clear_mapping(codex_session_id, _state=_state)
@@ -420,14 +433,13 @@ def _lock_path(codex_session_id: str, *, _state: Path | None = None) -> Path:
     return codex_lifecycle_dir(_state=_state) / f".{session_id}.lock"
 
 
-def _workspace_recovery_lock_path(
-    workspace_commitment: str, *, _state: Path | None = None
-) -> Path:
+def _workspace_recovery_lock_path(workspace_commitment: str, *, _state: Path | None = None) -> Path:
     """Return one collision-safe lock path for a validated workspace commitment."""
 
-    if type(workspace_commitment) is not str or _WORKSPACE_COMMITMENT_RE.fullmatch(
-        workspace_commitment
-    ) is None:
+    if (
+        type(workspace_commitment) is not str
+        or _WORKSPACE_COMMITMENT_RE.fullmatch(workspace_commitment) is None
+    ):
         raise ProtocolValueError("invalid_commitment")
     digest = workspace_commitment.removeprefix("hmac-sha256:")
     directory = codex_lifecycle_dir(_state=_state) / "workspace-recovery-locks"
@@ -498,11 +510,7 @@ class _LifecycleLock:
         """Return true only when the lock payload names a definitively dead PID."""
 
         pid_raw, separator, _stamp = token.rstrip(b"\n").partition(b":")
-        if (
-            separator != b":"
-            or not pid_raw.isdigit()
-            or len(pid_raw) > _MAX_LOCK_PID_DIGITS
-        ):
+        if separator != b":" or not pid_raw.isdigit() or len(pid_raw) > _MAX_LOCK_PID_DIGITS:
             return False
         try:
             pid = int(pid_raw)
