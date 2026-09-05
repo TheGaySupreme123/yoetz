@@ -78,7 +78,8 @@ tool, or populate a host capability cell.
    manifest carries the child identity, origin, acceptance, child frontier, check/receipt identity,
    coverage, findings state, `lineage_authority_revision`, and an optional project
    `membership_generation`. The pure kernel evaluates only that recorded snapshot, never a live
-   child bundle.
+   child bundle. The lineage coordinator records changed child facts; receipt generation only
+   reuses an already recorded manifest and never records or refreshes one (#500).
 
 6. **User-controlled content stays out of structure (C6).** Project titles, descriptions, and
    host labels are encrypted objects rendered through the existing disclosure policy. They never
@@ -116,7 +117,7 @@ than implementation notes.
 | Decision | Amendment (2026-09-05) | Reason |
 |---|---|---|
 | D2 | Use three immutable origins plus a separate parent-controlled acceptance field. | Codex can expose a subagent identity without an agent-side `start`; acceptance must not rewrite provenance. |
-| D6 | Birth an implicit project at the second **live** task in the same repository; repository membership is the grouping key and never a resume selector. | Worktrees are the modal multi-agent setup, while sequential sessions must not create a project or select a task by possession. |
+| D6 | When `projects.auto_grouping` is enabled, birth an implicit project at the second **live** task in the same repository; repository membership is the grouping key and never a resume selector. | Worktrees are the modal multi-agent setup, while sequential sessions must not create a project or select a task by possession. |
 | D7 | Project coordination is local disclosure authorized by each source workspace's consent and, for general or cross-repository projects, an explicit generation-bound coordination grant. The privacy egress lattice is unchanged. | Membership is a mutable graph; cross-repository semantic dispatch is outside this series, so a new egress scope kind would add authority without a new permitted channel. |
 | D8 | Retire `workspace_task_exists` only from automatic admission after the #497 decision table is implemented; explicit `mode=create` sibling admission remains. | The existing conflict is part of the ended-session recovery path; removing it before replacement would strand predecessor work and pending observations. |
 | D9 | Coordination detectors are advice-first. A finding requires a declared, unaddressed coordination obligation; a disposition addresses it and a later qualifying check resolves it. | Intentional collaborative edits should not create an unconditional finding storm. |
@@ -130,7 +131,8 @@ than implementation notes.
 1. **A child is a real task with its own bundle.** The layout remains `catalog.sqlite3` plus
    `tasks/<task-id>/`; a child is another `tsk_` with another bundle. The catalog records
    `parent_task_id`, `depth` (0 for a root), `lineage_digest`, `origin`, `acceptance`, and
-   `work_state`. Nesting is recorded to any depth; presentation remains one level. Session health
+   `work_state`. Nesting may be recorded to any supported depth, subject to #499's configured
+   depth and fan-out ceilings with typed refusals; presentation remains one level. Session health
    is a per-session fact, not a route shortcut. Clients never open a sibling or child bundle; the
    service projects their permitted views.
 
@@ -152,9 +154,10 @@ than implementation notes.
    receipt; the old receipt remains immutable.
 
 4. **Parent rollup is one level and severity-dependent.** A parent receipt projects only direct
-   children from the frozen manifest. Current actionable child findings block the parent receipt;
-   informational findings annotate it. A live child is an open gap and an abandoned child is an
-   incomplete gap. Grandchildren are visible only through their direct parent. The clean-parent
+   children from the frozen manifest. Current actionable findings on accepted children block
+   clean-completion wording; the receipt is still produced and names the child and finding.
+   Pending-acceptance children and informational findings annotate only. An accepted live child
+   is an open gap and an accepted abandoned child is an incomplete gap. Grandchildren are visible only through their direct parent. The clean-parent
    wording remains coverage-bounded and never says that Yoetz verified every child.
 
 5. **A project is a grouping object, not an egress scope.** `IdKind.project` uses server-generated
@@ -164,9 +167,10 @@ than implementation notes.
    Membership rows are append-only and carry a monotonic `membership_generation`. A repository
    commitment or workspace commitment is a membership fact, never the project's identity.
 
-6. **Project birth and opt-out are repository-scoped.** The second concurrent live task in one
-   repository materializes an implicit repository project. A general or multi-repository project
-   is created explicitly. An implicit project persists when concurrency drops to one. A repository
+6. **Project birth and opt-out are repository-scoped.** With `projects.auto_grouping` enabled, the
+   second concurrent live task in one repository materializes an implicit repository project.
+   When disabled, the task is admitted without creating a project row (#497). A general or
+   multi-repository project is created explicitly. An implicit project persists when concurrency drops to one. A repository
    may opt out through `projects.auto_grouping` of automatic grouping and cross-task disclosure;
    opting out never erases accepted
    delegations, obligations, or recorded receipt dependencies. Project management is #505.

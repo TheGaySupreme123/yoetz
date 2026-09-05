@@ -1631,7 +1631,8 @@ are membership facts and never the project's identity.
 
 **Lineage names and facts.** A child is a real task (`tsk_`) with its own bundle. The catalog holds
 `parent_task_id`, `depth`, `lineage_digest`, `origin`, `acceptance`, and `work_state`; nesting is
-recorded to any depth while presentation remains one level, and session health remains per session.
+recorded to any supported depth within #499's configured depth and fan-out ceilings (with typed
+refusals), while presentation remains one level and session health remains per session.
 Work lifecycle is `open | closed | cancelled | abandoned | written_off`; session health is
 `active | contact_lost | ended`; receipt history is service-owned by receipt finalization and
 records the latest receipt and its frontier. The task's explicit work publication owns `closed`, a
@@ -1654,10 +1655,13 @@ only through that service path, and ordinary client publication cannot self-awar
 **Frozen rollup.** Before a parent check or receipt uses a child, the parent ledger records a
 `child-dependencies-recorded` manifest containing child identity, origin, acceptance, frontier,
 check/receipt identity, coverage, findings state, `lineage_authority_revision`, and optional
-`membership_generation`. The parent receipt projects direct children one level: current actionable
-findings block, informational findings annotate, live children are open gaps, and abandoned
-children are incomplete gaps. A grandchild is visible only through its parent. Only a new manifest
-and qualifying recheck can clear a live-child gap in a later receipt.
+`membership_generation`. The lineage coordinator records changed child facts; receipt generation
+only reuses recorded manifests and never records or refreshes one (#500). The parent receipt
+projects direct children one level: current actionable findings on accepted children block
+clean-completion wording, while the receipt is still produced and names the child and finding.
+Pending-acceptance children and informational findings annotate only; accepted live children are
+open gaps and accepted abandoned children are incomplete gaps. A grandchild is visible only through
+its parent. Only a new manifest and qualifying recheck can clear a live-child gap in a later receipt.
 
 **Lineage disclosure authority.** An accepted edge authorizes only (1) a service-side child read
 to build the frozen manifest, (2) disclosure of bounded structural manifest facts into the parent
@@ -1666,9 +1670,10 @@ keeps the child's provenance, category, never-send, task-scope, minimization, an
 restrictions. Project membership is unnecessary for lineage; cross-repository lineage is
 prohibited in increment A. `AuthorizationScope.contains()` stays unchanged.
 
-**Project birth and coordination.** The second concurrent live task in one repository materializes
-an implicit repository project. General or multi-repository projects are explicit and amendable;
-implicit projects persist when concurrency drops to one. A repository may opt out through
+**Project birth and coordination.** With `projects.auto_grouping` enabled, the second concurrent
+live task in one repository materializes an implicit repository project. When disabled, the task
+is admitted without creating a project row (#497). General or multi-repository projects are explicit
+and amendable; implicit projects persist when concurrency drops to one. A repository may opt out through
 `projects.auto_grouping` of automatic grouping and cross-task disclosure without erasing accepted
 delegations, obligations, or receipt
 dependencies. A fact enters coordination only when its source workspace consent is active; consent
