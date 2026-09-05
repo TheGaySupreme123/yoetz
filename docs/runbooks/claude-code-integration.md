@@ -226,7 +226,12 @@ task, the selector still active, no sibling task, the matching repository-privac
 start already pending for that route. This reuses an already-known session selector; the public
 conflict still discloses no task or session ID, and a hard crash without `SessionEnd` remains
 fail-closed rather than being guessed from age. A successful recovery also rewrites every ended
-same-host predecessor mapping for that task to the rotated session and writer. Pending predecessor rows then
+same-host predecessor mapping for that task to the rotated session and writer. Recovery first takes a
+nonblocking workspace reservation, then holds ordered locks for every eligible ended same-host session
+through full candidate revalidation, the service RPC, authorized rewrites, and pruning. The revalidation
+covers unmapped sessions, cross-workspace ownership, mapping identity, and mapping recency; contention
+or changed state falls back to the ordinary request rather than attaching through a stale selector.
+Pending predecessor rows then
 drain on that successor route (`session_superseded` is followed, not quarantined as
 `ledger_rejected`). A failed attempt records its cause as a
 payload-free `hook_diagnostics` reason
@@ -238,6 +243,14 @@ under the bounded budget. An explicit cooperative MCP `start` bound from its exa
 result remains the recovery path, not a substitute proof that natural auto-attach works. For
 `vault_locked` on a never-initialized install, that explicit `start` returns the typed
 `vault_initialization_required` continuation (see the proof checklist) rather than a dead end.
+
+Busy host lifecycle changes are durable local work. State schema `/10` adds bounded pending
+session-lifecycle intents, and a READY or hook drain reconciles them under the workspace and
+session reservations before routing their rows; busy mapping writes use an atomic per-session
+handoff. Upgrade this state quiescently: stop the older Yoetz service and Claude Code hooks,
+install the new runtime, then restart the service and all Claude Code integrations before writing
+`/10` state. Mixed old and new writers are unsupported because a `/9` writer ignores the new field
+and can erase a deferred intent when it saves.
 
 The shared `observe status` CLI maps an unsafe state/lock path to `storage_unsafe`, bounded
 open/permission/read-only/missing-parent/lock-acquisition failures to `storage_unavailable`, and

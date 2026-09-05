@@ -3283,7 +3283,12 @@ timestamp ties. The attach carries that selector plus the new host pair, while t
 handshake carries the canonical workspace for repository privacy. The catalog requires the
 selector to remain active, the task to be the workspace's sole non-quarantined route, and no start
 for that route to be pending. Both calls share one five-second deadline. The response must retain
-the candidate's task ID. A successful recovery records the new mapping, rewrites every ended
+the candidate's task ID. Recovery first takes a nonblocking workspace reservation and then holds
+ordered locks for every eligible ended same-host session through full candidate revalidation, the
+service RPC, authorized rewrites, and pruning; no observation-store lock spans the RPC. The
+revalidation includes unmapped sessions, cross-workspace ownership, mapping identities, and mapping
+recency. If the reservation or any session lock is busy, or the snapshot changes, recovery falls back
+to the ordinary create/attach request. A successful recovery records the new mapping, rewrites every ended
 same-host predecessor mapping for that task to the rotated session and writer, and drains pending
 rows without publishing the intermediate conflict as a diagnostic. Predecessor rows still pending
 at rotation follow the `session_superseded` binding on ingest (the current task session and the
@@ -3297,7 +3302,14 @@ conflict), `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_map
 `privacy_authority_required`, or the shared `service_unavailable`, `vault_locked`, `timeout`,
 `storage_unsafe`, and `storage_corrupt` tokens. Turn-boundary hooks retry auto-attach under a
 bounded budget and record the same typed cause next to the `auto_attach_retry_failed` path marker
-when no mapping results. The resume/compact status read for a mapped session connects through the same consented
+when no mapping results. Busy lifecycle mutations are durable: observation-local schema `/10` adds
+a bounded `pending_lifecycles` queue, and hook or READY drains reconcile it under the same workspace
+and session reservations before routing rows. Busy mapping writes use an atomic per-session handoff.
+The `/10` extension requires a quiesced upgrade: stop the older Yoetz service and all host hooks,
+install the new runtime, then restart the service and every host integration before writing the new
+state. Mixed old and new writers are unsupported because a `/9` writer ignores the new field and can
+erase a deferred intent when it saves.
+The resume/compact status read for a mapped session connects through the same consented
 workspace locator as the auto-attach `start` (`yoetz hooks session-start` derives it from
 `--workspace` or, absent that, the hook's own working directory), so the daemon's repository
 fence admits a live mapping (issue #578). A `SESSION_NOT_FOUND` answer (`session_superseded`, whose

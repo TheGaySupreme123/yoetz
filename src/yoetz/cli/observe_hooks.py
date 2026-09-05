@@ -8,7 +8,7 @@ import re
 import shlex
 import sys
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Generator, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,9 +18,13 @@ from typing import TYPE_CHECKING, BinaryIO, Final, Literal, Protocol, cast
 from yoetz.adapters.integrations.codex_lifecycle import (
     LifecycleMapping,
     acquire_session_lock,
+    acquire_workspace_recovery_lock,
+    apply_pending_mapping,
+    clear_mapping,
     load_mapping,
     mapping_from_start_ids,
     mapping_path,
+    queue_mapping_clear,
     store_mapping,
     validate_codex_session_id,
 )
@@ -1000,6 +1004,7 @@ async def _drain_outbox(
     _state: Path | None = None,
     budget_seconds: float = _HOOK_DRAIN_BUDGET_SECONDS,
     monotonic: Callable[[], float] = time.monotonic,
+    session_lock_owned: bool = False,
 ) -> None:
     """Drain the workspace outbox under a nonblocking per-workspace lease.
 
@@ -1025,6 +1030,7 @@ async def _drain_outbox(
             _state=_state,
             budget_seconds=budget_seconds,
             monotonic=monotonic,
+            session_lock_owned=session_lock_owned,
         )
 
 
@@ -1039,6 +1045,7 @@ async def _drain_outbox_leased(
     _state: Path | None = None,
     budget_seconds: float = _HOOK_DRAIN_BUDGET_SECONDS,
     monotonic: Callable[[], float] = time.monotonic,
+    session_lock_owned: bool = False,
 ) -> None:
     """Drain all mapped-session work fairly; ack only after service commit.
 
@@ -1113,6 +1120,9 @@ async def _drain_outbox_leased(
     # Re-attempting every row of a permanently-undeliverable backlog burned
     # the whole drain budget per hook forever — the recurrence tax of #211.
     skipped_sessions: set[str] = set()
+    bound_sessions, pending_lifecycle_sessions = store.lifecycle_reconciliation_snapshot(
+        workspace_commitment
+    )
     consecutive_unavailable = 0
     # The hook owns a bounded slice; the service sweeper owns bulk delivery.
     # Hitting the slice after moving backlog (acknowledged or quarantined rows)
@@ -1122,6 +1132,20 @@ async def _drain_outbox_leased(
     try:
         for row in pending:
             if row.codex_session_id in skipped_sessions:
+                continue
+            # A previous hook may have captured this row while its workspace
+            # membership reservation was busy. Converge the raw session route
+            # before any service delivery; contention leaves the row untouched.
+            if (
+                row.codex_session_id not in bound_sessions
+                or row.codex_session_id in pending_lifecycle_sessions
+            ) and not store.reconcile_outbox_session_lifecycle(
+                workspace_commitment,
+                row,
+                session_lock_owned=session_lock_owned
+                and row.codex_session_id == codex_session_id,
+            ):
+                skipped_sessions.add(row.codex_session_id)
                 continue
             remaining = budget_seconds - (monotonic() - started)
             if remaining <= 0:
@@ -1442,6 +1466,14 @@ _MAX_ENDED_SESSION_BINDINGS: Final = 32
 
 
 @dataclass(frozen=True, slots=True)
+class _RecoveryCandidate:
+    """One eligible predecessor mapping plus the recency used to select it."""
+
+    mapping: LifecycleMapping
+    modified_ns: int
+
+
+@dataclass(frozen=True, slots=True)
 class _RecoveryScan:
     """One pass's ended-session recovery scan, computed once and revalidated (#549)."""
 
@@ -1449,29 +1481,46 @@ class _RecoveryScan:
     mapping: LifecycleMapping | None
     # (host session id, ended) for every binding in the workspace at scan time.
     lifecycles: tuple[tuple[str, bool], ...]
+    # Every ended same-host session considered by the scan, including one without
+    # a mapping yet.  Holding these session locks keeps a mapping from appearing
+    # or changing while the recovery request is in flight.
+    eligible_session_ids: tuple[str, ...] = ()
+    # Valid, unambiguous mappings among ``eligible_session_ids``.  Recency is
+    # part of the snapshot because a same-byte rewrite can change the selector.
+    candidates: tuple[_RecoveryCandidate, ...] = ()
+
+
+def _load_recovery_candidate(
+    session_id: str, *, _state: Path | None
+) -> _RecoveryCandidate | None:
+    """Read one valid mapping and the file recency used for recovery ranking."""
+
+    mapping = load_mapping(session_id, _state=_state)
+    if mapping is None:
+        return None
+    try:
+        path = mapping_path(session_id, _state=_state)
+        if path.is_symlink():
+            return None
+        return _RecoveryCandidate(mapping, path.stat().st_mtime_ns)
+    except OSError, ProtocolValueError:
+        return None
 
 
 def _latest_mapping(
-    mappings: tuple[LifecycleMapping, ...], *, _state: Path | None
+    candidates: tuple[_RecoveryCandidate, ...],
 ) -> LifecycleMapping | None:
-    """Rank already-loaded mappings by file recency exactly as ``load_latest_mapping`` does.
-
-    The candidates were read moments ago by the same pass; ranking them in place
-    spares the second read per candidate the adapter helper would perform (#549).
-    """
+    """Rank already-loaded mappings by the file recency captured in one pass."""
 
     latest: tuple[int, bytes, LifecycleMapping] | None = None
-    for mapping in mappings:
-        try:
-            path = mapping_path(mapping.codex_session_id, _state=_state)
-            if path.is_symlink():
-                continue
-            modified_ns = path.stat().st_mtime_ns
-        except OSError, ProtocolValueError:
-            continue
-        candidate = (modified_ns, mapping.codex_session_id.encode(), mapping)
-        if latest is None or candidate[:2] > latest[:2]:
-            latest = candidate
+    for candidate in candidates:
+        ranked = (
+            candidate.modified_ns,
+            candidate.mapping.codex_session_id.encode(),
+            candidate.mapping,
+        )
+        if latest is None or ranked[:2] > latest[:2]:
+            latest = ranked
     return None if latest is None else latest[2]
 
 
@@ -1496,25 +1545,91 @@ def _scan_ended_workspace_recovery(
         lifecycles = store.codex_session_lifecycles_for_workspace(workspace_commitment)
     if any(session_id != codex_session_id and not ended for session_id, ended in lifecycles):
         return _RecoveryScan(None, lifecycles)
-    ended = tuple(
+    eligible = tuple(
         session_id
         for session_id, is_ended in lifecycles
         if session_id != codex_session_id
         and is_ended
         and _host_session_matches(session_id, harness_id)
     )
-    if not ended:
+    if not eligible:
         return _RecoveryScan(None, lifecycles)
     unambiguous = frozenset(store.unambiguous_codex_sessions_for_workspace(workspace_commitment))
-    valid = tuple(
-        mapping
-        for session_id in ended
+    candidates = tuple(
+        candidate
+        for session_id in eligible
         if session_id in unambiguous
-        and (mapping := load_mapping(session_id, _state=_state)) is not None
+        and (candidate := _load_recovery_candidate(session_id, _state=_state)) is not None
     )
-    if len({mapping.yoetz_task_id for mapping in valid}) != 1:
-        return _RecoveryScan(None, lifecycles)
-    return _RecoveryScan(_latest_mapping(valid, _state=_state), lifecycles)
+    if len({candidate.mapping.yoetz_task_id for candidate in candidates}) != 1:
+        return _RecoveryScan(None, lifecycles, eligible, candidates)
+    return _RecoveryScan(
+        _latest_mapping(candidates), lifecycles, eligible, candidates
+    )
+
+
+@contextlib.contextmanager
+def _acquire_recovery_session_locks(
+    session_ids: tuple[str, ...],
+    *,
+    held_codex_session_id: str,
+    _state: Path | None,
+) -> Generator[bool]:
+    """Hold every scanned predecessor lock through validation and attach.
+
+    Session locks are nonblocking by contract.  If another host event owns one
+    of the candidate locks, recovery yields ``False`` and the caller performs
+    the ordinary service request.  Acquiring in sorted order avoids a lock
+    hierarchy cycle between concurrent recovery attempts.
+    """
+
+    with contextlib.ExitStack() as stack:
+        for session_id in sorted(set(session_ids), key=str.encode):
+            if session_id == held_codex_session_id:
+                continue
+            if not stack.enter_context(acquire_session_lock(session_id, _state=_state)):
+                yield False
+                return
+        yield True
+
+
+@contextlib.contextmanager
+def _acquire_observe_membership_lock(
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    codex_session_id: str,
+    *,
+    _state: Path | None,
+    force: bool = False,
+    session_lock_owned: bool = False,
+) -> Generator[bool]:
+    """Reserve a workspace before creating a new host-session membership.
+
+    Existing membership is idempotent and need not contend with recovery except
+    for a forced SessionStart. A new membership takes the workspace reservation
+    first, then its session lock, matching recovery's lock order. Both locks are
+    nonblocking so a busy hook can still retain an explicitly targeted
+    observation envelope. ``session_lock_owned`` is used only by the clear-route
+    caller, which already owns the session lock but must still reserve the
+    workspace before changing membership state.
+    """
+
+    existing = codex_session_id in store.codex_sessions_for_workspace(workspace_commitment)
+    if not force and existing:
+        yield True
+        return
+    with acquire_workspace_recovery_lock(workspace_commitment, _state=_state) as workspace_owned:
+        if not workspace_owned:
+            yield False
+            return
+        if session_lock_owned:
+            # The clear-route caller already owns the session lock. It still
+            # needs the workspace reservation so recovery cannot race the
+            # generation/membership mutation.
+            yield True
+            return
+        with acquire_session_lock(codex_session_id, _state=_state) as session_owned:
+            yield session_owned
 
 
 def _recovery_scan_still_valid(
@@ -1524,21 +1639,29 @@ def _recovery_scan_still_valid(
     *,
     _state: Path | None,
 ) -> bool:
-    """Re-check one scan under the predecessor lock without repeating it (#549).
+    """Re-check all scan inputs while every eligible predecessor is locked (#605).
 
-    The lock held on the selected predecessor keeps it ended: a resumed
-    SessionStart restarts a generation only under that same lock. What can still
-    change is the binding set and its ended flags (a sibling session starting,
-    which would also have made the scan inadmissible) or the selected mapping
-    file itself, so exactly those are compared against the scan. Both checks are
-    one state read and one mapping read, whatever the binding count.
+    The caller holds the selected predecessor and every other eligible session
+    lock through this check and the recovery RPC.  Re-reading the complete
+    bounded candidate set catches cross-workspace ownership changes, newly
+    materialized mappings, changed task identities, and recency changes that
+    could otherwise leave a stale non-selected candidate outside validation.
     """
 
     if scan.mapping is None:
         return False
     if store.codex_session_lifecycles_for_workspace(workspace_commitment) != scan.lifecycles:
         return False
-    return load_mapping(scan.mapping.codex_session_id, _state=_state) == scan.mapping
+    unambiguous = frozenset(store.unambiguous_codex_sessions_for_workspace(workspace_commitment))
+    current = tuple(
+        candidate
+        for session_id in scan.eligible_session_ids
+        if session_id in unambiguous
+        and (candidate := _load_recovery_candidate(session_id, _state=_state)) is not None
+    )
+    if current != scan.candidates:
+        return False
+    return _latest_mapping(current) == scan.mapping
 
 
 def _prune_surplus_ended_session_bindings(
@@ -1626,31 +1749,52 @@ def _rewrite_ended_predecessor_mappings(
     harness_id: Literal["claude", "codex", "cursor"],
     _state: Path | None,
     held_codex_session_id: str | None = None,
+    held_codex_session_ids: frozenset[str] = frozenset(),
+    authorized_codex_session_ids: frozenset[str] | None = None,
     lifecycles: tuple[tuple[str, bool], ...] | None = None,
 ) -> tuple[str, ...]:
     """Point ended same-host mappings at the rotated successor route (#577).
 
     Returns the predecessors that now carry the successor route. ``lifecycles``
     is the pass's scan snapshot when the caller has one; the ended flag is still
-    re-read under each predecessor's lock before its mapping is touched.
+    re-read under each predecessor's lock before its mapping is touched. When
+    the caller supplies ``authorized_codex_session_ids``, only that scan-proven
+    unambiguous set can be rewritten. Direct callers compute the same set here.
     """
 
     if lifecycles is None:
         lifecycles = store.codex_session_lifecycles_for_workspace(workspace_commitment)
+    # A supplied set is a scan snapshot protected by the workspace reservation
+    # in the production recovery path. Direct callers have no such reservation,
+    # so they recheck each candidate while holding its per-session lock below.
+    authorized = authorized_codex_session_ids
+    held = set(held_codex_session_ids)
+    if held_codex_session_id is not None:
+        held.add(held_codex_session_id)
     consumed: list[str] = []
     for session_id, ended in lifecycles:
         if session_id == successor.codex_session_id or not ended:
             continue
         if not _host_session_matches(session_id, harness_id):
             continue
+        if authorized is not None and session_id not in authorized:
+            continue
         try:
-            if session_id == held_codex_session_id:
+            if session_id in held:
+                if authorized is None and session_id not in frozenset(
+                    store.unambiguous_codex_sessions_for_workspace(workspace_commitment)
+                ):
+                    continue
                 aligned = _rewrite_one_ended_predecessor_mapping(
                     store, workspace_commitment, session_id, successor, _state=_state
                 )
             else:
                 with acquire_session_lock(session_id, _state=_state) as owned:
                     if not owned:
+                        continue
+                    if authorized is None and session_id not in frozenset(
+                        store.unambiguous_codex_sessions_for_workspace(workspace_commitment)
+                    ):
                         continue
                     aligned = _rewrite_one_ended_predecessor_mapping(
                         store, workspace_commitment, session_id, successor, _state=_state
@@ -1673,71 +1817,91 @@ async def _try_workspace_auto_start(
     connect: HookStartConnector | None,
     prune_surplus: bool = False,
 ) -> AutoAttachOutcome:
-    """Auto-start, holding an ended predecessor stable through any recovery attach.
+    """Auto-start, holding every eligible predecessor stable through recovery.
 
-    The recovery scan runs once per call; the re-check under the predecessor lock
-    compares the store against that scan instead of scanning again, so the retry
-    events' one-second budget wraps a bounded amount of synchronous local work
-    (#549). ``prune_surplus`` is the SessionStart pass's retention step; retry
-    events skip it.
+    The recovery scan runs once per call; the bounded re-check under the selected
+    and eligible-predecessor locks compares the complete candidate snapshot before
+    the RPC, so the retry events' one-second budget wraps a bounded amount of
+    synchronous local work (#549/#605). ``prune_surplus`` is the SessionStart
+    pass's retention step; retry events skip it.
     """
 
-    lifecycles = store.codex_session_lifecycles_for_workspace(workspace_commitment)
-    if prune_surplus:
-        pruned: tuple[str, ...] = ()
-        with contextlib.suppress(Exception):
-            pruned = _prune_surplus_ended_session_bindings(
-                store, workspace_commitment, lifecycles, codex_session_id, _state=_state
-            )
-        if pruned:
-            lifecycles = tuple(entry for entry in lifecycles if entry[0] not in pruned)
-    scan = _scan_ended_workspace_recovery(
-        store,
-        workspace_commitment,
-        codex_session_id,
-        harness_id=harness_id,
-        _state=_state,
-        lifecycles=lifecycles,
-    )
-    recovery = scan.mapping
-    if recovery is None:
-        return await _try_auto_start(
+    with acquire_workspace_recovery_lock(workspace_commitment, _state=_state) as recovery_owned:
+        if not recovery_owned:
+            # Membership and recovery share this reservation. A contended
+            # SessionStart must wait for the owner; issuing an ordinary start
+            # here would attach a second task during recovery.
+            return AutoAttachOutcome(None, "auto_attach_recovery_busy")
+        lifecycles = store.codex_session_lifecycles_for_workspace(workspace_commitment)
+        if prune_surplus:
+            pruned: tuple[str, ...] = ()
+            with contextlib.suppress(Exception):
+                pruned = _prune_surplus_ended_session_bindings(
+                    store, workspace_commitment, lifecycles, codex_session_id, _state=_state
+                )
+            if pruned:
+                lifecycles = tuple(entry for entry in lifecycles if entry[0] not in pruned)
+        scan = _scan_ended_workspace_recovery(
+            store,
+            workspace_commitment,
             codex_session_id,
-            _state=_state,
             harness_id=harness_id,
-            workspace_locator=workspace_locator,
-            connect=connect,
+            _state=_state,
+            lifecycles=lifecycles,
         )
-
-    with acquire_session_lock(recovery.codex_session_id, _state=_state) as predecessor_owned:
-        if predecessor_owned and _recovery_scan_still_valid(
-            store, workspace_commitment, scan, _state=_state
-        ):
-            outcome = await _try_auto_start(
-                codex_session_id,
-                _state=_state,
-                harness_id=harness_id,
-                workspace_locator=workspace_locator,
-                recovery_mapping=recovery,
-                connect=connect,
-            )
-            if outcome.mapping is not None and outcome.recovered:
-                with contextlib.suppress(Exception):
-                    consumed = _rewrite_ended_predecessor_mappings(
-                        store,
-                        workspace_commitment,
-                        outcome.mapping,
-                        harness_id=harness_id,
-                        _state=_state,
+        recovery = scan.mapping
+        if recovery is None:
+            # Release the workspace reservation before the ordinary RPC.
+            # A return expression containing ``await`` would evaluate while
+            # this context is still held.
+            pass
+        else:
+            # Recovery locks the selected predecessor first for compatibility
+            # with its existing lifecycle fence, then takes every other
+            # candidate in stable order.
+            with acquire_session_lock(recovery.codex_session_id, _state=_state) as predecessor_owned:
+                if predecessor_owned:
+                    with _acquire_recovery_session_locks(
+                        scan.eligible_session_ids,
                         held_codex_session_id=recovery.codex_session_id,
-                        lifecycles=scan.lifecycles,
-                    )
-                    # Recovery consumed these predecessors: the live successor
-                    # binding now carries their task, and their mapping files stay
-                    # in the lifecycle store to route any rows still pending. The
-                    # store keeps every binding whose rows are not yet drained.
-                    store.prune_codex_session_bindings(workspace_commitment, consumed)
-            return outcome
+                        _state=_state,
+                    ) as candidates_owned:
+                        if candidates_owned and _recovery_scan_still_valid(
+                            store, workspace_commitment, scan, _state=_state
+                        ):
+                            outcome = await _try_auto_start(
+                                codex_session_id,
+                                _state=_state,
+                                harness_id=harness_id,
+                                workspace_locator=workspace_locator,
+                                recovery_mapping=recovery,
+                                connect=connect,
+                            )
+                            if outcome.mapping is not None and outcome.recovered:
+                                with contextlib.suppress(Exception):
+                                    consumed = _rewrite_ended_predecessor_mappings(
+                                        store,
+                                        workspace_commitment,
+                                        outcome.mapping,
+                                        harness_id=harness_id,
+                                        _state=_state,
+                                        held_codex_session_ids=frozenset(
+                                            scan.eligible_session_ids
+                                        ),
+                                        authorized_codex_session_ids=frozenset(
+                                            candidate.mapping.codex_session_id
+                                            for candidate in scan.candidates
+                                        ),
+                                        lifecycles=scan.lifecycles,
+                                    )
+                                    # Recovery consumed these predecessors: the live successor
+                                    # binding now carries their task, and their mapping files stay
+                                    # in the lifecycle store to route any rows still pending. The
+                                    # store keeps every binding whose rows are not yet drained.
+                                    store.prune_codex_session_bindings(
+                                        workspace_commitment, consumed
+                                    )
+                            return outcome
 
     # A resumed predecessor or changed local state invalidates the capability.
     # Still run the ordinary request so the hook records the service's typed
@@ -1912,6 +2076,27 @@ def handle_observe(
             _stdout_json({}, stdout)
             return 0
         resolved_event = raw_event
+        # ``clear`` is a host lifecycle command, not an observation consent
+        # decision. Apply or queue its mapping operation before the runtime
+        # gate and workspace consent checks so a busy/disabled hook cannot
+        # leave the integration route stale.
+        if resolved_event == "SessionStart" and payload.get("source") == "clear":
+            try:
+                clear_session_id = validate_codex_session_id(payload.get("session_id"))
+                clear_lock = (
+                    contextlib.nullcontext(True)
+                    if _session_lock_owned
+                    else acquire_session_lock(clear_session_id, _state=_state)
+                )
+                with clear_lock as clear_owned:
+                    if clear_owned:
+                        with contextlib.suppress(Exception):
+                            apply_pending_mapping(clear_session_id, _state=_state)
+                        clear_mapping(clear_session_id, _state=_state)
+                    else:
+                        queue_mapping_clear(clear_session_id, _state=_state)
+            except Exception:
+                pass
         try:
             capture_enabled = store.runtime_enabled()
         except TimeoutError:
@@ -2014,36 +2199,102 @@ def handle_observe(
         # service RPC so an outbox acknowledgement can never become durable
         # ahead of the ingest it acknowledges, and it never spans a network
         # wait: it holds the interprocess store lock for its duration.
-        with store.batched(workspace_commitment):
-            if resolved_event == "SessionStart":
-                # A recovery attach holds the predecessor's lifecycle lock. Gate
-                # generation restart on that same lock so a resumed predecessor
-                # cannot clear its ended marker between selection and attach.
-                if _session_lock_owned:
-                    session_commitment = store.bind_codex_session(
-                        workspace_commitment, codex_session_id
-                    )
-                    source_generation = store.begin_session_generation(
-                        workspace_commitment, session_commitment
-                    )
-                else:
-                    with acquire_session_lock(codex_session_id, _state=_state) as generation_owned:
-                        if not generation_owned:
-                            _stdout_json({}, stdout)
-                            return 0
-                        session_commitment = store.bind_codex_session(
-                            workspace_commitment, codex_session_id
-                        )
-                        source_generation = store.begin_session_generation(
-                            workspace_commitment, session_commitment
-                        )
-            else:
+        #
+        # Session membership creation shares the lifecycle lock with recovery.
+        # An already-known binding is idempotent and may continue while another
+        # pass owns that session's lock; if a new binding loses the nonblocking
+        # lock, keep the event as an observation envelope and defer membership
+        # creation rather than silently dropping a non-SessionStart hook.
+        known_session_binding = codex_session_id in store.codex_sessions_for_workspace(
+            workspace_commitment
+        )
+        binding_lock = _acquire_observe_membership_lock(
+            store,
+            workspace_commitment,
+            codex_session_id,
+            _state=_state,
+            force=resolved_event in {"SessionStart", "SessionEnd"},
+            session_lock_owned=_session_lock_owned,
+        )
+        with contextlib.ExitStack() as local_pass:
+            binding_owned = local_pass.enter_context(binding_lock)
+            local_pass.enter_context(store.batched(workspace_commitment))
+            if binding_owned:
                 session_commitment = store.bind_codex_session(
                     workspace_commitment, codex_session_id
                 )
-                source_generation = store.current_session_generation(
+            else:
+                # Another handler is changing membership.  Use the stable
+                # session commitment for local capture and let a later hook
+                # bind it once the lifecycle lock is available.
+                session_commitment = store.session_commitment(codex_session_id)
+            if resolved_event == "SessionStart" and binding_owned:
+                # A recovery attach holds the predecessor's lifecycle lock.
+                # Gate generation restart on that same lock so a resumed
+                # predecessor cannot clear its ended marker between
+                # selection and attach.
+                source_generation = store.begin_session_generation(
                     workspace_commitment, session_commitment
                 )
+            else:
+                source_generation = store.effective_session_generation(
+                    workspace_commitment, codex_session_id, session_commitment
+                )
+                lifecycle_start_applied = False
+                if resolved_event in {"SessionStart", "SessionEnd"} and not binding_owned:
+                    pending = store.list_pending_session_lifecycles(
+                        workspace_commitment, codex_session_id
+                    )
+                    latest = pending[-1] if pending else None
+                    clear_requested = payload.get("source") == "clear"
+                    if resolved_event == "SessionStart":
+                        target_generation = source_generation
+                        if latest is not None and latest.event_kind == "SessionEnd":
+                            target_generation += 1
+                        elif (
+                            latest is not None
+                            and latest.event_kind == "SessionStart"
+                            and latest.clear_mapping == clear_requested
+                        ):
+                            target_generation = latest.target_generation
+                        elif clear_requested and known_session_binding:
+                            target_generation += 1
+                        elif (
+                            known_session_binding
+                            and store.codex_session_ended(
+                                workspace_commitment, codex_session_id
+                            )
+                        ):
+                            # The public generation accessor presents legacy
+                            # pre-counter state as generation one. A deferred
+                            # first resume must use the persisted zero so its
+                            # eventual begin transition creates generation one
+                            # rather than manufacturing generation two.
+                            persisted_generation = store.persisted_session_generation(
+                                workspace_commitment, session_commitment
+                            )
+                            target_generation = (
+                                persisted_generation + 1 if persisted_generation > 0 else 1
+                            )
+
+                        if not lifecycle_start_applied:
+                            source_generation = target_generation
+                            store.record_pending_session_lifecycle(
+                                workspace_commitment,
+                                codex_session_id,
+                                session_commitment,
+                                "SessionStart",
+                                target_generation,
+                                clear_mapping=clear_requested,
+                            )
+                    else:
+                        store.record_pending_session_lifecycle(
+                            workspace_commitment,
+                            codex_session_id,
+                            session_commitment,
+                            "SessionEnd",
+                            source_generation,
+                        )
             gap_codes: list[str] = []
 
             # Prefer the host's canonical tool-use identity, while retaining
@@ -2109,7 +2360,11 @@ def handle_observe(
             content_map = {envelope.source_identity: content_chunks} if content_chunks else None
 
             # Local durable ingest first (never plaintext transcript spool).
-            local_result = store.ingest(envelope)
+            local_result = (
+                store.ingest(envelope)
+                if binding_owned
+                else store.ingest(envelope, workspace_commitment=workspace_commitment)
+            )
             # A Yoetz-owned tool call is delivered only when it carries evidence
             # the service does not already hold from serving it (#564); the
             # envelope itself is always retained locally above.
@@ -2128,7 +2383,7 @@ def handle_observe(
 
             # Persist session end so lifecycle can report STOPPED once every bound
             # session has ended.
-            if resolved_event == "SessionEnd":
+            if resolved_event == "SessionEnd" and binding_owned:
                 with contextlib.suppress(Exception):
                     store.note_session_end(
                         workspace_commitment,
@@ -2202,7 +2457,12 @@ def handle_observe(
                     bound_connector,
                 )
 
-                with acquire_session_lock(codex_session_id, _state=_state) as owned:
+                session_lifecycle_lock = (
+                    contextlib.nullcontext(True)
+                    if _session_lock_owned
+                    else acquire_session_lock(codex_session_id, _state=_state)
+                )
+                with session_lifecycle_lock as owned:
                     if owned:
                         mapping = load_mapping(codex_session_id, _state=_state)
                         if mapping is None and not skip_advice_loop:
@@ -2321,6 +2581,7 @@ def handle_observe(
                                     event_name=resolved_event,
                                     _state=_state,
                                     monotonic=_monotonic,
+                                    session_lock_owned=_session_lock_owned,
                                 )
 
                             with contextlib.suppress(Exception):
@@ -2344,7 +2605,12 @@ def handle_observe(
             # unreachable, so one missed SessionStart no longer costs the session's whole
             # record (#275). Bounded, and placed before the drain below so a fresh mapping
             # delivers this session's backlog in the same pass.
-            with acquire_session_lock(codex_session_id, _state=_state) as owned:
+            retry_session_lock = (
+                contextlib.nullcontext(True)
+                if _session_lock_owned
+                else acquire_session_lock(codex_session_id, _state=_state)
+            )
+            with retry_session_lock as owned:
                 if owned:
                     mapping = load_mapping(codex_session_id, _state=_state)
                     if mapping is None:
@@ -2401,6 +2667,7 @@ def handle_observe(
                         else _HOOK_DRAIN_BUDGET_SECONDS
                     ),
                     monotonic=_monotonic,
+                    session_lock_owned=_session_lock_owned,
                 )
 
             with contextlib.suppress(Exception):

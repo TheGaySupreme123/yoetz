@@ -603,6 +603,11 @@ async def _drain_observation_async(
     else:
         workspaces = (store.workspace_commitment(str(_resolve_workspace(workspace))),)
     tally = _DrainTally()
+    # READY and the explicit drain command both converge lifecycle intents;
+    # SessionStart has no deliverable outbox row of its own.
+    for commitment in workspaces:
+        with contextlib.suppress(Exception):
+            store.reconcile_pending_session_lifecycles(commitment)
     passes = 0
     terminal = _DRAIN_TERMINAL_DRAINED
     client: _DrainClient | None = None

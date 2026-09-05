@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import stat
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -16,10 +17,17 @@ from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_pa
 from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.ids import IdKind, is_valid_id, validate_id
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - lifecycle hosts are POSIX in production
+    fcntl = None  # type: ignore[assignment]
+
 __all__ = [
     "MAPPING_VERSION",
     "LifecycleMapping",
     "acquire_session_lock",
+    "acquire_workspace_recovery_lock",
+    "apply_pending_mapping",
     "clear_mapping",
     "codex_lifecycle_dir",
     "encode_frontier_token",
@@ -28,6 +36,8 @@ __all__ = [
     "mapping_from_start_ids",
     "mapping_path",
     "parse_frontier_token",
+    "queue_mapping_clear",
+    "queue_mapping_store",
     "store_mapping",
     "validate_codex_session_id",
 ]
@@ -44,10 +54,14 @@ _MAPPING_KEYS: Final = frozenset(
     }
 )
 _MAX_MAPPING_BYTES: Final = 4_096
+_MAX_PENDING_MAPPING_BYTES: Final = 8_192
 _MAX_CODEX_SESSION_ID_CHARS: Final = 128
 _MAX_FRONTIER_TOKEN_CHARS: Final = 128
 _LOCK_STALE_SECONDS: Final = 30.0
+_MAX_LOCK_TOKEN_BYTES: Final = 128
+_MAX_LOCK_PID_DIGITS: Final = 10
 _CODEX_SESSION_ID_RE: Final = re.compile(r"^[!-~]+$", re.ASCII)
+_WORKSPACE_COMMITMENT_RE: Final = re.compile(r"^hmac-sha256:[0-9a-f]{64}$", re.ASCII)
 _FRONTIER_DIGEST_RE: Final = re.compile(
     r"^(?:genesis|sha256:[0-9a-f]{64})$",
     re.ASCII,
@@ -281,9 +295,147 @@ def clear_mapping(codex_session_id: str, *, _state: Path | None = None) -> None:
             path.unlink()
 
 
+def _pending_mapping_path(codex_session_id: str, *, _state: Path | None = None) -> Path:
+    session_id = validate_codex_session_id(codex_session_id)
+    return codex_lifecycle_dir(_state=_state) / f".{session_id}.pending.json"
+
+
+def _queue_mapping_operation(
+    codex_session_id: str,
+    payload: Mapping[str, JsonValue],
+    *,
+    _state: Path | None,
+) -> None:
+    path = _pending_mapping_path(codex_session_id, _state=_state)
+    encoded = canonical_encode(dict(payload)) + b"\n"
+    if len(encoded) > _MAX_PENDING_MAPPING_BYTES:
+        raise ProtocolValueError("unsupported_json_type")
+    temporary = path.with_name(f".{path.name}.{os.urandom(8).hex()}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        view = memoryview(encoded)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short_write")
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+        raise
+
+
+def queue_mapping_store(mapping: LifecycleMapping, *, _state: Path | None = None) -> None:
+    """Durably queue one validated mapping until its session lock is available."""
+
+    if type(mapping) is not LifecycleMapping:
+        raise ProtocolValueError("unsupported_json_type")
+    validated = _parse_mapping(mapping.to_wire(), expected_session=mapping.codex_session_id)
+    _queue_mapping_operation(
+        validated.codex_session_id,
+        {
+            "schema": "yoetz.pending-mapping/1",
+            "operation": "store",
+            "mapping": validated.to_wire(),
+        },
+        _state=_state,
+    )
+
+
+def queue_mapping_clear(codex_session_id: str, *, _state: Path | None = None) -> None:
+    """Durably queue a mapping clear independent of observation consent."""
+
+    session_id = validate_codex_session_id(codex_session_id)
+    _queue_mapping_operation(
+        session_id,
+        {
+            "schema": "yoetz.pending-mapping/1",
+            "operation": "clear",
+            "codex_session_id": session_id,
+        },
+        _state=_state,
+    )
+
+
+def _load_pending_mapping_operation(
+    codex_session_id: str, *, _state: Path | None = None
+) -> tuple[str, LifecycleMapping | None] | None:
+    try:
+        path = _pending_mapping_path(codex_session_id, _state=_state)
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > _MAX_PENDING_MAPPING_BYTES:
+            return None
+        raw = strict_json_parse(path.read_bytes())
+        if not isinstance(raw, Mapping) or raw.get("schema") != "yoetz.pending-mapping/1":
+            return None
+        operation = raw.get("operation")
+        if operation == "clear" and raw.get("codex_session_id") == codex_session_id:
+            return ("clear", None)
+        if operation != "store" or not isinstance(raw.get("mapping"), Mapping):
+            return None
+        mapping = _parse_mapping(
+            cast(Mapping[str, JsonValue], raw["mapping"]),
+            expected_session=codex_session_id,
+        )
+        return ("store", mapping)
+    except OSError, ProtocolValueError, UnicodeError, TypeError, ValueError:
+        return None
+
+
+def apply_pending_mapping(codex_session_id: str, *, _state: Path | None = None) -> bool:
+    """Apply and remove one queued mapping operation; caller holds the session lock."""
+
+    operation = _load_pending_mapping_operation(codex_session_id, _state=_state)
+    if operation is None:
+        return False
+    path = _pending_mapping_path(codex_session_id, _state=_state)
+    kind, mapping = operation
+    if kind == "clear":
+        clear_mapping(codex_session_id, _state=_state)
+    elif mapping is not None:
+        store_mapping(mapping, _state=_state)
+    else:
+        return False
+    with contextlib.suppress(OSError, FileNotFoundError):
+        if path.is_file() and not path.is_symlink():
+            path.unlink()
+    return True
+
+
 def _lock_path(codex_session_id: str, *, _state: Path | None = None) -> Path:
     session_id = validate_codex_session_id(codex_session_id)
     return codex_lifecycle_dir(_state=_state) / f".{session_id}.lock"
+
+
+def _workspace_recovery_lock_path(
+    workspace_commitment: str, *, _state: Path | None = None
+) -> Path:
+    """Return one collision-safe lock path for a validated workspace commitment."""
+
+    if type(workspace_commitment) is not str or _WORKSPACE_COMMITMENT_RE.fullmatch(
+        workspace_commitment
+    ) is None:
+        raise ProtocolValueError("invalid_commitment")
+    digest = workspace_commitment.removeprefix("hmac-sha256:")
+    directory = codex_lifecycle_dir(_state=_state) / "workspace-recovery-locks"
+    _ensure_lifecycle_dir(directory)
+    # Keep workspace reservations in a dedicated directory.  A host session id
+    # is intentionally allowed to contain this prefix, so a filename prefix
+    # alone would collide with the per-session lock namespace.
+    return directory / f"{digest}.lock"
 
 
 def acquire_session_lock(
@@ -301,8 +453,233 @@ def acquire_session_lock(
     return _SessionLock(codex_session_id, _state=_state, stale_seconds=stale_seconds)
 
 
-class _SessionLock:
-    __slots__ = ("_owned", "_path", "_stale_seconds")
+def acquire_workspace_recovery_lock(
+    workspace_commitment: str,
+    *,
+    _state: Path | None = None,
+    stale_seconds: float = _LOCK_STALE_SECONDS,
+) -> _WorkspaceRecoveryLock:
+    """Acquire the nonblocking reservation held while a workspace recovers.
+
+    Membership creators use this reservation before their per-session lock. A
+    recovery pass holds it across scan revalidation, the service RPC, and route
+    rewrites, without holding the observation store lock over the network wait.
+    """
+
+    return _WorkspaceRecoveryLock(
+        _workspace_recovery_lock_path(workspace_commitment, _state=_state),
+        stale_seconds=stale_seconds,
+    )
+
+
+class _LifecycleLock:
+    __slots__ = ("_guard_descriptor", "_owned", "_path", "_stale_seconds", "_token")
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        stale_seconds: float,
+    ) -> None:
+        if type(stale_seconds) is not float or not 0.1 <= stale_seconds <= 300.0:
+            raise ValueError("lock_stale_timeout_invalid")
+        self._path = path
+        self._stale_seconds = stale_seconds
+        self._owned = False
+        self._token: bytes | None = None
+        # The takeover guard is held for the entire lifetime of a claimed
+        # marker.  Re-acquiring it only during ``__exit__`` leaves a window in
+        # which a stale contender can replace the marker before the old owner
+        # unlinks it.
+        self._guard_descriptor: int | None = None
+
+    @staticmethod
+    def _owner_is_dead(token: bytes) -> bool:
+        """Return true only when the lock payload names a definitively dead PID."""
+
+        pid_raw, separator, _stamp = token.rstrip(b"\n").partition(b":")
+        if (
+            separator != b":"
+            or not pid_raw.isdigit()
+            or len(pid_raw) > _MAX_LOCK_PID_DIGITS
+        ):
+            return False
+        try:
+            pid = int(pid_raw)
+        except ValueError:
+            return False
+        if pid <= 0 or pid > 2_147_483_647:
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            # Permission and platform errors are unknown ownership, so stale
+            # takeover fails closed instead of replacing a live owner.
+            return False
+        return False
+
+    def _read_token(self) -> tuple[bytes, float] | None:
+        flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NONBLOCK", 0)
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(self._path, flags)
+        except OSError:
+            return None
+        try:
+            facts = os.fstat(descriptor)
+            if not stat.S_ISREG(facts.st_mode) or facts.st_size > _MAX_LOCK_TOKEN_BYTES:
+                return None
+            token = os.read(descriptor, _MAX_LOCK_TOKEN_BYTES + 1)
+            if len(token) > _MAX_LOCK_TOKEN_BYTES:
+                return None
+            return token, facts.st_mtime
+        except OSError:
+            return None
+        finally:
+            os.close(descriptor)
+
+    def _stale_token(self) -> bytes | None:
+        snapshot = self._read_token()
+        if snapshot is None:
+            return None
+        token, modified = snapshot
+        if time.time() - modified < self._stale_seconds:
+            return None
+        if not self._owner_is_dead(token):
+            return None
+        return token
+
+    def _open_takeover_guard(self) -> int | None:
+        """Open and claim the persistent guard, or return ``None`` on failure."""
+
+        if fcntl is None:
+            # O_EXCL still serializes fresh creation. Stale takeover is disabled
+            # by ``__enter__`` below because compare/unlink is not a CAS here.
+            return None
+        guard_path = self._path.with_name(self._path.name + ".takeover")
+        flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(guard_path, flags, 0o600)
+            facts = os.fstat(descriptor)
+            owner = os.geteuid() if hasattr(os, "geteuid") else os.getuid()
+            if (
+                not stat.S_ISREG(facts.st_mode)
+                or stat.S_IMODE(facts.st_mode) != 0o600
+                or facts.st_uid != owner
+            ):
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
+                return None
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return descriptor
+        except OSError:
+            if descriptor is not None:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
+            return None
+
+    @staticmethod
+    def _close_takeover_guard(descriptor: int) -> None:
+        """Release one held advisory guard descriptor."""
+
+        if fcntl is not None:
+            with contextlib.suppress(OSError):
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+
+    def _take_over(self, expected: bytes, flags: int, payload: bytes) -> bool:
+        """Remove one unchanged dead-owner file and claim its path."""
+
+        try:
+            current = self._read_token()
+            if current is None or current[0] != expected:
+                return False
+            self._path.unlink()
+        except OSError:
+            return False
+        try:
+            descriptor = os.open(self._path, flags, 0o600)
+            try:
+                os.write(descriptor, payload)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except FileExistsError:
+            return False
+        except OSError:
+            # The old token was already removed. Never unlink again here: a
+            # concurrent claimant may have replaced the path after our open.
+            return False
+        self._token = payload
+        self._owned = True
+        return True
+
+    def __enter__(self) -> bool:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        payload = f"{os.getpid()}:{time.time_ns()}\n".encode("ascii")
+        guard_descriptor = self._open_takeover_guard()
+        if fcntl is not None and guard_descriptor is None:
+            return False
+        try:
+            try:
+                descriptor = os.open(self._path, flags, 0o600)
+                try:
+                    os.write(descriptor, payload)
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                self._owned = True
+                self._token = payload
+            except FileExistsError:
+                if fcntl is not None:
+                    stale_token = self._stale_token()
+                    if stale_token is not None:
+                        # The held guard serializes the re-read, unlink, and
+                        # claim; another stale contender cannot remove our
+                        # replacement before this owner releases it.
+                        self._take_over(stale_token, flags, payload)
+            if self._owned:
+                self._guard_descriptor = guard_descriptor
+                guard_descriptor = None
+        finally:
+            if guard_descriptor is not None:
+                self._close_takeover_guard(guard_descriptor)
+        return self._owned
+
+    def __exit__(self, *_exc: object) -> None:
+        if self._owned and self._token is not None:
+            release_failed = False
+            try:
+                current = self._read_token()
+                if current is not None and current[0] == self._token:
+                    self._path.unlink()
+            except OSError:
+                # Keep the ownership fields when release failed.  Clearing
+                # them while leaving a live marker behind would make the
+                # marker appear ownerless to this process and could wedge the
+                # lifecycle until stale recovery.
+                release_failed = True
+            finally:
+                descriptor = self._guard_descriptor
+                self._guard_descriptor = None
+                if descriptor is not None:
+                    self._close_takeover_guard(descriptor)
+            if not release_failed:
+                self._owned = False
+                self._token = None
+
+
+class _SessionLock(_LifecycleLock):
+    __slots__ = ()
 
     def __init__(
         self,
@@ -311,45 +688,14 @@ class _SessionLock:
         _state: Path | None,
         stale_seconds: float,
     ) -> None:
-        if type(stale_seconds) is not float or not 0.1 <= stale_seconds <= 300.0:
-            raise ValueError("lock_stale_timeout_invalid")
-        self._path = _lock_path(codex_session_id, _state=_state)
-        self._stale_seconds = stale_seconds
-        self._owned = False
+        super().__init__(_lock_path(codex_session_id, _state=_state), stale_seconds=stale_seconds)
 
-    def __enter__(self) -> bool:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        try:
-            descriptor = os.open(self._path, flags, 0o600)
-            try:
-                payload = f"{os.getpid()}:{time.time_ns()}\n".encode("ascii")
-                os.write(descriptor, payload)
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-            self._owned = True
-        except FileExistsError:
-            try:
-                age = time.time() - self._path.stat().st_mtime
-            except OSError:
-                age = 0.0
-            if age >= self._stale_seconds:
-                with contextlib.suppress(OSError):
-                    self._path.unlink()
-                try:
-                    descriptor = os.open(self._path, flags, 0o600)
-                    os.close(descriptor)
-                    self._owned = True
-                except FileExistsError:
-                    self._owned = False
-        return self._owned
 
-    def __exit__(self, *_exc: object) -> None:
-        if self._owned:
-            with contextlib.suppress(OSError):
-                self._path.unlink()
+class _WorkspaceRecoveryLock(_LifecycleLock):
+    __slots__ = ()
+
+    def __init__(self, path: Path, *, stale_seconds: float) -> None:
+        super().__init__(path, stale_seconds=stale_seconds)
 
 
 def mapping_from_start_ids(

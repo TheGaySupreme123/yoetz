@@ -214,7 +214,9 @@ class ObservationOutboxSweeper:
     async def sweep(self) -> ObservationDrainSummary:
         loop = asyncio.get_running_loop()
         deadline = None if self.budget_seconds is None else loop.time() + self.budget_seconds
-        rows = await self._off_loop(self._fair_pending_rows)
+        rows, lifecycle_workspaces = await self._off_loop(
+            self._fair_pending_rows_and_lifecycle_workspaces
+        )
         attempted = 0
         acknowledged = 0
         retry_pending = 0
@@ -222,7 +224,11 @@ class ObservationOutboxSweeper:
         reasons: dict[str, int] = {}
         retired_sessions: set[tuple[str, str]] = set()
 
-        workspaces = tuple(dict.fromkeys(workspace for workspace, _row in rows))
+        workspaces = tuple(
+            dict.fromkeys(
+                (*lifecycle_workspaces, *(workspace for workspace, _row in rows))
+            )
+        )
         for workspace in workspaces:
             if deadline is not None and loop.time() >= deadline:
                 # Budget spent: return what this pass resolved so far. The rows
@@ -244,6 +250,27 @@ class ObservationOutboxSweeper:
                 entered = True
                 if not owned:
                     continue
+                # A busy SessionStart/SessionEnd is durable lifecycle work even
+                # when it produced no outbox row. Reconcile it before routing
+                # this workspace's delivery lanes; the operation is bounded and
+                # uses the same workspace/session lock order as hook ingress.
+                bound_sessions, pending_lifecycle_sessions = await self._off_loop(
+                    partial(self.local.lifecycle_reconciliation_snapshot, workspace)
+                )
+                if pending_lifecycle_sessions:
+                    reconciled = await self._off_loop(
+                        partial(self.local.reconcile_pending_session_lifecycles, workspace)
+                    )
+                    if reconciled:
+                        # Re-read the same bounded snapshot after the pass.
+                        # A foreign owner or an unresolved generation can make
+                        # reconciliation return successfully while deliberately
+                        # retaining its intent; routing from the pre-pass
+                        # snapshot would then deliver that row as if membership
+                        # had converged.
+                        bound_sessions, pending_lifecycle_sessions = await self._off_loop(
+                            partial(self.local.lifecycle_reconciliation_snapshot, workspace)
+                        )
                 # The authoritative FIFO queues, re-read under the lease. A selected row is
                 # attempted only while it is still the head of its session's queue: anything
                 # else means another drain moved the outbox between selection and the lease,
@@ -266,6 +293,18 @@ class ObservationOutboxSweeper:
                         retired_sessions.add(session_key)
                         continue
                     queue.pop(0)
+                    # Reconcile a raw host-session membership before delivery.
+                    # A hook may have captured this row while recovery held the
+                    # workspace reservation; leave it untouched if the same
+                    # reservation/session locks are still busy.
+                    if (
+                        row.codex_session_id not in bound_sessions
+                        or row.codex_session_id in pending_lifecycle_sessions
+                    ) and not await self._off_loop(
+                        partial(self.local.reconcile_outbox_session_lifecycle, workspace, row)
+                    ):
+                        retired_sessions.add(session_key)
+                        continue
                     attempted += 1
                     request = ObservationIngestRequest(
                         codex_session_id=row.codex_session_id,
@@ -382,12 +421,21 @@ class ObservationOutboxSweeper:
         )
 
     def _fair_pending_rows(self) -> tuple[tuple[str, ObservationOutboxRow], ...]:
+        return self._fair_pending_rows_and_lifecycle_workspaces()[0]
+
+    def _fair_pending_rows_and_lifecycle_workspaces(
+        self,
+    ) -> tuple[
+        tuple[tuple[str, ObservationOutboxRow], ...],
+        tuple[str, ...],
+    ]:
         # Fairness may reorder *lanes*, never rows *within* a lane: each session's rows keep
         # strict outbox (FIFO) order. Sorting a lane by attempts once delivered a session's
         # newer rows ahead of its older, more-attempted ones, which advanced the ingest cursor
         # past the older rows and destroyed them as terminal cursor_stale quarantine (#272).
         lanes: dict[tuple[str, str], list[ObservationOutboxRow]] = {}
-        for workspace in self.local.pending_workspaces():
+        lifecycle_workspaces = self.local.pending_workspaces()
+        for workspace in lifecycle_workspaces:
             for row in self.local.list_pending_outbox_rows(workspace):
                 lanes.setdefault((workspace, row.codex_session_id), []).append(row)
         selected_per_lane = {lane: 0 for lane in lanes}
@@ -408,4 +456,4 @@ class ObservationOutboxSweeper:
             selected_per_lane[lane] += 1
             if not queue:
                 lanes.pop(lane)
-        return tuple(selected)
+        return tuple(selected), lifecycle_workspaces

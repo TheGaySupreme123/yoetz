@@ -1461,7 +1461,7 @@ def test_local_outbox_v1_compatibility_and_v2_attempt_round_trip(tmp_path: Path)
     assert durable.last_attempt_at == attempted_at
     assert durable.consecutive_reason_attempts == 1
     assert json.loads(state_path.read_text(encoding="utf-8"))["schema"] == (
-        "yoetz.observation-local/9"
+        "yoetz.observation-local/10"
     )
 
     raw = json.loads(state_path.read_text(encoding="utf-8"))

@@ -10,10 +10,12 @@ from pathlib import Path
 
 import pytest
 
+from yoetz.adapters.integrations import codex_lifecycle as codex_lifecycle_module
 from yoetz.adapters.integrations.codex_lifecycle import (
     MAPPING_VERSION,
     LifecycleMapping,
     acquire_session_lock,
+    acquire_workspace_recovery_lock,
     clear_mapping,
     encode_frontier_token,
     load_latest_mapping,
@@ -22,6 +24,7 @@ from yoetz.adapters.integrations.codex_lifecycle import (
     store_mapping,
     validate_codex_session_id,
 )
+from yoetz.config.paths import PathSafetyError
 from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.ids import IdKind, new_id
 
@@ -201,13 +204,119 @@ def test_session_lock_coalesces_concurrent_acquirers(tmp_path: Path) -> None:
     assert results.count(False) == 1
 
 
-def test_stale_lock_can_be_broken(tmp_path: Path) -> None:
+def test_workspace_recovery_lock_namespace_is_disjoint_from_session_locks(
+    tmp_path: Path,
+) -> None:
+    """A valid host id may contain the old workspace-lock filename prefix."""
+
+    digest = "ab" * 32
+    workspace = f"hmac-sha256:{digest}"
+    colliding_session = f"workspace-recovery-{digest}"
+
+    # Both locks must be acquirable at once: the workspace reservation lives in
+    # a dedicated directory instead of sharing the validated session-id names.
+    with acquire_session_lock(colliding_session, _state=tmp_path) as session_owned:
+        assert session_owned is True
+        with acquire_workspace_recovery_lock(workspace, _state=tmp_path) as workspace_owned:
+            assert workspace_owned is True
+
+
+def test_workspace_recovery_lock_namespace_rejects_symlink(tmp_path: Path) -> None:
+    """The dedicated lock directory keeps the lifecycle state symlink-safe."""
+
+    lifecycle = tmp_path / "codex-lifecycle"
+    lifecycle.mkdir(parents=True, mode=0o700)
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    (lifecycle / "workspace-recovery-locks").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(PathSafetyError):
+        acquire_workspace_recovery_lock(
+            f"hmac-sha256:{'cd' * 32}",
+            _state=tmp_path,
+        )
+
+
+def test_stale_lock_can_be_broken(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     session_id = "stale-lock"
     lock = tmp_path / "codex-lifecycle"
     lock.mkdir(parents=True, mode=0o700)
     path = lock / f".{session_id}.lock"
-    path.write_text("old\n", encoding="ascii")
+    path.write_text("4242:1\n", encoding="ascii")
     old = path.stat().st_mtime - 120
     os.utime(path, (old, old))
+    def dead(_pid: int, _signal: int) -> None:
+        raise ProcessLookupError
+
+    monkeypatch.setattr(codex_lifecycle_module.os, "kill", dead)
     with acquire_session_lock(session_id, _state=tmp_path, stale_seconds=1.0) as owned:
         assert owned is True
+
+
+def test_stale_lock_with_live_owner_is_not_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_id = "live-stale-lock"
+    lock = tmp_path / "codex-lifecycle"
+    lock.mkdir(parents=True, mode=0o700)
+    path = lock / f".{session_id}.lock"
+    payload = b"4242:1\n"
+    path.write_bytes(payload)
+    old = path.stat().st_mtime - 120
+    os.utime(path, (old, old))
+
+    def live(_pid: int, _signal: int) -> None:
+        return None
+
+    monkeypatch.setattr(codex_lifecycle_module.os, "kill", live)
+    with acquire_session_lock(session_id, _state=tmp_path, stale_seconds=1.0) as owned:
+        assert owned is False
+    assert path.read_bytes() == payload
+
+
+def test_stale_lock_takeover_is_serialized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_id = "serialized-stale-lock"
+    (tmp_path / "codex-lifecycle").mkdir(parents=True, mode=0o700)
+    path = tmp_path / "codex-lifecycle" / f".{session_id}.lock"
+    path.write_bytes(b"4242:1\n")
+    old = path.stat().st_mtime - 120
+    os.utime(path, (old, old))
+
+    def dead(_pid: int, _signal: int) -> None:
+        raise ProcessLookupError
+
+    monkeypatch.setattr(codex_lifecycle_module.os, "kill", dead)
+    start = threading.Barrier(2)
+    entered = threading.Barrier(2)
+    results: list[bool] = []
+
+    def contender() -> None:
+        start.wait()
+        with acquire_session_lock(session_id, _state=tmp_path, stale_seconds=1.0) as owned:
+            results.append(owned)
+            entered.wait()
+
+    threads = [threading.Thread(target=contender) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(results) == [False, True]
+
+
+def test_old_lock_owner_does_not_remove_a_replacement(
+    tmp_path: Path,
+) -> None:
+    session_id = "replacement-lock"
+    path = tmp_path / "codex-lifecycle" / f".{session_id}.lock"
+    replacement = b"7777:2\n"
+    with acquire_session_lock(session_id, _state=tmp_path) as owned:
+        assert owned is True
+        path.unlink()
+        path.write_bytes(replacement)
+    assert path.read_bytes() == replacement

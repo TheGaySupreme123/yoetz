@@ -28,7 +28,7 @@ from yoetz.cli.hooks import (
 from yoetz.ports.control import ControlClientKind, ControlError
 from yoetz.protocol.errors import PublicErrorCode
 from yoetz.protocol.ids import IdKind, new_id
-from yoetz.protocol.models import OperationFailureModel
+from yoetz.protocol.models import OperationFailureModel, StatusRequest
 
 
 def _task_ids() -> tuple[str, str, str]:
@@ -577,6 +577,93 @@ def test_session_start_startup_is_noop(tmp_path: Path) -> None:
         stdout.getvalue().strip() in {b"{}", b""}
         or json.loads(stdout.getvalue().decode("utf-8")) == {}
     )
+
+
+def test_session_start_resume_with_missing_mapping_runs_recovery_under_owned_lock(
+    tmp_path: Path,
+) -> None:
+    """A resume handler's owned session lock must not suppress auto-attach."""
+
+    from types import SimpleNamespace
+
+    from yoetz.adapters.integrations.observation_local import LocalObservationStore
+
+    task_id, prior_session_id, prior_writer_id = _task_ids()
+    successor_session_id = new_id(IdKind.SESSION)
+    successor_writer_id = new_id(IdKind.WRITER)
+    locator = str(tmp_path.resolve())
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+    prior = "codex-resume-prior"
+    prior_commitment = store.bind_codex_session(workspace, prior)
+    store.note_session_end(workspace, prior_commitment)
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=prior,
+            yoetz_task_id=task_id,
+            yoetz_session_id=prior_session_id,
+            yoetz_writer_id=prior_writer_id,
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+
+    class _RecoveryClient:
+        def __init__(self) -> None:
+            self.requests: list[object] = []
+
+        async def status(self, request: StatusRequest, *, deadline_ms: int | None = None) -> object:
+            del request, deadline_ms
+            return _failure_result(PublicErrorCode.SESSION_NOT_FOUND).root
+
+        async def start(self, request: object, *, deadline_ms: int | None = None) -> object:
+            del deadline_ms
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                return _failure_result(
+                    PublicErrorCode.SESSION_CONFLICT,
+                    safe_details={"reason_code": "workspace_task_exists"},
+                ).root
+            assert getattr(request, "mode", None) == "attach"
+            return SimpleNamespace(
+                ok=True,
+                frontier=SimpleNamespace(sequence="3", head_digest="sha256:" + "a" * 64),
+                task_id=task_id,
+                session_id=successor_session_id,
+                writer_id=successor_writer_id,
+            )
+
+        async def close(self) -> None:
+            return None
+
+    client = _RecoveryClient()
+
+    async def connect(_kind: ControlClientKind) -> _RecoveryClient:
+        return client
+
+    stdout = io.BytesIO()
+    code = handle_session_start(
+        stdin_bytes=json.dumps(
+            {"session_id": "codex-resume-next", "source": "resume"}
+        ).encode(),
+        stdout=stdout,
+        _state=tmp_path,
+        connect=connect,
+        workspace=locator,
+    )
+
+    assert code == 0
+    mapping = load_mapping("codex-resume-next", _state=tmp_path)
+    assert mapping is not None
+    assert mapping.yoetz_task_id == task_id
+    assert mapping.yoetz_session_id == successor_session_id
+    assert mapping.yoetz_writer_id == successor_writer_id
+    assert [getattr(request, "mode", None) for request in client.requests] == [
+        "create_or_attach",
+        "attach",
+    ]
+    assert task_id in stdout.getvalue().decode()
 
 
 # Claude Code 2.1.251 passes an MCP tool's structured result to PostToolUse as one bare JSON
