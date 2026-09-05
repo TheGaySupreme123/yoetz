@@ -51,6 +51,22 @@ denies or the approval expires, the agent may use a deterministic-only fallback 
 explicitly chooses it after seeing the semantic-review limitation. A later Yoetz
 `awaiting_human` result remains a separate Yoetz decision flow.
 
+## Local workflow calls and host holds
+
+`start`, `publish_work`, `respond`, and `receipt` append records to the local Yoetz
+ledger. They do not publish to GitHub or invoke a semantic provider. `status` and `read_guidance`
+read local or packaged state. These effects describe what Yoetz does after it receives a call; the
+host still decides whether to invoke an MCP tool.
+
+If an auto-review host holds one of these calls, treat the hold as a host authorization event, not
+as a Yoetz result. Use the host's visible approval control for that exact call when you want to
+continue, then let the host execute that held call and continue from its returned result. If the
+host requires resubmission or the response is unavailable, resend the same request body and
+`request_id`. If a call may have started but its result is unclear, recover the operation through
+`status view=operation` or replay the same `request_id` according to the operation's recovery
+instructions; do not mint replacement requests or duplicate event identities. A host refusal
+before invocation creates no Yoetz operation, semantic status, provider attempt, or receipt.
+
 ## Letting an auto-review host admit the authorized check
 
 Claude Code auto mode, Codex `approvals_reviewer = "auto_review"`, and Cursor Auto-review each
@@ -80,8 +96,10 @@ privacy grant permits external review. A grant is written only when all of these
   edited or written beside;
 - the file could be read. An unreadable file is `unknown`, never treated as empty.
 
-Only `check` is ever admitted. Start, publish, respond, status, receipt, and guidance already
-pass every host's rules.
+Host admission currently covers only `check`. The other operations remain local or read-only, but
+an auto-review host may still hold a non-allowlisted MCP call. Yoetz cannot guarantee that a host
+will admit any call, and no host hold should be described as a Yoetz privacy denial or semantic
+result.
 
 What each host receives:
 

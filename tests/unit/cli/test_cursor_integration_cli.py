@@ -126,6 +126,7 @@ def test_cursor_plugin_cli_binds_preview_install_status_and_remove(tmp_path: Pat
     assert status.exit_code == 0, status.output
     status_body = json.loads(status.stdout)
     assert status_body["state"] == "native_managed"
+    assert status_body["isolation_binding"] == "ambient"
     assert status_body["mcp"]["ownership_state"] == "plugin"
     # Issue #468: the CLI status exposes the bound launcher, its MCP binding, and the identity
     # probed from that exact executable (this venv's own console script here).
@@ -215,6 +216,27 @@ def test_cursor_plugin_cli_binds_preview_install_status_and_remove(tmp_path: Pat
         == 1
     )
     assert len(presence.seen) == 3
+
+
+def test_cursor_plugin_cli_preview_surfaces_isolated_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "isolated-root"
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.isolated_root", lambda: root
+    )
+    runner = CliRunner()
+    preview_result = runner.invoke(
+        app,
+        _args(
+            tmp_path / "cursor-config",
+            tmp_path / "project",
+            "preview",
+        ),
+    )
+    assert preview_result.exit_code == 0, preview_result.output
+    preview = json.loads(preview_result.stdout)
+    assert preview["isolation_root"] == str(root)
 
 
 def test_cursor_plugin_cli_rejects_unknown_action_with_bounded_reason(tmp_path: Path) -> None:

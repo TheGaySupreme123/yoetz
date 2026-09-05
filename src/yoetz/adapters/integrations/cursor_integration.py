@@ -43,6 +43,7 @@ from yoetz.adapters.integrations.portable_plugin import (
     RenderedPortablePlugin,
     build_portable_plugin_plan,
 )
+from yoetz.config.paths import ISOLATED_ROOT_ENV, isolated_root
 from yoetz.domain.values import JsonObject, RequestId
 from yoetz.domain.values import request_id as validate_request_id
 from yoetz.ports.integrations import HarnessHookProfile, HarnessId, HarnessProfile
@@ -79,6 +80,7 @@ __all__ = [
     "CursorArtifactIdentity",
     "CursorCapabilityIdentity",
     "CursorIntegrationError",
+    "CursorIsolationBindingState",
     "CursorMcpObservation",
     "CursorMcpProcessPort",
     "CursorMcpRuntimeObservation",
@@ -140,6 +142,7 @@ CURSOR_HARNESS_PROFILE: Final = HarnessProfile(
 _MARKER_NAME: Final = ".yoetz-cursor-plugin-install.json"
 _MARKER_SCHEMA_V1: Final = "yoetz.cursor-plugin-install/1"
 _MARKER_SCHEMA_V2: Final = "yoetz.cursor-plugin-install/2"
+_MARKER_SCHEMA_V3: Final = "yoetz.cursor-plugin-install/3"
 _RENDERER_VERSION: Final = "cursor-plugin/0.2.0"
 _ROLLBACK_NAME: Final = ".yoetz-cursor-plugin-rollback"
 _STAGE_PREFIX: Final = ".yoetz-cursor-plugin-stage-"
@@ -158,6 +161,10 @@ _DESCRIPTION: Final = (
     "Records material work in a local Yoetz ledger and checks completion claims "
     "against that record."
 )
+
+type CursorIsolationBindingState = Literal[
+    "ambient", "isolated_exact", "missing", "different", "unobserved"
+]
 
 
 class CursorSdkBinding(str, Enum):  # noqa: UP042 - exact public token
@@ -318,12 +325,39 @@ class CursorPluginTarget:
         return "CursorPluginTarget(cursor_config_root=<redacted>, scope='user')"
 
 
+def _valid_isolation_root_text(value: object) -> bool:
+    if type(value) is not str:
+        return False
+    return (
+        1 <= len(value) <= _MAX_PATH
+        and Path(value).is_absolute()
+        and not any(ord(char) < 32 or ord(char) == 127 for char in value)
+    )
+
+
+def _render_isolation_root() -> str | None:
+    """Resolve the one exact isolation binding for a native artifact.
+
+    ``isolated_root`` owns the path-safety contract.  The adapter only adds the bounded text
+    validation needed before a path is copied into a host-owned command/configuration artifact.
+    """
+
+    root = isolated_root()
+    if root is None:
+        return None
+    value = str(root)
+    if not _valid_isolation_root_text(value):
+        raise ValueError("cursor_isolation_root_invalid")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class CursorPluginArtifact:
     plan: PortablePluginPlan
     members: Mapping[str, bytes]
     artifact_digest: str
     yoetz_launcher: tuple[str, ...] | None = field(default=None, repr=False)
+    isolation_root: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if type(self.plan) is not PortablePluginPlan:
@@ -336,7 +370,13 @@ class CursorPluginArtifact:
         if self.plan.format_profile is PluginFormatProfile.CURSOR_PLUGIN_NATIVE:
             if not _valid_launcher(self.yoetz_launcher):
                 raise ValueError("cursor_artifact_invalid")
+            if self.isolation_root is not None and not _valid_isolation_root_text(
+                self.isolation_root
+            ):
+                raise ValueError("cursor_artifact_invalid")
         elif self.yoetz_launcher is not None:
+            raise ValueError("cursor_artifact_invalid")
+        elif self.isolation_root is not None:
             raise ValueError("cursor_artifact_invalid")
         _validate_digest(self.artifact_digest)
         expected = tuple(item.relative_path for item in self.plan.inventory)
@@ -380,6 +420,7 @@ class CursorPluginPreview:
     mcp_ownership: McpOwnership
     mcp_ownership_state: McpOwnershipState
     mcp_route_profile: Literal["strict", "policy"] | None
+    isolation_root: str | None = field(repr=False)
     warnings: tuple[str, ...]
 
     def __post_init__(self) -> None:
@@ -397,6 +438,8 @@ class CursorPluginPreview:
             self.preview_digest,
         ):
             _validate_digest(value)
+        if self.isolation_root is not None and not _valid_isolation_root_text(self.isolation_root):
+            raise ValueError("cursor_preview_invalid")
 
 
 type CursorLauncherExecutableState = Literal[
@@ -467,6 +510,7 @@ class CursorPluginStatus:
             None, None, "unobserved", "unobserved", UNOBSERVED_LAUNCHER_IDENTITY
         )
     )
+    isolation_binding: CursorIsolationBindingState = "unobserved"
 
     def __post_init__(self) -> None:
         if type(self.launcher) is not CursorLauncherStatus:
@@ -490,6 +534,14 @@ class CursorPluginStatus:
         ):
             raise ValueError("cursor_status_invalid")
         if any(type(item) is not PluginProofStatus for item in self.proof):
+            raise ValueError("cursor_status_invalid")
+        if self.isolation_binding not in {
+            "ambient",
+            "isolated_exact",
+            "missing",
+            "different",
+            "unobserved",
+        }:
             raise ValueError("cursor_status_invalid")
 
 
@@ -561,6 +613,7 @@ class _Inspection:
     marker_valid: bool
     rollback_available: bool
     installed_launcher: tuple[str, ...] | None = None
+    installed_isolation_root: str | None = None
 
 
 def _error(
@@ -595,7 +648,11 @@ _MCP_SERVE_ARGS: Final = ("mcp", "serve", "--host", "cursor")
 _MCP_SERVE_STRICT_ARGS: Final = (*_MCP_SERVE_ARGS, "--semantic", "off")
 
 
-def _mcp_json(route_profile: Literal["strict", "policy"], yoetz_launcher: tuple[str, ...]) -> bytes:
+def _mcp_json(
+    route_profile: Literal["strict", "policy"],
+    yoetz_launcher: tuple[str, ...],
+    isolation_root: str | None,
+) -> bytes:
     """Render the plugin-owned MCP entry bound to the exact launcher the hooks use.
 
     Cursor resolves a bare ``command`` through the desktop app's PATH, which is sanitized and
@@ -605,15 +662,18 @@ def _mcp_json(route_profile: Literal["strict", "policy"], yoetz_launcher: tuple[
     """
 
     serve = _MCP_SERVE_STRICT_ARGS if route_profile == "strict" else _MCP_SERVE_ARGS
-    args = [*yoetz_launcher[1:], *serve]
+    args = cast(list[JsonValue], [*yoetz_launcher[1:], *serve])
+    entry: dict[str, JsonValue] = {
+        "args": args,
+        "command": yoetz_launcher[0],
+        "type": "stdio",
+    }
+    if isolation_root is not None:
+        entry["env"] = {ISOLATED_ROOT_ENV: isolation_root}
     return canonical_encode(
         cast(
             JsonValue,
-            {
-                "mcpServers": {
-                    "yoetz": {"args": args, "command": yoetz_launcher[0], "type": "stdio"}
-                }
-            },
+            {"mcpServers": {"yoetz": entry}},
         )
     )
 
@@ -636,6 +696,7 @@ def _native_members(
     mcp_ownership: McpOwnership,
     route_profile: Literal["strict", "policy"] | None,
     yoetz_launcher: tuple[str, ...],
+    isolation_root: str | None,
 ) -> dict[str, bytes]:
     manifest: dict[str, JsonValue] = {
         "author": {"name": "Yoetz contributors"},
@@ -652,7 +713,10 @@ def _native_members(
     elif route_profile is not None:
         raise ValueError("cursor_mcp_route_forbidden")
     launcher = " ".join(shlex.quote(part) for part in yoetz_launcher)
-    hook_command = f"{launcher} hooks cursor-observe --workspace ."
+    isolation_prefix = (
+        "" if isolation_root is None else f"{ISOLATED_ROOT_ENV}={shlex.quote(isolation_root)} "
+    )
+    hook_command = f"{isolation_prefix}{launcher} hooks cursor-observe --workspace ."
     hook_timeouts = {
         "afterFileEdit": 5,
         "afterMCPExecution": 5,
@@ -673,7 +737,7 @@ def _native_members(
         members[f"skills/yoetz/references/{name}"] = source.read_bytes(f"guidance/{name}")
     if mcp_ownership is McpOwnership.PLUGIN_MANAGED:
         assert route_profile is not None
-        members["mcp.json"] = _mcp_json(route_profile, yoetz_launcher)
+        members["mcp.json"] = _mcp_json(route_profile, yoetz_launcher, isolation_root)
     return members
 
 
@@ -703,11 +767,13 @@ def render_cursor_plugin(
         )
         return CursorPluginArtifact(rendered.plan, dict(rendered.members), rendered.artifact_digest)
     resolved_yoetz_launcher = _resolve_yoetz_launcher(yoetz_launcher)
+    resolved_isolation_root = _render_isolation_root()
     members = _native_members(
         source=resources,
         mcp_ownership=mcp_ownership,
         route_profile=route_profile,
         yoetz_launcher=resolved_yoetz_launcher,
+        isolation_root=resolved_isolation_root,
     )
     plan = PortablePluginPlan(
         name="yoetz",
@@ -744,7 +810,9 @@ def render_cursor_plugin(
             "renderer_version": _RENDERER_VERSION,
         }
     )
-    return CursorPluginArtifact(plan, members, digest, resolved_yoetz_launcher)
+    return CursorPluginArtifact(
+        plan, members, digest, resolved_yoetz_launcher, resolved_isolation_root
+    )
 
 
 def _safe_existing_ancestor(path: Path) -> Path:
@@ -852,7 +920,7 @@ def _marker(artifact: CursorPluginArtifact) -> bytes:
         "mcp_route_profile": artifact.plan.mcp_route_profile,
         "renderer_version": artifact.plan.renderer_version,
         "schema": (
-            _MARKER_SCHEMA_V2
+            _MARKER_SCHEMA_V3
             if artifact.plan.format_profile is PluginFormatProfile.CURSOR_PLUGIN_NATIVE
             else _MARKER_SCHEMA_V1
         ),
@@ -861,6 +929,7 @@ def _marker(artifact: CursorPluginArtifact) -> bytes:
     if artifact.plan.format_profile is PluginFormatProfile.CURSOR_PLUGIN_NATIVE:
         assert artifact.yoetz_launcher is not None
         body["yoetz_launcher"] = list(artifact.yoetz_launcher)
+        body["isolation_root"] = artifact.isolation_root
     return canonical_encode({**body, "marker_digest": canonical_digest(body)})
 
 
@@ -872,6 +941,7 @@ def _valid_marker(
     if marker is None or marker.get("schema") not in {
         _MARKER_SCHEMA_V1,
         _MARKER_SCHEMA_V2,
+        _MARKER_SCHEMA_V3,
     }:
         return False, None, None
     schema = cast(str, marker["schema"])
@@ -889,14 +959,22 @@ def _valid_marker(
     }:
         return False, None, None
     launcher = marker.get("yoetz_launcher")
-    if schema == _MARKER_SCHEMA_V2:
+    isolation_root = marker.get("isolation_root")
+    if schema in {_MARKER_SCHEMA_V2, _MARKER_SCHEMA_V3}:
         if (
             format_profile is not PluginFormatProfile.CURSOR_PLUGIN_NATIVE
             or type(launcher) is not list
             or not _valid_launcher(tuple(cast(list[object], launcher)))
         ):
             return False, format_profile, cast(str | None, marker.get("artifact_digest"))
-    elif launcher is not None:
+        if schema == _MARKER_SCHEMA_V3 and (
+            "isolation_root" not in marker
+            or (isolation_root is not None and not _valid_isolation_root_text(isolation_root))
+        ):
+            return False, format_profile, cast(str | None, marker.get("artifact_digest"))
+        if schema == _MARKER_SCHEMA_V2 and isolation_root is not None:
+            return False, format_profile, cast(str | None, marker.get("artifact_digest"))
+    elif launcher is not None or isolation_root is not None:
         return False, format_profile, cast(str | None, marker.get("artifact_digest"))
     rows = marker.get("managed_files")
     if type(rows) is not list:
@@ -973,6 +1051,7 @@ def _inspect(target: CursorPluginTarget, artifact: CursorPluginArtifact) -> _Ins
     current_digest = _tree_digest(files)
     valid, format_profile, installed_digest = _valid_marker(files)
     installed_launcher = _marker_launcher(files) if valid else None
+    installed_isolation_root = _marker_isolation_root(files) if valid else None
     if not valid:
         state = (
             PluginArtifactState.MODIFIED
@@ -1014,15 +1093,16 @@ def _inspect(target: CursorPluginTarget, artifact: CursorPluginArtifact) -> _Ins
         True,
         False,
         installed_launcher,
+        installed_isolation_root,
     )
 
 
 def _marker_launcher(files: Mapping[str, bytes]) -> tuple[str, ...] | None:
-    """Return the exact launcher a marker-valid native ``/2`` tree binds, else ``None``."""
+    """Return the exact launcher a marker-valid native tree binds, else ``None``."""
 
     raw = files.get(_MARKER_NAME)
     marker = None if raw is None else _load_object(raw)
-    if marker is None or marker.get("schema") != _MARKER_SCHEMA_V2:
+    if marker is None or marker.get("schema") not in {_MARKER_SCHEMA_V2, _MARKER_SCHEMA_V3}:
         return None
     launcher = marker.get("yoetz_launcher")
     if type(launcher) is not list:
@@ -1031,6 +1111,19 @@ def _marker_launcher(files: Mapping[str, bytes]) -> tuple[str, ...] | None:
     if not _valid_launcher(candidate):
         return None
     return cast(tuple[str, ...], candidate)
+
+
+def _marker_isolation_root(files: Mapping[str, bytes]) -> str | None:
+    """Return the root recorded by a marker-valid native tree, or ``None`` for legacy/ambient."""
+
+    raw = files.get(_MARKER_NAME)
+    marker = None if raw is None else _load_object(raw)
+    if marker is None or marker.get("schema") != _MARKER_SCHEMA_V3:
+        return None
+    value = marker.get("isolation_root")
+    if type(value) is not str or not _valid_isolation_root_text(value):
+        return None
+    return value
 
 
 _ABSENT_STATE_DIGEST: Final = canonical_digest({"state": "absent"})
@@ -1055,6 +1148,28 @@ def _admissible_owner_states(artifact: CursorPluginArtifact) -> set[McpOwnership
     return {McpOwnershipState.ABSENT, McpOwnershipState.PLUGIN}
 
 
+def _isolation_drift_is_replaceable(
+    action: PluginArtifactAction,
+    inspection: _Inspection,
+    artifact: CursorPluginArtifact,
+    mcp_observation: CursorMcpObservation,
+) -> bool:
+    """Allow replacement of only the plugin-owned root binding drift."""
+
+    return (
+        action is PluginArtifactAction.REPLACE
+        and inspection.marker_valid
+        and inspection.format_profile is PluginFormatProfile.CURSOR_PLUGIN_NATIVE
+        and artifact.plan.format_profile is PluginFormatProfile.CURSOR_PLUGIN_NATIVE
+        and artifact.plan.mcp_ownership is McpOwnership.PLUGIN_MANAGED
+        and inspection.installed_isolation_root != artifact.isolation_root
+        and mcp_observation.observed
+        and mcp_observation.ownership_state is McpOwnershipState.FOREIGN
+        and mcp_observation.winning_source is CursorMcpSource.PLUGIN
+        and mcp_observation.present_sources == (CursorMcpSource.PLUGIN,)
+    )
+
+
 def _preview_digest(
     request: RequestId,
     effective: PluginArtifactAction,
@@ -1073,6 +1188,7 @@ def _preview_digest(
             "mcp_ownership": artifact.plan.mcp_ownership.value,
             "mcp_ownership_state": mcp_ownership_state.value,
             "mcp_route_profile": artifact.plan.mcp_route_profile,
+            "isolation_root": artifact.isolation_root,
             "request_id": request,
             "target_identity": target_identity,
         }
@@ -1113,7 +1229,9 @@ def _preview_from_inspection(
         raise _error(PluginArtifactReason.REMOVE_REFUSED)
     if action is not PluginArtifactAction.REMOVE:
         allowed = _admissible_owner_states(artifact)
-        if mcp_observation.ownership_state not in allowed:
+        if mcp_observation.ownership_state not in allowed and not _isolation_drift_is_replaceable(
+            action, inspection, artifact, mcp_observation
+        ):
             raise _error(
                 PluginArtifactReason.MCP_OWNERSHIP_CONFLICT,
                 {"mcp_ownership_state": mcp_observation.ownership_state.value},
@@ -1150,6 +1268,7 @@ def _preview_from_inspection(
         artifact.plan.mcp_ownership,
         mcp_observation.ownership_state,
         artifact.plan.mcp_route_profile,
+        artifact.isolation_root,
         warnings,
     )
 
@@ -1175,6 +1294,7 @@ def preview_cursor_plugin(
         inline_create=inline_create,
         inline_send=inline_send,
         yoetz_launchers=_known_launchers(artifact, inspection),
+        expected_isolation_root=artifact.isolation_root,
     )
     return _preview_from_inspection(request, action, inspection, artifact, observation)
 
@@ -1577,6 +1697,7 @@ def status_cursor_plugin(
         project_root=project_root,
         user_config_root=inspection.root,
         yoetz_launchers=_known_launchers(artifact, inspection),
+        expected_isolation_root=artifact.isolation_root,
     )
     runtime = observe_cursor_mcp_runtime(
         installed_route=observation.route_profile,
@@ -1589,6 +1710,7 @@ def status_cursor_plugin(
         inspection,
         OsLauncherProbe() if launcher_probe is None else launcher_probe,
     )
+    isolation_binding = _isolation_binding(artifact, inspection)
     return CursorPluginStatus(
         inspection.state,
         (
@@ -1607,11 +1729,125 @@ def status_cursor_plugin(
         runtime,
         _proof(inspection.state),
         launcher,
+        isolation_binding,
     )
 
 
+def _isolation_binding(
+    artifact: CursorPluginArtifact, inspection: _Inspection
+) -> CursorIsolationBindingState:
+    """Classify the native artifact's exact state-root binding without exposing the path.
+
+    The marker is necessary but not sufficient: the root-bearing MCP and hook members must also
+    still carry the expected binding before status reports ``ambient`` or ``isolated_exact``.
+    """
+
+    if artifact.plan.format_profile is not PluginFormatProfile.CURSOR_PLUGIN_NATIVE:
+        return "unobserved"
+    if not inspection.marker_valid:
+        return "unobserved"
+    installed = inspection.installed_isolation_root
+    expected = artifact.isolation_root
+    if expected is None:
+        if installed is not None:
+            return "different"
+        return "ambient" if _root_binding_surfaces_match(artifact, inspection) else "different"
+    if installed == expected:
+        return (
+            "isolated_exact" if _root_binding_surfaces_match(artifact, inspection) else "different"
+        )
+    return "missing" if installed is None else "different"
+
+
+def _safe_json_object(path: Path) -> Mapping[str, JsonValue] | None:
+    """Read one regular JSON file without following a host-owned symlink."""
+
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > _MAX_FILE_BYTES:
+            return None
+        return _load_object(path.read_bytes())
+    except OSError:
+        return None
+
+
+def _route_isolation_binding(
+    entry: Mapping[str, JsonValue] | None,
+) -> tuple[Literal["ambient", "isolated", "invalid", "missing"], str | None]:
+    """Return only the isolation binding represented by a parsed MCP entry."""
+
+    if entry is None:
+        return "missing", None
+    keys = set(entry)
+    if keys == {"args", "command", "type"}:
+        return "ambient", None
+    if keys == {"args", "command", "type", "env"}:
+        valid, root = _entry_isolation_root(entry)
+        return ("isolated", root) if valid else ("invalid", None)
+    return "invalid", None
+
+
+def _mcp_entry_from_object(
+    document: Mapping[str, JsonValue] | None,
+) -> Mapping[str, JsonValue] | None:
+    if document is None:
+        return None
+    servers = document.get("mcpServers")
+    if not isinstance(servers, Mapping):
+        return None
+    entry = servers.get("yoetz")
+    return cast(Mapping[str, JsonValue], entry) if isinstance(entry, Mapping) else None
+
+
+def _root_binding_surfaces_match(artifact: CursorPluginArtifact, inspection: _Inspection) -> bool:
+    """Check root-bearing MCP and hook members before reporting an exact binding."""
+
+    expected_hooks = _load_object(artifact.members.get("hooks/hooks.json", b""))
+    current_hooks = _safe_json_object(inspection.destination / "hooks" / "hooks.json")
+    if expected_hooks is None or current_hooks is None:
+        return False
+    expected_hook_map = expected_hooks.get("hooks")
+    current_hook_map = current_hooks.get("hooks")
+    if not isinstance(expected_hook_map, Mapping) or not isinstance(current_hook_map, Mapping):
+        return False
+    expected_prefix = (
+        ""
+        if artifact.isolation_root is None
+        else f"{ISOLATED_ROOT_ENV}={shlex.quote(artifact.isolation_root)} "
+    )
+    for event in CURSOR_HOOK_EVENTS:
+        expected_definition = expected_hook_map.get(event)
+        current_definition = current_hook_map.get(event)
+        if not isinstance(expected_definition, list) or not expected_definition:
+            return False
+        if not isinstance(current_definition, list) or not current_definition:
+            return False
+        expected_first = expected_definition[0]
+        current_first = current_definition[0]
+        if not isinstance(expected_first, Mapping) or not isinstance(current_first, Mapping):
+            return False
+        expected_command = expected_first.get("command")
+        current_command = current_first.get("command")
+        if not isinstance(expected_command, str) or not isinstance(current_command, str):
+            return False
+        if artifact.isolation_root is None:
+            if f"{ISOLATED_ROOT_ENV}=" in current_command:
+                return False
+        elif not current_command.startswith(expected_prefix):
+            return False
+
+    if "mcp.json" not in artifact.members:
+        return True
+    expected_mcp = _mcp_entry_from_object(_load_object(artifact.members["mcp.json"]))
+    current_mcp = _mcp_entry_from_object(_safe_json_object(inspection.destination / "mcp.json"))
+    expected_kind, expected_root = _route_isolation_binding(expected_mcp)
+    current_kind, current_root = _route_isolation_binding(current_mcp)
+    return (current_kind, current_root) == (expected_kind, expected_root)
+
+
 def _installed_mcp_binding(
-    inspection: _Inspection, installed_launcher: tuple[str, ...] | None
+    inspection: _Inspection,
+    installed_launcher: tuple[str, ...] | None,
+    expected_isolation_root: str | None,
 ) -> CursorMcpBindingState:
     """Say what the installed plugin-owned ``mcp.json`` would make Cursor spawn."""
 
@@ -1623,12 +1859,20 @@ def _installed_mcp_binding(
     if entry is None:
         return "absent"
     command = entry.get("command")
-    if command == "yoetz" and _route_profile(entry) is not None:
+    if (
+        command == "yoetz"
+        and _route_profile(entry, expected_isolation_root=expected_isolation_root) is not None
+    ):
         return "ambient_path"
     if (
         installed_launcher is not None
         and command == installed_launcher[0]
-        and _route_profile(entry, (installed_launcher,)) is not None
+        and _route_profile(
+            entry,
+            (installed_launcher,),
+            expected_isolation_root=expected_isolation_root,
+        )
+        is not None
     ):
         return "exact_launcher"
     return "foreign"
@@ -1640,7 +1884,7 @@ def _launcher_status(
     launcher_probe: LauncherProbePort,
 ) -> CursorLauncherStatus:
     installed = inspection.installed_launcher
-    binding = _installed_mcp_binding(inspection, installed)
+    binding = _installed_mcp_binding(inspection, installed, artifact.isolation_root)
     if not inspection.marker_valid:
         return CursorLauncherStatus(
             artifact.yoetz_launcher, None, "unobserved", binding, UNOBSERVED_LAUNCHER_IDENTITY
@@ -1719,27 +1963,47 @@ _POLICY_ROUTE_ARGS: Final = frozenset({("mcp", "serve"), _MCP_SERVE_ARGS})
 _STRICT_ROUTE_ARGS: Final = frozenset(
     {("mcp", "serve", "--semantic", "off"), _MCP_SERVE_STRICT_ARGS}
 )
+_UNSET_ISOLATION_ROOT: Final = object()
 
 
 def _route_profile(
     entry: Mapping[str, JsonValue] | None,
     yoetz_launchers: tuple[tuple[str, ...], ...] = (),
+    *,
+    expected_isolation_root: str | None | object = _UNSET_ISOLATION_ROOT,
 ) -> Literal["strict", "policy"] | None:
     """Classify one MCP entry as an exact Yoetz route, else ``None``.
 
     An exact route launches either a bare ``yoetz`` console script (an external registration
     the owner wrote by hand) or one of ``yoetz_launchers`` — this artifact's exact bound
     launcher, or the launcher the installed marker recorded — followed by the exact ``mcp
-    serve`` arguments.
+    serve`` arguments. When ``expected_isolation_root`` is supplied, the route must carry that
+    exact root (or no environment in ambient mode); omission keeps this helper's route-shape
+    classification independent from lifecycle ownership.
     """
 
     if entry is None:
         return None
     # Any non-exact same-name entry is foreign, so recognition is key-set exact and not merely
-    # value-compatible. An extra ``env``, ``cwd``, or any other key changes what the host will
-    # actually launch, and treating such an entry as a known route would silently attribute a
-    # foreign registration to Yoetz.
-    if set(entry) != {"args", "command", "type"}:
+    # value-compatible. The one exception is the exact isolated-root environment binding owned
+    # by this adapter. Route-shape callers may omit ``expected_isolation_root`` to classify a
+    # structurally valid isolated route; lifecycle ownership callers pass the artifact's exact
+    # expected root so a different root cannot count as owned or admitted. Arbitrary environment
+    # keys remain foreign and are never overwritten.
+    registered_isolation_root: str | None = None
+    keys = set(entry)
+    if keys == {"args", "command", "type"}:
+        pass
+    elif keys == {"args", "command", "type", "env"}:
+        readable, registered_isolation_root = _entry_isolation_root(entry)
+        if not readable:
+            return None
+    else:
+        return None
+    if (
+        expected_isolation_root is not _UNSET_ISOLATION_ROOT
+        and registered_isolation_root != expected_isolation_root
+    ):
         return None
     if entry.get("type") != "stdio":
         return None
@@ -1766,6 +2030,21 @@ def _route_profile(
     return None
 
 
+def _entry_isolation_root(entry: Mapping[str, JsonValue]) -> tuple[bool, str | None]:
+    """Read the only environment binding a Cursor route may carry."""
+
+    environment = entry.get("env")
+    if not isinstance(environment, Mapping):
+        return False, None
+    values = cast(Mapping[object, object], environment)
+    if set(values) != {ISOLATED_ROOT_ENV}:
+        return False, None
+    raw = values.get(ISOLATED_ROOT_ENV)
+    if not _valid_isolation_root_text(raw):
+        return False, None
+    return True, cast(str, raw)
+
+
 def observe_cursor_mcp(
     *,
     plugin_root: Path,
@@ -1774,6 +2053,7 @@ def observe_cursor_mcp(
     inline_create: Mapping[str, JsonValue] | None = None,
     inline_send: Mapping[str, JsonValue] | None = None,
     yoetz_launchers: tuple[tuple[str, ...], ...] = (),
+    expected_isolation_root: str | None = None,
 ) -> CursorMcpObservation:
     """Classify exact same-name sources using Cursor SDK precedence.
 
@@ -1781,7 +2061,9 @@ def observe_cursor_mcp(
     Duplicate exact sources remain ambiguous (or dual for plugin+external), and
     any same-name foreign entry remains foreign. ``yoetz_launchers`` are the exact
     bound launchers (this artifact's and the installed marker's) that an exact route
-    may name beside a bare ``yoetz``.
+    may name beside a bare ``yoetz``. The expected isolation root defaults to ambient mode;
+    callers rendering an isolated artifact pass its exact root explicitly. Route-shape-only
+    classification remains available through the private ``_route_profile`` helper.
     """
 
     candidates: list[tuple[CursorMcpSource, Mapping[str, JsonValue] | None]] = []
@@ -1820,7 +2102,17 @@ def observe_cursor_mcp(
         )
     if not candidates:
         return CursorMcpObservation(McpOwnershipState.ABSENT, None, None, (), True)
-    profiles = [(source, _route_profile(entry, yoetz_launchers)) for source, entry in candidates]
+    profiles = [
+        (
+            source,
+            _route_profile(
+                entry,
+                yoetz_launchers,
+                expected_isolation_root=expected_isolation_root,
+            ),
+        )
+        for source, entry in candidates
+    ]
     present = tuple(source for source, _profile in profiles)
     if any(profile is None for _source, profile in profiles):
         foreign_source = next(source for source, profile in profiles if profile is None)

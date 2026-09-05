@@ -45,7 +45,13 @@ type McpRouteProfile = Literal["policy", "strict"]
 
 _SCHEMA_VERSION: Final = "1.0.0"
 _TOOL_INPUT_SCHEMA_VERSIONS: Final = MappingProxyType({"publish_work": "1.1.0", "status": "1.1.0"})
-_TOOL_OUTPUT_SCHEMA_VERSIONS: Final = MappingProxyType({"status": "1.1.0"})
+_TOOL_OUTPUT_SCHEMA_VERSIONS: Final = MappingProxyType(
+    {
+        "check": "1.1.0",
+        "receipt": "1.1.0",
+        "status": "1.2.0",
+    }
+)
 
 
 def _tool_input_schema_version(name: str) -> str:
@@ -1457,7 +1463,10 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "publish_work",
         "Publish recorded work",
         "Records a bounded batch of agent-published work events and returns the accepted event "
-        "range and coverage. It has no information about work outside that batch. Every set-valued "
+        "range and coverage. When `dry_run` is false, this appends records to the local Yoetz "
+        "ledger; it "
+        "does not publish to GitHub or run a semantic evaluation. It has no information about "
+        "work outside that batch. Every set-valued "
         "reference list in a draft envelope or payload (obligation_refs, obligation_ids, "
         "supporting_refs, and the other canonical set fields) is admitted only when its members "
         "are unique and already in ascending ASCII order; uniqueItems does not express order, and "
@@ -1553,8 +1562,10 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "respond",
         "Respond to a finding",
         "Records an acknowledgement, provenance dispute, or rejection for one finding at the "
-        "result frontier of the check that returned it, not its subject_frontier. It does not "
-        "resolve other findings or establish that underlying work changed. "
+        "result frontier of the check that returned it, not its subject_frontier. This appends one "
+        "finding-response record to the local Yoetz ledger; it does not publish to "
+        "GitHub or run a semantic evaluation. It does not resolve other findings or establish "
+        "that underlying work changed. "
         "A provenance_disputed response contests the finding's authorship or provenance premise "
         "rather than its conclusion, requires a reason, and never resolves the finding. "
         "Bounded waiver is reserved for an authorized local-CLI human and is not an agent option. "
@@ -1672,22 +1683,22 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "policy": MappingProxyType(
             {
                 "start": "sha256:ac5c4ac0bd12f67e08437f3aea4b7bc328c060f08809ef6f20e86b879d683a29",
-                "publish_work": "sha256:676036fa37e435770bb9d96d9ecb4a09121337576437023e3af5a4c4f8bbbad5",
-                "check": "sha256:db57da2058052843ebb583f2ac141ebf7925dcf920583b0cdad6533c3f7fa29a",
-                "respond": "sha256:669697ed16dc7cbb14bab5528a5e06d7782d3ce7b943b2a9036ae1dfd5ca8717",
-                "status": "sha256:c8fa1e75331e46ffe25b141f71fdf06265fd505353d798c902fada5895b588c0",
-                "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
+                "publish_work": "sha256:4e90f9bdb94adb0a0de05bd5ec046f54fcab4c89f93d4c4b7191c12e19e229de",
+                "check": "sha256:3175800b79a9ea035fabde6c64227ff8a0c9783a4f5d13a29a7a9b80e91c41a2",
+                "respond": "sha256:6003245eb4b02e6a81fa4f1083bfa00da675ec247398e302bcfbd2b82219664c",
+                "status": "sha256:e4798c4fedc7cb6bc7dda204b52ec2734b9dc319c27ca3834bdbaadd5c2613e4",
+                "receipt": "sha256:cf4b426af9764747848d3334d0671d0d0961ab5c86173d70c067222e9feb5ee2",
                 "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
             }
         ),
         "strict": MappingProxyType(
             {
                 "start": "sha256:ac5c4ac0bd12f67e08437f3aea4b7bc328c060f08809ef6f20e86b879d683a29",
-                "publish_work": "sha256:676036fa37e435770bb9d96d9ecb4a09121337576437023e3af5a4c4f8bbbad5",
-                "check": "sha256:89899d93b76ea85c90d79d3df150f076f6b64a28cdb8f410c263ce3c1aa89b91",
-                "respond": "sha256:669697ed16dc7cbb14bab5528a5e06d7782d3ce7b943b2a9036ae1dfd5ca8717",
-                "status": "sha256:c8fa1e75331e46ffe25b141f71fdf06265fd505353d798c902fada5895b588c0",
-                "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
+                "publish_work": "sha256:4e90f9bdb94adb0a0de05bd5ec046f54fcab4c89f93d4c4b7191c12e19e229de",
+                "check": "sha256:b1cf1b1554d437b315f10f38080590b919c355b38f678bdcc458cd78620e1d60",
+                "respond": "sha256:6003245eb4b02e6a81fa4f1083bfa00da675ec247398e302bcfbd2b82219664c",
+                "status": "sha256:e4798c4fedc7cb6bc7dda204b52ec2734b9dc319c27ca3834bdbaadd5c2613e4",
+                "receipt": "sha256:cf4b426af9764747848d3334d0671d0d0961ab5c86173d70c067222e9feb5ee2",
                 "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
             }
         ),
@@ -1695,8 +1706,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:f33f5ff45ccd9797daa0996b724e05fa7a0904c4223b062fb3c9bea83b0fccc4",
-        "strict": "sha256:e9633bcb7d0919405f64cd268c6a1c33e8707938a00d0545d967f7be17ac1016",
+        "policy": "sha256:de1d9f9bd2f821bbf0cdf2ff64616213b2def4ad9d6952fbd1a485508700706c",
+        "strict": "sha256:1910d370ae257ff094984bf98ec5390added1cce159d5f045f10a7eafe44dcce",
     }
 )
 

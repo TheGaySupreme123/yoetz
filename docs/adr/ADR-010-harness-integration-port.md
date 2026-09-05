@@ -197,7 +197,7 @@ separately.** A bare `command: "yoetz"` let Cursor's sanitized desktop PATH reso
 ambient runtime (control schema 2.1.0) behind a marker-valid then-current plugin (2.3.0); the model's
 `start` then reached an incompatible bridge and no task, evidence, or receipt could exist. Cursor's
 MCP reference admits a full path in `command`, so the native entry is now `launcher[0]` plus
-`[*launcher[1:], "mcp", "serve", "--host", "cursor", …]` from the same `/2` marker launcher the
+`[*launcher[1:], "mcp", "serve", "--host", "cursor", …]` from the same `/3` marker launcher the
 hooks use; the entry is a managed member, so carrier bytes bind it. Route recognition accepts a
 bare `yoetz` or a known launcher (this artifact's or the installed marker's) with the exact serve
 arguments. `CursorPluginStatus.launcher` reports executable state (`matched|drifted|missing|
@@ -216,6 +216,24 @@ The append-only local-control schema `2.1.0` admits `cursor_hook`, a keyed HMAC
 Cursor's documented `afterMCPExecution` result is content and is discarded; because the host does
 not publish a validated `success` or `result_status` field for that event, ingress never fabricates
 either value.
+
+**Amendment (2026-09-05, issue #596): native Cursor MCP binds the service handshake to the active
+MCP session's roots.** A native Cursor helper may start from the user's home directory, so its
+process CWD cannot select repository privacy authority. The `--host cursor` bridge asks the MCP
+client for `roots/list` on the first workflow call, decodes only local `file:` roots, bounds their
+URI/path input, and canonicalizes each through the shared safe workspace resolver. It accepts one
+canonical repository (equivalent roots in that repository are aliases); missing, unsupported,
+remote, malformed, unsafe, oversized, or distinct-repository roots fail closed with the existing
+`SESSION_CONFLICT` / `repository_identity_required` boundary before connecting to the service.
+The locator is retained only in the bridge's private client slot, revalidated before each workflow
+call, and is never derived from public `workspace_ref`, model arguments, or transcript content. The
+reviewed Cursor 3.19.7 host bundle advertises `roots.listChanged: false`, so revalidation runs on
+every workflow call even when no change notification is available. A changed or unusable roots/list
+result, or a roots-list-changed notification, retires the slot and
+its service client; the host must create a fresh MCP session to bind again, preventing one process
+from crossing repository authorities. Generic MCP bridges keep their existing process
+CWD behavior. The server still advertises only tools/resources: roots are a standard client-to-
+server handshake input, not a Yoetz tool or new server capability.
 
 **Amendment (ADR-012, 2026-07-21):** MCP server registration is added as a *sibling* port,
 `HarnessMcpPort` (`ports/harness_mcp.py`), with its own Codex adapters
