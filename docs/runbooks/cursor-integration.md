@@ -23,6 +23,15 @@ metadata-only fixture pins for future design work; they are not supported compat
 Cursor's Python package deliberately has no `1.0.23` release; it aligned with the shared SDK
 release line at `1.0.24`. Nearby versions are untested, not implicitly compatible.
 
+A pinned test instance (ADR-028, issue #604) adds a second guard beneath the artifact binding:
+when the native MCP entry and hook commands name the absolute launcher of a runtime created with
+`yoetz instance create --bind-runtime`, that launcher resolves its own root even if Cursor drops the
+`env` block or a hook runs without it, and a different `YOETZ_ISOLATED_ROOT` is refused as
+`isolation_root_conflict`. The artifact-level `isolation_binding` status is unchanged and still
+required; the pin does not replace it, and it does not prove isolated plugin discovery either.
+The everyday Cursor profile must keep naming the everyday launcher by absolute path. See
+[`test-instances.md`](test-instances.md).
+
 ## Preview and install
 
 Use an explicit isolated root; never point a test at regular `~/.cursor`. An isolated Cursor

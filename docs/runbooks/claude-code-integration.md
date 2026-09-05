@@ -100,6 +100,17 @@ Claude development/plugin route continues to inherit the explicitly exported roo
 session environment, and its MCP bridge and hooks must be tested under that same environment. No
 Codex registration status or `--env` behavior is inferred for Claude Code.
 
+Issue #604 (ADR-028) adds the executable-bound guard and, again, no mutation path. When the plugin's
+hook and MCP commands name the absolute launcher of a pinned test instance (one provisioned with
+`yoetz instance create --bind-runtime`, which `scripts/provision_test_instance.py` always does),
+that launcher resolves the instance's own root even if Claude Code launches it without the exported
+variable, and refuses a conflicting variable (`isolation_root_conflict`). The everyday plugin
+installation must name the everyday launcher by absolute path, never a bare `yoetz` resolved
+through `PATH`, so that a test runtime earlier on `PATH` cannot become the host's Yoetz. Verify with
+`yoetz instance status --json` from the exact launcher the plugin names: `binding` must be
+`runtime_pin` or `environment_and_pin` for a test instance and `ambient` for the everyday install.
+See [`test-instances.md`](test-instances.md).
+
 ## Upgrading Yoetz under a running service
 
 The local-control handshake pins the exact schema-manifest digest, so after installing a new Yoetz

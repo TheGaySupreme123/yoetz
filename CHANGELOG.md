@@ -6,6 +6,23 @@ reverse-chronological released versions.
 
 ## Unreleased
 
+### Added
+
+- Independent permanent installs and test snapshots (ADR-028, issue #604). An isolated root can now
+  carry a sealed `instance-identity.json` naming its lifecycle (`persistent` or `disposable`),
+  exact source revision, wheel digest, and bounded expiry, and a snapshot's own runtime can be
+  pinned to its root with `yoetz instance create --bind-runtime`: the pinned launcher resolves
+  that root even when a host, hook, or shell drops `YOETZ_ISOLATED_ROOT`, a different root in the
+  environment is refused as `isolation_root_conflict`, and a re-pointed pin, an expired snapshot,
+  or a labeled marker in ambient state refuses to serve before the singleton is taken. New
+  connection-free commands `yoetz instance create|status|dispose` create, inspect (digest-only,
+  with `binding`, `lifecycle`, and provenance), and remove exactly one marked root, stopping only
+  the service that holds that root's lock; `yoetz service isolation --json` reports `binding` and
+  `lifecycle`, and the singleton lock stamp names the holder's instance lifecycle and source ref.
+  Contributors provision snapshots from an exact checkout revision with
+  `scripts/provision_test_instance.py` (see `docs/runbooks/test-instances.md`). The everyday
+  install is unchanged: it carries no marker and no pin, and `dispose` can never target it.
+
 ### Fixed
 
 - Hook observation no longer reports a live task mapping as stale after every Claude Code

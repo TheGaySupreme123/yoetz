@@ -4542,7 +4542,44 @@ facade and are never MCP tools.
   closed as `PathSafetyError("isolation_root_invalid")` or the precise existing path-safety
   reason, never by falling back to ambient platform directories. `YOETZ_STORAGE_DATA_DIR` and
   `storage.data_dir` alone are storage relocation, not isolation. The connection-free proof
-  surface is `yoetz service isolation --json` (`cli/isolation_status.py`), digest-only.
+  surface is `yoetz service isolation --json` (`cli/isolation_status.py`), digest-only; it also
+  reports `binding` (`IsolationBinding` = `ambient|environment|runtime_pin|environment_and_pin`)
+  and `lifecycle` (`ReportedLifecycle` = `permanent|persistent|disposable|unlabeled`).
+  The runtime pin (ADR-028, issue #604) is the second, executable-bound source of the same root:
+  `read_runtime_pin()` reads `RUNTIME_PIN_NAME` = `yoetz-instance-pin.json`
+  (`RUNTIME_PIN_SCHEMA` = `yoetz.runtime-instance-pin/1`: exact `isolated_root` plus
+  `installation_id`) from this process's `sys.prefix` into a `RuntimePin`; `isolated_root()`
+  prefers the variable, falls back to the pin, and fails closed on a difference
+  (`isolation_root_conflict`) or an unreadable, foreign-owned, group/world-writable, or
+  malformed pin (`runtime_pin_invalid`); `isolation_binding()` names the selected source.
+- `config/installation.py`: instance identity for independent installations (ADR-028).
+  `InstanceIdentity` is the sealed `INSTANCE_IDENTITY_NAME` = `instance-identity.json`
+  (`INSTANCE_IDENTITY_SCHEMA` = `yoetz.instance-identity/1`) beneath the state directory:
+  `installation_id` (`ins_`), `lifecycle` (`InstanceLifecycle` = `persistent|disposable`; the
+  everyday install is `permanent` by the marker's absence), `created_at`, optional `expires_at`
+  (disposable only, ≤ 30 days), `source_ref` (exact 40/64-hex commit or null), `source_state`
+  (`SourceState` = `clean|modified|unknown`), `package_version`, optional `package_digest`, and
+  `runtime_prefix_digest`; canonical JSON, owner-only, domain-separated `record_digest`.
+  `read_instance_identity()` returns `None` when absent and raises `InstanceIdentityError`
+  (closed `reason`: `instance_identity_invalid|instance_expired|instance_exists|instance_absent|
+  instance_not_disposable|instance_root_invalid|instance_root_too_long|instance_expiry_invalid|
+  instance_lifecycle_requires_isolated_root|installation_identity_mismatch|
+  instance_service_running|runtime_pin_conflict|runtime_pin_invalid`) otherwise;
+  `write_instance_identity()` never overwrites; `verify_instance_binding()` is the service-start
+  gate `service/daemon.py` runs before `acquire_singleton()`; `write_runtime_pin()` /
+  `remove_runtime_pin()` own the pin file. `cli/exits.py` maps the reasons through
+  `INSTANCE_PUBLIC_CODES` (usage-shaped refusals exit 2, untrusted identity 20 as
+  `STORAGE_UNSAFE`, `instance_expired` 20 as `SERVICE_UNAVAILABLE`, `instance_service_running`
+  20 as `BUNDLE_BUSY`) and carries their remediation lines.
+- `cli/instance.py`: `yoetz instance create|status|dispose` (ADR-028). `create_instance()`
+  creates one owner-only root (parent must exist; same path-safety gate; socket path bound
+  `MAX_SOCKET_PATH_BYTES` = 100), seals the marker, and with `--bind-runtime` pins `sys.prefix`;
+  it echoes the exact root once. `instance_status()` is connection-free and digest-only: mode,
+  binding, lifecycle, marker fields, `expired`, `runtime_provenance`
+  (`matched|drifted|unrecorded`), `runtime_pin` (`bound|none`), and the lock-stamped
+  `service_holder`. `dispose_instance()` removes exactly one marked persistent/disposable root:
+  flock probe, SIGTERM to the stamped holder only, bounded wait (`STOP_WAIT_SECONDS` = 35),
+  optional log retention to `<dir>/<installation_id>/`, `rmtree`, pin removal; repeat is a no-op.
 - `observability/logging.py`: structured stderr logging, allowlisted fields only; shared `LogMode`
   is exactly `service|cli|mcp_stdio|confidential_helper` so each process installs only its bounded
   sink/filter profile.
