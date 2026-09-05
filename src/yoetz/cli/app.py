@@ -2738,7 +2738,7 @@ def provider_codex_subscription_setup(
             help="Selected Codex CLI/native executable; its exact native binary is digest-bound.",
         ),
     ],
-    model: Annotated[str, typer.Option("--model", help="Exact Codex model id.")] = "gpt-5.6-sol",
+    model: Annotated[str, typer.Option("--model", help="Exact Codex model id.")] = "gpt-5.6-luna",
     reasoning_effort: Annotated[
         str, typer.Option("--reasoning-effort", help="Exact reasoning effort.")
     ] = "high",

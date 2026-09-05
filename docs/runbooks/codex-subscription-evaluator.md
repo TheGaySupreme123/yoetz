@@ -25,6 +25,12 @@ reasoning setting inherits this cell. The exact identity digest covers the compa
 cell fields and its review/expiry dates; stale evidence fails before child launch. The release
 support matrix remains authoritative about which cells have completed packaged live evidence.
 
+New Codex-subscription setups recommend and preselect `gpt-5.6-luna`. Default reasoning effort
+stays independently `high`. An explicit `--model` (including `gpt-5.6-sol` when the app-server
+lists it) still binds that exact id. Existing persisted bindings are not rewritten. OpenAI
+API-key and other provider-preset catalogs stay Sol-first. Historical packaged live evidence that
+names `gpt-5.6-sol` remains Sol proof; it is not Luna acceptance and does not migrate.
+
 ## Setup and reverse operations
 
 Use a dedicated home; never point this route at a normal Codex home or copy authentication from
@@ -33,7 +39,7 @@ one.
 ```text
 yoetz provider codex-subscription setup \
   --executable /absolute/path/to/codex \
-  --model gpt-5.6-sol \
+  --model gpt-5.6-luna \
   --reasoning-effort high
 
 yoetz provider codex-subscription status --json

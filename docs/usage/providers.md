@@ -41,6 +41,9 @@ setup, the prompt-loop provider menu, `/provider`, or run:
 yoetz provider codex-subscription setup --executable /absolute/path/to/codex
 ```
 
+New setups preselect `gpt-5.6-luna` with reasoning effort `high`. Pass `--model` to bind a
+different exact id. Existing bindings stay as written.
+
 The selected executable can be an npm wrapper with the native package nested below that wrapper,
 an npm-prefix wrapper with `@openai/codex-darwin-arm64` hoisted beside the wrapper package in the
 same prefix, or the exact native `codex` executable itself. Yoetz resolves only those bounded

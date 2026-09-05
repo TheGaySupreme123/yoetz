@@ -331,7 +331,7 @@ class FakeRuntime:
         return self.credential_result
 
     def codex_subscription_defaults(self) -> tuple[str, str, str, str]:
-        return "/opt/codex/codex", "/var/lib/yoetz/codex-home", "gpt-5.6-sol", "high"
+        return "/opt/codex/codex", "/var/lib/yoetz/codex-home", "gpt-5.6-luna", "high"
 
     def preview_codex_subscription(
         self, executable: str, codex_home: str, model: str, reasoning_effort: str

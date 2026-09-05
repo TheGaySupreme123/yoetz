@@ -758,7 +758,7 @@ class YoetzRuntime:
                 provider_id="openai-codex",
                 host="openai.com",
                 base_path_prefix=" through Codex-managed login",
-                default_model="gpt-5.6-sol",
+                default_model="gpt-5.6-luna",
                 api_style="Codex app-server v2 (stdio)",
                 endpoint_profile_id="codex-chatgpt-subscription",
                 endpoint_profile_version="1.0.0",
@@ -774,7 +774,7 @@ class YoetzRuntime:
 
         binaries = discover_codex_binaries()
         executable = "" if not binaries else binaries[0].executable_path
-        return executable, str(default_codex_home()), "gpt-5.6-sol", "high"
+        return executable, str(default_codex_home()), "gpt-5.6-luna", "high"
 
     def preview_codex_subscription(
         self, executable: str, codex_home: str, model: str, reasoning_effort: str

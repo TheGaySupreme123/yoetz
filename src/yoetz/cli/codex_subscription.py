@@ -530,7 +530,7 @@ async def prompt_codex_subscription_setup() -> dict[str, JsonValue]:
     codex_home = Path(
         typer.prompt("Dedicated evaluator CODEX_HOME", default=str(default_codex_home()))
     ).expanduser()
-    model = typer.prompt("Exact model", default="gpt-5.6-sol").strip()
+    model = typer.prompt("Exact model", default="gpt-5.6-luna").strip()
     reasoning_effort = typer.prompt("Reasoning effort", default="high").strip()
     login_choice = typer.prompt("Login method (browser/device_code)", default="browser").strip()
     if login_choice not in {"browser", "device_code"}:

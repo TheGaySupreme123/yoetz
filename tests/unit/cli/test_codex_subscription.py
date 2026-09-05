@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import shutil
@@ -821,15 +822,17 @@ def test_guided_setup_offers_account_switch(
         [
             str(tmp_path / "codex"),
             str(tmp_path / "home"),
-            "gpt-5.6-sol",
+            "gpt-5.6-luna",
             "high",
             "browser",
         ]
     )
     confirms: list[str] = []
+    prompt_defaults: dict[str, object] = {}
 
-    def prompt(message: str, **_kwargs: object) -> str:
-        del message
+    def prompt(message: str, **kwargs: object) -> str:
+        if "default" in kwargs:
+            prompt_defaults[message] = kwargs["default"]
         return next(prompts)
 
     def confirm(message: str, **_kwargs: object) -> bool:
@@ -864,6 +867,8 @@ def test_guided_setup_offers_account_switch(
 
     anyio.run(module.prompt_codex_subscription_setup)
 
+    assert prompt_defaults["Exact model"] == "gpt-5.6-luna"
+    assert prompt_defaults["Reasoning effort"] == "high"
     assert any(item.startswith("Continue to Codex sign-in") for item in confirms)
     assert any("switch ChatGPT account" in item for item in confirms)
     assert captured == [True]
@@ -878,15 +883,15 @@ def test_guided_setup_discloses_login_reuse_before_the_confirmation(
         [
             str(tmp_path / "codex"),
             str(tmp_path / "home"),
-            "gpt-5.6-sol",
+            "gpt-5.6-luna",
             "high",
             "browser",
         ]
     )
     disclosed_before_confirm: list[bool] = []
 
-    def prompt(message: str, **_kwargs: object) -> str:
-        del message
+    def prompt(message: str, **kwargs: object) -> str:
+        del kwargs
         return next(prompts)
 
     def confirm(message: str, **_kwargs: object) -> bool:
@@ -1448,3 +1453,11 @@ def test_cli_status_accepts_a_valid_storage_data_dir_configuration(
     assert result.exit_code == 20
     assert "codex_subscription_not_configured" in result.stderr
     assert "internal_error" not in result.stderr
+
+
+def test_cli_setup_recommends_luna_and_keeps_independent_high_effort() -> None:
+    from yoetz.cli.app import provider_codex_subscription_setup
+
+    params = inspect.signature(provider_codex_subscription_setup).parameters
+    assert params["model"].default == "gpt-5.6-luna"
+    assert params["reasoning_effort"].default == "high"
