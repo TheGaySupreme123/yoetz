@@ -44,6 +44,10 @@ from yoetz.adapters.integrations.portable_plugin import (
     build_portable_plugin_plan,
 )
 from yoetz.config.paths import ISOLATED_ROOT_ENV, isolated_root
+from yoetz.domain.observation_profiles import (
+    CURSOR_ORDINARY_HOOK_MAPPING_VERSION,
+    CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+)
 from yoetz.domain.values import JsonObject, RequestId
 from yoetz.domain.values import request_id as validate_request_id
 from yoetz.ports.integrations import HarnessHookProfile, HarnessId, HarnessProfile
@@ -75,6 +79,9 @@ __all__ = [
     "CURSOR_HOOK_EVENTS",
     "CURSOR_HARNESS_PROFILE",
     "CURSOR_NATIVE_PROFILE_ID",
+    "CURSOR_ORDINARY_HOOK_MAPPING_VERSION",
+    "CURSOR_ORDINARY_OBSERVATION_PROFILE_ID",
+    "CURSOR_ORDINARY_HOOK_EVENTS",
     "CURSOR_PLUGIN_RELATIVE_ROOT",
     "CURSOR_SDK_PROOF_LIMITS",
     "CursorArtifactIdentity",
@@ -113,6 +120,14 @@ CURSOR_SDK_PROOF_LIMITS: Final = ("metadata_only", "not_a_support_claim")
 CURSOR_HOOK_EVENTS: Final = (
     "afterFileEdit",
     "afterMCPExecution",
+    "sessionEnd",
+    "sessionStart",
+    "stop",
+)
+CURSOR_ORDINARY_HOOK_EVENTS: Final = (
+    "postToolUse",
+    "postToolUseFailure",
+    "preToolUse",
     "sessionEnd",
     "sessionStart",
     "stop",
@@ -699,6 +714,7 @@ def _native_members(
     route_profile: Literal["strict", "policy"] | None,
     yoetz_launcher: tuple[str, ...],
     isolation_root: str | None,
+    observation_profile: Literal["structural", "ordinary"],
 ) -> dict[str, bytes]:
     manifest: dict[str, JsonValue] = {
         "author": {"name": "Yoetz contributors"},
@@ -719,16 +735,26 @@ def _native_members(
         "" if isolation_root is None else f"{ISOLATED_ROOT_ENV}={shlex.quote(isolation_root)} "
     )
     hook_command = f"{isolation_prefix}{launcher} hooks cursor-observe --workspace ."
+    hook_events = CURSOR_HOOK_EVENTS
+    if observation_profile == "ordinary":
+        hook_command = (
+            f"{hook_command} --observation-profile "
+            f"{shlex.quote(CURSOR_ORDINARY_OBSERVATION_PROFILE_ID)}"
+        )
+        hook_events = CURSOR_ORDINARY_HOOK_EVENTS
     hook_timeouts = {
         "afterFileEdit": 5,
         "afterMCPExecution": 5,
+        "postToolUse": 5,
+        "postToolUseFailure": 5,
+        "preToolUse": 5,
         "sessionEnd": 3,
         "sessionStart": 10,
         "stop": 10,
     }
     hooks = {
         event: [{"command": f"{hook_command} --event {event}", "timeout": hook_timeouts[event]}]
-        for event in CURSOR_HOOK_EVENTS
+        for event in hook_events
     }
     members: dict[str, bytes] = {
         ".cursor-plugin/plugin.json": canonical_encode(manifest),
@@ -750,6 +776,7 @@ def render_cursor_plugin(
     route_profile: Literal["strict", "policy"] | None = None,
     source: PackagedPortableResources | None = None,
     yoetz_launcher: Path | str | Sequence[str] | None = None,
+    observation_profile: Literal["structural", "ordinary"] = "structural",
 ) -> CursorPluginArtifact:
     """Render one Cursor artifact from canonical packaged guidance bytes."""
 
@@ -760,7 +787,14 @@ def render_cursor_plugin(
         raise ValueError("cursor_format_invalid")
     if type(mcp_ownership) is not McpOwnership:
         raise ValueError("cursor_mcp_ownership_invalid")
+    if observation_profile not in {"structural", "ordinary"}:
+        raise ValueError("cursor_observation_profile_invalid")
     resources = PackagedPortableResources() if source is None else source
+    if (
+        observation_profile == "ordinary"
+        and format_profile is not PluginFormatProfile.CURSOR_PLUGIN_NATIVE
+    ):
+        raise ValueError("cursor_observation_profile_unsupported")
     if format_profile is PluginFormatProfile.AGENT_PLUGINS_1:
         rendered: RenderedPortablePlugin = build_portable_plugin_plan(
             mcp_ownership=mcp_ownership,
@@ -776,6 +810,7 @@ def render_cursor_plugin(
         route_profile=route_profile,
         yoetz_launcher=resolved_yoetz_launcher,
         isolation_root=resolved_isolation_root,
+        observation_profile=observation_profile,
     )
     plan = PortablePluginPlan(
         name="yoetz",
@@ -784,7 +819,11 @@ def render_cursor_plugin(
         format_profile=PluginFormatProfile.CURSOR_PLUGIN_NATIVE,
         mcp_ownership=mcp_ownership,
         mcp_route_profile=route_profile,
-        host_extension_profile=CURSOR_NATIVE_PROFILE_ID,
+        host_extension_profile=(
+            CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
+            if observation_profile == "ordinary"
+            else CURSOR_NATIVE_PROFILE_ID
+        ),
         specification_version="1.0.0",
         renderer_version=_RENDERER_VERSION,
         source_refs=tuple(
@@ -905,15 +944,23 @@ def _load_object(data: bytes) -> Mapping[str, JsonValue] | None:
     return cast(Mapping[str, JsonValue], value) if isinstance(value, Mapping) else None
 
 
+def _hook_mapping_version_for_artifact(artifact: CursorPluginArtifact) -> str | None:
+    """Return the exact mapping bound into a native artifact, if any."""
+
+    if artifact.plan.format_profile is not PluginFormatProfile.CURSOR_PLUGIN_NATIVE:
+        return None
+    return (
+        CURSOR_ORDINARY_HOOK_MAPPING_VERSION
+        if artifact.plan.host_extension_profile == CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
+        else CURSOR_HOOK_MAPPING_VERSION
+    )
+
+
 def _marker(artifact: CursorPluginArtifact) -> bytes:
     body: dict[str, JsonValue] = {
         "artifact_digest": artifact.artifact_digest,
         "format_profile": artifact.plan.format_profile.value,
-        "hook_mapping_version": (
-            CURSOR_HOOK_MAPPING_VERSION
-            if artifact.plan.format_profile is PluginFormatProfile.CURSOR_PLUGIN_NATIVE
-            else None
-        ),
+        "hook_mapping_version": _hook_mapping_version_for_artifact(artifact),
         "managed_files": [
             {"relative_path": item.relative_path, "sha256": item.sha256, "size": item.size}
             for item in artifact.plan.inventory

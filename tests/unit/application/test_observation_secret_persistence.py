@@ -55,6 +55,7 @@ from yoetz.observability.privacy import PersistenceScanResult
 from yoetz.ports.check_sandbox import CheckSandboxLaunch, CheckSandboxStatus
 from yoetz.ports.objects import ObjectMetadata, ObjectRef, ObjectSource
 from yoetz.ports.workspace_inspect import InspectedArtifact
+from yoetz.protocol.canonical import canonical_encode
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 
 _TASK = "tsk_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -259,6 +260,67 @@ async def test_observation_capture_binds_inner_bytes_and_deleted_object_weakens(
         captured_content=replay[0],
     )
     assert any(item.role.startswith("captured_") for item in replay_only.drafts)
+
+
+@pytest.mark.anyio
+async def test_capture_rejects_noncanonical_inner_media_without_staging(
+    tmp_path: Path,
+) -> None:
+    """Native captured-content ingress only persists canonical ``text/plain`` chunks."""
+
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": "task_obs", "owner_generation": "1"})
+    store = SqliteObservationStore(db)
+    objects = _CapturingObjects()
+    coordinator = _coordinator(tmp_path, objects)
+    runtime = SimpleNamespace(task_id=_TASK, objects=objects)
+    envelope = _observation_envelope()
+    invalid = ObservationContentChunk(
+        ObservationContentKind.TOOL_OUTPUT,
+        "call-302",
+        _COMMITMENT,
+        "application/json",
+        0,
+        1,
+        b'{"ok":true}',
+    )
+
+    manifests, replay, redacted, unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=envelope,
+        chunks=(invalid,),
+    )
+
+    assert manifests == ()
+    assert replay == ()
+    assert redacted is False
+    assert unavailable is True
+    assert objects.payloads == []
+
+    valid = replace(invalid, media_type="text/plain", content=b"captured")
+    manifests, _, _, unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=envelope,
+        chunks=(valid,),
+    )
+    assert len(manifests) == 1
+    assert unavailable is False
+    wrapped = json.loads(objects.object_payloads[manifests[0].object_id])
+    wrapped["media_type"] = "application/json"
+    objects.object_payloads[manifests[0].object_id] = canonical_encode(wrapped)
+    recovered, _, _, unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=envelope,
+        chunks=(),
+    )
+    assert recovered == ()
+    assert unavailable is True
 
 
 @pytest.mark.anyio

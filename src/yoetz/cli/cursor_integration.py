@@ -83,7 +83,11 @@ def _emit(value: dict[str, object], *, json_output: bool) -> None:
 
 
 def plugin_artifact(
-    format_name: str, ownership_name: str, route_name: str | None
+    format_name: str,
+    ownership_name: str,
+    route_name: str | None,
+    *,
+    observation_profile: str = "structural",
 ) -> CursorPluginArtifact:
     formats = {
         "native": PluginFormatProfile.CURSOR_PLUGIN_NATIVE,
@@ -111,11 +115,19 @@ def plugin_artifact(
             if ownership is McpOwnership.PLUGIN_MANAGED
             else "cursor_mcp_route_forbidden"
         )
+    if observation_profile not in {"structural", "ordinary"}:
+        raise ValueError("cursor_observation_profile_invalid")
+    if (
+        observation_profile == "ordinary"
+        and format_profile is not PluginFormatProfile.CURSOR_PLUGIN_NATIVE
+    ):
+        raise ValueError("cursor_observation_profile_unsupported")
     return render_cursor_plugin(
         format_profile,
         mcp_ownership=ownership,
         route_profile=route,
         yoetz_launcher=_invoking_launcher(),
+        observation_profile=cast(Literal["structural", "ordinary"], observation_profile),
     )
 
 
@@ -199,6 +211,7 @@ def run_cursor_plugin_command(
     preview_digest: str | None,
     accept: bool,
     json_output: bool,
+    observation_profile: str = "structural",
     _state: Path | None = None,
     _presence: ArtifactUserPresencePort | None = None,
 ) -> int:
@@ -214,12 +227,26 @@ def run_cursor_plugin_command(
         sys.stderr.write("cursor_plugin_command_invalid\n")
         return 2
     try:
-        artifact = plugin_artifact(format_name, ownership_name, route_profile)
+        artifact = plugin_artifact(
+            format_name, ownership_name, route_profile, observation_profile=observation_profile
+        )
         target = CursorPluginTarget(str(cursor_config_root.expanduser().absolute()))
         project = None if project_root is None else project_root.expanduser().absolute()
         status = status_cursor_plugin(target, artifact, project_root=project)
         if command == "status":
-            _emit(_status_body(status), json_output=json_output)
+            _emit(
+                {
+                    **_status_body(status),
+                    "requested_observation_profile": artifact.plan.host_extension_profile,
+                    "installed_observation_profile": (
+                        artifact.plan.host_extension_profile
+                        if status.marker_valid
+                        and status.installed_digest == artifact.artifact_digest
+                        else None
+                    ),
+                },
+                json_output=json_output,
+            )
             return 0
 
         request = _request(request_value)
@@ -259,6 +286,7 @@ def run_cursor_plugin_command(
                         else None
                     ),
                     "artifact_digest": preview.artifact_digest,
+                    "observation_profile": artifact.plan.host_extension_profile,
                     "authorization": {
                         "operation": "plugin_artifact_apply",
                         "prepare_command": [
@@ -329,6 +357,7 @@ def run_cursor_plugin_command(
                     else None
                 ),
                 "artifact_digest": result.artifact_digest,
+                "requested_observation_profile": artifact.plan.host_extension_profile,
                 "changed_files": list(result.changed_files),
                 "format_profile": result.format_profile.value,
                 "installed_digest": result.installed_digest,

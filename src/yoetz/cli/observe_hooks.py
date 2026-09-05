@@ -73,6 +73,13 @@ from yoetz.domain.observation import (
     observation_ingest_request_to_json,
     observation_ingest_result_from_json,
 )
+from yoetz.domain.observation_profiles import (
+    CLAUDE_CODE_ORDINARY_HOOK_MAPPING_VERSION,
+    CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+    CURSOR_ORDINARY_HOOK_MAPPING_VERSION,
+    CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+    content_capture_profile_matches_source,
+)
 from yoetz.domain.values import (
     JsonObject,
     Timestamp,
@@ -85,7 +92,12 @@ from yoetz.ports.integrations import (
     YOETZ_WORKFLOW_TOOL_NAMES,
     observation_pairing_contract,
 )
-from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
+from yoetz.protocol.canonical import (
+    JsonValue,
+    canonical_digest,
+    canonical_encode,
+    strict_json_parse,
+)
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode
 
 if TYPE_CHECKING:
@@ -112,6 +124,7 @@ SUPPORTED_HOOK_EVENTS: Final = frozenset(
         "PreToolUse",
         "PostToolUse",
         "PermissionRequest",
+        "PermissionDecision",
         "PreCompact",
         "PostCompact",
         "SubagentStart",
@@ -851,7 +864,11 @@ def _visible_content_chunks(
         add(
             ObservationContentKind.TOOL_OUTPUT,
             "tool-output",
-            payload.get("tool_response") or payload.get("tool_output") or payload.get("output"),
+            payload.get("tool_response")
+            or payload.get("tool_output")
+            or payload.get("output")
+            or payload.get("result")
+            or payload.get("result_json"),
         )
     elif event_name not in SUPPORTED_HOOK_EVENTS:
         # Unknown host events are retained only when the host marks their
@@ -1007,6 +1024,7 @@ async def _try_service_ingest(
     envelope: ObservationEnvelope,
     *,
     content_chunks: tuple[ObservationContentChunk, ...] = (),
+    content_capture_profile: str | None = None,
     deadline_ms: int,
 ) -> ObservationIngestResult:
     """Attempt one typed ingest through an already-open preflight client."""
@@ -1019,6 +1037,7 @@ async def _try_service_ingest(
                 codex_session_id=codex_session_id,
                 envelope=envelope,
                 content_chunks=content_chunks,
+                content_capture_profile=content_capture_profile,
             )
         )
         raw = await client.observation_ingest(body, deadline_ms=deadline_ms)
@@ -1055,6 +1074,7 @@ async def _drain_outbox(
     workspace_commitment: str,
     codex_session_id: str,
     content_by_source_identity: Mapping[str, tuple[ObservationContentChunk, ...]] | None = None,
+    content_capture_profile: str | None = None,
     connect: HookDrainConnector | None = None,
     event_name: str = "drain",
     _state: Path | None = None,
@@ -1075,12 +1095,22 @@ async def _drain_outbox(
 
     with store.drain_lease(workspace_commitment) as owned:
         if not owned:
+            if content_by_source_identity:
+                # Native content chunks are intentionally absent from the
+                # durable outbox. A concurrent drain therefore cannot replay
+                # this hook's bytes; make that loss visible even though the
+                # structural row continues through the other owner.
+                store.note_coverage_gap(
+                    workspace_commitment,
+                    ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                )
             return
         await _drain_outbox_leased(
             store,
             workspace_commitment=workspace_commitment,
             codex_session_id=codex_session_id,
             content_by_source_identity=content_by_source_identity,
+            content_capture_profile=content_capture_profile,
             connect=connect,
             event_name=event_name,
             _state=_state,
@@ -1096,6 +1126,7 @@ async def _drain_outbox_leased(
     workspace_commitment: str,
     codex_session_id: str,
     content_by_source_identity: Mapping[str, tuple[ObservationContentChunk, ...]] | None = None,
+    content_capture_profile: str | None = None,
     connect: HookDrainConnector | None = None,
     event_name: str = "drain",
     _state: Path | None = None,
@@ -1123,6 +1154,11 @@ async def _drain_outbox_leased(
 
     all_pending = store.list_pending_outbox_rows(workspace_commitment)
     if not all_pending:
+        if content_by_source_identity:
+            store.note_coverage_gap(
+                workspace_commitment,
+                ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+            )
         return
 
     connector = cast(HookDrainConnector, _connect_service()) if connect is None else connect
@@ -1133,6 +1169,11 @@ async def _drain_outbox_leased(
         )
     except Exception:
         record_hook_diagnostic("drain_preflight_failed", event_name, _state=_state)
+        if content_by_source_identity:
+            store.note_coverage_gap(
+                workspace_commitment,
+                ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+            )
         return
     # The budget clock starts after the connect: the preflight bounds connect
     # time on its own, and charging a slow-but-successful connect against the
@@ -1219,11 +1260,17 @@ async def _drain_outbox_leased(
                         row.codex_session_id,
                         row.envelope,
                         content_chunks=chunks,
+                        content_capture_profile=content_capture_profile,
                         deadline_ms=max(1, int(remaining * 1_000)),
                     ),
                     timeout=remaining,
                 )
             except TimeoutError:
+                if chunks:
+                    store.note_coverage_gap(
+                        workspace_commitment,
+                        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                    )
                 if progressed == 0:
                     record_hook_diagnostic("drain_budget_exhausted", event_name, _state=_state)
                 break
@@ -1256,6 +1303,11 @@ async def _drain_outbox_leased(
                         store.acknowledge_outbox_row(workspace_commitment, attempted)
                         progressed += 1
             if attempted is None:
+                if chunks:
+                    store.note_coverage_gap(
+                        workspace_commitment,
+                        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                    )
                 continue
             if decision.reason is not None and not expected_backpressure:
                 record_hook_diagnostic(decision.reason, event_name, _state=_state)
@@ -2047,6 +2099,8 @@ def handle_observe(
     source: ObservationSource = ObservationSource.CODEX_HOOK,
     _output_event_name: str | None = None,
     _session_lock_owned: bool = False,
+    _content_capture_profile: str | None = None,
+    _content_payload: Mapping[str, JsonValue] | None = None,
 ) -> int:
     """Bounded observation ingress for Codex lifecycle hooks. Always exits 0.
 
@@ -2148,12 +2202,13 @@ def handle_observe(
                         queue_mapping_clear(clear_session_id, _state=_state)
             except Exception:
                 pass
+        capture_authority_known = True
         try:
             capture_enabled = store.runtime_enabled()
         except TimeoutError:
-            # Store-lock contention says nothing about the gate itself.
-            # Fall back to the missing-marker default (enabled) instead of
-            # discarding the event; consent still gates every ingest below.
+            # Retain structural activity on contention, but unknown runtime
+            # authority must never permit extracting or forwarding plaintext.
+            capture_authority_known = False
             _stderr_line("hook_observe_degraded: runtime_gate_contended")
             record_hook_diagnostic("runtime_gate_contended", resolved_event, _state=_state)
             capture_enabled = True
@@ -2374,15 +2429,43 @@ def handle_observe(
                 gap_codes=tuple(sorted(set(gap_codes), key=str.encode)),
                 source=source,
             )
-            # Cursor publishes structural observation only. Its hook payloads
-            # contain prompts, responses, transcript paths, file contents, and
-            # MCP arguments/results that must never enter Yoetz content capture.
-            if source in {ObservationSource.CLAUDE_HOOK, ObservationSource.CURSOR_HOOK}:
+            # Native host content requires both the explicit profile argument
+            # emitted by the rendered artifact and the matching user consent
+            # arm.  Old/native structural hooks therefore remain contentless;
+            # Codex's historical session-stream path keeps its prior behavior.
+            native_content_source = source in {
+                ObservationSource.CLAUDE_HOOK,
+                ObservationSource.CURSOR_HOOK,
+            }
+            content_authorized = capture_authority_known and not native_content_source
+            if native_content_source:
+                content_authorized = (
+                    capture_authority_known
+                    and _content_capture_profile is not None
+                    and content_capture_profile_matches_source(
+                        source.value, _content_capture_profile
+                    )
+                    and _content_capture_profile in consent.content_capture_profiles
+                )
+                if (
+                    capture_authority_known
+                    and _content_capture_profile is not None
+                    and not content_authorized
+                ):
+                    gap_codes.append(ObservationGapCode.CONTENT_UNSELECTED.value)
+            if not capture_authority_known:
+                gap_codes.append(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
+            if tuple(sorted(set(gap_codes), key=str.encode)) != envelope.gap_codes:
+                envelope = replace(
+                    envelope,
+                    gap_codes=tuple(sorted(set(gap_codes), key=str.encode)),
+                )
+            if not content_authorized:
                 content_chunks, content_truncated = (), False
             else:
                 content_chunks, content_truncated = _visible_content_chunks(
                     resolved_event,
-                    payload,
+                    payload if _content_payload is None else _content_payload,
                     envelope=envelope,
                     workspace_locator=workspace_locator,
                 )
@@ -2397,6 +2480,7 @@ def handle_observe(
                     ),
                 )
             content_map = {envelope.source_identity: content_chunks} if content_chunks else None
+            service_content_profile = _content_capture_profile if content_authorized else None
 
             # Local durable ingest and pairing admission share one store lock.
             # The returned envelope is authoritative: a paired orphan's gap is
@@ -2412,6 +2496,14 @@ def handle_observe(
                 is_pre_event=_is_pre_event(resolved_event),
                 is_post_event=_is_post_event(resolved_event),
             )
+            if content_chunks and local_result.disposition.value != "accepted":
+                # The plaintext chunks have no durable retry carrier. A local
+                # cursor/consent rejection therefore needs the same explicit
+                # omission signal as a service delivery failure.
+                store.note_coverage_gap(
+                    workspace_commitment,
+                    ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                )
             # A Yoetz-owned tool call is delivered only when it carries evidence
             # the service does not already hold from serving it (#564); the
             # envelope itself is always retained locally above.
@@ -2624,6 +2716,7 @@ def handle_observe(
                                     workspace_commitment=workspace_commitment,
                                     codex_session_id=codex_session_id,
                                     content_by_source_identity=content_map,
+                                    content_capture_profile=service_content_profile,
                                     connect=cast(HookDrainConnector | None, connect),
                                     event_name=resolved_event,
                                     _state=_state,
@@ -2705,6 +2798,7 @@ def handle_observe(
                     workspace_commitment=workspace_commitment,
                     codex_session_id=codex_session_id,
                     content_by_source_identity=content_map,
+                    content_capture_profile=service_content_profile,
                     connect=cast(HookDrainConnector | None, connect),
                     event_name=resolved_event,
                     _state=_state,
@@ -2753,7 +2847,13 @@ def handle_observe(
             and not skip_advice_loop
             and not stop_already_active
             and (
-                source is not ObservationSource.CURSOR_HOOK or _output_event_name == "sessionStart"
+                source is not ObservationSource.CURSOR_HOOK
+                or _output_event_name == "sessionStart"
+                or (
+                    _output_event_name == "postToolUse"
+                    and payload.get("capability_profile_id")
+                    == CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
+                )
             )
         )
         delivery_gate = (
@@ -2893,6 +2993,222 @@ def _claude_capability_profile_id(claude_version: object) -> str | None:
 
 _CLAUDE_CHECK_TOOL_NAMES: Final = frozenset({"mcp__yoetz__check", "mcp__plugin_yoetz_yoetz__check"})
 
+_NATIVE_OUTCOME_JSON_BYTES: Final = 65_536
+_NATIVE_SUCCESS_STATUSES: Final = frozenset(
+    {"complete", "completed", "ok", "passed", "success", "succeeded"}
+)
+_NATIVE_FAILURE_STATUS_MAP: Final = MappingProxyType(
+    {
+        "aborted": "aborted",
+        "canceled": "cancelled",
+        "cancelled": "cancelled",
+        "denied": "denied",
+        "error": "error",
+        "errored": "error",
+        "failed": "failure",
+        "failure": "failure",
+        "interrupted": "interrupted",
+        "nonzero": "nonzero_exit",
+        "nonzero_exit": "nonzero_exit",
+        "permission_denied": "denied",
+        "timed_out": "timeout",
+        "timeout": "timeout",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _NativeOutcomeFacts:
+    """Closed outcome facts extracted from a native host result.
+
+    Host result objects are untrusted and may contain arbitrary prose.  This
+    value retains only booleans, a bounded process exit code, and a closed
+    result token.  ``success=None`` deliberately means that the host did not
+    provide enough outcome evidence to call the operation successful.
+    """
+
+    success: bool | None
+    denied: bool
+    exit_status: int | None
+    result_status: str | None
+
+
+def _bounded_outcome_mapping(value: object) -> Mapping[str, JsonValue] | None:
+    """Return one bounded host result object, parsing JSON strings transiently."""
+
+    if isinstance(value, Mapping):
+        return cast(Mapping[str, JsonValue], value)
+    if type(value) is not str or not value:
+        return None
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    if len(encoded) > _NATIVE_OUTCOME_JSON_BYTES:
+        return None
+    try:
+        parsed = strict_json_parse(encoded)
+    except ProtocolValueError, TypeError, ValueError:
+        return None
+    return cast(Mapping[str, JsonValue], parsed) if isinstance(parsed, Mapping) else None
+
+
+def _native_outcome_mappings(
+    payload: Mapping[str, JsonValue],
+) -> tuple[Mapping[str, JsonValue], ...]:
+    """Collect top-level and one bounded layer of documented result wrappers."""
+
+    mappings: list[Mapping[str, JsonValue]] = [payload]
+    for key in ("tool_response", "tool_output", "result", "result_json"):
+        mapping = _bounded_outcome_mapping(payload.get(key))
+        if mapping is None:
+            continue
+        mappings.append(mapping)
+        for nested_key in ("structuredContent", "structured_content", "data", "result"):
+            nested = _bounded_outcome_mapping(mapping.get(nested_key))
+            if nested is not None:
+                mappings.append(nested)
+    return tuple(mappings)
+
+
+def _native_outcome_facts(
+    payload: Mapping[str, JsonValue],
+    *,
+    force_failure: bool = False,
+    force_denied: bool = False,
+    require_process_exit: bool = False,
+) -> _NativeOutcomeFacts:
+    """Extract closed native outcome facts without retaining host prose.
+
+    Command-like tools require an explicit process exit when
+    ``require_process_exit`` is true. A host-level success flag or an
+    ``isError=false`` wrapper then proves tool delivery only, so the command
+    result stays unknown until an exit/status fact is present.
+    """
+
+    success_true = False
+    success_false = False
+    denied = force_denied
+    interrupted = False
+    error = False
+    error_false = False
+    unknown = False
+    partial = False
+    valid_exits: list[int] = []
+    invalid_exit = False
+    failure_status: str | None = "failure" if force_failure else None
+    success_status = False
+
+    for mapping in _native_outcome_mappings(payload):
+        for key in ("denied", "is_denied", "permission_denied"):
+            value = mapping.get(key)
+            if type(value) is bool and value:
+                denied = True
+        for key in (
+            "interrupted",
+            "is_interrupted",
+            "is_interrupt",
+            "isInterrupted",
+            "cancelled",
+            "canceled",
+            "is_cancelled",
+            "isCanceled",
+        ):
+            value = mapping.get(key)
+            if type(value) is bool and value:
+                interrupted = True
+        for key in ("is_error", "isError", "failed"):
+            value = mapping.get(key)
+            if type(value) is bool and value:
+                error = True
+            elif key in {"is_error", "isError"} and type(value) is bool:
+                error_false = True
+        for key in ("success", "ok"):
+            value = mapping.get(key)
+            if type(value) is bool:
+                success_true = success_true or value
+                success_false = success_false or not value
+        for key in ("exit_code", "exitCode", "exit_status", "exitStatus"):
+            if key not in mapping:
+                continue
+            value = mapping.get(key)
+            if type(value) is int and not isinstance(value, bool) and -1 <= value <= 255:
+                valid_exits.append(value)
+            else:
+                invalid_exit = True
+        for key in ("result_status", "status", "outcome", "failure_type"):
+            if key not in mapping:
+                continue
+            value = mapping.get(key)
+            if type(value) is not str:
+                if value is not None:
+                    unknown = True
+                continue
+            lowered = value.lower()
+            if lowered in _NATIVE_FAILURE_STATUS_MAP:
+                failure_status = _NATIVE_FAILURE_STATUS_MAP[lowered]
+                if failure_status == "denied":
+                    denied = True
+            elif lowered in _NATIVE_SUCCESS_STATUSES:
+                success_status = True
+            elif lowered in {"partial", "partially_completed"}:
+                partial = True
+            else:
+                # Keep an explicit unknown marker useful for materialization,
+                # while never copying an arbitrary host token or prose.
+                unknown = True
+        if "error" in mapping:
+            value = mapping.get("error")
+            if value not in (None, False, ""):
+                error = True
+
+    if denied:
+        failure_status = "denied"
+    elif interrupted:
+        failure_status = "interrupted"
+    elif error:
+        failure_status = "error"
+    elif valid_exits and any(value != 0 for value in valid_exits):
+        failure_status = "nonzero_exit"
+
+    if failure_status is not None:
+        return _NativeOutcomeFacts(
+            False,
+            denied,
+            next((value for value in valid_exits if value != 0), None),
+            failure_status,
+        )
+    if success_false:
+        return _NativeOutcomeFacts(
+            False,
+            denied,
+            valid_exits[0] if valid_exits else None,
+            "failure",
+        )
+    if partial:
+        return _NativeOutcomeFacts(
+            None,
+            denied,
+            valid_exits[0] if valid_exits else None,
+            "partial",
+        )
+    if invalid_exit:
+        return _NativeOutcomeFacts(None, denied, None, "unknown")
+    if valid_exits:
+        return _NativeOutcomeFacts(
+            all(value == 0 for value in valid_exits),
+            denied,
+            valid_exits[0],
+            "success" if all(value == 0 for value in valid_exits) else "nonzero_exit",
+        )
+    if require_process_exit:
+        return _NativeOutcomeFacts(None, denied, None, "unknown")
+    if unknown:
+        return _NativeOutcomeFacts(None, denied, None, "unknown")
+    if success_true or success_status or error_false:
+        return _NativeOutcomeFacts(True, denied, None, "success")
+    return _NativeOutcomeFacts(None, denied, None, None)
+
 
 def _record_claude_permission_denied(
     payload: Mapping[str, JsonValue], *, _state: Path | None
@@ -2926,13 +3242,15 @@ def handle_claude_observe(
     connect: ServiceConnector | None = None,
     run_async: AsyncRunner | None = None,
     skip_service: bool = False,
+    observation_profile: str | None = None,
 ) -> int:
-    """Normalize one Claude hook into structural-only Yoetz observation.
+    """Normalize one Claude hook into bounded Yoetz observation.
 
     The host payload can contain transcript/cwd paths, prompts, assistant text,
-    complete tool inputs/responses, and raw errors.  None crosses this boundary.
-    Only a closed lifecycle action, exact scoped Yoetz tool identity, bounded
-    correlation token, and host-derived success bit are retained.
+    complete tool inputs/responses, and raw errors.  Structural profiles retain
+    only the historical scoped Yoetz events.  The explicit ordinary profile
+    admits generic tool pre/post/failure events; content remains separately
+    gated by the matching user consent arm.
     """
 
     event_map = {
@@ -2942,6 +3260,31 @@ def handle_claude_observe(
         "SessionStart": "SessionStart",
         "Stop": "Stop",
     }
+    ordinary_profile = observation_profile == CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+    if observation_profile is not None and not ordinary_profile:
+        with contextlib.suppress(Exception):
+            record_hook_diagnostic(
+                "observation_profile_invalid", event_name or "unknown_event", _state=_state
+            )
+        with contextlib.suppress(BaseException):
+            hook_io.stdout_json({}, stdout)
+        return 0
+    if ordinary_profile:
+        # Generic tool hooks are authoritative.  Specialized filesystem and
+        # batch events stay out of this subscription until a common dedup
+        # contract proves that they add distinct work.
+        event_map.update(
+            {
+                "PermissionDenied": "PermissionDecision",
+                "PermissionRequest": "PermissionRequest",
+                "PreToolUse": "PreToolUse",
+                "PostToolUse": "PostToolUse",
+                "PostToolUseFailure": "PostToolUse",
+                # StopFailure is a per-turn API failure, not a lifecycle end.
+                # Keep the observation visible without fencing the session.
+                "StopFailure": "Stop",
+            }
+        )
     start_actions = {
         "startup": "claude_session_startup",
         "resume": "claude_session_resume",
@@ -2952,7 +3295,7 @@ def handle_claude_observe(
     try:
         payload = read_hook_payload(stdin_bytes)
         raw_event = event_name or payload.get("hook_event_name")
-        if raw_event == "PermissionDenied":
+        if raw_event == "PermissionDenied" and not ordinary_profile:
             # Not an observation of work: the host refused the call before Yoetz saw it. Retain
             # only a closed reason token; tool input, reason prose, cwd, and ids are discarded.
             _record_claude_permission_denied(payload, _state=_state)
@@ -2965,7 +3308,11 @@ def handle_claude_observe(
         if session is None or len(session) > _MAX_TOKEN_CHARS - len(_CLAUDE_SESSION_PREFIX):
             hook_io.stdout_json({}, stdout)
             return 0
-        capability_profile_id = _claude_capability_profile_id(payload.get("claude_code_version"))
+        capability_profile_id = (
+            CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+            if ordinary_profile
+            else _claude_capability_profile_id(payload.get("claude_code_version"))
+        )
         pairing_mode, correlation_kind = observation_pairing_contract(
             "claude", capability_profile_id
         )
@@ -2978,6 +3325,10 @@ def handle_claude_observe(
         }
         if capability_profile_id is not None:
             structural["capability_profile_id"] = capability_profile_id
+        if ordinary_profile:
+            # Keep the materialization cursor vocabulary stable while recording
+            # the exact host mapping used by this opt-in profile separately.
+            structural["mapping_hint"] = CLAUDE_CODE_ORDINARY_HOOK_MAPPING_VERSION
         if raw_event == "Stop" and payload.get("stop_hook_active") is True:
             structural["stop_hook_active"] = True
         if raw_event == "SessionStart":
@@ -2987,20 +3338,122 @@ def handle_claude_observe(
                 if type(source) is str and source in start_actions
                 else "claude_session"
             )
-        if raw_event in {"PostToolUse", "PostToolUseFailure"}:
-            tool_name = payload.get("tool_name")
-            if type(tool_name) is not str or _CLAUDE_SCOPED_TOOL_RE.fullmatch(tool_name) is None:
+        if ordinary_profile and raw_event == "PermissionRequest":
+            # Claude's documented PermissionRequest payload has no tool_use_id.
+            # Retain the event and any bounded tool name without manufacturing
+            # a call identity or pairing operation. The closed permission
+            # classification describes the host event and mints no work row.
+            tool_token = _token_or_none(payload.get("tool_name"))
+            if tool_token is not None:
+                structural["tool_name"] = tool_token
+            structural["action"] = "claude_permission_request"
+            structural["permission_decision"] = "requested"
+        if ordinary_profile and raw_event == "PreToolUse":
+            tool_token = _token_or_none(payload.get("tool_name"))
+            correlation = _token_or_none(payload.get("tool_use_id")) or _token_or_none(
+                payload.get("tool_call_id")
+            )
+            if tool_token is None or correlation is None:
+                with contextlib.suppress(Exception):
+                    record_hook_diagnostic(
+                        "claude_tool_identity_missing", event_map[raw_event], _state=_state
+                    )
                 hook_io.stdout_json({}, stdout)
                 return 0
-            structural["action"] = (
-                "claude_mcp_success" if raw_event == "PostToolUse" else "claude_mcp_failure"
+            structural["tool_name"] = tool_token
+            structural["tool_use_id"] = correlation
+            structural["action"] = "claude_tool_pending"
+            if _routine_read_action(payload):
+                structural["action"] = "routine_read"
+        if ordinary_profile and raw_event == "PermissionDenied":
+            tool_token = _token_or_none(payload.get("tool_name"))
+            correlation = _token_or_none(payload.get("tool_use_id")) or _token_or_none(
+                payload.get("tool_call_id")
             )
-            structural["success"] = raw_event == "PostToolUse"
-            structural["tool_name"] = tool_name
-            correlation = _token_or_none(payload.get("tool_use_id"))
+            if tool_token is None or correlation is None:
+                with contextlib.suppress(Exception):
+                    record_hook_diagnostic(
+                        "claude_tool_identity_missing", event_map[raw_event], _state=_state
+                    )
+                hook_io.stdout_json({}, stdout)
+                return 0
+            structural.update(
+                {
+                    "action": "claude_permission_denied",
+                    "denied": True,
+                    "permission_decision": "denied",
+                    "tool_name": tool_token,
+                    "tool_use_id": correlation,
+                }
+            )
+        if ordinary_profile and raw_event == "StopFailure":
+            structural["action"] = "claude_api_failure"
+            outcome = _native_outcome_facts(
+                payload,
+                force_failure=True,
+            )
+            structural["result_status"] = outcome.result_status or "error"
+        if raw_event in {"PostToolUse", "PostToolUseFailure"} or (
+            raw_event == "PermissionDenied" and not ordinary_profile
+        ):
+            tool_name = payload.get("tool_name")
+            if not ordinary_profile and (
+                type(tool_name) is not str or _CLAUDE_SCOPED_TOOL_RE.fullmatch(tool_name) is None
+            ):
+                hook_io.stdout_json({}, stdout)
+                return 0
+            tool_token = _token_or_none(tool_name)
+            if tool_token is None:
+                hook_io.stdout_json({}, stdout)
+                return 0
+            if ordinary_profile:
+                outcome = _native_outcome_facts(
+                    payload,
+                    force_failure=raw_event == "PostToolUseFailure",
+                    require_process_exit=(tool_token.lower() in _SHELL_TOOLS),
+                )
+                structural["action"] = (
+                    "claude_tool_success"
+                    if outcome.success is True
+                    else "claude_tool_failure"
+                    if outcome.success is False
+                    else "claude_tool_outcome_unknown"
+                )
+                if outcome.success is not None:
+                    structural["success"] = outcome.success
+                if outcome.denied:
+                    structural["denied"] = True
+                if outcome.exit_status is not None:
+                    structural["exit_status"] = outcome.exit_status
+                if outcome.result_status is not None:
+                    structural["result_status"] = outcome.result_status
+                if (
+                    _routine_read_action(payload)
+                    and outcome.success is not False
+                    and not outcome.denied
+                ):
+                    structural["action"] = "routine_read"
+            else:
+                structural["action"] = (
+                    "claude_mcp_success" if raw_event == "PostToolUse" else "claude_mcp_failure"
+                )
+                structural["success"] = raw_event == "PostToolUse"
+            structural["tool_name"] = tool_token
+            correlation = _token_or_none(payload.get("tool_use_id")) or _token_or_none(
+                payload.get("tool_call_id")
+            )
             if correlation is not None:
                 structural["tool_use_id"] = correlation
-            if raw_event == "PostToolUse" and tool_name == "mcp__plugin_yoetz_yoetz__start":
+            if not ordinary_profile:
+                result_status = _token_or_none(
+                    payload.get("result_status") or payload.get("failure_type")
+                )
+                if result_status is not None:
+                    structural["result_status"] = result_status
+                duration = _int_or_none(payload.get("duration_ms"))
+                if duration is not None:
+                    structural["duration_ms"] = duration
+            if raw_event == "PostToolUse" and tool_token == "mcp__plugin_yoetz_yoetz__start":
                 # Claude's observation envelope stays structural-only, but the
                 # successful start result is the sole authority that can bind
                 # this host session to the cooperative Yoetz task. Inspect the
@@ -3041,6 +3494,10 @@ def handle_claude_observe(
             skip_service=skip_service,
             source=ObservationSource.CLAUDE_HOOK,
             _output_event_name=raw_event,
+            _content_capture_profile=(
+                CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID if ordinary_profile else None
+            ),
+            _content_payload=payload if ordinary_profile else None,
         )
     except BaseException:
         with contextlib.suppress(BaseException):
@@ -3058,13 +3515,15 @@ def handle_cursor_observe(
     connect: ServiceConnector | None = None,
     run_async: AsyncRunner | None = None,
     skip_service: bool = False,
+    observation_profile: str | None = None,
 ) -> int:
-    """Normalize one Cursor hook into structural-only Yoetz observation.
+    """Normalize one Cursor hook into bounded Yoetz observation.
 
     Cursor supplies prompts, transcript paths, file paths/edits, MCP inputs/results,
     response text, email, and other user-controlled content in the same envelope.
-    This boundary copies none of those values. Only bounded identifiers, exact host/
-    model tokens, durations, booleans, and a one-way changed-path digest survive.
+    Structural profiles copy none of those values. The explicit ordinary profile
+    admits Cursor's generic tool lifecycle and keeps content behind its separate
+    consent arm.
     """
 
     event_map = {
@@ -3074,6 +3533,28 @@ def handle_cursor_observe(
         "sessionStart": "SessionStart",
         "stop": "Stop",
     }
+    ordinary_profile = observation_profile == CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
+    if observation_profile is not None and not ordinary_profile:
+        with contextlib.suppress(Exception):
+            record_hook_diagnostic(
+                "observation_profile_invalid", event_name or "unknown_event", _state=_state
+            )
+        with contextlib.suppress(BaseException):
+            hook_io.stdout_json({}, stdout)
+        return 0
+    if ordinary_profile:
+        # Cursor's generic tool events are the authoritative stream.  Shell,
+        # read-file, MCP and edit-specific hooks are deliberately supplemental
+        # and remain unsupported here until their overlap is proven distinct.
+        event_map.pop("afterFileEdit")
+        event_map.pop("afterMCPExecution")
+        event_map.update(
+            {
+                "preToolUse": "PreToolUse",
+                "postToolUse": "PostToolUse",
+                "postToolUseFailure": "PostToolUse",
+            }
+        )
     try:
         try:
             payload = read_cursor_hook_payload(stdin_bytes)
@@ -3133,7 +3614,11 @@ def handle_cursor_observe(
                 )
             return 0 if hook_io.stdout_json({}, stdout) else 0
         cursor_version = _token_or_none(payload.get("cursor_version"))
-        capability_profile_id = _cursor_capability_profile_id(cursor_version)
+        capability_profile_id = (
+            CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
+            if ordinary_profile
+            else _cursor_capability_profile_id(cursor_version)
+        )
         pairing_mode, correlation_kind = observation_pairing_contract(
             "cursor", capability_profile_id
         )
@@ -3152,11 +3637,22 @@ def handle_cursor_observe(
         }
         if capability_profile_id is not None:
             structural["capability_profile_id"] = capability_profile_id
-        for source_key, target_key in (
-            ("cursor_version", "cursor_version"),
-            ("generation_id", "generation_id"),
-            ("tool_name", "tool_name"),
-        ):
+        if ordinary_profile:
+            structural["mapping_hint"] = CURSOR_ORDINARY_HOOK_MAPPING_VERSION
+        identity_fields = (
+            (
+                ("cursor_version", "cursor_version"),
+                ("tool_use_id", "tool_call_id"),
+                ("tool_name", "tool_name"),
+            )
+            if ordinary_profile
+            else (
+                ("cursor_version", "cursor_version"),
+                ("generation_id", "correlation_id"),
+                ("tool_name", "tool_name"),
+            )
+        )
+        for source_key, target_key in identity_fields:
             value = _token_or_none(payload.get(source_key))
             if value is not None:
                 structural[target_key] = value
@@ -3175,6 +3671,39 @@ def handle_cursor_observe(
         duration = _int_or_none(payload.get("duration"))
         if duration is not None:
             structural["duration_ms"] = duration
+        if ordinary_profile and raw_event in {"postToolUse", "postToolUseFailure"}:
+            outcome = _native_outcome_facts(
+                payload,
+                force_failure=raw_event == "postToolUseFailure",
+                require_process_exit=(
+                    (_token_or_none(payload.get("tool_name")) or "").lower() in _SHELL_TOOLS
+                ),
+            )
+            structural["action"] = (
+                "cursor_tool_denied"
+                if outcome.denied
+                else "cursor_tool_success"
+                if outcome.success is True
+                else "cursor_tool_failure"
+                if outcome.success is False
+                else "cursor_tool_outcome_unknown"
+            )
+            if outcome.success is not None:
+                structural["success"] = outcome.success
+            if outcome.denied:
+                structural["denied"] = True
+            if outcome.exit_status is not None:
+                structural["exit_status"] = outcome.exit_status
+            if outcome.result_status is not None:
+                structural["result_status"] = outcome.result_status
+            if (
+                _routine_read_action(payload)
+                and outcome.success is not False
+                and not outcome.denied
+            ):
+                structural["action"] = "routine_read"
+        elif ordinary_profile and raw_event == "preToolUse":
+            structural["action"] = "cursor_tool_pending"
         path_value = payload.get("file_path")
         if raw_event == "afterFileEdit" and type(path_value) is str and path_value:
             store = LocalObservationStore(_state=_state)
@@ -3201,6 +3730,10 @@ def handle_cursor_observe(
             skip_service=skip_service,
             source=ObservationSource.CURSOR_HOOK,
             _output_event_name=raw_event,
+            _content_capture_profile=(
+                CURSOR_ORDINARY_OBSERVATION_PROFILE_ID if ordinary_profile else None
+            ),
+            _content_payload=payload if ordinary_profile else None,
         )
     except BaseException:
         with contextlib.suppress(BaseException):

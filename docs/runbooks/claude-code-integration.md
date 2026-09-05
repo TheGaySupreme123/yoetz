@@ -187,8 +187,53 @@ the new pair can fall through its legacy opaque branch.
 
 Claude Code remains structural-only for issue #302: the scoped hook path discards raw prompt,
 result, transcript, path, and error content before storage and therefore cannot mint
-`observation_captured` evidence. Any future content-bearing profile is a separate capability and
-privacy decision with its own fixture and consent proof.
+`observation_captured` evidence. Content-bearing profiles are separate capability and privacy
+decisions with their own fixture and consent proof; the explicitly opted-in profile below is the
+ordinary-work decision for this release.
+
+The default structural artifact keeps that boundary. An explicitly rendered ordinary-work
+artifact uses the neutral profile id `claude-code-ordinary-observation-v1` and subscribes to
+Claude's generic `PreToolUse`, `PostToolUse`, and `PostToolUseFailure` events plus lifecycle and
+permission/API-failure signals. It does not subscribe to `FileChanged` or `PostToolBatch` until a
+deduplication contract proves those signals add distinct work. The hook command carries the exact
+profile id with `--observation-profile`; the id is a mapping contract, not a claim about the
+installed Claude version.
+
+The [Claude hook contract](https://code.claude.com/docs/en/hooks) keeps permission
+requests separate from tool execution. `PermissionRequest` has no tool-call identifier, so Yoetz
+retains an uncorrelated permission event without inventing a tool action. `PermissionDenied`
+reports auto-mode refusals; it does not cover manual dialog denial, deny rules, or a pre-tool hook
+blocking execution. `StopFailure` records an API-failed turn without ending the observed session,
+and emits no advice output. Cancellation and process outcomes are retained only when explicit
+native fields supply them; a successful shell tool call without an exit fact leaves command/test
+outcome unknown. These decisions do not add filesystem or batch observation.
+
+Select these hooks with `--observation-profile ordinary` on the existing Claude plugin
+preview/install/update/status commands, or on `yoetz integrate claude plugin export` for a
+development directory. Repeat the same profile when applying an exact preview. To return to
+scoped structural hooks, preview and apply an update with `--observation-profile structural`.
+Artifact selection does not grant content capture.
+Preview names the selected profile. Status reports the requested profile and confirms an installed
+profile only when its verified marker and artifact digest match; otherwise that installed value is
+unknown rather than inferred from the request.
+
+Native content remains a second, per-host consent arm. After granting structural observation, an
+operator can enable and later revoke it with the user-facing commands below:
+
+```text
+yoetz observe content-enable --workspace /exact/project \
+  --profile claude-code-ordinary-observation-v1
+yoetz observe content-status --workspace /exact/project --json
+yoetz observe content-disable --workspace /exact/project \
+  --profile claude-code-ordinary-observation-v1
+```
+
+The service accepts Claude chunks only when that exact profile is active in local consent and in
+the mapped task grant. A missing or mismatched profile drops plaintext chunks and records
+`content_capture_unavailable`; chunks are never retained in the structural outbox for later
+replay. The current installed Claude `2.1.261` probe is a candidate host fact only; it does not
+certify this ordinary profile without an exact isolated fixture and a receipt that separately
+proves native hook delivery, accepted content, semantic selection, and any resulting influence.
 
 Claude Code has no `codex exec --json` import surface. Issue #301's bounded import authorization
 therefore makes no Claude adapter change; Claude evidence continues through cooperative MCP and

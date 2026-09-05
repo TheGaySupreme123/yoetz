@@ -38,6 +38,8 @@ from yoetz.application.observation_materialize import (
 )
 from yoetz.domain.findings import Finding
 from yoetz.domain.observation import (
+    ObservationContentChunk,
+    ObservationContentKind,
     ObservationCursor,
     ObservationEnvelope,
     ObservationGapCode,
@@ -49,6 +51,7 @@ from yoetz.domain.observation import (
     observation_ingest_request_from_json,
     observation_ingest_request_to_json,
 )
+from yoetz.domain.observation_profiles import CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
 from yoetz.domain.values import Frontier, JsonObject, Timestamp, finding_id
 from yoetz.ports.ledger import CheckPhase, OperationKind, OperationRecord, OperationState
 from yoetz.ports.runtime import TaskRuntime
@@ -1572,7 +1575,7 @@ def test_local_outbox_v1_compatibility_and_v2_attempt_round_trip(tmp_path: Path)
     assert durable.last_attempt_at == attempted_at
     assert durable.consecutive_reason_attempts == 1
     assert json.loads(state_path.read_text(encoding="utf-8"))["schema"] == (
-        "yoetz.observation-local/11"
+        "yoetz.observation-local/13"
     )
 
     raw = json.loads(state_path.read_text(encoding="utf-8"))
@@ -1729,7 +1732,7 @@ def test_size_compaction_accounts_for_distinct_same_source_rows(
     # /11 persists pairing-history provenance, adding a small fixed envelope to
     # the compacted authority state. Keep the bound tight while allowing that
     # required marker to fit after both outbox rows are accounted for.
-    monkeypatch.setattr(local_mod, "_MAX_STATE_BYTES", 2_150)
+    monkeypatch.setattr(local_mod, "_MAX_STATE_BYTES", 2_400)
 
     store.note_coverage_gap(workspace, ObservationGapCode.SERVICE_UNAVAILABLE.value)
 
@@ -1742,7 +1745,7 @@ def test_size_compaction_accounts_for_distinct_same_source_rows(
         + int(persisted["quarantine_evicted_count"])
     )
     assert accounted == 2
-    assert state_path.stat().st_size <= 2_150
+    assert state_path.stat().st_size <= 2_400
 
 
 def test_monotonic_samples_fenced_across_simulated_reboot(tmp_path: Path) -> None:
@@ -3655,6 +3658,142 @@ def _mapped_local(
         last_frontier=None,
     )
     return local, workspace, session, mapping
+
+
+@pytest.mark.anyio
+async def test_native_content_requires_matching_local_and_task_profile_grants(
+    tmp_path: Path,
+) -> None:
+    """Native chunks need the same explicit host profile at both consent boundaries."""
+
+    from types import SimpleNamespace
+
+    import apsw
+
+    codex_id = "native-content-profile"
+    local, workspace, session, mapping = _mapped_local(tmp_path, codex_id)
+    local.enable_content_capture(workspace, CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID)
+
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": mapping.yoetz_task_id, "owner_generation": "1"})
+    task_store = SqliteObservationStore(db)
+    runtime = SimpleNamespace(
+        task_id=mapping.yoetz_task_id,
+        session_id=mapping.yoetz_session_id,
+        writer_id=observation_writer_id(mapping.yoetz_task_id, mapping.yoetz_session_id),
+        observation=task_store,
+    )
+
+    class _RuntimePort:
+        def __init__(self) -> None:
+            self.disable_before_capture = False
+
+        async def route(self, command: object) -> object:
+            del command
+            if self.disable_before_capture:
+                self.disable_before_capture = False
+                # Model a queued request whose runtime gate is disabled after
+                # the coordinator's initial consent read but before capture.
+                local.set_runtime_enabled(False)
+            return runtime
+
+        async def release(self, released: object) -> None:
+            assert released is runtime
+
+    captured: list[tuple[ObservationContentChunk, ...]] = []
+
+    class _Coordinator(ObservationCoordinator):
+        async def _capture_content(  # type: ignore[override]
+            self, runtime: object, store: object, **kwargs: object
+        ) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...], bool, bool]:
+            del runtime, store
+            captured.append(cast(tuple[ObservationContentChunk, ...], kwargs["chunks"]))
+            return (), (), False, False
+
+        async def _append_materialized(  # type: ignore[override]
+            self, *args: object, **kwargs: object
+        ) -> None:
+            del args, kwargs
+            return None
+
+        async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+        async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+    runtime_port = _RuntimePort()
+    coordinator = _Coordinator(
+        runtime=runtime_port,  # type: ignore[arg-type]
+        local=local,
+        clock=object(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
+    chunk = ObservationContentChunk(
+        content_kind=ObservationContentKind.TOOL_OUTPUT,
+        correlation_identity="hook:native-content:tool-output",
+        source_commitment="hmac-sha256:" + "ab" * 32,
+        media_type="text/plain",
+        part_index=0,
+        part_count=1,
+        content=b"bounded native output",
+        redacted=False,
+    )
+
+    def request(
+        identity: str, *, profile: str | None = CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+    ) -> ObservationIngestRequest:
+        return ObservationIngestRequest(
+            codex_session_id=codex_id,
+            envelope=_envelope(
+                session=session,
+                kind="PostToolUse",
+                identity=identity,
+                ordinal=len(captured) + 1,
+                source=ObservationSource.CLAUDE_HOOK,
+            ),
+            content_chunks=(chunk,),
+            content_capture_profile=profile,
+        )
+
+    # A native request without the profile is retained structurally, but no
+    # plaintext chunk reaches the service capture hook and the gap is explicit.
+    omitted = await coordinator.ingest_request(request("hook:native-content-omitted", profile=None))
+    assert omitted.disposition is ObservationIngestDisposition.ACCEPTED
+    assert captured == [()]
+    assert (
+        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+        in task_store.list_envelopes(workspace)[0].gap_codes
+    )
+
+    selected = await coordinator.ingest_request(request("hook:native-content-selected"))
+    assert selected.disposition is ObservationIngestDisposition.ACCEPTED
+    assert captured[-1] == (chunk,)
+    assert task_store.content_capture_profiles(workspace) == (
+        CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+    )
+
+    mismatch = await coordinator.ingest_request(
+        request(
+            "hook:native-content-mismatch",
+            profile="cursor-ordinary-observation-v1",
+        )
+    )
+    assert mismatch.disposition is ObservationIngestDisposition.REJECTED
+    assert mismatch.reason == ObservationGapCode.CONTENT_CAPTURE_PROFILE_MISMATCH.value
+    assert captured[-1] == (chunk,)
+
+    # A direct/queued native request still admits its structural envelope, but
+    # the authoritative runtime fence blocks the plaintext capture path.
+    runtime_port.disable_before_capture = True
+    before_blocked_capture_count = len(captured)
+    queued = await coordinator.ingest_request(request("hook:native-content-runtime-off"))
+    assert queued.disposition is ObservationIngestDisposition.ACCEPTED
+    assert len(captured) == before_blocked_capture_count
+    retained = task_store.list_envelopes(workspace)
+    assert ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value in retained[-1].gap_codes
 
 
 @pytest.mark.anyio

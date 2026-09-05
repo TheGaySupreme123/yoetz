@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -10,7 +11,11 @@ import pytest
 import yoetz.service.ready_composition as ready_composition
 from builders.privacy_policies import local_only_policy
 from yoetz.adapters.providers.fake import scripted_success
-from yoetz.application.egress import PrivacyCoordinator, SemanticEgressSuccess
+from yoetz.application.egress import (
+    PrivacyCoordinator,
+    SemanticEgressBlocked,
+    SemanticEgressSuccess,
+)
 from yoetz.domain.findings import SemanticDispatchKind
 from yoetz.domain.privacy import (
     AuthorizationScope,
@@ -82,9 +87,11 @@ class _Audit:
 class _Gateway:
     def __init__(self) -> None:
         self.result = scripted_success(SemanticJudgment("no_material_discrepancy", ())).result
+        self.calls = 0
 
     async def dispatch_local_semantic(self, case: object, deadline: Deadline) -> object:
         del case, deadline
+        self.calls += 1
         return self.result
 
 
@@ -172,17 +179,21 @@ def _minimized() -> MinimizedDisclosure:
     )
 
 
-async def _dispatch(*, persist: bool) -> tuple[object, _Audit]:
+async def _dispatch(
+    *, persist: bool, dispatch_guard: Callable[[], Awaitable[bool] | bool] | None = None
+) -> tuple[object, _Audit, _Gateway]:
     binding = _binding()
     audit = _Audit(persist=persist)
+    gateway = _Gateway()
     coordinator = PrivacyCoordinator(
         cast(PrivacyPolicyStorePort, object()),
         cast(PrivacyClassifierPort, object()),
         cast(PrivacyAuditPort, audit),
-        cast(OutboundGatewayPort, _Gateway()),
+        cast(OutboundGatewayPort, gateway),
         cast(ClockPort, _Clock()),
         ready_composition.IdPort(),
     )
+    coordinator._semantic_dispatch_guard = dispatch_guard  # pyright: ignore[reportPrivateUsage]
     result = await coordinator._dispatch_approved(  # pyright: ignore[reportPrivateUsage]
         _candidate(binding),
         _effective(binding),
@@ -192,12 +203,12 @@ async def _dispatch(*, persist: bool) -> tuple[object, _Audit]:
         Deadline(_NOW + timedelta(minutes=1), 60.0),
         subject_digest=_SUBJECT_DIGEST,
     )
-    return result, audit
+    return result, audit, gateway
 
 
 @pytest.mark.anyio
 async def test_local_semantic_success_persists_receipt_and_finalizes_local_provenance() -> None:
-    result, audit = await _dispatch(persist=True)
+    result, audit, _gateway = await _dispatch(persist=True)
 
     assert isinstance(result, SemanticEgressSuccess)
     assert result.authorization_id is None
@@ -221,7 +232,7 @@ async def test_local_semantic_success_persists_receipt_and_finalizes_local_prove
 
 @pytest.mark.anyio
 async def test_local_semantic_success_fails_closed_when_receipt_is_not_durable() -> None:
-    result, audit = await _dispatch(persist=False)
+    result, audit, _gateway = await _dispatch(persist=False)
 
     assert isinstance(result, SemanticEgressSuccess)
     assert audit.authorize_calls == 0
@@ -235,7 +246,7 @@ async def test_local_semantic_success_fails_closed_when_receipt_is_not_durable()
 
 @pytest.mark.anyio
 async def test_external_semantic_success_still_requires_authority_and_request_commitment() -> None:
-    local, _audit = await _dispatch(persist=True)
+    local, _audit, _gateway = await _dispatch(persist=True)
     assert isinstance(local, SemanticEgressSuccess)
     external = replace(
         local,
@@ -260,3 +271,13 @@ async def test_external_semantic_success_still_requires_authority_and_request_co
     assert unbound.status is SemanticStatus.UNAVAILABLE
     assert unbound.reason is SemanticReason.RECEIPT_PERSISTENCE_UNKNOWN
     assert unbound.provenance is None
+
+
+@pytest.mark.anyio
+async def test_local_semantic_rechecks_content_fence_before_provider_call() -> None:
+    result, audit, gateway = await _dispatch(persist=True, dispatch_guard=lambda: False)
+
+    assert isinstance(result, SemanticEgressBlocked)
+    assert result.reason.value == "scope_mismatch"
+    assert audit.receipt is None
+    assert gateway.calls == 0

@@ -11,6 +11,7 @@ import base64
 import contextlib
 import dataclasses
 import errno
+import hashlib
 import os
 import re
 import stat
@@ -46,6 +47,10 @@ from yoetz.domain.observation import (
     observation_envelope_to_json,
     workspace_commitment_from_path,
 )
+from yoetz.domain.observation_profiles import (
+    is_content_capture_profile,
+    validate_content_capture_profile,
+)
 from yoetz.domain.values import (
     Frontier,
     JsonObject,
@@ -68,6 +73,7 @@ __all__ = [
     "HOOK_MAPPING_VERSION",
     "AdviceDelivery",
     "FrontierMotionNotice",
+    "LocalContentCaptureAuthority",
     "LocalObservationConsent",
     "LocalObservationStore",
     "ObservationOutboxRow",
@@ -136,6 +142,9 @@ _OBSERVATION_GAP_CODES: Final = frozenset(item.value for item in ObservationGapC
 _RUNTIME_GATE_SCHEMA: Final = "yoetz.observation-runtime-gate/1"
 _RUNTIME_GATE_NAME: Final = "runtime-gate.json"
 _MAX_RUNTIME_GATE_BYTES: Final = 256
+# A legacy runtime-gate marker has no persisted nonce.  It remains readable,
+# but it can never be confused with a nonce emitted by the current writer.
+_LEGACY_RUNTIME_GATE_GENERATION: Final = "sha256:" + "0" * 64
 # Never a legal character in an event-kind token. An interim build stamped
 # hook timing after the kind as ``<kind>|<...>``; the reader below still trims
 # it so such a value can never be mistaken for an event kind.
@@ -514,10 +523,64 @@ class LocalObservationConsent:
     granted_at: Timestamp
     revoked_at: Timestamp | None = None
     paused: bool = False
+    # Structural observation consent predates native ordinary-work capture.
+    # ``None`` is therefore meaningful: old grants must never be widened by a
+    # reader that learns about content profiles later.
+    content_capture_profiles: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        profiles = self.content_capture_profiles
+        if type(profiles) is not tuple or len(profiles) > 2:
+            raise ProtocolValueError("invalid_event_value_type")
+        if any(not is_content_capture_profile(profile) for profile in profiles):
+            raise ProtocolValueError("invalid_event_value_type")
+        if tuple(sorted(set(profiles), key=str.encode)) != profiles:
+            raise ProtocolValueError("invalid_event_value_type")
 
     @property
     def active(self) -> bool:
         return self.revoked_at is None and not self.paused
+
+
+@dataclass(frozen=True, slots=True)
+class LocalContentCaptureAuthority:
+    """The current local fence for the retained-content arm.
+
+    This snapshot contains no plaintext. Its generation and exact profile set
+    are read under the owner-private local-store lock and are rechecked by the
+    semantic service immediately before it opens an object or dispatches a
+    packet. The local store remains authoritative while task-bundle consent
+    propagation is pending.
+    """
+
+    workspace_commitment: str
+    generation: str
+    active: bool
+    revoked: bool
+    runtime_enabled: bool
+    profiles: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        try:
+            object.__setattr__(
+                self,
+                "workspace_commitment",
+                validate_commitment(self.workspace_commitment),
+            )
+            validate_sha256_digest(self.generation)
+        except (ProtocolValueError, TypeError, ValueError) as exc:
+            raise ProtocolValueError("invalid_event_value_type") from exc
+        if (
+            type(self.generation) is not str
+            or type(self.active) is not bool
+            or type(self.revoked) is not bool
+            or type(self.runtime_enabled) is not bool
+            or type(self.profiles) is not tuple
+            or len(self.profiles) > 2
+            or any(not is_content_capture_profile(profile) for profile in self.profiles)
+            or tuple(sorted(set(self.profiles), key=str.encode)) != self.profiles
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
 
 
 @dataclass(frozen=True, slots=True)
@@ -693,6 +756,12 @@ class _WorkspaceState:
     session_generations: dict[str, int] | None = None
     ended_session_generations: dict[str, int] | None = None
     pending_lifecycles: list[PendingSessionLifecycle] | None = None
+    # Opaque, durable nonce for the native content-consent arm.  This is
+    # separate from the human-readable consent fields because those fields
+    # can return to an earlier value (pause/resume and disable/enable).  A
+    # fresh nonce on every real authority transition prevents that ABA from
+    # revalidating an old semantic case.
+    content_capture_epoch: str | None = None
     quarantine_evicted_count: int = 0
     quarantine_reclaimed_count: int = 0
     quarantine_evicted_commitment: str | None = None
@@ -1092,6 +1161,58 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         session_generations=dict(state.session_generations or {}),
         ended_session_generations=dict(state.ended_session_generations or {}),
         pending_lifecycles=list(state.pending_lifecycles or ()),
+        content_capture_epoch=state.content_capture_epoch,
+    )
+
+
+def _new_content_capture_epoch() -> str:
+    """Create an unguessable persisted epoch for one consent authority."""
+
+    return "sha256:" + hashlib.sha256(os.urandom(_KEY_BYTES)).hexdigest()
+
+
+def _ensure_content_capture_epoch(state: _WorkspaceState) -> str:
+    """Return the state nonce, upgrading a pre-epoch state to a fresh one."""
+
+    epoch = state.content_capture_epoch
+    if type(epoch) is str:
+        try:
+            return validate_sha256_digest(epoch)
+        except ProtocolValueError, TypeError, ValueError:
+            pass
+    epoch = _new_content_capture_epoch()
+    state.content_capture_epoch = epoch
+    return epoch
+
+
+def _rotate_content_capture_epoch(state: _WorkspaceState) -> str:
+    """Advance the local content fence after a real authority transition."""
+
+    epoch = _new_content_capture_epoch()
+    state.content_capture_epoch = epoch
+    return epoch
+
+
+def _consent_generation(
+    consent: LocalObservationConsent,
+    *,
+    content_capture_epoch: str,
+    runtime_gate_generation: str,
+) -> str:
+    """Derive a fence token from the durable consent and runtime epochs."""
+
+    return canonical_digest(
+        JsonObject(
+            {
+                "content_capture_epoch": content_capture_epoch,
+                "granted_at": consent.granted_at.wire,
+                "paused": consent.paused,
+                "profiles": list(consent.content_capture_profiles),
+                "revoked_at": None if consent.revoked_at is None else consent.revoked_at.wire,
+                "runtime_gate_generation": runtime_gate_generation,
+                "workspace_commitment": consent.workspace_commitment,
+            }
+        )
     )
 
 
@@ -1107,6 +1228,22 @@ def _stream_profile_id_valid(profile_id: object) -> bool:
         and profile_id[0].isalnum()
         and all(char.isalnum() or char in "._+/-" for char in profile_id)
     )
+
+
+def _content_capture_profiles_from_json(row: Mapping[str, JsonValue]) -> tuple[str, ...]:
+    """Load the bounded plural consent arm, tolerating an early singular draft."""
+
+    raw = row.get("content_capture_profiles")
+    if raw is None:
+        legacy = row.get("content_capture_profile")
+        raw = () if legacy is None else (legacy,)
+    if not isinstance(raw, (tuple, list)):
+        return ()
+    profiles: list[str] = []
+    for value in cast(tuple[JsonValue, ...] | list[JsonValue], raw):
+        if type(value) is str and is_content_capture_profile(value):
+            profiles.append(value)
+    return tuple(sorted(set(profiles), key=str.encode))[:2]
 
 
 def _dedup_key(workspace: str, envelope: ObservationEnvelope) -> str:
@@ -1221,19 +1358,43 @@ class LocalObservationStore:
         The marker is synchronized when a fresh READY composition is built.  A
         missing marker preserves the typed configuration default (enabled);
         malformed or unsafe markers fail closed in :meth:`runtime_enabled`.
+
+        The runtime gate carries the nonce that participates in every content
+        fence.  Repeating the same value is a no-op so READY repair and restart
+        retries do not invalidate an unchanged in-flight review; an actual
+        transition gets a new nonce atomically with the enabled bit.
         """
 
         if type(enabled) is not bool:
             raise TypeError("observation_runtime_gate_invalid")
-        payload = (
-            canonical_encode(JsonObject({"schema": _RUNTIME_GATE_SCHEMA, "enabled": enabled}))
-            + b"\n"
-        )
         with self._lock:
-            _atomic_write(self._root / _RUNTIME_GATE_NAME, payload)
+            gate_path = self._root / _RUNTIME_GATE_NAME
+            marker_present = gate_path.exists() and not gate_path.is_symlink()
+            try:
+                current, _generation = self._runtime_gate_facts()
+            except PublicOperationError:
+                # Preserve the existing repair behavior for a malformed
+                # marker: the authorized service setter may replace it with a
+                # fresh, valid gate and a fresh fence nonce.
+                current = None
+            if marker_present and current is enabled:
+                return
+            payload = (
+                canonical_encode(
+                    JsonObject(
+                        {
+                            "enabled": enabled,
+                            "generation": _new_content_capture_epoch(),
+                            "schema": _RUNTIME_GATE_SCHEMA,
+                        }
+                    )
+                )
+                + b"\n"
+            )
+            _atomic_write(gate_path, payload)
 
-    def runtime_enabled(self) -> bool:
-        """Return the current service-synchronized capture gate, failing closed.
+    def _runtime_gate_facts(self) -> tuple[bool, str]:
+        """Read the enabled bit and fence nonce from one marker descriptor.
 
         Deliberately lock-free: the marker is a tiny owner-only file that
         :meth:`set_runtime_enabled` only ever replaces atomically, and every
@@ -1250,7 +1411,7 @@ class LocalObservationStore:
         try:
             descriptor = os.open(path, flags)
         except FileNotFoundError:
-            return True
+            return True, _LEGACY_RUNTIME_GATE_GENERATION
         except OSError as exc:
             message = (
                 "Observation runtime gate is unsafe."
@@ -1302,7 +1463,11 @@ class LocalObservationStore:
             ) from exc
         if (
             not isinstance(parsed, Mapping)
-            or set(parsed) != {"schema", "enabled"}
+            or set(parsed)
+            not in (
+                {"schema", "enabled"},
+                {"schema", "enabled", "generation"},
+            )
             or parsed.get("schema") != _RUNTIME_GATE_SCHEMA
             or type(parsed.get("enabled")) is not bool
         ):
@@ -1311,7 +1476,35 @@ class LocalObservationStore:
                 "Observation runtime gate is invalid.",
                 retryable=False,
             )
-        return cast(bool, parsed["enabled"])
+        raw_generation = parsed.get("generation")
+        if raw_generation is None:
+            generation = _LEGACY_RUNTIME_GATE_GENERATION
+        elif type(raw_generation) is str:
+            try:
+                generation = validate_sha256_digest(raw_generation)
+            except (ProtocolValueError, TypeError, ValueError) as exc:
+                raise _error(
+                    PublicErrorCode.STORAGE_UNSAFE,
+                    "Observation runtime gate is invalid.",
+                    retryable=False,
+                ) from exc
+        else:
+            raise _error(
+                PublicErrorCode.STORAGE_UNSAFE,
+                "Observation runtime gate is invalid.",
+                retryable=False,
+            )
+        return cast(bool, parsed["enabled"]), generation
+
+    def runtime_enabled(self) -> bool:
+        """Return the current service-synchronized capture gate, failing closed."""
+
+        return self._runtime_gate_facts()[0]
+
+    def runtime_gate_generation(self) -> str:
+        """Return the persisted runtime nonce without taking the store lock."""
+
+        return self._runtime_gate_facts()[1]
 
     def workspace_commitment(self, path: str) -> str:
         return workspace_commitment_from_path(self.key_material(), path)
@@ -1319,17 +1512,175 @@ class LocalObservationStore:
     def session_commitment(self, codex_session_id: str) -> str:
         return session_commitment_from_codex_id(self.key_material(), codex_session_id)
 
-    def grant_consent(self, workspace_commitment: str, granted_at: Timestamp | None = None) -> None:
+    def grant_consent(
+        self,
+        workspace_commitment: str,
+        granted_at: Timestamp | None = None,
+        *,
+        content_capture_profiles: tuple[str, ...] = (),
+    ) -> None:
+        if type(content_capture_profiles) is not tuple:
+            raise ProtocolValueError("invalid_event_value_type")
+        for profile in content_capture_profiles:
+            validate_content_capture_profile(profile)
         with self._lock:
             state = self._load(workspace_commitment)
             stamp = granted_at if granted_at is not None else _now()
-            state.consent = LocalObservationConsent(
+            next_consent = LocalObservationConsent(
                 workspace_commitment=workspace_commitment,
                 granted_at=stamp,
                 revoked_at=None,
                 paused=False,
+                content_capture_profiles=content_capture_profiles,
             )
+            if state.consent != next_consent:
+                _rotate_content_capture_epoch(state)
+            state.consent = next_consent
             self._save(workspace_commitment, state)
+
+    def enable_content_capture(self, workspace_commitment: str, profile: str) -> None:
+        """Explicitly enable one versioned native-host content profile.
+
+        This is a second consent arm.  A historical structural grant remains
+        contentless until this operation is performed, and a revoked grant can
+        never be re-enabled without a fresh structural grant.
+        """
+
+        validate_content_capture_profile(profile)
+        with self._lock:
+            state = self._load(workspace_commitment)
+            consent = state.consent
+            if consent is None:
+                raise _error(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "Observation consent is missing.",
+                    retryable=False,
+                )
+            if consent.revoked_at is not None:
+                raise _error(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "Observation consent is revoked.",
+                    retryable=False,
+                )
+            profiles = tuple(
+                sorted(
+                    {*consent.content_capture_profiles, profile},
+                    key=str.encode,
+                )
+            )
+            next_consent = dataclasses.replace(
+                consent,
+                content_capture_profiles=profiles,
+            )
+            if next_consent != consent:
+                _rotate_content_capture_epoch(state)
+            state.consent = next_consent
+            self._save(workspace_commitment, state)
+
+    def disable_content_capture(
+        self, workspace_commitment: str, profile: str | None = None
+    ) -> None:
+        """Disable one native-host content arm, or all arms when omitted."""
+
+        if profile is not None:
+            validate_content_capture_profile(profile)
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            consent = state.consent
+            if consent is None:
+                raise _error(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "Observation consent is missing.",
+                    retryable=False,
+                )
+            profiles = (
+                ()
+                if profile is None
+                else tuple(item for item in consent.content_capture_profiles if item != profile)
+            )
+            next_consent = dataclasses.replace(
+                consent,
+                content_capture_profiles=profiles,
+            )
+            if next_consent != consent:
+                _rotate_content_capture_epoch(state)
+            state.consent = next_consent
+            self._save(workspace_commitment, state)
+
+    def content_capture_profiles(self, workspace_commitment: str) -> tuple[str, ...]:
+        """Return the persisted content arms, including while observation is paused."""
+
+        with self._lock:
+            consent = self._load(workspace_commitment).consent
+            return () if consent is None else consent.content_capture_profiles
+
+    def content_capture_authority(
+        self, workspace_commitment: str
+    ) -> LocalContentCaptureAuthority | None:
+        """Read the authoritative local content fence under the store lock."""
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            prior_epoch = state.content_capture_epoch
+            content_capture_epoch = _ensure_content_capture_epoch(state)
+            if content_capture_epoch != prior_epoch:
+                self._save(workspace_commitment, state)
+            consent = state.consent
+            if consent is None:
+                return None
+            runtime_enabled, runtime_generation = self._runtime_gate_facts()
+            return LocalContentCaptureAuthority(
+                workspace_commitment=workspace_commitment,
+                generation=_consent_generation(
+                    consent,
+                    content_capture_epoch=content_capture_epoch,
+                    runtime_gate_generation=runtime_generation,
+                ),
+                active=consent.active,
+                revoked=consent.revoked_at is not None,
+                runtime_enabled=runtime_enabled,
+                profiles=consent.content_capture_profiles,
+            )
+
+    def content_capture_authority_is_current(
+        self,
+        workspace_commitment: str,
+        generation: str,
+        profiles: tuple[str, ...],
+    ) -> bool:
+        """Atomically test a previously read content fence against current consent."""
+
+        if (
+            type(generation) is not str
+            or not generation.startswith("sha256:")
+            or type(profiles) is not tuple
+        ):
+            return False
+        try:
+            validate_sha256_digest(generation)
+        except ProtocolValueError, TypeError, ValueError:
+            return False
+        with self._lock:
+            state = self._load(workspace_commitment)
+            prior_epoch = state.content_capture_epoch
+            content_capture_epoch = _ensure_content_capture_epoch(state)
+            if content_capture_epoch != prior_epoch:
+                self._save(workspace_commitment, state)
+            consent = state.consent
+            runtime_enabled, runtime_generation = self._runtime_gate_facts()
+            return (
+                consent is not None
+                and consent.active
+                and runtime_enabled
+                and _consent_generation(
+                    consent,
+                    content_capture_epoch=content_capture_epoch,
+                    runtime_gate_generation=runtime_generation,
+                )
+                == generation
+                and consent.content_capture_profiles == profiles
+            )
 
     def bind_session(self, workspace_commitment: str, session_commitment: str) -> None:
         with self._lock:
@@ -3742,12 +4093,16 @@ class LocalObservationStore:
                     "Observation consent is revoked.",
                     retryable=False,
                 )
-            state.consent = LocalObservationConsent(
+            next_consent = LocalObservationConsent(
                 workspace_commitment=consent.workspace_commitment,
                 granted_at=consent.granted_at,
                 revoked_at=consent.revoked_at,
                 paused=True,
+                content_capture_profiles=consent.content_capture_profiles,
             )
+            if next_consent != consent:
+                _rotate_content_capture_epoch(state)
+            state.consent = next_consent
             self._save(command.workspace_commitment, state)
             return self._status_unlocked(command.workspace_commitment)
 
@@ -3767,12 +4122,16 @@ class LocalObservationStore:
                     "Observation consent is revoked.",
                     retryable=False,
                 )
-            state.consent = LocalObservationConsent(
+            next_consent = LocalObservationConsent(
                 workspace_commitment=consent.workspace_commitment,
                 granted_at=consent.granted_at,
                 revoked_at=None,
                 paused=False,
+                content_capture_profiles=consent.content_capture_profiles,
             )
+            if next_consent != consent:
+                _rotate_content_capture_epoch(state)
+            state.consent = next_consent
             self._save(command.workspace_commitment, state)
             return self._status_unlocked(command.workspace_commitment)
 
@@ -3786,15 +4145,19 @@ class LocalObservationStore:
                     "Observation consent is missing.",
                     retryable=False,
                 )
-            revoked_at = (
+            revoked_at = consent.revoked_at or (
                 state.last_receipt if state.last_receipt is not None else consent.granted_at
             )
-            state.consent = LocalObservationConsent(
+            next_consent = LocalObservationConsent(
                 workspace_commitment=consent.workspace_commitment,
                 granted_at=consent.granted_at,
                 revoked_at=revoked_at,
                 paused=True,
+                content_capture_profiles=(),
             )
+            if next_consent != consent:
+                _rotate_content_capture_epoch(state)
+            state.consent = next_consent
             self._save(command.workspace_commitment, state)
             return self._status_unlocked(command.workspace_commitment)
 
@@ -4370,6 +4733,7 @@ class LocalObservationStore:
 
     def _state_to_json(self, workspace: str, state: _WorkspaceState) -> dict[str, JsonValue]:
         consent = state.consent
+        content_capture_epoch = _ensure_content_capture_epoch(state)
         assert state.session_workspaces is not None
         assert state.cursors is not None
         assert state.dedup is not None
@@ -4385,19 +4749,21 @@ class LocalObservationStore:
         assert state.codex_session_bindings is not None
         consent_json: JsonValue = None
         if consent is not None:
-            consent_json = JsonObject(
-                {
-                    "workspace_commitment": consent.workspace_commitment,
-                    "granted_at": consent.granted_at.wire,
-                    "revoked_at": None if consent.revoked_at is None else consent.revoked_at.wire,
-                    "paused": consent.paused,
-                }
-            )
+            consent_body: dict[str, JsonValue] = {
+                "workspace_commitment": consent.workspace_commitment,
+                "granted_at": consent.granted_at.wire,
+                "revoked_at": None if consent.revoked_at is None else consent.revoked_at.wire,
+                "paused": consent.paused,
+            }
+            if consent.content_capture_profiles:
+                consent_body["content_capture_profiles"] = consent.content_capture_profiles
+            consent_json = JsonObject(consent_body)
         payload: dict[str, JsonValue] = {
-            # /11 adds source/session/generation-scoped paired-profile orphan
-            # identities, retention provenance, and pairing-history fencing.
-            # /10 adds generation-fenced
-            # deferred host-session lifecycle intents.
+            # /13 adds durable content-consent and runtime-gate fence epochs after /12's
+            # explicit native-host content-consent arm, /11's
+            # source/session/generation-scoped paired-profile orphan identities,
+            # retention provenance, and pairing-history fencing. /10 adds
+            # generation-fenced deferred host-session lifecycle intents.
             # /9 generation-fences call-id pairing and stream file identity. /8
             # persisted unfenced call-id to tool-name pairing for rollout outputs.
             # /7 attributes dropped stream-partial gaps per session. /6 adds one-shot
@@ -4405,9 +4771,10 @@ class LocalObservationStore:
             # corruption-session tracking. /3 added quarantined_at per
             # quarantine entry and the reclaimed counter. Readers tolerate both directions:
             # unknown keys are ignored and missing keys default safely.
-            "schema": "yoetz.observation-local/11",
+            "schema": "yoetz.observation-local/13",
             "pairing_state_unknown": state.pairing_state_unknown,
             "workspace_commitment": workspace,
+            "content_capture_epoch": content_capture_epoch,
             "consent": consent_json,
             "session_workspaces": JsonObject(
                 {key: value for key, value in sorted(state.session_workspaces.items())}
@@ -4668,6 +5035,7 @@ class LocalObservationStore:
                 granted_at=Timestamp(str(row["granted_at"])),
                 revoked_at=None if revoked is None else Timestamp(str(revoked)),
                 paused=bool(row.get("paused", False)),
+                content_capture_profiles=_content_capture_profiles_from_json(row),
             )
         session_workspaces = {
             str(key): str(value)
@@ -5054,6 +5422,16 @@ class LocalObservationStore:
                 *(mark.recency_ordinal for mark in frontier_motion_delivered.values()),
             ]
         )
+        raw_content_capture_epoch = raw.get("content_capture_epoch")
+        content_capture_epoch = None
+        if type(raw_content_capture_epoch) is str:
+            try:
+                content_capture_epoch = validate_sha256_digest(raw_content_capture_epoch)
+            except ProtocolValueError, TypeError, ValueError:
+                # A malformed or absent epoch is upgraded to a fresh nonce on
+                # the next durable save.  It must never make an old fence
+                # current by falling back to consent fields alone.
+                content_capture_epoch = None
         state = _WorkspaceState(
             consent=consent,
             session_workspaces=session_workspaces,
@@ -5063,6 +5441,7 @@ class LocalObservationStore:
             session_generations=session_generations,
             ended_session_generations=ended_session_generations,
             pending_lifecycles=pending_lifecycles,
+            content_capture_epoch=content_capture_epoch,
             envelopes=envelopes,
             envelopes_truncated=envelopes_truncated,
             gaps=gap_history,

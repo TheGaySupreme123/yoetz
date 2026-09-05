@@ -19,6 +19,30 @@ An MCP host can impose a stronger process-local ceiling with
 durable policy is widened later. It is separate from the policy profiles below; see
 [Auto-approving an MCP route](auto-approving-agents.md).
 
+## Native work evidence is a separate choice
+
+The default host integration records structural observation. When you explicitly select a host's
+versioned ordinary-work artifact, it can also prepare bounded native content for that host. Selecting
+the artifact does not enable content capture. Content capture is a second, reversible choice for the
+same repository:
+
+```text
+yoetz observe content-enable --workspace /exact/project \
+  --profile claude-code-ordinary-observation-v1
+yoetz observe content-status --workspace /exact/project --json
+yoetz observe content-disable --workspace /exact/project \
+  --profile claude-code-ordinary-observation-v1
+```
+
+Status keeps the configured profiles separate from effective capture. A configured profile is the
+profile you selected; it is effective only while observation consent is active and the local runtime
+gate is enabled. Pausing observation or disabling the runtime gate preserves the configured choice
+but makes effective capture empty. Disabling a profile removes that configured choice.
+
+Native content capture and semantic review have separate authority. Enabling a host profile does not
+authorize external review, choose a provider, or permit any content to leave the computer. Semantic
+review still requires its own provider readiness and repository privacy decision described below.
+
 ## The four LLM privacy profiles
 
 `local_only`, `confirm_every_request`, `minimal_external`, `trusted_provider`.

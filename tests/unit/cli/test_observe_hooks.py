@@ -1078,7 +1078,7 @@ def test_pairing_history_fence_survives_a_pre11_writer_round_trip(tmp_path: Path
     )
     reopened.note_coverage_gap(workspace, ObservationGapCode.SERVICE_UNAVAILABLE.value)
     persisted = json.loads(state_path.read_text(encoding="utf-8"))
-    assert persisted["schema"] == "yoetz.observation-local/11"
+    assert persisted["schema"] == "yoetz.observation-local/12"
     assert persisted["pairing_state_unknown"] is True
     assert (
         ObservationGapCode.UNPAIRED_EVENT.value

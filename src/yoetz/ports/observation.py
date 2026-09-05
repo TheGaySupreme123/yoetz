@@ -78,7 +78,21 @@ class TaskObservationPort(Protocol):
     read back coverage, and record advice snapshots for one mapped task bundle.
     """
 
-    def grant_consent(self, workspace_commitment: str, granted_at: Timestamp) -> None: ...
+    def grant_consent(
+        self,
+        workspace_commitment: str,
+        granted_at: Timestamp,
+        *,
+        content_capture_profiles: tuple[str, ...] = (),
+    ) -> None: ...
+
+    def content_capture_profiles(self, workspace_commitment: str) -> tuple[str, ...]: ...
+
+    def enable_content_capture(self, workspace_commitment: str, profile: str) -> None: ...
+
+    def disable_content_capture(
+        self, workspace_commitment: str, profile: str | None = None
+    ) -> None: ...
 
     def bind_session(self, workspace_commitment: str, session_commitment: str) -> None: ...
 
