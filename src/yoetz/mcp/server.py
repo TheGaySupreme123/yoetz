@@ -24,7 +24,10 @@ from pydantic import AnyUrl, BaseModel, ValidationError
 
 from yoetz import __version__
 from yoetz.adapters.mcp_stdio import bounded_stdio_server
-from yoetz.cli.workspace_binding import MAX_WORKSPACE_LOCATOR_BYTES, canonical_workspace_locator
+from yoetz.adapters.workspace_binding import (
+    MAX_WORKSPACE_LOCATOR_BYTES,
+    canonical_workspace_locator,
+)
 from yoetz.config.load import load_config
 from yoetz.config.models import LoggingConfig
 from yoetz.mcp.descriptors import (

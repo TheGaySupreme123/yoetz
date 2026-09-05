@@ -30,6 +30,7 @@ from yoetz.adapters.integrations.observation_local import (
     LocalObservationStore,
     ObservationOutboxRow,
 )
+from yoetz.adapters.workspace_binding import canonical_workspace_locator
 from yoetz.application.observation_check_policy import load_observation_check_policy
 from yoetz.application.observation_drain import (
     EXPECTED_OBSERVATION_BACKPRESSURE_REASONS,
@@ -40,7 +41,6 @@ from yoetz.application.observation_drain import (
 from yoetz.application.observation_verification import run_bound_approved_check
 from yoetz.cli.exits import exit_code_for, remediation_message
 from yoetz.cli.hook_diagnostics import hook_diagnostic_summary
-from yoetz.cli.workspace_binding import canonical_workspace_locator
 from yoetz.config.paths import PathSafetyError
 from yoetz.domain.observation import (
     ObservationControlCommand,

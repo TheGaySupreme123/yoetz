@@ -36,6 +36,7 @@ from yoetz.adapters.integrations.observation_local import (
     ObservationOutboxRow,
     self_observation_deliverable,
 )
+from yoetz.adapters.workspace_binding import canonical_workspace_locator, resolve_workspace_locator
 from yoetz.cli import hook_io
 from yoetz.cli.hook_diagnostics import record_hook_diagnostic, record_hook_timing
 from yoetz.cli.hook_io import (
@@ -53,7 +54,6 @@ from yoetz.cli.hook_io import (
 from yoetz.cli.hook_io import (
     stderr_line as _stderr_line,
 )
-from yoetz.cli.workspace_binding import canonical_workspace_locator, resolve_workspace_locator
 from yoetz.domain.observation import (
     ObservationContentChunk,
     ObservationContentKind,
