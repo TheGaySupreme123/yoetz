@@ -82,10 +82,13 @@ from yoetz.application.semantic_attempts import (
     status_for_semantic_reason,
 )
 from yoetz.application.semantic_case import (
+    MAX_CAPTURED_SEMANTIC_CONTENT_PARTS,
+    MAX_CAPTURED_SEMANTIC_INPUT_BYTES,
     SemanticCaseTooLarge,
     build_semantic_case,
     semantic_case_to_candidate_context,
 )
+from yoetz.application.semantic_content import resolve_captured_semantic_content
 from yoetz.application.service import (
     ControlProjectionBinding,
     ReadyApplicationFactory,
@@ -2410,6 +2413,39 @@ def _privacy_gated_semantic_evaluator(
                     reason=SemanticReason.CONTENT_CATEGORY_NOT_AUTHORIZED.value,
                     request_id=frozen.lease.operation_id,
                 )
+            captured_content = ()
+            captured_content_scope = None
+            captured_content_gaps = ()
+            if (
+                runtime is not None
+                and "targeted_excerpts" in review_selection.sections
+                and review_selection.max_excerpts > 0
+            ):
+                try:
+                    captured_resolution = await resolve_captured_semantic_content(
+                        runtime=runtime,
+                        frozen=FrozenCase(frozen.case, current_lease[0]),
+                        workspace_commitment=repository,
+                        max_parts=min(
+                            MAX_CAPTURED_SEMANTIC_CONTENT_PARTS,
+                            max(16, review_selection.max_excerpts * 16),
+                        ),
+                        max_total_bytes=MAX_CAPTURED_SEMANTIC_INPUT_BYTES,
+                    )
+                    captured_content = captured_resolution.content
+                    captured_content_scope = captured_resolution.scope
+                    captured_content_gaps = captured_resolution.gaps
+                except Exception as exc:
+                    # Content is an additive evidence arm. A malformed or unavailable
+                    # retained object must leave the deterministic case usable while
+                    # carrying an explicit bounded coverage gap into the packet.
+                    record_unexpected_exception_without_raising(
+                        exc,
+                        component="semantic_composition",
+                        operation="semantic_content_resolution_failed",
+                        request_id=frozen.lease.operation_id,
+                    )
+                    captured_content_gaps = ("content_capture_unavailable",)
             semantic_case = build_semantic_case(
                 case_id=recovered_case_id or ids.new(IdKind.OUTBOUND_CASE),
                 frozen_case=frozen.case,
@@ -2419,6 +2455,9 @@ def _privacy_gated_semantic_evaluator(
                 review_selection=review_selection,
                 policy_id=policy_id,
                 policy_version=policy_version,
+                captured_content=captured_content,
+                captured_content_scope=captured_content_scope,
+                captured_content_gaps=captured_content_gaps,
             )
             # The builder folds the gap into the packet coverage the reviewer sees; the check
             # result is a separate coverage fold, so carry the fact rather than re-deriving it.

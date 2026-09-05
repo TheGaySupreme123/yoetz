@@ -4,14 +4,16 @@ Constructs ``SemanticCase`` / ``ReviewPacket`` from the already-frozen check cas
 pinned deterministic findings/bases, and the active ``ReviewSelectionPolicy``.
 
 This module is deliberately capability-free: no Git, filesystem, network, transcript,
-environment, database, or provider access. Missing material becomes an omission.
+environment, database, or provider access. Captured bytes, when present, arrive as frozen
+service-authenticated values; missing material becomes an omission.
 """
 
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Final, Literal, cast
 
 from yoetz.application.check import (
@@ -24,6 +26,11 @@ from yoetz.domain.events import (
     ClaimRecordedPayload,
     ClaimRecordedPayloadV1_1,
     DecisionRecordedPayload,
+    EvidenceContentAvailability,
+    EvidenceDigestBinding,
+    EvidenceDigestProvenance,
+    EvidenceDigestSubject,
+    EvidenceImmutability,
     EvidenceKind,
     EvidenceRecordedPayload,
     ObligationPublishedPayload,
@@ -31,6 +38,7 @@ from yoetz.domain.events import (
     encode_payload,
 )
 from yoetz.domain.findings import Finding, FindingKind
+from yoetz.domain.observation import ObservationContentKind, ObservationContentManifest
 from yoetz.domain.privacy import (
     MAX_EGRESS_ENVELOPE_BYTES,
     REVIEW_PACKET_ITEM_ID,
@@ -43,13 +51,24 @@ from yoetz.domain.privacy import (
     ReviewSelectionPolicy,
 )
 from yoetz.domain.receipts import SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP
-from yoetz.domain.values import SubjectStateRelation
+from yoetz.domain.values import (
+    SubjectStateRelation,
+    session_id,
+    task_id,
+    validate_commitment,
+    validate_sha256_digest,
+)
+from yoetz.domain.values import (
+    evidence_id as validate_evidence_id,
+)
 from yoetz.kernel.claims import effective_claim_items
 from yoetz.kernel.deterministic_checks import (
     DeterministicAssessment,
     DeterministicCase,
     FrozenHistoryEvent,
 )
+from yoetz.kernel.projections import EvidenceProjectionRecord
+from yoetz.ports.objects import ObjectKind, ObjectRef
 from yoetz.ports.semantic import (
     ChangeObservation,
     ExcerptDigestProvenance,
@@ -76,6 +95,11 @@ from yoetz.protocol.models import (
 )
 
 __all__ = [
+    "CapturedContentScope",
+    "CapturedSemanticContent",
+    "MAX_CAPTURED_SEMANTIC_CONTENT_BYTES",
+    "MAX_CAPTURED_SEMANTIC_CONTENT_PARTS",
+    "MAX_CAPTURED_SEMANTIC_INPUT_BYTES",
     "OVER_CASE_ITEM_LIMIT_REASON",
     "REVIEW_PACKET_ITEM_ID",
     "SEMANTIC_REVIEW_PURPOSE",
@@ -134,6 +158,183 @@ type _ExcerptKind = Literal["evidence", "test", "failure", "diff", "command", "r
 type _OmissionReason = Literal[
     "not_recorded", "not_selected", "withheld_by_policy", "redacted_never_send"
 ]
+
+# The observation ingest bound is intentionally larger than one semantic item. The service-side
+# resolver authenticates a complete retained chunk here, after which the selection policy clips it
+# to its own excerpt/item/total limits. Keeping this bound below the ordinary object-store limit
+# prevents a malformed captured-content wrapper from becoming an unbounded semantic input.
+MAX_CAPTURED_SEMANTIC_CONTENT_BYTES: Final = 512 * 1024
+_CAPTURED_CONTENT_MEDIA_TYPE: Final = "application/vnd.yoetz.observation-content+json"
+_CAPTURED_CONTENT_KINDS: Final = frozenset(
+    {
+        ObservationContentKind.TOOL_OUTPUT,
+        ObservationContentKind.CHANGED_FILE,
+        ObservationContentKind.WORKSPACE_DIFF,
+    }
+)
+_AUTHORIZED_CAPTURE_PROFILES: Final = frozenset(
+    {
+        # These are the only ordinary host content arms currently certified by the
+        # coordinator.  The service-side resolver applies the same closed vocabulary;
+        # keeping the pure boundary closed prevents a caller from minting a future arm.
+        "claude-code-ordinary-observation-v1",
+        "cursor-ordinary-observation-v1",
+    }
+)
+MAX_CAPTURED_SEMANTIC_CONTENT_PARTS: Final = 64
+MAX_CAPTURED_SEMANTIC_INPUT_BYTES: Final = 2 * MAX_CAPTURED_SEMANTIC_CONTENT_BYTES
+_CAPTURE_GAP_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)
+
+
+@dataclass(frozen=True, slots=True)
+class CapturedContentScope:
+    """Current service-authorized boundary for native captured semantic content.
+
+    The scope is assembled by the service after it checks the active local consent arm. The pure
+    case builder accepts it as a frozen assertion and still rechecks every excerpt against the
+    projection and scope; it never discovers consent or reads an object itself.
+    """
+
+    task_id: str
+    session_id: str
+    workspace_commitment: str
+    authorized_profiles: tuple[str, ...]
+    # Each entry is a service-derived evidence ref → phase identity binding.  A
+    # caller-supplied phase digest is useful only when it agrees with the durable
+    # evidence/envelope identity that the resolver derived before opening bytes.
+    phase_bindings: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        try:
+            object.__setattr__(self, "task_id", task_id(self.task_id))
+            object.__setattr__(self, "session_id", session_id(self.session_id))
+            object.__setattr__(
+                self,
+                "workspace_commitment",
+                validate_commitment(self.workspace_commitment),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("semantic_case_capture_scope_invalid") from exc
+        if type(self.authorized_profiles) is not tuple or not self.authorized_profiles:
+            raise ValueError("semantic_case_capture_scope_invalid")
+        if any(profile not in _AUTHORIZED_CAPTURE_PROFILES for profile in self.authorized_profiles):
+            raise ValueError("semantic_case_capture_scope_invalid")
+        if self.authorized_profiles != tuple(sorted(set(self.authorized_profiles), key=str.encode)):
+            raise ValueError("semantic_case_capture_scope_invalid")
+        if (
+            type(self.phase_bindings) is not tuple
+            or len(self.phase_bindings) > MAX_CAPTURED_SEMANTIC_CONTENT_PARTS
+        ):
+            raise ValueError("semantic_case_capture_scope_invalid")
+        normalized_bindings: list[tuple[str, str]] = []
+        for binding in self.phase_bindings:
+            if type(binding) is not tuple or len(binding) != 2:
+                raise ValueError("semantic_case_capture_scope_invalid")
+            try:
+                ref = validate_evidence_id(binding[0])
+                phase = validate_sha256_digest(binding[1])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("semantic_case_capture_scope_invalid") from exc
+            normalized_bindings.append((str(ref), phase))
+        if tuple(normalized_bindings) != tuple(
+            sorted(set(normalized_bindings), key=lambda item: item[0].encode("ascii"))
+        ):
+            raise ValueError("semantic_case_capture_scope_invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class CapturedSemanticContent:
+    """One service-authenticated, complete observation-content part.
+
+    ``content`` is the decoded inner bytes, never the encrypted object wrapper. The resolver owns
+    object authentication and supplies the exact ``ObjectRef``/manifest pair. The builder then
+    verifies the pair and maps only content whose object is already represented by a case-bound
+    observation evidence row.
+    """
+
+    object_ref: ObjectRef
+    manifest: ObservationContentManifest
+    content: bytes
+    task_id: str
+    session_id: str
+    workspace_commitment: str
+    phase_identity: str
+    capture_profile: str
+    capture_gaps: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.object_ref) is not ObjectRef
+            or type(self.manifest) is not ObservationContentManifest
+        ):
+            raise ValueError("semantic_case_captured_content_invalid")
+        if (
+            self.manifest.content_kind not in _CAPTURED_CONTENT_KINDS
+            or self.manifest.envelope_digest is None
+            or self.manifest.content_digest is None
+            or self.manifest.content_bytes is None
+            or self.manifest.correlation_identity is None
+            or self.manifest.source_commitment is None
+            or type(self.manifest.redacted) is not bool
+        ):
+            raise ValueError("semantic_case_captured_content_invalid")
+        if (
+            self.object_ref.metadata.kind is not ObjectKind.CAPTURED_CONTENT
+            or self.object_ref.metadata.media_type != _CAPTURED_CONTENT_MEDIA_TYPE
+            or self.object_ref.object_id != self.manifest.object_id
+            or self.object_ref.envelope_digest != self.manifest.envelope_digest
+        ):
+            raise ValueError("semantic_case_captured_content_invalid")
+        if (
+            type(self.content) is not bytes
+            or not 1 <= len(self.content) <= MAX_CAPTURED_SEMANTIC_CONTENT_BYTES
+        ):
+            raise ValueError("semantic_case_captured_content_invalid")
+        try:
+            self.content.decode("utf-8", errors="strict")
+            actual_digest = "sha256:" + hashlib.sha256(self.content).hexdigest()
+            object.__setattr__(self, "task_id", task_id(self.task_id))
+            object.__setattr__(self, "session_id", session_id(self.session_id))
+            object.__setattr__(
+                self,
+                "workspace_commitment",
+                validate_commitment(self.workspace_commitment),
+            )
+            object.__setattr__(
+                self,
+                "phase_identity",
+                validate_sha256_digest(self.phase_identity),
+            )
+        except (TypeError, ValueError, UnicodeDecodeError) as exc:
+            raise ValueError("semantic_case_captured_content_invalid") from exc
+        if self.object_ref.metadata.task_id != self.task_id:
+            raise ValueError("semantic_case_captured_content_invalid")
+        if self.manifest.content_digest != actual_digest or self.manifest.content_bytes != len(
+            self.content
+        ):
+            raise ValueError("semantic_case_captured_content_invalid")
+        if (
+            type(self.capture_profile) is not str
+            or self.capture_profile not in _AUTHORIZED_CAPTURE_PROFILES
+        ):
+            raise ValueError("semantic_case_captured_content_invalid")
+        if type(self.capture_gaps) is not tuple or len(self.capture_gaps) > 16:
+            raise ValueError("semantic_case_captured_content_invalid")
+        if any(
+            type(gap) is not str or _CAPTURE_GAP_PATTERN.fullmatch(gap) is None
+            for gap in self.capture_gaps
+        ) or self.capture_gaps != tuple(sorted(set(self.capture_gaps), key=str.encode)):
+            raise ValueError("semantic_case_captured_content_invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class _CapturedGroup:
+    evidence_refs: tuple[str, ...]
+    content: bytes
+    source_kind: _ExcerptKind
+    digest_provenance: ExcerptDigestProvenance
+    capture_gaps: tuple[str, ...]
+
 
 _EVIDENCE_EXCERPT_KIND: Final[Mapping[EvidenceKind, _ExcerptKind]] = {
     EvidenceKind.ARTIFACT: "evidence",
@@ -297,6 +498,181 @@ def _omit(
     )
 
 
+def _captured_content_groups(
+    projection: object,
+    allowed: frozenset[str],
+    content: Sequence[CapturedSemanticContent],
+    scope: CapturedContentScope | None,
+) -> tuple[dict[str, _CapturedGroup], frozenset[str]]:
+    """Index service-authenticated content by its case-bound evidence row.
+
+    This is intentionally a pure check. The service has already decrypted and secret-scanned the
+    object before constructing ``CapturedSemanticContent``; this function verifies that the bytes
+    cannot be attached to another task, phase, profile, or evidence identity and that multipart
+    content is complete before it becomes a semantic excerpt.
+    """
+
+    # Importing the concrete projection type would make the public builder depend on the adapter
+    # implementation. The frozen case owns the mapping and the small attribute checks below keep
+    # this seam capability-free.
+    evidence = getattr(projection, "evidence", None)
+    if not isinstance(evidence, Mapping):
+        return {}, frozenset({"content_capture_unavailable"}) if content else frozenset()
+
+    gaps: set[str] = set()
+    expected_phases = dict(scope.phase_bindings) if scope is not None else {}
+    by_object: dict[str, list[tuple[str, object]]] = {}
+    payload_by_ref: dict[str, EvidenceRecordedPayload] = {}
+    evidence_map = cast(Mapping[object, object], evidence)
+    for raw_ref, record in evidence_map.items():
+        ref = str(raw_ref)
+        typed_record = cast(EvidenceProjectionRecord, record)
+        payload = typed_record.payload
+        object_value = getattr(payload, "captured_object_id", None)
+        if object_value is not None:
+            by_object.setdefault(str(object_value), []).append((ref, record))
+        if type(payload) is EvidenceRecordedPayload:
+            payload_by_ref[ref] = payload
+
+    parts: dict[
+        tuple[str, str, str, str, str, int],
+        list[tuple[str, CapturedSemanticContent]],
+    ] = {}
+    for item in content:
+        if scope is None:
+            gaps.add("content_capture_unavailable")
+            continue
+        if (
+            item.task_id != scope.task_id
+            or item.session_id != scope.session_id
+            or item.workspace_commitment != scope.workspace_commitment
+        ):
+            gaps.add("content_unselected")
+            continue
+        if item.capture_profile not in scope.authorized_profiles:
+            gaps.add("content_unselected")
+            continue
+
+        associations = by_object.get(item.object_ref.object_id, ())
+        if len(associations) != 1:
+            gaps.add("content_unselected")
+            continue
+        evidence_ref, record = associations[0]
+        if evidence_ref not in allowed:
+            gaps.add("content_unselected")
+            continue
+        expected_phase = expected_phases.get(evidence_ref)
+        if expected_phase is None or item.phase_identity != expected_phase:
+            # The phase identity is only meaningful when the service derived the
+            # same identity from the envelope that materialized this evidence row.
+            # A valid digest from another phase must remain excluded.
+            gaps.add("content_unselected")
+            continue
+        payload = getattr(record, "payload", None)
+        binding = getattr(payload, "digest_binding", None)
+        if (
+            type(payload) is not EvidenceRecordedPayload
+            or payload.evidence_kind is not EvidenceKind.OTHER
+            or payload.strength is not EvidenceImmutability.IMMUTABLE_SNAPSHOT
+            or payload.captured_object_id != item.object_ref.object_id
+            or payload.content_digest != item.manifest.content_digest
+            or type(binding) is not EvidenceDigestBinding
+            or binding.subject is not EvidenceDigestSubject.BOUNDED_EXCERPT
+            or binding.content_availability is not EvidenceContentAvailability.CAPTURED
+            or binding.provenance is not EvidenceDigestProvenance.OBSERVATION_CAPTURED
+            or binding.byte_count != item.manifest.content_bytes
+        ):
+            gaps.add("content_capture_unavailable")
+            continue
+        if (
+            getattr(record, "redacted", False)
+            or not getattr(record, "object_available", False)
+            or getattr(record, "redacted_object_id", None) is not None
+        ):
+            gaps.add(
+                "content_redacted"
+                if getattr(record, "redacted", False)
+                else "content_capture_unavailable"
+            )
+            continue
+
+        if item.manifest.redacted:
+            gaps.add("content_redacted")
+        gaps.update(item.capture_gaps)
+        key = (
+            item.phase_identity,
+            item.capture_profile,
+            item.manifest.content_kind.value,
+            item.manifest.correlation_identity or "",
+            item.manifest.source_commitment or "",
+            item.manifest.part_count,
+        )
+        parts.setdefault(key, []).append((evidence_ref, item))
+
+    groups: dict[str, _CapturedGroup] = {}
+    for rows in parts.values():
+        rows.sort(key=lambda row: (row[1].manifest.part_index, row[0].encode("ascii")))
+        expected_count = rows[0][1].manifest.part_count
+        indexes = [item.manifest.part_index for _ref, item in rows]
+        if (
+            len(rows) != expected_count
+            or indexes != list(range(expected_count))
+            or len({ref for ref, _item in rows}) != len(rows)
+        ):
+            gaps.add("content_capture_unavailable")
+            continue
+        combined = b"".join(item.content for _ref, item in rows)
+        if not 1 <= len(combined) <= MAX_CAPTURED_SEMANTIC_CONTENT_BYTES:
+            gaps.add("content_capture_unavailable")
+            continue
+        first_ref, first_item = rows[0]
+        source_kind: _ExcerptKind = (
+            "evidence"
+            if first_item.manifest.content_kind is ObservationContentKind.TOOL_OUTPUT
+            else "diff"
+        )
+        if len(rows) == 1:
+            payload = payload_by_ref[first_ref]
+            binding = payload.digest_binding
+            assert type(binding) is EvidenceDigestBinding
+            provenance = ExcerptDigestProvenance(
+                evidence_kind=payload.evidence_kind,
+                strength=payload.strength,
+                content_digest=payload.content_digest or first_item.manifest.content_digest or "",
+                digest_subject=binding.subject,
+                content_availability=binding.content_availability,
+                byte_count=binding.byte_count,
+                provenance=binding.provenance,
+                approval_commitment=binding.approval_commitment,
+                approved_check_result_digest=binding.approved_check_result_digest,
+            )
+        else:
+            # The ledger binds each part independently. The combined excerpt gets a freshly
+            # computed digest over exactly those authenticated parts, with the same observation
+            # provenance; no caller description is used as a substitute.
+            provenance = ExcerptDigestProvenance(
+                evidence_kind=EvidenceKind.OTHER,
+                strength=EvidenceImmutability.IMMUTABLE_SNAPSHOT,
+                content_digest="sha256:" + hashlib.sha256(combined).hexdigest(),
+                digest_subject=EvidenceDigestSubject.BOUNDED_EXCERPT,
+                content_availability=EvidenceContentAvailability.CAPTURED,
+                byte_count=len(combined),
+                provenance=EvidenceDigestProvenance.OBSERVATION_CAPTURED,
+            )
+        group = _CapturedGroup(
+            evidence_refs=tuple(ref for ref, _item in rows),
+            content=combined,
+            source_kind=source_kind,
+            digest_provenance=provenance,
+            capture_gaps=tuple(
+                sorted({gap for _ref, item in rows for gap in item.capture_gaps}, key=str.encode)
+            ),
+        )
+        groups[first_ref] = group
+
+    return groups, frozenset(gaps)
+
+
 def _match_assessments(
     case: DeterministicCase,
     findings: Sequence[Finding],
@@ -332,6 +708,9 @@ def build_semantic_case(
     review_selection: ReviewSelectionPolicy,
     policy_id: str,
     policy_version: str,
+    captured_content: Sequence[CapturedSemanticContent] = (),
+    captured_content_scope: CapturedContentScope | None = None,
+    captured_content_gaps: Sequence[str] = (),
 ) -> SemanticCase:
     """Build one pre-egress semantic case from frozen authority only."""
 
@@ -341,6 +720,31 @@ def build_semantic_case(
         raise TypeError("review_context_profile_invalid")
     if type(review_selection) is not ReviewSelectionPolicy:
         raise TypeError("review_selection_invalid")
+    if type(captured_content) not in {tuple, list} or any(
+        type(item) is not CapturedSemanticContent for item in captured_content
+    ):
+        raise TypeError("semantic_case_captured_content_invalid")
+    if len(captured_content) > MAX_CAPTURED_SEMANTIC_CONTENT_PARTS:
+        raise ValueError("semantic_case_captured_content_over_limit")
+    captured_input_bytes = sum(len(item.content) for item in captured_content)
+    if captured_input_bytes > MAX_CAPTURED_SEMANTIC_INPUT_BYTES:
+        raise ValueError("semantic_case_captured_content_over_limit")
+    if (
+        captured_content_scope is not None
+        and type(captured_content_scope) is not CapturedContentScope
+    ):
+        raise TypeError("semantic_case_capture_scope_invalid")
+    if type(captured_content_gaps) not in {tuple, list} or len(captured_content_gaps) > 16:
+        raise TypeError("semantic_case_capture_gaps_invalid")
+    capture_gaps = tuple(captured_content_gaps)
+    if any(
+        type(gap) is not str or _CAPTURE_GAP_PATTERN.fullmatch(gap) is None for gap in capture_gaps
+    ) or capture_gaps != tuple(sorted(set(capture_gaps), key=str.encode)):
+        raise ValueError("semantic_case_capture_gaps_invalid")
+    if captured_content and captured_content_scope is None:
+        # Content is an explicitly scoped disclosure. A bare byte sequence cannot enter a case,
+        # even when it happens to match a durable evidence digest.
+        raise ValueError("semantic_case_capture_scope_required")
     if review_context_profile is not ReviewContextProfile.CUSTOM:
         expected = ReviewSelectionPolicy.for_profile(review_context_profile)
         if review_selection != expected:
@@ -361,6 +765,29 @@ def build_semantic_case(
     frontier_refs = frontier_refs - local_check_refs
     allowed = frontier_refs | local_check_refs
     projection = frozen_case.projection
+
+    captured_groups, captured_gaps = _captured_content_groups(
+        projection,
+        allowed,
+        captured_content,
+        captured_content_scope,
+    )
+    capture_gap_set = {*capture_gaps, *captured_gaps}
+    if captured_content_scope is not None:
+        supplied_objects = {item.object_ref.object_id for item in captured_content}
+        for record in projection.evidence.values():
+            payload = record.payload
+            if (
+                payload is not None
+                and payload.captured_object_id is not None
+                and str(payload.captured_object_id) not in supplied_objects
+            ):
+                capture_gap_set.add("content_capture_unavailable")
+    capture_gaps = tuple(sorted(capture_gap_set, key=str.encode))
+    captured_group_leader: dict[str, str] = {}
+    for leader, group in captured_groups.items():
+        for evidence_ref in group.evidence_refs:
+            captured_group_leader[evidence_ref] = leader
 
     items: list[SemanticCaseItem] = []
     # Item ids whose recorded text was admitted by the publish-side prose bound and then could
@@ -898,7 +1325,18 @@ def build_semantic_case(
                 )
                 continue
             assert type(payload) is EvidenceRecordedPayload
-            excerpt_kind = _EVIDENCE_EXCERPT_KIND.get(payload.evidence_kind, "evidence")
+            leader = captured_group_leader.get(ref)
+            if leader is not None and leader != ref:
+                # Multipart captured evidence is one semantic excerpt. Carrying each part as a
+                # separate excerpt would let an incomplete group look reviewable and would spend
+                # the selection budget on duplicate structural descriptions.
+                continue
+            captured_group = captured_groups.get(ref)
+            excerpt_kind = (
+                captured_group.source_kind
+                if captured_group is not None
+                else _EVIDENCE_EXCERPT_KIND.get(payload.evidence_kind, "evidence")
+            )
             if excerpt_kind not in selection.excerpt_kinds:
                 omissions.append(
                     _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
@@ -912,7 +1350,13 @@ def build_semantic_case(
                     )
                     continue
             digest_provenance: ExcerptDigestProvenance | None = None
-            if payload.content_digest is not None:
+            if captured_group is not None:
+                # The service-authenticated inner bytes are the only source that may populate a
+                # captured semantic excerpt. Their digest provenance is retained separately from
+                # the digest of the selection-clipped item below.
+                text = captured_group.content.decode("utf-8")
+                digest_provenance = captured_group.digest_provenance
+            elif payload.content_digest is not None:
                 binding = payload.digest_binding
                 if binding is None:
                     omissions.append(
@@ -976,6 +1420,10 @@ def build_semantic_case(
             if excerpt_truncated:
                 text = encoded[: selection.max_excerpt_bytes].decode("utf-8", errors="ignore")
                 encoded = text.encode("utf-8")
+                # The reviewer receives a valid UTF-8 prefix, but its digest is
+                # necessarily the delivered prefix rather than the retained
+                # source. Keep that limitation visible in the case coverage.
+                capture_gap_set.add("truncated_payload")
             if excerpt_bytes_used + len(encoded) > selection.max_total_excerpt_bytes:
                 omissions.append(
                     _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
@@ -985,13 +1433,30 @@ def build_semantic_case(
                 sorted(
                     {
                         ref,
+                        *(captured_group.evidence_refs if captured_group is not None else ()),
                         str(record.source_event_id),
+                        *(
+                            str(
+                                projection.evidence[
+                                    validate_evidence_id(evidence_ref)
+                                ].source_event_id
+                            )
+                            for evidence_ref in (
+                                captured_group.evidence_refs if captured_group is not None else ()
+                            )
+                            if validate_evidence_id(evidence_ref) in projection.evidence
+                        ),
                         *(
                             str(claim_id)
                             for claim_id, claim_record in effective_claim_items(projection)
                             if claim_record.payload is not None
                             and any(
-                                str(support) == ref
+                                str(support)
+                                in (
+                                    set(captured_group.evidence_refs)
+                                    if captured_group is not None
+                                    else {ref}
+                                )
                                 for support in claim_record.payload.supporting_refs
                             )
                         ),
@@ -1028,7 +1493,11 @@ def build_semantic_case(
                     source_kind=excerpt_kind,
                     linked_subject_refs=linked,
                     subject_state_relation=SubjectStateRelation.UNKNOWN,
-                    content_visibility="available",
+                    content_visibility=(
+                        "available"
+                        if captured_group is not None or payload.captured_object_id is None
+                        else "not_recorded"
+                    ),
                     content_digest=item.content_digest,
                     content_bytes=item.content_bytes,
                     digest_provenance=digest_provenance,
@@ -1257,7 +1726,13 @@ def build_semantic_case(
         items = [item]
         timeline_ids = [item.item_id]
 
+    capture_gaps = tuple(sorted(capture_gap_set, key=str.encode))
     coverage = case_coverage(frozen_case, semantic=True)
+    if capture_gaps:
+        coverage = replace(
+            coverage,
+            known_gaps=tuple(sorted({*coverage.known_gaps, *capture_gaps}, key=str.encode)),
+        )
     # Count only overflow on items the caps kept: an item dropped downstream is already disclosed
     # as an omission, and naming it here would report a shortening the reviewer never saw.
     if over_limit & {item.item_id for item in items}:
@@ -1313,6 +1788,42 @@ def build_semantic_case(
                 "review_selection_digest": selection_digest,
                 "schema": "yoetz.semantic-case/1",
                 "subject_frontier": dict(frozen_case.frontier.as_wire()),
+                "captured_content_gaps": list(capture_gaps),
+                "captured_content_scope": (
+                    None
+                    if captured_content_scope is None
+                    else {
+                        "authorized_profiles": list(captured_content_scope.authorized_profiles),
+                        "phase_bindings": [
+                            {"evidence_ref": ref, "phase_identity": phase}
+                            for ref, phase in captured_content_scope.phase_bindings
+                        ],
+                        "session_id": captured_content_scope.session_id,
+                        "task_id": captured_content_scope.task_id,
+                        "workspace_commitment": captured_content_scope.workspace_commitment,
+                    }
+                ),
+                "captured_content": [
+                    {
+                        "capture_profile": item.capture_profile,
+                        "content_digest": item.manifest.content_digest,
+                        "content_kind": item.manifest.content_kind.value,
+                        "correlation_identity": item.manifest.correlation_identity,
+                        "envelope_digest": item.object_ref.envelope_digest,
+                        "object_id": item.object_ref.object_id,
+                        "part_count": item.manifest.part_count,
+                        "part_index": item.manifest.part_index,
+                        "phase_identity": item.phase_identity,
+                        "source_commitment": item.manifest.source_commitment,
+                    }
+                    for item in sorted(
+                        captured_content,
+                        key=lambda item: (
+                            item.object_ref.object_id.encode("ascii"),
+                            item.manifest.part_index,
+                        ),
+                    )
+                ],
             },
         )
     )
