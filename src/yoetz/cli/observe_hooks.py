@@ -2838,7 +2838,13 @@ def handle_observe(
             and not skip_advice_loop
             and not stop_already_active
             and (
-                source is not ObservationSource.CURSOR_HOOK or _output_event_name == "sessionStart"
+                source is not ObservationSource.CURSOR_HOOK
+                or _output_event_name == "sessionStart"
+                or (
+                    _output_event_name == "postToolUse"
+                    and payload.get("capability_profile_id")
+                    == CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
+                )
             )
         )
         delivery_gate = (
@@ -3265,7 +3271,9 @@ def handle_claude_observe(
                 "PreToolUse": "PreToolUse",
                 "PostToolUse": "PostToolUse",
                 "PostToolUseFailure": "PostToolUse",
-                "StopFailure": "SessionEnd",
+                # StopFailure is a per-turn API failure, not a lifecycle end.
+                # Keep the observation visible without fencing the session.
+                "StopFailure": "Stop",
             }
         )
     start_actions = {
@@ -3303,10 +3311,11 @@ def handle_claude_observe(
             "action": "claude_lifecycle",
             "pairing_mode": pairing_mode,
             "correlation_kind": correlation_kind,
-            "capability_profile_id": capability_profile_id,
             "hook_event_name": event_map[raw_event],
             "session_id": f"{_CLAUDE_SESSION_PREFIX}{session}",
         }
+        if capability_profile_id is not None:
+            structural["capability_profile_id"] = capability_profile_id
         if ordinary_profile:
             # Keep the materialization cursor vocabulary stable while recording
             # the exact host mapping used by this opt-in profile separately.
@@ -3320,7 +3329,17 @@ def handle_claude_observe(
                 if type(source) is str and source in start_actions
                 else "claude_session"
             )
-        if ordinary_profile and raw_event in {"PermissionRequest", "PreToolUse"}:
+        if ordinary_profile and raw_event == "PermissionRequest":
+            # Claude's documented PermissionRequest payload has no tool_use_id.
+            # Retain the event and any bounded tool name without manufacturing
+            # a call identity or pairing operation. The closed permission
+            # classification describes the host event and mints no work row.
+            tool_token = _token_or_none(payload.get("tool_name"))
+            if tool_token is not None:
+                structural["tool_name"] = tool_token
+            structural["action"] = "claude_permission_request"
+            structural["permission_decision"] = "requested"
+        if ordinary_profile and raw_event == "PreToolUse":
             tool_token = _token_or_none(payload.get("tool_name"))
             correlation = _token_or_none(payload.get("tool_use_id")) or _token_or_none(
                 payload.get("tool_call_id")
@@ -3334,16 +3353,9 @@ def handle_claude_observe(
                 return 0
             structural["tool_name"] = tool_token
             structural["tool_use_id"] = correlation
-            if raw_event == "PermissionRequest":
-                # Keep a permission request distinct from PreToolUse. Claude
-                # may emit both for one call; only the latter creates the
-                # action row that the post result completes.
-                structural["action"] = "claude_permission_request"
-                structural["permission_decision"] = "requested"
-            else:
-                structural["action"] = "claude_tool_pending"
-                if _routine_read_action(payload):
-                    structural["action"] = "routine_read"
+            structural["action"] = "claude_tool_pending"
+            if _routine_read_action(payload):
+                structural["action"] = "routine_read"
         if ordinary_profile and raw_event == "PermissionDenied":
             tool_token = _token_or_none(payload.get("tool_name"))
             correlation = _token_or_none(payload.get("tool_use_id")) or _token_or_none(
@@ -3611,10 +3623,11 @@ def handle_cursor_observe(
             ),
             "pairing_mode": pairing_mode,
             "correlation_kind": correlation_kind,
-            "capability_profile_id": capability_profile_id,
             "hook_event_name": event_map[raw_event],
             "session_id": f"{_CURSOR_SESSION_PREFIX}{session}",
         }
+        if capability_profile_id is not None:
+            structural["capability_profile_id"] = capability_profile_id
         if ordinary_profile:
             structural["mapping_hint"] = CURSOR_ORDINARY_HOOK_MAPPING_VERSION
         identity_fields = (

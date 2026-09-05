@@ -89,6 +89,91 @@ def test_content_profiles_are_independent_and_user_controls_are_reversible(
     assert status["content_capture_profiles"] == [CURSOR_ORDINARY_OBSERVATION_PROFILE_ID]
 
 
+def test_content_actions_report_requested_and_effective_profiles(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    workspace = str(tmp_path)
+    state = tmp_path / "state"
+    store = LocalObservationStore(_state=state)
+    commitment = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(commitment)
+    store.enable_content_capture(commitment, CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID)
+
+    observe_cli.pause_observation(workspace=workspace, _state=state)
+    store.set_runtime_enabled(False)
+    capsys.readouterr()
+
+    assert (
+        observe_cli.enable_observation_content(
+            workspace=workspace,
+            profile=CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+            _state=state,
+            json_output=True,
+        )
+        == 0
+    )
+    enabled_while_stopped = json.loads(capsys.readouterr().out)
+    assert enabled_while_stopped["content_capture_profiles"] == [
+        CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+        CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+    ]
+    assert enabled_while_stopped["effective_content_capture_profiles"] == []
+    assert enabled_while_stopped["consent_active"] is False
+    assert enabled_while_stopped["runtime_enabled"] is False
+    assert enabled_while_stopped["enabled"] is False
+
+    assert (
+        observe_cli.observation_content_status(
+            workspace=workspace,
+            json_output=True,
+            _state=state,
+        )
+        == 0
+    )
+    stopped_status = json.loads(capsys.readouterr().out)
+    assert (
+        stopped_status["content_capture_profiles"]
+        == enabled_while_stopped["content_capture_profiles"]
+    )
+    assert stopped_status["effective_content_capture_profiles"] == []
+    assert stopped_status["enabled"] is False
+
+    assert (
+        observe_cli.disable_observation_content(
+            workspace=workspace,
+            profile=CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+            _state=state,
+            json_output=True,
+        )
+        == 0
+    )
+    disabled_while_stopped = json.loads(capsys.readouterr().out)
+    assert disabled_while_stopped["content_capture_profiles"] == [
+        CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+    ]
+    assert disabled_while_stopped["effective_content_capture_profiles"] == []
+    assert disabled_while_stopped["enabled"] is False
+
+    store.set_runtime_enabled(True)
+    observe_cli.resume_observation(workspace=workspace, _state=state)
+    capsys.readouterr()
+    assert (
+        observe_cli.observation_content_status(
+            workspace=workspace,
+            json_output=True,
+            _state=state,
+        )
+        == 0
+    )
+    resumed_status = json.loads(capsys.readouterr().out)
+    assert resumed_status["consent_active"] is True
+    assert resumed_status["runtime_enabled"] is True
+    assert resumed_status["effective_content_capture_profiles"] == [
+        CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+    ]
+    assert resumed_status["enabled"] is True
+
+
 def test_claude_ordinary_profile_forwards_redacted_content_only_when_explicitly_selected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -402,13 +487,13 @@ def test_claude_permission_request_and_denial_keep_distinct_terminal_identity(
     base: dict[str, JsonValue] = {
         "session_id": "claude-permission-overlap",
         "tool_name": "Bash",
-        "tool_use_id": "call-permission",
     }
     emit("PermissionRequest", {**base, "hook_event_name": "PermissionRequest"})
+    paired = {**base, "tool_use_id": "call-permission"}
     emit(
         "PreToolUse",
         {
-            **base,
+            **paired,
             "hook_event_name": "PreToolUse",
             "tool_input": {"command": "rm file.txt"},
         },
@@ -416,7 +501,7 @@ def test_claude_permission_request_and_denial_keep_distinct_terminal_identity(
     emit(
         "PostToolUse",
         {
-            **base,
+            **paired,
             "hook_event_name": "PostToolUse",
             "tool_response": {"exitCode": 0},
         },
@@ -424,7 +509,7 @@ def test_claude_permission_request_and_denial_keep_distinct_terminal_identity(
     emit(
         "PermissionDenied",
         {
-            **base,
+            **paired,
             "hook_event_name": "PermissionDenied",
             "source": "auto_mode",
             "reason": "DENIAL_REASON_CANARY",
@@ -438,7 +523,10 @@ def test_claude_permission_request_and_denial_keep_distinct_terminal_identity(
         "PostToolUse",
         "PermissionDecision",
     ]
-    assert envelopes[0].structural_payload["tool_call_id"] == "call-permission"
+    assert envelopes[0].structural_payload["action"] == "claude_permission_request"
+    assert envelopes[0].structural_payload["permission_decision"] == "requested"
+    assert envelopes[0].structural_payload["tool_name"] == "Bash"
+    assert "tool_call_id" not in envelopes[0].structural_payload
     assert envelopes[1].structural_payload["tool_call_id"] == "call-permission"
     assert "unpaired_event" not in envelopes[2].gap_codes
     denied = envelopes[3].structural_payload
@@ -643,6 +731,16 @@ def test_claude_ordinary_cancellation_and_invalid_status_are_closed(
             "error": "API_ERROR_PROSE_CANARY",
         },
     )
+    emit(
+        "PostToolUse",
+        {
+            **base,
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Read",
+            "tool_use_id": "call-after-stop-failure",
+            "tool_response": {"success": True},
+        },
+    )
 
     envelopes = LocalObservationStore(_state=tmp_path / "state").list_envelopes(commitment)
     cancelled = envelopes[1].structural_payload
@@ -659,6 +757,9 @@ def test_claude_ordinary_cancellation_and_invalid_status_are_closed(
     api_failure = envelopes[6].structural_payload
     assert api_failure["action"] == "claude_api_failure"
     assert api_failure["result_status"] == "error"
+    assert envelopes[6].event_kind == "Stop"
+    assert envelopes[7].event_kind == "PostToolUse"
+    assert envelopes[7].structural_payload["tool_name"] == "Read"
     state_bytes = b"".join(
         path.read_bytes()
         for path in (tmp_path / "state").rglob("*")

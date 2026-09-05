@@ -264,6 +264,35 @@ class _DeliveryFacts:
     oldest_pending_receipt: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class _ContentCaptureFacts:
+    """Requested native profiles and the profiles currently able to capture."""
+
+    requested_profiles: tuple[str, ...]
+    effective_profiles: tuple[str, ...]
+    consent_active: bool
+    runtime_enabled: bool
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.effective_profiles)
+
+
+def _content_capture_facts(store: LocalObservationStore, commitment: str) -> _ContentCaptureFacts:
+    """Read the local consent and runtime fences as one status snapshot."""
+
+    authority = store.content_capture_authority(commitment)
+    if authority is None:
+        return _ContentCaptureFacts((), (), False, store.runtime_enabled())
+    effective = authority.profiles if authority.active and authority.runtime_enabled else ()
+    return _ContentCaptureFacts(
+        requested_profiles=authority.profiles,
+        effective_profiles=effective,
+        consent_active=authority.active,
+        runtime_enabled=authority.runtime_enabled,
+    )
+
+
 def _delivery_facts(
     store: LocalObservationStore, commitment: str, *, state_root: Path | None
 ) -> _DeliveryFacts:
@@ -301,7 +330,8 @@ def observe_status(
     root = _resolve_workspace(workspace)
     commitment = store.workspace_commitment(str(root))
     consent = store.consent_for(commitment)
-    content_profiles = () if consent is None else consent.content_capture_profiles
+    content_facts = _content_capture_facts(store, commitment)
+    content_profiles = content_facts.requested_profiles
     with contextlib.suppress(Exception):
         store.refresh_advice(commitment)
     status = store.status(ObservationStatusQuery(commitment))
@@ -365,6 +395,10 @@ def observe_status(
                 "workspace_commitment": commitment,
                 "consent": consent_label,
                 "content_capture_profiles": content_profiles,
+                "effective_content_capture_profiles": content_facts.effective_profiles,
+                "content_capture_enabled": content_facts.enabled,
+                "content_capture_consent_active": content_facts.consent_active,
+                "content_capture_runtime_enabled": content_facts.runtime_enabled,
                 "status": observation_status_to_json(status),
                 "advice": advice_payload,
                 "undelivered_count": undelivered,
@@ -387,6 +421,11 @@ def observe_status(
         "workspace_commitment": commitment,
         "consent": consent_label,
         "content_profiles": ",".join(content_profiles) if content_profiles else "none",
+        "effective_content_profiles": (
+            ",".join(content_facts.effective_profiles)
+            if content_facts.effective_profiles
+            else "none"
+        ),
         "lifecycle": status.lifecycle.value,
         "lag_events": status.lag_events,
         "undelivered": (
@@ -738,18 +777,25 @@ def enable_observation_content(
     store = LocalObservationStore(_state=_state)
     commitment = store.workspace_commitment(str(_resolve_workspace(workspace)))
     store.enable_content_capture(commitment, profile)
+    content_facts = _content_capture_facts(store, commitment)
     if json_output:
         _emit(
             {
                 "workspace_commitment": commitment,
                 "content_capture_profile": profile,
-                "content_capture_profiles": store.content_capture_profiles(commitment),
-                "enabled": True,
+                "content_capture_profiles": content_facts.requested_profiles,
+                "effective_content_capture_profiles": content_facts.effective_profiles,
+                "consent_active": content_facts.consent_active,
+                "runtime_enabled": content_facts.runtime_enabled,
+                "enabled": content_facts.enabled,
             },
             json_output=True,
         )
     else:
-        typer.echo(f"observation_content_capture_enabled:{profile}")
+        typer.echo(
+            f"observation_content_capture_configured:{profile}:"
+            f"effective={'active' if content_facts.enabled else 'inactive'}"
+        )
     return 0
 
 
@@ -768,21 +814,23 @@ def disable_observation_content(
     store = LocalObservationStore(_state=_state)
     commitment = store.workspace_commitment(str(_resolve_workspace(workspace)))
     store.disable_content_capture(commitment, profile)
-    profiles = store.content_capture_profiles(commitment)
+    content_facts = _content_capture_facts(store, commitment)
     if json_output:
         _emit(
             {
                 "workspace_commitment": commitment,
                 "content_capture_profile": profile,
-                "content_capture_profiles": profiles,
-                "enabled": bool(profiles),
+                "content_capture_profiles": content_facts.requested_profiles,
+                "effective_content_capture_profiles": content_facts.effective_profiles,
+                "consent_active": content_facts.consent_active,
+                "runtime_enabled": content_facts.runtime_enabled,
+                "enabled": content_facts.enabled,
             },
             json_output=True,
         )
     else:
         typer.echo(
-            "observation_content_capture_disabled:"
-            + (profile if profile is not None else "all")
+            "observation_content_capture_disabled:" + (profile if profile is not None else "all")
         )
     return 0
 
@@ -795,19 +843,28 @@ def observation_content_status(
 
     store = LocalObservationStore(_state=_state)
     commitment = store.workspace_commitment(str(_resolve_workspace(workspace)))
-    consent = store.consent_for(commitment)
-    profiles = () if consent is None else consent.content_capture_profiles
+    content_facts = _content_capture_facts(store, commitment)
     payload = {
         "workspace_commitment": commitment,
-        "content_capture_profiles": profiles,
-        "enabled": bool(profiles) and consent is not None and consent.active,
+        "content_capture_profiles": content_facts.requested_profiles,
+        "effective_content_capture_profiles": content_facts.effective_profiles,
+        "consent_active": content_facts.consent_active,
+        "runtime_enabled": content_facts.runtime_enabled,
+        "enabled": content_facts.enabled,
     }
     if json_output:
         _emit(payload, json_output=True)
     else:
         typer.echo(
             "observation_content_capture_status:"
-            + (", ".join(profiles) if profiles else "disabled")
+            + (", ".join(content_facts.effective_profiles) if content_facts.enabled else "disabled")
+            + " (configured: "
+            + (
+                ", ".join(content_facts.requested_profiles)
+                if content_facts.requested_profiles
+                else "none"
+            )
+            + ")"
         )
     return 0
 
