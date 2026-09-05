@@ -59,6 +59,36 @@ def test_authorization_docs_do_not_contradict_the_implemented_consent_lane() -> 
     assert "trusted-terminal ceremony is the single authorization" not in protocol
     assert "`yoetz consent` lane described above is its only exception" in protocol
 
+    # Issue #553: the shipped README, the architecture overview, the CONTRIBUTING honesty rules,
+    # the usage privacy page, and INTERFACES made the same single-authority claim; each must name
+    # the consent lane's widening path.
+    for path in (
+        "README.md",
+        "docs/architecture.md",
+        "CONTRIBUTING.md",
+        "docs/usage/privacy-and-semantic-review.md",
+        "docs/INTERFACES.md",
+    ):
+        surface = " ".join(_text(path).split())
+        assert "only a reauthenticated local human can loosen" not in surface, path
+        assert "reauthenticated local human" not in surface, path
+        assert "reauthenticated decision" in surface, path
+        assert "trusted local ceremony" in surface, path
+        assert "explicit current-chat" in surface, path
+        assert "exact prepared" in surface, path
+
+    # ADR-009 is a record: its original decision-6 sentence stays, but the amendment pointer to
+    # ADR-016's consent lane must sit beside it rather than only in the later table.
+    adr = " ".join(_text("docs/adr/ADR-009-data-egress-privacy.md").split())
+    original = (
+        "MCP/agent/LLM calls can request more context but cannot approve or persist the expansion."
+    )
+    assert original in adr
+    tail = adr[adr.index(original) : adr.index(original) + 600]
+    assert "Amended by ADR-016 decision 5" in tail
+    assert "explicit current-chat" in tail
+    assert "cannot independently authenticate" in tail
+
 
 def test_catalog_exposes_user_control_rules_and_all_named_recipes() -> None:
     catalog = catalog_payload()

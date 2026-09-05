@@ -74,6 +74,7 @@ _REASONS: Final = frozenset(
         "auto_attach_refused",
         "auto_attach_result_invalid",
         "auto_attach_mapping_write_failed",
+        "auto_attach_recovery_busy",
         "privacy_authority_required",
         "runtime_gate_contended",
         "runtime_gate_unsafe",
@@ -107,6 +108,7 @@ _REASONS: Final = frozenset(
         # bind failed silently and observation kept routing to the old task.
         "start_bind_unparsed",
         "start_bind_invalid_ids",
+        "start_bind_deferred",
         "start_bind_write_failed",
         # Observability only: the end-to-end hook budget is a contract, not an
         # enforcement point. Aborting mid-hook would drop ingest.

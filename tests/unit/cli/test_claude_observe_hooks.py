@@ -23,7 +23,12 @@ from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_pa
 
 def test_claude_hook_ingress_retains_only_closed_structural_mcp_fields(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
+    inherited = tmp_path / "inherited"
+    inherited.mkdir(mode=0o700)
+    monkeypatch.setenv("YOETZ_ISOLATED_ROOT", str(inherited))
+    local_state = tmp_path / "local-state"
     captured: dict[str, object] = {}
 
     def fake_handle_observe(**kwargs: object) -> int:
@@ -49,6 +54,7 @@ def test_claude_hook_ingress_retains_only_closed_structural_mcp_fields(
             stdin_bytes=canonical_encode(payload),
             stdout=io.BytesIO(),
             workspace=".",
+            _state=local_state,
         )
         == 0
     )
@@ -64,6 +70,8 @@ def test_claude_hook_ingress_retains_only_closed_structural_mcp_fields(
         "tool_use_id": "tool-1",
     }
     assert captured["source"] is ObservationSource.CLAUDE_HOOK
+    assert _recorded_diagnostics(local_state) == [("start_bind_unparsed", "PostToolUse")]
+    assert list(inherited.iterdir()) == []
 
 
 @pytest.mark.parametrize("response_shape", ["structured", "content_blocks", "json_string"])

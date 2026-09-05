@@ -974,17 +974,17 @@ class ObservationCoordinator:
                     # Validation and identity rejections are terminal by their
                     # public contract. Calling them service_unavailable made a
                     # healthy daemon look down and left the FIFO head immortal
-                    # because every drain path retried it (#540).
+                    # because every drain path retried it (#540). That includes
+                    # SESSION_NOT_FOUND without a followable binding and
+                    # SESSION_CONFLICT: every route, catalog, and ledger
+                    # authority raises both non-retryable, so neither has a
+                    # retryable rendering below (#554).
                     return _reject(ObservationGapCode.LEDGER_REJECTED.value)
                 if exc.code is PublicErrorCode.VAULT_LOCKED:
                     return _reject(ObservationGapCode.VAULT_LOCKED.value)
-                if exc.code in {
-                    PublicErrorCode.SERVICE_UNAVAILABLE,
-                    PublicErrorCode.SESSION_NOT_FOUND,
-                }:
-                    return _reject(ObservationGapCode.SERVICE_UNAVAILABLE.value)
-                if exc.code is PublicErrorCode.SESSION_CONFLICT:
-                    return _reject(ObservationGapCode.MAPPING_MISSING.value)
+                # Any other retryable public failure is transient coordination
+                # with no narrower class; the row stays pending under the
+                # consecutive-rejection ceiling (#539).
                 return _reject(ObservationGapCode.SERVICE_UNAVAILABLE.value)
             except Exception as exc:
                 record_unexpected_exception_without_raising(

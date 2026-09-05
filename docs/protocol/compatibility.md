@@ -196,7 +196,13 @@ default, discovery/component inventory, hook declaration, fresh-session plugin/s
 registration, and connected plugin-owned strict MCP. A correlated model call was blocked by absent
 authentication in the isolated Claude config; only SessionStart/SessionEnd hook delivery was seen,
 and the separately installed older Yoetz lacked the new hook command. Model use, accepted
-observation, semantic dispatch, privacy receipt, and workflow receipt therefore remain unobserved.
+observation, semantic dispatch, privacy receipt, and workflow receipt therefore remain unobserved
+for that `2.1.241` cell. A later live capture (2026-09-04) on Claude Code `2.1.251` observed
+`PostToolUse` delivery for a scoped MCP tool with `tool_response` as one bare JSON string of the
+structured result; the binder admits that shape and a fixture pins it
+(`docs/runbooks/claude-code-integration.md`). That capture is an observed payload shape only: it
+populates no capability-profile entry, does not move the cell above, and `2.1.251` is not a tested
+version.
 Claude Desktop local/SSH, Desktop remote, web/cloud, synced plugins, managed/user/local scopes,
 Agent SDK, and noninteractive/headless behavior are separate unpopulated cells. Claude Code is not
 claimed to consume Agent Plugins 1.0.0.

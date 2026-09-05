@@ -5,8 +5,10 @@ contracts on the CLI and over MCP — same names, same fields, same errors
 ([ADR-002](../adr/ADR-002-canonical-protocol.md),
 [ADR-010](../adr/ADR-010-harness-integration-port.md)).
 
-Everything else the CLI offers — `import`, `review`, `backup`, `restore`, `migrate`, `integrate`,
-`version`, `service`, `mcp`, `state` — is a bounded support surface, not a seventh operation.
+Everything else the CLI offers — `setup`, `recommend`, `provider`, `privacy`, `consent`
+(alias `elevated-bootstrap`), `integrate`, `hooks`, `observe`, `import`, `review`, `backup`,
+`restore`, `migrate`, `version`, `service`, `mcp`, `state`, `menu` — is a bounded support surface,
+not a seventh operation.
 
 ## Calling them
 
@@ -82,6 +84,29 @@ coverage vector. `mode` selects how much:
 `semantic_required` never erases deterministic truth. If the provider is absent, denied by policy,
 refuses, times out, or returns stale or invalid output, you get the deterministic findings back with
 verdict `incomplete_check`, an explicit reason, and no semantic findings.
+
+#### Approved workspace checks
+
+`check` reads the ledger; it does not run your test suite. A project may declare fixed commands
+it is willing to have run on its behalf in `.yoetz/checks.toml` — an exact argv, a timeout, and
+whether network is requested. Those bytes grant nothing by themselves. Trust is given per
+workspace to one exact policy digest by a local human (first-run setup offers it for the policy
+present at that time), and revoked the same way; if the file changes afterwards, the old trust no
+longer matches and nothing runs until the new digest is trusted.
+
+```text
+yoetz observe checks preview                          # policy digest and each proposed argv, without activating
+yoetz observe checks trust --policy-digest <digest>   # trust only the exact digest currently present
+yoetz observe checks status                           # trusted or untrusted, and which checks may run
+yoetz observe checks revoke                           # withdraw this workspace's check-policy trust
+yoetz observe checks run                              # run the trusted argv under the enforcing sandbox
+```
+
+`run` refuses an untrusted digest and records a coverage gap instead. A check that asks for
+network is not run; it is reported as unsupported. Each result carries a status and outcome, the
+output digest and byte count, and whether it is current: a run is bound to the working tree and
+diff state captured before and after it, so a result whose tree moved while it ran is marked not
+current rather than reusable. When no enforcing sandbox is available the outcome says so.
 
 ### `respond`
 Answers a finding: accept and act, supply evidence, revise the claim, dispute with evidence, or

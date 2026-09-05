@@ -45,9 +45,12 @@ Some content classes can never become model input or reach another sink — see 
 [`PRIVACY.md`](../../PRIVACY.md). No profile overrides it. No approval unlocks it. Authorship does
 not unlock it: sensitive and confidential content stays sensitive no matter who wrote it.
 
-Only a reauthenticated local human can loosen effective policy, and loosening is never silent. The
-machine row is an installation ceiling; external LLM work also needs an exact granted row for the
-current repository beneath it.
+Effective policy loosens only through a reauthenticated decision you make: the trusted local
+ceremony, or your explicit current-chat approval of one exact prepared, previewed, expiring consent
+target that a capable agent relays for you. That relay is the agent's assertion, which Yoetz cannot
+independently authenticate, so the local ceremony remains the stronger path. Loosening is never
+silent: every path shows the complete change before you decide. The machine row is an installation
+ceiling; external LLM work also needs an exact granted row for the current repository beneath it.
 
 ## Commands
 
@@ -57,9 +60,11 @@ yoetz privacy setup             # equivalent guided policy review
 yoetz privacy show              # current effective policy
 yoetz privacy tighten           # tighten (proceeds through gates)
 yoetz privacy propose           # propose a change for decision
+yoetz privacy decide-policy     # approve or deny one exact pending policy proposal on the terminal
 yoetz privacy export-desired    # effective nonsecret policy as desired-state TOML (never secrets)
 yoetz privacy apply-desired     # apply desired-state TOML; tighten may proceed, widen never silent
 yoetz privacy pending           # list disclosure decisions waiting for you
+yoetz privacy decide-disclosure # decide one exact pending disclosure by id (see below)
 yoetz privacy receipts          # inspect bounded structural egress receipts
 ```
 

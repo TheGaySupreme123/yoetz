@@ -529,22 +529,32 @@ async def _drain_pass(
         if decision.action is ObservationDrainAction.RETRY:
             retired_lanes.add(lane)
             if decision.reason == ObservationGapCode.MAPPING_MISSING.value:
-                moved = store.quarantine_ended_unmapped_session(
-                    commitment,
-                    row.codex_session_id,
-                    decision.reason,
-                )
+                # Terminalization takes the session's lifecycle lock so an
+                # attach still persisting its mapping wins (#275). A lock or
+                # store failure is this lane's problem only: the rows stay
+                # pending for the next run and the other lanes keep draining,
+                # as in the hook drain (#554).
+                moved = 0
+                with contextlib.suppress(Exception):
+                    moved = store.quarantine_ended_unmapped_session(
+                        commitment,
+                        row.codex_session_id,
+                        decision.reason,
+                    )
                 if moved:
                     tally.quarantined += moved
                     resolved += moved
                     continue
             tally.retry_pending += 1
             if decision.reason is not None:
-                store.note_outbox_session_reason(
-                    commitment,
-                    row.codex_session_id,
-                    decision.reason,
-                )
+                # Stamp the retired siblings with the shared cause so
+                # `observe status` never reports them as not_attempted.
+                with contextlib.suppress(Exception):
+                    store.note_outbox_session_reason(
+                        commitment,
+                        row.codex_session_id,
+                        decision.reason,
+                    )
             if decision.reason in WORKSPACE_GLOBAL_OBSERVATION_STOP_REASONS:
                 stopped_workspaces.add(commitment)
         elif decision.action is ObservationDrainAction.QUARANTINE:
@@ -593,6 +603,11 @@ async def _drain_observation_async(
     else:
         workspaces = (store.workspace_commitment(str(_resolve_workspace(workspace))),)
     tally = _DrainTally()
+    # READY and the explicit drain command both converge lifecycle intents;
+    # SessionStart has no deliverable outbox row of its own.
+    for commitment in workspaces:
+        with contextlib.suppress(Exception):
+            store.reconcile_pending_session_lifecycles(commitment)
     passes = 0
     terminal = _DRAIN_TERMINAL_DRAINED
     client: _DrainClient | None = None

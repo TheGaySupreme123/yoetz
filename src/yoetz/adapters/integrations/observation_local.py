@@ -16,7 +16,7 @@ import re
 import stat
 import threading
 import time
-from collections.abc import Callable, Generator, Mapping, MutableMapping
+from collections.abc import Callable, Generator, Iterable, Mapping, MutableMapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -52,6 +52,7 @@ from yoetz.domain.values import (
     JsonValue,
     Timestamp,
     timestamp_from_datetime,
+    validate_commitment,
     validate_sha256_digest,
 )
 from yoetz.ports.integrations import YOETZ_WORKFLOW_TOOL_NAMES
@@ -70,6 +71,7 @@ __all__ = [
     "LocalObservationConsent",
     "LocalObservationStore",
     "ObservationOutboxRow",
+    "PendingSessionLifecycle",
     "STREAM_MAPPING_VERSION",
     "YOETZ_OWNED_TOOL_NAMES",
     "YOETZ_READ_TOOL_NAMES",
@@ -91,6 +93,7 @@ _MAX_ENVELOPES: Final = 256
 _MAX_DEDUP: Final = 4_096
 _MAX_OPEN_PRE: Final = 256
 _MAX_OUTBOX: Final = 512
+_MAX_PENDING_LIFECYCLES: Final = 256
 _MAX_QUARANTINE: Final = 512
 # Quarantined detail is a diagnostic aid, not the durable record; entries this
 # stale are pure per-hook parse/encode tax (#211). Age-expired detail folds
@@ -561,6 +564,66 @@ class ObservationOutboxRow:
             raise ProtocolValueError("invalid_event_value_type")
 
 
+@dataclass(frozen=True, slots=True)
+class PendingSessionLifecycle:
+    """One durable host-session lifecycle operation waiting for its lock.
+
+    The target generation is frozen when the hook captures the event.  That
+    makes retries idempotent: a later worker can distinguish an already
+    applied operation from a still-pending one without inferring intent from
+    the current ended flag alone.
+    """
+
+    codex_session_id: str
+    session_commitment: str
+    event_kind: str
+    target_generation: int
+    clear_mapping: bool = False
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.codex_session_id) is not str
+            or not 1 <= len(self.codex_session_id) <= 128
+            or "/" in self.codex_session_id
+            or "\\" in self.codex_session_id
+            or "\0" in self.codex_session_id
+            or not self.codex_session_id.isascii()
+            or not all(0x21 <= ord(char) <= 0x7E for char in self.codex_session_id)
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        if type(self.session_commitment) is not str or not re.fullmatch(
+            r"hmac-sha256:[0-9a-f]{64}", self.session_commitment
+        ):
+            raise ProtocolValueError("invalid_commitment")
+        if self.event_kind not in {"SessionStart", "SessionEnd"}:
+            raise ProtocolValueError("invalid_event_value_type")
+        if (
+            type(self.target_generation) is not int
+            or isinstance(self.target_generation, bool)
+            or not 1 <= self.target_generation <= _MAX_SAFE_INTEGER
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        if type(self.clear_mapping) is not bool:
+            raise ProtocolValueError("invalid_event_value_type")
+        if self.clear_mapping and self.event_kind != "SessionStart":
+            raise ProtocolValueError("invalid_event_value_type")
+
+    @property
+    def operation_id(self) -> str:
+        """Stable identity for retries, independent of the target generation."""
+
+        return canonical_digest(
+            JsonObject(
+                {
+                    "codex_session_id": self.codex_session_id,
+                    "session_commitment": self.session_commitment,
+                    "event_kind": self.event_kind,
+                    "clear_mapping": self.clear_mapping,
+                }
+            )
+        )
+
+
 @dataclass
 class _GapState:
     first_seen: Timestamp
@@ -617,6 +680,7 @@ class _WorkspaceState:
     ended_sessions: set[str] | None = None
     session_generations: dict[str, int] | None = None
     ended_session_generations: dict[str, int] | None = None
+    pending_lifecycles: list[PendingSessionLifecycle] | None = None
     quarantine_evicted_count: int = 0
     quarantine_reclaimed_count: int = 0
     quarantine_evicted_commitment: str | None = None
@@ -670,6 +734,8 @@ class _WorkspaceState:
             self.session_generations = {}
         if self.ended_session_generations is None:
             self.ended_session_generations = {}
+        if self.pending_lifecycles is None:
+            self.pending_lifecycles = []
         if self.session_advice is None:
             self.session_advice = {}
         if self.session_advice_suppression is None:
@@ -910,6 +976,7 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         ended_sessions=set(state.ended_sessions or ()),
         session_generations=dict(state.session_generations or {}),
         ended_session_generations=dict(state.ended_session_generations or {}),
+        pending_lifecycles=list(state.pending_lifecycles or ()),
     )
 
 
@@ -1174,26 +1241,50 @@ class LocalObservationStore:
 
         with self._lock:
             state = self._load(workspace_commitment)
-            assert state.session_generations is not None
-            assert state.ended_session_generations is not None
-            assert state.ended_sessions is not None
-            generation = state.session_generations.get(session_commitment, 0) + 1
-            state.session_generations[session_commitment] = generation
-            state.ended_session_generations.pop(session_commitment, None)
-            state.ended_sessions.discard(session_commitment)
-            assert state.stream_partial_dropped_sessions is not None
-            state.stream_partial_dropped_sessions.discard(session_commitment)
-            state.stream_partial_dropped_sessions.discard(_LEGACY_STREAM_PARTIAL_DROPPED_SESSION)
-            if not state.stream_partial_dropped_sessions:
-                self._resolve_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
+            generation = self._begin_session_generation_state(state, session_commitment)
             self._save(workspace_commitment, state)
             return generation
+
+    @staticmethod
+    def _begin_session_generation_state(state: _WorkspaceState, session_commitment: str) -> int:
+        """Advance one generation in an already-held workspace state."""
+
+        assert state.session_generations is not None
+        assert state.ended_session_generations is not None
+        assert state.ended_sessions is not None
+        generation = state.session_generations.get(session_commitment, 0) + 1
+        state.session_generations[session_commitment] = generation
+        state.ended_session_generations.pop(session_commitment, None)
+        state.ended_sessions.discard(session_commitment)
+        assert state.stream_partial_dropped_sessions is not None
+        state.stream_partial_dropped_sessions.discard(session_commitment)
+        state.stream_partial_dropped_sessions.discard(_LEGACY_STREAM_PARTIAL_DROPPED_SESSION)
+        if not state.stream_partial_dropped_sessions:
+            LocalObservationStore._resolve_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
+        return generation
 
     def current_session_generation(self, workspace_commitment: str, session_commitment: str) -> int:
         with self._lock:
             state = self._load(workspace_commitment)
             assert state.session_generations is not None
             return state.session_generations.get(session_commitment, 1)
+
+    def persisted_session_generation(
+        self, workspace_commitment: str, session_commitment: str
+    ) -> int:
+        """Return the stored counter, preserving zero for legacy state.
+
+        ``current_session_generation`` is the public event-stamping view and
+        therefore presents a pre-counter binding as generation one. Lifecycle
+        reconciliation needs the persisted counter itself so a deferred first
+        start can materialize generation one exactly once instead of advancing
+        a legacy ended binding to generation two.
+        """
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.session_generations is not None
+            return state.session_generations.get(session_commitment, 0)
 
     def note_session_end(
         self,
@@ -1210,23 +1301,37 @@ class LocalObservationStore:
 
         with self._lock:
             state = self._load(workspace_commitment)
-            assert state.ended_sessions is not None
-            assert state.session_generations is not None
-            assert state.ended_session_generations is not None
-            assert state.session_workspaces is not None
-            current = state.session_generations.get(session_commitment, 1)
-            observed = current if generation is None else generation
-            if observed != current:
-                return
-            # Retain the binding so "all bound sessions ended" is computable.
-            state.session_workspaces.setdefault(session_commitment, workspace_commitment)
-            state.ended_sessions.add(session_commitment)
-            state.ended_session_generations[session_commitment] = observed
-            assert state.stream_partial_dropped_sessions is not None
-            state.stream_partial_dropped_sessions.discard(session_commitment)
-            if not state.stream_partial_dropped_sessions:
-                self._resolve_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
-            self._save(workspace_commitment, state)
+            if self._note_session_end_state(
+                state, workspace_commitment, session_commitment, generation
+            ):
+                self._save(workspace_commitment, state)
+
+    @staticmethod
+    def _note_session_end_state(
+        state: _WorkspaceState,
+        workspace_commitment: str,
+        session_commitment: str,
+        generation: int | None,
+    ) -> bool:
+        """Apply one generation-fenced end to an already-held workspace state."""
+
+        assert state.ended_sessions is not None
+        assert state.session_generations is not None
+        assert state.ended_session_generations is not None
+        assert state.session_workspaces is not None
+        current = state.session_generations.get(session_commitment, 1)
+        observed = current if generation is None else generation
+        if observed != current:
+            return False
+        # Retain the binding so "all bound sessions ended" is computable.
+        state.session_workspaces.setdefault(session_commitment, workspace_commitment)
+        state.ended_sessions.add(session_commitment)
+        state.ended_session_generations[session_commitment] = observed
+        assert state.stream_partial_dropped_sessions is not None
+        state.stream_partial_dropped_sessions.discard(session_commitment)
+        if not state.stream_partial_dropped_sessions:
+            LocalObservationStore._resolve_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
+        return True
 
     def bind_codex_session(self, workspace_commitment: str, codex_session_id: str) -> str:
         """Bind a Codex session id to a consented workspace; return session commitment."""
@@ -1239,6 +1344,88 @@ class LocalObservationStore:
             state.codex_session_bindings[codex_session_id] = session
             self._save(workspace_commitment, state)
         return session
+
+    def reconcile_outbox_session_lifecycle(
+        self,
+        workspace_commitment: str,
+        row: ObservationOutboxRow,
+        *,
+        session_lock_owned: bool = False,
+    ) -> bool:
+        """Converge raw session membership before one outbox row is delivered.
+
+        A hook can capture an envelope while the workspace reservation is held by
+        recovery. The row is the durable handoff containing both the raw host
+        session id and its target workspace. A later hook drain or READY sweep
+        binds that id under the same workspace-then-session locks before sending
+        the row. Contended locks and foreign ownership return ``False`` so the
+        caller leaves the row untouched for a later pass.
+        """
+
+        if type(row) is not ObservationOutboxRow:
+            return False
+        pending = self.list_pending_session_lifecycles(workspace_commitment, row.codex_session_id)
+        if not pending and row.codex_session_id in self.codex_sessions_for_workspace(
+            workspace_commitment
+        ):
+            # The normal mapped-session path already serialized its lifecycle
+            # mutation before enqueueing. Avoid taking a second pair of locks
+            # for every ordinary delivery row.
+            return True
+        if not self.reconcile_pending_session_lifecycles(
+            workspace_commitment,
+            row.codex_session_id,
+            session_lock_owned=session_lock_owned,
+        ):
+            return False
+        if self.list_pending_session_lifecycles(workspace_commitment, row.codex_session_id):
+            # A foreign owner or stale target remains unresolved. Do not route
+            # the row before its explicit lifecycle intent converges.
+            return False
+        from yoetz.adapters.integrations.codex_lifecycle import (
+            acquire_session_lock,
+            acquire_workspace_recovery_lock,
+        )
+
+        try:
+            with acquire_workspace_recovery_lock(
+                workspace_commitment, _state=self._state_root
+            ) as workspace_owned:
+                if not workspace_owned:
+                    return False
+                session_lock = (
+                    contextlib.nullcontext(True)
+                    if session_lock_owned
+                    else acquire_session_lock(row.codex_session_id, _state=self._state_root)
+                )
+                with session_lock as session_owned:
+                    if not session_owned:
+                        return False
+                    session_commitment = self.session_commitment(row.codex_session_id)
+                    known = row.codex_session_id in self.codex_sessions_for_workspace(
+                        workspace_commitment
+                    )
+                    if not known:
+                        self.bind_codex_session(workspace_commitment, row.codex_session_id)
+                    current_generation = self.current_session_generation(
+                        workspace_commitment, session_commitment
+                    )
+                    event_kind = row.envelope.event_kind
+                    source_generation = row.envelope.cursor.source_generation
+                    if event_kind == "SessionEnd" and (current_generation == source_generation):
+                        self.note_session_end(
+                            workspace_commitment,
+                            session_commitment,
+                            generation=source_generation,
+                        )
+                    elif event_kind == "SessionStart":
+                        # A historical outbox Start does not prove that its
+                        # lifecycle was deferred. Only explicit pending
+                        # intents may advance a generation.
+                        return True
+                    return True
+        except Exception:
+            return False
 
     def codex_session_ended(self, workspace_commitment: str, codex_session_id: str) -> bool:
         """Whether the bound Codex session is marked ended for its current generation.
@@ -1331,6 +1518,77 @@ class LocalObservationStore:
                     key=str.encode,
                 )
             )
+
+    def codex_session_lifecycles_for_workspace(
+        self, workspace_commitment: str
+    ) -> tuple[tuple[str, bool], ...]:
+        """Return every bound host session id with its ended flag from one state read.
+
+        The SessionStart recovery scan needs the ended flag of every binding in the
+        workspace. Asking ``codex_session_ended`` per binding copies the whole state once
+        per call outside a batch, so the scan cost grew with the binding count (#549).
+        """
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.codex_session_bindings is not None
+            assert state.ended_sessions is not None
+            bindings = state.codex_session_bindings
+            ended = state.ended_sessions
+            return tuple(
+                (session_id, bindings[session_id] in ended)
+                for session_id in sorted(bindings, key=str.encode)
+            )
+
+    def prune_codex_session_bindings(
+        self, workspace_commitment: str, codex_session_ids: Iterable[str]
+    ) -> tuple[str, ...]:
+        """Drop the requested bindings whose sessions are ended and fully drained (#549).
+
+        Rule: a binding is removed only when its session is marked ended for its current
+        generation, no pending outbox row and no quarantine row still names the session,
+        and the session is not held as storage-corrupt. Anything else is kept whatever
+        the caller asked for. The ended-unmapped quarantine path resolves a host session
+        id through this map to decide that its rows are terminal, and the corruption
+        repair path clears a session through it, so a binding with undrained work must
+        outlive that work. A pruned session that resumes re-binds on its next hook event;
+        its generation counter is keyed by commitment and retained, so the resumed
+        generation continues rather than restarting. Returns the ids removed, sorted.
+        """
+
+        requested = {
+            session_id for session_id in codex_session_ids if type(session_id) is str and session_id
+        }
+        if not requested:
+            return ()
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.codex_session_bindings is not None
+            assert state.ended_sessions is not None
+            assert state.pending_outbox is not None
+            assert state.quarantine is not None
+            assert state.storage_corrupt_sessions is not None
+            assert state.pending_lifecycles is not None
+            bindings = state.codex_session_bindings
+            busy = {row.codex_session_id for row in state.pending_outbox}
+            busy.update(entry[0] for entry in state.quarantine)
+            busy.update(state.storage_corrupt_sessions)
+            busy.update(intent.codex_session_id for intent in state.pending_lifecycles)
+            removed: list[str] = []
+            for session_id in sorted(requested & bindings.keys(), key=str.encode):
+                if bindings[session_id] not in state.ended_sessions or session_id in busy:
+                    continue
+                del bindings[session_id]
+                # One-shot frontier notices are keyed by host session id and are
+                # only ever dropped through the binding's ended flag.
+                if state.frontier_motion_notices:
+                    state.frontier_motion_notices.pop(session_id, None)
+                if state.frontier_motion_delivered:
+                    state.frontier_motion_delivered.pop(session_id, None)
+                removed.append(session_id)
+            if removed:
+                self._save(workspace_commitment, state)
+            return tuple(removed)
 
     def consent_for(self, workspace_commitment: str) -> LocalObservationConsent | None:
         with self._lock:
@@ -2165,15 +2423,263 @@ class LocalObservationStore:
             )
 
     def pending_workspaces(self) -> tuple[str, ...]:
-        """Return only opaque commitments for workspaces with undelivered rows."""
+        """Return opaque commitments with undelivered rows or lifecycle work."""
 
         with self._lock:
             pending: list[str] = []
             for workspace, state in self._iter_workspaces():
                 assert state.pending_outbox is not None
-                if state.pending_outbox:
+                assert state.pending_lifecycles is not None
+                if state.pending_outbox or state.pending_lifecycles:
                     pending.append(workspace)
             return tuple(sorted(pending, key=str.encode))
+
+    def list_pending_session_lifecycles(
+        self, workspace_commitment: str, codex_session_id: str | None = None
+    ) -> tuple[PendingSessionLifecycle, ...]:
+        """Return immutable deferred lifecycle intents in capture order."""
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.pending_lifecycles is not None
+            if codex_session_id is None:
+                return tuple(state.pending_lifecycles)
+            return tuple(
+                intent
+                for intent in state.pending_lifecycles
+                if intent.codex_session_id == codex_session_id
+            )
+
+    def lifecycle_reconciliation_snapshot(
+        self, workspace_commitment: str
+    ) -> tuple[frozenset[str], frozenset[str]]:
+        """Return bound and deferred raw session ids from one state read."""
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.codex_session_bindings is not None
+            assert state.pending_lifecycles is not None
+            return (
+                frozenset(state.codex_session_bindings),
+                frozenset(intent.codex_session_id for intent in state.pending_lifecycles),
+            )
+
+    def effective_session_generation(
+        self,
+        workspace_commitment: str,
+        codex_session_id: str,
+        session_commitment: str,
+    ) -> int:
+        """Return the generation future envelopes must use while intents are queued."""
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.session_generations is not None
+            generation = state.session_generations.get(session_commitment, 0) or 1
+            assert state.pending_lifecycles is not None
+            for intent in state.pending_lifecycles:
+                if (
+                    intent.codex_session_id != codex_session_id
+                    or intent.session_commitment != session_commitment
+                ):
+                    continue
+                if intent.event_kind == "SessionStart":
+                    generation = intent.target_generation
+                elif intent.target_generation == generation:
+                    # A queued end makes the next start a new generation.  The
+                    # current generation remains the one stamped on events
+                    # captured before that start is observed.
+                    continue
+            return generation
+
+    def record_pending_session_lifecycle(
+        self,
+        workspace_commitment: str,
+        codex_session_id: str,
+        session_commitment: str,
+        event_kind: str,
+        target_generation: int,
+        *,
+        clear_mapping: bool = False,
+    ) -> bool:
+        """Persist one lifecycle intent when a nonblocking membership lock is busy.
+
+        The intent and the envelope that caused it are committed by the same
+        workspace batch in the hook. Consecutive duplicate intents collapse;
+        distinct start/end transitions retain their order up to a bounded
+        per-workspace queue.
+        """
+
+        intent = PendingSessionLifecycle(
+            codex_session_id=codex_session_id,
+            session_commitment=session_commitment,
+            event_kind=event_kind,
+            target_generation=target_generation,
+            clear_mapping=clear_mapping,
+        )
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.pending_lifecycles is not None
+            for prior in reversed(state.pending_lifecycles):
+                if prior.codex_session_id != codex_session_id:
+                    continue
+                if (
+                    prior.event_kind == intent.event_kind
+                    and prior.target_generation == intent.target_generation
+                    and prior.clear_mapping == intent.clear_mapping
+                    and prior.session_commitment == intent.session_commitment
+                ):
+                    return True
+                break
+            if len(state.pending_lifecycles) >= _MAX_PENDING_LIFECYCLES:
+                return False
+            state.pending_lifecycles.append(intent)
+            self._save(workspace_commitment, state)
+            return True
+
+    def _pending_session_workspace_owners(self, codex_session_id: str) -> frozenset[str]:
+        """Return every raw binding owner while the store lock is held."""
+
+        owners: set[str] = set()
+        for workspace, state in self._iter_workspaces():
+            assert state.codex_session_bindings is not None
+            if codex_session_id in state.codex_session_bindings:
+                owners.add(workspace)
+        return frozenset(owners)
+
+    def reconcile_pending_session_lifecycles(
+        self,
+        workspace_commitment: str,
+        codex_session_id: str | None = None,
+        *,
+        session_lock_owned: bool = False,
+    ) -> bool:
+        """Apply queued lifecycle operations under the shared workspace reservation.
+
+        ``False`` means a reservation or session lock was busy and the intents
+        remain durable.  A successful pass removes only operations that were
+        applied or proven already applied at their frozen target generation.
+        """
+
+        from yoetz.adapters.integrations.codex_lifecycle import (
+            acquire_session_lock,
+            acquire_workspace_recovery_lock,
+            clear_mapping,
+        )
+
+        pending = self.list_pending_session_lifecycles(workspace_commitment, codex_session_id)
+        if not pending:
+            return True
+        session_ids = tuple(sorted({intent.codex_session_id for intent in pending}, key=str.encode))
+        with acquire_workspace_recovery_lock(
+            workspace_commitment, _state=self._state_root
+        ) as workspace_owned:
+            if not workspace_owned:
+                return False
+            with contextlib.ExitStack() as locks:
+                for session_id in session_ids:
+                    if session_lock_owned and session_id == codex_session_id:
+                        continue
+                    if not locks.enter_context(
+                        acquire_session_lock(session_id, _state=self._state_root)
+                    ):
+                        return False
+                changed = False
+                with self.batched(workspace_commitment):
+                    state = self._load(workspace_commitment)
+                    assert state.pending_lifecycles is not None
+                    current = list(state.pending_lifecycles)
+                    remaining: list[PendingSessionLifecycle] = []
+                    for intent in current:
+                        if (
+                            codex_session_id is not None
+                            and intent.codex_session_id != codex_session_id
+                        ):
+                            remaining.append(intent)
+                            continue
+                        if intent.codex_session_id not in session_ids:
+                            remaining.append(intent)
+                            continue
+                        # A raw id can never move between consented workspaces.
+                        # Keep the intent visible if a foreign binding appears;
+                        # silently repairing it would cross an ownership boundary.
+                        owners = self._pending_session_workspace_owners(intent.codex_session_id)
+                        if owners - {workspace_commitment}:
+                            remaining.append(intent)
+                            continue
+                        assert state.consent is not None
+                        if not state.consent.active:
+                            remaining.append(intent)
+                            continue
+                        assert state.codex_session_bindings is not None
+                        assert state.session_workspaces is not None
+                        assert state.session_generations is not None
+                        assert state.ended_sessions is not None
+                        session = self.session_commitment(intent.codex_session_id)
+                        if session != intent.session_commitment:
+                            remaining.append(intent)
+                            continue
+                        if intent.codex_session_id not in state.codex_session_bindings:
+                            state.session_workspaces.setdefault(session, workspace_commitment)
+                            state.codex_session_bindings[intent.codex_session_id] = session
+                            changed = True
+                        stored_generation = state.session_generations.get(session, 0)
+                        # A legacy end may have been persisted before the
+                        # generation counter existed; its public generation
+                        # is still the initial value one. Starts keep the
+                        # stored-zero distinction so a deferred first Start
+                        # materializes that counter exactly once.
+                        generation = (
+                            stored_generation
+                            if stored_generation > 0 or intent.event_kind == "SessionStart"
+                            else 1
+                        )
+                        ended = session in state.ended_sessions
+                        if intent.event_kind == "SessionStart":
+                            if generation > intent.target_generation:
+                                # A stale clear has no authority over a later route.
+                                continue
+                            if intent.clear_mapping:
+                                clear_mapping(intent.codex_session_id, _state=self._state_root)
+                            if generation == intent.target_generation and not ended:
+                                # The operation reached its frozen target before
+                                # the worker got here. Do not increment again.
+                                pass
+                            elif generation + 1 == intent.target_generation and (
+                                ended or intent.clear_mapping
+                            ):
+                                self._begin_session_generation_state(state, session)
+                                changed = True
+                            elif generation == 0 and intent.target_generation == 1:
+                                self._begin_session_generation_state(state, session)
+                                changed = True
+                            elif generation > intent.target_generation:
+                                # A later generation already superseded this
+                                # stale intent; dropping it is idempotent.
+                                pass
+                            else:
+                                remaining.append(intent)
+                                continue
+                        elif generation == intent.target_generation:
+                            if not ended:
+                                self._note_session_end_state(
+                                    state,
+                                    workspace_commitment,
+                                    session,
+                                    intent.target_generation,
+                                )
+                                changed = True
+                        elif generation < intent.target_generation:
+                            remaining.append(intent)
+                            continue
+                        # An end already recorded at the frozen generation is
+                        # complete and is removed below.
+                    if remaining != current:
+                        state.pending_lifecycles[:] = remaining
+                        changed = True
+                    if changed:
+                        self._save(workspace_commitment, state)
+                return True
 
     def bump_outbox_row_attempt(
         self,
@@ -2649,7 +3155,21 @@ class LocalObservationStore:
             state.trusted_policy_mac = None
             self._save(workspace, state)
 
-    def ingest(self, envelope: ObservationEnvelope) -> ObservationIngestResult:
+    def ingest(
+        self,
+        envelope: ObservationEnvelope,
+        *,
+        workspace_commitment: str | None = None,
+    ) -> ObservationIngestResult:
+        """Durably ingest one envelope, optionally at an explicit local workspace.
+
+        The explicit workspace is a hook-only fallback for an observation whose
+        session membership could not be created because its nonblocking
+        lifecycle reservation was busy. It selects the already-consented target
+        state without mutating session ownership; ordinary callers continue to
+        resolve the workspace from the envelope's bound session commitment.
+        """
+
         if type(envelope) is not ObservationEnvelope:
             raise _error(
                 PublicErrorCode.INVALID_REQUEST,
@@ -2657,14 +3177,36 @@ class LocalObservationStore:
                 retryable=False,
             )
         with self._lock:
-            try:
-                workspace = self._workspace_for_envelope(envelope)
-            except PublicOperationError:
-                return ObservationIngestResult(
-                    ObservationIngestDisposition.REJECTED,
-                    ObservationGapCode.CONSENT_MISSING.value,
-                    None,
-                )
+            if workspace_commitment is None:
+                try:
+                    workspace = self._workspace_for_envelope(envelope)
+                except PublicOperationError:
+                    return ObservationIngestResult(
+                        ObservationIngestDisposition.REJECTED,
+                        ObservationGapCode.CONSENT_MISSING.value,
+                        None,
+                    )
+            else:
+                try:
+                    workspace = validate_commitment(workspace_commitment)
+                except ProtocolValueError:
+                    return ObservationIngestResult(
+                        ObservationIngestDisposition.REJECTED,
+                        ObservationGapCode.CONSENT_MISSING.value,
+                        None,
+                    )
+                for other_workspace, other_state in self._iter_workspaces():
+                    assert other_state.session_workspaces is not None
+                    if (
+                        other_workspace != workspace
+                        and other_state.session_workspaces.get(envelope.session_commitment)
+                        is not None
+                    ):
+                        return ObservationIngestResult(
+                            ObservationIngestDisposition.REJECTED,
+                            ObservationGapCode.CONSENT_MISSING.value,
+                            None,
+                        )
             state = self._load(workspace)
             consent = state.consent
             if consent is None:
@@ -2685,6 +3227,9 @@ class LocalObservationStore:
                     "paused",
                     None,
                 )
+            if workspace_commitment is not None:
+                assert state.session_workspaces is not None
+                state.session_workspaces.setdefault(envelope.session_commitment, workspace)
             assert state.dedup is not None
             assert state.cursors is not None
             assert state.envelopes is not None
@@ -3383,6 +3928,7 @@ class LocalObservationStore:
                 }
             )
         payload: dict[str, JsonValue] = {
+            # /10 adds generation-fenced deferred host-session lifecycle intents.
             # /9 generation-fences call-id pairing and stream file identity. /8
             # persisted unfenced call-id to tool-name pairing for rollout outputs.
             # /7 attributes dropped stream-partial gaps per session. /6 adds one-shot
@@ -3390,7 +3936,7 @@ class LocalObservationStore:
             # corruption-session tracking. /3 added quarantined_at per
             # quarantine entry and the reclaimed counter. Readers tolerate both directions:
             # unknown keys are ignored and missing keys default safely.
-            "schema": "yoetz.observation-local/9",
+            "schema": "yoetz.observation-local/10",
             "workspace_commitment": workspace,
             "consent": consent_json,
             "session_workspaces": JsonObject(
@@ -3622,6 +4168,19 @@ class LocalObservationStore:
                     )
                 }
             )
+        if state.pending_lifecycles:
+            payload["pending_lifecycles"] = tuple(
+                JsonObject(
+                    {
+                        "codex_session_id": intent.codex_session_id,
+                        "session_commitment": intent.session_commitment,
+                        "event_kind": intent.event_kind,
+                        "target_generation": intent.target_generation,
+                        "clear_mapping": intent.clear_mapping,
+                    }
+                )
+                for intent in state.pending_lifecycles
+            )
         return payload
 
     def _state_from_json(self, raw: Mapping[str, JsonValue]) -> _WorkspaceState:
@@ -3662,6 +4221,27 @@ class LocalObservationStore:
             ).items()
             if type(value) is int and not isinstance(value, bool) and value >= 1
         }
+        pending_lifecycles: list[PendingSessionLifecycle] = []
+        for item in cast(
+            tuple[JsonValue, ...] | list[JsonValue], raw.get("pending_lifecycles") or ()
+        ):
+            if not isinstance(item, Mapping):
+                continue
+            pending = cast(Mapping[str, JsonValue], item)
+            try:
+                pending_lifecycles.append(
+                    PendingSessionLifecycle(
+                        codex_session_id=pending.get("codex_session_id"),  # type: ignore[arg-type]
+                        session_commitment=pending.get("session_commitment"),  # type: ignore[arg-type]
+                        event_kind=pending.get("event_kind"),  # type: ignore[arg-type]
+                        target_generation=pending.get("target_generation"),  # type: ignore[arg-type]
+                        clear_mapping=pending.get("clear_mapping", False),  # type: ignore[arg-type]
+                    )
+                )
+            except ProtocolValueError, TypeError, ValueError:
+                continue
+            if len(pending_lifecycles) >= _MAX_PENDING_LIFECYCLES:
+                break
         envelopes_raw = raw.get("envelopes") or ()
         gaps_raw = raw.get("gaps") or ()
         gap_history: dict[str, _GapState] = {}
@@ -3975,6 +4555,7 @@ class LocalObservationStore:
             ended_sessions=set(cast(tuple[str, ...], ended_sessions_raw)),
             session_generations=session_generations,
             ended_session_generations=ended_session_generations,
+            pending_lifecycles=pending_lifecycles,
             envelopes=envelopes,
             gaps=gap_history,
             unsupported_events=set(cast(tuple[str, ...], unsupported_raw)),

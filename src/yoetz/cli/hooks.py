@@ -15,10 +15,13 @@ from yoetz import __version__
 from yoetz.adapters.integrations.codex_lifecycle import (
     LifecycleMapping,
     acquire_session_lock,
+    apply_pending_mapping,
     clear_mapping,
     encode_frontier_token,
     load_mapping,
     mapping_from_start_ids,
+    queue_mapping_clear,
+    queue_mapping_store,
     store_mapping,
     validate_codex_session_id,
 )
@@ -72,6 +75,7 @@ type StartBindOutcome = Literal[
     "skipped",
     "start_bind_unparsed",
     "start_bind_invalid_ids",
+    "start_bind_deferred",
     "start_bind_write_failed",
 ]
 
@@ -488,7 +492,20 @@ def bind_start_mapping_outcome(
     except ProtocolValueError, TypeError, ValueError:
         return "start_bind_invalid_ids"
     try:
-        store_mapping(mapping, _state=_state)
+        # Mapping writes participate in the same per-host-session lifecycle
+        # lock as observation membership and recovery.  A recovery pass holding
+        # this lock must finish before a scoped Claude start result can replace
+        # the predecessor route.
+        with acquire_session_lock(codex_session_id, _state=_state) as owned:
+            if not owned:
+                try:
+                    queue_mapping_store(mapping, _state=_state)
+                except Exception:
+                    return "start_bind_write_failed"
+                return "start_bind_deferred"
+            with contextlib.suppress(Exception):
+                apply_pending_mapping(codex_session_id, _state=_state)
+            store_mapping(mapping, _state=_state)
     except Exception:
         return "start_bind_write_failed"
     return "bound"
@@ -729,7 +746,29 @@ def handle_session_start(
         )
         payload = read_hook_payload(raw)
         source = payload.get("source")
+        session_raw = payload.get("session_id")
+        try:
+            codex_session_id = validate_codex_session_id(session_raw)
+        except ProtocolValueError:
+            if source == "startup":
+                from yoetz.cli.observe_hooks import handle_observe
+
+                return handle_observe(
+                    event_name="SessionStart",
+                    stdin_bytes=raw,
+                    stdout=stdout,
+                    workspace=workspace,
+                    _state=_state,
+                    connect=connect,
+                    run_async=run_async,
+                )
+            _stdout_json(_context_output("SessionStart", INACTIVE_CONTEXT), stdout)
+            return 0
         if source == "startup":
+            with acquire_session_lock(codex_session_id, _state=_state) as owned:
+                if owned:
+                    with contextlib.suppress(Exception):
+                        apply_pending_mapping(codex_session_id, _state=_state)
             from yoetz.cli.observe_hooks import handle_observe
 
             return handle_observe(
@@ -741,25 +780,44 @@ def handle_session_start(
                 connect=connect,
                 run_async=run_async,
             )
-        session_raw = payload.get("session_id")
-        try:
-            codex_session_id = validate_codex_session_id(session_raw)
-        except ProtocolValueError:
-            _stdout_json(_context_output("SessionStart", INACTIVE_CONTEXT), stdout)
-            return 0
         if source == "clear":
-            clear_mapping(codex_session_id, _state=_state)
-            from yoetz.cli.observe_hooks import handle_observe
+            # Clearing a host route is a lifecycle mutation too.  Serialize it
+            # with recovery so a predecessor cannot lose its mapping after the
+            # recovery snapshot and before the attach request.
+            with acquire_session_lock(codex_session_id, _state=_state) as owned:
+                if not owned:
+                    with contextlib.suppress(Exception):
+                        queue_mapping_clear(codex_session_id, _state=_state)
+                    # Preserve the SessionStart observation even when another
+                    # lifecycle handler owns this session lock. The delegated
+                    # path must not claim the lock; it records a targeted local
+                    # envelope and defers the clear until a later safe turn.
+                    from yoetz.cli.observe_hooks import handle_observe
 
-            handle_observe(
-                event_name="SessionStart",
-                stdin_bytes=raw,
-                stdout=__import__("io").BytesIO(),
-                workspace=workspace,
-                _state=_state,
-                connect=connect,
-                run_async=run_async,
-            )
+                    return handle_observe(
+                        event_name="SessionStart",
+                        stdin_bytes=raw,
+                        stdout=stdout,
+                        workspace=workspace,
+                        _state=_state,
+                        connect=connect,
+                        run_async=run_async,
+                    )
+                with contextlib.suppress(Exception):
+                    apply_pending_mapping(codex_session_id, _state=_state)
+                clear_mapping(codex_session_id, _state=_state)
+                from yoetz.cli.observe_hooks import handle_observe
+
+                handle_observe(
+                    event_name="SessionStart",
+                    stdin_bytes=raw,
+                    stdout=__import__("io").BytesIO(),
+                    workspace=workspace,
+                    _state=_state,
+                    connect=connect,
+                    run_async=run_async,
+                    _session_lock_owned=True,
+                )
             _stdout_json({}, stdout)
             return 0
         if source not in {"resume", "compact"}:
@@ -776,9 +834,22 @@ def handle_session_start(
             )
         with acquire_session_lock(codex_session_id, _state=_state) as owned:
             if not owned:
-                # Another concurrent handler is already re-grounding this session.
-                _stdout_json({}, stdout)
-                return 0
+                # Another concurrent handler is already re-grounding this
+                # session. Keep the hook evidence through the shared ingress;
+                # it will contend for membership without claiming this lock.
+                from yoetz.cli.observe_hooks import handle_observe
+
+                return handle_observe(
+                    event_name="SessionStart",
+                    stdin_bytes=raw,
+                    stdout=stdout,
+                    workspace=workspace,
+                    _state=_state,
+                    connect=connect,
+                    run_async=run_async,
+                )
+            with contextlib.suppress(Exception):
+                apply_pending_mapping(codex_session_id, _state=_state)
             mapping = load_mapping(codex_session_id, _state=_state)
             if mapping is None:
                 from yoetz.cli.observe_hooks import handle_observe

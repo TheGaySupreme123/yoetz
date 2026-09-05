@@ -12,7 +12,8 @@ replay repairs; 2026-08-18 for the
 maintainer-directed issue #346 incident repairs #350, #351, and
 #352 (decisions 12–14); 2026-08-18 for maintainer-authored issues #320 and #326 and issue #322
 (delivered frontier-motion high-water); 2026-08-16 for maintainer-approved issue #224; 2026-08-14
-for moderator-approved issue #244 and the reopened issue #216 recurrence.
+for moderator-approved issue #244 and the reopened issue #216 recurrence; 2026-09-05 for issue #605
+(workspace recovery revalidation and durable lifecycle repair, decision 20).
 **Implemented by:** `src/yoetz/application/observation_materialize.py`,
 `src/yoetz/application/observation_coordinator.py`, `src/yoetz/cli/observe_hooks.py`,
 `src/yoetz/adapters/memory/ledger.py`,
@@ -316,13 +317,28 @@ unsupported claims and unbounded duplicate findings.
     updated lifecycle mapping on each hop under its lifecycle lock only if the stored mapping still
     equals the predecessor. Busy locks, changed or cleared mappings, and persistence failures skip
     the cache update without blocking successor delivery. The shared hook recovery path also rewrites every ended
-    same-host predecessor mapping for that task in the same pass it stores the successor mapping. A
+same-host predecessor mapping for that task in the same pass it stores the successor mapping. The
+shared hook recovery path takes a nonblocking workspace reservation and ordered locks for every
+eligible ended same-host session through full candidate revalidation, the service RPC, authorized
+rewrites, and pruning; contention or changed state falls back to the ordinary request. A
     row refused only because its route was retired is never `ledger_rejected`; a superseded payload
     that cannot be followed (missing or mismatched task/session/writer ids, a hop cycle, or a
     rotation after the route already opened) quarantines that row as `session_superseded`. That
     reason is not `mapping_missing`, so ended-unmapped drain terminalization and the status rule
     that hides `mapping_missing` while a mapping file exists cannot mislabel a mapped retirement.
     `ledger_rejected` remains the terminal class for content and identity refusals.
+
+20. Workspace recovery and host lifecycle mutation share a nonblocking workspace reservation and
+    ordered per-session locks. The recovery snapshot is revalidated against every eligible
+    candidate, including cross-workspace ownership, before the service RPC and again before any
+    rewrite or prune. If a hook cannot acquire that reservation, it captures the envelope and
+    persists an explicit bounded lifecycle intent; READY and hook drains reconcile those intents
+    before delivery. Observation-local schema `/10` carries the intents. Upgrading it is a
+    quiesced operation: stop older Yoetz services and host hooks, install the new runtime, then
+    restart all services and integrations before writing `/10`; mixed `/9` and `/10` writers are
+    unsupported because the `/9` reader ignores the new field and can erase it on save. The
+    retention bound protects pending and quarantined evidence, so protected rows may keep the
+    total above the clean-binding cap without being deleted.
 
 ## Security and privacy consequences
 

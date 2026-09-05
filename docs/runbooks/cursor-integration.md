@@ -347,7 +347,7 @@ the matching repository-privacy binding, and no start already pending for that r
 reveals no selector, and a hard crash without `sessionEnd` remains fail-closed rather than being
 guessed from age. A successful recovery also rewrites every ended same-host predecessor mapping for that task to
 the rotated session and writer so pending predecessor rows drain on the successor route
-(`session_superseded` is followed, not quarantined as `ledger_rejected`). A failed attempt records its typed cause (`auto_attach_workspace_unbound`,
+(`session_superseded` is followed, not quarantined as `ledger_rejected`). Recovery first takes a nonblocking workspace reservation, then holds ordered locks for every eligible ended same-host session through full candidate revalidation, the service RPC, authorized rewrites, and pruning. The revalidation covers unmapped sessions, cross-workspace ownership, mapping identity, and mapping recency; a busy workspace reservation defers with `auto_attach_recovery_busy`, while candidate-lock contention or changed state falls back to the ordinary request. A failed attempt records its typed cause (`auto_attach_workspace_unbound`,
 `auto_attach_request_invalid`, `auto_attach_conflict`, `auto_attach_refused`,
 `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`,
 `service_unavailable`, `vault_locked`, `timeout`, `storage_unsafe`, or `storage_corrupt`) in the
@@ -355,6 +355,14 @@ same diagnostics file, and the session keeps an observation-only binding until a
 explicit `start` maps it. For `vault_locked` on a never-initialized install, that explicit
 `start` returns the typed `vault_initialization_required` continuation (see Troubleshooting)
 rather than a dead end.
+
+Busy host lifecycle changes are durable local work. State schema `/10` adds bounded pending
+session-lifecycle intents, and a READY or hook drain reconciles them under the workspace and
+session reservations before routing their rows; busy mapping writes use an atomic per-session
+handoff. Upgrade this state quiescently: stop the older Yoetz service and Cursor hooks, install
+the new runtime, then restart the service and all Cursor integrations before writing `/10` state.
+Mixed old and new writers are unsupported because a `/9` writer ignores the new field and can
+erase a deferred intent when it saves.
 
 The native Cursor MCP bridge has a separate workspace binding. It does not use the helper's process
 CWD, because a Cursor MCP child can be launched from the user home directory. On the first workflow
