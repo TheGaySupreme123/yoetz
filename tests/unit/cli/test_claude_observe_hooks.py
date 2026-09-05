@@ -63,7 +63,9 @@ def test_claude_hook_ingress_retains_only_closed_structural_mcp_fields(
     assert sanitized == {
         "action": "claude_mcp_success",
         "capability_profile_id": "untested",
+        "correlation_kind": "tool_call_id",
         "hook_event_name": "PostToolUse",
+        "pairing_mode": "post_only",
         "session_id": "claude:session-1",
         "success": True,
         "tool_name": "mcp__plugin_yoetz_yoetz__start",

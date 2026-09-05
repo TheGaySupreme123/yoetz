@@ -40,6 +40,7 @@ from yoetz.application.observation_check_policy import load_observation_check_po
 from yoetz.application.observation_materialize import (
     MATERIALIZATION_LEGACY_MAPPING_VERSIONS,
     MATERIALIZATION_MAPPING_VERSION,
+    SESSION_BOUND_MAPPING_VERSIONS,
     MaterializedObservationBatch,
     approved_check_author,
     canonical_logical_identity,
@@ -1234,31 +1235,58 @@ class ObservationCoordinator:
                 candidate_roles,
             )
         # Legacy mapping versions bound the digest to the routed session and
-        # writer. Search both admitted writers for each of them before staging
-        # so an in-flight pre-upgrade outbox row reuses its committed operation.
+        # writer (1.2-1.4).  Mapping 1.5 was task-scoped but used the older
+        # identity shape; search it through the same task-wide lookup with the
+        # legacy identity before staging so pre-1.6 rows remain replayable.
         for mapping_version in MATERIALIZATION_LEGACY_MAPPING_VERSIONS:
-            for candidate_writer_id in writer_ids:
-                for candidate_roles in candidate_role_sets:
-                    candidate_digest = observation_operation_digest(
-                        task_id=runtime.task_id,
-                        logical_identity=logical_identity,
-                        draft_roles=candidate_roles,
-                        mapping_version=mapping_version,
-                        session_id=runtime.session_id,
-                        writer_id=candidate_writer_id,
-                    )
-                    candidate_operation_id = self._stable_operation_id(candidate_digest)
-                    existing = await runtime.ledger.lookup_operation(
-                        candidate_writer_id, candidate_operation_id
-                    )
-                    if existing is not None:
-                        return (
-                            candidate_operation_id,
-                            candidate_digest,
-                            _append_result_from_committed(existing),
-                            mapping_version,
-                            candidate_roles,
+            legacy_identities = (
+                logical_identity,
+                canonical_logical_identity(envelope, mapping_version=mapping_version),
+            )
+            # Preserve the established writer/role lookup order for the
+            # session-bound mappings. Try every role under the current
+            # identity before falling back to the historical identity; this
+            # keeps replay probes deterministic while still finding rows
+            # written before the source/session identity was widened.
+            for legacy_identity in dict.fromkeys(legacy_identities):
+                candidate_writer_ids = (
+                    writer_ids
+                    if mapping_version in SESSION_BOUND_MAPPING_VERSIONS
+                    else (writer_id,)
+                )
+                for candidate_writer_id in candidate_writer_ids:
+                    for candidate_roles in candidate_role_sets:
+                        digest_kwargs: dict[str, str] = {}
+                        if mapping_version in SESSION_BOUND_MAPPING_VERSIONS:
+                            digest_kwargs = {
+                                "session_id": runtime.session_id,
+                                "writer_id": candidate_writer_id,
+                            }
+                        candidate_digest = observation_operation_digest(
+                            task_id=runtime.task_id,
+                            logical_identity=legacy_identity,
+                            draft_roles=candidate_roles,
+                            mapping_version=mapping_version,
+                            **digest_kwargs,
                         )
+                        candidate_operation_id = self._stable_operation_id(candidate_digest)
+                        existing = (
+                            await runtime.ledger.lookup_operation(
+                                candidate_writer_id, candidate_operation_id
+                            )
+                            if mapping_version in SESSION_BOUND_MAPPING_VERSIONS
+                            else await runtime.ledger.lookup_task_operation(
+                                writer_id, candidate_operation_id
+                            )
+                        )
+                        if existing is not None:
+                            return (
+                                candidate_operation_id,
+                                candidate_digest,
+                                _append_result_from_committed(existing),
+                                mapping_version,
+                                candidate_roles,
+                            )
 
         digest = observation_operation_digest(
             task_id=runtime.task_id,
@@ -1776,6 +1804,14 @@ class ObservationCoordinator:
 
         logical_identity = canonical_logical_identity(envelope)
         content_identity = observation_content_identity(envelope)
+        legacy_logical_identities = tuple(
+            canonical_logical_identity(envelope, mapping_version=mapping_version)
+            for mapping_version in MATERIALIZATION_LEGACY_MAPPING_VERSIONS
+        )
+        legacy_content_identities = tuple(
+            observation_content_identity(envelope, mapping_version=mapping_version)
+            for mapping_version in MATERIALIZATION_LEGACY_MAPPING_VERSIONS
+        )
         manifests: dict[str, ObservationContentManifest] = {}
         replay_candidates: list[tuple[ObservationContentManifest, ...]] = []
         any_redacted = False
@@ -1891,22 +1927,40 @@ class ObservationCoordinator:
         # usable content; every legacy source group is also kept separately as
         # lookup-only input, because an equivalent post-upgrade stream copy has
         # a different source identity but the same committed operation roles.
-        recovered_legacy_same_source = store.content_manifests_for_logical_identity(
-            workspace=workspace,
-            logical_identity=logical_identity,
-            correlation_identity_prefix=f"{envelope.source_identity}:",
+        recovered_legacy_same_source: list[ObservationContentManifest] = []
+        recovered_legacy_all: list[ObservationContentManifest] = []
+        # The raw canonical identity is the pre-#539 manifest key. Keep both
+        # that shape and the phase-scoped identities used by newer writers;
+        # the mapping-version variants cover rows written before #607 widened
+        # canonical identity with source lane and generation.
+        recovery_identities = (
+            content_identity,
+            logical_identity,
+            *legacy_content_identities,
+            *legacy_logical_identities,
         )
-        recovered_legacy_all = store.content_manifests_for_logical_identity(
-            workspace=workspace,
-            logical_identity=logical_identity,
-        )
+        for candidate_identity in dict.fromkeys(recovery_identities):
+            recovered_legacy_same_source.extend(
+                store.content_manifests_for_logical_identity(
+                    workspace=workspace,
+                    logical_identity=candidate_identity,
+                    correlation_identity_prefix=f"{envelope.source_identity}:",
+                )
+            )
+            recovered_legacy_all.extend(
+                store.content_manifests_for_logical_identity(
+                    workspace=workspace,
+                    logical_identity=candidate_identity,
+                )
+            )
+        recovered_legacy_same_source_tuple = tuple(recovered_legacy_same_source)
         legacy_groups: dict[str, list[ObservationContentManifest]] = {}
         for item in recovered_legacy_all:
             legacy_groups.setdefault(legacy_source_group(item), []).append(item)
         recovered_sets: list[tuple[ObservationContentManifest, ...]] = []
         for candidate in (
             recovered_current,
-            recovered_legacy_same_source,
+            recovered_legacy_same_source_tuple,
             *(
                 tuple(sorted(group, key=lambda item: item.object_id.encode()))
                 for group in legacy_groups.values()
@@ -1914,7 +1968,12 @@ class ObservationCoordinator:
         ):
             if candidate and candidate not in recovered_sets:
                 recovered_sets.append(candidate)
-        primary_recovered = recovered_current or recovered_legacy_same_source
+        # Keep object identity here: the loop below deliberately admits
+        # captured roles only for the primary same-phase/source candidate.
+        # Re-wrapping a list as a tuple would make ``candidate is
+        # primary_recovered`` false and silently turn every historical retry
+        # into replay-only evidence.
+        primary_recovered = recovered_current or recovered_legacy_same_source_tuple
         for candidate in recovered_sets:
             complete = manifests_complete(candidate)
             if not complete:

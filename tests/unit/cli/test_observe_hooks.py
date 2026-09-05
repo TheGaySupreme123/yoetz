@@ -22,6 +22,8 @@ from yoetz.application.recommendations import RecommendationState, store_recomme
 from yoetz.cli import observe_hooks as observe_hooks_module
 from yoetz.cli.observe_hooks import (
     SUPPORTED_HOOK_EVENTS,
+    handle_claude_observe,
+    handle_cursor_observe,
     handle_observe,
     handle_spool,
     map_hook_payload_to_envelope,
@@ -29,6 +31,7 @@ from yoetz.cli.observe_hooks import (
 from yoetz.domain.observation import (
     ObservationContentChunk,
     ObservationContentKind,
+    ObservationEnvelope,
     ObservationGapCode,
     ObservationIngestDisposition,
     ObservationIngestResult,
@@ -852,10 +855,118 @@ def test_codex_delivery_pairs_pre_post_end_to_end(tmp_path: Path) -> None:
     status = store.status(ObservationStatusQuery(workspace))
     assert status.source_coverage[ObservationSource.CODEX_HOOK] is True
     assert ObservationGapCode.UNPAIRED_EVENT.value not in status.gaps
-    assert store.has_open_pre(workspace, "call_e2e_1") is False
+    assert (
+        store.has_open_pre(
+            workspace,
+            "call_e2e_1",
+            source=ObservationSource.CODEX_HOOK,
+            session_commitment=store.session_commitment("codex-precedence"),
+            source_generation=1,
+        )
+        is False
+    )
 
 
-def test_unpaired_event_gap_resolves_after_pairing_recovers(tmp_path: Path) -> None:
+def test_issue_607_all_host_hook_shapes_keep_pairing_honest(tmp_path: Path) -> None:
+    """Exercise the six reported cases through the real host ingress adapters."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+
+    claude_common = {
+        "session_id": "claude-607",
+        "tool_name": "mcp__plugin_yoetz_yoetz__status",
+        "tool_use_id": "claude-call-607",
+    }
+    assert (
+        handle_claude_observe(
+            event_name="PostToolUse",
+            stdin_bytes=json.dumps({**claude_common, "hook_event_name": "PostToolUse"}).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    assert (
+        handle_claude_observe(
+            event_name="PostToolUseFailure",
+            stdin_bytes=json.dumps(
+                {**claude_common, "hook_event_name": "PostToolUseFailure"}
+            ).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+
+    for event_name, session, generation in (
+        ("afterMCPExecution", "cursor-607-mcp", "generation-mcp"),
+        ("afterFileEdit", "cursor-607-edit", "generation-edit"),
+    ):
+        assert (
+            handle_cursor_observe(
+                event_name=event_name,
+                stdin_bytes=json.dumps(
+                    {
+                        "conversation_id": session,
+                        "hook_event_name": event_name,
+                        "generation_id": generation,
+                        "tool_name": "shell",
+                        "file_path": "/private/607.py",
+                    }
+                ).encode(),
+                stdout=io.BytesIO(),
+                workspace=str(tmp_path),
+                _state=tmp_path,
+                skip_service=True,
+            )
+            == 0
+        )
+
+    handle_observe(
+        event_name=None,
+        stdin_bytes=json.dumps(_codex_0146_payload("PreToolUse", "codex-call-607")).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+    handle_observe(
+        event_name=None,
+        stdin_bytes=json.dumps(_codex_0146_payload("PostToolUse", "codex-call-607")).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+    handle_observe(
+        event_name=None,
+        stdin_bytes=json.dumps(_codex_0146_payload("PostToolUse", "codex-orphan-607")).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+
+    envelopes = store.list_envelopes(workspace)
+    assert len(envelopes) == 7
+    assert all(
+        "unpaired_event" not in envelope.gap_codes
+        for envelope in envelopes[:4]
+    )
+    assert "unpaired_event" not in envelopes[5].gap_codes
+    assert "unpaired_event" in envelopes[6].gap_codes
+    assert ObservationGapCode.UNPAIRED_EVENT.value in store.status(
+        ObservationStatusQuery(workspace)
+    ).gaps
+
+
+def test_unpaired_event_gap_survives_an_unrelated_pair(tmp_path: Path) -> None:
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
     store.grant_consent(workspace)
@@ -882,12 +993,244 @@ def test_unpaired_event_gap_resolves_after_pairing_recovers(tmp_path: Path) -> N
             _state=tmp_path,
             skip_service=True,
         )
-    # A completed pre→post pair is live evidence pairing works now; the latched
-    # gap no longer describes the workspace (#274).
+    # A completed pair in another call lane cannot resolve the retained orphan.
+    # Resolution must be scoped to the same source/session/generation/call, so
+    # the true diagnostic remains visible (#607).
     assert (
         ObservationGapCode.UNPAIRED_EVENT.value
-        not in store.status(ObservationStatusQuery(workspace)).gaps
+        in store.status(ObservationStatusQuery(workspace)).gaps
     )
+
+
+@pytest.mark.parametrize("source", [ObservationSource.CLAUDE_HOOK, ObservationSource.CURSOR_HOOK])
+def test_historical_host_pairing_gap_resolves_without_erasing_history(
+    tmp_path: Path, source: ObservationSource
+) -> None:
+    """A pre-#607 host false positive is retired while its history stays auditable."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment(f"{source.value}-historical")
+    envelope = map_hook_payload_to_envelope(
+        "PostToolUse",
+        {
+            "session_id": f"{source.value}-historical",
+            "tool_name": "shell",
+            "tool_use_id": "historical-call",
+        },
+        session_commitment=session,
+        event_ordinal=1,
+        key_material=store.key_material(),
+        source=source,
+        gap_codes=(ObservationGapCode.UNPAIRED_EVENT.value,),
+    )
+    result = store.ingest(envelope, workspace_commitment=workspace)
+    assert result.disposition is ObservationIngestDisposition.ACCEPTED
+
+    status = store.status(ObservationStatusQuery(workspace))
+    assert ObservationGapCode.UNPAIRED_EVENT.value not in status.gaps
+    state_path = next((tmp_path / "observation" / "workspaces").glob("*.json"))
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["gap_history"][ObservationGapCode.UNPAIRED_EVENT.value]["active"] is False
+    assert ObservationGapCode.UNPAIRED_EVENT.value in state["gaps"]
+
+
+def test_codex_pairing_contract_cannot_be_overridden_by_payload_marker(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+
+    payload = _codex_0146_payload(
+        "PostToolUse",
+        "call-forged-profile",
+        pairing_mode="post_only",
+        correlation_kind="generation_id",
+        generation_id="generation-forged",
+    )
+    handle_observe(
+        event_name=None,
+        stdin_bytes=json.dumps(payload).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+    assert ObservationGapCode.UNPAIRED_EVENT.value in store.status(
+        ObservationStatusQuery(workspace)
+    ).gaps
+
+
+def test_pairing_admission_serializes_shared_pre_and_two_posts(tmp_path: Path) -> None:
+    """Only one concurrent post may consume a durable pre; the other stays orphaned."""
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment("codex-atomic-pairing")
+
+    def envelope(event: str, ordinal: int) -> ObservationEnvelope:
+        return map_hook_payload_to_envelope(
+            event,
+            _codex_0146_payload(event, "shared-call", event_ordinal=ordinal),
+            session_commitment=session,
+            event_ordinal=ordinal,
+            key_material=store.key_material(),
+        )
+
+    pre = envelope("PreToolUse", 1)
+    pre_result, _ = store.ingest_with_pairing(
+        pre,
+        workspace_commitment=workspace,
+        pairing_mode="paired",
+        correlation_id="shared-call",
+        source=ObservationSource.CODEX_HOOK,
+        session_commitment=session,
+        source_generation=1,
+        is_pre_event=True,
+        is_post_event=False,
+    )
+    assert pre_result.disposition is ObservationIngestDisposition.ACCEPTED
+
+    posts = (envelope("PostToolUse", 2), envelope("PostToolUse", 3))
+
+    def ingest(post: ObservationEnvelope) -> tuple[ObservationIngestDisposition, ObservationEnvelope]:
+        result, admitted = store.ingest_with_pairing(
+            post,
+            workspace_commitment=workspace,
+            pairing_mode="paired",
+            correlation_id="shared-call",
+            source=ObservationSource.CODEX_HOOK,
+            session_commitment=session,
+            source_generation=1,
+            is_pre_event=False,
+            is_post_event=True,
+        )
+        return result.disposition, admitted
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = tuple(pool.map(ingest, posts))
+
+    assert [result[0] for result in results].count(ObservationIngestDisposition.ACCEPTED) == 2
+    retained_posts = store.list_envelopes(workspace)[1:]
+    assert sorted("unpaired_event" in post.gap_codes for post in retained_posts) == [False, True]
+    assert (
+        store.has_open_pre(
+            workspace,
+            "shared-call",
+            source=ObservationSource.CODEX_HOOK,
+            session_commitment=session,
+            source_generation=1,
+        )
+        is False
+    )
+
+
+def test_reordered_post_then_pre_keeps_the_orphan_diagnostic(tmp_path: Path) -> None:
+    """A late pre cannot retroactively prove an orphaned post was paired."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment("codex-reordered-pairing")
+
+    def envelope(event: str, ordinal: int) -> ObservationEnvelope:
+        return map_hook_payload_to_envelope(
+            event,
+            _codex_0146_payload(event, "reordered-call", event_ordinal=ordinal),
+            session_commitment=session,
+            event_ordinal=ordinal,
+            key_material=store.key_material(),
+        )
+
+    post_result, admitted_post = store.ingest_with_pairing(
+        envelope("PostToolUse", 1),
+        workspace_commitment=workspace,
+        pairing_mode="paired",
+        correlation_id="reordered-call",
+        source=ObservationSource.CODEX_HOOK,
+        session_commitment=session,
+        source_generation=1,
+        is_pre_event=False,
+        is_post_event=True,
+    )
+    assert post_result.disposition is ObservationIngestDisposition.ACCEPTED
+    assert ObservationGapCode.UNPAIRED_EVENT.value in admitted_post.gap_codes
+
+    pre_result, admitted_pre = store.ingest_with_pairing(
+        envelope("PreToolUse", 2),
+        workspace_commitment=workspace,
+        pairing_mode="paired",
+        correlation_id="reordered-call",
+        source=ObservationSource.CODEX_HOOK,
+        session_commitment=session,
+        source_generation=1,
+        is_pre_event=True,
+        is_post_event=False,
+    )
+    assert pre_result.disposition is ObservationIngestDisposition.ACCEPTED
+    assert ObservationGapCode.UNPAIRED_EVENT.value not in admitted_pre.gap_codes
+    assert ObservationGapCode.UNPAIRED_EVENT.value in store.status(
+        ObservationStatusQuery(workspace)
+    ).gaps
+
+
+def test_duplicate_post_does_not_consume_orphan_pairing_state(tmp_path: Path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment("codex-duplicate-pairing")
+    pre = map_hook_payload_to_envelope(
+        "PreToolUse",
+        _codex_0146_payload("PreToolUse", "duplicate-call"),
+        session_commitment=session,
+        event_ordinal=1,
+        key_material=store.key_material(),
+    )
+    post = map_hook_payload_to_envelope(
+        "PostToolUse",
+        _codex_0146_payload("PostToolUse", "duplicate-call"),
+        session_commitment=session,
+        event_ordinal=2,
+        key_material=store.key_material(),
+    )
+    store.ingest_with_pairing(
+        pre,
+        workspace_commitment=workspace,
+        pairing_mode="paired",
+        correlation_id="duplicate-call",
+        source=ObservationSource.CODEX_HOOK,
+        session_commitment=session,
+        source_generation=1,
+        is_pre_event=True,
+        is_post_event=False,
+    )
+
+    def ingest_duplicate() -> ObservationIngestDisposition:
+        result, _ = store.ingest_with_pairing(
+            post,
+            workspace_commitment=workspace,
+            pairing_mode="paired",
+            correlation_id="duplicate-call",
+            source=ObservationSource.CODEX_HOOK,
+            session_commitment=session,
+            source_generation=1,
+            is_pre_event=False,
+            is_post_event=True,
+        )
+        return result.disposition
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        dispositions = tuple(pool.map(lambda _unused: ingest_duplicate(), (0, 1)))
+    assert sorted(disposition.value for disposition in dispositions) == ["accepted", "duplicate"]
+    assert "unpaired_event" not in store.list_envelopes(workspace)[-1].gap_codes
+    assert ObservationGapCode.UNPAIRED_EVENT.value not in store.status(
+        ObservationStatusQuery(workspace)
+    ).gaps
 
 
 def test_yoetz_tool_still_ingests_but_skips_advice_loop(tmp_path: Path) -> None:

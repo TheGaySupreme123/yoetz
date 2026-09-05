@@ -72,6 +72,7 @@ def _envelope(
     corr: str = "c1",
     exit_status: int | None = None,
     source: ObservationSource = ObservationSource.CODEX_HOOK,
+    generation: int = 1,
 ) -> ObservationEnvelope:
     structural: dict[str, object] = {
         "tool_name": tool,
@@ -85,7 +86,9 @@ def _envelope(
         event_kind=kind,
         source_identity=identity,
         source=source,
-        cursor=ObservationCursor(1, 0, ordinal, f"hmac-sha256:{'ab' * 32}", "codex-obs-hook/1.0.0"),
+        cursor=ObservationCursor(
+            generation, 0, ordinal, f"hmac-sha256:{'ab' * 32}", "codex-obs-hook/1.0.0"
+        ),
         receipt_time=Timestamp("2026-01-01T00:00:00.000Z"),
         structural_payload=JsonObject(structural),
         content_object_refs=(),
@@ -157,6 +160,85 @@ def test_materialize_pre_post_and_unpaired() -> None:
         task_id=task,
     )
     assert ObservationGapCode.CONTENT_UNSELECTED.value in unselected.coverage.known_gaps
+
+
+def test_materialize_post_only_profiles_never_invent_a_pre_pair() -> None:
+    from yoetz.domain.events import ActionRecordedPayload
+
+    task = _task_id()
+    session = f"hmac-sha256:{'73' * 32}"
+    claude = _envelope(
+        session=session,
+        kind="PostToolUse",
+        identity="claude:post-only",
+        source=ObservationSource.CLAUDE_HOOK,
+        exit_status=0,
+    )
+    claude = replace(
+        claude,
+        structural_payload=JsonObject(
+            {
+                **claude.structural_payload,
+                "pairing_mode": "post_only",
+                "correlation_kind": "tool_call_id",
+            }
+        ),
+    )
+    claude_batch = materialize_observation_envelope(claude, task_id=task)
+    assert [item.role for item in claude_batch.drafts] == ["action", "result"]
+    assert ObservationGapCode.UNPAIRED_EVENT.value not in claude_batch.gaps
+    action_payload = cast(ActionRecordedPayload, claude_batch.drafts[0].draft.payload)
+    assert "post-only hook" in action_payload.description
+
+    cursor = _envelope(
+        session=session,
+        kind="PostToolUse",
+        identity="cursor:post-only-generation",
+        source=ObservationSource.CURSOR_HOOK,
+        exit_status=0,
+    )
+    cursor_structural = {
+        key: value
+        for key, value in cursor.structural_payload.items()
+        if key not in {"tool_call_id", "correlation_id"}
+    }
+    cursor = replace(
+        cursor,
+        structural_payload=JsonObject(
+            {
+                **cursor_structural,
+                "pairing_mode": "post_only",
+                "correlation_kind": "generation_id",
+                "generation_id": "generation-1",
+            }
+        ),
+    )
+    cursor_batch = materialize_observation_envelope(cursor, task_id=task)
+    assert [item.role for item in cursor_batch.drafts] == ["post_only_evidence"]
+    assert ObservationGapCode.UNPAIRED_EVENT.value not in cursor_batch.gaps
+    assert ObservationGapCode.UNPAIRED_EVENT.value not in cursor_batch.coverage.known_gaps
+
+    forged_codex = replace(
+        _envelope(
+            session=session,
+            kind="PostToolUse",
+            identity="codex:forged-post-only",
+            gaps=(ObservationGapCode.UNPAIRED_EVENT.value,),
+        ),
+        structural_payload=JsonObject(
+            {
+                "tool_name": "shell",
+                "tool_call_id": "forged-call",
+                "correlation_id": "forged-call",
+                "pairing_mode": "post_only",
+                "correlation_kind": "generation_id",
+                "generation_id": "generation-forged",
+            }
+        ),
+    )
+    forged_batch = materialize_observation_envelope(forged_codex, task_id=task)
+    assert [item.role for item in forged_batch.drafts] == ["unpaired_evidence"]
+    assert ObservationGapCode.UNPAIRED_EVENT.value in forged_batch.gaps
 
 
 def test_successful_routine_reads_stay_observation_only_but_failures_materialize() -> None:
@@ -1461,7 +1543,7 @@ def test_local_outbox_v1_compatibility_and_v2_attempt_round_trip(tmp_path: Path)
     assert durable.last_attempt_at == attempted_at
     assert durable.consecutive_reason_attempts == 1
     assert json.loads(state_path.read_text(encoding="utf-8"))["schema"] == (
-        "yoetz.observation-local/10"
+        "yoetz.observation-local/11"
     )
 
     raw = json.loads(state_path.read_text(encoding="utf-8"))
@@ -2299,6 +2381,71 @@ def test_hook_and_stream_copies_share_one_logical_operation() -> None:
         kind="SessionStart",
     )
     assert canonical_logical_identity(opaque_hook) != canonical_logical_identity(opaque_stream)
+
+
+def test_reused_call_id_isolated_by_source_session_and_generation() -> None:
+    """A host call id is meaningful only inside its source generation lane."""
+
+    from yoetz.application.observation_materialize import materialize_observation_envelope
+    from yoetz.domain.events import ActionRecordedPayload, ResultRecordedPayload
+
+    task = "task_identity_scope"
+    base = _envelope(
+        session=f"hmac-sha256:{'71' * 32}",
+        kind="PostToolUse",
+        identity="hook:post:reused",
+        corr="reused-call",
+        exit_status=0,
+        generation=1,
+    )
+    same_codex_stream = replace(
+        base,
+        source=ObservationSource.CODEX_SESSION_STREAM,
+        event_kind="item.completed",
+        source_identity="stream:post:reused",
+    )
+    next_generation = replace(
+        base,
+        cursor=replace(base.cursor, source_generation=2),
+        source_identity="hook:post:reused-generation-2",
+    )
+    different_session = replace(
+        base,
+        session_commitment=f"hmac-sha256:{'72' * 32}",
+        source_identity="hook:post:reused-session-2",
+    )
+    different_host = replace(
+        base,
+        source=ObservationSource.CLAUDE_HOOK,
+        session_commitment=f"hmac-sha256:{'71' * 32}",
+        source_identity="claude:post:reused",
+    )
+
+    assert canonical_logical_identity(base) == canonical_logical_identity(same_codex_stream)
+    assert len(
+        {
+            canonical_logical_identity(item)
+            for item in (base, next_generation, different_session, different_host)
+        }
+    ) == 4
+    batches = [
+        materialize_observation_envelope(item, task_id=task)
+        for item in (base, next_generation, different_session, different_host)
+    ]
+    action_ids = {
+        cast(ActionRecordedPayload, item.draft.payload).action_id
+        for batch in batches
+        for item in batch.drafts
+        if item.draft.schema.name == "action_recorded"
+    }
+    result_ids = {
+        cast(ResultRecordedPayload, item.draft.payload).result_id
+        for batch in batches
+        for item in batch.drafts
+        if item.draft.schema.name == "result_recorded"
+    }
+    assert len(action_ids) == 4
+    assert len(result_ids) == 4
 
 
 @pytest.mark.anyio

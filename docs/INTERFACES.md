@@ -2999,12 +2999,14 @@ start operation. Observation-derived lifecycle records are evidence under that w
 on the cooperative agent's behalf. Materialization emits `evidence_recorded` unless the structural
 payload itself carries an explicitly admitted `claim_kind`. Mapping `obs-ledger/1.4.0` additionally
 materializes trusted eligible capture manifests as `evidence_recorded/1.2.0`. Mapping
-`obs-ledger/1.5.0` makes the idempotent operation digest task-scoped (task, canonical logical
+`obs-ledger/1.6.0` makes the idempotent operation digest task-scoped (task, canonical logical
 identity, draft-role tuple, mapping version; no session or writer), matching the stable event ids
 it commits, and the coordinator resolves it task-wide through `lookup_task_operation` so a
 workflow reattach that rotates the session and writer still replays the committed operation
-(issue #560). Legacy 1.4/1.3/1.2 operation identities stay session-bound and remain replay-only
-upgrade candidates from the session that committed them.
+(issue #560). Its canonical identity includes the source lane, host session commitment, and source
+generation, so a reused call id cannot alias another session or generation; Codex hook and
+session-stream copies in the same lane still coalesce. Legacy 1.5/1.4/1.3/1.2 operation identities
+remain replay-only upgrade candidates with their historical identity shape.
 
 Shared closed types:
 
@@ -3018,6 +3020,15 @@ Shared closed types:
   closed identifier from the capability cell, or an opaque unsupported token), stable source
   identity, `ObservationCursor`, receipt time, bounded allowlisted structural payload, content-
   object references (encrypted object IDs/commitments only), and gap codes.
+  Host hook profiles also declare a pairing contract: `pairing_mode` is `paired` or `post_only`,
+  and `correlation_kind` is `tool_call_id`, `generation_id`, or `none`. Claude Code and Cursor's
+  installed legacy hook profiles are post-only; Claude may use a retained `tool_use_id`, while
+  Cursor's `generation_id` is metadata only and never a tool identity. Codex remains paired even
+  when an input tries to carry a different marker. The source plus exact capability-profile table
+  is authoritative for historical envelopes and omitted host-version fields; a future paired
+  Claude/Cursor profile must register an exact profile cell. Pairing state is admitted under one
+  local-store lock with deduplication, so a duplicate cannot consume a pre-event and a concurrent
+  second post remains an explicit orphan.
 - `ObservationContentChunk` — ordinary-control-only bounded visible content carrying exact
   `content_kind`, correlation identity, source commitment, media type, part index/count, redaction
   flag, and bytes. At most 16 chunks and 700,000 aggregate input bytes keep the request below the
@@ -3308,15 +3319,17 @@ conflict), `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_map
 `privacy_authority_required`, or the shared `service_unavailable`, `vault_locked`, `timeout`,
 `storage_unsafe`, and `storage_corrupt` tokens. Turn-boundary hooks retry auto-attach under a
 bounded budget and record the same typed cause next to the `auto_attach_retry_failed` path marker
-when no mapping results. Busy lifecycle mutations are durable: observation-local schema `/10` adds
-a bounded `pending_lifecycles` queue, and hook or READY drains reconcile it under the same workspace
-and session reservations before routing rows. Busy mapping writes use an atomic per-session handoff. Applying a handoff claims a separate
+when no mapping results. Busy lifecycle mutations are durable: observation-local schema `/11` adds
+a bounded `pending_lifecycles` queue and source/session/generation-scoped paired-orphan identities,
+and hook or READY drains reconcile them under the same workspace and session reservations before
+routing rows. Historical false post-only diagnostics are retired only when retained envelope
+history is complete; their gap-history rows remain. Busy mapping writes use an atomic per-session handoff. Applying a handoff claims a separate
 file, retains concurrently queued updates, and replays an interrupted claim on the next attempt.
 A deferred clear superseded by a later generation cannot remove that generation's mapping.
-The `/10` extension requires a quiesced upgrade: stop the older Yoetz service and all host hooks,
+The `/11` extension requires a quiesced upgrade: stop the older Yoetz service and all host hooks,
 install the new runtime, then restart the service and every host integration before writing the new
-state. Mixed old and new writers are unsupported because a `/9` writer ignores the new field and can
-erase a deferred intent when it saves.
+state. Mixed old and new writers are unsupported because a `/10` writer ignores the new fields and can
+erase pairing provenance when it saves.
 The resume/compact status read for a mapped session connects through the same consented
 workspace locator as the auto-attach `start` (`yoetz hooks session-start` derives it from
 `--workspace` or, absent that, the hook's own working directory), so the daemon's repository
