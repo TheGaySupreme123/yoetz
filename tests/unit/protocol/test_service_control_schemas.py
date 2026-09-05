@@ -484,7 +484,7 @@ def test_v23_updates_only_the_status_operation_schema_refs() -> None:
         assert (_ROOT / filename).read_bytes() == _PACKAGE_ROOT.joinpath(filename).read_bytes()
 
 
-def test_v24_updates_only_publish_provenance_and_privacy_policy_contracts() -> None:
+def test_v24_updates_publish_provenance_privacy_and_ordinary_content_contracts() -> None:
     request_v23 = cast(
         dict[str, Any],
         strict_json_parse((_ROOT / "control-request-2.3.0.schema.json").read_bytes()),
@@ -542,6 +542,22 @@ def test_v24_updates_only_publish_provenance_and_privacy_policy_contracts() -> N
     for name in pairing_fields:
         del structural_v24[name]
     del check_v24["properties"]["host_profile"]
+    request_v24_defs = cast(dict[str, dict[str, Any]], request_v24["$defs"])
+    request_v24_ingest = request_v24_defs["observation_ingest_body"]
+    content_profile = cast(
+        dict[str, Any],
+        cast(dict[str, Any], request_v24_ingest["properties"])["content_capture_profile"],
+    )
+    assert content_profile == {
+        "enum": [
+            "claude-code-ordinary-observation-v1",
+            "cursor-ordinary-observation-v1",
+        ],
+        "type": "string",
+    }
+    # This selector is the only ordinary-observation wire addition in 2.4;
+    # remove it before comparing the inherited 2.3 contract below.
+    del cast(dict[str, Any], request_v24_ingest["properties"])["content_capture_profile"]
 
     policy_ref = "https://schemas.yoetz.dev/0.1/privacy/privacy-policy-1.0.0.schema.json"
     policy_union = [

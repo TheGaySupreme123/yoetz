@@ -923,10 +923,12 @@ class ObservationIngestResult:
 
 @dataclass(frozen=True, slots=True)
 class ObservationIngestRequest:
-    """Redacted local-control ingest body: Codex session routing + envelope only.
+    """Redacted local-control ingest body: session routing, envelope, and bounded chunks.
 
     Callers MUST NOT supply Yoetz task/session/writer IDs. The service coordinator
-    resolves those from the validated lifecycle mapping.
+    resolves those from the validated lifecycle mapping. Native-host chunks also
+    carry the exact user-enabled content profile; profile-less requests preserve
+    the historical structural-only path.
     """
 
     codex_session_id: str
