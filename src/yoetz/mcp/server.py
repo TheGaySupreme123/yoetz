@@ -63,7 +63,13 @@ from yoetz.observability.logging import (
     record_public_error_without_raising,
     record_unexpected_exception_without_raising,
 )
-from yoetz.ports.control import ControlClientKind, ControlError, ServiceState, WorkspaceLocator
+from yoetz.ports.control import (
+    ControlClientKind,
+    ControlError,
+    McpHostProfile,
+    ServiceState,
+    WorkspaceLocator,
+)
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.consent import CONSENT_PENDING_TTL_SECONDS
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
@@ -209,6 +215,11 @@ _GUIDANCE_BY_OPERATION: Final = MappingProxyType(
     }
 )
 
+# The host profile is part of the serving command, rather than inferred from the MCP client.
+# ``generic`` is deliberately unknown; only an explicit ``codex`` profile may be compared with
+# the Codex applied-route record. Native Claude and Cursor carriers identify themselves explicitly
+# so that record cannot be applied to another host.
+
 
 def _authoring_hint_for(operation: str, locations: Sequence[Mapping[str, str]]) -> str:
     """Look up the frozen presentation schema for one tool and hint from it, or say nothing."""
@@ -285,7 +296,7 @@ class BridgeRuntime:
     descriptors: tuple[ToolDescriptor, ...]
     resources: tuple[GuidanceResource, ...]
     instructions: str
-    host_profile: Literal["generic", "cursor"] = "generic"
+    host_profile: McpHostProfile = "generic"
     workspace_locator: WorkspaceLocator | None = field(
         default_factory=lambda: WorkspaceLocator(os.fspath(Path.cwd().resolve(strict=True))),
         repr=False,
@@ -297,7 +308,7 @@ class BridgeRuntime:
 def build_bridge_runtime(
     route_profile: McpRouteProfile = "policy",
     *,
-    host_profile: Literal["generic", "cursor"] = "generic",
+    host_profile: McpHostProfile = "generic",
     workspace_locator: WorkspaceLocator | None = None,
 ) -> BridgeRuntime:
     """Verify every agent-readable byte and construct an unconnected bridge runtime.
@@ -311,7 +322,7 @@ def build_bridge_runtime(
 
     if route_profile not in TOOL_DESCRIPTORS:
         raise ValueError("mcp_route_profile_invalid")
-    if host_profile not in {"generic", "cursor"}:
+    if host_profile not in {"generic", "codex", "claude", "cursor"}:
         raise ValueError("mcp_host_profile_invalid")
     resources = list_guidance_resources()
     instructions = server_instructions(route_profile)
@@ -325,7 +336,7 @@ def build_bridge_runtime(
     build_last_resort_internal_error_result()
     if workspace_locator is not None and type(workspace_locator) is not WorkspaceLocator:
         raise TypeError("workspace_locator_invalid")
-    if host_profile == "generic" and workspace_locator is None:
+    if host_profile != "cursor" and workspace_locator is None:
         workspace_locator = WorkspaceLocator(os.fspath(Path.cwd().resolve(strict=True)))
     slot = _ClientSlot()
     if host_profile == "cursor" and workspace_locator is not None:
@@ -526,7 +537,7 @@ async def close_bridge_runtime(runtime: BridgeRuntime = BRIDGE_RUNTIME) -> None:
 def _result_text(
     wire: Mapping[str, object],
     *,
-    host_profile: Literal["generic", "cursor"] = "generic",
+    host_profile: McpHostProfile = "generic",
 ) -> str:
     """Project one result onto the model-visible text channel for the selected host.
 
@@ -538,7 +549,7 @@ def _result_text(
 
     if host_profile == "cursor":
         return canonical_encode(cast(JsonValue, dict(wire))).decode("utf-8")
-    if host_profile != "generic":
+    if host_profile not in {"generic", "codex", "claude"}:
         raise ValueError("mcp_host_profile_invalid")
     return render_safe_compact_summary(wire)
 
@@ -546,7 +557,7 @@ def _result_text(
 def result_from_public_model(
     result: object,
     *,
-    host_profile: Literal["generic", "cursor"] = "generic",
+    host_profile: McpHostProfile = "generic",
 ) -> types.CallToolResult:
     """Validate and project one public result to structured plus host-compatible text."""
 
@@ -563,7 +574,7 @@ def result_from_public_model(
 def _result_from_wire(
     wire: Mapping[str, object],
     *,
-    host_profile: Literal["generic", "cursor"] = "generic",
+    host_profile: McpHostProfile = "generic",
 ) -> types.CallToolResult:
     structured = dict(wire)
     return types.CallToolResult(
@@ -602,7 +613,7 @@ def structured_error_result(
     correlation_id: str | None = None,
     operation: str | None = None,
     diagnostic_reason: str | None = None,
-    host_profile: Literal["generic", "cursor"] = "generic",
+    host_profile: McpHostProfile = "generic",
 ) -> types.CallToolResult:
     """Build a bounded structured tool error with a prevalidated nested fallback.
 
@@ -787,7 +798,7 @@ def _control_public_error_result(
     code: PublicErrorCode,
     message: str,
     retryable: bool,
-    host_profile: Literal["generic", "cursor"],
+    host_profile: McpHostProfile,
     safe_details: Mapping[str, object] | None = None,
     diagnostic_reason: str | None = None,
 ) -> types.CallToolResult:
@@ -837,10 +848,10 @@ async def _vault_initialization_continuation(
         "prepare_command": _VAULT_INITIALIZE_PREPARE_COMMAND,
         "review_command": _CONSENT_REVIEW_COMMAND,
     }
-    # Cursor is never an agent-chat attestation client, and the bridge knows that binding
-    # positively. The generic profile serves both the allowlisted first-party client and hosts
-    # that are not; the message states the allowlist condition and the host runbooks own the
-    # split, exactly as they do for the consent catalog's own authorize_command.
+    # Host identity never grants agent-chat attestation. Cursor is never an agent-chat
+    # attestation client, and the bridge knows that binding positively. Other profiles may carry
+    # the reviewed command, but the elevated authorize path still requires its independent
+    # allowlisted client-kind and current-chat facts.
     if runtime.host_profile != "cursor":
         details["authorize_command"] = _CONSENT_AUTHORIZE_COMMAND
     if request_id is not None:
@@ -875,7 +886,7 @@ def _control_error_result(
     request_id: str | None,
     operation: str,
     *,
-    host_profile: Literal["generic", "cursor"] = "generic",
+    host_profile: McpHostProfile = "generic",
     vault_initialization_details: Mapping[str, object] | None = None,
 ) -> types.CallToolResult:
     # Prefer the service-minted diagnostic id when present so the agent-facing public error
@@ -1698,7 +1709,7 @@ def _publish_validation_recovery_unavailable_result(
     request_id: str | None,
     locations: Sequence[Mapping[str, str]] = (),
     *,
-    host_profile: Literal["generic", "cursor"] = "generic",
+    host_profile: McpHostProfile = "generic",
 ) -> types.CallToolResult:
     """Field-pointed INVALID_REQUEST primary, unreachable-oracle caveat alongside."""
 
@@ -1946,6 +1957,7 @@ async def dispatch_check(
             request,
             deadline_ms=_SEMANTIC_CHECK_RPC_DEADLINE_MS,
             route_profile=runtime.route_profile,
+            host_profile=runtime.host_profile,
         ),
         runtime,
         "check",
@@ -2230,7 +2242,12 @@ def _bridge_logging_config() -> LoggingConfig:
         return LoggingConfig()
 
 
-def record_startup_route_drift(serving_profile: str, *, _state: Path | None = None) -> None:
+def record_startup_route_drift(
+    serving_profile: str,
+    *,
+    host_profile: McpHostProfile = "generic",
+    _state: Path | None = None,
+) -> None:
     """Record `registration_drift` when this bridge's route disagrees with the applied one.
 
     Issue #537. This is the sole emitter of the diagnostic: the bridge is the one process
@@ -2241,6 +2258,10 @@ def record_startup_route_drift(serving_profile: str, *, _state: Path | None = No
     never raises, never blocks serving, never records content.
     """
 
+    # The applied-route record belongs to the Codex registration adapter. A generic, Claude, or
+    # Cursor bridge cannot establish that it is the process described by that record.
+    if host_profile != "codex":
+        return
     try:
         from yoetz.application.applied_mcp_route import read_applied_route
         from yoetz.cli.hook_diagnostics import record_hook_diagnostic
@@ -2265,13 +2286,13 @@ def record_startup_route_drift(serving_profile: str, *, _state: Path | None = No
 def main(
     *,
     semantic: Literal["on", "off"] = "on",
-    host: Literal["generic", "cursor"] = "generic",
+    host: McpHostProfile = "generic",
 ) -> None:
     """Run the MCP bridge on stdio using the SDK-supported latest protocol contract."""
 
     if semantic not in {"on", "off"}:
         raise ValueError("mcp_semantic_profile_invalid")
-    if host not in {"generic", "cursor"}:
+    if host not in {"generic", "codex", "claude", "cursor"}:
         raise ValueError("mcp_host_profile_invalid")
     if types.LATEST_PROTOCOL_VERSION not in SUPPORTED_PROTOCOL_VERSIONS:
         raise RuntimeError("mcp_sdk_protocol_registry_invalid")
@@ -2280,7 +2301,7 @@ def main(
         "strict" if semantic == "off" else "policy",
         host_profile=host,
     )
-    record_startup_route_drift(runtime.route_profile)
+    record_startup_route_drift(runtime.route_profile, host_profile=runtime.host_profile)
     anyio.run(
         run_stdio,
         runtime,

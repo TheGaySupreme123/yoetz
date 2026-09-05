@@ -11,6 +11,10 @@ import pytest
 from yoetz.adapters.integrations.codex_mcp import CodexMcpAdapter, CommandOutput
 from yoetz.config.paths import PathSafetyError
 from yoetz.ports.harness_mcp import (
+    MCP_LEGACY_SERVE_COMMAND,
+    MCP_LEGACY_STRICT_SERVE_COMMAND,
+    MCP_SERVE_COMMAND,
+    MCP_STRICT_SERVE_COMMAND,
     HarnessBinary,
     McpRegistrationAction,
     McpRegistrationCommand,
@@ -29,10 +33,27 @@ _BINARY = HarnessBinary(
 )
 
 
-def _yoetz_entry(*, strict: bool = False, isolated_root: str | None = None) -> bytes:
-    args = ["mcp", "serve"]
-    if strict:
-        args.extend(["--semantic", "off"])
+@pytest.fixture(autouse=True)
+def scripted_registration_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The scripted host entries below model ambient registration by default.
+    # Isolated-registration cases explicitly override this adapter lookup;
+    # keep the process-wide isolation guard intact for all other test effects.
+    monkeypatch.setattr("yoetz.adapters.integrations.codex_mcp.isolated_root", lambda: None)
+
+
+def _yoetz_entry(
+    *, strict: bool = False, isolated_root: str | None = None, legacy: bool = False
+) -> bytes:
+    command = (
+        MCP_LEGACY_STRICT_SERVE_COMMAND
+        if strict and legacy
+        else MCP_LEGACY_SERVE_COMMAND
+        if legacy
+        else MCP_STRICT_SERVE_COMMAND
+        if strict
+        else MCP_SERVE_COMMAND
+    )
+    args = list(command[1:])
     transport: dict[str, object] = {"command": "yoetz", "args": args}
     if isolated_root is not None:
         transport["env"] = {"YOETZ_ISOLATED_ROOT": isolated_root}
@@ -325,7 +346,7 @@ def test_strict_preview_binds_exact_command_and_changes_digest() -> None:
         ).preview_registration(_BINARY)
     )
 
-    assert policy.serve_command == ("yoetz", "mcp", "serve")
+    assert policy.serve_command == MCP_SERVE_COMMAND
     assert policy.route_profile == "policy"
     assert policy.preview_digest == canonical_digest(
         {
@@ -333,12 +354,12 @@ def test_strict_preview_binds_exact_command_and_changes_digest() -> None:
             "executable_path": _BINARY.executable_path,
             "harness": "codex",
             "schema": "yoetz.mcp-registration-preview/1",
-            "serve_command": ["yoetz", "mcp", "serve"],
+            "serve_command": list(MCP_SERVE_COMMAND),
             "server_name": "yoetz",
             "state_before": "absent",
         }
     )
-    assert strict.serve_command == ("yoetz", "mcp", "serve", "--semantic", "off")
+    assert strict.serve_command == MCP_STRICT_SERVE_COMMAND
     assert strict.route_profile == "strict"
     assert strict.preview_digest != policy.preview_digest
 
@@ -391,7 +412,7 @@ def test_explicit_preview_allows_reregistering_an_owned_route_profile() -> None:
     )
 
     assert result.action is McpRegistrationAction.REREGISTER
-    assert runner.calls[1][-5:] == ("yoetz", "mcp", "serve", "--semantic", "off")
+    assert runner.calls[1][-len(MCP_STRICT_SERVE_COMMAND) :] == MCP_STRICT_SERVE_COMMAND
 
 
 def test_apply_requires_explicit_acceptance_and_exact_digest() -> None:
@@ -443,9 +464,7 @@ def test_apply_registers_then_verifies_by_rereading_state() -> None:
         "add",
         "yoetz",
         "--",
-        "yoetz",
-        "mcp",
-        "serve",
+        *MCP_SERVE_COMMAND,
     )
 
 
@@ -480,9 +499,7 @@ def test_apply_isolated_registration_passes_only_the_reviewed_root(
         "--env",
         f"YOETZ_ISOLATED_ROOT={root}",
         "--",
-        "yoetz",
-        "mcp",
-        "serve",
+        *MCP_SERVE_COMMAND,
     )
 
 
@@ -492,14 +509,14 @@ def test_apply_reregisters_a_legacy_bare_entry_with_the_isolated_root(
     root = str(tmp_path)
     monkeypatch.setattr("yoetz.adapters.integrations.codex_mcp.isolated_root", lambda: tmp_path)
     preview = anyio.run(
-        lambda: CodexMcpAdapter(_Runner([CommandOutput(0, _yoetz_entry())])).preview_registration(
-            _BINARY
-        )
+        lambda: CodexMcpAdapter(
+            _Runner([CommandOutput(0, _yoetz_entry(legacy=True))])
+        ).preview_registration(_BINARY)
     )
     assert preview.action is McpRegistrationAction.REREGISTER
     runner = _Runner(
         [
-            CommandOutput(0, _yoetz_entry()),
+            CommandOutput(0, _yoetz_entry(legacy=True)),
             CommandOutput(0, b""),
             CommandOutput(0, _yoetz_entry(isolated_root=root)),
         ]
@@ -607,7 +624,7 @@ def test_preview_unregistration_of_foreign_entry_warns_without_echoing_argv() ->
     assert preview.action is McpRegistrationAction.UNREGISTER
     assert preview.state_before is McpRegistrationState.FOREIGN_PRESENT
     assert preview.warnings == ("foreign_entry_present",)
-    assert preview.serve_command == ("yoetz", "mcp", "serve")
+    assert preview.serve_command == MCP_SERVE_COMMAND
     preview = anyio.run(
         lambda: CodexMcpAdapter(_Runner(_absent_outputs())).preview_unregistration(_BINARY)
     )

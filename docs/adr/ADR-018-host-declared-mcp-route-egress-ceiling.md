@@ -23,19 +23,25 @@ semantic review would be dishonest.
 
 ## Decisions
 
-1. **The MCP process has one immutable route profile.** `yoetz mcp serve` starts the `policy`
-   profile. `yoetz mcp serve --semantic off` starts the `strict` profile. The flag is parsed before
-   the server accepts stdin and cannot be changed by an MCP request, an agent field, environment,
-   provider readiness, or a later privacy-policy change.
+1. **The MCP process has one immutable route profile and an independent serving identity.**
+   `yoetz mcp serve` starts the `policy` profile and `yoetz mcp serve --semantic off` starts the
+   `strict` profile. Native host carriers declare `--host codex`, `--host claude`, or
+   `--host cursor`; portable and legacy/manual carriers default to `--host generic`, which leaves
+   the host unproven. Both flags are parsed before the server accepts stdin and cannot be changed by
+   an MCP request, an agent field, environment, provider readiness, or a later privacy-policy
+   change. The host declaration identifies the serving carrier only; it grants neither host
+   admission nor agent-chat attestation.
 
 2. **Strict is a ceiling, not a privacy policy.** The durable policy continues to authorize or deny
    disclosure. The strict route adds a stronger process-local limit: `check` never requests the
    semantic runtime capability and never invokes a semantic evaluator. It does not disable
    deterministic checks, local service IPC, receipts, or the other five operations.
 
-3. **The public six-operation schemas stay host-neutral.** `route_profile` exists only in the
-   private local control envelope between the MCP bridge and the service, and only for `check` and
-   `status`. An agent-supplied field remains invalid under the frozen public request schema.
+3. **The public six-operation schemas stay host-neutral.** `route_profile` and the serving
+   `host_profile` exist only in the private local control envelope between the MCP bridge and the
+   service; the host profile is carried only for `check`, while route profile remains available for
+   `check` and `status`. Agent-supplied fields remain invalid under the frozen public request
+   schema.
 
 4. **A requested review fails honestly under strict.** A semantic request returns
    `semantic_status=blocked_by_policy` and
@@ -55,9 +61,10 @@ semantic review would be dishonest.
 
 7. **Registration binds the exact command.** A host registration preview includes the exact argv,
    route profile, and digest. Zero-egress setup registers Codex with
-   `yoetz mcp serve --semantic off`; an installation whose configured posture permits semantic
-   review registers the policy command. A Yoetz-owned registration with the wrong profile requires
-   a fresh digest-bound re-registration. A foreign same-name entry is still preserved.
+   `yoetz mcp serve --host codex --semantic off`; an installation whose configured posture permits
+   semantic review registers `yoetz mcp serve --host codex`. A Yoetz-owned registration with the
+   wrong profile requires a fresh digest-bound re-registration. A foreign same-name entry is still
+   preserved.
 
 ## Consequences
 
@@ -98,7 +105,8 @@ digest-bound re-registration.
 
 **Issue #151 implementation detail.** The portable projection emits one closed stdio server named
 `yoetz`. Its executable token is exactly `yoetz`; policy args are exactly `mcp serve`, and strict
-args are exactly `mcp serve --semantic off`. It emits no `env`, headers, credential references, or
+args are exactly `mcp serve --semantic off`. Portable routes retain the generic unknown host
+identity and emit no `env`, headers, credential references, or
 shell command. The pinned Agent Plugins schema is validated offline. Invalid top-level MCP config
 disables only MCP; an invalid, unsupported, or failing entry skips only that server, so the
 independent Yoetz skill remains loadable. Preview binds the full `mcp.json` bytes through

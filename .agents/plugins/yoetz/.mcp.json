@@ -1,1 +1,1 @@
-{"mcpServers":{"yoetz":{"args":["mcp","serve"],"command":"yoetz"}}}
+{"mcpServers":{"yoetz":{"args":["mcp","serve","--host","codex"],"command":"yoetz"}}}

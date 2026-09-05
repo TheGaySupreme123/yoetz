@@ -182,12 +182,17 @@ The host-facing MCP `outputSchema` also projects fixed `prefixItems` tuples into
 only the declaration used by the host: every returned result is first validated against the exact
 immutable catalogue schema, which retains tuple order, length, and member identity.
 
-The native Cursor profile starts the same bridge with `--host cursor`. Cursor `3.17.x` does not
+The bridge accepts a serving host identity with `--host generic|codex|claude|cursor`. `generic`
+leaves the host unproven and is the default for portable/manual carriers; it never implies Codex.
+The native Codex and Claude carriers use `--host codex` and `--host claude` respectively, while the
+native Cursor profile starts the same bridge with `--host cursor`. Cursor `3.17.x` does not
 reliably deliver `structuredContent` to its model, so this explicit host profile repeats the exact
 canonical JSON wire body as the single text `content` item while retaining `structuredContent`
 unchanged. It adds no field and grants no additional read authority: payload-bearing fields appear
 only when the ordinary service route already returned them. Generic and portable Agent Plugin
-routes keep the bounded weaker projection above, preserving the shared portable bundle bytes.
+routes keep the bounded weaker projection above, preserving the shared portable bundle bytes. Host
+identity is a serving and diagnostic fact; it does not grant host admission or agent-chat
+attestation, which retain their independent client allowlists and authorization checks.
 
 Protocol reason
 `expected_frontier_required` marks a state-sensitive `publish_work` batch that omitted
@@ -847,11 +852,12 @@ top-level known-gap set, and the fold must equal that top-level coverage.
 Shared structural gap codes for optional semantic relevance review (distinct families):
 
 - `optional_semantic_review_blocked_by_policy` — blocked before dispatch by network-egress policy;
-- `optional_semantic_review_registration_drift` — the strict route ceiling blocked this process
-  while the durable applied-route record says the last install applied the policy route. The
-  disagreement is the whole claim: a strict route reached outside the install ceremony is a
-  legitimate owner action, so the gap offers the recovery rather than asserting a stale
-  process. Carried alongside the ceiling gap above, never instead of it, so the terminal
+- `optional_semantic_review_registration_drift` — the explicit Codex strict route ceiling blocked
+  this process while the durable applied-route record says the last install applied the policy
+  route. The disagreement is the whole claim: a strict route reached outside the install ceremony
+  is a legitimate owner action, so the gap offers the recovery rather than asserting a stale
+  process. Generic, Claude, and Cursor serving identities cannot be attributed to that Codex
+  record. Carried alongside the ceiling gap above, never instead of it, so the terminal
   status/reason/provenance binding is unchanged;
 - `semantic_review_not_configured` — evaluator/provider not configured;
 - `semantic_relevance_review_not_run` — evaluation failed/timed out/unavailable without a clean pass;
@@ -3666,9 +3672,9 @@ MCP server registration is a sibling port, never an `IntegrationsPort` overload 
 `apply_registration`, `preview_unregistration`, and `apply_unregistration`, each taking a
 `HarnessBinary` (harness ID, redacted-repr executable path,
 optional reported version, `supported|untested` compatibility). Shared names are
-`MCP_SERVER_NAME` (exactly `yoetz`), `MCP_SERVE_COMMAND` (exactly `("yoetz", "mcp", "serve")`),
-`MCP_STRICT_SERVE_COMMAND` (exactly
-`("yoetz", "mcp", "serve", "--semantic", "off")`),
+`MCP_SERVER_NAME` (exactly `yoetz`), `MCP_SERVE_COMMAND` (exactly
+`("yoetz", "mcp", "serve", "--host", "codex")`), `MCP_STRICT_SERVE_COMMAND` (exactly
+`("yoetz", "mcp", "serve", "--host", "codex", "--semantic", "off")`),
 `McpRegistrationState` (`absent|yoetz_owned|foreign_present`), `McpRegistrationAction`
 (`register|reregister|unregister|noop`), `McpRegistrationReason` (`confirmation_required|preview_stale|
 harness_unavailable|parse_failed|timeout|registration_failed|foreign_entry_present|isolation_invalid`),
@@ -3820,10 +3826,14 @@ overwrite the record — including an accepted install that had nothing to write
 clears it, so absence with no record reads as no drift. A strict ceiling check served while the
 applied record says `policy` keeps the same
 `blocked_by_policy` / `route_semantic_ceiling` status, reason, and null provenance, and carries
-the `optional_semantic_review_registration_drift` coverage gap alongside the ceiling gap; its
+the `optional_semantic_review_registration_drift` coverage gap alongside the ceiling gap only when
+the serving command declares `--host codex`; generic, Claude, and Cursor processes cannot be
+attributed to the Codex record. Its
 receipt names the recovery (re-run `mcp preview` / `mcp install --route-profile policy`, start
 a fresh Codex process) as a conditional, because a strict route reached outside the ceremony is
-a legitimate owner action. A ceiling with no applied-policy record keeps the terminal wording.
+a legitimate owner action. A ceiling with no applied-policy record keeps the terminal wording. The
+bridge emits `registration_drift` at startup only for an explicit Codex serving identity; generic
+legacy invocations remain unknown and keep the strict ceiling without a Codex drift claim.
 MCP `status view=versions` and the `mcp serve` descriptor intentionally stay serving-only: they
 name the live route of the serving process, and the applied-vs-serving drift join lives in the
 CLI status surfaces — so the omission there reads as decided, not missing. The closed

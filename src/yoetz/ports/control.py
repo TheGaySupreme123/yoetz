@@ -39,6 +39,7 @@ __all__ = [
     "ProjectionRenderMode",
     "ControlRequest",
     "ControlResult",
+    "McpHostProfile",
     "McpRouteProfile",
     "ServiceState",
     "ServiceStopResult",
@@ -73,6 +74,7 @@ class ProjectionRenderMode(str, Enum):  # noqa: UP042 - exact wire enum base
 
 
 type RepositoryIdentityKind = Literal["git_common_root", "directory"]
+type McpHostProfile = Literal["generic", "codex", "claude", "cursor"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,6 +242,7 @@ class ControlCallRequest:
     body: ControlCallBody
     deadline_ms: int | None = None
     route_profile: McpRouteProfile | None = None
+    host_profile: McpHostProfile | None = None
 
     def __post_init__(self) -> None:
         if self.kind != "call":
@@ -259,6 +262,11 @@ class ControlCallRequest:
             or self.method not in {ControlMethod.CHECK, ControlMethod.STATUS}
         ):
             raise ValueError("control_route_profile_invalid")
+        if self.host_profile is not None and (
+            self.host_profile not in {"generic", "codex", "claude", "cursor"}
+            or self.method is not ControlMethod.CHECK
+        ):
+            raise ValueError("control_host_profile_invalid")
 
 
 @dataclass(frozen=True, slots=True)

@@ -572,6 +572,42 @@ async def test_ready_handler_preserves_check_route_default(
 
 
 @pytest.mark.anyio
+async def test_ready_handler_forwards_serving_host_identity_to_check() -> None:
+    seen: list[object] = []
+    marker = object()
+
+    async def handler(
+        _request: object,
+        *,
+        route_profile: object = "policy",
+        host_profile: object = "generic",
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
+    ) -> object:
+        assert repository_privacy_context is None
+        seen.append((route_profile, host_profile))
+        return marker
+
+    request = ControlCallRequest(
+        kind="call",
+        protocol_version="1.0",
+        rpc_id=new_id(IdKind.CONTROL_RPC),
+        service_instance_id=_INSTANCE_ID,
+        service_generation="7",
+        method=ControlMethod.CHECK,
+        body=_check_body(),
+        route_profile="strict",
+        host_profile="claude",
+    )
+
+    result = await ServiceDaemon._invoke_ready_handler(  # pyright: ignore[reportPrivateUsage]
+        handler, request
+    )
+
+    assert result is marker
+    assert seen == [("strict", "claude")]
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     "method",
     (

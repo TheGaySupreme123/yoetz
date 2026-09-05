@@ -217,7 +217,7 @@ def test_native_projection_uses_shared_bytes_and_only_admitted_claude_components
     launcher = managed.yoetz_launcher
     assert len(launcher) == 1 and Path(launcher[0]).is_absolute()
     assert json.loads(managed.members[".mcp.json"])["mcpServers"]["yoetz"] == {
-        "args": ["mcp", "serve", "--semantic", "off"],
+        "args": ["mcp", "serve", "--host", "claude", "--semantic", "off"],
         "command": launcher[0],
         "type": "stdio",
     }
@@ -279,7 +279,7 @@ def test_launcher_binding_uses_the_invoking_installation_and_marks_the_marker(
     assert artifact.yoetz_launcher == (str(interpreter.resolve()), "-m", "yoetz")
     entry = json.loads(artifact.members[".mcp.json"])["mcpServers"]["yoetz"]
     assert entry == {
-        "args": ["-m", "yoetz", "mcp", "serve"],
+        "args": ["-m", "yoetz", "mcp", "serve", "--host", "claude"],
         "command": str(interpreter.resolve()),
         "type": "stdio",
     }
