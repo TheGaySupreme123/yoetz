@@ -5,9 +5,9 @@ merely whether Yoetz was healthy, authorable, or able to emit feedback. Its purp
 questions to be answered **separately**, so a zero-influence run with a healthy service and an honest
 receipt is never summarized as “Yoetz improved the agent.”
 
-It exists because of the 2026-08-03 postmortem
-([`docs/postmortems/2026-08-03-codex-testing-yoetz-schema-feedback-influence.md`](../postmortems/2026-08-03-codex-testing-yoetz-schema-feedback-influence.md)),
-which recorded operational health and receipt honesty while demonstrating little attributable work
+It exists because of the 2026-08-03 codex-testing postmortem (a private drafting input under the
+gitignored `docs/postmortems/`, not shipped; this runbook is self-contained without it), which
+recorded operational health and receipt honesty while demonstrating little attributable work
 revision. The postmortem's P1.6–P1.8 remediation items (policy-enabled qualitative route, seeded
 defect, intervention timing) are the experiment contract this runbook operationalizes.
 
@@ -306,6 +306,6 @@ if prose claims improvement.
 - [Codex integration runbook](codex-integration.md) — skill install, MCP registration, route profile.
 - [Privacy and semantic review](../usage/privacy-and-semantic-review.md) — durable policy that
   authorizes disclosure.
-- Postmortem
-  [`2026-08-03-codex-testing-yoetz-schema-feedback-influence.md`](../postmortems/2026-08-03-codex-testing-yoetz-schema-feedback-influence.md)
-  — root evidence and P1.6–P1.8.
+- The 2026-08-03 codex-testing postmortem — root evidence and the P1.6–P1.8 remediation items —
+  is a private drafting input under the gitignored `docs/postmortems/` and is not shipped; the
+  experiment contract above restates everything this runbook needs from it.

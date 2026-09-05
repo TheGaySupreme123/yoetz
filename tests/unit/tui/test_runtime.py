@@ -173,3 +173,25 @@ async def test_store_provider_credential_supplies_the_scoped_reauthentication_se
     assert credential is None
     assert reauthentication is not None
     assert bytes(cast(bytearray, reauthentication)) == b"scoped-reauth"
+
+
+def test_every_reviewed_provider_preset_gets_a_friendly_picker_label(tmp_path: Path) -> None:
+    """A preset missing from the label map either vanishes from ``/provider`` or
+    shows its raw provider id; both regress silently, so the map is locked to
+    the preset registry rather than to a hand-maintained list."""
+
+    from yoetz.config.write import PROVIDER_PRESETS
+
+    options = {option.choice: option for option in YoetzRuntime(cwd=tmp_path).provider_options()}
+
+    missing = sorted(set(PROVIDER_PRESETS) - set(options))
+    assert missing == [], f"presets without a picker entry: {missing}"
+    for choice, preset in PROVIDER_PRESETS.items():
+        option = options[choice]
+        assert option.provider_id == preset.provider_id
+        assert option.label.strip(), f"empty label for preset {choice}"
+        assert option.label != preset.provider_id, (
+            f"preset {choice} falls through to its raw provider id {preset.provider_id!r}"
+        )
+        assert option.label != choice, f"preset {choice} falls through to its choice key"
+    assert options["grok"].label == "Grok (xAI)"

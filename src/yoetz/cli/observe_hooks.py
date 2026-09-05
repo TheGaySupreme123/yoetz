@@ -18,9 +18,9 @@ from typing import TYPE_CHECKING, BinaryIO, Final, Literal, Protocol, cast
 from yoetz.adapters.integrations.codex_lifecycle import (
     LifecycleMapping,
     acquire_session_lock,
-    load_latest_mapping,
     load_mapping,
     mapping_from_start_ids,
+    mapping_path,
     store_mapping,
     validate_codex_session_id,
 )
@@ -1432,44 +1432,152 @@ def _host_session_matches(
     return not session_id.startswith((_CLAUDE_SESSION_PREFIX, _CURSOR_SESSION_PREFIX))
 
 
-def _ended_workspace_recovery_mapping(
+# Ended host-session bindings retained per workspace beyond the ones a recovery
+# attach consumed. Consumed bindings are pruned at consumption; this cap bounds
+# the never-consumed remainder (sessions that never mapped, sibling tasks in one
+# workspace) so neither the SessionStart scan nor the state file grows with the
+# workspace's whole history (#549). Ranked by mapping recency so the selectors
+# recovery would pick survive; ended sessions without a mapping go first.
+_MAX_ENDED_SESSION_BINDINGS: Final = 32
+
+
+@dataclass(frozen=True, slots=True)
+class _RecoveryScan:
+    """One pass's ended-session recovery scan, computed once and revalidated (#549)."""
+
+    # The selected predecessor mapping, or None when recovery is not admissible.
+    mapping: LifecycleMapping | None
+    # (host session id, ended) for every binding in the workspace at scan time.
+    lifecycles: tuple[tuple[str, bool], ...]
+
+
+def _latest_mapping(
+    mappings: tuple[LifecycleMapping, ...], *, _state: Path | None
+) -> LifecycleMapping | None:
+    """Rank already-loaded mappings by file recency exactly as ``load_latest_mapping`` does.
+
+    The candidates were read moments ago by the same pass; ranking them in place
+    spares the second read per candidate the adapter helper would perform (#549).
+    """
+
+    latest: tuple[int, bytes, LifecycleMapping] | None = None
+    for mapping in mappings:
+        try:
+            path = mapping_path(mapping.codex_session_id, _state=_state)
+            if path.is_symlink():
+                continue
+            modified_ns = path.stat().st_mtime_ns
+        except OSError, ProtocolValueError:
+            continue
+        candidate = (modified_ns, mapping.codex_session_id.encode(), mapping)
+        if latest is None or candidate[:2] > latest[:2]:
+            latest = candidate
+    return None if latest is None else latest[2]
+
+
+def _scan_ended_workspace_recovery(
     store: LocalObservationStore,
     workspace_commitment: str,
     codex_session_id: str,
     *,
     harness_id: Literal["claude", "codex", "cursor"],
     _state: Path | None,
-) -> LifecycleMapping | None:
-    """Return the latest same-host selector when every other bound session has ended."""
+    lifecycles: tuple[tuple[str, bool], ...] | None = None,
+) -> _RecoveryScan:
+    """Select the latest same-host predecessor when every other bound session has ended.
 
-    unambiguous = frozenset(store.unambiguous_codex_sessions_for_workspace(workspace_commitment))
-    bound_sessions = store.codex_sessions_for_workspace(workspace_commitment)
-    if any(
-        session_id != codex_session_id
-        and not store.codex_session_ended(workspace_commitment, session_id)
-        for session_id in bound_sessions
-    ):
-        return None
+    One state read yields every binding's ended flag, so the live-session early
+    return costs no per-binding store call; the cross-workspace ambiguity probe
+    and the mapping reads run only once some ended same-host candidate exists,
+    and each candidate's mapping file is read once per pass (#549).
+    """
 
+    if lifecycles is None:
+        lifecycles = store.codex_session_lifecycles_for_workspace(workspace_commitment)
+    if any(session_id != codex_session_id and not ended for session_id, ended in lifecycles):
+        return _RecoveryScan(None, lifecycles)
     ended = tuple(
         session_id
-        for session_id in bound_sessions
+        for session_id, is_ended in lifecycles
         if session_id != codex_session_id
-        and store.codex_session_ended(workspace_commitment, session_id)
-        and session_id in unambiguous
+        and is_ended
         and _host_session_matches(session_id, harness_id)
     )
+    if not ended:
+        return _RecoveryScan(None, lifecycles)
+    unambiguous = frozenset(store.unambiguous_codex_sessions_for_workspace(workspace_commitment))
     valid = tuple(
         mapping
         for session_id in ended
-        if (mapping := load_mapping(session_id, _state=_state)) is not None
+        if session_id in unambiguous
+        and (mapping := load_mapping(session_id, _state=_state)) is not None
     )
     if len({mapping.yoetz_task_id for mapping in valid}) != 1:
-        return None
-    return load_latest_mapping(
-        tuple(mapping.codex_session_id for mapping in valid),
-        _state=_state,
-    )
+        return _RecoveryScan(None, lifecycles)
+    return _RecoveryScan(_latest_mapping(valid, _state=_state), lifecycles)
+
+
+def _recovery_scan_still_valid(
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    scan: _RecoveryScan,
+    *,
+    _state: Path | None,
+) -> bool:
+    """Re-check one scan under the predecessor lock without repeating it (#549).
+
+    The lock held on the selected predecessor keeps it ended: a resumed
+    SessionStart restarts a generation only under that same lock. What can still
+    change is the binding set and its ended flags (a sibling session starting,
+    which would also have made the scan inadmissible) or the selected mapping
+    file itself, so exactly those are compared against the scan. Both checks are
+    one state read and one mapping read, whatever the binding count.
+    """
+
+    if scan.mapping is None:
+        return False
+    if store.codex_session_lifecycles_for_workspace(workspace_commitment) != scan.lifecycles:
+        return False
+    return load_mapping(scan.mapping.codex_session_id, _state=_state) == scan.mapping
+
+
+def _prune_surplus_ended_session_bindings(
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    lifecycles: tuple[tuple[str, bool], ...],
+    codex_session_id: str,
+    *,
+    _state: Path | None,
+) -> tuple[str, ...]:
+    """Keep the newest ended bindings up to the cap; ask the store to prune the rest.
+
+    Only the surplus is ranked, and ranking is one ``stat`` per ended binding:
+    sessions with no mapping file first (they cannot serve recovery), then by
+    mapping modification time, oldest first. The store enforces the
+    ended-and-drained rule, so a surplus binding with pending or quarantined rows
+    survives and is offered again on a later pass (#549).
+    """
+
+    ended = [
+        session_id
+        for session_id, is_ended in lifecycles
+        if is_ended and session_id != codex_session_id
+    ]
+    surplus = len(ended) - _MAX_ENDED_SESSION_BINDINGS
+    if surplus <= 0:
+        return ()
+
+    def _rank(session_id: str) -> tuple[int, int, bytes]:
+        try:
+            path = mapping_path(session_id, _state=_state)
+            if path.is_symlink():
+                return (0, 0, session_id.encode())
+            return (1, path.stat().st_mtime_ns, session_id.encode())
+        except OSError, ProtocolValueError:
+            return (0, 0, session_id.encode())
+
+    ended.sort(key=_rank)
+    return store.prune_codex_session_bindings(workspace_commitment, ended[:surplus])
 
 
 def _rewrite_one_ended_predecessor_mapping(
@@ -1479,19 +1587,24 @@ def _rewrite_one_ended_predecessor_mapping(
     successor: LifecycleMapping,
     *,
     _state: Path | None,
-) -> None:
-    """Rewrite one ended predecessor if it still maps the recovered task."""
+) -> bool:
+    """Rewrite one ended predecessor if it still maps the recovered task.
+
+    Returns True when the predecessor now carries the successor route, whether it
+    was rewritten here or was already aligned: those are the bindings the
+    recovery consumed (#549).
+    """
 
     if not store.codex_session_ended(workspace_commitment, session_id):
-        return
+        return False
     predecessor = load_mapping(session_id, _state=_state)
     if predecessor is None or predecessor.yoetz_task_id != successor.yoetz_task_id:
-        return
+        return False
     if (
         predecessor.yoetz_session_id == successor.yoetz_session_id
         and predecessor.yoetz_writer_id == successor.yoetz_writer_id
     ):
-        return
+        return True
     store_mapping(
         mapping_from_start_ids(
             codex_session_id=predecessor.codex_session_id,
@@ -1502,6 +1615,7 @@ def _rewrite_one_ended_predecessor_mapping(
         ),
         _state=_state,
     )
+    return True
 
 
 def _rewrite_ended_predecessor_mappings(
@@ -1512,30 +1626,40 @@ def _rewrite_ended_predecessor_mappings(
     harness_id: Literal["claude", "codex", "cursor"],
     _state: Path | None,
     held_codex_session_id: str | None = None,
-) -> None:
-    """Point ended same-host mappings at the rotated successor route (#577)."""
+    lifecycles: tuple[tuple[str, bool], ...] | None = None,
+) -> tuple[str, ...]:
+    """Point ended same-host mappings at the rotated successor route (#577).
 
-    for session_id in store.codex_sessions_for_workspace(workspace_commitment):
-        if session_id == successor.codex_session_id:
-            continue
-        if not store.codex_session_ended(workspace_commitment, session_id):
+    Returns the predecessors that now carry the successor route. ``lifecycles``
+    is the pass's scan snapshot when the caller has one; the ended flag is still
+    re-read under each predecessor's lock before its mapping is touched.
+    """
+
+    if lifecycles is None:
+        lifecycles = store.codex_session_lifecycles_for_workspace(workspace_commitment)
+    consumed: list[str] = []
+    for session_id, ended in lifecycles:
+        if session_id == successor.codex_session_id or not ended:
             continue
         if not _host_session_matches(session_id, harness_id):
             continue
         try:
             if session_id == held_codex_session_id:
-                _rewrite_one_ended_predecessor_mapping(
+                aligned = _rewrite_one_ended_predecessor_mapping(
                     store, workspace_commitment, session_id, successor, _state=_state
                 )
-                continue
-            with acquire_session_lock(session_id, _state=_state) as owned:
-                if not owned:
-                    continue
-                _rewrite_one_ended_predecessor_mapping(
-                    store, workspace_commitment, session_id, successor, _state=_state
-                )
+            else:
+                with acquire_session_lock(session_id, _state=_state) as owned:
+                    if not owned:
+                        continue
+                    aligned = _rewrite_one_ended_predecessor_mapping(
+                        store, workspace_commitment, session_id, successor, _state=_state
+                    )
         except Exception:
             continue
+        if aligned:
+            consumed.append(session_id)
+    return tuple(consumed)
 
 
 async def _try_workspace_auto_start(
@@ -1547,16 +1671,35 @@ async def _try_workspace_auto_start(
     harness_id: Literal["claude", "codex", "cursor"],
     _state: Path | None,
     connect: HookStartConnector | None,
+    prune_surplus: bool = False,
 ) -> AutoAttachOutcome:
-    """Auto-start, holding an ended predecessor stable through any recovery attach."""
+    """Auto-start, holding an ended predecessor stable through any recovery attach.
 
-    recovery = _ended_workspace_recovery_mapping(
+    The recovery scan runs once per call; the re-check under the predecessor lock
+    compares the store against that scan instead of scanning again, so the retry
+    events' one-second budget wraps a bounded amount of synchronous local work
+    (#549). ``prune_surplus`` is the SessionStart pass's retention step; retry
+    events skip it.
+    """
+
+    lifecycles = store.codex_session_lifecycles_for_workspace(workspace_commitment)
+    if prune_surplus:
+        pruned: tuple[str, ...] = ()
+        with contextlib.suppress(Exception):
+            pruned = _prune_surplus_ended_session_bindings(
+                store, workspace_commitment, lifecycles, codex_session_id, _state=_state
+            )
+        if pruned:
+            lifecycles = tuple(entry for entry in lifecycles if entry[0] not in pruned)
+    scan = _scan_ended_workspace_recovery(
         store,
         workspace_commitment,
         codex_session_id,
         harness_id=harness_id,
         _state=_state,
+        lifecycles=lifecycles,
     )
+    recovery = scan.mapping
     if recovery is None:
         return await _try_auto_start(
             codex_session_id,
@@ -1567,34 +1710,34 @@ async def _try_workspace_auto_start(
         )
 
     with acquire_session_lock(recovery.codex_session_id, _state=_state) as predecessor_owned:
-        if predecessor_owned:
-            refreshed = _ended_workspace_recovery_mapping(
-                store,
-                workspace_commitment,
+        if predecessor_owned and _recovery_scan_still_valid(
+            store, workspace_commitment, scan, _state=_state
+        ):
+            outcome = await _try_auto_start(
                 codex_session_id,
-                harness_id=harness_id,
                 _state=_state,
+                harness_id=harness_id,
+                workspace_locator=workspace_locator,
+                recovery_mapping=recovery,
+                connect=connect,
             )
-            if refreshed is not None and refreshed == recovery:
-                outcome = await _try_auto_start(
-                    codex_session_id,
-                    _state=_state,
-                    harness_id=harness_id,
-                    workspace_locator=workspace_locator,
-                    recovery_mapping=refreshed,
-                    connect=connect,
-                )
-                if outcome.mapping is not None and outcome.recovered:
-                    with contextlib.suppress(Exception):
-                        _rewrite_ended_predecessor_mappings(
-                            store,
-                            workspace_commitment,
-                            outcome.mapping,
-                            harness_id=harness_id,
-                            _state=_state,
-                            held_codex_session_id=refreshed.codex_session_id,
-                        )
-                return outcome
+            if outcome.mapping is not None and outcome.recovered:
+                with contextlib.suppress(Exception):
+                    consumed = _rewrite_ended_predecessor_mappings(
+                        store,
+                        workspace_commitment,
+                        outcome.mapping,
+                        harness_id=harness_id,
+                        _state=_state,
+                        held_codex_session_id=recovery.codex_session_id,
+                        lifecycles=scan.lifecycles,
+                    )
+                    # Recovery consumed these predecessors: the live successor
+                    # binding now carries their task, and their mapping files stay
+                    # in the lifecycle store to route any rows still pending. The
+                    # store keeps every binding whose rows are not yet drained.
+                    store.prune_codex_session_bindings(workspace_commitment, consumed)
+            return outcome
 
     # A resumed predecessor or changed local state invalidates the capability.
     # Still run the ordinary request so the hook records the service's typed
@@ -2074,6 +2217,7 @@ def handle_observe(
                                         harness_id=harness_id,
                                         workspace_locator=workspace_locator,
                                         connect=cast(HookStartConnector | None, connect),
+                                        prune_surplus=True,
                                     )
 
                                 mapping = _record_auto_attach(

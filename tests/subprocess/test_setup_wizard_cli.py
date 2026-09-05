@@ -446,6 +446,28 @@ def _wire_composed_provider_setup(
     return state
 
 
+def test_wizard_ambient_configuration_resolves_inside_the_hermetic_home() -> None:
+    """The wizard's ``load_config({}, os.environ, None)`` reads never reach a developer's config.
+
+    ``setup run`` decides the route profile, the credential-probe prompt, and semantic readiness
+    from ambient configuration on purpose; the suite, not the product, owns keeping that read
+    inside the per-test tree (issue #551). This pins the contract the ``tests/subprocess``
+    ``conftest`` provides so a regression fails here rather than three unrelated cases below.
+    """
+
+    from yoetz.config.load import default_config_file_path, load_config
+
+    config_home = Path(os.environ["XDG_CONFIG_HOME"])
+    assert default_config_file_path() == config_home / "yoetz" / "config.toml"
+    assert not default_config_file_path().exists()
+    assert Path.home() == Path(os.environ["HOME"])
+    assert Path(os.environ["HOME"]).parent == config_home.parent
+    assert not [name for name in os.environ if name.startswith("YOETZ_")]
+    config = load_config({}, os.environ, None)
+    assert config.external_runtime is None
+    assert config.provider is None
+
+
 def test_non_interactive_without_accept_is_a_dry_run(wizard_env: dict[str, object]) -> None:
     result = _RUNNER.invoke(cli.app, ["setup", "run", "--non-interactive", "--json"])
     assert result.exit_code == 0, (result.output, result.exception)

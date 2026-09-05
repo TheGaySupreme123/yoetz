@@ -405,8 +405,8 @@ Both verdicts and the repository-authority inputs appear wherever readiness is s
 
 - `yoetz provider status` (human and `--json`).
 - The terminal interface's readiness layers, as a separate `Codex agent route permits deeper
-  review` line beside `Repository grant` and `Deeper review ready`. An unread registration or
-  unbound repository renders as unknown rather than as inherited authority.
+  review` line beside `Privacy permits external review` and `Deeper review ready`. An unread
+  registration or unbound repository renders as unknown rather than as inherited authority.
 - `yoetz privacy setup` and the terminal interface's `/privacy`: when a committed policy permits
   external review and the registered route is `strict`, the ceremony names the mismatch and the
   command that fixes it. That note is advisory — it never fails the ceremony, changes an exit

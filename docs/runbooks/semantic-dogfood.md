@@ -4,9 +4,9 @@ This runbook governs sessions that use Yoetz on Yoetz and then report a finding 
 purpose is to fix, **before** the first task action, which claim the run is allowed to make — so a
 result is never read as evidence for a question the run's configuration made unanswerable.
 
-It exists because of the 2026-08-03 postmortem
-([`docs/postmortems/2026-08-03-codex-testing-yoetz-schema-feedback-influence.md`](../postmortems/2026-08-03-codex-testing-yoetz-schema-feedback-influence.md)),
-which scored "did semantic feedback help?" against a session whose MCP route was `strict`. Yoetz
+It exists because of the 2026-08-03 codex-testing postmortem (a private drafting input under the
+gitignored `docs/postmortems/`, not shipped; this runbook is self-contained without it), which
+scored "did semantic feedback help?" against a session whose MCP route was `strict`. Yoetz
 behaved correctly and reported honestly — `semantic_status=blocked_by_policy`,
 `semantic_reason=route_semantic_ceiling`, `semantic_provenance: null`, zero egress. The run simply
 could never have measured semantic usefulness. Nothing in the tooling said so in advance.

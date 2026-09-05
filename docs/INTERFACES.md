@@ -376,7 +376,8 @@ The independent exhaustive path-to-`SchemaKind` map is: `events/* -> event`,
 `config/* -> config`, `version/* -> version_manifest`, and
 `common/*|operations/*|findings/*|receipts/*|privacy/*|service/* -> request_result`. The manifest
 records both typed values and the catalog re-derives each from its own map. These prefixes exhaust
-the 96 v0.1 schema artifacts; no `support_manifest` kind or support-manifest schema exists.
+every member of `schemas/manifest.json` (the reviewed manifest, not this prose, owns the count);
+no `support_manifest` kind or support-manifest schema exists.
 
 ## 5. Coverage (`protocol/coverage.py`)
 
@@ -2507,10 +2508,14 @@ Shared privacy values are `ProviderBinding`, `AuthorizationScope`, `ChannelPolic
 `CandidateContext`, and closed composition supplies reviewed bundled adapters no repository,
 bundle, transcript, environment, log, database, or keyring handle. Third-party/dynamic adapters are
 absent; this is not an OS sandbox against malicious code already inside the trusted service. Policy
-widening requires a reauthenticated local human bound to the exact diff/digest and shown the
-complete `before → after` change set that produced the widening classification; tightening is
-immediate after an ordinary explicit confirmation and revokes affected
-authorizations/transports. The never-send set is non-overridable even by that human.
+widening requires a reauthenticated decision by the user: either the trusted local ceremony, bound
+to the exact diff/digest and shown the complete `before → after` change set that produced the
+widening classification, or the user's explicit current-chat instruction for one exact prepared,
+previewed, expiring consent target relayed by a capable agent through the consent lane (ADR-009
+"Human required?" table; ADR-016 decision 5), which is an agent attestation Yoetz cannot
+independently authenticate; tightening is immediate after an ordinary explicit confirmation and
+revokes affected authorizations/transports. The never-send set is non-overridable under either
+path.
 
 `PreDispatchAuditDecision` is structural-only and terminal; it permits no prepared bytes,
 authorization, or dispatch. A v0.1 content-bearing `DisclosureProposal` has one owning `task_id` and
@@ -3373,7 +3378,11 @@ gap history remains after recovery, and renewed shedding reactivates it (issue #
 Public ingest failures use their `retryable` contract, not a spelling fallback. A non-retryable
 failure that is not already a narrower terminal class (`dedup_conflict` or
 `observation_storage_corrupt`) becomes `ledger_rejected`; drain and sweep quarantine that one row,
-record the reason once, and continue its lane. `SESSION_NOT_FOUND` with
+record the reason once, and continue its lane. `SESSION_CONFLICT` and a `SESSION_NOT_FOUND` that
+carries no followable binding are in that class: every route, catalog, and ledger authority in this
+repository raises them non-retryable, so ingest keeps no separate `service_unavailable` or
+`mapping_missing` rendering for either code (issue #554). A retryable public failure outside the
+designed back-pressure set and `VAULT_LOCKED` is `service_unavailable`. `SESSION_NOT_FOUND` with
 `reason_code: session_superseded` is not that class: ingest follows the current binding carried in
 `safe_details` (same task, successor session, observation writer derived for it), persists the
 updated lifecycle mapping on each hop only while holding the lifecycle lock and the stored
@@ -4519,9 +4528,15 @@ facade and are never MCP tools.
 
 `version.py` exposes `VersionManifest`: package, protocol (`0.1`), local control protocol (`1.0`),
 privacy-policy schema (`1.1.0`), egress-receipt schema (`1.0.0`), engine (`0.1.0`), policy pack
-versions, projection (`yoetz/0.1.0`), object format (`yoetz-object/1`), storage schema
-(`user_version` bundle 2, catalog 3), Python, APSW/SQLite source ID, MCP SDK, provider adapter
-versions.
+versions, projection (`yoetz/0.1.0`), object format (`yoetz-object/1`), storage schema identities
+(`catalog_schema_version` `4`, `bundle_schema_version` `2` — hand-versioned positive-decimal
+counters stamped into every receipt's version block and pinned as `const` in the current
+version-manifest schema), Python, APSW/SQLite source ID, MCP SDK, provider adapter versions.
+Those two identities are not the SQLite `user_version`: that axis is owned by the ordered migration
+registries under `migrations/` (`catalog/` and `bundle/`, one file per step), and
+`adapters/sqlite/connection.py` compares a file's `user_version` against the registry head it was
+built with — currently catalog 3 and bundle 9 — reporting `migration_required` when the file is
+older and refusing `schema_newer_than_binary` when it is newer.
 Its shared support values are frozen `ResourceIdentity(name, media_type, size_bytes,
 sha256_digest)` and `CapabilitySet(name, supported_versions, tested_versions, denied_versions)`.
 Every capability collection is an exact ASCII-sorted set: membership is literal, with no SemVer

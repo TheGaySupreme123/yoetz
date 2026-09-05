@@ -1991,6 +1991,50 @@ async def test_nonretryable_public_ingest_errors_are_terminal(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    "code", [PublicErrorCode.SESSION_NOT_FOUND, PublicErrorCode.SESSION_CONFLICT]
+)
+async def test_retryable_session_route_errors_stay_pending_as_service_unavailable(
+    tmp_path: Path, code: PublicErrorCode
+) -> None:
+    """#554: no ingest authority raises these codes retryable, and the removed
+    per-code branches must not come back by accident. A retryable answer, should
+    one ever appear, is transient coordination that keeps the row pending under
+    the generic retryable class; it is never `mapping_missing`, which would
+    retire the lane and terminalize an ended session."""
+
+    class _RetryableRuntime:
+        async def route(self, command: object) -> object:
+            del command
+            raise PublicOperationError(code, "Observation route is busy.", True)
+
+        async def release(self, runtime: object) -> None:
+            raise AssertionError(f"unrouted runtime released: {runtime!r}")
+
+    local, _workspace, session, mapping = _mapped_local(tmp_path, f"retryable-{code.value}")
+    coordinator = ObservationCoordinator(
+        runtime=_RetryableRuntime(),  # type: ignore[arg-type]
+        local=local,
+        clock=object(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
+
+    result = await coordinator.ingest_request(
+        ObservationIngestRequest(
+            codex_session_id=mapping.codex_session_id,
+            envelope=_envelope(session=session),
+        )
+    )
+
+    assert result.disposition is ObservationIngestDisposition.REJECTED
+    assert result.reason == ObservationGapCode.SERVICE_UNAVAILABLE.value
+    assert result.reason != ObservationGapCode.MAPPING_MISSING.value
+    assert route_observation_ingest(result).action is ObservationDrainAction.RETRY
+
+
+@pytest.mark.anyio
 async def test_ledger_event_invalid_is_terminal_not_service_unavailable(tmp_path: Path) -> None:
     """#540: a ledger validation refusal quarantines its envelope immediately."""
 

@@ -1,9 +1,16 @@
 # Install and first run
 
-> Local Cursor support is configured explicitly, not by ambient discovery. Use
+> Three harnesses have first-party integrations: Codex, Claude Code, and Cursor. The first-run
+> wizard detects and connects Codex. Claude Code and Cursor are configured explicitly, never by
+> ambient discovery: `yoetz integrate claude plugin preview` for Claude Code (then `install`,
+> `update`, `enable`, `disable`, `remove`, or `export` for a development plugin directory) and
 > `yoetz integrate cursor plugin preview` with an exact isolated Cursor configuration root and
-> project; see [the Cursor integration runbook](../runbooks/cursor-integration.md). Cursor Cloud is
-> not supported.
+> project; see [the Claude Code integration runbook](../runbooks/claude-code-integration.md) and
+> [the Cursor integration runbook](../runbooks/cursor-integration.md). For both, the integration
+> ships but its support evidence is release-bound: each covers one exact local CLI cell, and no
+> cell is claimed beyond what its runbook records. Claude Desktop, remote, and web sessions are
+> untested, not claimed either way; Cursor Cloud is not supported. Any other agent can use Yoetz
+> over MCP with no integration at all.
 
 ## Install
 
@@ -38,7 +45,9 @@ pipes, redirected streams — prints help instead, exactly as before.
 
 Setup is a linear path inside the interface, each finished step collapsing into a short line:
 
-1. **Detection.** Supported harnesses (Codex in v0.1), your project and its canonical Git common
+1. **Detection.** Codex installations (the wizard detects Codex only; Claude Code and Cursor are
+   connected afterwards through `yoetz integrate claude ...` and `yoetz integrate cursor ...`, see
+   the note at the top of this page), your project and its canonical Git common
    root (or resolved non-Git directory), whether system secure storage is available, and whether
    Yoetz is connected yet.
 2. **Which installation**, when several Codex binaries are found on your `PATH`, in the standard
@@ -158,9 +167,16 @@ yoetz provider credential set      # provision the API credential through the te
 `yoetz service run` runs in the foreground on purpose when invoked directly — you choose the
 supervisor (launchd, systemd, a terminal). Interactive setup may use the bounded on-demand launcher.
 Related: `yoetz service status`, `lock`, `unlock`, `initialize-passphrase`,
-`rotate-passphrase`, `idle-relock`, `stop`. Passphrase setup and rotation mask input with `*` and
-re-prompt invalid or mismatched values; they never accept a secret through a flag, pipe, or the
-full-screen window.
+`rotate-passphrase`, `idle-relock`, `stop`; `restart` stops the running service — even one from
+another installation — and starts this one; `isolation` reports the resolved identity roots and
+isolation mode as digests, without connecting to a service; `diagnostics --correlation-id
+<err_...>` resolves one durable owner-only diagnostic record by the correlation id printed with a
+public error. Two sub-trees sit beneath it: `yoetz service auto-unlock status|enable|repair`
+inspects or repairs restart-safe passphrase unlock after proving the current vault passphrase, and
+`yoetz service recovery status|provision|rotate|revoke|export|import|restore` provisions and uses
+installation-vault recovery without exposing secrets to agents. Passphrase setup and rotation mask
+input with `*` and re-prompt invalid or mismatched values; they never accept a secret through a
+flag, pipe, or the full-screen window.
 
 ## What a fresh installation does not do
 
@@ -189,3 +205,6 @@ From here:
 - [Privacy and semantic review](privacy-and-semantic-review.md) — before you enable any egress.
 - [`docs/runbooks/codex-integration.md`](../runbooks/codex-integration.md) — integration detail and
   the exact tested Codex version set.
+- [`docs/runbooks/claude-code-integration.md`](../runbooks/claude-code-integration.md) and
+  [`docs/runbooks/cursor-integration.md`](../runbooks/cursor-integration.md) — the exact Claude
+  Code and Cursor cells, their commands, and what each host's hooks do and do not observe.

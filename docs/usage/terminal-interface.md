@@ -132,10 +132,28 @@ Guidance installed                  Provider binding saved
 Structural hooks installed          Credential stored
 Project consent active              Provider connection tested
 Approved-check policy trusted       Deeper-review evaluator composed
-                                    Machine privacy ceiling permits review
-                                    Exact repository grant active
+                                    Privacy permits external review
                                     Deeper review ready
+                                    Codex agent route permits deeper review
+                                    Host auto-review admits the semantic check
 ```
+
+The last four are deliberately separate lines, because each can be true while the others are not:
+
+- **Privacy permits external review** — the effective privacy policy for this repository allows
+  external LLM inference. Unknown when the policy could not be read; its detail line carries the
+  policy summary.
+- **Deeper review ready** — the installation reports `semantic_ready`: semantic review enabled, a
+  bound provider with a stored credential, a policy that permits inference, and an exact grant for
+  this repository. Configured, not proven working. Otherwise the detail says external review is
+  off.
+- **Codex agent route permits deeper review** — whether the registered Codex MCP route can dispatch
+  semantic review. A route registered as `strict` is verified installation-side and still shows
+  here as not permitting review, with the command that changes it; unknown when the registration
+  could not be read.
+- **Host auto-review admits the semantic check** — whether at least one host's automatic reviewer
+  has been admitted for this repository; the detail names each host as present or absent, and a
+  stale admission that outlives its grant or route is called out for revocation.
 
 "Connected" is never a substitute for any of these. If the privacy policy could not be read,
 `/status` says so rather than claiming nothing is leaving your computer.
@@ -177,8 +195,9 @@ confirmation.
 
 ### `/provider`
 
-Choose a preset — OpenAI, Fireworks AI, Anthropic, Google Gemini, OpenRouter, Vercel AI Gateway,
-or a custom OpenAI-compatible HTTPS endpoint — or choose **Codex with ChatGPT subscription**.
+Choose a preset — OpenAI, Fireworks AI, Anthropic, Google Gemini, OpenRouter, Grok (xAI), Vercel
+AI Gateway, or a custom OpenAI-compatible HTTPS endpoint — or choose **Codex with ChatGPT
+subscription**.
 The same command also offers Codex subscription **status**, **disconnect**, **rollback**, and
 **switch account**. Yoetz shows the endpoint/runtime and privacy posture before asking for an API
 key or opening Codex login, and states plainly that storing a binding does not switch external

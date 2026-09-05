@@ -46,7 +46,7 @@
     },
     {
       "claim_id": "ops.six_operation_parity",
-      "statement": "Yoetz exposes exactly six workflow operations (start, publish_work, check, respond, status, receipt) with identical request/result contracts across the CLI and MCP surfaces; MCP also registers one read-only guidance tool that is not a ledger operation. Import, review, backup, restore, migrate, version, and harness integration are CLI support commands, never additional workflow operations.",
+      "statement": "Yoetz exposes exactly six workflow operations (start, publish_work, check, respond, status, receipt) with identical request/result contracts across the CLI and MCP surfaces; MCP also registers one read-only guidance tool that is not a ledger operation. Everything else the CLI offers — import, review, backup, restore, migrate, version, service, mcp, state, setup, recommend, provider, privacy, consent/elevated-bootstrap, menu, and harness integration (integrate, hooks, observe) — is a bounded support command, never an additional workflow operation.",
       "scope": {
         "operations": [
           "start",
@@ -365,15 +365,18 @@
     },
     {
       "claim_id": "privacy.local_human_widening_only",
-      "statement": "Ordinary agent, MCP, provider, and import schemas cannot loosen privacy policy; tightening may apply immediately once the service proves it cannot widen, and every widening requires strong trusted local-human authority, with the exact foreground consent for one already-authorized confirm_every_request preview separately limited and never itself a grant of policy authority.",
+      "statement": "Ordinary agent, MCP, provider, and import schemas cannot loosen privacy policy; tightening may apply immediately once the service proves it cannot widen. Every widening requires a reauthenticated decision by the user through one of two paths: the strong trusted local-human ceremony bound to the exact before/after diff and digest, or the user's explicit current-chat instruction for one exact prepared, previewed, expiring consent target relayed by a capable agent through the consent lane (assisted_review since issue #164, expanded_review since issue #542), which is an agent attestation Yoetz cannot independently authenticate. The consent lane admits only that closed prepared-target set; vault initialization, idle-relock weakening, and plugin artifact apply keep the trusted ceremony as sole authority; the never-send set is non-overridable under either path; and the exact foreground consent for one already-authorized confirm_every_request preview is separately limited and never itself a grant of policy authority.",
       "scope": {
         "surfaces": [
           "privacy_propose",
           "privacy_tighten",
-          "privacy_decide_policy"
+          "privacy_decide_policy",
+          "consent_authorize"
         ]
       },
       "limitations": [
+        "agent_relayed_consent_is_attestation_not_independent_proof",
+        "consent_lane_limited_to_prepared_expiring_targets",
         "same_uid_automation_not_excluded_by_tty_consent"
       ],
       "surfaces": [
@@ -385,11 +388,13 @@
         "ADR-009"
       ],
       "tests": [
+        "tests/integration/service/test_repository_grant_authorize_composition.py",
         "tests/subprocess/test_service_lock_and_confidential_unlock.py",
         "tests/unit/privacy/test_local_enforcer.py",
         "tests/unit/privacy/test_policy_and_contracts.py"
       ],
       "evidence_kinds": [
+        "integration_test",
         "subprocess_test",
         "unit_test"
       ],

@@ -2396,10 +2396,17 @@ class _StartFailureClient(_InstantAckClient):
 class _WorkspaceConflictThenAttachClient(_InstantAckClient):
     """Model one workspace route: create once, then recover only by known session selector."""
 
-    def __init__(self, *, successor_task_id: str = _START_IDS["task_id"]) -> None:
+    def __init__(
+        self,
+        *,
+        successor_task_id: str = _START_IDS["task_id"],
+        expected_session_id: str = _START_IDS["session_id"],
+    ) -> None:
         self.requests: list[StartRequest] = []
         self.created = False
         self.successor_task_id = successor_task_id
+        # The selector a recovery attach must carry: the predecessor's session id.
+        self.expected_session_id = expected_session_id
 
     async def start(self, request: object, *, deadline_ms: int | None = None) -> object:
         del deadline_ms
@@ -2431,7 +2438,7 @@ class _WorkspaceConflictThenAttachClient(_InstantAckClient):
                 }
             )
         assert request.mode == "attach"
-        assert request.session_id == _START_IDS["session_id"]
+        assert request.session_id == self.expected_session_id
         return SimpleNamespace(
             ok=True,
             frontier=SimpleNamespace(sequence="4", head_digest="sha256:" + "b" * 64),
@@ -2592,16 +2599,16 @@ def test_workspace_conflict_recovery_never_selects_a_live_host_session(tmp_path:
     )
 
     assert (
-        observe_hooks_module._ended_workspace_recovery_mapping(  # pyright: ignore[reportPrivateUsage]
+        observe_hooks_module._scan_ended_workspace_recovery(  # pyright: ignore[reportPrivateUsage]
             store, workspace, "codex-next-1", harness_id="codex", _state=tmp_path
-        )
+        ).mapping
         is None
     )
 
     store.note_session_end(workspace, previous_commitment)
-    recovered = observe_hooks_module._ended_workspace_recovery_mapping(  # pyright: ignore[reportPrivateUsage]
+    recovered = observe_hooks_module._scan_ended_workspace_recovery(  # pyright: ignore[reportPrivateUsage]
         store, workspace, "codex-next-1", harness_id="codex", _state=tmp_path
-    )
+    ).mapping
     assert recovered is not None
     assert recovered.codex_session_id == previous
 
@@ -2688,13 +2695,13 @@ def test_workspace_conflict_recovery_rejects_a_cross_workspace_session_binding(
         _state=tmp_path,
     )
 
-    recovered = observe_hooks_module._ended_workspace_recovery_mapping(  # pyright: ignore[reportPrivateUsage]
+    recovered = observe_hooks_module._scan_ended_workspace_recovery(  # pyright: ignore[reportPrivateUsage]
         store,
         first_workspace,
         "codex-next-1",
         harness_id="codex",
         _state=tmp_path,
-    )
+    ).mapping
     assert recovered is None
 
 
@@ -2718,9 +2725,9 @@ def test_workspace_conflict_recovery_does_not_cross_host_families(tmp_path: Path
         _state=tmp_path,
     )
 
-    recovered = observe_hooks_module._ended_workspace_recovery_mapping(  # pyright: ignore[reportPrivateUsage]
+    recovered = observe_hooks_module._scan_ended_workspace_recovery(  # pyright: ignore[reportPrivateUsage]
         store, workspace, "codex-next-1", harness_id="codex", _state=tmp_path
-    )
+    ).mapping
     assert recovered is None
 
 
@@ -2757,9 +2764,9 @@ def test_workspace_conflict_recovery_rejects_multiple_local_task_ids(tmp_path: P
             _state=tmp_path,
         )
 
-    recovered = observe_hooks_module._ended_workspace_recovery_mapping(  # pyright: ignore[reportPrivateUsage]
+    recovered = observe_hooks_module._scan_ended_workspace_recovery(  # pyright: ignore[reportPrivateUsage]
         store, workspace, "codex-next-1", harness_id="codex", _state=tmp_path
-    )
+    ).mapping
     assert recovered is None
 
 
@@ -3054,6 +3061,299 @@ def test_session_restart_cannot_clear_ended_state_while_recovery_holds_lock(
 
     assert output.getvalue() == b"{}\n"
     assert store.codex_session_ended(workspace, previous) is True
+
+
+def _count_mapping_loads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every host session id whose mapping file the hook module reads."""
+
+    loads: list[str] = []
+    real_load = observe_hooks_module.load_mapping
+
+    def counting_load(codex_session_id: str, *, _state: Path | None = None):
+        loads.append(codex_session_id)
+        return real_load(codex_session_id, _state=_state)
+
+    monkeypatch.setattr(observe_hooks_module, "load_mapping", counting_load)
+    return loads
+
+
+def _bind_ended_predecessors(
+    store: LocalObservationStore,
+    workspace: str,
+    session_ids: tuple[str, ...],
+    *,
+    _state: Path,
+    task_id: str | None = _START_IDS["task_id"],
+) -> None:
+    """Bind, end, and (unless ``task_id`` is None) map each predecessor to one task."""
+
+    for session_id in session_ids:
+        commitment = store.bind_codex_session(workspace, session_id)
+        store.note_session_end(workspace, commitment)
+        if task_id is None:
+            continue
+        observe_hooks_module.store_mapping(
+            observe_hooks_module.mapping_from_start_ids(
+                codex_session_id=session_id,
+                yoetz_task_id=task_id,
+                yoetz_session_id=_START_IDS["session_id"],
+                yoetz_writer_id=_START_IDS["writer_id"],
+                last_frontier=None,
+            ),
+            _state=_state,
+        )
+
+
+def _recover(
+    store: LocalObservationStore,
+    workspace: str,
+    locator: str,
+    successor: str,
+    *,
+    _state: Path,
+    client: object | None = None,
+    prune_surplus: bool = True,
+) -> observe_hooks_module.AutoAttachOutcome:
+    if client is None:
+        client = _WorkspaceConflictThenAttachClient()
+        client.created = True
+    # handle_observe binds the current session at ingest, before any attach.
+    store.bind_codex_session(workspace, successor)
+    return asyncio.run(
+        observe_hooks_module._try_workspace_auto_start(  # pyright: ignore[reportPrivateUsage]
+            successor,
+            store=store,
+            workspace_commitment=workspace,
+            workspace_locator=locator,
+            harness_id="codex",
+            _state=_state,
+            connect=cast(observe_hooks_module.HookStartConnector, _connector(client)),
+            prune_surplus=prune_surplus,
+        )
+    )
+
+
+def test_recovery_scan_reads_each_predecessor_mapping_once_per_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#549: one scan, one revalidation read, one rewrite read per predecessor; no rescan."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+    predecessors = tuple(f"codex-ended-{index}" for index in range(6))
+    _bind_ended_predecessors(store, workspace, predecessors, _state=tmp_path)
+    loads = _count_mapping_loads(monkeypatch)
+
+    outcome = _recover(store, workspace, locator, "codex-next-1", _state=tmp_path)
+
+    assert outcome.mapping is not None and outcome.recovered is True
+    per_predecessor = {session_id: loads.count(session_id) for session_id in predecessors}
+    # Scan once (1 each), revalidate the selected predecessor under its lock (1),
+    # then the #577 rewrite reads each ended predecessor once (1 each).
+    assert sum(per_predecessor.values()) == 2 * len(predecessors) + 1
+    assert set(per_predecessor.values()) == {2, 3}
+    assert sum(1 for count in per_predecessor.values() if count == 3) == 1
+    # Every consumed predecessor was drained, so only the live successor stays bound.
+    assert store.codex_session_lifecycles_for_workspace(workspace) == (("codex-next-1", False),)
+    for session_id in predecessors:
+        rewritten = observe_hooks_module.load_mapping(session_id, _state=tmp_path)
+        assert rewritten is not None
+        assert rewritten.yoetz_session_id == _SUCCESSOR_IDS["session_id"]
+
+
+def test_recovery_scan_is_not_repeated_while_the_predecessor_lock_is_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#549: a contended predecessor lock costs the single scan and nothing more."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+    predecessors = tuple(f"codex-ended-{index}" for index in range(4))
+    _bind_ended_predecessors(store, workspace, predecessors, _state=tmp_path)
+    loads = _count_mapping_loads(monkeypatch)
+    # The newest mapping is the selector; hold its lock as a resuming session would.
+    selected = predecessors[-1]
+    newest = time.time_ns() + 10**12
+    os.utime(observe_hooks_module.mapping_path(selected, _state=tmp_path), ns=(newest, newest))
+
+    with acquire_session_lock(selected, _state=tmp_path) as owned:
+        assert owned is True
+        outcome = _recover(store, workspace, locator, "codex-next-1", _state=tmp_path)
+
+    assert outcome.mapping is None
+    assert outcome.reason == "auto_attach_conflict"
+    assert sorted(loads) == sorted(predecessors)
+    # Nothing was consumed, so nothing was pruned.
+    assert store.codex_session_lifecycles_for_workspace(workspace) == tuple(
+        (session_id, session_id != "codex-next-1")
+        for session_id in sorted((*predecessors, "codex-next-1"))
+    )
+
+
+def test_recovery_prunes_consumed_predecessors_but_keeps_undrained_and_foreign_bindings(
+    tmp_path: Path,
+) -> None:
+    """#549: pruning follows consumption, never a live session or an undrained lane."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+    _bind_ended_predecessors(
+        store, workspace, ("codex-ended-clean", "codex-ended-pending"), _state=tmp_path
+    )
+    # A different host family's ended session is neither a candidate nor consumed.
+    _bind_ended_predecessors(store, workspace, ("cursor:ended-x",), _state=tmp_path)
+    store.enqueue_outbox(
+        workspace,
+        "codex-ended-pending",
+        _drain_envelope(store, "codex-ended-pending", "hook:pending", 1),
+    )
+
+    outcome = _recover(store, workspace, locator, "codex-next-1", _state=tmp_path)
+
+    assert outcome.mapping is not None and outcome.recovered is True
+    assert store.codex_session_lifecycles_for_workspace(workspace) == (
+        ("codex-ended-pending", True),
+        ("codex-next-1", False),
+        ("cursor:ended-x", True),
+    )
+    # The retained predecessor still routes its pending row on the successor
+    # route and still answers the ended-unmapped quarantine question.
+    pending = observe_hooks_module.load_mapping("codex-ended-pending", _state=tmp_path)
+    assert pending is not None
+    assert pending.yoetz_writer_id == _SUCCESSOR_IDS["writer_id"]
+    assert store.codex_session_ended(workspace, "codex-ended-pending") is True
+    # The pruned predecessor's mapping file stays for any late row that names it.
+    assert observe_hooks_module.load_mapping("codex-ended-clean", _state=tmp_path) is not None
+
+
+def test_session_start_retention_keeps_the_newest_ended_bindings(tmp_path: Path) -> None:
+    """#549: over the cap, unmapped ended sessions go first, then the oldest mappings."""
+
+    cap = observe_hooks_module._MAX_ENDED_SESSION_BINDINGS  # pyright: ignore[reportPrivateUsage]
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+    other_task = "tsk_3b4e28ba-2fa1-4d3b-8f0a-0c1d2e3f4a5b"
+    mapped = tuple(f"codex-old-{index:03d}" for index in range(cap + 2))
+    # Two tasks in one workspace keep recovery inadmissible, so only retention acts.
+    for index, session_id in enumerate(mapped):
+        _bind_ended_predecessors(
+            store,
+            workspace,
+            (session_id,),
+            _state=tmp_path,
+            task_id=_START_IDS["task_id"] if index % 2 else other_task,
+        )
+        path = observe_hooks_module.mapping_path(session_id, _state=tmp_path)
+        stamp = 10**15 + index * 10**9
+        os.utime(path, ns=(stamp, stamp))
+    unmapped = ("codex-unmapped-a", "codex-unmapped-b", "codex-unmapped-c", "codex-unmapped-d")
+    _bind_ended_predecessors(store, workspace, unmapped, _state=tmp_path, task_id=None)
+    live = store.bind_codex_session(workspace, "codex-live-1")
+    del live
+
+    outcome = _recover(
+        store, workspace, locator, "codex-next-1", _state=tmp_path, client=_StartOkClient()
+    )
+
+    assert outcome.mapping is not None and outcome.recovered is False
+    lifecycles = dict(store.codex_session_lifecycles_for_workspace(workspace))
+    ended = sorted(session_id for session_id, is_ended in lifecycles.items() if is_ended)
+    assert lifecycles["codex-live-1"] is False and lifecycles["codex-next-1"] is False
+    # Surplus was 6: all four unmapped sessions and the two oldest mappings.
+    assert len(ended) == cap
+    assert ended == sorted(mapped[2:])
+
+
+def test_retry_pass_scan_is_bounded_by_binding_count_and_skips_retention(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#549: a retry event reads each ended binding's mapping once and prunes nothing."""
+
+    cap = observe_hooks_module._MAX_ENDED_SESSION_BINDINGS  # pyright: ignore[reportPrivateUsage]
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    ended = tuple(f"codex-unmapped-{index:03d}" for index in range(cap + 8))
+    _bind_ended_predecessors(store, workspace, ended, _state=tmp_path, task_id=None)
+    loads = _count_mapping_loads(monkeypatch)
+    starts: list[LifecycleMapping | None] = []
+
+    async def unavailable(codex_session_id: str, **kwargs: object) -> object:
+        del codex_session_id
+        starts.append(cast(LifecycleMapping | None, kwargs.get("recovery_mapping")))
+        return observe_hooks_module.AutoAttachOutcome(None, "service_unavailable")
+
+    monkeypatch.setattr(observe_hooks_module, "_try_auto_start", unavailable)
+
+    for event in ("UserPromptSubmit", "SessionStart"):
+        del loads[:]
+        code = handle_observe(
+            event_name=event,
+            stdin_bytes=json.dumps(
+                {"session_id": "codex-retry-1", "hook_event_name": event}
+            ).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            connect=_connector(_InstantAckClient()),  # type: ignore[arg-type]
+        )
+        assert code == 0
+        remaining = [
+            session_id
+            for session_id, is_ended in store.codex_session_lifecycles_for_workspace(workspace)
+            if is_ended
+        ]
+        scanned = [session_id for session_id in loads if session_id in ended]
+        # No candidate maps, so the scan is one read per ended binding, never two.
+        assert sorted(scanned) == sorted(remaining)
+        if event == "UserPromptSubmit":
+            assert len(remaining) == len(ended)
+        else:
+            assert len(remaining) == cap
+    assert starts == [None, None]
+
+
+def test_many_ended_bindings_cost_one_scan_and_then_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#549: weeks of ended sessions are consumed by one recovery; the next pass is O(1)."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+    history = tuple(f"codex-week-{index:03d}" for index in range(96))
+    _bind_ended_predecessors(store, workspace, history, _state=tmp_path)
+    loads = _count_mapping_loads(monkeypatch)
+
+    first = _recover(store, workspace, locator, "codex-next-1", _state=tmp_path)
+    assert first.mapping is not None and first.recovered is True
+    # Retention trimmed the history to the cap before the scan, so the pass read
+    # each retained predecessor twice plus one revalidation, never the whole history.
+    cap = observe_hooks_module._MAX_ENDED_SESSION_BINDINGS  # pyright: ignore[reportPrivateUsage]
+    assert len(loads) == 2 * cap + 1
+    assert set(loads) == set(history[-cap:])
+    assert store.codex_session_lifecycles_for_workspace(workspace) == (("codex-next-1", False),)
+
+    store.note_session_end(workspace, store.session_commitment("codex-next-1"))
+    del loads[:]
+    # The sole predecessor now carries the rotated route, so its selector is the
+    # successor session id the first recovery minted.
+    rotated = _WorkspaceConflictThenAttachClient(expected_session_id=_SUCCESSOR_IDS["session_id"])
+    rotated.created = True
+    second = _recover(store, workspace, locator, "codex-next-2", _state=tmp_path, client=rotated)
+    assert second.mapping is not None and second.recovered is True
+    # Scan the sole predecessor, revalidate it, rewrite it: three reads, not ~400.
+    assert loads == ["codex-next-1", "codex-next-1", "codex-next-1"]
+    assert store.codex_session_lifecycles_for_workspace(workspace) == (("codex-next-2", False),)
 
 
 def test_real_auto_start_connector_receives_the_canonical_workspace_locator(

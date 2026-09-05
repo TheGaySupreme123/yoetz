@@ -164,6 +164,11 @@ case → single-use authorization → bounded gateway → bound sink/provider �
    effective permission requires a locally authenticated human on a trusted control surface,
    reauthentication, an exact diff, and a durable decision; MCP/agent/LLM calls can request more
    context but cannot approve or persist the expansion.
+   *Amended by ADR-016 decision 5 (issues #164/#533) and the "Human required?" table below:* the
+   user's explicit current-chat instruction, relayed by a capable agent through the consent lane for
+   one exact prepared, previewed, expiring consent target, is a second reauthenticated loosening
+   path; that relay is an agent attestation Yoetz cannot independently authenticate, and it never
+   overrides the never-send set.
    Answering a `confirm_every_request` disclosure is deliberately *not* one of these loosening
    operations and does not require passphrase mode or strong reauthentication: it decides one exact
    prepared case already bounded by the committed policy, and it can neither widen the policy nor

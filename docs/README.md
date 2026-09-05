@@ -24,8 +24,9 @@ golden vectors under [`fixtures/`](../fixtures/) win over any prose, including t
 - [`docs/protocol/`](protocol/) — the technical protocol: compatibility, data egress and privacy,
   local service security, the privacy setup wizard.
 - [`docs/runbooks/`](runbooks/) — operational procedures: backup/restore, key recovery, migration
-  rollback, quarantine recovery, Codex integration, portable plugin authoring/lifecycle, semantic
-  dogfood, exact-worktree Codex dogfood parity, and influence dogfood.
+  rollback, quarantine recovery, Codex integration, Claude Code integration, Cursor integration,
+  the Codex subscription semantic evaluator, portable plugin authoring/lifecycle, semantic dogfood,
+  exact-worktree Codex dogfood parity, and influence dogfood.
 - [`docs/public-claims.json`](public-claims.json) — every public claim bound to its requirements,
   surfaces, tests, and honest release status. Enforced by `tests/conformance/claims/`.
 - [`docs/releases/`](releases/) — curated release notes, one file per tag; the release workflow

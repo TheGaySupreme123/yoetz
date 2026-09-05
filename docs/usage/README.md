@@ -4,7 +4,9 @@ Task-oriented guides. For the system's shape see [`docs/architecture.md`](../arc
 the decisions behind it see [`docs/adr/`](../adr/).
 
 - [Install and first run](install-and-first-run.md) — install, first run, starting the service,
-  what a fresh installation will and will not do.
+  what a fresh installation will and will not do. Codex is connected by the first-run wizard;
+  Claude Code and Cursor have first-party integrations configured through `yoetz integrate
+  claude ...` and `yoetz integrate cursor ...`, each bounded to the exact cell its runbook records.
 - [Agent start](agent-start.md) — the same installation addressed to a coding agent: what it runs
   itself, what it asks the user, and where it hands over the terminal.
 - [The terminal interface](terminal-interface.md) — the full-screen interface, its status

@@ -16,7 +16,7 @@ import re
 import stat
 import threading
 import time
-from collections.abc import Callable, Generator, Mapping, MutableMapping
+from collections.abc import Callable, Generator, Iterable, Mapping, MutableMapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1331,6 +1331,75 @@ class LocalObservationStore:
                     key=str.encode,
                 )
             )
+
+    def codex_session_lifecycles_for_workspace(
+        self, workspace_commitment: str
+    ) -> tuple[tuple[str, bool], ...]:
+        """Return every bound host session id with its ended flag from one state read.
+
+        The SessionStart recovery scan needs the ended flag of every binding in the
+        workspace. Asking ``codex_session_ended`` per binding copies the whole state once
+        per call outside a batch, so the scan cost grew with the binding count (#549).
+        """
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.codex_session_bindings is not None
+            assert state.ended_sessions is not None
+            bindings = state.codex_session_bindings
+            ended = state.ended_sessions
+            return tuple(
+                (session_id, bindings[session_id] in ended)
+                for session_id in sorted(bindings, key=str.encode)
+            )
+
+    def prune_codex_session_bindings(
+        self, workspace_commitment: str, codex_session_ids: Iterable[str]
+    ) -> tuple[str, ...]:
+        """Drop the requested bindings whose sessions are ended and fully drained (#549).
+
+        Rule: a binding is removed only when its session is marked ended for its current
+        generation, no pending outbox row and no quarantine row still names the session,
+        and the session is not held as storage-corrupt. Anything else is kept whatever
+        the caller asked for. The ended-unmapped quarantine path resolves a host session
+        id through this map to decide that its rows are terminal, and the corruption
+        repair path clears a session through it, so a binding with undrained work must
+        outlive that work. A pruned session that resumes re-binds on its next hook event;
+        its generation counter is keyed by commitment and retained, so the resumed
+        generation continues rather than restarting. Returns the ids removed, sorted.
+        """
+
+        requested = {
+            session_id for session_id in codex_session_ids if type(session_id) is str and session_id
+        }
+        if not requested:
+            return ()
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.codex_session_bindings is not None
+            assert state.ended_sessions is not None
+            assert state.pending_outbox is not None
+            assert state.quarantine is not None
+            assert state.storage_corrupt_sessions is not None
+            bindings = state.codex_session_bindings
+            busy = {row.codex_session_id for row in state.pending_outbox}
+            busy.update(entry[0] for entry in state.quarantine)
+            busy.update(state.storage_corrupt_sessions)
+            removed: list[str] = []
+            for session_id in sorted(requested & bindings.keys(), key=str.encode):
+                if bindings[session_id] not in state.ended_sessions or session_id in busy:
+                    continue
+                del bindings[session_id]
+                # One-shot frontier notices are keyed by host session id and are
+                # only ever dropped through the binding's ended flag.
+                if state.frontier_motion_notices:
+                    state.frontier_motion_notices.pop(session_id, None)
+                if state.frontier_motion_delivered:
+                    state.frontier_motion_delivered.pop(session_id, None)
+                removed.append(session_id)
+            if removed:
+                self._save(workspace_commitment, state)
+            return tuple(removed)
 
     def consent_for(self, workspace_commitment: str) -> LocalObservationConsent | None:
         with self._lock:

@@ -102,7 +102,9 @@ These are not style preferences. They are why the product is worth using, and CI
 - `semantic_required` never erases a completed deterministic result: unavailability returns that
   result as `incomplete_check` with an exact gap.
 - Every network channel is independently authorized. No profile overrides the never-send set, and
-  only a reauthenticated local human can loosen effective policy.
+  effective policy loosens only through a reauthenticated decision the user makes: the trusted local
+  ceremony, or the user's explicit current-chat approval of one exact prepared consent target
+  relayed by a capable agent.
 
 ## Pull request checklist
 
