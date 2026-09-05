@@ -74,7 +74,7 @@ from yoetz.kernel.reducers import replay
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef
 from yoetz.ports.semantic import ExcerptDigestProvenance, SemanticCase
 from yoetz.protocol.canonical import JsonValue, strict_json_parse
-from yoetz.protocol.coverage import EvidenceImmutability
+from yoetz.protocol.coverage import EvidenceImmutability, LedgerFreshness
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import MAX_REVIEW_TEXT_BYTES, DataCategory
 
@@ -629,6 +629,47 @@ def test_redacted_captured_bytes_remain_available_with_explicit_gap() -> None:
     excerpt = next(item for item in semantic.items if item.item_id == f"excerpt-{evd(1)}")
     assert excerpt.content == captured.content
     assert "content_redacted" in semantic.packet.coverage.known_gaps
+
+
+def test_selection_clipping_marks_partial_coverage_only_when_excerpt_is_admitted() -> None:
+    case, captured, scope = _captured_case_values()
+    selection = replace(
+        ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED),
+        max_excerpt_bytes=8,
+    )
+    semantic = build_semantic_case(
+        case_id="cas_10000000-0000-4000-8000-000000000001",
+        frozen_case=case,
+        dependency_digest="sha256:" + "b" * 64,
+        findings=_findings_for(case),
+        review_context_profile=ReviewContextProfile.EXPANDED,
+        review_selection=selection,
+        policy_id="pvy_10000000-0000-4000-8000-000000000001",
+        policy_version="1",
+        captured_content=(captured,),
+        captured_content_scope=scope,
+    )
+    assert semantic.packet.coverage.ledger_freshness is LedgerFreshness.PARTIAL
+    assert "truncated_payload" in semantic.packet.coverage.known_gaps
+    excerpt = semantic.packet.targeted_excerpts[0]
+    assert excerpt.content_bytes == 8
+
+    omitted_selection = replace(selection, max_total_excerpt_bytes=1)
+    omitted = build_semantic_case(
+        case_id="cas_10000000-0000-4000-8000-000000000001",
+        frozen_case=case,
+        dependency_digest="sha256:" + "b" * 64,
+        findings=_findings_for(case),
+        review_context_profile=ReviewContextProfile.EXPANDED,
+        review_selection=omitted_selection,
+        policy_id="pvy_10000000-0000-4000-8000-000000000001",
+        policy_version="1",
+        captured_content=(captured,),
+        captured_content_scope=scope,
+    )
+    assert "truncated_payload" not in omitted.packet.coverage.known_gaps
+    assert "content_unselected" in omitted.packet.coverage.known_gaps
+    assert "content_capture_unavailable" not in omitted.packet.coverage.known_gaps
 
 
 def test_captured_content_input_is_bounded_before_grouping() -> None:

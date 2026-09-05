@@ -493,6 +493,37 @@ class SqliteObservationStore:
             return None
         return row[0]
 
+    def observation_route_for_session(
+        self, *, workspace: str, yoetz_session_id: str
+    ) -> tuple[str, str, bool] | None:
+        """Return the durable session route with task and active state.
+
+        Historical route rows remain readable for observation-advice recovery, so
+        ``codex_session_commitment_for_session`` intentionally keeps that older
+        behavior. Semantic captured-content selection needs the stronger tuple
+        to verify that the routed task matches the runtime before opening an
+        object.
+        """
+
+        try:
+            row = self._db.execute(
+                "SELECT codex_session_commitment, yoetz_task_id, active "
+                "FROM observation_workspace_session_routes "
+                "WHERE workspace_commitment = ? AND yoetz_session_id = ?",
+                (workspace, yoetz_session_id),
+            ).fetchone()
+        except Exception:
+            return None
+        if (
+            row is None
+            or type(row[0]) is not str
+            or type(row[1]) is not str
+            or type(row[2]) is not int
+            or row[2] not in {0, 1}
+        ):
+            return None
+        return row[0], row[1], bool(row[2])
+
     def workspace_for_yoetz_session(self, yoetz_session_id: str) -> str | None:
         try:
             row = self._db.execute(

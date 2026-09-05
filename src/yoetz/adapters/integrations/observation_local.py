@@ -72,6 +72,7 @@ __all__ = [
     "HOOK_MAPPING_VERSION",
     "AdviceDelivery",
     "FrontierMotionNotice",
+    "LocalContentCaptureAuthority",
     "LocalObservationConsent",
     "LocalObservationStore",
     "ObservationOutboxRow",
@@ -535,6 +536,47 @@ class LocalObservationConsent:
     @property
     def active(self) -> bool:
         return self.revoked_at is None and not self.paused
+
+
+@dataclass(frozen=True, slots=True)
+class LocalContentCaptureAuthority:
+    """The current local fence for the retained-content arm.
+
+    This snapshot contains no plaintext. Its generation and exact profile set
+    are read under the owner-private local-store lock and are rechecked by the
+    semantic service immediately before it opens an object or dispatches a
+    packet. The local store remains authoritative while task-bundle consent
+    propagation is pending.
+    """
+
+    workspace_commitment: str
+    generation: str
+    active: bool
+    revoked: bool
+    runtime_enabled: bool
+    profiles: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        try:
+            object.__setattr__(
+                self,
+                "workspace_commitment",
+                validate_commitment(self.workspace_commitment),
+            )
+            validate_sha256_digest(self.generation)
+        except (ProtocolValueError, TypeError, ValueError) as exc:
+            raise ProtocolValueError("invalid_event_value_type") from exc
+        if (
+            type(self.generation) is not str
+            or type(self.active) is not bool
+            or type(self.revoked) is not bool
+            or type(self.runtime_enabled) is not bool
+            or type(self.profiles) is not tuple
+            or len(self.profiles) > 2
+            or any(not is_content_capture_profile(profile) for profile in self.profiles)
+            or tuple(sorted(set(self.profiles), key=str.encode)) != self.profiles
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1112,6 +1154,22 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
     )
 
 
+def _consent_generation(consent: LocalObservationConsent) -> str:
+    """Derive a durable fence token without adding plaintext state fields."""
+
+    return canonical_digest(
+        JsonObject(
+            {
+                "granted_at": consent.granted_at.wire,
+                "paused": consent.paused,
+                "profiles": list(consent.content_capture_profiles),
+                "revoked_at": None if consent.revoked_at is None else consent.revoked_at.wire,
+                "workspace_commitment": consent.workspace_commitment,
+            }
+        )
+    )
+
+
 def _stream_profile_id_valid(profile_id: object) -> bool:
     """Accept ``None`` or one bounded ASCII profile-id token such as ``codex-rollout-jsonl/x/v1``."""
 
@@ -1405,7 +1463,10 @@ class LocalObservationStore:
                     key=str.encode,
                 )
             )
-            state.consent = dataclasses.replace(consent, content_capture_profiles=profiles)
+            state.consent = dataclasses.replace(
+                consent,
+                content_capture_profiles=profiles,
+            )
             self._save(workspace_commitment, state)
 
     def disable_content_capture(self, workspace_commitment: str, profile: str | None = None) -> None:
@@ -1430,7 +1491,10 @@ class LocalObservationStore:
                     item for item in consent.content_capture_profiles if item != profile
                 )
             )
-            state.consent = dataclasses.replace(consent, content_capture_profiles=profiles)
+            state.consent = dataclasses.replace(
+                consent,
+                content_capture_profiles=profiles,
+            )
             self._save(workspace_commitment, state)
 
     def content_capture_profiles(self, workspace_commitment: str) -> tuple[str, ...]:
@@ -1439,6 +1503,52 @@ class LocalObservationStore:
         with self._lock:
             consent = self._load(workspace_commitment).consent
             return () if consent is None else consent.content_capture_profiles
+
+    def content_capture_authority(
+        self, workspace_commitment: str
+    ) -> LocalContentCaptureAuthority | None:
+        """Read the authoritative local content fence under the store lock."""
+
+        with self._lock:
+            consent = self._load(workspace_commitment).consent
+            if consent is None:
+                return None
+            return LocalContentCaptureAuthority(
+                workspace_commitment=workspace_commitment,
+                generation=_consent_generation(consent),
+                active=consent.active,
+                revoked=consent.revoked_at is not None,
+                runtime_enabled=self.runtime_enabled(),
+                profiles=consent.content_capture_profiles,
+            )
+
+    def content_capture_authority_is_current(
+        self,
+        workspace_commitment: str,
+        generation: str,
+        profiles: tuple[str, ...],
+    ) -> bool:
+        """Atomically test a previously read content fence against current consent."""
+
+        if (
+            type(generation) is not str
+            or not generation.startswith("sha256:")
+            or type(profiles) is not tuple
+        ):
+            return False
+        try:
+            validate_sha256_digest(generation)
+        except (ProtocolValueError, TypeError, ValueError):
+            return False
+        with self._lock:
+            consent = self._load(workspace_commitment).consent
+            return (
+                consent is not None
+                and consent.active
+                and self.runtime_enabled()
+                and _consent_generation(consent) == generation
+                and consent.content_capture_profiles == profiles
+            )
 
     def bind_session(self, workspace_commitment: str, session_commitment: str) -> None:
         with self._lock:

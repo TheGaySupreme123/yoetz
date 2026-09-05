@@ -39,6 +39,7 @@ from yoetz.domain.events import (
 )
 from yoetz.domain.findings import Finding, FindingKind
 from yoetz.domain.observation import ObservationContentKind, ObservationContentManifest
+from yoetz.domain.observation_profiles import ORDINARY_CONTENT_CAPTURE_PROFILE_IDS
 from yoetz.domain.privacy import (
     MAX_EGRESS_ENVELOPE_BYTES,
     REVIEW_PACKET_ITEM_ID,
@@ -172,15 +173,9 @@ _CAPTURED_CONTENT_KINDS: Final = frozenset(
         ObservationContentKind.WORKSPACE_DIFF,
     }
 )
-_AUTHORIZED_CAPTURE_PROFILES: Final = frozenset(
-    {
-        # These are the only ordinary host content arms currently certified by the
-        # coordinator.  The service-side resolver applies the same closed vocabulary;
-        # keeping the pure boundary closed prevents a caller from minting a future arm.
-        "claude-code-ordinary-observation-v1",
-        "cursor-ordinary-observation-v1",
-    }
-)
+# The resolver and pure builder share the closed profile vocabulary. The builder still
+# treats its scope as a service-authenticated assertion; it does not discover consent.
+_AUTHORIZED_CAPTURE_PROFILES: Final = ORDINARY_CONTENT_CAPTURE_PROFILE_IDS
 MAX_CAPTURED_SEMANTIC_CONTENT_PARTS: Final = 64
 MAX_CAPTURED_SEMANTIC_INPUT_BYTES: Final = 2 * MAX_CAPTURED_SEMANTIC_CONTENT_BYTES
 _CAPTURE_GAP_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)
@@ -773,7 +768,7 @@ def build_semantic_case(
         captured_content_scope,
     )
     capture_gap_set = {*capture_gaps, *captured_gaps}
-    if captured_content_scope is not None:
+    if captured_content_scope is not None and "content_unselected" not in capture_gap_set:
         supplied_objects = {item.object_ref.object_id for item in captured_content}
         for record in projection.evidence.values():
             payload = record.payload
@@ -1420,11 +1415,11 @@ def build_semantic_case(
             if excerpt_truncated:
                 text = encoded[: selection.max_excerpt_bytes].decode("utf-8", errors="ignore")
                 encoded = text.encode("utf-8")
-                # The reviewer receives a valid UTF-8 prefix, but its digest is
-                # necessarily the delivered prefix rather than the retained
-                # source. Keep that limitation visible in the case coverage.
-                capture_gap_set.add("truncated_payload")
             if excerpt_bytes_used + len(encoded) > selection.max_total_excerpt_bytes:
+                if captured_group is not None:
+                    # The retained group was authenticated but the selection budget excluded
+                    # this row entirely; report omission rather than claiming a delivered prefix.
+                    capture_gap_set.add("content_unselected")
                 omissions.append(
                     _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
                 )
@@ -1470,10 +1465,9 @@ def build_semantic_case(
                     _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
                 )
                 continue
-            # Clipping at the selection policy's excerpt bound is the author's declared choice
-            # (the packet metadata carries max_excerpt_bytes); only _content_item's item bound
-            # records the over-item-limit gap. A custom policy narrower than the item bound
-            # must not read as a size failure.
+            # Clipping at the selection policy's excerpt bound remains within the
+            # declared packet limit, but its retained-source limitation is carried
+            # as ``truncated_payload`` and downgrades coverage to PARTIAL below.
             item_id = f"excerpt-{ref}"
             item = _content_item(
                 item_id=item_id,
@@ -1503,6 +1497,12 @@ def build_semantic_case(
                     digest_provenance=digest_provenance,
                 )
             )
+            if excerpt_truncated:
+                # The reviewer receives a valid UTF-8 prefix, but its digest is
+                # necessarily the delivered prefix rather than the retained
+                # source. Keep that limitation visible only when the prefix was
+                # actually admitted to the packet.
+                capture_gap_set.add("truncated_payload")
             excerpt_bytes_used += item.content_bytes
 
         # Optional command excerpts from actions when expanded selection allows exact commands.
@@ -1731,6 +1731,11 @@ def build_semantic_case(
     if capture_gaps:
         coverage = replace(
             coverage,
+            ledger_freshness=(
+                LedgerFreshness.PARTIAL
+                if coverage.ledger_freshness is LedgerFreshness.CURRENT
+                else coverage.ledger_freshness
+            ),
             known_gaps=tuple(sorted({*coverage.known_gaps, *capture_gaps}, key=str.encode)),
         )
     # Count only overflow on items the caps kept: an item dropped downstream is already disclosed

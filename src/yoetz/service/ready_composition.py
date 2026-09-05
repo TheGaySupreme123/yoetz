@@ -2185,6 +2185,7 @@ def _privacy_gated_semantic_evaluator(
     fallback_timeout_seconds: int = 60,
     fallback_max_retries: int = 2,
     configured_primary: ProviderBinding | None = None,
+    local_observation: object | None = None,
 ):
     total_timeout = float(max(1, min(int(timeout_seconds), 300)))
     # The fallback endpoint owns its own deadline share (#582): a primary that spends its whole
@@ -2416,6 +2417,9 @@ def _privacy_gated_semantic_evaluator(
             captured_content = ()
             captured_content_scope = None
             captured_content_gaps = ()
+            captured_local_fence_generation: str | None = None
+            captured_local_fence_profiles: tuple[str, ...] = ()
+            captured_local_fence_required = False
             if (
                 runtime is not None
                 and "targeted_excerpts" in review_selection.sections
@@ -2426,6 +2430,7 @@ def _privacy_gated_semantic_evaluator(
                         runtime=runtime,
                         frozen=FrozenCase(frozen.case, current_lease[0]),
                         workspace_commitment=repository,
+                        local_observation=local_observation,
                         max_parts=min(
                             MAX_CAPTURED_SEMANTIC_CONTENT_PARTS,
                             max(16, review_selection.max_excerpts * 16),
@@ -2435,6 +2440,9 @@ def _privacy_gated_semantic_evaluator(
                     captured_content = captured_resolution.content
                     captured_content_scope = captured_resolution.scope
                     captured_content_gaps = captured_resolution.gaps
+                    captured_local_fence_generation = captured_resolution.local_fence_generation
+                    captured_local_fence_profiles = captured_resolution.local_fence_profiles
+                    captured_local_fence_required = captured_resolution.local_fence_required
                 except Exception as exc:
                     # Content is an additive evidence arm. A malformed or unavailable
                     # retained object must leave the deterministic case usable while
@@ -2446,6 +2454,7 @@ def _privacy_gated_semantic_evaluator(
                         request_id=frozen.lease.operation_id,
                     )
                     captured_content_gaps = ("content_capture_unavailable",)
+                    captured_local_fence_required = False
             semantic_case = build_semantic_case(
                 case_id=recovered_case_id or ids.new(IdKind.OUTBOUND_CASE),
                 frozen_case=frozen.case,
@@ -2459,6 +2468,17 @@ def _privacy_gated_semantic_evaluator(
                 captured_content_scope=captured_content_scope,
                 captured_content_gaps=captured_content_gaps,
             )
+            if captured_local_fence_required and captured_content_scope is not None:
+                # A resolver may authenticate a group that the active excerpt selection then
+                # omits. Keep the final disclosure fence only when retained bytes actually became
+                # a case item; structural review can continue with an honest omission gap.
+                captured_refs = frozenset(
+                    ref for ref, _phase in captured_content_scope.phase_bindings
+                )
+                captured_local_fence_required = any(
+                    item.section == "excerpt" and item.source_ref in captured_refs
+                    for item in semantic_case.items
+                )
             # The builder folds the gap into the packet coverage the reviewer sees; the check
             # result is a separate coverage fold, so carry the fact rather than re-deriving it.
             over_item_limit = (
@@ -2558,12 +2578,76 @@ def _privacy_gated_semantic_evaluator(
             def _dispatch_for(
                 binding: ProviderBinding,
             ) -> Callable[[object, Deadline], Awaitable[FinalSemanticEvaluation]]:
+                async def _captured_content_fence_current() -> bool:
+                    if not captured_local_fence_required:
+                        return True
+                    if captured_local_fence_generation is None or local_observation is None:
+                        return False
+                    checker = getattr(
+                        local_observation,
+                        "content_capture_authority_is_current",
+                        None,
+                    )
+                    if not callable(checker):
+                        return False
+                    try:
+                        return (
+                            checker(
+                                repository,
+                                captured_local_fence_generation,
+                                captured_local_fence_profiles,
+                            )
+                            is True
+                        )
+                    except Exception:
+                        return False
+
+                async def _evaluate_with_fence(
+                    candidate: CandidateContext,
+                    attempt_deadline: Deadline,
+                ) -> object:
+                    # Keep a runtime compatibility seam for small composition fakes used by
+                    # non-dispatch tests while retaining the concrete coordinator's final gate.
+                    if type(privacy) is PrivacyCoordinator:
+                        return await privacy.evaluate_semantic(
+                            candidate,
+                            attempt_deadline,
+                            dispatch_guard=_captured_content_fence_current,
+                        )
+                    # Small composition fakes used by non-dispatch tests predate
+                    # the optional final-boundary guard; the concrete production
+                    # coordinator above owns that boundary.
+                    return await privacy.evaluate_semantic(candidate, attempt_deadline)
+
+                async def _resume_with_fence(
+                    request_id: str,
+                    case_digest: str,
+                    attempt_deadline: Deadline,
+                ) -> object:
+                    if type(privacy) is PrivacyCoordinator:
+                        return await privacy.resume(
+                            request_id,
+                            case_digest,
+                            attempt_deadline,
+                            dispatch_guard=_captured_content_fence_current,
+                        )
+                    return await privacy.resume(request_id, case_digest, attempt_deadline)
+
                 async def _dispatch(
                     handle: object, attempt_deadline: Deadline
                 ) -> FinalSemanticEvaluation:
                     from yoetz.ports.ledger import SemanticAttemptHandle as _Handle
 
                     assert type(handle) is _Handle
+                    # The local observation store is the authority for retained
+                    # content. Its generation must still be current after all
+                    # object resolution and before candidate bytes can enter the
+                    # privacy coordinator's evaluate/resume path.
+                    if not await _captured_content_fence_current():
+                        return FinalSemanticEvaluation(
+                            SemanticStatus.BLOCKED_BY_POLICY,
+                            SemanticReason.SCOPE_NOT_AUTHORIZED,
+                        )
                     # Rebuilt per attempt for a fresh request identity so authorization cannot
                     # be reused. The envelope itself is a pure function of the case, so the
                     # bytes are identical to the ones validated above; only the request id — and,
@@ -2577,6 +2661,11 @@ def _privacy_gated_semantic_evaluator(
                     wait = await runtime.ledger.load_disclosure_wait(
                         handle.writer_id, handle.operation_id
                     )
+                    if not await _captured_content_fence_current():
+                        return FinalSemanticEvaluation(
+                            SemanticStatus.BLOCKED_BY_POLICY,
+                            SemanticReason.SCOPE_NOT_AUTHORIZED,
+                        )
                     if (
                         wait is not None
                         and wait.job_id == handle.job_id
@@ -2587,13 +2676,13 @@ def _privacy_gated_semantic_evaluator(
                         # already-prepared proposal. Starting the semantic pipeline again would
                         # mint a replacement proposal and could never observe the decision
                         # bound to this attempt.
-                        result = await privacy.resume(
+                        result = await _resume_with_fence(
                             handle.provider_request_id,
                             semantic_case.case_digest,
                             attempt_deadline,
                         )
                     else:
-                        result = await privacy.evaluate_semantic(candidate, attempt_deadline)
+                        result = await _evaluate_with_fence(candidate, attempt_deadline)
                     return _map_egress_to_final(
                         result,
                         ids,
@@ -3010,6 +3099,11 @@ async def provide_service_ready_context(
         )
 
     versions = _receipt_versions(manifest)
+    local_observation = LocalObservationStore(_state=paths.state)
+    # Publish the loaded config gate before semantic composition can resolve
+    # retained bytes. The owner-private store is also the authoritative consent
+    # fence while task-bundle propagation is still catching up.
+    local_observation.set_runtime_enabled(config.observation.enabled)
     if not semantic_configured:
         semantic_evaluator = _semantic_not_configured
     elif not provider_endpoint_bound:
@@ -3031,6 +3125,7 @@ async def provide_service_ready_context(
             ),
             fallback_max_retries=2 if fallback_config is None else int(fallback_config.max_retries),
             configured_primary=candidate_binding,
+            local_observation=local_observation,
         )
 
     async def _semantic_review(
@@ -3139,11 +3234,6 @@ async def provide_service_ready_context(
     verification_supervisor = ObservationVerificationSupervisor(
         service_generation=service_generation
     )
-    local_observation = LocalObservationStore(_state=paths.state)
-    # Hooks deliberately avoid loading the full service config.  Publish the exact
-    # config snapshot owned by this fresh READY generation before it can receive
-    # observation RPCs; malformed/unsafe markers fail closed in hook processes.
-    local_observation.set_runtime_enabled(config.observation.enabled)
     observation_coordinator = ObservationCoordinator(
         runtime=runtime,
         local=local_observation,

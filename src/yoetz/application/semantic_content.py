@@ -42,6 +42,13 @@ from yoetz.domain.observation import (
     ObservationGapCode,
     ObservationSource,
 )
+from yoetz.domain.observation_profiles import (
+    CLAUDE_CODE_ORDINARY_HOOK_MAPPING_VERSION,
+    CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+    CURSOR_ORDINARY_HOOK_MAPPING_VERSION,
+    CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+)
+from yoetz.domain.values import validate_sha256_digest
 from yoetz.kernel.projections import EvidenceProjectionRecord
 from yoetz.ports.ledger import FrozenCase
 from yoetz.ports.objects import ObjectKind, ObjectRef
@@ -55,9 +62,10 @@ __all__ = [
 ]
 
 _CAPTURED_CONTENT_MEDIA_TYPE: Final = "application/vnd.yoetz.observation-content+json"
+_CAPTURED_CONTENT_INNER_MEDIA_TYPE: Final = "text/plain"
 _MAX_WRAPPER_BYTES: Final = 1_048_576
-_CLAUDE_ORDINARY_PROFILE: Final = "claude-code-ordinary-observation-v1"
-_CURSOR_ORDINARY_PROFILE: Final = "cursor-ordinary-observation-v1"
+_CLAUDE_ORDINARY_PROFILE: Final = CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+_CURSOR_ORDINARY_PROFILE: Final = CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
 _AUTHORIZED_CAPTURE_PROFILES: Final = frozenset(
     {_CLAUDE_ORDINARY_PROFILE, _CURSOR_ORDINARY_PROFILE}
 )
@@ -77,6 +85,100 @@ _CORRELATION_KEYS: Final = (
     "correlation_id",
     "parent_tool_call_id",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _LocalCaptureFence:
+    """Validated, plaintext-free snapshot of the authoritative local consent arm."""
+
+    generation: str
+    active: bool
+    revoked: bool
+    runtime_enabled: bool
+    profiles: tuple[str, ...]
+
+
+def _local_capture_fence(
+    local_observation: object | None,
+    workspace: str,
+) -> tuple[_LocalCaptureFence | None, set[str], bool]:
+    """Read the local consent fence, distinguishing missing from no local seam.
+
+    ``TaskRuntime.observation`` is the mapped task bundle and can lag the owner-private local
+    store while a pause, disable, or revoke is being propagated. Production passes the local
+    store explicitly; the third return value preserves compatibility for pure/fake callers that
+    have no local adapter at all.
+    """
+
+    if local_observation is None:
+        return None, set(), False
+    reader = getattr(local_observation, "content_capture_authority", None)
+    if not callable(reader):
+        return None, {ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value}, True
+    try:
+        raw = reader(workspace)
+    except Exception:
+        return None, {ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value}, True
+    if raw is None:
+        return None, {ObservationGapCode.CONSENT_MISSING.value}, True
+    authority_workspace = getattr(raw, "workspace_commitment", None)
+    generation = getattr(raw, "generation", None)
+    active = getattr(raw, "active", None)
+    revoked = getattr(raw, "revoked", False)
+    runtime_enabled = getattr(raw, "runtime_enabled", None)
+    raw_profiles = getattr(raw, "profiles", None)
+    if (
+        type(authority_workspace) is not str
+        or authority_workspace != workspace
+        or type(generation) is not str
+        or type(active) is not bool
+        or type(revoked) is not bool
+        or type(runtime_enabled) is not bool
+        or type(raw_profiles) is not tuple
+    ):
+        return None, {ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value}, True
+    profiles = cast(tuple[object, ...], raw_profiles)
+    if (
+        len(profiles) > 2
+        or any(type(profile) is not str for profile in profiles)
+    ):
+        return None, {ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value}, True
+    profile_values = tuple(cast(str, profile) for profile in profiles)
+    if (
+        any(profile not in _AUTHORIZED_CAPTURE_PROFILES for profile in profile_values)
+        or tuple(sorted(set(profile_values), key=str.encode)) != profile_values
+    ):
+        return None, {ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value}, True
+    try:
+        generation = validate_sha256_digest(generation)
+    except (TypeError, ValueError):
+        return None, {ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value}, True
+    return _LocalCaptureFence(
+        generation,
+        active,
+        revoked,
+        runtime_enabled,
+        profile_values,
+    ), set(), True
+
+
+def _local_capture_fence_current(
+    local_observation: object | None,
+    workspace: str,
+    fence: _LocalCaptureFence,
+) -> bool:
+    """Check the local fence at a linearization point before opening/dispatching."""
+
+    if local_observation is None:
+        return True
+    checker = getattr(local_observation, "content_capture_authority_is_current", None)
+    if callable(checker):
+        try:
+            return checker(workspace, fence.generation, fence.profiles) is True
+        except Exception:
+            return False
+    current, _gaps, _provided = _local_capture_fence(local_observation, workspace)
+    return current is not None and current == fence and current.active
 
 type _CandidateRow = tuple[str, EvidenceRecordedPayload, EvidenceProjectionRecord]
 type _PendingRow = tuple[
@@ -107,6 +209,13 @@ class CapturedContentResolution:
     scope: CapturedContentScope | None
     content: tuple[CapturedSemanticContent, ...]
     gaps: tuple[str, ...]
+    # A local-store generation is carried back to the dispatch seam. The semantic
+    # case may contain authenticated bytes only while this same generation is
+    # still active; a pause/disable/revoke therefore invalidates the case before
+    # another object open or provider call.
+    local_fence_generation: str | None = None
+    local_fence_profiles: tuple[str, ...] = ()
+    local_fence_required: bool = False
 
     def __post_init__(self) -> None:
         if self.scope is not None and type(self.scope) is not CapturedContentScope:
@@ -121,13 +230,50 @@ class CapturedContentResolution:
             raise ValueError("semantic_content_resolution_invalid")
         if self.gaps != tuple(sorted(set(self.gaps), key=str.encode)):
             raise ValueError("semantic_content_resolution_invalid")
+        if self.local_fence_generation is not None and (
+            type(self.local_fence_generation) is not str
+        ):
+            raise ValueError("semantic_content_resolution_invalid")
+        if self.local_fence_generation is not None:
+            try:
+                validate_sha256_digest(self.local_fence_generation)
+            except (TypeError, ValueError):
+                raise ValueError("semantic_content_resolution_invalid") from None
+        if (
+            type(self.local_fence_profiles) is not tuple
+            or len(self.local_fence_profiles) > 2
+            or any(profile not in _AUTHORIZED_CAPTURE_PROFILES for profile in self.local_fence_profiles)
+            or tuple(sorted(set(self.local_fence_profiles), key=str.encode))
+            != self.local_fence_profiles
+        ):
+            raise ValueError("semantic_content_resolution_invalid")
+        if type(self.local_fence_required) is not bool:
+            raise ValueError("semantic_content_resolution_invalid")
 
 
-def _profile_for_source(source: ObservationSource) -> str | None:
-    if source is ObservationSource.CLAUDE_HOOK:
-        return _CLAUDE_ORDINARY_PROFILE
-    if source is ObservationSource.CURSOR_HOOK:
-        return _CURSOR_ORDINARY_PROFILE
+def _profile_for_envelope(envelope: ObservationEnvelope) -> str | None:
+    """Return a profile only for the exact ordinary renderer identity.
+
+    Source enum alone is insufficient: legacy/native hook envelopes use the same
+    source while carrying different structural vocabularies and must never gain
+    the ordinary captured-content arm by inference.
+    """
+
+    structural = envelope.structural_payload
+    profile = structural.get("capability_profile_id")
+    mapping_hint = structural.get("mapping_hint")
+    if envelope.source is ObservationSource.CLAUDE_HOOK:
+        if (
+            profile == _CLAUDE_ORDINARY_PROFILE
+            and mapping_hint == CLAUDE_CODE_ORDINARY_HOOK_MAPPING_VERSION
+        ):
+            return _CLAUDE_ORDINARY_PROFILE
+    elif envelope.source is ObservationSource.CURSOR_HOOK:
+        if (
+            profile == _CURSOR_ORDINARY_PROFILE
+            and mapping_hint == CURSOR_ORDINARY_HOOK_MAPPING_VERSION
+        ):
+            return _CURSOR_ORDINARY_PROFILE
     return None
 
 
@@ -198,9 +344,19 @@ def _consent_profiles(observation: object, workspace: str) -> tuple[tuple[str, .
     return profile_values, set()
 
 
-async def _read_wrapper(runtime: TaskRuntime, ref: ObjectRef) -> bytes:
+async def _read_wrapper(
+    runtime: TaskRuntime,
+    ref: ObjectRef,
+    *,
+    fence_check: Callable[[], bool] | None = None,
+) -> bytes:
+    if fence_check is not None and not fence_check():
+        raise ValueError("content_capture_unavailable")
     collected = bytearray()
     async for chunk in runtime.objects.open_verified(ref):
+        if fence_check is not None and not fence_check():
+            collected.clear()
+            raise ValueError("content_capture_unavailable")
         if type(chunk) is not bytes or len(collected) + len(chunk) > _MAX_WRAPPER_BYTES:
             collected.clear()
             raise ValueError("content_capture_unavailable")
@@ -210,6 +366,8 @@ async def _read_wrapper(runtime: TaskRuntime, ref: ObjectRef) -> bytes:
     result = bytes(collected)
     collected.clear()
     if len(result) != ref.plaintext_size:
+        raise ValueError("content_capture_unavailable")
+    if fence_check is not None and not fence_check():
         raise ValueError("content_capture_unavailable")
     return result
 
@@ -242,6 +400,7 @@ def _manifest_from_wrapper(
         or parsed.get("format") != "yoetz.observation-content/1"
         or type(parsed.get("content_b64")) is not str
         or type(parsed.get("redacted")) is not bool
+        or parsed.get("media_type") != _CAPTURED_CONTENT_INNER_MEDIA_TYPE
     ):
         raise ValueError("content_capture_unavailable")
     encoded = cast(str, parsed["content_b64"])
@@ -368,17 +527,40 @@ def _projected_candidates(
     )
 
 
-def _session_commitment_for_runtime(observation: object, workspace: str, session_id: str) -> str:
-    route_lookup = getattr(observation, "codex_session_commitment_for_session", None)
-    if not callable(route_lookup):
-        raise ValueError("content_capture_unavailable")
-    try:
-        commitment = route_lookup(workspace=workspace, yoetz_session_id=session_id)
-    except Exception as exc:
-        raise ValueError("content_capture_unavailable") from exc
-    if type(commitment) is not str or not commitment:
-        raise ValueError("content_capture_unavailable")
-    return commitment
+def _session_commitment_for_runtime(
+    observation: object,
+    workspace: str,
+    session_id: str,
+    task_id: str,
+) -> str:
+    route_reader = getattr(observation, "observation_route_for_session", None)
+    if callable(route_reader):
+        try:
+            route = route_reader(workspace=workspace, yoetz_session_id=session_id)
+        except Exception as exc:
+            raise ValueError("content_capture_unavailable") from exc
+        if type(route) is not tuple:
+            raise ValueError("content_capture_unavailable")
+        route_values = cast(tuple[object, ...], route)
+        if (
+            len(route_values) != 3
+            or type(route_values[0]) is not str
+            or type(route_values[1]) is not str
+            or type(route_values[2]) is not bool
+            or route_values[1] != task_id
+        ):
+            raise ValueError("content_capture_unavailable")
+        # An inactive historical route is admitted only for this exact runtime
+        # task. This explicit same-task reattach case retains task evidence while
+        # refusing a row from another task; no broad workspace fallback exists.
+        commitment = route_values[0]
+        if not commitment:
+            raise ValueError("content_capture_unavailable")
+        return commitment
+    # The historical commitment-only accessor cannot prove the runtime task or whether the
+    # route is an explicit same-task reattach. Captured-content disclosure therefore fails closed
+    # when the strengthened route seam is unavailable.
+    raise ValueError("content_capture_unavailable")
 
 
 async def _session_envelopes(
@@ -386,12 +568,18 @@ async def _session_envelopes(
     *,
     workspace: str,
     session_id: str,
+    task_id: str,
     gaps: set[str],
 ) -> tuple[ObservationEnvelope, ...]:
-    """Read envelopes for the exact routed task session, with a safe fallback filter."""
+    """Read envelopes for the exact routed task session and reattach route."""
 
     try:
-        session_commitment = _session_commitment_for_runtime(observation, workspace, session_id)
+        session_commitment = _session_commitment_for_runtime(
+            observation,
+            workspace,
+            session_id,
+            task_id,
+        )
     except ValueError:
         gaps.add(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
         return ()
@@ -402,13 +590,9 @@ async def _session_envelopes(
     )
     if callable(status_reader):
         try:
-            status = await status_reader(workspace, session_commitment)
+            await status_reader(workspace, session_commitment)
         except Exception:
             gaps.add(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
-            return ()
-        lifecycle = getattr(getattr(status, "lifecycle", None), "value", None)
-        if lifecycle == "stopped":
-            gaps.add(ObservationGapCode.CONTENT_UNSELECTED.value)
             return ()
 
     list_for_session = cast(
@@ -452,6 +636,7 @@ async def resolve_captured_semantic_content(
     runtime: TaskRuntime,
     frozen: FrozenCase,
     workspace_commitment: str,
+    local_observation: object | None = None,
     max_parts: int = _MAX_CAPTURED_SEMANTIC_PARTS,
     max_total_bytes: int = _MAX_CAPTURED_SEMANTIC_INPUT_BYTES,
 ) -> CapturedContentResolution:
@@ -474,8 +659,43 @@ async def resolve_captured_semantic_content(
         raise ValueError("semantic_content_bounds_invalid")
     observation = runtime.observation
     if observation is None:
-        return CapturedContentResolution(None, (), ("content_capture_unavailable",))
+        return CapturedContentResolution(
+            None,
+            (),
+            ("content_capture_unavailable",),
+            local_fence_required=False,
+        )
+    local_fence, local_gaps, local_fence_provided = _local_capture_fence(
+        local_observation,
+        workspace_commitment,
+    )
     profiles, gaps = _consent_profiles(observation, workspace_commitment)
+    gaps.update(local_gaps)
+    if local_fence_provided and (
+        local_fence is None
+        or not local_fence.active
+        or not local_fence.runtime_enabled
+        or not local_fence.profiles
+    ):
+        if local_fence is not None and local_fence.revoked:
+            gaps.add(ObservationGapCode.CONSENT_REVOKED.value)
+        else:
+            gaps.add(ObservationGapCode.CONTENT_UNSELECTED.value)
+        return CapturedContentResolution(
+            None,
+            (),
+            _sort_gaps(gaps),
+            None if local_fence is None else local_fence.generation,
+            () if local_fence is None else local_fence.profiles,
+            False,
+        )
+    if local_fence is not None:
+        # Local consent is authoritative for the content arm. Task-store profiles
+        # may lag after a CLI change; selecting their intersection preserves the
+        # durable task boundary while local disable/pause/revoke remains immediate.
+        profiles = tuple(profile for profile in profiles if profile in local_fence.profiles)
+        if not profiles:
+            gaps.add(ObservationGapCode.CONTENT_UNSELECTED.value)
     scope = (
         None
         if not profiles
@@ -487,33 +707,60 @@ async def resolve_captured_semantic_content(
         )
     )
     if scope is None:
-        return CapturedContentResolution(None, (), tuple(sorted(gaps, key=str.encode)))
+        return CapturedContentResolution(
+            None,
+            (),
+            _sort_gaps(gaps),
+            None if local_fence is None else local_fence.generation,
+            () if local_fence is None else local_fence.profiles,
+            False,
+        )
 
     if max_parts == 0:
         gaps.add(ObservationGapCode.CONTENT_UNSELECTED.value)
-        return CapturedContentResolution(scope, (), _sort_gaps(gaps))
+        return CapturedContentResolution(
+            scope,
+            (),
+            _sort_gaps(gaps),
+            None if local_fence is None else local_fence.generation,
+            () if local_fence is None else local_fence.profiles,
+            False,
+        )
 
     allowed = frozenset(str(ref) for ref in frozen.case.allowed_ids)
     candidates, candidate_gaps = _projected_candidates(frozen, allowed=allowed)
     gaps.update(candidate_gaps)
-    selected_objects = tuple(sorted(candidates, key=str.encode))[:max_parts]
+    # Metadata selection is bounded independently from semantic part admission:
+    # selecting only the first object ID could split a valid multipart group and
+    # turn an otherwise admissible capture into a false unavailable gap.
+    selected_objects = tuple(sorted(candidates, key=str.encode))[:_MAX_CAPTURED_SEMANTIC_PARTS]
     if len(candidates) > len(selected_objects):
         gaps.add(ObservationGapCode.CONTENT_UNSELECTED.value)
     if not selected_objects:
-        return CapturedContentResolution(scope, (), _sort_gaps(gaps))
+        return CapturedContentResolution(
+            scope,
+            (),
+            _sort_gaps(gaps),
+            None if local_fence is None else local_fence.generation,
+            () if local_fence is None else local_fence.profiles,
+            False,
+        )
 
     envelopes = await _session_envelopes(
         observation,
         workspace=workspace_commitment,
         session_id=runtime.session_id,
+        task_id=runtime.task_id,
         gaps=gaps,
     )
     pending: list[_PendingRow] = []
     pending_keys: set[tuple[str, str]] = set()
     selected_set = frozenset(selected_objects)
     for envelope in envelopes:
-        profile = _profile_for_source(envelope.source)
+        profile = _profile_for_envelope(envelope)
         if profile is None:
+            if envelope.content_object_refs:
+                gaps.add(ObservationGapCode.CONTENT_UNSELECTED.value)
             continue
         if profile not in scope.authorized_profiles:
             if envelope.content_object_refs:
@@ -557,7 +804,14 @@ async def resolve_captured_semantic_content(
             )
 
     if not pending:
-        return CapturedContentResolution(scope, (), _sort_gaps(gaps))
+        return CapturedContentResolution(
+            scope,
+            (),
+            _sort_gaps(gaps),
+            None if local_fence is None else local_fence.generation,
+            () if local_fence is None else local_fence.profiles,
+            False,
+        )
 
     # Read manifest metadata first. This bounds aggregate bytes and validates complete
     # multipart groups before the object store is asked for any plaintext wrapper.
@@ -653,16 +907,35 @@ async def resolve_captured_semantic_content(
 
     bounded_groups: list[list[_MetadataRow]] = []
     admitted_bytes = 0
+    admitted_parts = 0
     for rows in complete_groups:
         group_bytes = sum(row[-1].content_bytes or 0 for row in rows)
-        if admitted_bytes + group_bytes > max_total_bytes:
+        if (
+            admitted_parts + len(rows) > max_parts
+            or admitted_bytes + group_bytes > max_total_bytes
+        ):
             gaps.add(ObservationGapCode.CONTENT_UNSELECTED.value)
             continue
         admitted_bytes += group_bytes
+        admitted_parts += len(rows)
         bounded_groups.append(rows)
 
     parts: list[CapturedSemanticContent] = []
     admitted_phase_bindings: dict[str, str] = {}
+
+    def _open_fence_current() -> bool:
+        return (
+            not local_fence_provided
+            or (
+                local_fence is not None
+                and _local_capture_fence_current(
+                    local_observation,
+                    workspace_commitment,
+                    local_fence,
+                )
+            )
+        )
+
     for rows in bounded_groups:
         opened: list[CapturedSemanticContent] = []
         failed = False
@@ -676,6 +949,13 @@ async def resolve_captured_semantic_content(
             _payload,
             loaded,
         ) in rows:
+            if not _open_fence_current():
+                # A local pause/disable/revoke that wins before this linearization
+                # point invalidates the whole multipart group. Do not open even
+                # an authenticated object from the stale task-store snapshot.
+                gaps.add(ObservationGapCode.CONTENT_UNSELECTED.value)
+                failed = True
+                break
             try:
                 assert loaded.envelope_digest is not None
                 resolved = await runtime.objects.resolve_verified(
@@ -690,7 +970,11 @@ async def resolve_captured_semantic_content(
                     or resolved.envelope_digest != loaded.envelope_digest
                 ):
                     raise ValueError("content_capture_unavailable")
-                material = await _read_wrapper(runtime, resolved)
+                material = await _read_wrapper(
+                    runtime,
+                    resolved,
+                    fence_check=_open_fence_current,
+                )
                 parsed, content_bytes = _manifest_from_wrapper(
                     material,
                     object_id=resolved.object_id,
@@ -756,4 +1040,11 @@ async def resolve_captured_semantic_content(
             sorted(admitted_phase_bindings.items(), key=lambda item: item[0].encode("ascii"))
         ),
     )
-    return CapturedContentResolution(scope, tuple(parts), _sort_gaps(gaps))
+    return CapturedContentResolution(
+        scope,
+        tuple(parts),
+        _sort_gaps(gaps),
+        None if local_fence is None else local_fence.generation,
+        () if local_fence is None else local_fence.profiles,
+        local_fence_provided and bool(parts),
+    )

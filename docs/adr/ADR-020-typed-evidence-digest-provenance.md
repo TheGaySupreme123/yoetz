@@ -106,15 +106,20 @@ ordinary cooperative publication cannot claim.
     copy captured object bytes into semantic review. A later semantic selection may carry retained
     bytes only when the service resolves the current consent arm for the exact closed host profile,
     task, session, and workspace, matches the durable evidence source event to the envelope's
-    phase identity, verifies the object envelope/media type and canonical inner wrapper, and proves
-    the digest, byte count, source commitment, correlation, and complete multipart group. Redacted
-    sanitized bytes remain usable with `content_redacted`; selection clipping remains visible as
-    `truncated_payload`. The resulting bounded values still pass ADR-009's independent
-    classification, minimization, authorization, and egress path; the pre-approval case envelope
-    remains metadata-only, and an arbitrary object reference never authorizes a read. Migration
-    0008 adds nullable digest/byte bindings to observation manifests and inspection snapshots plus
-    durable inspection redaction/truncation flags. Existing NULL rows stay weak history and are
-    never upgraded by inference.
+    phase identity, verifies the object envelope/media type, the canonical inner wrapper, and its
+    `text/plain` inner media, and proves the digest, byte count, source commitment, correlation,
+    and complete multipart group. Redacted sanitized bytes remain usable with `content_redacted`;
+    selection clipping remains visible as `truncated_payload`. The local consent store supplies a
+    plaintext-free generation/runtime fence that is rechecked before each object read and at the
+    final provider gateway boundary whenever retained bytes are in the case, so a pause, disable,
+    or revoke that wins before either boundary prevents a new captured-content disclosure even
+    when task-store propagation is stale. A disclosure already in progress cannot be retracted.
+    The resulting bounded values still pass ADR-009's independent classification, minimization,
+    authorization, and egress path; the pre-approval case envelope remains metadata-only, and an
+    arbitrary object reference never authorizes a read. Migration 0008 adds nullable digest/byte
+    bindings to observation manifests and inspection snapshots plus durable inspection
+    redaction/truncation flags. Existing NULL rows stay weak history and are never upgraded by
+    inference.
 
 ## Consequences
 
