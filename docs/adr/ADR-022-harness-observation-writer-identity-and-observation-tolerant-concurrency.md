@@ -306,11 +306,14 @@ unsupported claims and unbounded duplicate findings.
     conflicting reuse of the operation identity and fails closed as non-retryable
     `IDEMPOTENCY_CONFLICT` (`ledger_rejected`); a repeat that reuses committed event ids under a
     different logical identity still fails closed as `EVENT_INVALID`. Legacy versions keep their
-    session-bound digests as replay-only upgrade candidates probed under both admitted writers,
-    exactly as before: a pre-upgrade committed row is still replayable from the session that
-    committed it, and only from that session. Hook ordinals, session generations, and host session
-    commitments are keyed on the host session, not the mapping, so they stay monotonic across a
-    reattach.
+    session-bound digests as replay-only upgrade candidates. During route retirement, the lifecycle
+    adapter retains a bounded suffix of predecessor `(session, writer)` bindings in a private,
+    same-task sidecar before replacing the one-slot mapping. A fresh process can therefore probe
+    the retained predecessor routes after restart; a missing sidecar means there are no retained
+    predecessors, a malformed sidecar fails closed, and entries older than the bound are outside
+    the replay guarantee. Clearing a host mapping clears its route history as well. Hook ordinals,
+    session generations, and host session commitments are keyed on the host session, not the
+    mapping, so they stay monotonic across a reattach.
 19. An ended-host-session recovery attach that rotates the task route does not retire still-pending
     observation rows of the predecessor (issue #577). `SESSION_NOT_FOUND` with
     `reason_code: session_superseded` already carries the current task binding; ingest follows that

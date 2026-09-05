@@ -25,6 +25,7 @@ except ImportError:  # pragma: no cover - lifecycle hosts are POSIX in productio
 __all__ = [
     "MAPPING_VERSION",
     "LifecycleMapping",
+    "RouteHistory",
     "acquire_session_lock",
     "acquire_workspace_recovery_lock",
     "apply_pending_mapping",
@@ -35,6 +36,7 @@ __all__ = [
     "load_mapping",
     "mapping_from_start_ids",
     "mapping_path",
+    "load_route_history",
     "parse_frontier_token",
     "queue_mapping_clear",
     "queue_mapping_store",
@@ -54,6 +56,9 @@ _MAPPING_KEYS: Final = frozenset(
     }
 )
 _MAX_MAPPING_BYTES: Final = 4_096
+_MAX_ROUTE_HISTORY_BYTES: Final = 4_096
+_MAX_ROUTE_HISTORY: Final = 5
+_ROUTE_HISTORY_SCHEMA: Final = "yoetz.codex-route-history/1"
 _MAX_PENDING_MAPPING_BYTES: Final = 8_192
 _MAX_CODEX_SESSION_ID_CHARS: Final = 128
 _MAX_FRONTIER_TOKEN_CHARS: Final = 128
@@ -88,6 +93,14 @@ class LifecycleMapping:
             "yoetz_writer_id": self.yoetz_writer_id,
             "last_frontier": self.last_frontier,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class RouteHistory:
+    """Bounded predecessor bindings retained for one Codex lifecycle mapping."""
+
+    routes: tuple[tuple[str, str], ...]
+    truncated: bool
 
 
 def validate_codex_session_id(value: object) -> str:
@@ -159,6 +172,181 @@ def mapping_path(codex_session_id: str, *, _state: Path | None = None) -> Path:
 
     session_id = validate_codex_session_id(codex_session_id)
     return codex_lifecycle_dir(_state=_state) / f"{session_id}.json"
+
+
+def _route_history_path(codex_session_id: str, *, _state: Path | None = None) -> Path:
+    session_id = validate_codex_session_id(codex_session_id)
+    directory = codex_lifecycle_dir(_state=_state) / "route-history"
+    _ensure_lifecycle_dir(directory)
+    # Keep the sidecar namespace separate from mapping files. Codex session
+    # ids are printable opaque tokens, so a suffix-based sibling name could
+    # collide with another valid session id (``session.history`` vs
+    # ``session``).
+    return directory / f"{session_id}.json"
+
+
+def _write_private_atomic(path: Path, payload: bytes) -> None:
+    """Write one owner-only lifecycle file with cleanup on every failure path."""
+
+    temporary = path.with_name(f".{path.name}.{os.urandom(8).hex()}.tmp")
+    descriptor: int | None = None
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(temporary, flags, 0o600)
+        try:
+            view = memoryview(payload)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError("short_write")
+                view = view[written:]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+            descriptor = None
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except BaseException:
+        if descriptor is not None:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+        raise
+
+
+def _decode_route_history(raw: object) -> tuple[str, RouteHistory] | None:
+    if not isinstance(raw, Mapping):
+        return None
+    document = cast(Mapping[str, JsonValue], raw)
+    if frozenset(document) != frozenset({"schema", "task_id", "routes", "truncated"}):
+        return None
+    if document.get("schema") != _ROUTE_HISTORY_SCHEMA:
+        return None
+    task_id = document.get("task_id")
+    if type(task_id) is not str:
+        return None
+    try:
+        task_id = validate_id(IdKind.TASK, task_id)
+    except ProtocolValueError:
+        return None
+    raw_routes = document.get("routes")
+    truncated = document.get("truncated")
+    if type(truncated) is not bool:
+        return None
+    if not isinstance(raw_routes, (list, tuple)):
+        return None
+    routes_raw = cast(list[JsonValue] | tuple[JsonValue, ...], raw_routes)
+    if not 0 <= len(routes_raw) <= _MAX_ROUTE_HISTORY:
+        return None
+    routes: list[tuple[str, str]] = []
+    for raw_route in routes_raw:
+        if not isinstance(raw_route, Mapping):
+            return None
+        route_document = cast(Mapping[str, JsonValue], raw_route)
+        if frozenset(route_document) != frozenset({"session_id", "writer_id"}):
+            return None
+        session_id = route_document.get("session_id")
+        writer_id = route_document.get("writer_id")
+        try:
+            session_id = validate_id(IdKind.SESSION, session_id)
+            writer_id = validate_id(IdKind.WRITER, writer_id)
+        except ProtocolValueError:
+            return None
+        route = (session_id, writer_id)
+        if route not in routes:
+            routes.append(route)
+    return task_id, RouteHistory(tuple(routes), truncated)
+
+
+def load_route_history(
+    mapping: LifecycleMapping, *, _state: Path | None = None
+) -> RouteHistory | None:
+    """Load bounded predecessor routes retained beside a lifecycle mapping.
+
+    The mapping file is a one-slot cache and may be replaced after a session
+    retirement.  This sidecar keeps the session/writer pairs that were present
+    before those replacements, so a process restart can still probe legacy
+    session-bound observation operations.  A missing sidecar is an empty,
+    complete history; a present malformed sidecar is reported as ``None`` so
+    callers fail closed instead of reminting an old operation graph.  A valid
+    sidecar for another task is ignored. ``truncated`` records that an older
+    predecessor was evicted at the bound.
+    """
+
+    if type(mapping) is not LifecycleMapping:
+        return None
+    try:
+        path = _route_history_path(mapping.codex_session_id, _state=_state)
+        if not path.exists() and not path.is_symlink():
+            return RouteHistory((), False)
+        if path.is_symlink() or not path.is_file():
+            return None
+        if path.stat().st_size <= 0 or path.stat().st_size > _MAX_ROUTE_HISTORY_BYTES:
+            return None
+        raw_bytes = path.read_bytes()
+        if not 0 < len(raw_bytes) <= _MAX_ROUTE_HISTORY_BYTES:
+            return None
+        parsed = strict_json_parse(raw_bytes)
+        decoded = _decode_route_history(parsed)
+    except OSError, ProtocolValueError, UnicodeError, TypeError, ValueError:
+        return None
+    if decoded is None:
+        return None
+    if decoded[0] != mapping.yoetz_task_id:
+        return RouteHistory((), False)
+    return decoded[1]
+
+
+def _write_route_history(
+    mapping: LifecycleMapping,
+    routes: tuple[tuple[str, str], ...],
+    *,
+    truncated: bool,
+    _state: Path | None,
+) -> None:
+    if not 0 <= len(routes) <= _MAX_ROUTE_HISTORY or type(truncated) is not bool:
+        raise ProtocolValueError("unsupported_json_type")
+    payload = (
+        canonical_encode(
+            {
+                "schema": _ROUTE_HISTORY_SCHEMA,
+                "task_id": mapping.yoetz_task_id,
+                "routes": tuple(
+                    {"session_id": session_id, "writer_id": writer_id}
+                    for session_id, writer_id in routes
+                ),
+                "truncated": truncated,
+            }
+        )
+        + b"\n"
+    )
+    if len(payload) > _MAX_ROUTE_HISTORY_BYTES:
+        raise ProtocolValueError("unsupported_json_type")
+    _write_private_atomic(_route_history_path(mapping.codex_session_id, _state=_state), payload)
+
+
+def _retain_predecessor_route(mapping: LifecycleMapping, *, _state: Path | None) -> None:
+    prior = load_route_history(mapping, _state=_state)
+    if prior is None:
+        raise ProtocolValueError("unsupported_json_type")
+    route = (mapping.yoetz_session_id, mapping.yoetz_writer_id)
+    if route in prior.routes:
+        return
+    routes = (*prior.routes, route)
+    _write_route_history(
+        mapping,
+        routes[-_MAX_ROUTE_HISTORY:],
+        truncated=prior.truncated or len(routes) > _MAX_ROUTE_HISTORY,
+        _state=_state,
+    )
 
 
 def _parse_mapping(
@@ -250,37 +438,31 @@ def store_mapping(mapping: LifecycleMapping, *, _state: Path | None = None) -> N
     if type(mapping) is not LifecycleMapping:
         raise ProtocolValueError("unsupported_json_type")
     validated = _parse_mapping(mapping.to_wire(), expected_session=mapping.codex_session_id)
+    previous = load_mapping(validated.codex_session_id, _state=_state)
+    if previous is None or previous.yoetz_task_id != validated.yoetz_task_id:
+        # A clear can stop after unlinking the mapping but before its history.
+        # Reset that orphan before publishing a new attachment of the same host.
+        history = _route_history_path(validated.codex_session_id, _state=_state)
+        if history.exists() or history.is_symlink():
+            _write_route_history(validated, (), truncated=False, _state=_state)
+    if (
+        previous is not None
+        and previous.yoetz_task_id == validated.yoetz_task_id
+        and (
+            previous.yoetz_session_id != validated.yoetz_session_id
+            or previous.yoetz_writer_id != validated.yoetz_writer_id
+        )
+    ):
+        # Persist the predecessor before replacing the one-slot mapping. A
+        # process can die after the replacement and before the observation
+        # request reaches its ledger lookup; the next process must still know
+        # which session-bound legacy writers to probe.
+        _retain_predecessor_route(previous, _state=_state)
     path = mapping_path(validated.codex_session_id, _state=_state)
     encoded = canonical_encode(validated.to_wire()) + b"\n"
     if len(encoded) > _MAX_MAPPING_BYTES:
         raise ProtocolValueError("unsupported_json_type")
-    temporary = path.with_name(f".{path.name}.{os.urandom(8).hex()}.tmp")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    descriptor = os.open(temporary, flags, 0o600)
-    try:
-        view = memoryview(encoded)
-        while view:
-            written = os.write(descriptor, view)
-            if written <= 0:
-                raise OSError("short_write")
-            view = view[written:]
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    try:
-        os.replace(temporary, path)
-        os.chmod(path, 0o600)
-        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            temporary.unlink()
-        raise
+    _write_private_atomic(path, encoded)
 
 
 def clear_mapping(codex_session_id: str, *, _state: Path | None = None) -> None:
@@ -293,6 +475,10 @@ def clear_mapping(codex_session_id: str, *, _state: Path | None = None) -> None:
     with contextlib.suppress(OSError, FileNotFoundError):
         if path.is_file() and not path.is_symlink():
             path.unlink()
+    history = _route_history_path(codex_session_id, _state=_state)
+    with contextlib.suppress(OSError, FileNotFoundError):
+        if history.is_file() and not history.is_symlink():
+            history.unlink()
 
 
 def _pending_mapping_path(codex_session_id: str, *, _state: Path | None = None) -> Path:
@@ -310,33 +496,7 @@ def _queue_mapping_operation(
     encoded = canonical_encode(dict(payload)) + b"\n"
     if len(encoded) > _MAX_PENDING_MAPPING_BYTES:
         raise ProtocolValueError("unsupported_json_type")
-    temporary = path.with_name(f".{path.name}.{os.urandom(8).hex()}.tmp")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    descriptor = os.open(temporary, flags, 0o600)
-    try:
-        view = memoryview(encoded)
-        while view:
-            written = os.write(descriptor, view)
-            if written <= 0:
-                raise OSError("short_write")
-            view = view[written:]
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    try:
-        os.replace(temporary, path)
-        os.chmod(path, 0o600)
-        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            temporary.unlink()
-        raise
+    _write_private_atomic(path, encoded)
 
 
 def queue_mapping_store(mapping: LifecycleMapping, *, _state: Path | None = None) -> None:

@@ -980,10 +980,20 @@ async def test_coordinator_replays_content_commit_after_reply_is_lost(
             envelope: ObservationEnvelope,
             batch: MaterializedObservationBatch,
             *,
+            legacy_session_id: str | None = None,
             legacy_writer_id: str | None = None,
+            legacy_writer_routes: tuple[tuple[str, str], ...] = (),
+            replay_required: bool = False,
+            replay_claims: tuple[tuple[tuple[str, str, str], tuple[str, ...]], ...] = (),
             replay_draft_role_sets: tuple[tuple[str, ...], ...] = (),
         ) -> tuple[str, str, None, str, tuple[str, ...]]:
-            del legacy_writer_id
+            del (
+                legacy_session_id,
+                legacy_writer_id,
+                legacy_writer_routes,
+                replay_required,
+                replay_claims,
+            )
             self.batches.append(batch)
             current_roles = tuple(item.role for item in batch.drafts)
             candidates = (current_roles, *replay_draft_role_sets)

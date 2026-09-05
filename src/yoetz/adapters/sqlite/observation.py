@@ -39,6 +39,7 @@ from yoetz.domain.observation_profiles import (
 from yoetz.domain.values import JsonObject, JsonValue, Timestamp, format_rfc3339_millis
 from yoetz.kernel.policies.observation_advice import ObservationCheckFact
 from yoetz.ports.objects import ObjectRef
+from yoetz.ports.observation import ObservationLogicalIdentityClaim
 from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 
@@ -1169,6 +1170,25 @@ class SqliteObservationStore:
                     "WHERE workspace_commitment=? AND logical_identity=?",
                     (combined, workspace, logical_identity),
                 )
+
+    def load_logical_identity_claim(
+        self, *, workspace: str, logical_identity: str
+    ) -> ObservationLogicalIdentityClaim | None:
+        row = self._db.execute(
+            "SELECT canonical_materialization_digest,operation_id,mapping_version "
+            "FROM observation_logical_identity "
+            "WHERE workspace_commitment=? AND logical_identity=?",
+            (workspace, logical_identity),
+        ).fetchone()
+        if row is None:
+            return None
+        if not all(type(value) is str for value in row):
+            raise _error(
+                PublicErrorCode.STORAGE_CORRUPT,
+                "Observation logical identity claim is invalid.",
+                retryable=False,
+            )
+        return cast(ObservationLogicalIdentityClaim, tuple(row))
 
     def _consent_row(self, workspace: str) -> tuple[str | None, bool, str, tuple[str, ...]] | None:
         if self._content_capture_column_present():

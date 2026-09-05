@@ -4002,9 +4002,19 @@ async def test_pre_post_and_stream_copies_claim_without_storage_corrupt(tmp_path
             *,
             legacy_session_id: str | None = None,
             legacy_writer_id: str | None = None,
+            legacy_writer_routes: tuple[tuple[str, str], ...] = (),
+            replay_required: bool = False,
+            replay_claims: tuple[tuple[tuple[str, str, str], tuple[str, ...]], ...] = (),
             replay_draft_role_sets: tuple[tuple[str, ...], ...] = (),
         ) -> tuple[str, str, None, str, tuple[str, ...]]:
-            del legacy_session_id, legacy_writer_id, replay_draft_role_sets
+            del (
+                legacy_session_id,
+                legacy_writer_id,
+                legacy_writer_routes,
+                replay_required,
+                replay_claims,
+                replay_draft_role_sets,
+            )
             roles = tuple(item.role for item in batch.drafts)
             digest = _digest(
                 task_id=runtime.task_id,  # type: ignore[attr-defined]
@@ -4129,9 +4139,18 @@ async def test_post_only_replay_includes_historical_unpaired_role_set(tmp_path: 
             *,
             legacy_session_id: str | None = None,
             legacy_writer_id: str | None = None,
+            legacy_writer_routes: tuple[tuple[str, str], ...] = (),
+            replay_required: bool = False,
+            replay_claims: tuple[tuple[tuple[str, str, str], tuple[str, ...]], ...] = (),
             replay_draft_role_sets: tuple[tuple[str, ...], ...] = (),
         ) -> tuple[str, str, None, str, tuple[str, ...]]:
-            del legacy_session_id, legacy_writer_id
+            del (
+                legacy_session_id,
+                legacy_writer_id,
+                legacy_writer_routes,
+                replay_required,
+                replay_claims,
+            )
             replay_sets.append(replay_draft_role_sets)
             roles = tuple(item.role for item in batch.drafts)
             digest = observation_operation_digest(
@@ -4339,10 +4358,20 @@ async def test_later_stream_failure_correction_projection_policy(
             *,
             legacy_session_id: str | None = None,
             legacy_writer_id: str | None = None,
+            legacy_writer_routes: tuple[tuple[str, str], ...] = (),
+            replay_required: bool = False,
+            replay_claims: tuple[tuple[tuple[str, str, str], tuple[str, ...]], ...] = (),
             replay_draft_role_sets: tuple[tuple[str, ...], ...] = (),
         ) -> tuple[str, str, AppendResult, str, tuple[str, ...]]:
             nonlocal core_unknown
-            del legacy_session_id, legacy_writer_id, replay_draft_role_sets
+            del (
+                legacy_session_id,
+                legacy_writer_id,
+                legacy_writer_routes,
+                replay_required,
+                replay_claims,
+                replay_draft_role_sets,
+            )
             roles = tuple(item.role for item in batch.drafts)
             appended_roles.append(roles)
             appended_batches.append(batch)
@@ -5170,6 +5199,383 @@ async def test_session_superseded_without_followable_binding_is_not_ledger_rejec
     assert result.reason != ObservationGapCode.LEDGER_REJECTED.value
     assert result.reason != ObservationGapCode.MAPPING_MISSING.value
     assert route_observation_ingest(result).action is ObservationDrainAction.QUARANTINE
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("hop_count", "seed_index"),
+    [(1, 0), (2, 1)],
+    ids=["single-hop-predecessor", "multi-hop-intermediate"],
+)
+async def test_ingest_replays_legacy_operation_through_every_route_writer(
+    tmp_path: Path, hop_count: int, seed_index: int
+) -> None:
+    """Legacy observation operations remain reachable after bounded reattach chains.
+
+    The lifecycle mapping stores the cooperative start writer, while the old
+    observation materializer used the deterministic writer derived from each
+    routed session.  Exercise real ``ingest_request`` routing with an old 1.4
+    operation under that derived writer, including an intermediate writer in a
+    two-hop retirement chain.
+    """
+
+    from types import SimpleNamespace
+
+    from builders.ledger_adapters import FixedClock
+
+    cell = _reattach_fixture(tmp_path, f"legacy-replay-{hop_count}")
+    predecessor = cell.mapping
+    sessions = [predecessor.yoetz_session_id]
+    cooperative_writers = [predecessor.yoetz_writer_id]
+    for _ in range(hop_count):
+        sessions.append(PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4()))
+        cooperative_writers.append(PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4()))
+    derived_writers = [observation_writer_id(cell.task_id, session) for session in sessions]
+
+    envelope = _envelope(
+        session=cell.session,
+        kind="PreToolUse",
+        identity=f"hook:legacy-replay:{hop_count}",
+        corr=f"legacy-replay-call-{hop_count}",
+    )
+    batch = materialize_observation_envelope(envelope, task_id=cell.task_id)
+    roles = tuple(item.role for item in batch.drafts)
+    mapping_version = MATERIALIZATION_LEGACY_MAPPING_VERSIONS[0]
+    seeded_digest = observation_operation_digest(
+        task_id=cell.task_id,
+        logical_identity=canonical_logical_identity(envelope, mapping_version=mapping_version),
+        draft_roles=roles,
+        mapping_version=mapping_version,
+        session_id=sessions[seed_index],
+        writer_id=derived_writers[seed_index],
+    )
+    seeded_operation_id = ""
+    lookup_routes: list[tuple[str, str]] = []
+
+    class _Ledger:
+        async def lookup_task_operation(self, writer_id: str, operation_id: str):
+            del writer_id, operation_id
+            return None
+
+        async def lookup_operation(self, writer_id: str, operation_id: str):
+            lookup_routes.append((writer_id, operation_id))
+            if writer_id == derived_writers[seed_index] and operation_id == seeded_operation_id:
+                return SimpleNamespace(request_digest=seeded_digest)
+            return None
+
+    ledger = _Ledger()
+    current_runtime = SimpleNamespace(
+        task_id=cell.task_id,
+        session_id=sessions[-1],
+        writer_id=derived_writers[-1],
+        ledger=ledger,
+        observation=cell.store,
+        objects=object(),
+    )
+
+    class _RuntimePort:
+        async def route(self, command: object) -> object:
+            session_id = cast(str, getattr(command, "session_id"))
+            hop = sessions.index(session_id)
+            if hop < hop_count:
+                raise PublicOperationError(
+                    PublicErrorCode.SESSION_NOT_FOUND,
+                    "The requested session was replaced.",
+                    retryable=False,
+                    safe_details={
+                        "reason_code": "session_superseded",
+                        "task_id": cell.task_id,
+                        "session_id": sessions[hop + 1],
+                        "writer_id": cooperative_writers[hop + 1],
+                    },
+                )
+            return current_runtime
+
+        async def release(self, released: object) -> None:
+            assert released is current_runtime
+
+    class _Coordinator(ObservationCoordinator):
+        async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+        async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+    coordinator = _Coordinator(
+        runtime=_RuntimePort(),  # type: ignore[arg-type]
+        local=cell.local,
+        clock=FixedClock(),
+        ids=object(),  # type: ignore[arg-type]
+        state_root=cell.local_root,
+        mapping_loader=lambda *_args, **_kwargs: predecessor,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+        mapping_storer=lambda *_args, **_kwargs: None,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
+    seeded_operation_id = coordinator._stable_operation_id(seeded_digest)  # pyright: ignore[reportPrivateUsage]
+
+    first = await coordinator.ingest_request(ObservationIngestRequest(cell.codex_id, envelope))
+    replayed = await coordinator.ingest_request(ObservationIngestRequest(cell.codex_id, envelope))
+
+    assert first.disposition is ObservationIngestDisposition.ACCEPTED, first.reason
+    assert replayed.disposition is ObservationIngestDisposition.DUPLICATE, replayed.reason
+    assert lookup_routes
+    assert (derived_writers[seed_index], seeded_operation_id) in lookup_routes
+    # The route history includes both the cooperative and deterministic writer
+    # for every predecessor needed before the seeded operation is found.
+    expected_operation_ids = {
+        (
+            writer,
+            coordinator._stable_operation_id(  # pyright: ignore[reportPrivateUsage]
+                observation_operation_digest(
+                    task_id=cell.task_id,
+                    logical_identity=canonical_logical_identity(
+                        envelope, mapping_version=mapping_version
+                    ),
+                    draft_roles=roles,
+                    mapping_version=mapping_version,
+                    session_id=session_id,
+                    writer_id=writer,
+                )
+            ),
+        )
+        for index in range(seed_index + 1)
+        for session_id, writer in (
+            (sessions[index], cooperative_writers[index]),
+            (sessions[index], derived_writers[index]),
+        )
+    }
+    assert expected_operation_ids.issubset(set(lookup_routes))
+
+
+@pytest.mark.anyio
+async def test_ingest_replays_legacy_operation_after_route_cache_restart(tmp_path: Path) -> None:
+    """A route-cache replacement keeps predecessor replay reachable after a crash."""
+
+    from types import SimpleNamespace
+
+    from builders.ledger_adapters import FixedClock
+    from yoetz.adapters.integrations.codex_lifecycle import (
+        load_mapping,
+        load_route_history,
+        store_mapping,
+    )
+
+    cell = _reattach_fixture(tmp_path, "legacy-replay-restart")
+    predecessor = cell.mapping
+    successor = replace(
+        predecessor,
+        yoetz_session_id=PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4()),
+        yoetz_writer_id=PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4()),
+    )
+    store_mapping(predecessor, _state=tmp_path)
+    envelope = _envelope(
+        session=cell.session,
+        kind="PreToolUse",
+        identity="hook:legacy-replay-restart",
+        corr="legacy-replay-restart-call",
+    )
+    batch = materialize_observation_envelope(envelope, task_id=cell.task_id)
+    roles = tuple(item.role for item in batch.drafts)
+    mapping_version = MATERIALIZATION_LEGACY_MAPPING_VERSIONS[0]
+    predecessor_derived_writer = observation_writer_id(cell.task_id, predecessor.yoetz_session_id)
+    seeded_digest = observation_operation_digest(
+        task_id=cell.task_id,
+        logical_identity=canonical_logical_identity(envelope, mapping_version=mapping_version),
+        draft_roles=roles,
+        mapping_version=mapping_version,
+        session_id=predecessor.yoetz_session_id,
+        writer_id=predecessor_derived_writer,
+    )
+    seeded_operation_id = ""
+    lookup_routes: list[tuple[str, str]] = []
+
+    class _Ledger:
+        async def lookup_task_operation(self, writer_id: str, operation_id: str):
+            del writer_id, operation_id
+            return None
+
+        async def lookup_operation(self, writer_id: str, operation_id: str):
+            lookup_routes.append((writer_id, operation_id))
+            if writer_id == predecessor_derived_writer and operation_id == seeded_operation_id:
+                return SimpleNamespace(request_digest=seeded_digest)
+            return None
+
+    current_runtime = SimpleNamespace(
+        task_id=cell.task_id,
+        session_id=successor.yoetz_session_id,
+        writer_id=observation_writer_id(cell.task_id, successor.yoetz_session_id),
+        ledger=_Ledger(),
+        observation=cell.store,
+        objects=object(),
+    )
+
+    class _RuntimePort:
+        async def route(self, command: object) -> object:
+            session_id = cast(str, getattr(command, "session_id"))
+            if session_id == predecessor.yoetz_session_id:
+                raise PublicOperationError(
+                    PublicErrorCode.SESSION_NOT_FOUND,
+                    "The requested session was replaced.",
+                    retryable=False,
+                    safe_details={
+                        "reason_code": "session_superseded",
+                        "task_id": cell.task_id,
+                        "session_id": successor.yoetz_session_id,
+                        "writer_id": successor.yoetz_writer_id,
+                    },
+                )
+            assert session_id == successor.yoetz_session_id
+            return current_runtime
+
+        async def release(self, released: object) -> None:
+            assert released is current_runtime
+
+    class _Interrupted(ObservationCoordinator):
+        async def _capture_content(self, *args: object, **kwargs: object):  # type: ignore[override]
+            del args, kwargs
+            raise RuntimeError("simulated interrupted ingest")
+
+    class _Recovered(ObservationCoordinator):
+        async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+        async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+    common = {
+        "runtime": _RuntimePort(),
+        "local": cell.local,
+        "clock": FixedClock(),
+        "ids": object(),
+        "state_root": tmp_path,
+        "mapping_loader": load_mapping,
+        "mapping_storer": store_mapping,
+    }
+    interrupted = _Interrupted(**common)  # type: ignore[arg-type]
+    seeded_operation_id = interrupted._stable_operation_id(seeded_digest)  # pyright: ignore[reportPrivateUsage]
+
+    failed = await interrupted.ingest_request(ObservationIngestRequest(cell.codex_id, envelope))
+    assert failed.disposition is ObservationIngestDisposition.REJECTED
+    assert failed.reason == ObservationGapCode.SERVICE_UNAVAILABLE.value
+    cached = load_mapping(cell.codex_id, _state=tmp_path)
+    assert cached is not None
+    assert cached.yoetz_session_id == successor.yoetz_session_id
+    history = load_route_history(cached, _state=tmp_path)
+    assert history is not None
+    assert history.routes == ((predecessor.yoetz_session_id, predecessor.yoetz_writer_id),)
+    assert history.truncated is False
+
+    recovered = _Recovered(**common)  # type: ignore[arg-type]
+    accepted = await recovered.ingest_request(ObservationIngestRequest(cell.codex_id, envelope))
+    assert accepted.disposition is ObservationIngestDisposition.ACCEPTED, accepted.reason
+    assert (predecessor_derived_writer, seeded_operation_id) in lookup_routes
+
+
+@pytest.mark.anyio
+async def test_truncated_route_history_uses_claim_or_rejects_without_reminting(
+    tmp_path: Path,
+) -> None:
+    """An evicted legacy route can recover from its durable claim, or fails closed."""
+
+    from types import SimpleNamespace
+
+    from builders.ledger_adapters import FixedClock
+
+    task_id = _task_id()
+    current_session = PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4())
+    current_writer = observation_writer_id(task_id, current_session)
+    envelope = _envelope(
+        session=f"hmac-sha256:{'d1' * 32}",
+        kind="PreToolUse",
+        identity="hook:truncated-route",
+        corr="truncated-route-call",
+    )
+    batch = materialize_observation_envelope(envelope, task_id=task_id)
+    roles = tuple(item.role for item in batch.drafts)
+    mapping_version = MATERIALIZATION_LEGACY_MAPPING_VERSIONS[0]
+    legacy_session = PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4())
+    legacy_writer = observation_writer_id(task_id, legacy_session)
+    digest = observation_operation_digest(
+        task_id=task_id,
+        logical_identity=canonical_logical_identity(envelope, mapping_version=mapping_version),
+        draft_roles=roles,
+        mapping_version=mapping_version,
+        session_id=legacy_session,
+        writer_id=legacy_writer,
+    )
+
+    class _Ledger:
+        async def lookup_task_operation(self, writer_id: str, operation_id: str):
+            del writer_id
+            if operation_id == operation_id_for_claim:
+                return SimpleNamespace(operation_id=operation_id, request_digest=digest)
+            return None
+
+        async def lookup_operation(self, writer_id: str, operation_id: str):
+            del writer_id, operation_id
+            return None
+
+    coordinator = ObservationCoordinator(
+        runtime=object(),  # type: ignore[arg-type]
+        local=LocalObservationStore(_state=tmp_path),
+        clock=FixedClock(),
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+    )
+    operation_id_for_claim = coordinator._stable_operation_id(  # pyright: ignore[reportPrivateUsage]
+        digest
+    )
+    runtime = cast(
+        TaskRuntime,
+        SimpleNamespace(
+            task_id=task_id,
+            session_id=current_session,
+            writer_id=current_writer,
+            ledger=_Ledger(),
+            objects=object(),
+        ),
+    )
+    claim = ((digest, operation_id_for_claim, mapping_version), roles)
+    recovered = await coordinator._append_materialized(  # pyright: ignore[reportPrivateUsage]
+        runtime,
+        envelope,
+        batch,
+        replay_required=True,
+        replay_claims=(claim,),
+    )
+    assert recovered is not None
+    assert recovered[0] == operation_id_for_claim
+    assert recovered[1] == digest
+    assert recovered[3] == mapping_version
+    assert recovered[4] == roles
+
+    class _MissingLedger:
+        async def lookup_task_operation(self, writer_id: str, operation_id: str):
+            del writer_id, operation_id
+            return None
+
+        async def lookup_operation(self, writer_id: str, operation_id: str):
+            del writer_id, operation_id
+            return None
+
+    missing_runtime = cast(
+        TaskRuntime,
+        SimpleNamespace(
+            task_id=task_id,
+            session_id=current_session,
+            writer_id=current_writer,
+            ledger=_MissingLedger(),
+            objects=object(),
+        ),
+    )
+    with pytest.raises(PublicOperationError) as missing:
+        await coordinator._append_materialized(  # pyright: ignore[reportPrivateUsage]
+            missing_runtime,
+            envelope,
+            batch,
+            replay_required=True,
+        )
+    assert missing.value.code is PublicErrorCode.SESSION_NOT_FOUND
+    assert missing.value.safe_details["reason_code"] == "session_superseded"
 
 
 @pytest.mark.anyio

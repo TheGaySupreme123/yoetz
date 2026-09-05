@@ -42,6 +42,7 @@ __all__ = [
     "ObservationIngestDisposition",
     "ObservationIngestResult",
     "ObservationInspectionSnapshot",
+    "ObservationLogicalIdentityClaim",
     "ObservationLifecycle",
     "ObservationPort",
     "ObservationRevokeCommand",
@@ -52,6 +53,8 @@ __all__ = [
     "observation_earns_hook_observed",
     "workspace_commitment_from_path",
 ]
+
+type ObservationLogicalIdentityClaim = tuple[str, str, str]
 
 
 class ObservationPort(Protocol):
@@ -241,3 +244,7 @@ class TaskObservationPort(Protocol):
         mapping_version: str,
         materialized_at: Timestamp,
     ) -> None: ...
+
+    def load_logical_identity_claim(
+        self, *, workspace: str, logical_identity: str
+    ) -> ObservationLogicalIdentityClaim | None: ...
