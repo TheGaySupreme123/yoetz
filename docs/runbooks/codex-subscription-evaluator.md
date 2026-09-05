@@ -25,6 +25,29 @@ reasoning setting inherits this cell. The exact identity digest covers the compa
 cell fields and its review/expiry dates; stale evidence fails before child launch. The release
 support matrix remains authoritative about which cells have completed packaged live evidence.
 
+New Codex-subscription setups recommend and preselect `gpt-5.6-luna`. Default reasoning effort
+stays independently `high`. When an existing binding is targeted, omitting `--model` preserves its
+exact model, including during `--switch-account`; an explicit `--model` (including `gpt-5.6-sol`
+when the app-server lists it) is required to change it. OpenAI API-key and other provider-preset
+catalogs stay Sol-first. Historical packaged live evidence that names `gpt-5.6-sol` remains Sol
+proof; it is not Luna acceptance and does not migrate.
+
+## Luna acceptance boundary (2026-09-05)
+
+[Issue #513](https://github.com/TheGaySupreme123/yoetz/issues/513) records two fresh packaged
+`semantic_required` attempts on the exact macOS arm64 Codex `0.150.1` cell using Luna/high.
+Both returned schema-valid judgments, distinct one-use authorizations and terminal privacy
+receipts, finalized runtime provenance, and verified process cleanup. Their check results also
+validate against the policy and strict MCP output descriptors. This is evaluator acceptance on
+bounded cooperatively published records, not fresh Cursor activation or source-correctness proof.
+A `harness_controlled_model_catalog_unavailable` negative used the same native runtime and
+filtered only the Luna entry from its `model/list` response in memory. Yoetz returned
+`model_unavailable` before `thread/start` or `turn/start`, with no case disclosure or provider
+request and terminated cleanup. This proves the refusal boundary under the controlled catalog;
+it does not claim that the upstream account lacks Luna. Historical Sol evidence stays unchanged;
+the broader release-support cell remains an implementation candidate with pending evidence for
+its full negative-control checklist.
+
 ## Setup and reverse operations
 
 Use a dedicated home; never point this route at a normal Codex home or copy authentication from
@@ -33,7 +56,7 @@ one.
 ```text
 yoetz provider codex-subscription setup \
   --executable /absolute/path/to/codex \
-  --model gpt-5.6-sol \
+  --model gpt-5.6-luna \
   --reasoning-effort high
 
 yoetz provider codex-subscription status --json
