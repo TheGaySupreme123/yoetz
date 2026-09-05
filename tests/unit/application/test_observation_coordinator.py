@@ -1575,7 +1575,7 @@ def test_local_outbox_v1_compatibility_and_v2_attempt_round_trip(tmp_path: Path)
     assert durable.last_attempt_at == attempted_at
     assert durable.consecutive_reason_attempts == 1
     assert json.loads(state_path.read_text(encoding="utf-8"))["schema"] == (
-        "yoetz.observation-local/12"
+        "yoetz.observation-local/13"
     )
 
     raw = json.loads(state_path.read_text(encoding="utf-8"))
@@ -1732,7 +1732,7 @@ def test_size_compaction_accounts_for_distinct_same_source_rows(
     # /11 persists pairing-history provenance, adding a small fixed envelope to
     # the compacted authority state. Keep the bound tight while allowing that
     # required marker to fit after both outbox rows are accounted for.
-    monkeypatch.setattr(local_mod, "_MAX_STATE_BYTES", 2_150)
+    monkeypatch.setattr(local_mod, "_MAX_STATE_BYTES", 2_400)
 
     store.note_coverage_gap(workspace, ObservationGapCode.SERVICE_UNAVAILABLE.value)
 
@@ -1745,7 +1745,7 @@ def test_size_compaction_accounts_for_distinct_same_source_rows(
         + int(persisted["quarantine_evicted_count"])
     )
     assert accounted == 2
-    assert state_path.stat().st_size <= 2_150
+    assert state_path.stat().st_size <= 2_400
 
 
 def test_monotonic_samples_fenced_across_simulated_reboot(tmp_path: Path) -> None:
