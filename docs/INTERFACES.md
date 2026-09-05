@@ -4129,7 +4129,12 @@ each workflow call. A `notifications/roots/list_changed` notification retires th
 a fresh MCP session,
 so one process cannot cross repository authorities. The bridge continues to advertise the same
 tools/resources surface; roots are a client-to-server locator exchange, not a new Yoetz tool or
-server capability.
+server capability. The public `workspace_ref` remains the caller's task-attachment selector and
+the guidance convention is still to set it to the open repository root; the native roots binding
+does not rewrite or reject a mismatching public ref. Such a mismatch can leave a session safely
+bound to the host root while normal create/attach lookup semantics continue to use the caller's
+ref pair. Hook auto-attach, queue admission, and mapping failures remain separate host lifecycle
+concerns.
 
 ### Claude Code local project harness contract (issue #154)
 

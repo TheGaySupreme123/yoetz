@@ -12,6 +12,7 @@ import pytest
 from mcp import types
 from pydantic import FileUrl
 
+import yoetz.cli.app as cli_app
 import yoetz.mcp.server as bridge
 from integration.service.test_consent_vault_initialize_composition import (
     _approve_attestation,  # pyright: ignore[reportPrivateUsage]
@@ -21,7 +22,8 @@ from integration.service.test_consent_vault_initialize_composition import (
     runtime_directory,  # noqa: F401 - imported pytest fixture  # pyright: ignore[reportUnusedImport]
 )
 from yoetz.cli import elevated
-from yoetz.protocol.canonical import JsonValue
+from yoetz.protocol.canonical import JsonValue, canonical_encode
+from yoetz.protocol.models import StatusRequest
 from yoetz.service.elevated_bootstrap import load_pending
 
 
@@ -123,7 +125,10 @@ async def test_cursor_root_binding_reaches_real_service_and_refuses_root_switch(
         start_request = types.CallToolRequest(
             params=types.CallToolRequestParams(
                 name="start",
-                arguments=_root_body("req_00000000-0000-4000-8000-000000000596", workspace=project),
+                # The public ref is deliberately the other directory. It remains the agent's
+                # task-attachment selector, while the native Cursor roots response is the trusted
+                # repository authority for this MCP session.
+                arguments=_root_body("req_00000000-0000-4000-8000-000000000596", workspace=other),
             )
         )
         start_response = await bridge._handle_call_tool_request(  # pyright: ignore[reportPrivateUsage]
@@ -152,6 +157,23 @@ async def test_cursor_root_binding_reaches_real_service_and_refuses_root_switch(
         assert status["ok"] is True
         assert status["task_id"] == start["task_id"]
         assert roots.calls == 2
+
+        # The CLI's ordinary cwd binding confirms the service route is A-bound even though the
+        # start request carried public workspace_ref B. B cannot use that session through status.
+        status_input = canonical_encode(cast(JsonValue, status_request.params.arguments)).decode(
+            "utf-8"
+        )
+        monkeypatch.chdir(project)
+        matching_cli_exit = await cli_app._call_workflow(  # pyright: ignore[reportPrivateUsage]
+            "status", StatusRequest, None, status_input, True, None
+        )
+        assert matching_cli_exit == 0
+        monkeypatch.chdir(other)
+        foreign_cli_exit = await cli_app._call_workflow(  # pyright: ignore[reportPrivateUsage]
+            "status", StatusRequest, None, status_input, True, None
+        )
+        assert foreign_cli_exit != 0
+        monkeypatch.chdir(Path.home())
 
         # Cursor 3.19.7 does not promise roots/list_changed. A changed root on the next workflow
         # call must retire the existing client before it can dispatch against the wrong route.

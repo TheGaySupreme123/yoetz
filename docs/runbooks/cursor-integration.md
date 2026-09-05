@@ -332,7 +332,11 @@ so fully quit and relaunch Cursor or start a fresh MCP process before another wo
 The reviewed Cursor 3.19.7 host bundle advertises `roots.listChanged: false`, so the per-call
 revalidation remains required even when no roots-change notification is sent.
 `read_guidance`, tools discovery, and resource reads remain available without a project root. The
-public workflow `workspace_ref` is never consulted for this binding.
+public workflow `workspace_ref` is never consulted for this binding. Keep that field equal to the
+open repository root when using create/attach selectors, as the agent convention and guidance
+require; a mismatch does not override or invalidate the trusted roots binding, but normal task
+lookup can still follow the mismatching public ref pair. Auto-attach, queue admission, and mapping
+diagnostics are separate hook lifecycle behavior and are not repaired by this MCP binding.
 
 The `sessionStart` status probe for an already-mapped session connects with the resolved workspace
 root as its repository locator, so a live mapping answers `active` and the `additional_context`
