@@ -48,7 +48,11 @@ from yoetz.protocol.models import (
     StartRequest,
     StatusRequest,
 )
-from yoetz.protocol.schemas import validate_schema_instance
+from yoetz.protocol.schemas import (
+    load_schema_catalog,
+    request_result_schema_versions,
+    validate_schema_instance,
+)
 
 _EXPECTED_TOOL_NAMES = (
     "start",
@@ -280,8 +284,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:f33f5ff45ccd9797daa0996b724e05fa7a0904c4223b062fb3c9bea83b0fccc4",
-        "strict": "sha256:e9633bcb7d0919405f64cd268c6a1c33e8707938a00d0545d967f7be17ac1016",
+        "policy": "sha256:5795465d4e1890f9c8ded84afbc916c4c7d4d4bdc0b1853a7aae52ad0bc1c2e2",
+        "strict": "sha256:c90fb52fbd0511dcaffc0f8d60e31f6b0a6fd167a01f47b3ee2f2efc0952a40f",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -320,9 +324,13 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     publish_descriptor = descriptor_for("publish_work")
     assert publish_descriptor.input_schema_ref.endswith("publish-work-request-1.1.0.schema.json")
     assert publish_descriptor.output_schema_ref.endswith("publish-work-result-1.0.0.schema.json")
+    check_descriptor = descriptor_for("check")
+    assert check_descriptor.output_schema_ref.endswith("check-result-1.1.0.schema.json")
     status_descriptor = descriptor_for("status")
     assert status_descriptor.input_schema_ref.endswith("status-request-1.1.0.schema.json")
-    assert status_descriptor.output_schema_ref.endswith("status-result-1.1.0.schema.json")
+    assert status_descriptor.output_schema_ref.endswith("status-result-1.2.0.schema.json")
+    receipt_descriptor = descriptor_for("receipt")
+    assert receipt_descriptor.output_schema_ref.endswith("receipt-result-1.1.0.schema.json")
     for descriptors in TOOL_DESCRIPTORS.values():
         assert {item.name for item in descriptors if item.annotations.read_only} == {
             "status",
@@ -381,6 +389,330 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     with pytest.raises(KeyError, match="unregistered_tool_descriptor") as captured:
         descriptor_for("secret-tool")
     assert "secret-tool" not in str(captured.value)
+
+
+def test_advertised_schema_versions_match_catalog_current_versions() -> None:
+    """Every tools/list schema reference must point at the catalog's current result contract."""
+
+    catalog = load_schema_catalog()
+    current_versions = request_result_schema_versions(catalog)
+    for profile in TOOL_DESCRIPTORS:
+        for descriptor in TOOL_DESCRIPTORS[profile]:
+            for kind, reference in (
+                ("request", descriptor.input_schema_ref),
+                ("result", descriptor.output_schema_ref),
+            ):
+                schema_name = f"{descriptor.name.replace('_', '-')}-{kind}"
+                expected_version = current_versions[schema_name]
+                assert reference.endswith(f"{schema_name}-{expected_version}.schema.json"), (
+                    f"{profile}/{descriptor.name} advertises a stale {kind} schema"
+                )
+
+
+_SUBSCRIPTION_DIGEST = "sha256:" + "a" * 64
+_SUBSCRIPTION_COMMITMENT = "hmac-sha256:" + "b" * 64
+
+
+def _subscription_id(prefix: str, ordinal: int) -> str:
+    return f"{prefix}00000000-0000-4000-8000-{ordinal:012d}"
+
+
+def _subscription_coverage() -> dict[str, Any]:
+    return {
+        "publication_channels": ["cooperative_mcp"],
+        "authorship_assurance": "service_authenticated",
+        "artifact_observation": "published_only",
+        "evidence_immutability": "metadata_only",
+        "ledger_freshness": "current",
+        "check_types": ["deterministic", "semantic_model_derived"],
+        "known_gaps": [],
+    }
+
+
+def _subscription_privacy_projection() -> dict[str, Any]:
+    return {
+        "sink": "agent_context",
+        "local_disclosure_receipt_id": _subscription_id("egr_", 2),
+        "policy_id": _subscription_id("pvy_", 3),
+        "policy_version": "1",
+        "policy_digest": _SUBSCRIPTION_DIGEST,
+        "included_categories": [],
+        "blocked_categories": [],
+        "omitted_pointers": [],
+        "projection_commitment": _SUBSCRIPTION_COMMITMENT,
+    }
+
+
+def _subscription_provenance() -> dict[str, Any]:
+    return {
+        "provider": "openai-codex",
+        "endpoint_profile_id": "codex-chatgpt-subscription",
+        "endpoint_profile_version": "1.0.0",
+        "model": "gpt-5.6-luna",
+        "sdk_version": "codex-app-server-0.150.1",
+        "prompt_digest": _SUBSCRIPTION_DIGEST,
+        "schema_digest": _SUBSCRIPTION_DIGEST,
+        "policy_digest": _SUBSCRIPTION_DIGEST,
+        "privacy_policy_digest": _SUBSCRIPTION_DIGEST,
+        "sampling_params": {"max_output_tokens": "2048"},
+        "latency_ms": "321",
+        "semantic_attempt_id": _subscription_id("att_", 1),
+        "dispatch_kind": "external_runtime_oauth",
+        "privacy_receipt_id": _subscription_id("egr_", 2),
+        "status": "succeeded",
+        "reason": "semantic_completed",
+        "egress_authorization_id": _subscription_id("aut_", 3),
+        "request_commitment": _SUBSCRIPTION_COMMITMENT,
+        "runtime_evidence": {
+            "app_server_schema_sha256": _SUBSCRIPTION_DIGEST,
+            "capability_cell_sha256": _SUBSCRIPTION_DIGEST,
+            "capability_evidence_expires_at": "2026-11-30T00:00:00Z",
+            "capability_profile": "codex-evaluator/0.150.1/v1",
+            "case_disclosed": True,
+            "credential_authority": "external_runtime_oauth",
+            "disclosed_case_sha256": _SUBSCRIPTION_DIGEST,
+            "executable_sha256": _SUBSCRIPTION_DIGEST,
+            "instruction_sha256": _SUBSCRIPTION_DIGEST,
+            "isolated_config_sha256": _SUBSCRIPTION_DIGEST,
+            "launcher_sha256": _SUBSCRIPTION_DIGEST,
+            "output_schema_sha256": _SUBSCRIPTION_DIGEST,
+            "process_cleanup": "terminated",
+            "reasoning_effort": "high",
+            "runtime_source_identity": "openai-codex-npm-darwin-arm64-0.150.1",
+            "runtime_version": "0.150.1",
+            "selection_sha256": _SUBSCRIPTION_DIGEST,
+            "turn_acknowledged": True,
+            "upstream_body_observability": "unavailable",
+            "auth_mode": "chatgpt",
+            "plan_type": "prolite",
+            "thread_id": "thread-1",
+            "turn_id": "turn-1",
+            "final_output_sha256": _SUBSCRIPTION_DIGEST,
+        },
+    }
+
+
+def _subscription_finding() -> dict[str, Any]:
+    return {
+        "finding_id": _subscription_id("fnd_", 8),
+        "kind": "material_limitation_omitted",
+        "origin": "semantic_model_derived",
+        "priority": 1,
+        "summary": "The synthetic semantic finding remains advisory.",
+        "detail": "The synthetic semantic finding remains advisory.",
+        "subject_refs": [_subscription_id("clm_", 9)],
+        "policy_id": "research-evidence",
+        "policy_version": "0.1.0",
+        "subject_frontier": {"sequence": "1", "head_digest": _SUBSCRIPTION_DIGEST},
+        "coverage": _subscription_coverage(),
+        "provenance": _subscription_provenance(),
+    }
+
+
+def _subscription_check_result() -> dict[str, Any]:
+    frontier = {"sequence": "1", "head_digest": _SUBSCRIPTION_DIGEST}
+    return {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": _subscription_id("req_", 7),
+        "ok": True,
+        "state": "complete",
+        "task_id": _subscription_id("tsk_", 4),
+        "session_id": _subscription_id("ses_", 5),
+        "writer_id": _subscription_id("wri_", 6),
+        "subject_frontier": frontier,
+        "result_frontier": frontier,
+        "verdict": "action_required",
+        "findings": [_subscription_finding()],
+        "suppressed_count": "0",
+        "policy_executions": [
+            {
+                "policy_id": "work-integrity",
+                "policy_version": "0.1.0",
+                "outcome": "run",
+                "reason": "completed",
+            }
+        ],
+        "semantic_status": "succeeded",
+        "semantic_reason": "semantic_completed",
+        "semantic_provenance": _subscription_provenance(),
+        "coverage": _subscription_coverage(),
+        "versions": {
+            "protocol_version": "0.1",
+            "engine_version": "0.1.0",
+            "projection_version": "0.1.0",
+            "policy_packs": ["work-integrity/0.1.0"],
+        },
+        "privacy_projection": _subscription_privacy_projection(),
+    }
+
+
+def _subscription_status_result() -> dict[str, Any]:
+    frontier = {"sequence": "1", "head_digest": _SUBSCRIPTION_DIGEST}
+    finding = _subscription_finding()
+    finding.update(
+        {
+            "disposition": "none",
+            "resolved": False,
+            "response_event_id": None,
+            "reason": None,
+            "waiver_scope": None,
+            "waiver_expiry": None,
+        }
+    )
+    return {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": _subscription_id("req_", 10),
+        "ok": True,
+        "task_id": _subscription_id("tsk_", 4),
+        "session_id": _subscription_id("ses_", 5),
+        "writer_id": _subscription_id("wri_", 6),
+        "view": "findings",
+        "requested_frontier": frontier,
+        "head_frontier": frontier,
+        "subject_frontier": frontier,
+        "result_frontier": frontier,
+        "projection_lag": "0",
+        "projection_version": "0.1.0",
+        "rebuild_state": "current",
+        "page": {"items": [finding], "next_cursor": None},
+        "coverage": _subscription_coverage(),
+        "gaps": [],
+        "import_status": {
+            "pending_count": "0",
+            "terminal_count": "0",
+            "phase": None,
+            "report_evidence_id": None,
+            "source_identity_digest": None,
+        },
+        "closure_readiness": {
+            "declared_obligation_count": "0",
+            "no_obligations_reason": None,
+            "open_obligation_count": "0",
+            "unanswered_finding_count": "1",
+            "receipt_blocking_finding_count": "1",
+            "blocking_conditions": ["findings_unanswered"],
+        },
+        "privacy_projection": _subscription_privacy_projection(),
+    }
+
+
+def _subscription_receipt_result() -> dict[str, Any]:
+    frontier = {"sequence": "1", "head_digest": _SUBSCRIPTION_DIGEST}
+    finding = _subscription_finding()
+    document: dict[str, Any] = {
+        "schema_version": "1.0.0",
+        "receipt_id": _subscription_id("rcp_", 11),
+        "task_id": _subscription_id("tsk_", 4),
+        "session_id": _subscription_id("ses_", 5),
+        "generated_at": "2026-09-05T00:00:00.000Z",
+        "subject_frontier": frontier,
+        "conclusion": "unresolved_findings_remain",
+        "suppressed_finding_count": 0,
+        "versions": {
+            "package_name": "yoetz",
+            "package_version": "0.1.0",
+            "protocol_version": "0.1",
+            "engine_version": "0.1.0",
+            "projection_version": "yoetz/0.1.0",
+            "object_format_version": "yoetz-object/1",
+            "catalog_schema_version": "6",
+            "bundle_schema_version": "9",
+            "policy_versions": [
+                {"policy_id": "research-evidence", "policy_version": "0.1.0"},
+                {"policy_id": "work-integrity", "policy_version": "0.1.0"},
+            ],
+            "schema_versions": [
+                {"schema_id": "findings/finding", "schema_version": "1.1.0"},
+                {"schema_id": "receipts/receipt-document", "schema_version": "1.1.0"},
+            ],
+            "resource_manifest_digest": _SUBSCRIPTION_DIGEST,
+        },
+        "coverage": _subscription_coverage(),
+        "findings": [finding],
+        "obligations": [],
+        "responses": [],
+        "claim_refs": [_subscription_id("clm_", 9)],
+        "evidence_refs": [],
+        "gaps": [],
+        "redactions": [],
+        "sections": [
+            {"key": "summary", "title": "Summary", "body": "Synthetic receipt.", "items": []},
+            {
+                "key": "outstanding_work",
+                "title": "Outstanding work",
+                "body": "The synthetic finding remains open.",
+                "items": [],
+            },
+            {
+                "key": "findings_and_dispositions",
+                "title": "Findings",
+                "body": "One synthetic finding remains.",
+                "items": [_subscription_id("fnd_", 8)],
+            },
+            {
+                "key": "evidence_and_claim_basis",
+                "title": "Evidence basis",
+                "body": "The synthetic receipt carries bounded provenance.",
+                "items": [],
+            },
+            {
+                "key": "limitations_and_coverage",
+                "title": "Limitations",
+                "body": "The result is advisory.",
+                "items": [],
+            },
+            {
+                "key": "version_and_policy_identity",
+                "title": "Versions and policy",
+                "body": "Synthetic contract fixture.",
+                "items": [],
+            },
+        ],
+    }
+    return {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": _subscription_id("req_", 12),
+        "ok": True,
+        "receipt_id": document["receipt_id"],
+        "task_id": document["task_id"],
+        "session_id": document["session_id"],
+        "subject_frontier": document["subject_frontier"],
+        "result_frontier": {"sequence": "2", "head_digest": _SUBSCRIPTION_DIGEST},
+        "receipt_object_id": _subscription_id("obj_", 13),
+        "receipt_digest": _SUBSCRIPTION_DIGEST,
+        "conclusion": document["conclusion"],
+        "redaction_profile": "full_local",
+        "format": "json",
+        "include": "full",
+        "document": document,
+        "human_text": None,
+        "coverage": document["coverage"],
+        "suppressed_finding_count": document["suppressed_finding_count"],
+        "versions": document["versions"],
+        "privacy_projection": _subscription_privacy_projection(),
+    }
+
+
+@pytest.mark.parametrize("profile", ("policy", "strict"))
+def test_advertised_outputs_accept_subscription_runtime_provenance(
+    profile: McpRouteProfile,
+) -> None:
+    """Current MCP result declarations must carry the OAuth runtime provenance contract."""
+
+    outputs = {
+        "check": _subscription_check_result(),
+        "status": _subscription_status_result(),
+        "receipt": _subscription_receipt_result(),
+    }
+    for tool_name, output in outputs.items():
+        validator = cast(
+            Any, Draft202012Validator(cast(Any, descriptor_for(tool_name, profile).output_schema))
+        )
+        errors = sorted(validator.iter_errors(output), key=lambda error: list(error.path))
+        assert not errors, f"{profile}/{tool_name}: {errors[0].json_path}: {errors[0].message}"
 
 
 def test_respond_agent_surface_names_every_admitted_disposition() -> None:
