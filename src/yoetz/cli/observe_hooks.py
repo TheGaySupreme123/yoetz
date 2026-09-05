@@ -2202,12 +2202,13 @@ def handle_observe(
                         queue_mapping_clear(clear_session_id, _state=_state)
             except Exception:
                 pass
+        capture_authority_known = True
         try:
             capture_enabled = store.runtime_enabled()
         except TimeoutError:
-            # Store-lock contention says nothing about the gate itself.
-            # Fall back to the missing-marker default (enabled) instead of
-            # discarding the event; consent still gates every ingest below.
+            # Retain structural activity on contention, but unknown runtime
+            # authority must never permit extracting or forwarding plaintext.
+            capture_authority_known = False
             _stderr_line("hook_observe_degraded: runtime_gate_contended")
             record_hook_diagnostic("runtime_gate_contended", resolved_event, _state=_state)
             capture_enabled = True
@@ -2436,21 +2437,29 @@ def handle_observe(
                 ObservationSource.CLAUDE_HOOK,
                 ObservationSource.CURSOR_HOOK,
             }
-            content_authorized = not native_content_source
+            content_authorized = capture_authority_known and not native_content_source
             if native_content_source:
                 content_authorized = (
-                    _content_capture_profile is not None
+                    capture_authority_known
+                    and _content_capture_profile is not None
                     and content_capture_profile_matches_source(
                         source.value, _content_capture_profile
                     )
                     and _content_capture_profile in consent.content_capture_profiles
                 )
-                if _content_capture_profile is not None and not content_authorized:
+                if (
+                    capture_authority_known
+                    and _content_capture_profile is not None
+                    and not content_authorized
+                ):
                     gap_codes.append(ObservationGapCode.CONTENT_UNSELECTED.value)
-                    envelope = replace(
-                        envelope,
-                        gap_codes=tuple(sorted(set(gap_codes), key=str.encode)),
-                    )
+            if not capture_authority_known:
+                gap_codes.append(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
+            if tuple(sorted(set(gap_codes), key=str.encode)) != envelope.gap_codes:
+                envelope = replace(
+                    envelope,
+                    gap_codes=tuple(sorted(set(gap_codes), key=str.encode)),
+                )
             if not content_authorized:
                 content_chunks, content_truncated = (), False
             else:

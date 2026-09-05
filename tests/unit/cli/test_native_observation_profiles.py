@@ -768,3 +768,63 @@ def test_claude_ordinary_cancellation_and_invalid_status_are_closed(
     assert b"CANCEL_CANARY" not in state_bytes
     assert b"future-status" not in state_bytes
     assert b"API_ERROR_PROSE_CANARY" not in state_bytes
+
+
+@pytest.mark.parametrize("host", ["claude", "cursor"])
+def test_unknown_runtime_authority_never_extracts_native_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str
+) -> None:
+    state = tmp_path / "state"
+    store = LocalObservationStore(_state=state)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    profile = (
+        CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+        if host == "claude"
+        else CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
+    )
+    store.grant_consent(workspace)
+    store.enable_content_capture(workspace, profile)
+    extracted: list[bool] = []
+
+    def contended(_store: LocalObservationStore) -> bool:
+        raise TimeoutError("observation_store_lock_timeout")
+
+    def visible_content(*args: object, **kwargs: object) -> tuple[tuple[()], bool]:
+        extracted.append(True)
+        return (), False
+
+    monkeypatch.setattr(LocalObservationStore, "runtime_enabled", contended)
+    monkeypatch.setattr(observe_hooks, "_visible_content_chunks", visible_content)
+    event = "PostToolUse" if host == "claude" else "postToolUse"
+    payload: dict[str, JsonValue] = {
+        "hook_event_name": event,
+        "session_id": "unknown-authority",
+        "tool_name": "Read",
+        "tool_use_id": "read-1",
+        "tool_response": "PRIVATE_CONTENT_MUST_NOT_BE_EXTRACTED",
+        "tool_output": "PRIVATE_CONTENT_MUST_NOT_BE_EXTRACTED",
+        "workspace_roots": (str(tmp_path),),
+    }
+    handler = (
+        observe_hooks.handle_claude_observe
+        if host == "claude"
+        else observe_hooks.handle_cursor_observe
+    )
+    assert (
+        handler(
+            event_name=event,
+            stdin_bytes=canonical_encode(payload),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=state,
+            skip_service=True,
+            observation_profile=profile,
+        )
+        == 0
+    )
+    assert extracted == []
+    pending = tuple(row.envelope for row in store.list_pending_outbox_rows(workspace))
+    assert len(pending) == 1
+    assert "content_capture_unavailable" in pending[0].gap_codes
+    assert "content_unselected" not in pending[0].gap_codes
+    assert pending[0].content_object_refs == ()
