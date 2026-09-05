@@ -373,7 +373,15 @@ is repaired by restarting a service that already reports ready.
 not enqueued for delivery, while `start`, `publish_work`, `check`, and `respond` enqueue one row
 each. Cursor's hook payload states no outcome fact for MCP executions, so a failed Yoetz call is
 indistinguishable from a successful one at this ingress; the service's own record of the call is
-the authority on its outcome. `afterFileEdit` and lifecycle events are unchanged.
+the authority on its outcome. Cursor reports `duration` as a finite decimal number of milliseconds
+for MCP executions, while the canonical structural field is the bounded integer `duration_ms`.
+Cursor ingress truncates that vendor value to whole milliseconds before structural filtering; the canonical parser
+continues to reject floats on every ledger and non-Cursor host surface. Decimal values in discarded
+vendor fields are replaced transiently and never reach the structural envelope. Execution and file
+edit payloads use `model`, while lifecycle payloads may also provide `model_id`; a valid
+`model_id` takes precedence when both spellings are present, and `model` is its bounded fallback.
+Malformed or unsafe Cursor envelopes remain fail-open but record `cursor_payload_invalid` as a
+payload-free hook diagnostic. `afterFileEdit` and lifecycle events are otherwise unchanged.
 
 Measured on 2026-08-28 with Cursor Agent CLI `2026.08.25-3e8eec8` (payload `cursor_version`;
 `cursor-agent --version` printed `2026.08.11-e8db854`) loading the native plugin through

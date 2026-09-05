@@ -4105,7 +4105,13 @@ loading has no independent installed-artifact, event-delivery, privacy-filtering
 or accepted-observation proof. Native IDE rendering or schema validity cannot populate those
 neighboring cells.
 Cursor ingress maps only bounded session/generation/tool IDs, exact Cursor/model/effort tokens,
-duration, capability profile, and an installation-keyed HMAC changed-path commitment. It discards
+duration, capability profile, and an installation-keyed HMAC changed-path commitment. Cursor's
+`afterMCPExecution` duration is admitted as a finite decimal millisecond value only at this host
+boundary and truncated to the canonical integer `duration_ms`; the canonical parser remains
+float-free. Discarded vendor-field floats are replaced transiently, and malformed or unsafe Cursor
+envelopes remain fail-open while recording the payload-free `cursor_payload_invalid` diagnostic.
+The `model` spelling from execution/file-edit events normalizes to `model_id`; a valid `model_id`
+spelling wins when both are present. It discards
 prompt, reasoning, response text, paths, file contents/edits, MCP/tool inputs/results, transcripts,
 commands/output, and email before storage and never reconciles a Cursor transcript stream. It uses
 `workspace_roots` transiently, then `CURSOR_PROJECT_DIR`, then the explicit hook argument to choose

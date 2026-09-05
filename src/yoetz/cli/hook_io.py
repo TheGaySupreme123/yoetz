@@ -1,6 +1,6 @@
 """Leaf hook IO helpers: stdin payload, stdout JSON, stderr line, context output.
 
-Deliberately imports nothing beyond ``yoetz.protocol``. ``yoetz.cli.hooks``
+Deliberately imports no Yoetz modules beyond ``yoetz.protocol``. ``yoetz.cli.hooks``
 re-exports these names unchanged; the split exists so a hook process does not
 pay for ``service.client`` → ``control_protocol`` → ``protocol.schemas`` →
 jsonschema just to write one JSON object to stdout (#242).
@@ -8,11 +8,19 @@ jsonschema just to write one JSON object to stdout (#242).
 
 from __future__ import annotations
 
+import json
 import sys
 from collections.abc import Mapping
+from decimal import Decimal, InvalidOperation
 from typing import BinaryIO, Final, cast
 
-from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
+from yoetz.protocol.canonical import (
+    MAX_JSON_DEPTH,
+    JsonValue,
+    canonical_encode,
+    ensure_canonical_value,
+    strict_json_parse,
+)
 from yoetz.protocol.errors import ProtocolValueError
 
 __all__ = [
@@ -22,6 +30,7 @@ __all__ = [
     "claude_context_output",
     "context_output",
     "cursor_context_output",
+    "read_cursor_hook_payload",
     "read_hook_payload",
     "stderr_line",
     "stdout_json",
@@ -30,6 +39,7 @@ __all__ = [
 _MAX_STDIN_BYTES: Final = 262_144
 _MAX_CONTEXT_CHARS: Final = 2_000
 _MAX_STDERR_CHARS: Final = 200
+_MAX_SAFE_INTEGER: Final = 2**53 - 1
 # Codex events whose output schema admits hookSpecificOutput.additionalContext.
 ADDITIONAL_CONTEXT_EVENTS: Final = frozenset(
     {
@@ -175,3 +185,124 @@ def read_hook_payload(raw: bytes | None = None) -> Mapping[str, JsonValue]:
     if not isinstance(parsed, Mapping):
         raise ProtocolValueError("unsupported_json_type")
     return cast(Mapping[str, JsonValue], parsed)
+
+
+def _parse_cursor_integer(literal: str) -> int:
+    """Parse a Cursor host integer with the same safe bound as canonical JSON."""
+
+    if literal == "-0":
+        raise ProtocolValueError("float_forbidden")
+    try:
+        value = int(literal)
+    except ValueError as exc:
+        raise ProtocolValueError("integer_out_of_safe_range") from exc
+    if not -_MAX_SAFE_INTEGER <= value <= _MAX_SAFE_INTEGER:
+        raise ProtocolValueError("integer_out_of_safe_range")
+    return value
+
+
+def _reject_cursor_constant(_: str) -> object:
+    raise ProtocolValueError("float_forbidden")
+
+
+def _normalize_cursor_duration(value: Decimal) -> int:
+    """Truncate one finite, nonnegative Cursor duration to canonical milliseconds."""
+
+    if not value.is_finite() or value < 0 or (value.is_zero() and value.is_signed()):
+        raise ProtocolValueError("invalid_duration")
+    if value > _MAX_SAFE_INTEGER:
+        raise ProtocolValueError("integer_out_of_safe_range")
+    return int(value)
+
+
+def _normalize_cursor_value(value: object, *, key: str | None, depth: int) -> JsonValue:
+    """Convert Cursor floats without admitting them to the canonical payload.
+
+    The host may place ordinary decimal numbers in discarded vendor fields such
+    as tool metadata. Those values remain transient and are replaced with
+    ``null``; only the top-level duration is retained after normalization.
+    """
+
+    if isinstance(value, Decimal):
+        if key == "duration" and depth == 1:
+            return _normalize_cursor_duration(value)
+        if depth == 0:
+            raise ProtocolValueError("float_forbidden")
+        return None
+    if value is None or type(value) in {bool, int, str}:
+        return cast(JsonValue, value)
+    if type(value) is list:
+        if depth >= MAX_JSON_DEPTH:
+            raise ProtocolValueError("nesting_too_deep")
+        return [
+            _normalize_cursor_value(item, key=None, depth=depth + 1)
+            for item in cast(list[object], value)
+        ]
+    if type(value) is dict:
+        if depth >= MAX_JSON_DEPTH:
+            raise ProtocolValueError("nesting_too_deep")
+        normalized: dict[str, JsonValue] = {}
+        for child_key, item in cast(dict[object, object], value).items():
+            if type(child_key) is not str:
+                raise ProtocolValueError("object_key_not_string")
+            normalized[child_key] = _normalize_cursor_value(
+                item,
+                key=child_key,
+                depth=depth + 1,
+            )
+        return normalized
+    raise ProtocolValueError("unsupported_json_type")
+
+
+def read_cursor_hook_payload(raw: bytes | None = None) -> Mapping[str, JsonValue]:
+    """Read Cursor's bounded host JSON, normalizing its decimal duration field.
+
+    Cursor reports MCP hook durations as fractional milliseconds. That vendor shape
+    is admitted only here; canonical ledger and all other host parsers remain
+    float-free. Unknown or nested numeric floats are replaced with ``null`` before
+    structural filtering, while all host-controlled values are still discarded
+    by the caller.
+    """
+
+    data = sys.stdin.buffer.read(_MAX_STDIN_BYTES + 1) if raw is None else raw
+    if type(data) is bytearray:
+        data = bytes(data)
+    elif type(data) is not bytes:
+        raise ProtocolValueError("input_not_bytes")
+    if not data or len(data) > _MAX_STDIN_BYTES:
+        raise ProtocolValueError("invalid_event_value_type")
+    if b"\x00" in data:
+        raise ProtocolValueError("nul_byte_forbidden")
+    try:
+        text = data.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ProtocolValueError("invalid_utf8") from exc
+    if text.startswith("\ufeff"):
+        raise ProtocolValueError("byte_order_mark_forbidden")
+
+    def _decode_object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = dict(pairs)
+        if len(result) != len(pairs):
+            raise ProtocolValueError("duplicate_object_key")
+        return result
+
+    try:
+        parsed = json.loads(
+            text,
+            object_pairs_hook=_decode_object_pairs,
+            parse_float=Decimal,
+            parse_int=_parse_cursor_integer,
+            parse_constant=_reject_cursor_constant,
+        )
+    except json.JSONDecodeError as exc:
+        raise ProtocolValueError("malformed_json") from exc
+    except RecursionError as exc:
+        raise ProtocolValueError("nesting_too_deep") from exc
+    except InvalidOperation as exc:
+        raise ProtocolValueError("float_forbidden") from exc
+
+    normalized = _normalize_cursor_value(parsed, key=None, depth=0)
+    ensure_canonical_value(normalized)
+    if not isinstance(normalized, Mapping):
+        raise ProtocolValueError("unsupported_json_type")
+    return cast(Mapping[str, JsonValue], normalized)
