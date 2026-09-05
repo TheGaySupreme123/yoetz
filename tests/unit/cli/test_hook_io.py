@@ -126,7 +126,7 @@ def test_claude_context_is_bounded_by_the_shared_context_limit() -> None:
     ("literal", "expected"),
     [("428.607", 428), ("428.5", 428), ("428.499", 428), ("0.0", 0), ("1e3", 1_000)],
 )
-def test_cursor_hook_payload_rounds_fractional_duration_to_canonical_integer(
+def test_cursor_hook_payload_truncates_fractional_duration_to_canonical_integer(
     literal: str, expected: int
 ) -> None:
     payload = ('{"duration":' + literal + ',"hook_event_name":"afterMCPExecution"}').encode()
