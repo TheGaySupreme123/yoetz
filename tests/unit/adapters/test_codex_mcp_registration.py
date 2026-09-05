@@ -33,6 +33,14 @@ _BINARY = HarnessBinary(
 )
 
 
+@pytest.fixture(autouse=True)
+def scripted_registration_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The scripted host entries below model ambient registration by default.
+    # Isolated-registration cases explicitly override this adapter lookup;
+    # keep the process-wide isolation guard intact for all other test effects.
+    monkeypatch.setattr("yoetz.adapters.integrations.codex_mcp.isolated_root", lambda: None)
+
+
 def _yoetz_entry(
     *, strict: bool = False, isolated_root: str | None = None, legacy: bool = False
 ) -> bytes:
