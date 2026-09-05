@@ -2,8 +2,8 @@
 
 **Status:** Accepted (2026-08-13), recorded for issues #214–#223 and acknowledged in issue #225.
 **Amended:** 2026-09-05 for issue #494 / ADR-027 (observation writer stays per task/session;
-bundle-resident workspace-keyed store from `migrations/bundle/0004.sql` is logically
-project-scoped once multiple live tasks share a workspace); 2026-09-04 for issue #577 (pending observation rows follow a superseded session
+only inventory-designated shared-mutable workspace routing or verification-job scheduling authority
+may become project-scoped once multiple live tasks share a repository); 2026-09-04 for issue #577 (pending observation rows follow a superseded session
 binding after ended-session recovery attach); 2026-09-04 for issue #560 (task-scoped operation identity across workflow
 reattach, decision 18); 2026-09-03 for issues #539 (content-bearing committed replay) and #540
 (terminal ingest rejection and retry ceiling); 2026-08-30 for issue #302 (captured observation ledger
@@ -334,12 +334,14 @@ own retained envelopes and is never silently fed a workspace-wide aggregate.
 
 ADR-027's bounded reversal of the #250/#352 no-cross-task-state posture does not create a shared
 writable ledger and does not let workspace-wide observation become a silent input to another
-task's advice snapshot. Once multiple live tasks share a workspace, the bundle-resident
-workspace-keyed observation local store from `migrations/bundle/0004.sql`
-(`observation_inspection_snapshots`, `observation_workspace_session_routes`,
-`observation_session_advice`) is logically project-scoped and must not remain in one task
-bundle. Issue #496 relocates that state to the catalog or project home. Until that relocation,
-`workspace_task_exists` still keeps the store single-task-safe.
+task's advice snapshot. The #498 ownership inventory must classify each table before #496 moves
+anything. Only inventory-designated shared-mutable workspace routing may move to a catalog or
+project home; task-owned provenance remains in its task bundle. In the expected `0004` inventory,
+`observation_workspace_session_routes` is one expected shared-mutable candidate. The
+`observation_verification_jobs` per-workspace running-job uniqueness in `0003` is a separate
+expected scheduling-authority candidate. Job results, `observation_inspection_snapshots`, and
+`observation_session_advice` remain task-owned unless the inventory proves otherwise. Until that
+migration, `workspace_task_exists` still keeps the store single-task-safe.
 
 ## Security and privacy consequences
 

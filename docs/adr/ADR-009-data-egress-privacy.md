@@ -332,7 +332,7 @@ case → single-use authorization → bounded gateway → bound sink/provider �
     does not authorize semantic/live artifact inspection, and does not weaken never-send. An
     unsupported, partial, unsafe, changing, or over-limit capture returns no comparable state.
 16. **Live harness observation retention (first-party Codex, ADR-010 amendment 2026-07-22):**
-    Observation consent is independent of egress consent. One project-level confirmation records a
+    Observation consent is independent of egress consent. One workspace-level confirmation records a
     private workspace commitment (never a raw path). The normalized workspace locator is an
     authenticated encrypted task object; plaintext state retains only its commitment and object
     identity. Locator normalization selects a safe Git root and performs lexical path cleanup; it
@@ -398,18 +398,16 @@ case → single-use authorization → bounded gateway → bound sink/provider �
     digests, expiry, denial, crash rollback, or exhausted entitlements leave the prior rows unchanged
     and external LLM admission blocked.
 
-18. **Project scope on the authorization lattice (2026-09-05, issue #494 / ADR-027):**
-    `AuthorizationScopeKind` gains `project` between `machine` and `workspace`. A project scope
-    carries `installation_id` and `project_id` (`prj_`). `contains()` is membership-aware: a
-    machine scope contains a project; a project contains a workspace, task, or request whose
-    catalog membership belongs to that project; a workspace scope never contains a project.
-    Same-workspace coordination under an implicit `workspace_bound` project inherits the existing
-    workspace grant and needs no new ceremony. A `general` or otherwise cross-workspace project
-    requires an explicit project-scope grant before coordination, rollup projection across those
-    workspaces, or membership mutation. Overlay storage, the ceremony, and the live enum change
-    are issue #502 / #495. Today's four-kind structural `contains()` remains executable until
-    then. Decision 16's observation consent — one confirmation via a private workspace
-    commitment — is unchanged and is not this `prj_` object (resolved F-021).
+18. **Project coordination stays local disclosure (2026-09-05, issue #494 / ADR-027):**
+    A first-class `prj_` project is a grouping object, not a fifth egress scope. The
+    `AuthorizationScopeKind` enum and `AuthorizationScope.contains()` relation remain the
+    four-kind chain `machine → workspace → task → request`; project membership cannot widen
+    egress authority. A fact enters local coordination only when its source workspace's own
+    observation consent is active. General or cross-repository coordination additionally needs
+    an explicit generation-bound coordination grant, checked at admission and delivery, while
+    cross-repository semantic dispatch remains outside this series. This explains why project
+    membership is not inserted into `privacy_policy_versions` or `privacy_audit_records` and why
+    the existing never-send, category, provenance, and task-scope restrictions remain unchanged.
 
 ### Human involvement under the recommended recipe
 

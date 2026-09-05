@@ -83,13 +83,13 @@ reverse-chronological released versions.
 
 ### Added
 
-- ADR-027 ratifies task lineage and first-class project scope: child tasks are own bundles with
-  catalog-held parent, depth, and creation provenance; receipts roll up one level by severity;
-  `prj_` is the accepted project id; same-workspace coordination inherits the existing workspace
-  grant, and cross-workspace work needs an explicit project-scope grant.
-  `workspace_task_exists` and bundle-resident workspace-keyed observation state
-  (`migrations/bundle/0004.sql`) are named for retirement, with replacement invariants, in
-  #496/#497. No wire, catalog, or admission change ships in this change (issue #494).
+- ADR-027 ratifies task lineage and first-class project grouping: child tasks are own bundles with
+  catalog-held parent, depth, lineage digest, origin, acceptance, and work state; receipts roll
+  up one level by severity; `prj_` is the accepted project id. Coordination remains local
+  disclosure under each source workspace's consent, with a generation-bound coordination grant
+  for general or cross-repository work; the egress lattice is unchanged. `workspace_task_exists`
+  and only inventory-designated shared-mutable state are named for retirement, with replacement
+  invariants, in #496/#497. No wire, catalog, or admission change ships in this change (issue #494).
 
 - Agents can now set up or change semantic review through normal conversation. When a user
   explicitly wants semantic review, the agent recommends Expanded review first, explains the
@@ -551,7 +551,7 @@ and contained no usable Yoetz implementation.
 - First-party Codex **live observation and advice** as a required v0.1 capability (ADR-010
   amendment): dual-source ingest (hooks primary + selective session-stream reconciliation), local
   `ObservationPort` control (`yoetz observe status|grant|pause|resume|revoke|reconcile|drain|reclaim`), unified
-  `yoetz hooks observe`, project-level observation consent via private workspace commitment,
+  `yoetz hooks observe`, workspace-level observation consent via private workspace commitment,
   automatic session↔task attachment without depending on MCP `start`, descriptor-safe workspace
   inspection, approved-check runner, and deterministic `AdviceSnapshot` guidance (optional semantic
   review remains additive). Still exactly six MCP tools; observation is CLI/service control only.

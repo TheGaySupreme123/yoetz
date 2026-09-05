@@ -69,7 +69,7 @@ skill files under `skills/codex/`, and `tests/capability/`.
    `hook_observed` publication/artifact classes) require a justified observation channel. For
    first-party Codex that channel is the v0.1 `ObservationPort` path — hooks primary, selective
    session-stream reconciliation secondary — once the exact capability cell proves observation and
-   project-level observation consent is active (ADR-010). A trigger-only hook still observes
+   workspace-level observation consent is active (ADR-010). A trigger-only hook still observes
    nothing and cannot raise authorship or artifact observation. No inference from display names or
    transcript fields.
 7. **Startup budget:** measured cold-start target < 2 s on reference hardware; the release binds

@@ -101,7 +101,7 @@ Flow for a typical task:
 5. **`receipt`** projects the honest summary: what was checked, at what coverage, what is still
    open. Available as `json`, `markdown`, or `text`.
 
-With separate project consent, first-party harness hooks may retain selected visible content as
+With separate workspace observation consent, first-party harness hooks may retain selected visible content as
 secret-scanned encrypted objects. The observation coordinator can materialize only eligible tool
 output, changed-file, diff, and bounded inspection objects as `observation_captured` immutable
 evidence. That path proves retention and byte identity, not correctness, reproduction, or egress
