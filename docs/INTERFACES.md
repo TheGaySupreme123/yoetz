@@ -3196,9 +3196,12 @@ bounded profile set to the mapped task store. Structural subscriptions and nativ
 are independent; profile-free Codex observation retains its existing contract.
 
 `yoetz observe content-enable`, `content-disable`, and `content-status` operate on the same canonical
-workspace as observation consent. Pause, disable, and revoke must fence retained native content
-reads and subsequent semantic disclosure as well as future capture. A task-store snapshot is not
-independent authority after a local consent change. Selection into a semantic case additionally
+workspace as observation consent. The local content fence combines a durable per-workspace epoch
+with a persisted runtime-gate nonce; every real consent or runtime transition advances it, including
+pause/resume and off/on ABA cycles, and legacy state receives a fresh epoch before authority is
+accepted. Pause, disable, and revoke must fence retained native content reads and subsequent
+semantic disclosure as well as future capture. A task-store snapshot is not independent authority
+after a local consent change. Selection into a semantic case additionally
 requires authenticated captured-object provenance, case membership, source/session/phase binding,
 and the effective privacy selection. Captured bytes remain bounded advisory evidence; they do not
 prove that a command passed, a file was independently inspected, or a reviewer acted on the bytes.

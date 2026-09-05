@@ -3685,8 +3685,16 @@ async def test_native_content_requires_matching_local_and_task_profile_grants(
     )
 
     class _RuntimePort:
+        def __init__(self) -> None:
+            self.disable_before_capture = False
+
         async def route(self, command: object) -> object:
             del command
+            if self.disable_before_capture:
+                self.disable_before_capture = False
+                # Model a queued request whose runtime gate is disabled after
+                # the coordinator's initial consent read but before capture.
+                local.set_runtime_enabled(False)
             return runtime
 
         async def release(self, released: object) -> None:
@@ -3714,8 +3722,9 @@ async def test_native_content_requires_matching_local_and_task_profile_grants(
         async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
             del args, kwargs
 
+    runtime_port = _RuntimePort()
     coordinator = _Coordinator(
-        runtime=_RuntimePort(),  # type: ignore[arg-type]
+        runtime=runtime_port,  # type: ignore[arg-type]
         local=local,
         clock=object(),  # type: ignore[arg-type]
         ids=object(),  # type: ignore[arg-type]
@@ -3754,9 +3763,10 @@ async def test_native_content_requires_matching_local_and_task_profile_grants(
     omitted = await coordinator.ingest_request(request("hook:native-content-omitted", profile=None))
     assert omitted.disposition is ObservationIngestDisposition.ACCEPTED
     assert captured == [()]
-    assert ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value in task_store.list_envelopes(
-        workspace
-    )[0].gap_codes
+    assert (
+        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+        in task_store.list_envelopes(workspace)[0].gap_codes
+    )
 
     selected = await coordinator.ingest_request(request("hook:native-content-selected"))
     assert selected.disposition is ObservationIngestDisposition.ACCEPTED
@@ -3774,6 +3784,16 @@ async def test_native_content_requires_matching_local_and_task_profile_grants(
     assert mismatch.disposition is ObservationIngestDisposition.REJECTED
     assert mismatch.reason == ObservationGapCode.CONTENT_CAPTURE_PROFILE_MISMATCH.value
     assert captured[-1] == (chunk,)
+
+    # A direct/queued native request still admits its structural envelope, but
+    # the authoritative runtime fence blocks the plaintext capture path.
+    runtime_port.disable_before_capture = True
+    before_blocked_capture_count = len(captured)
+    queued = await coordinator.ingest_request(request("hook:native-content-runtime-off"))
+    assert queued.disposition is ObservationIngestDisposition.ACCEPTED
+    assert len(captured) == before_blocked_capture_count
+    retained = task_store.list_envelopes(workspace)
+    assert ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value in retained[-1].gap_codes
 
 
 @pytest.mark.anyio
