@@ -92,7 +92,12 @@ from yoetz.ports.integrations import (
     YOETZ_WORKFLOW_TOOL_NAMES,
     observation_pairing_contract,
 )
-from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
+from yoetz.protocol.canonical import (
+    JsonValue,
+    canonical_digest,
+    canonical_encode,
+    strict_json_parse,
+)
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode
 
 if TYPE_CHECKING:
@@ -119,6 +124,7 @@ SUPPORTED_HOOK_EVENTS: Final = frozenset(
         "PreToolUse",
         "PostToolUse",
         "PermissionRequest",
+        "PermissionDecision",
         "PreCompact",
         "PostCompact",
         "SubagentStart",
@@ -2465,9 +2471,7 @@ def handle_observe(
                     ),
                 )
             content_map = {envelope.source_identity: content_chunks} if content_chunks else None
-            service_content_profile = (
-                _content_capture_profile if content_authorized else None
-            )
+            service_content_profile = _content_capture_profile if content_authorized else None
 
             # Local durable ingest and pairing admission share one store lock.
             # The returned envelope is authoritative: a paired orphan's gap is
@@ -2974,6 +2978,222 @@ def _claude_capability_profile_id(claude_version: object) -> str | None:
 
 _CLAUDE_CHECK_TOOL_NAMES: Final = frozenset({"mcp__yoetz__check", "mcp__plugin_yoetz_yoetz__check"})
 
+_NATIVE_OUTCOME_JSON_BYTES: Final = 65_536
+_NATIVE_SUCCESS_STATUSES: Final = frozenset(
+    {"complete", "completed", "ok", "passed", "success", "succeeded"}
+)
+_NATIVE_FAILURE_STATUS_MAP: Final = MappingProxyType(
+    {
+        "aborted": "aborted",
+        "canceled": "cancelled",
+        "cancelled": "cancelled",
+        "denied": "denied",
+        "error": "error",
+        "errored": "error",
+        "failed": "failure",
+        "failure": "failure",
+        "interrupted": "interrupted",
+        "nonzero": "nonzero_exit",
+        "nonzero_exit": "nonzero_exit",
+        "permission_denied": "denied",
+        "timed_out": "timeout",
+        "timeout": "timeout",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _NativeOutcomeFacts:
+    """Closed outcome facts extracted from a native host result.
+
+    Host result objects are untrusted and may contain arbitrary prose.  This
+    value retains only booleans, a bounded process exit code, and a closed
+    result token.  ``success=None`` deliberately means that the host did not
+    provide enough outcome evidence to call the operation successful.
+    """
+
+    success: bool | None
+    denied: bool
+    exit_status: int | None
+    result_status: str | None
+
+
+def _bounded_outcome_mapping(value: object) -> Mapping[str, JsonValue] | None:
+    """Return one bounded host result object, parsing JSON strings transiently."""
+
+    if isinstance(value, Mapping):
+        return cast(Mapping[str, JsonValue], value)
+    if type(value) is not str or not value:
+        return None
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    if len(encoded) > _NATIVE_OUTCOME_JSON_BYTES:
+        return None
+    try:
+        parsed = strict_json_parse(encoded)
+    except ProtocolValueError, TypeError, ValueError:
+        return None
+    return cast(Mapping[str, JsonValue], parsed) if isinstance(parsed, Mapping) else None
+
+
+def _native_outcome_mappings(
+    payload: Mapping[str, JsonValue],
+) -> tuple[Mapping[str, JsonValue], ...]:
+    """Collect top-level and one bounded layer of documented result wrappers."""
+
+    mappings: list[Mapping[str, JsonValue]] = [payload]
+    for key in ("tool_response", "tool_output", "result", "result_json"):
+        mapping = _bounded_outcome_mapping(payload.get(key))
+        if mapping is None:
+            continue
+        mappings.append(mapping)
+        for nested_key in ("structuredContent", "structured_content", "data", "result"):
+            nested = _bounded_outcome_mapping(mapping.get(nested_key))
+            if nested is not None:
+                mappings.append(nested)
+    return tuple(mappings)
+
+
+def _native_outcome_facts(
+    payload: Mapping[str, JsonValue],
+    *,
+    force_failure: bool = False,
+    force_denied: bool = False,
+    require_process_exit: bool = False,
+) -> _NativeOutcomeFacts:
+    """Extract closed native outcome facts without retaining host prose.
+
+    Command-like tools require an explicit process exit when
+    ``require_process_exit`` is true. A host-level success flag or an
+    ``isError=false`` wrapper then proves tool delivery only, so the command
+    result stays unknown until an exit/status fact is present.
+    """
+
+    success_true = False
+    success_false = False
+    denied = force_denied
+    interrupted = False
+    error = False
+    error_false = False
+    unknown = False
+    partial = False
+    valid_exits: list[int] = []
+    invalid_exit = False
+    failure_status: str | None = "failure" if force_failure else None
+    success_status = False
+
+    for mapping in _native_outcome_mappings(payload):
+        for key in ("denied", "is_denied", "permission_denied"):
+            value = mapping.get(key)
+            if type(value) is bool and value:
+                denied = True
+        for key in (
+            "interrupted",
+            "is_interrupted",
+            "is_interrupt",
+            "isInterrupted",
+            "cancelled",
+            "canceled",
+            "is_cancelled",
+            "isCanceled",
+        ):
+            value = mapping.get(key)
+            if type(value) is bool and value:
+                interrupted = True
+        for key in ("is_error", "isError", "failed"):
+            value = mapping.get(key)
+            if type(value) is bool and value:
+                error = True
+            elif key in {"is_error", "isError"} and type(value) is bool:
+                error_false = True
+        for key in ("success", "ok"):
+            value = mapping.get(key)
+            if type(value) is bool:
+                success_true = success_true or value
+                success_false = success_false or not value
+        for key in ("exit_code", "exitCode", "exit_status", "exitStatus"):
+            if key not in mapping:
+                continue
+            value = mapping.get(key)
+            if type(value) is int and not isinstance(value, bool) and -1 <= value <= 255:
+                valid_exits.append(value)
+            else:
+                invalid_exit = True
+        for key in ("result_status", "status", "outcome", "failure_type"):
+            if key not in mapping:
+                continue
+            value = mapping.get(key)
+            if type(value) is not str:
+                if value is not None:
+                    unknown = True
+                continue
+            lowered = value.lower()
+            if lowered in _NATIVE_FAILURE_STATUS_MAP:
+                failure_status = _NATIVE_FAILURE_STATUS_MAP[lowered]
+                if failure_status == "denied":
+                    denied = True
+            elif lowered in _NATIVE_SUCCESS_STATUSES:
+                success_status = True
+            elif lowered in {"partial", "partially_completed"}:
+                partial = True
+            else:
+                # Keep an explicit unknown marker useful for materialization,
+                # while never copying an arbitrary host token or prose.
+                unknown = True
+        if "error" in mapping:
+            value = mapping.get("error")
+            if value not in (None, False, ""):
+                error = True
+
+    if denied:
+        failure_status = "denied"
+    elif interrupted:
+        failure_status = "interrupted"
+    elif error:
+        failure_status = "error"
+    elif valid_exits and any(value != 0 for value in valid_exits):
+        failure_status = "nonzero_exit"
+
+    if failure_status is not None:
+        return _NativeOutcomeFacts(
+            False,
+            denied,
+            next((value for value in valid_exits if value != 0), None),
+            failure_status,
+        )
+    if success_false:
+        return _NativeOutcomeFacts(
+            False,
+            denied,
+            valid_exits[0] if valid_exits else None,
+            "failure",
+        )
+    if partial:
+        return _NativeOutcomeFacts(
+            None,
+            denied,
+            valid_exits[0] if valid_exits else None,
+            "partial",
+        )
+    if invalid_exit:
+        return _NativeOutcomeFacts(None, denied, None, "unknown")
+    if valid_exits:
+        return _NativeOutcomeFacts(
+            all(value == 0 for value in valid_exits),
+            denied,
+            valid_exits[0],
+            "success" if all(value == 0 for value in valid_exits) else "nonzero_exit",
+        )
+    if require_process_exit:
+        return _NativeOutcomeFacts(None, denied, None, "unknown")
+    if unknown:
+        return _NativeOutcomeFacts(None, denied, None, "unknown")
+    if success_true or success_status or error_false:
+        return _NativeOutcomeFacts(True, denied, None, "success")
+    return _NativeOutcomeFacts(None, denied, None, None)
+
 
 def _record_claude_permission_denied(
     payload: Mapping[str, JsonValue], *, _state: Path | None
@@ -3028,7 +3248,9 @@ def handle_claude_observe(
     ordinary_profile = observation_profile == CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
     if observation_profile is not None and not ordinary_profile:
         with contextlib.suppress(Exception):
-            record_hook_diagnostic("observation_profile_invalid", event_name or "unknown_event", _state=_state)
+            record_hook_diagnostic(
+                "observation_profile_invalid", event_name or "unknown_event", _state=_state
+            )
         with contextlib.suppress(BaseException):
             hook_io.stdout_json({}, stdout)
         return 0
@@ -3038,8 +3260,8 @@ def handle_claude_observe(
         # contract proves that they add distinct work.
         event_map.update(
             {
-                "PermissionDenied": "PostToolUse",
-                "PermissionRequest": "PreToolUse",
+                "PermissionDenied": "PermissionDecision",
+                "PermissionRequest": "PermissionRequest",
                 "PreToolUse": "PreToolUse",
                 "PostToolUse": "PostToolUse",
                 "PostToolUseFailure": "PostToolUse",
@@ -3098,26 +3320,64 @@ def handle_claude_observe(
                 if type(source) is str and source in start_actions
                 else "claude_session"
             )
-        if ordinary_profile and raw_event == "PermissionRequest":
+        if ordinary_profile and raw_event in {"PermissionRequest", "PreToolUse"}:
             tool_token = _token_or_none(payload.get("tool_name"))
-            if tool_token is not None:
+            correlation = _token_or_none(payload.get("tool_use_id")) or _token_or_none(
+                payload.get("tool_call_id")
+            )
+            if tool_token is None or correlation is None:
+                with contextlib.suppress(Exception):
+                    record_hook_diagnostic(
+                        "claude_tool_identity_missing", event_map[raw_event], _state=_state
+                    )
+                hook_io.stdout_json({}, stdout)
+                return 0
+            structural["tool_name"] = tool_token
+            structural["tool_use_id"] = correlation
+            if raw_event == "PermissionRequest":
+                # Keep a permission request distinct from PreToolUse. Claude
+                # may emit both for one call; only the latter creates the
+                # action row that the post result completes.
                 structural["action"] = "claude_permission_request"
-                structural["tool_name"] = tool_token
-            correlation = _token_or_none(payload.get("tool_use_id"))
-            if correlation is not None:
-                structural["tool_use_id"] = correlation
+                structural["permission_decision"] = "requested"
+            else:
+                structural["action"] = "claude_tool_pending"
+                if _routine_read_action(payload):
+                    structural["action"] = "routine_read"
+        if ordinary_profile and raw_event == "PermissionDenied":
+            tool_token = _token_or_none(payload.get("tool_name"))
+            correlation = _token_or_none(payload.get("tool_use_id")) or _token_or_none(
+                payload.get("tool_call_id")
+            )
+            if tool_token is None or correlation is None:
+                with contextlib.suppress(Exception):
+                    record_hook_diagnostic(
+                        "claude_tool_identity_missing", event_map[raw_event], _state=_state
+                    )
+                hook_io.stdout_json({}, stdout)
+                return 0
+            structural.update(
+                {
+                    "action": "claude_permission_denied",
+                    "denied": True,
+                    "permission_decision": "denied",
+                    "tool_name": tool_token,
+                    "tool_use_id": correlation,
+                }
+            )
         if ordinary_profile and raw_event == "StopFailure":
             structural["action"] = "claude_api_failure"
-            failure_type = _token_or_none(payload.get("error")) or _token_or_none(
-                payload.get("error_type")
+            outcome = _native_outcome_facts(
+                payload,
+                force_failure=True,
             )
-            if failure_type is not None:
-                structural["result_status"] = failure_type
-        if raw_event in {"PostToolUse", "PostToolUseFailure", "PermissionDenied"}:
+            structural["result_status"] = outcome.result_status or "error"
+        if raw_event in {"PostToolUse", "PostToolUseFailure"} or (
+            raw_event == "PermissionDenied" and not ordinary_profile
+        ):
             tool_name = payload.get("tool_name")
-            if (
-                not ordinary_profile
-                and (type(tool_name) is not str or _CLAUDE_SCOPED_TOOL_RE.fullmatch(tool_name) is None)
+            if not ordinary_profile and (
+                type(tool_name) is not str or _CLAUDE_SCOPED_TOOL_RE.fullmatch(tool_name) is None
             ):
                 hook_io.stdout_json({}, stdout)
                 return 0
@@ -3125,32 +3385,53 @@ def handle_claude_observe(
             if tool_token is None:
                 hook_io.stdout_json({}, stdout)
                 return 0
-            structural["action"] = (
-                (
-                    "claude_tool_success"
-                    if raw_event == "PostToolUse"
-                    else "claude_tool_denied"
-                    if raw_event == "PermissionDenied"
-                    else "claude_tool_failure"
-                )
-                if ordinary_profile
-                else ("claude_mcp_success" if raw_event == "PostToolUse" else "claude_mcp_failure")
-            )
-            structural["success"] = raw_event == "PostToolUse"
             if ordinary_profile:
-                structural["denied"] = raw_event == "PermissionDenied"
+                outcome = _native_outcome_facts(
+                    payload,
+                    force_failure=raw_event == "PostToolUseFailure",
+                    require_process_exit=(tool_token.lower() in _SHELL_TOOLS),
+                )
+                structural["action"] = (
+                    "claude_tool_success"
+                    if outcome.success is True
+                    else "claude_tool_failure"
+                    if outcome.success is False
+                    else "claude_tool_outcome_unknown"
+                )
+                if outcome.success is not None:
+                    structural["success"] = outcome.success
+                if outcome.denied:
+                    structural["denied"] = True
+                if outcome.exit_status is not None:
+                    structural["exit_status"] = outcome.exit_status
+                if outcome.result_status is not None:
+                    structural["result_status"] = outcome.result_status
+                if (
+                    _routine_read_action(payload)
+                    and outcome.success is not False
+                    and not outcome.denied
+                ):
+                    structural["action"] = "routine_read"
+            else:
+                structural["action"] = (
+                    "claude_mcp_success" if raw_event == "PostToolUse" else "claude_mcp_failure"
+                )
+                structural["success"] = raw_event == "PostToolUse"
             structural["tool_name"] = tool_token
-            correlation = _token_or_none(payload.get("tool_use_id"))
+            correlation = _token_or_none(payload.get("tool_use_id")) or _token_or_none(
+                payload.get("tool_call_id")
+            )
             if correlation is not None:
                 structural["tool_use_id"] = correlation
-            result_status = _token_or_none(
-                payload.get("result_status") or payload.get("failure_type")
-            )
-            if result_status is not None:
-                structural["result_status"] = result_status
-            duration = _int_or_none(payload.get("duration_ms"))
-            if duration is not None:
-                structural["duration_ms"] = duration
+            if not ordinary_profile:
+                result_status = _token_or_none(
+                    payload.get("result_status") or payload.get("failure_type")
+                )
+                if result_status is not None:
+                    structural["result_status"] = result_status
+                duration = _int_or_none(payload.get("duration_ms"))
+                if duration is not None:
+                    structural["duration_ms"] = duration
             if raw_event == "PostToolUse" and tool_token == "mcp__plugin_yoetz_yoetz__start":
                 # Claude's observation envelope stays structural-only, but the
                 # successful start result is the sole authority that can bind
@@ -3244,6 +3525,8 @@ def handle_cursor_observe(
         # Cursor's generic tool events are the authoritative stream.  Shell,
         # read-file, MCP and edit-specific hooks are deliberately supplemental
         # and remain unsupported here until their overlap is proven distinct.
+        event_map.pop("afterFileEdit")
+        event_map.pop("afterMCPExecution")
         event_map.update(
             {
                 "preToolUse": "PreToolUse",
@@ -3367,21 +3650,36 @@ def handle_cursor_observe(
         if duration is not None:
             structural["duration_ms"] = duration
         if ordinary_profile and raw_event in {"postToolUse", "postToolUseFailure"}:
-            failure_type = _token_or_none(payload.get("failure_type"))
+            outcome = _native_outcome_facts(
+                payload,
+                force_failure=raw_event == "postToolUseFailure",
+                require_process_exit=(
+                    (_token_or_none(payload.get("tool_name")) or "").lower() in _SHELL_TOOLS
+                ),
+            )
             structural["action"] = (
                 "cursor_tool_denied"
-                if failure_type == "permission_denied"
+                if outcome.denied
                 else "cursor_tool_success"
-                if raw_event == "postToolUse"
+                if outcome.success is True
                 else "cursor_tool_failure"
+                if outcome.success is False
+                else "cursor_tool_outcome_unknown"
             )
-            structural["success"] = raw_event == "postToolUse"
-            if failure_type is not None:
-                structural["result_status"] = failure_type
-            exit_code = _int_or_none(payload.get("exit_code"))
-            if exit_code is not None:
-                structural["exit_status"] = exit_code
-            structural["denied"] = failure_type == "permission_denied"
+            if outcome.success is not None:
+                structural["success"] = outcome.success
+            if outcome.denied:
+                structural["denied"] = True
+            if outcome.exit_status is not None:
+                structural["exit_status"] = outcome.exit_status
+            if outcome.result_status is not None:
+                structural["result_status"] = outcome.result_status
+            if (
+                _routine_read_action(payload)
+                and outcome.success is not False
+                and not outcome.denied
+            ):
+                structural["action"] = "routine_read"
         elif ordinary_profile and raw_event == "preToolUse":
             structural["action"] = "cursor_tool_pending"
         path_value = payload.get("file_path")
