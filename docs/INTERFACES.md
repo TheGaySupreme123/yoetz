@@ -3186,6 +3186,23 @@ Independent verification support (local control, not MCP):
   that return `additionalContext` or a Stop `decision: block` stay synchronous with the same bound,
   and `SessionEnd` keeps the host-clamped 3 seconds (ingest/drain only; it is not an advice channel).
 
+Native ordinary-work capture adds a separate, closed profile selection to that workspace consent.
+`LocalObservationConsent.content_capture_profiles` is a sorted set containing at most
+`claude-code-ordinary-observation-v1` and `cursor-ordinary-observation-v1`; absent legacy fields
+mean no native content authorization. `ObservationIngestRequest.content_capture_profile` is an
+optional selector in current control-request `2.4.0`, bound to the envelope's host source. The
+selector cannot grant capture: ingress requires the active local selection and synchronizes its
+bounded profile set to the mapped task store. Structural subscriptions and native content consent
+are independent; profile-free Codex observation retains its existing contract.
+
+`yoetz observe content-enable`, `content-disable`, and `content-status` operate on the same canonical
+workspace as observation consent. Pause, disable, and revoke must fence retained native content
+reads and subsequent semantic disclosure as well as future capture. A task-store snapshot is not
+independent authority after a local consent change. Selection into a semantic case additionally
+requires authenticated captured-object provenance, case membership, source/session/phase binding,
+and the effective privacy selection. Captured bytes remain bounded advisory evidence; they do not
+prove that a command passed, a file was independently inspected, or a reviewer acted on the bytes.
+
 Observation consent is one project-level confirmation recorded as a private workspace commitment.
 Consent, status, pause, resume, revoke, setup probes, and hook ingress all canonicalize an explicit
 Git subdirectory to the same nearest safe Git project root; a non-Git directory remains its exact
