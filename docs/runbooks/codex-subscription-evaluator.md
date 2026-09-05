@@ -26,10 +26,11 @@ cell fields and its review/expiry dates; stale evidence fails before child launc
 support matrix remains authoritative about which cells have completed packaged live evidence.
 
 New Codex-subscription setups recommend and preselect `gpt-5.6-luna`. Default reasoning effort
-stays independently `high`. An explicit `--model` (including `gpt-5.6-sol` when the app-server
-lists it) still binds that exact id. Existing persisted bindings are not rewritten. OpenAI
-API-key and other provider-preset catalogs stay Sol-first. Historical packaged live evidence that
-names `gpt-5.6-sol` remains Sol proof; it is not Luna acceptance and does not migrate.
+stays independently `high`. When an existing binding is targeted, omitting `--model` preserves its
+exact model, including during `--switch-account`; an explicit `--model` (including `gpt-5.6-sol`
+when the app-server lists it) is required to change it. OpenAI API-key and other provider-preset
+catalogs stay Sol-first. Historical packaged live evidence that names `gpt-5.6-sol` remains Sol
+proof; it is not Luna acceptance and does not migrate.
 
 ## Setup and reverse operations
 

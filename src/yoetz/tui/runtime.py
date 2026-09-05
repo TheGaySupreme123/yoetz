@@ -770,11 +770,14 @@ class YoetzRuntime:
         """Return discovered nonsecret defaults; setup still digest-validates the exact binary."""
 
         from yoetz.adapters.integrations.codex_discovery import discover_codex_binaries
-        from yoetz.cli.codex_subscription import default_codex_home
+        from yoetz.cli.codex_subscription import (
+            default_codex_home,
+            default_codex_subscription_model,
+        )
 
         binaries = discover_codex_binaries()
         executable = "" if not binaries else binaries[0].executable_path
-        return executable, str(default_codex_home()), "gpt-5.6-luna", "high"
+        return executable, str(default_codex_home()), default_codex_subscription_model(), "high"
 
     def preview_codex_subscription(
         self, executable: str, codex_home: str, model: str, reasoning_effort: str

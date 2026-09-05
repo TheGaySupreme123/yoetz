@@ -514,6 +514,44 @@ async def test_provider_can_switch_the_codex_account(make_app: MakeApp) -> None:
         assert runtime.subscription_actions == ["switch"]
 
 
+async def test_provider_switch_preserves_existing_subscription_model_when_omitted(
+    make_app: MakeApp,
+) -> None:
+    runtime = FakeRuntime()
+    runtime.codex_subscription_defaults = lambda: (  # type: ignore[method-assign]
+        "/opt/codex/codex",
+        "/var/lib/yoetz/codex-home",
+        "gpt-5.6-sol",
+        "high",
+    )
+    app = make_app(runtime=runtime)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await run_command(pilot, app, "/provider")
+        view = app.open_view
+        assert view is not None
+        view.filter("switch")  # type: ignore[attr-defined]
+        await pilot.press("enter")
+        await pilot.pause()
+        for _ in range(4):
+            await pilot.press("enter")
+            await pilot.pause()
+        await pilot.press("up")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert runtime.subscription_setups == [
+        (
+            "/opt/codex/codex",
+            "/var/lib/yoetz/codex-home",
+            "gpt-5.6-sol",
+            "high",
+            True,
+        )
+    ]
+
+
 async def test_provider_discloses_and_reports_a_reused_codex_login(make_app: MakeApp) -> None:
     """Setup on a home Codex already reports signed in reuses it and says so (#534)."""
 
@@ -554,6 +592,7 @@ async def test_provider_discloses_and_reports_a_reused_codex_login(make_app: Mak
         await pilot.press("enter")
         await pilot.pause()
         assert runtime.subscription_actions == ["setup"]
+        assert runtime.subscription_setups[0][2] == "gpt-5.6-luna"
         assert "reused the existing Codex login" in transcript(app)
 
 

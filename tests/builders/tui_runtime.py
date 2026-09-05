@@ -148,6 +148,7 @@ class FakeRuntime:
     ceremonies: list[str] = field(default_factory=lambda: [])
     bindings: list[tuple[str, str]] = field(default_factory=lambda: [])
     subscription_actions: list[str] = field(default_factory=lambda: [])
+    subscription_setups: list[tuple[str, str, str, str, bool]] = field(default_factory=lambda: [])
     checks: list[tuple[str, CheckMode]] = field(default_factory=lambda: [])
     opened: list[str] = field(default_factory=lambda: [])
 
@@ -360,6 +361,9 @@ class FakeRuntime:
     ) -> dict[str, object]:
         action = "switch" if switch_account else "setup"
         self.subscription_actions.append(action)
+        self.subscription_setups.append(
+            (executable, codex_home, model, reasoning_effort, switch_account)
+        )
         self.ceremonies.append(f"codex_subscription:{action}")
         return {
             "auth_mode": "chatgpt",
