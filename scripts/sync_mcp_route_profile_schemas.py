@@ -122,7 +122,7 @@ def _sync_control_request(document: dict[str, JsonValue]) -> None:
             if existing_host is not None and existing_host != _HOST_PROFILE_SCHEMA:
                 raise RuntimeError("control_host_profile_schema_changed")
             properties["host_profile"] = copy.deepcopy(_HOST_PROFILE_SCHEMA)
-        updated.add(cast(str, method))
+        updated.add(method)
     if updated != {"check", "status"}:
         raise RuntimeError("control_route_profile_methods_missing")
 
