@@ -217,6 +217,24 @@ Cursor's documented `afterMCPExecution` result is content and is discarded; beca
 not publish a validated `success` or `result_status` field for that event, ingress never fabricates
 either value.
 
+**Amendment (2026-09-05, issue #596): native Cursor MCP binds the service handshake to the active
+MCP session's roots.** A native Cursor helper may start from the user's home directory, so its
+process CWD cannot select repository privacy authority. The `--host cursor` bridge asks the MCP
+client for `roots/list` on the first workflow call, decodes only local `file:` roots, bounds their
+URI/path input, and canonicalizes each through the shared safe workspace resolver. It accepts one
+canonical repository (equivalent roots in that repository are aliases); missing, unsupported,
+remote, malformed, unsafe, oversized, or distinct-repository roots fail closed with the existing
+`SESSION_CONFLICT` / `repository_identity_required` boundary before connecting to the service.
+The locator is retained only in the bridge's private client slot, revalidated before each workflow
+call, and is never derived from public `workspace_ref`, model arguments, or transcript content. The
+reviewed Cursor 3.19.7 host bundle advertises `roots.listChanged: false`, so revalidation runs on
+every workflow call even when no change notification is available. A changed or unusable roots/list
+result, or a roots-list-changed notification, retires the slot and
+its service client; the host must create a fresh MCP session to bind again, preventing one process
+from crossing repository authorities. Generic MCP bridges keep their existing process
+CWD behavior. The server still advertises only tools/resources: roots are a standard client-to-
+server handshake input, not a Yoetz tool or new server capability.
+
 **Amendment (ADR-012, 2026-07-21):** MCP server registration is added as a *sibling* port,
 `HarnessMcpPort` (`ports/harness_mcp.py`), with its own Codex adapters
 (`codex_discovery.py`, `codex_mcp.py`). It deliberately does not extend `IntegrationsPort`:

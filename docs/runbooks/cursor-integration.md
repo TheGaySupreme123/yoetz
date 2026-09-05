@@ -320,6 +320,20 @@ explicit `start` maps it. For `vault_locked` on a never-initialized install, tha
 `start` returns the typed `vault_initialization_required` continuation (see Troubleshooting)
 rather than a dead end.
 
+The native Cursor MCP bridge has a separate workspace binding. It does not use the helper's process
+CWD, because a Cursor MCP child can be launched from the user home directory. On the first workflow
+tool call, the `--host cursor` bridge asks the active MCP client for `roots/list` and accepts only
+safe local `file:` roots that canonicalize to one repository. An unavailable, remote, malformed, or
+multi-repository response returns `SESSION_CONFLICT` with
+`safe_details.reason_code: repository_identity_required` before any local-service call. The bridge
+retains and revalidates that binding before each workflow call; a changed or unusable root result
+retires the session and its local client. A `notifications/roots/list_changed` message does the same,
+so fully quit and relaunch Cursor or start a fresh MCP process before another workflow call.
+The reviewed Cursor 3.19.7 host bundle advertises `roots.listChanged: false`, so the per-call
+revalidation remains required even when no roots-change notification is sent.
+`read_guidance`, tools discovery, and resource reads remain available without a project root. The
+public workflow `workspace_ref` is never consulted for this binding.
+
 The `sessionStart` status probe for an already-mapped session connects with the resolved workspace
 root as its repository locator, so a live mapping answers `active` and the `additional_context`
 names the task, frontier, mapped `session_id` and `writer_id`, and the `start mode=attach`

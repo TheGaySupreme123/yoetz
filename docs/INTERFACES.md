@@ -4119,6 +4119,18 @@ The selected locator retains its exact filesystem-encoded spelling through looku
 Unicode normalization never aliases distinct directories. A grant created under a differently
 normalized spelling does not authorize its sibling and requires an explicit regrant.
 
+The native Cursor MCP bridge has an additional session binding: on the first workflow call it asks
+the MCP client for the standard `roots/list` result and accepts only safe local file roots that
+canonicalize to one repository. Its process CWD and public workflow `workspace_ref` are not authority
+inputs. Missing, unsupported, remote, malformed, oversized, or multi-repository roots fail closed as
+`SESSION_CONFLICT` with `reason_code: repository_identity_required` before the service handshake;
+the bound locator is retained only in that bridge's private client slot and revalidated before
+each workflow call. A `notifications/roots/list_changed` notification retires the slot and requires
+a fresh MCP session,
+so one process cannot cross repository authorities. The bridge continues to advertise the same
+tools/resources surface; roots are a client-to-server locator exchange, not a new Yoetz tool or
+server capability.
+
 ### Claude Code local project harness contract (issue #154)
 
 Claude Code is a native dual target and is not an Agent Plugins consumer. The initial cell is
