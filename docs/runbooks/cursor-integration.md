@@ -36,9 +36,10 @@ group are Claude Code lifecycles and refuse for Cursor with
 `cursor_plugin_command_unsupported:<command> supported=preview,install,status,remove` (exit 2).
 
 Issue #561 changes only Yoetz-owned external Codex registration. Cursor remains supported through
-its native plugin projection: the exact isolated root is rendered into the test cell's `mcp.json`
-and hook commands and is bound by that artifact's preview digest. Cursor does not consume the Codex
-`mcp add --env` path or its `isolation_binding` status field.
+its native plugin projection: when `YOETZ_ISOLATED_ROOT` is set, the exact validated root is
+rendered into the plugin-managed `mcp.json` environment and every native hook command, and is
+bound by that artifact's preview and marker digests. Cursor uses its own
+`isolation_binding` status field; it does not consume the Codex `mcp add --env` path.
 
 ```text
 yoetz integrate cursor plugin preview \
@@ -87,6 +88,12 @@ status` reports `mcp.runtime.activation` as `matched` or `full_restart_required`
 is available. That is activation work, not installation proof. For CLI use the exact installed tree with `--plugin-dir`. Do not copy
 the skill to `.cursor/skills`, add a rule, or rely on `.agents/skills` as fallback evidence.
 
+The current Cursor desktop host can still discover a user-local plugin under the regular shared
+`~/.cursor/plugins/local/yoetz` when launched with another user-data directory. Treat that as a
+host discovery limitation: an isolated user-data directory does not by itself prove isolated
+plugin discovery. Keep the explicit plugin root, Yoetz root binding, and discovery observation as
+separate proof facets; a clean cell must verify which plugin directory Cursor actually loaded.
+
 ## MCP ownership and source precedence
 
 Ownership mode is exactly `external_registration` or `plugin_managed`. Observed state is exactly
@@ -109,23 +116,35 @@ route. The exact plugin-managed routes are `yoetz mcp serve` (policy) and
 Cursor target adds `--host cursor` and binds the exact launcher: its `mcp.json` entry is
 `command: <absolute yoetz executable>` (or the interpreter, with `-m yoetz` leading `args`) followed
 by `mcp serve --host cursor` (policy) or `mcp serve --host cursor --semantic off` (strict) — the
-same launcher the native hooks use and the `/2` marker records. Cursor's MCP reference resolves a
+same launcher the native hooks use and the `/3` marker records. In an isolated artifact the MCP
+entry also carries exactly `env: {YOETZ_ISOLATED_ROOT: <validated-root>}`; arbitrary environment
+keys remain foreign. Cursor's MCP reference resolves a
 bare `command` through the desktop app's sanitized PATH, which in the 2026-08-29 dogfood launched
 an older ambient runtime (control schema 2.1.0) behind a marker-valid then-current plugin (2.3.0); the
 bound entry removes PATH from the runtime choice (issue #468). That profile retains
 `structuredContent` and also repeats the exact canonical JSON body in text `content`, because
 pinned Cursor `3.17.x` can otherwise hide structured results from the model. It adds no
-environment or secret field and does not widen the service route. Decision for Cursor (issue
+environment or secret beyond the exact isolated-root binding and does not widen the service
+route. Decision for Cursor (issue
 #579): supported here — the `--host cursor` text channel is the exact canonical JSON wire body,
 so `safe_details.reason_code` and `safe_details.field` are already model-visible for
 `EVENT_INVALID`. The generic bounded `Reason:` summary is the Claude Code path; Cursor tests lock
 that the JSON copy still carries those tokens and is not reduced to the weaker summary. Route recognition accepts a
 hand-written bare `yoetz` (external registrations) or a known launcher (this runtime's or the
-installed marker's) with the exact serve arguments; anything else is `foreign`. Raw initialize and
+installed marker's) with the exact serve arguments, optionally with exactly the validated
+`YOETZ_ISOLATED_ROOT` environment binding. Route-shape recognition can describe a structurally
+valid binding, but lifecycle ownership requires the artifact's exact root; a different valid root
+is `foreign` and cannot count as owned or admitted. Any other command, prefix, or key set is
+`foreign`. Raw initialize and
 tools/list prove only runtime registration. Require a correlated model-controlled `start` or
 `status` call for use.
 
-`yoetz integrate cursor plugin status` reports the binding under `launcher`: `installed` and
+`yoetz integrate cursor plugin status` reports the state-root binding as `isolation_binding`
+(`ambient|isolated_exact|missing|different|unobserved`). `ambient` and `isolated_exact` require
+the marker and every root-bearing MCP/hook member to agree; a marker alone does not prove the
+child launch binding. `different` covers a changed root or a root-bearing member whose binding
+drifted. It reports the executable binding under
+`launcher`: `installed` and
 `artifact` launchers; `executable` (`matched` — same launcher and it exists; `drifted` — the
 installed tree binds another installation than the one reading status; `missing` — the bound
 executable is gone; `unbound` — portable or legacy `/1` marker; `unobserved`); `mcp_binding`
@@ -142,7 +161,7 @@ fully quit Cursor.
 
 Decision for Cursor: not supported here — no additional state-root applied-route record
 at this time. The plugin-managed `mcp.json` entry already binds the route profile (the exact
-serve arguments, including `--semantic off` for strict) and the `/2` marker records the same
+serve arguments, including `--semantic off` for strict) and the `/3` marker records the same
 launcher the native hooks use; the live binding and launcher read-backs above remain the
 authority for which route this host serves. A stale serving process shows as
 `executable_mismatch` / `full_restart_required`, not as applied-vs-serving drift. If a
@@ -175,6 +194,23 @@ server the same way is undocumented and unverified; the acceptance cell in issue
 `status` reports `partial` when only one of the two files carries the entry. A wildcard
 (`yoetz:*`, `*:*`, `Mcp(*:*)`) or a CLI deny rule is `foreign` and never edited.
 
+The other workflow calls have a local effect: `start`, `publish_work`, `respond`, and `receipt`
+append or read records in the local Yoetz ledger, while `status` and `read_guidance` read local or
+packaged state. None of these calls publishes to GitHub or invokes a semantic provider. This
+describes the effect after Yoetz receives the call; it does not predict Cursor's admission decision.
+Cursor Auto-review may still hold a non-allowlisted local call as a shared-state or external-workflow
+action, and Cursor provides no hook event for that classifier decision.
+
+For a held local call, use Cursor's visible approval control for that exact call if the workflow is
+authorized to continue. A hold before invocation is not a Yoetz result and creates no operation,
+semantic status, provider attempt, or receipt. After approval, let Cursor execute the exact held
+call and continue from its returned result. If Cursor requires resubmission or the response is
+missing, retry the same request body and `request_id`. If the call may have started but its result
+is ambiguous, use `status view=operation` with the original request identity or replay that same
+request according to the operation's recovery instructions. Do not mint a replacement request or
+duplicate event identity. This recovery procedure does not change Cursor's Auto-review settings or
+prove that a future call will be admitted.
+
 A mutating preview warns `host_config_not_compare_and_swap`; keep Cursor and other settings writers
 quiescent during apply. Yoetz rechecks each exact preimage immediately before its atomic mutation
 and verifies the combined result, but ordinary files cannot exclude a non-cooperating same-UID
@@ -185,9 +221,9 @@ Reverse: `admission revoke`; `plugin remove` and an install/replace onto the str
 the entry when `--project-root` is given and report `admission_cleanup`; a privacy commit that
 stops external review sweeps it; `provider status` reports `host_admission_drift`. That report
 walks from the launch directory to the repository root, so a subdirectory cwd does not read as
-`absent`. Cursor
-publishes no hook for a classifier denial, so a held check is visible only through the #187
-pause/approval flow; that gap is documented, not diagnosed.
+`absent`. Cursor publishes no hook for a classifier denial. A held `check` is visible only through
+the #187 pause/approval flow, while a held local call has no Yoetz-side denial diagnostic; that
+gap is documented, not diagnosed.
 
 ## Upgrading Yoetz under a running service
 
@@ -271,10 +307,10 @@ console-script invocation resolves to that absolute executable; the documented `
 entrypoint (ADR-007) is preserved as an equivalent module invocation of the same interpreter.
 Explicit absolute and relative invocations retain their path intent and never fall back to
 an ambient `PATH` entry; only a bare `yoetz` name uses `PATH`. The resolved launcher command is
-recorded in native marker schema `/2`; an explicit invocation does not silently bind a
-different ambient-PATH installation, and a malformed `/2` launcher invalidates the marker. Portable
-markers
-remain `/1`. A valid legacy native `/1` marker is recognized as managed-but-modified so users can
+recorded in native marker schema `/3`; an explicit invocation does not silently bind a
+different ambient-PATH installation, and a malformed `/2` or `/3` launcher invalidates the marker.
+The `/3` marker also records the exact isolated root or null for ambient mode. Portable markers
+remain `/1`. A valid legacy native `/1` or `/2` marker is recognized as managed-but-modified so users can
 perform one exact previewed replacement (or safe removal) instead of being stranded. The rendered
 timeouts are 10 seconds for `sessionStart`/`stop`, 5 seconds for
 `afterFileEdit`/`afterMCPExecution`, and 3 seconds for `sessionEnd`; `failClosed` remains false.
@@ -327,6 +363,24 @@ handoff. Upgrade this state quiescently: stop the older Yoetz service and Cursor
 the new runtime, then restart the service and all Cursor integrations before writing `/10` state.
 Mixed old and new writers are unsupported because a `/9` writer ignores the new field and can
 erase a deferred intent when it saves.
+
+The native Cursor MCP bridge has a separate workspace binding. It does not use the helper's process
+CWD, because a Cursor MCP child can be launched from the user home directory. On the first workflow
+tool call, the `--host cursor` bridge asks the active MCP client for `roots/list` and accepts only
+safe local `file:` roots that canonicalize to one repository. An unavailable, remote, malformed, or
+multi-repository response returns `SESSION_CONFLICT` with
+`safe_details.reason_code: repository_identity_required` before any local-service call. The bridge
+retains and revalidates that binding before each workflow call; a changed or unusable root result
+retires the session and its local client. A `notifications/roots/list_changed` message does the same,
+so fully quit and relaunch Cursor or start a fresh MCP process before another workflow call.
+The reviewed Cursor 3.19.7 host bundle advertises `roots.listChanged: false`, so the per-call
+revalidation remains required even when no roots-change notification is sent.
+`read_guidance`, tools discovery, and resource reads remain available without a project root. The
+public workflow `workspace_ref` is never consulted for this binding. Keep that field equal to the
+open repository root when using create/attach selectors, as the agent convention and guidance
+require; a mismatch does not override or invalidate the trusted roots binding, but normal task
+lookup can still follow the mismatching public ref pair. Auto-attach, queue admission, and mapping
+diagnostics are separate hook lifecycle behavior and are not repaired by this MCP binding.
 
 The `sessionStart` status probe for an already-mapped session connects with the resolved workspace
 root as its repository locator, so a live mapping answers `active` and the `additional_context`
@@ -381,7 +435,15 @@ is repaired by restarting a service that already reports ready.
 not enqueued for delivery, while `start`, `publish_work`, `check`, and `respond` enqueue one row
 each. Cursor's hook payload states no outcome fact for MCP executions, so a failed Yoetz call is
 indistinguishable from a successful one at this ingress; the service's own record of the call is
-the authority on its outcome. `afterFileEdit` and lifecycle events are unchanged.
+the authority on its outcome. Cursor reports `duration` as a finite decimal number of milliseconds
+for MCP executions, while the canonical structural field is the bounded integer `duration_ms`.
+Cursor ingress truncates that vendor value to whole milliseconds before structural filtering; the canonical parser
+continues to reject floats on every ledger and non-Cursor host surface. Decimal values in discarded
+vendor fields are replaced transiently and never reach the structural envelope. Execution and file
+edit payloads use `model`, while lifecycle payloads may also provide `model_id`; a valid
+`model_id` takes precedence when both spellings are present, and `model` is its bounded fallback.
+Malformed or unsafe Cursor envelopes remain fail-open but record `cursor_payload_invalid` as a
+payload-free hook diagnostic. `afterFileEdit` and lifecycle events are otherwise unchanged.
 
 Measured on 2026-08-28 with Cursor Agent CLI `2026.08.25-3e8eec8` (payload `cursor_version`;
 `cursor-agent --version` printed `2026.08.11-e8db854`) loading the native plugin through
@@ -440,7 +502,8 @@ service through the user-selected supervisor before retrying Cursor. Runtime rep
 restart, and Cursor/plugin activation are separate proof facets.
 
 Removal moves only an exact marker-verified managed tree and deletes it after the directory swap is
-durable. Modified plugin bytes or recovery residue are preserved for review. Foreign, dual, or
+durable. Modified plugin bytes or recovery residue, including an isolated-root drift, are preserved
+for review until an explicit replacement or removal preview is accepted. Foreign, dual, or
 ambiguous MCP sources do not block exact plugin removal because the operation leaves every external
 source untouched. Removal does not delete ledgers, vault/keyring state, provider credentials,
 privacy grants, project/user MCP entries, or unrelated Cursor settings. After removal, independently check installed bytes,
@@ -483,7 +546,7 @@ the 2026-08-29 measurement above recorded for a locked cell.
 | Install refuses `authority_required` after `--accept` | no `plugin_artifact_apply` review is prepared for that exact digest |
 | Install refuses `human_authority_unavailable` | LocalAuthentication was cancelled, unavailable, timed out, or the host is outside the pinned macOS authority cell; no mutation occurred |
 | Install replay reports `preview_stale` | the inferred action became `replace`; replay with `--action install` |
-| MCP entry looks right but reads `foreign` | route recognition is key-set exact; an extra `env`/`cwd` key is a foreign entry, and an absolute `command` that is neither this runtime's launcher nor the installed marker's is another installation |
+| MCP entry looks right but reads `foreign` | route recognition is key-set exact; an extra key such as `cwd`, or an `env` object other than exactly `YOETZ_ISOLATED_ROOT=<absolute printable root>`, is foreign, and an absolute `command` that is neither this runtime's launcher nor the installed marker's is another installation |
 | Hooks observe but a model-controlled `start` returns `SERVICE_UNAVAILABLE` / `service_incompatible` right after install | the plugin's MCP process is another Yoetz installation; read `launcher.executable`, `launcher.mcp_binding`, `launcher.identity`, and `mcp.runtime.executable_activation`, replace a legacy `ambient_path` tree, then fully quit Cursor |
 | `launcher.executable` is `drifted` or `missing` | the installed tree binds a launcher that is not this runtime's or no longer exists; one exact previewed replace re-binds hooks and MCP together |
 | Delegated workers each report the same `correlation_id` with `availability_inherited: true` | expected: the bridge latched the parent's outage; repair once, replay the original `request_id`, and do not read those as fresh failures |

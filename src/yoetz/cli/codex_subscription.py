@@ -50,6 +50,7 @@ __all__ = [
     "codex_subscription_setup",
     "codex_subscription_status",
     "default_codex_home",
+    "default_codex_subscription_model",
     "prompt_codex_subscription_setup",
     "resolve_supported_codex_executable",
     "subscription_failure_reason",
@@ -66,6 +67,7 @@ _CODEX_NATIVE_PACKAGE_SPEC: Final = f"npm:{_CODEX_PACKAGE_NAME}@{_CODEX_NATIVE_P
 _CODEX_NATIVE_EXECUTABLE_RELATIVE: Final = Path("vendor/aarch64-apple-darwin/bin/codex")
 _CODEX_PACKAGE_JSON_MAX_BYTES: Final = 64 * 1024
 _SUPPORTED_REASONING: Final = frozenset({"low", "medium", "high", "xhigh", "max", "ultra"})
+_DEFAULT_CODEX_SUBSCRIPTION_MODEL: Final = "gpt-5.6-luna"
 _CLOSED_FAILURE_TOKEN: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 
 
@@ -341,6 +343,15 @@ def _base_config(path: Path | None) -> YoetzConfig:
     return _bounded_config_operation(lambda: load_config({}, {}, target))
 
 
+def default_codex_subscription_model(path: Path | None = None) -> str:
+    """Return the new-binding recommendation or preserve an existing binding's model."""
+
+    config = _base_config(path)
+    if config.external_runtime is not None:
+        return config.external_runtime.model
+    return _DEFAULT_CODEX_SUBSCRIPTION_MODEL
+
+
 def _config_snapshot(path: Path) -> tuple[YoetzConfig, bytes | None]:
     """Load the write base and exact preimage as one locked operation."""
 
@@ -530,7 +541,7 @@ async def prompt_codex_subscription_setup() -> dict[str, JsonValue]:
     codex_home = Path(
         typer.prompt("Dedicated evaluator CODEX_HOME", default=str(default_codex_home()))
     ).expanduser()
-    model = typer.prompt("Exact model", default="gpt-5.6-sol").strip()
+    model = typer.prompt("Exact model", default=default_codex_subscription_model()).strip()
     reasoning_effort = typer.prompt("Reasoning effort", default="high").strip()
     login_choice = typer.prompt("Login method (browser/device_code)", default="browser").strip()
     if login_choice not in {"browser", "device_code"}:

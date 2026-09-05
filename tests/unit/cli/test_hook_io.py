@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import io
 
+import pytest
+
 from yoetz.cli.hook_io import (
     claude_context_output,
     context_output,
     cursor_context_output,
+    read_cursor_hook_payload,
     stdout_json,
 )
+from yoetz.protocol.canonical import strict_json_parse
+from yoetz.protocol.errors import ProtocolValueError
 
 
 def test_session_start_and_post_tool_use_emit_additional_context() -> None:
@@ -115,3 +120,46 @@ def test_claude_context_is_bounded_by_the_shared_context_limit() -> None:
     assert claude_context_output("Stop", "x" * 2_001) == {
         "hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": "x" * 2_000}
     }
+
+
+@pytest.mark.parametrize(
+    ("literal", "expected"),
+    [("428.607", 428), ("428.5", 428), ("428.499", 428), ("0.0", 0), ("1e3", 1_000)],
+)
+def test_cursor_hook_payload_truncates_fractional_duration_to_canonical_integer(
+    literal: str, expected: int
+) -> None:
+    payload = ('{"duration":' + literal + ',"hook_event_name":"afterMCPExecution"}').encode()
+
+    parsed = read_cursor_hook_payload(payload)
+
+    assert parsed["duration"] == expected
+    # The canonical parser remains float-free for every non-Cursor wire surface.
+    with pytest.raises(ProtocolValueError, match="float_forbidden"):
+        strict_json_parse(payload)
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        (b'{"duration":-1.0}', "invalid_duration"),
+        (b'{"duration":NaN}', "float_forbidden"),
+        (b'{"duration":1.2,"duration":2.3}', "duplicate_object_key"),
+        (b'{"duration":9007199254740992}', "integer_out_of_safe_range"),
+        (b'{"duration":9007199254740991.4}', "integer_out_of_safe_range"),
+        (b'{"value":"\\u0000"}', "nul_byte_forbidden"),
+    ],
+)
+def test_cursor_hook_payload_preserves_bounded_wire_rejections(payload: bytes, reason: str) -> None:
+    with pytest.raises(ProtocolValueError, match=reason):
+        read_cursor_hook_payload(payload)
+
+
+def test_cursor_hook_payload_discards_nested_vendor_floats() -> None:
+    parsed = read_cursor_hook_payload(
+        b'{"model_params":[{"id":"temperature","value":0.2}],'
+        b'"tool_input":{"ratio":1.5},"hook_event_name":"afterMCPExecution"}'
+    )
+
+    assert parsed["model_params"] == [{"id": "temperature", "value": None}]
+    assert parsed["tool_input"] == {"ratio": None}

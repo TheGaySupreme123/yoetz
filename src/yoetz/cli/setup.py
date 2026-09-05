@@ -40,12 +40,12 @@ from yoetz.adapters.integrations.codex_skill import (
     inspect_destination,
     load_packaged_skill_source,
 )
+from yoetz.adapters.workspace_binding import canonical_workspace_locator
 from yoetz.application.applied_mcp_route import clear_applied_route, read_applied_route
 from yoetz.application.codex_plugin import CodexPluginService
 from yoetz.application.harness_mcp import HarnessMcpService, McpRegistrationConfirmation
 from yoetz.application.observation_check_policy import load_observation_check_policy
 from yoetz.cli.agent_start import AGENT_START_HANDOFF
-from yoetz.cli.workspace_binding import canonical_workspace_locator
 from yoetz.config.load import load_config
 from yoetz.config.models import ConfigError
 from yoetz.config.paths import PathSafetyError, setup_marker_path

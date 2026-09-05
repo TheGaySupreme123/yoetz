@@ -119,6 +119,177 @@ def test_cursor_hook_ingress_drops_every_content_and_identity_denylist_field(
     assert forbidden.isdisjoint(sanitized)
 
 
+@pytest.mark.parametrize(
+    ("event_name", "extra", "expected_duration"),
+    [
+        (
+            "afterMCPExecution",
+            {"duration": 428.607, "model": "grok-4.6"},
+            428,
+        ),
+        (
+            "afterFileEdit",
+            {"model": "grok-4.6"},
+            None,
+        ),
+    ],
+)
+def test_cursor_raw_vendor_fields_reach_structural_observation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    event_name: str,
+    extra: dict[str, object],
+    expected_duration: int | None,
+) -> None:
+    monkeypatch.delenv("CURSOR_PROJECT_DIR", raising=False)
+    captured: dict[str, object] = {}
+
+    def fake_handle_observe(**kwargs: object) -> int:
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(observe_hooks, "handle_observe", fake_handle_observe)
+    payload: dict[str, object] = {
+        "conversation_id": "cursor-raw-vendor-fields",
+        "cursor_version": "3.17.8",
+        "generation_id": "generation-1",
+        "hook_event_name": event_name,
+        "tool_name": "status",
+        "tool_input": {"private": 1.5},
+        "result_json": "private result",
+        **extra,
+    }
+
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name=event_name,
+            stdin_bytes=json.dumps(payload, separators=(",", ":")).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+        )
+        == 0
+    )
+
+    sanitized = strict_json_parse(cast(bytes, captured["stdin_bytes"]))
+    assert isinstance(sanitized, Mapping)
+    assert sanitized["model_id"] == "grok-4.6"
+    if expected_duration is None:
+        assert "duration_ms" not in sanitized
+    else:
+        assert sanitized["duration_ms"] == expected_duration
+    assert sanitized["tool_name"] == "status"
+    assert "tool_input" not in sanitized
+    assert "result_json" not in sanitized
+
+
+def test_cursor_model_id_takes_precedence_over_vendor_model_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_handle_observe(**kwargs: object) -> int:
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(observe_hooks, "handle_observe", fake_handle_observe)
+    payload = json.dumps(
+        {
+            "conversation_id": "cursor-model-precedence",
+            "hook_event_name": "stop",
+            "model": "cursor-grok-4.6-medium-fast",
+            "model_id": "grok-4.6",
+        },
+        separators=(",", ":"),
+    ).encode()
+
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name="stop",
+            stdin_bytes=payload,
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+        )
+        == 0
+    )
+
+    sanitized = strict_json_parse(cast(bytes, captured["stdin_bytes"]))
+    assert isinstance(sanitized, Mapping)
+    assert sanitized["model_id"] == "grok-4.6"
+
+
+def test_cursor_raw_fractional_duration_is_stored_structurally(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CURSOR_PROJECT_DIR", raising=False)
+    store, commitment = _consented_store(tmp_path)
+    canaries = {
+        "tool_input": {"prompt": "PROMPT_CANARY", "ratio": 1.5},
+        "result_json": "RESULT_CANARY",
+        "transcript_path": "/private/TRANSCRIPT_CANARY",
+    }
+    payload = {
+        "conversation_id": "cursor-stored-fraction",
+        "hook_event_name": "afterMCPExecution",
+        "model": "grok-4.6",
+        "duration": 428.607,
+        "tool_name": "status",
+        **canaries,
+    }
+
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name="afterMCPExecution",
+            stdin_bytes=json.dumps(payload, separators=(",", ":")).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+
+    envelopes = store.list_envelopes(commitment)
+    assert len(envelopes) == 1
+    structural = envelopes[0].structural_payload
+    assert structural["duration_ms"] == 428
+    assert structural["model_id"] == "grok-4.6"
+    assert structural["tool_name"] == "status"
+    stored = b"".join(
+        path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    )
+    for canary in ("PROMPT_CANARY", "RESULT_CANARY", "TRANSCRIPT_CANARY"):
+        assert canary.encode() not in stored
+
+
+def test_cursor_invalid_vendor_payload_records_bounded_diagnostic(
+    tmp_path: Path,
+) -> None:
+    stdout = io.BytesIO()
+
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name="afterMCPExecution",
+            stdin_bytes=b'{"conversation_id":"cursor-invalid","duration":-1.0}',
+            stdout=stdout,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+        )
+        == 0
+    )
+
+    assert stdout.getvalue() == b"{}\n"
+    diagnostic = tmp_path / "observation/hook-diagnostics.jsonl"
+    row = json.loads(diagnostic.read_text(encoding="utf-8"))
+    assert row == {
+        "event": "PostToolUse",
+        "reason": "cursor_payload_invalid",
+        "ts": row["ts"],
+    }
+    assert "cursor-invalid" not in diagnostic.read_text(encoding="utf-8")
+
+
 def test_cursor_file_edit_uses_keyed_path_commitment_and_drops_outcomes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

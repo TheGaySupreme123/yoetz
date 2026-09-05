@@ -10,7 +10,8 @@ decision, never the agent and never a self-approving hook, tells the host to adm
 
 Rules shared by every host surface:
 
-- Only ``check`` is ever admitted; the other tools pass every host's rules already.
+- Only ``check`` is admitted by this adapter. The other operations have local or read-only
+  effects, but host invocation policies remain independent and may hold them.
 - An entry is recognized by exact bytes. A wider rule (a server-wide allow, a wildcard, a Codex
   server-level default) or a deny rule for the same tool is ``foreign``: reported, never edited,
   and never a reason to write beside it.

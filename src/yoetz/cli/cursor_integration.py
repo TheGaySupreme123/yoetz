@@ -24,6 +24,7 @@ from yoetz.adapters.integrations.portable_plugin import (
     ElevatedPortableArtifactReview,
 )
 from yoetz.cli.host_admission import admission_cleanup_preview, reverse_sweep
+from yoetz.config.paths import PathSafetyError
 from yoetz.domain.values import RequestId, request_id
 from yoetz.ports.plugin_artifacts import (
     ArtifactAuthority,
@@ -133,6 +134,7 @@ def _status_body(status: CursorPluginStatus) -> dict[str, object]:
         "artifact_digest": status.artifact_digest,
         "format_profile": None if status.format_profile is None else status.format_profile.value,
         "installed_digest": status.installed_digest,
+        "isolation_binding": status.isolation_binding,
         "launcher": {
             "artifact": (
                 None
@@ -273,6 +275,7 @@ def run_cursor_plugin_command(
                     "mcp_ownership": preview.mcp_ownership.value,
                     "mcp_ownership_state": preview.mcp_ownership_state.value,
                     "mcp_route_profile": preview.mcp_route_profile,
+                    "isolation_root": preview.isolation_root,
                     "preview_digest": preview.preview_digest,
                     "request_id": preview.request_id,
                     "scope": "user",
@@ -339,6 +342,9 @@ def run_cursor_plugin_command(
             json_output=json_output,
         )
         return 0
+    except PathSafetyError as error:
+        sys.stderr.write(f"cursor_isolation_root_invalid:{error.reason_code}\n")
+        return 1
     except (CursorIntegrationError, ValueError) as error:
         reason = error.reason.value if isinstance(error, CursorIntegrationError) else str(error)
         sys.stderr.write(f"{reason}\n")

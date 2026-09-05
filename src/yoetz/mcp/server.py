@@ -11,7 +11,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final, Literal, cast
+from typing import Final, Literal, Protocol, cast
+from urllib.parse import unquote_to_bytes, urlsplit
 
 import anyio
 from mcp import types
@@ -23,6 +24,10 @@ from pydantic import AnyUrl, BaseModel, ValidationError
 
 from yoetz import __version__
 from yoetz.adapters.mcp_stdio import bounded_stdio_server
+from yoetz.adapters.workspace_binding import (
+    MAX_WORKSPACE_LOCATOR_BYTES,
+    canonical_workspace_locator,
+)
 from yoetz.config.load import load_config
 from yoetz.config.models import LoggingConfig
 from yoetz.mcp.descriptors import (
@@ -114,6 +119,10 @@ __all__ = [
 _SERVER_NAME: Final = "yoetz"
 _WORKFLOW_RPC_DEADLINE_MS: Final = 30_000
 _SEMANTIC_CHECK_RPC_DEADLINE_MS: Final = 300_000
+_CURSOR_ROOTS_REQUEST_TIMEOUT_SECONDS: Final = 5.0
+_MAX_CURSOR_ROOTS: Final = 32
+_MAX_CURSOR_ROOT_URI_BYTES: Final = MAX_WORKSPACE_LOCATOR_BYTES * 2
+_INVALID_URI_ESCAPE: Final = re.compile(r"%(?![0-9A-Fa-f]{2})", re.ASCII)
 _REGISTERED_TOOL_NAMES: Final = frozenset(
     {"start", "publish_work", "check", "respond", "status", "receipt", "read_guidance"}
 )
@@ -253,6 +262,15 @@ class _ClientSlot:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     client: ServiceClient | None = None
     availability: _AvailabilityLatch | None = None
+    # Cursor's native MCP process is often launched from the host home directory. Its ordinary
+    # process cwd therefore cannot be a repository authority. A Cursor slot starts unresolved and
+    # is bound once from the host's MCP roots/list response; generic slots retain the build-time
+    # cwd in BridgeRuntime.
+    workspace_locator: WorkspaceLocator | None = None
+    workspace_binding_state: Literal["unresolved", "bound", "failed"] = "unresolved"
+    workspace_binding_source: Literal["injected", "mcp_roots"] = "mcp_roots"
+    workspace_binding_correlation_id: str | None = None
+    workspace_binding_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # Concurrent first arrivals share one on-demand probe: the owner sets attempting, waiters
     # park on attempt_finished, then re-check the completed latch (issue #476).
     attempting: bool = False
@@ -268,7 +286,7 @@ class BridgeRuntime:
     resources: tuple[GuidanceResource, ...]
     instructions: str
     host_profile: Literal["generic", "cursor"] = "generic"
-    workspace_locator: WorkspaceLocator = field(
+    workspace_locator: WorkspaceLocator | None = field(
         default_factory=lambda: WorkspaceLocator(os.fspath(Path.cwd().resolve(strict=True))),
         repr=False,
         compare=False,
@@ -280,8 +298,16 @@ def build_bridge_runtime(
     route_profile: McpRouteProfile = "policy",
     *,
     host_profile: Literal["generic", "cursor"] = "generic",
+    workspace_locator: WorkspaceLocator | None = None,
 ) -> BridgeRuntime:
-    """Verify every agent-readable byte and construct an unconnected bridge runtime."""
+    """Verify every agent-readable byte and construct an unconnected bridge runtime.
+
+    Generic bridges use their process cwd as the ordinary trusted locator. Cursor bridges defer
+    binding to the MCP session's client-provided roots/list response because a native Cursor helper
+    may start from the user's home directory. ``workspace_locator`` is an internal injection point
+    for an already trusted host binding and for transport tests; it is never read from a public
+    workflow request.
+    """
 
     if route_profile not in TOOL_DESCRIPTORS:
         raise ValueError("mcp_route_profile_invalid")
@@ -297,7 +323,15 @@ def build_bridge_runtime(
         descriptor.input_schema
         descriptor.output_schema
     build_last_resort_internal_error_result()
-    workspace_locator = WorkspaceLocator(os.fspath(Path.cwd().resolve(strict=True)))
+    if workspace_locator is not None and type(workspace_locator) is not WorkspaceLocator:
+        raise TypeError("workspace_locator_invalid")
+    if host_profile == "generic" and workspace_locator is None:
+        workspace_locator = WorkspaceLocator(os.fspath(Path.cwd().resolve(strict=True)))
+    slot = _ClientSlot()
+    if host_profile == "cursor" and workspace_locator is not None:
+        slot.workspace_locator = workspace_locator
+        slot.workspace_binding_state = "bound"
+        slot.workspace_binding_source = "injected"
     return BridgeRuntime(
         route_profile,
         descriptors,
@@ -305,10 +339,89 @@ def build_bridge_runtime(
         instructions,
         host_profile,
         workspace_locator,
+        slot,
     )
 
 
 BRIDGE_RUNTIME: Final = build_bridge_runtime()
+
+
+class _RootsSession(Protocol):
+    """The MCP session capability needed to ask a host for its project roots."""
+
+    async def list_roots(self) -> types.ListRootsResult: ...
+
+
+class _CursorWorkspaceBindingError(Exception):
+    """The native Cursor bridge has no trusted project locator for this MCP session."""
+
+
+def _cursor_root_path(root: object) -> str | None:
+    """Decode one MCP file root without accepting hostnames or URI metadata as a path."""
+
+    if not isinstance(root, types.Root):
+        return None
+    try:
+        uri = str(root.uri)
+        if len(uri.encode("utf-8")) > _MAX_CURSOR_ROOT_URI_BYTES:
+            return None
+        parsed = urlsplit(uri)
+    except TypeError, ValueError:
+        return None
+    if (
+        parsed.scheme != "file"
+        or parsed.netloc not in {"", "localhost"}
+        or parsed.query
+        or parsed.fragment
+        or not parsed.path.startswith("/")
+        or _INVALID_URI_ESCAPE.search(parsed.path) is not None
+    ):
+        return None
+    try:
+        path = unquote_to_bytes(parsed.path).decode("utf-8", errors="strict")
+    except UnicodeDecodeError, ValueError:
+        return None
+    try:
+        path_bytes = path.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    if (
+        not path
+        or len(path_bytes) > MAX_WORKSPACE_LOCATOR_BYTES
+        or any(ord(character) < 32 or ord(character) == 127 for character in path)
+    ):
+        return None
+    return path
+
+
+def _cursor_workspace_locator(result: object) -> WorkspaceLocator | None:
+    """Convert a host roots/list result to one canonical repository locator.
+
+    The roots capability is a host-session input, not a workflow field. Every root must be a
+    local, safe directory and all roots must resolve to one canonical repository. Distinct
+    repositories are ambiguous and fail closed; equivalent roots in one repository are harmless
+    aliases of the same private identity.
+    """
+
+    if not isinstance(result, types.ListRootsResult) or type(result.roots) is not list:
+        return None
+    if not result.roots or len(result.roots) > _MAX_CURSOR_ROOTS:
+        return None
+    canonical: list[str] = []
+    for root in result.roots:
+        path = _cursor_root_path(root)
+        if path is None:
+            return None
+        resolved = canonical_workspace_locator(path)
+        if resolved is None:
+            return None
+        canonical.append(resolved)
+    if len(set(canonical)) != 1:
+        return None
+    try:
+        return WorkspaceLocator(canonical[0])
+    except ValueError:
+        return None
 
 
 async def _close_client(client: ServiceClient) -> None:
@@ -342,6 +455,9 @@ async def ensure_service_client(
     """
 
     slot = runtime._slot  # pyright: ignore[reportPrivateUsage]
+    workspace_locator = _workspace_locator_for_runtime(runtime)
+    if workspace_locator is None:
+        raise _CursorWorkspaceBindingError()
     keep_gate = False
     try:
         while True:
@@ -370,7 +486,7 @@ async def ensure_service_client(
                     try:
                         connected_attempt = await connect_service_on_demand(
                             ControlClientKind.MCP_BRIDGE,
-                            workspace_locator=runtime.workspace_locator,
+                            workspace_locator=workspace_locator,
                         )
                         await connected_attempt.connect()
                     except BaseException as exc:
@@ -542,6 +658,125 @@ def structured_error_result(
                 structuredContent=fallback,
                 isError=True,
             )
+
+
+def _cursor_workspace_error(
+    runtime: BridgeRuntime,
+    request_id: str | None,
+    operation: str,
+) -> types.CallToolResult:
+    """Return one bounded, repeatable error for an unbound native Cursor session."""
+
+    slot = runtime._slot  # pyright: ignore[reportPrivateUsage]
+    result = structured_error_result(
+        PublicErrorCode.SESSION_CONFLICT,
+        (
+            "The Cursor MCP session did not provide one safe local project root. Fully quit and "
+            "relaunch Cursor, or create a new MCP process with the project open, then retry this "
+            "operation."
+        ),
+        request_id=request_id,
+        correlation_id=slot.workspace_binding_correlation_id,
+        operation=operation,
+        diagnostic_reason="repository_identity_required",
+        safe_details={
+            "host_profile": "cursor",
+            "reason_code": "repository_identity_required",
+        },
+        host_profile=runtime.host_profile,
+    )
+    # A failed roots/list exchange is session-scoped. Reusing its correlation id keeps repeated
+    # delegated calls from minting one diagnostic per tool while preserving the same public fact.
+    if slot.workspace_binding_correlation_id is None:
+        wire = _wire_error(result)
+        if wire is not None and type(wire.get("correlation_id")) is str:
+            slot.workspace_binding_correlation_id = cast(str, wire["correlation_id"])
+    return result
+
+
+async def _ensure_cursor_workspace_binding(
+    runtime: BridgeRuntime,
+    session: _RootsSession | None,
+    request_id: str | None,
+    operation: str,
+) -> types.CallToolResult | None:
+    """Bind and revalidate a Cursor bridge against the host's MCP roots/list response.
+
+    Native Cursor helpers can launch from a user home directory, so process cwd is not a valid
+    repository selector for this host profile. The binding is fetched only from the active MCP
+    session and cached for that bridge process; no workflow request field participates.
+    """
+
+    if runtime.host_profile != "cursor":
+        return None
+    slot = runtime._slot  # pyright: ignore[reportPrivateUsage]
+    retire_client = False
+    binding_error: types.CallToolResult | None = None
+    async with slot.workspace_binding_lock:
+        if slot.workspace_binding_state == "bound" and slot.workspace_binding_source == "injected":
+            return None
+        if slot.workspace_binding_state == "failed":
+            return _cursor_workspace_error(runtime, request_id, operation)
+        if session is None:
+            slot.workspace_binding_state = "failed"
+            slot.workspace_locator = None
+            binding_error = _cursor_workspace_error(runtime, request_id, operation)
+            retire_client = True
+        else:
+            try:
+                async with asyncio.timeout(_CURSOR_ROOTS_REQUEST_TIMEOUT_SECONDS):
+                    roots = await session.list_roots()
+            except Exception:
+                slot.workspace_binding_state = "failed"
+                slot.workspace_locator = None
+                binding_error = _cursor_workspace_error(runtime, request_id, operation)
+                retire_client = True
+            else:
+                locator = _cursor_workspace_locator(roots)
+                if locator is None or (
+                    slot.workspace_binding_state == "bound" and slot.workspace_locator != locator
+                ):
+                    # Cursor 3.19 advertises roots.listChanged=false, so a notification cannot be
+                    # relied on to retire a process after the user switches projects. Revalidate
+                    # before every workflow call and retire the old client on any change.
+                    slot.workspace_binding_state = "failed"
+                    slot.workspace_locator = None
+                    slot.workspace_binding_correlation_id = None
+                    binding_error = _cursor_workspace_error(runtime, request_id, operation)
+                    retire_client = True
+                else:
+                    slot.workspace_locator = locator
+                    slot.workspace_binding_state = "bound"
+                    slot.workspace_binding_source = "mcp_roots"
+    if retire_client:
+        await close_bridge_runtime(runtime)
+    if binding_error is not None:
+        return binding_error
+    return None
+
+
+async def _invalidate_cursor_workspace_binding(runtime: BridgeRuntime) -> None:
+    """Retire this bridge when the host says its project roots changed.
+
+    Rebinding an existing MCP process would let one service-client slot cross repository
+    authorities. The safe lifecycle is to discard the old client and require the host to create a
+    fresh bridge session, which asks roots/list again.
+    """
+
+    if runtime.host_profile != "cursor":
+        return
+    slot = runtime._slot  # pyright: ignore[reportPrivateUsage]
+    async with slot.workspace_binding_lock:
+        slot.workspace_locator = None
+        slot.workspace_binding_state = "failed"
+        slot.workspace_binding_correlation_id = None
+    await close_bridge_runtime(runtime)
+
+
+def _workspace_locator_for_runtime(runtime: BridgeRuntime) -> WorkspaceLocator | None:
+    if runtime.host_profile == "cursor":
+        return runtime._slot.workspace_locator  # pyright: ignore[reportPrivateUsage]
+    return runtime.workspace_locator
 
 
 def _control_public_error_result(
@@ -1091,9 +1326,12 @@ async def _clear_availability(runtime: BridgeRuntime) -> None:
 async def _quiet_probe(runtime: BridgeRuntime) -> ServiceClient | None:
     """Handshake with a service that is already listening; never spawn or supersede one."""
 
+    workspace_locator = _workspace_locator_for_runtime(runtime)
+    if workspace_locator is None:
+        return None
     try:
         client = await connect_service(
-            ControlClientKind.MCP_BRIDGE, workspace_locator=runtime.workspace_locator
+            ControlClientKind.MCP_BRIDGE, workspace_locator=workspace_locator
         )
     except Exception:
         return None
@@ -1277,6 +1515,8 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
             request_id,
             retain_availability_failure_for_latch=True,
         )
+    except _CursorWorkspaceBindingError:
+        return _cursor_workspace_error(runtime, request_id, operation)
     except PublicOperationError as exc:
         # Defense in depth: the ordinary client normally returns ok:false bodies, but if a
         # PublicOperationError escapes the service boundary, keep the exact public code.
@@ -1541,6 +1781,8 @@ async def _publish_recovery_from_envelope(
             lambda service, request: service.status(request, deadline_ms=_WORKFLOW_RPC_DEADLINE_MS),
             recovery_request_id,
         )
+    except _CursorWorkspaceBindingError:
+        return _PublishRecoveryOutcome(_PublishRecoveryKind.UNAVAILABLE)
     except PublicOperationError as exc:
         # A nested public failure (session conflict, projection, etc.) does not prove the
         # operation is absent or found. Do not promote it over the outer authoring diagnostic,
@@ -1856,6 +2098,8 @@ async def call_tool(
 async def _handle_call_tool_request(
     req: types.CallToolRequest,
     runtime: BridgeRuntime = BRIDGE_RUNTIME,
+    *,
+    session: _RootsSession | None = None,
 ) -> types.ServerResult:
     """Own CallToolRequest so unknown names never reach the SDK's name-echoing cache path."""
 
@@ -1866,6 +2110,15 @@ async def _handle_call_tool_request(
             types.ErrorData(code=types.INVALID_PARAMS, message=sanitize_unknown_tool_name(name))
         )
     arguments = dict(req.params.arguments or {})
+    if name != "read_guidance":
+        binding_error = await _ensure_cursor_workspace_binding(
+            runtime,
+            session,
+            safe_request_id_from(arguments),
+            name,
+        )
+        if binding_error is not None:
+            return types.ServerResult(binding_error)
     result = await call_tool(name, arguments, runtime)
     return types.ServerResult(result)
 
@@ -1912,7 +2165,14 @@ def _build_server(runtime: BridgeRuntime) -> Server[object]:
         return await list_tools(runtime)
 
     async def runtime_call_tool(req: types.CallToolRequest) -> types.ServerResult:
-        return await _handle_call_tool_request(req, runtime)
+        return await _handle_call_tool_request(
+            req,
+            runtime,
+            session=cast(_RootsSession, active.request_context.session),
+        )
+
+    async def runtime_roots_changed(_notify: types.RootsListChangedNotification) -> None:
+        await _invalidate_cursor_workspace_binding(runtime)
 
     async def runtime_list_resources() -> list[types.Resource]:
         return await list_resources(runtime)
@@ -1921,6 +2181,7 @@ def _build_server(runtime: BridgeRuntime) -> Server[object]:
     # Register a Yoetz-owned CallToolRequest handler instead of Server.call_tool so an unregistered
     # name becomes a sanitized JSON-RPC error and never reaches the SDK path that logs the raw name.
     active.request_handlers[types.CallToolRequest] = runtime_call_tool
+    active.notification_handlers[types.RootsListChangedNotification] = runtime_roots_changed
     active.list_resources()(runtime_list_resources)
     active.read_resource()(read_resource)
     return active

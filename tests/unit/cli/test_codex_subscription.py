@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import shutil
@@ -821,15 +822,17 @@ def test_guided_setup_offers_account_switch(
         [
             str(tmp_path / "codex"),
             str(tmp_path / "home"),
-            "gpt-5.6-sol",
+            "gpt-5.6-luna",
             "high",
             "browser",
         ]
     )
     confirms: list[str] = []
+    prompt_defaults: dict[str, object] = {}
 
-    def prompt(message: str, **_kwargs: object) -> str:
-        del message
+    def prompt(message: str, **kwargs: object) -> str:
+        if "default" in kwargs:
+            prompt_defaults[message] = kwargs["default"]
         return next(prompts)
 
     def confirm(message: str, **_kwargs: object) -> bool:
@@ -864,9 +867,64 @@ def test_guided_setup_offers_account_switch(
 
     anyio.run(module.prompt_codex_subscription_setup)
 
+    assert prompt_defaults["Exact model"] == "gpt-5.6-luna"
+    assert prompt_defaults["Reasoning effort"] == "high"
     assert any(item.startswith("Continue to Codex sign-in") for item in confirms)
     assert any("switch ChatGPT account" in item for item in confirms)
     assert captured == [True]
+
+
+def test_guided_setup_preserves_existing_model_when_switching_accounts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    prompts = iter(
+        [
+            str(tmp_path / "codex"),
+            str(tmp_path / "home"),
+            "high",
+            "browser",
+        ]
+    )
+    setup_args: list[tuple[object, object]] = []
+
+    def prompt(message: str, **kwargs: object) -> str:
+        if message == "Exact model":
+            assert kwargs["default"] == "gpt-5.6-sol"
+            return str(kwargs["default"])
+        return next(prompts)
+
+    def confirm(_message: str, **_kwargs: object) -> bool:
+        return True
+
+    async def setup(**kwargs: object) -> dict[str, object]:
+        setup_args.append((kwargs["model"], kwargs["switch_account"]))
+        return {"auth_mode": "chatgpt"}
+
+    def preview(**kwargs: object) -> dict[str, str]:
+        assert kwargs["model"] == "gpt-5.6-sol"
+        return {
+            "executable_path": "/opt/codex",
+            "executable_sha256": "sha256:" + "a" * 64,
+            "runtime_version": "0.150.1",
+            "capability_cell_sha256": "sha256:" + "b" * 64,
+            "capability_evidence_expires_at": "2026-11-30T00:00:00Z",
+            "codex_home": "/home",
+            "disconnect_command": "yoetz provider codex-subscription disconnect",
+            "rollback_command": "yoetz provider codex-subscription rollback",
+        }
+
+    monkeypatch.setattr("yoetz.adapters.integrations.codex_discovery.discover_codex_binaries", list)
+    monkeypatch.setattr(module, "default_codex_subscription_model", lambda: "gpt-5.6-sol")
+    monkeypatch.setattr("typer.prompt", prompt)
+    monkeypatch.setattr("typer.confirm", confirm)
+    monkeypatch.setattr(module, "codex_subscription_preview", preview)
+    monkeypatch.setattr(module, "codex_subscription_setup", setup)
+
+    import anyio
+
+    anyio.run(module.prompt_codex_subscription_setup)
+
+    assert setup_args == [("gpt-5.6-sol", True)]
 
 
 def test_guided_setup_discloses_login_reuse_before_the_confirmation(
@@ -878,15 +936,15 @@ def test_guided_setup_discloses_login_reuse_before_the_confirmation(
         [
             str(tmp_path / "codex"),
             str(tmp_path / "home"),
-            "gpt-5.6-sol",
+            "gpt-5.6-luna",
             "high",
             "browser",
         ]
     )
     disclosed_before_confirm: list[bool] = []
 
-    def prompt(message: str, **_kwargs: object) -> str:
-        del message
+    def prompt(message: str, **kwargs: object) -> str:
+        del kwargs
         return next(prompts)
 
     def confirm(message: str, **_kwargs: object) -> bool:
@@ -935,13 +993,17 @@ def test_cli_setup_discloses_reuse_and_names_its_override_before_the_confirmatio
     def resolve(selected: Path) -> tuple[Path, str, str]:
         return selected, "sha256:" + "a" * 64, "openai-codex-npm-darwin-arm64-0.150.1"
 
-    async def setup(**_kwargs: object) -> dict[str, object]:
+    selected_models: list[object] = []
+
+    async def setup(**kwargs: object) -> dict[str, object]:
+        selected_models.append(kwargs["model"])
         return {"schema": "yoetz.codex-subscription-status/1", "login_reused": True}
 
     async def restart() -> dict[str, object]:
         return {"reachable": True, "state": "ready", "vault_mode": None}
 
     monkeypatch.setattr(module, "resolve_supported_codex_executable", resolve)
+    monkeypatch.setattr(module, "default_codex_subscription_model", lambda: "gpt-5.6-sol")
     monkeypatch.setattr(module, "codex_subscription_setup", setup)
     monkeypatch.setattr("yoetz.cli.setup.restart_service_for_semantic_composition", restart)
 
@@ -965,6 +1027,9 @@ def test_cli_setup_discloses_reuse_and_names_its_override_before_the_confirmatio
     assert switch.exit_code == 0
     assert "existing sign-in: logged out first, then a new Codex sign-in" in switch.stdout
     assert "reused when Codex reports" not in switch.stdout
+    explicit = runner.invoke(app, [*arguments, "--model", "gpt-5.6-terra"])
+    assert explicit.exit_code == 0
+    assert selected_models == ["gpt-5.6-sol", "gpt-5.6-sol", "gpt-5.6-terra"]
 
 
 @pytest.mark.anyio
@@ -1448,3 +1513,21 @@ def test_cli_status_accepts_a_valid_storage_data_dir_configuration(
     assert result.exit_code == 20
     assert "codex_subscription_not_configured" in result.stderr
     assert "internal_error" not in result.stderr
+
+
+def test_cli_setup_recommends_luna_and_keeps_independent_high_effort() -> None:
+    from yoetz.cli.app import provider_codex_subscription_setup
+
+    params = inspect.signature(provider_codex_subscription_setup).parameters
+    assert params["model"].default is None
+    assert params["reasoning_effort"].default == "high"
+
+
+def test_default_subscription_model_recommends_luna_or_preserves_existing_binding(
+    tmp_path: Path,
+) -> None:
+    absent = tmp_path / "absent.toml"
+    assert module.default_codex_subscription_model(absent) == "gpt-5.6-luna"
+
+    target = _bound_config_file(tmp_path, _binding(tmp_path / "codex", tmp_path / "home"))
+    assert module.default_codex_subscription_model(target) == "gpt-5.6-sol"

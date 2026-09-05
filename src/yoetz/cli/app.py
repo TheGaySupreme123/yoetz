@@ -2738,7 +2738,16 @@ def provider_codex_subscription_setup(
             help="Selected Codex CLI/native executable; its exact native binary is digest-bound.",
         ),
     ],
-    model: Annotated[str, typer.Option("--model", help="Exact Codex model id.")] = "gpt-5.6-sol",
+    model: Annotated[
+        str | None,
+        typer.Option(
+            "--model",
+            help=(
+                "Exact Codex model id. Defaults to gpt-5.6-luna for a new binding and "
+                "preserves an existing binding's model when omitted."
+            ),
+        ),
+    ] = None,
     reasoning_effort: Annotated[
         str, typer.Option("--reasoning-effort", help="Exact reasoning effort.")
     ] = "high",
@@ -2782,12 +2791,14 @@ def provider_codex_subscription_setup(
         CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT,
         codex_subscription_setup,
         default_codex_home,
+        default_codex_subscription_model,
         resolve_supported_codex_executable,
     )
 
     try:
         native, digest, source = resolve_supported_codex_executable(executable)
         destination = default_codex_home() if codex_home is None else codex_home
+        selected_model = default_codex_subscription_model() if model is None else model
         typer.echo("Codex with ChatGPT subscription")
         typer.echo(f"  runtime: {native}")
         typer.echo(f"  executable_sha256: {digest}")
@@ -2795,7 +2806,7 @@ def provider_codex_subscription_setup(
         typer.echo(f"  capability cell: {CODEX_EVALUATOR_CAPABILITY_CELL_SHA256}")
         typer.echo(f"  cell evidence expires: {CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT}")
         typer.echo(f"  dedicated CODEX_HOME: {destination}")
-        typer.echo(f"  model/reasoning: {model} / {reasoning_effort}")
+        typer.echo(f"  model/reasoning: {selected_model} / {reasoning_effort}")
         typer.echo("  destination: OpenAI through Codex-managed ChatGPT authentication")
         typer.echo("  data-use posture: unknown; your ChatGPT plan and terms apply")
         typer.echo("  Yoetz sends only a privacy-approved case; Codex owns the upstream body.")
@@ -2822,7 +2833,7 @@ def provider_codex_subscription_setup(
                 lambda: codex_subscription_setup(
                     executable=executable,
                     codex_home=destination,
-                    model=model,
+                    model=selected_model,
                     reasoning_effort=reasoning_effort,
                     login_mode="device_code" if device_code else "browser",
                     open_browser=open_browser,

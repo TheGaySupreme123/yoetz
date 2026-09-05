@@ -40,6 +40,7 @@ from yoetz.adapters.integrations.observation_local import (
     ObservationOutboxRow,
     self_observation_deliverable,
 )
+from yoetz.adapters.workspace_binding import canonical_workspace_locator, resolve_workspace_locator
 from yoetz.cli import hook_io
 from yoetz.cli.hook_diagnostics import record_hook_diagnostic, record_hook_timing
 from yoetz.cli.hook_io import (
@@ -52,12 +53,12 @@ from yoetz.cli.hook_io import (
     cursor_context_output as _cursor_context_output,
 )
 from yoetz.cli.hook_io import (
+    read_cursor_hook_payload,
     read_hook_payload,
 )
 from yoetz.cli.hook_io import (
     stderr_line as _stderr_line,
 )
-from yoetz.cli.workspace_binding import canonical_workspace_locator, resolve_workspace_locator
 from yoetz.domain.observation import (
     ObservationContentChunk,
     ObservationContentKind,
@@ -3014,7 +3015,23 @@ def handle_cursor_observe(
         "stop": "Stop",
     }
     try:
-        payload = read_hook_payload(stdin_bytes)
+        try:
+            payload = read_cursor_hook_payload(stdin_bytes)
+        except ProtocolValueError:
+            # Cursor emits vendor-shaped decimal durations. Keep malformed host
+            # ingress fail-open, but make the dropped event visible through the
+            # bounded owner-only diagnostic stream.
+            with contextlib.suppress(BaseException):
+                record_hook_diagnostic(
+                    "cursor_payload_invalid",
+                    event_map.get(event_name or "", "unknown_event"),
+                    _state=_state,
+                )
+            with contextlib.suppress(BaseException):
+                _stderr_line("hook_cursor_observe_degraded: invalid_payload")
+            with contextlib.suppress(BaseException):
+                hook_io.stdout_json({}, stdout)
+            return 0
         raw_event = event_name or payload.get("hook_event_name")
         if type(raw_event) is not str or raw_event not in event_map:
             return 0 if hook_io.stdout_json({}, stdout) else 0
@@ -3071,12 +3088,18 @@ def handle_cursor_observe(
         for source_key, target_key in (
             ("cursor_version", "cursor_version"),
             ("generation_id", "correlation_id"),
-            ("model_id", "model_id"),
             ("tool_name", "tool_name"),
         ):
             value = _token_or_none(payload.get(source_key))
             if value is not None:
                 structural[target_key] = value
+        # Cursor's lifecycle payloads use ``model_id`` while execution and file
+        # edit payloads use ``model``. Prefer the canonical lifecycle spelling
+        # when both are present (they can intentionally differ: e.g. a provider
+        # alias in ``model`` and the selected model in ``model_id``).
+        model_id = _token_or_none(payload.get("model_id")) or _token_or_none(payload.get("model"))
+        if model_id is not None:
+            structural["model_id"] = model_id
         duration = _int_or_none(payload.get("duration"))
         if duration is not None:
             structural["duration_ms"] = duration

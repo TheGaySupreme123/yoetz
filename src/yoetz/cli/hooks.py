@@ -25,6 +25,7 @@ from yoetz.adapters.integrations.codex_lifecycle import (
     store_mapping,
     validate_codex_session_id,
 )
+from yoetz.adapters.workspace_binding import canonical_workspace_locator
 from yoetz.cli.hook_io import (
     context_output as _context_output,
 )
@@ -37,7 +38,6 @@ from yoetz.cli.hook_io import (
 from yoetz.cli.hook_io import (
     stdout_json as _stdout_json,
 )
-from yoetz.cli.workspace_binding import canonical_workspace_locator
 from yoetz.ports.control import ControlClientKind, ControlError, WorkspaceLocator
 from yoetz.protocol.canonical import JsonValue, strict_json_parse
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode

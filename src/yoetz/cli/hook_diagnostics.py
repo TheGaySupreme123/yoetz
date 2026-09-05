@@ -79,6 +79,10 @@ _REASONS: Final = frozenset(
         "runtime_gate_contended",
         "runtime_gate_unsafe",
         "stdout_write_failed",
+        # Cursor's vendor envelope uses fractional millisecond durations. A
+        # malformed or otherwise unsafe host payload is fail-open, but must be
+        # distinguishable from a hook that never ran (#593).
+        "cursor_payload_invalid",
         # Workspace binding outcomes for every host ingress (#420/#435): an
         # explicit locator that cannot be canonicalized, and a canonical
         # locator that carries no active consent. Without them a dropped hook
