@@ -296,11 +296,28 @@ async def _pipeline(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    ("host", "profile", "event_name", "payload", "marker", "content_kind"),
+    (
+        "host",
+        "profile",
+        "pre_event_name",
+        "pre_payload",
+        "post_event_name",
+        "post_payload",
+        "captured_bytes",
+        "marker",
+        "content_kind",
+    ),
     (
         (
             "claude",
             CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+            "PreToolUse",
+            {
+                "hook_event_name": "PreToolUse",
+                "session_id": "claude-capture-session",
+                "tool_name": "Bash",
+                "tool_use_id": "claude-tool-1",
+            },
             "PostToolUse",
             {
                 "hook_event_name": "PostToolUse",
@@ -311,42 +328,55 @@ async def _pipeline(
                 "exit_status": 0,
             },
             b"planted-claude-work-marker: missing validation",
+            b"planted-claude-work-marker: missing validation",
             ObservationContentKind.TOOL_OUTPUT,
         ),
         (
             "cursor",
             CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
-            "afterFileEdit",
+            "preToolUse",
             {
-                "hook_event_name": "afterFileEdit",
+                "hook_event_name": "preToolUse",
                 "conversation_id": "cursor-capture-session",
                 "tool_use_id": "cursor-tool-1",
-                "tool_name": "edit",
-                "file_path": "src/planted.py",
-                "file_content": "planted-cursor-code-marker: missing validation\n",
+                "tool_name": "shell",
                 "workspace_roots": (),
             },
-            b"planted-cursor-code-marker: missing validation\n",
-            ObservationContentKind.CHANGED_FILE,
+            "postToolUse",
+            {
+                "hook_event_name": "postToolUse",
+                "conversation_id": "cursor-capture-session",
+                "tool_use_id": "cursor-tool-1",
+                "tool_name": "shell",
+                "tool_output": '{"exitCode":0,"stdout":"planted-cursor-tool-output-marker: missing validation"}',
+                "exit_code": 0,
+                "workspace_roots": (),
+            },
+            b'{"exitCode":0,"stdout":"planted-cursor-tool-output-marker: missing validation"}',
+            b"planted-cursor-tool-output-marker: missing validation",
+            ObservationContentKind.TOOL_OUTPUT,
         ),
     ),
-    ids=("claude-tool-output", "cursor-changed-file"),
+    ids=("claude-tool-output", "cursor-tool-output"),
 )
 async def test_ordinary_native_hook_content_reaches_prepared_semantic_packet(
     tmp_path: Path,
     host: str,
     profile: str,
-    event_name: str,
-    payload: Mapping[str, object],
+    pre_event_name: str,
+    pre_payload: Mapping[str, object],
+    post_event_name: str,
+    post_payload: Mapping[str, object],
+    captured_bytes: bytes,
     marker: bytes,
     content_kind: ObservationContentKind,
 ) -> None:
-    codex_session_id = f"{host}:{payload.get('session_id') or payload['conversation_id']}"
+    codex_session_id = f"{host}:{pre_payload.get('session_id') or pre_payload['conversation_id']}"
     (
         project,
         workspace,
         session_commitment,
-        _local,
+        local,
         task_observation,
         ledger,
         runtime,
@@ -364,7 +394,7 @@ async def test_ordinary_native_hook_content_reaches_prepared_semantic_packet(
         # hook's coroutine runner explicitly so the hook exercises its normal service drain.
         return asyncio.run(factory())
 
-    def run_hook() -> int:
+    def run_hook(event_name: str, payload: Mapping[str, object]) -> int:
         if host == "claude":
             return handle_claude_observe(
                 event_name=event_name,
@@ -387,31 +417,43 @@ async def test_ordinary_native_hook_content_reaches_prepared_semantic_packet(
             observation_profile=profile,
         )
 
-    assert await asyncio.to_thread(run_hook) == 0
-    assert len(client.requests) == 1, f"connector calls={client.connect_calls}"
-    request = client.requests[0]
+    assert await asyncio.to_thread(run_hook, pre_event_name, pre_payload) == 0
+    assert await asyncio.to_thread(run_hook, post_event_name, post_payload) == 0
+    assert len(client.requests) == 2, f"connector calls={client.connect_calls}"
+    pre_request, request = client.requests
+    assert pre_request.codex_session_id == codex_session_id
+    assert pre_request.content_capture_profile == profile
+    assert pre_request.content_chunks == ()
     assert request.codex_session_id == codex_session_id
     assert request.content_capture_profile == profile
     assert len(request.content_chunks) == 1
     assert request.content_chunks[0].content_kind is content_kind
-    assert request.content_chunks[0].content == marker
+    assert request.content_chunks[0].content == captured_bytes
+    assert marker in captured_bytes
 
     envelopes = task_observation.list_envelopes_for_session(workspace, session_commitment)
-    assert len(envelopes) == 1, (
+    assert len(envelopes) == 2, (
         f"session={session_commitment!r} all="
         f"{[(item.session_commitment, item.source_identity) for item in task_observation.list_envelopes(workspace)]!r}"
     )
-    envelope = envelopes[0]
+    pre_envelope = next(
+        item for item in envelopes if item.source_identity == pre_request.envelope.source_identity
+    )
+    envelope = next(
+        item for item in envelopes if item.source_identity == request.envelope.source_identity
+    )
+    assert pre_envelope.content_object_refs == ()
+    assert pre_envelope.gap_codes == ()
     assert envelope.source_identity == request.envelope.source_identity
     assert envelope.content_object_refs
-    assert envelope.gap_codes == ("unpaired_event",)
+    assert envelope.gap_codes == ()
     manifest = task_observation.load_content_manifest(envelope.content_object_refs[0])
     assert manifest is not None
     assert manifest.content_kind is content_kind
     content_digest = manifest.content_digest
-    assert content_digest == "sha256:" + hashlib.sha256(marker).hexdigest()
+    assert content_digest == "sha256:" + hashlib.sha256(captured_bytes).hexdigest()
     assert content_digest is not None
-    assert manifest.content_bytes == len(marker)
+    assert manifest.content_bytes == len(captured_bytes)
 
     # The service's routed-session table is the resolver's exact host/session fence.  Production
     # verification workers record it when a workspace locator is available; this small in-process
@@ -437,11 +479,12 @@ async def test_ordinary_native_hook_content_reaches_prepared_semantic_packet(
         runtime=runtime,
         frozen=frozen,
         workspace_commitment=workspace,
+        local_observation=local,
     )
     assert resolved.gaps == ()
     assert len(resolved.content) == 1
     captured = resolved.content[0]
-    assert captured.content == marker
+    assert captured.content == captured_bytes
     assert captured.manifest.object_id == envelope.content_object_refs[0]
     assert captured.object_ref.metadata.kind is ObjectKind.CAPTURED_CONTENT
     assert captured.object_ref.metadata.media_type == _CAPTURE_MEDIA_TYPE
@@ -471,16 +514,15 @@ async def test_ordinary_native_hook_content_reaches_prepared_semantic_packet(
     excerpt = next(
         item
         for item in semantic.packet.targeted_excerpts
-        if item.content_digest == "sha256:" + hashlib.sha256(marker).hexdigest()
+        if item.content_digest == "sha256:" + hashlib.sha256(captured_bytes).hexdigest()
     )
     assert excerpt.content_visibility == "available"
+    assert "unpaired_event" not in semantic.packet.coverage.known_gaps
     prepared = semantic_case_to_prepared_payload(
         semantic,
         {item.item_id for item in semantic.items},
     )
-    # JSON canonicalization escapes a source newline, so inspect the semantic bytes after
-    # decoding that transport representation rather than matching the escaped wire spelling.
-    assert marker.decode("utf-8") in prepared.decode("utf-8").replace("\\n", "\n")
+    assert marker.decode("utf-8") in prepared.decode("utf-8")
     assert content_digest.encode("ascii") in prepared
 
 
