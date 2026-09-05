@@ -52,7 +52,7 @@ from yoetz.domain.observation import (
 from yoetz.domain.values import Frontier, JsonObject, Timestamp, finding_id
 from yoetz.ports.ledger import CheckPhase, OperationKind, OperationRecord, OperationState
 from yoetz.ports.runtime import TaskRuntime
-from yoetz.protocol.canonical import canonical_encode
+from yoetz.protocol.canonical import canonical_digest, canonical_encode
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 
@@ -239,6 +239,35 @@ def test_materialize_post_only_profiles_never_invent_a_pre_pair() -> None:
     forged_batch = materialize_observation_envelope(forged_codex, task_id=task)
     assert [item.role for item in forged_batch.drafts] == ["unpaired_evidence"]
     assert ObservationGapCode.UNPAIRED_EVENT.value in forged_batch.gaps
+
+    # An unreviewed native profile is conservative and must retain a
+    # host-specific action description if it is later widened to paired.
+    for source, label in (
+        (ObservationSource.CLAUDE_HOOK, "Claude Code hook"),
+        (ObservationSource.CURSOR_HOOK, "Cursor hook"),
+    ):
+        native = _envelope(
+            session=session,
+            kind="PostToolUse",
+            identity=f"{source.value}:paired-profile",
+            source=source,
+            exit_status=0,
+        )
+        native = replace(
+            native,
+            structural_payload=JsonObject(
+                {
+                    **native.structural_payload,
+                    "capability_profile_id": "future-paired-profile",
+                    "pairing_mode": "paired",
+                    "correlation_kind": "tool_call_id",
+                }
+            ),
+        )
+        native_batch = materialize_observation_envelope(native, task_id=task)
+        native_action = cast(ActionRecordedPayload, native_batch.drafts[0].draft.payload)
+        assert label in native_action.description
+        assert "Codex hook" not in native_action.description
 
 
 def test_successful_routine_reads_stay_observation_only_but_failures_materialize() -> None:
@@ -549,7 +578,7 @@ async def test_live_upgrade_finds_legacy_mapping_under_legacy_writer(tmp_path: P
         async def lookup_operation(self, writer_id: str, operation_id: str):
             lookups.append((writer_id, operation_id))
             return (
-                object()
+                SimpleNamespace(request_digest=legacy_digest)
                 if writer_id == legacy_writer_id and operation_id == expected_operation_id
                 else None
             )
@@ -1697,7 +1726,10 @@ def test_size_compaction_accounts_for_distinct_same_source_rows(
             "sess-compact",
             _envelope(session=session, identity="hook:same", ordinal=ordinal),
         )
-    monkeypatch.setattr(local_mod, "_MAX_STATE_BYTES", 2_100)
+    # /11 persists pairing-history provenance, adding a small fixed envelope to
+    # the compacted authority state. Keep the bound tight while allowing that
+    # required marker to fit after both outbox rows are accounted for.
+    monkeypatch.setattr(local_mod, "_MAX_STATE_BYTES", 2_150)
 
     store.note_coverage_gap(workspace, ObservationGapCode.SERVICE_UNAVAILABLE.value)
 
@@ -1710,7 +1742,7 @@ def test_size_compaction_accounts_for_distinct_same_source_rows(
         + int(persisted["quarantine_evicted_count"])
     )
     assert accounted == 2
-    assert state_path.stat().st_size <= 2_100
+    assert state_path.stat().st_size <= 2_150
 
 
 def test_monotonic_samples_fenced_across_simulated_reboot(tmp_path: Path) -> None:
@@ -2422,12 +2454,15 @@ def test_reused_call_id_isolated_by_source_session_and_generation() -> None:
     )
 
     assert canonical_logical_identity(base) == canonical_logical_identity(same_codex_stream)
-    assert len(
-        {
-            canonical_logical_identity(item)
-            for item in (base, next_generation, different_session, different_host)
-        }
-    ) == 4
+    assert (
+        len(
+            {
+                canonical_logical_identity(item)
+                for item in (base, next_generation, different_session, different_host)
+            }
+        )
+        == 4
+    )
     batches = [
         materialize_observation_envelope(item, task_id=task)
         for item in (base, next_generation, different_session, different_host)
@@ -3826,10 +3861,11 @@ async def test_pre_post_and_stream_copies_claim_without_storage_corrupt(tmp_path
             envelope: ObservationEnvelope,
             batch: MaterializedObservationBatch,
             *,
+            legacy_session_id: str | None = None,
             legacy_writer_id: str | None = None,
             replay_draft_role_sets: tuple[tuple[str, ...], ...] = (),
         ) -> tuple[str, str, None, str, tuple[str, ...]]:
-            del legacy_writer_id, replay_draft_role_sets
+            del legacy_session_id, legacy_writer_id, replay_draft_role_sets
             roles = tuple(item.role for item in batch.drafts)
             digest = _digest(
                 task_id=runtime.task_id,  # type: ignore[attr-defined]
@@ -3894,6 +3930,127 @@ async def test_pre_post_and_stream_copies_claim_without_storage_corrupt(tmp_path
     # stream coverage into source_mask == 3 (previously dead code, issue #309).
     assert [row[0] for row in rows] == [1, 3]
     assert {row[1] for row in rows} == {MATERIALIZATION_LEGACY_MAPPING_VERSIONS[0]}
+
+
+@pytest.mark.anyio
+async def test_post_only_replay_includes_historical_unpaired_role_set(tmp_path: Path) -> None:
+    """A native post-only retry can find the old unpaired-evidence operation."""
+
+    from types import SimpleNamespace
+
+    local, _workspace, session, mapping = _mapped_local(tmp_path, "legacy-post-only-replay")
+    replay_sets: list[tuple[tuple[str, ...], ...]] = []
+
+    class _Store:
+        def grant_consent(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        def bind_session(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        async def ingest(self, envelope: ObservationEnvelope) -> ObservationIngestResult:
+            return ObservationIngestResult(
+                ObservationIngestDisposition.ACCEPTED, None, envelope.cursor
+            )
+
+        def record_logical_identity_claim(self, **kwargs: object) -> None:
+            del kwargs
+
+    runtime = SimpleNamespace(
+        task_id=mapping.yoetz_task_id,
+        session_id=mapping.yoetz_session_id,
+        writer_id=observation_writer_id(mapping.yoetz_task_id, mapping.yoetz_session_id),
+        observation=_Store(),
+    )
+
+    class _RuntimePort:
+        async def route(self, command: object) -> object:
+            del command
+            return runtime
+
+        async def release(self, released: object) -> None:
+            del released
+
+    class _Clock:
+        def now_utc(self) -> datetime:
+            return datetime(2026, 1, 1, tzinfo=UTC)
+
+    class _Coordinator(ObservationCoordinator):
+        async def _capture_content(  # type: ignore[override]
+            self, runtime: object, store: object, **kwargs: object
+        ) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...], bool, bool]:
+            del runtime, store, kwargs
+            return (), (), False, False
+
+        async def _append_materialized(  # type: ignore[override]
+            self,
+            runtime: object,
+            envelope: ObservationEnvelope,
+            batch: MaterializedObservationBatch,
+            *,
+            legacy_session_id: str | None = None,
+            legacy_writer_id: str | None = None,
+            replay_draft_role_sets: tuple[tuple[str, ...], ...] = (),
+        ) -> tuple[str, str, None, str, tuple[str, ...]]:
+            del legacy_session_id, legacy_writer_id
+            replay_sets.append(replay_draft_role_sets)
+            roles = tuple(item.role for item in batch.drafts)
+            digest = observation_operation_digest(
+                task_id=runtime.task_id,  # type: ignore[attr-defined]
+                logical_identity=canonical_logical_identity(envelope),
+                draft_roles=roles,
+            )
+            return (
+                self._stable_operation_id(digest),
+                digest,
+                None,
+                MATERIALIZATION_MAPPING_VERSION,
+                roles,
+            )
+
+        async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+        async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+    coordinator = _Coordinator(
+        runtime=_RuntimePort(),  # type: ignore[arg-type]
+        local=local,
+        clock=_Clock(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
+    base_envelope = _envelope(
+        session=session,
+        kind="PostToolUse",
+        identity="claude:historical-unpaired",
+        source=ObservationSource.CLAUDE_HOOK,
+        exit_status=0,
+        corr="historical-call",
+        gaps=(ObservationGapCode.UNPAIRED_EVENT.value,),
+    )
+    envelope = replace(
+        base_envelope,
+        structural_payload=JsonObject(
+            {
+                **base_envelope.structural_payload,
+                "capability_profile_id": "claude-code-cli-local-project-2.1.241",
+                "pairing_mode": "post_only",
+                "correlation_kind": "tool_call_id",
+            }
+        ),
+    )
+
+    result = await coordinator.ingest_request(
+        ObservationIngestRequest(
+            codex_session_id="legacy-post-only-replay",
+            envelope=envelope,
+        )
+    )
+    assert result.disposition is ObservationIngestDisposition.ACCEPTED
+    assert replay_sets == [(("action", "result"), ("unpaired_evidence",))]
 
 
 @pytest.mark.anyio
@@ -4041,11 +4198,12 @@ async def test_later_stream_failure_correction_projection_policy(
             envelope: ObservationEnvelope,
             batch: MaterializedObservationBatch,
             *,
+            legacy_session_id: str | None = None,
             legacy_writer_id: str | None = None,
             replay_draft_role_sets: tuple[tuple[str, ...], ...] = (),
         ) -> tuple[str, str, AppendResult, str, tuple[str, ...]]:
             nonlocal core_unknown
-            del legacy_writer_id, replay_draft_role_sets
+            del legacy_session_id, legacy_writer_id, replay_draft_role_sets
             roles = tuple(item.role for item in batch.drafts)
             appended_roles.append(roles)
             appended_batches.append(batch)
@@ -4643,6 +4801,23 @@ async def test_advice_findings_reuse_operation_committed_by_predecessor_session(
         SimpleNamespace(event_id=draft.draft.event_id, schema=draft.draft.schema)
         for draft in materialize_observation_envelope(envelope, task_id=task_id).drafts
     ]
+    advice_subject_refs = tuple(
+        sorted((str(record.event_id) for record in ledger_events), key=str.encode)[:64]
+    )
+    advice_request_digest = canonical_digest(
+        JsonObject(
+            {
+                "format": "yoetz.observation-advice-findings/1",
+                "task_id": task_id,
+                "findings": (
+                    {
+                        "finding_id": str(item.finding_id),
+                        "subject_refs": advice_subject_refs,
+                    },
+                ),
+            }
+        )
+    )
     committed_result = canonical_encode(
         {
             "accepted": (
@@ -4663,7 +4838,7 @@ async def test_advice_findings_reuse_operation_committed_by_predecessor_session(
         predecessor_writer,
         PREFIX_BY_KIND[IdKind.REQUEST] + str(uuid.uuid4()),
         OperationKind.PUBLISH_WORK,
-        "sha256:" + "e" * 64,
+        advice_request_digest,
         OperationState.COMPLETE,
         CheckPhase.TERMINAL,
         None,

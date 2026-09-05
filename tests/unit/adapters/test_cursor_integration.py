@@ -102,6 +102,11 @@ def test_cursor_profile_exposes_only_supported_ide_and_cli_cells() -> None:
 def test_portable_and_native_reuse_exact_skill_bytes_but_keep_manifests_disjoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # This fixture models a legacy ambient install. Keep the process isolated
+    # while mocking only the adapter's binding lookup.
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.isolated_root", lambda: None
+    )
     executable = tmp_path / "bin" / "yoetz"
     executable.parent.mkdir()
     executable.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n", encoding="utf-8")
@@ -162,7 +167,13 @@ def test_portable_and_native_reuse_exact_skill_bytes_but_keep_manifests_disjoint
     ]
 
 
-def test_plugin_managed_native_route_is_exact_and_external_omits_it() -> None:
+def test_plugin_managed_native_route_is_exact_and_external_omits_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The scripted route is the pre-isolation ambient form.
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.isolated_root", lambda: None
+    )
     external = render_cursor_plugin(PluginFormatProfile.CURSOR_PLUGIN_NATIVE)
     managed = render_cursor_plugin(
         PluginFormatProfile.CURSOR_PLUGIN_NATIVE,
@@ -313,6 +324,12 @@ def test_plugin_mcp_ignores_sanitized_path_and_foreign_older_yoetz(
 ) -> None:
     """Negative controls for issue #468: PATH must not choose the MCP runtime."""
 
+    # The fixture asserts the legacy ambient route shape; only the adapter
+    # lookup is mocked so YOETZ_ISOLATED_ROOT remains set for the test process.
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.isolated_root", lambda: None
+    )
+
     invoking = _fake_yoetz(tmp_path / "current" / "bin" / "yoetz")
     older = _fake_yoetz(tmp_path / "older-channel" / "bin" / "yoetz")
 
@@ -359,6 +376,9 @@ def test_plugin_mcp_ignores_sanitized_path_and_foreign_older_yoetz(
 def test_module_entrypoint_launcher_binds_plugin_mcp_arguments(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.isolated_root", lambda: None
+    )
     interpreter = _fake_yoetz(tmp_path / "venv" / "bin" / "python")
 
     def refuse_path_lookup(_name: str) -> str | None:
@@ -513,6 +533,10 @@ def test_status_reports_legacy_bare_plugin_mcp_as_ambient_path(
 ) -> None:
     """A marker-valid tree rendered before #468 still launches whatever PATH resolves."""
 
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.isolated_root", lambda: None
+    )
+
     from yoetz.adapters.integrations.launcher_probe import FixedLauncherProbe
 
     monkeypatch.setattr(
@@ -575,6 +599,9 @@ def test_native_render_prefers_explicit_invoking_executable_over_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.isolated_root", lambda: None
+    )
     invoking = tmp_path / "invoking" / "yoetz"
     invoking.parent.mkdir()
     invoking.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -610,6 +637,9 @@ def test_native_render_preserves_module_entrypoint_launcher(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.isolated_root", lambda: None
+    )
     interpreter = tmp_path / "venv" / "bin" / "python"
     interpreter.parent.mkdir(parents=True)
     interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -695,7 +725,12 @@ def test_portable_render_never_resolves_a_host_executable(
     assert artifact.yoetz_launcher is None
 
 
-def test_safe_cursor_lifecycle_is_preview_bound_atomic_and_reversible(tmp_path: Path) -> None:
+def test_safe_cursor_lifecycle_is_preview_bound_atomic_and_reversible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.isolated_root", lambda: None
+    )
     target = CursorPluginTarget(str(tmp_path / ".cursor"))
     artifact = render_cursor_plugin(PluginFormatProfile.CURSOR_PLUGIN_NATIVE)
 
@@ -1093,7 +1128,12 @@ def test_native_executable_drift_is_modified_and_replaceable(
     assert json.loads(marker_path.read_bytes())["yoetz_launcher"] == [str(second.resolve())]
 
 
-def test_remove_preserves_separately_registered_mcp_route(tmp_path: Path) -> None:
+def test_remove_preserves_separately_registered_mcp_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.isolated_root", lambda: None
+    )
     target = CursorPluginTarget(str(tmp_path / ".cursor"))
     artifact = render_cursor_plugin(
         PluginFormatProfile.CURSOR_PLUGIN_NATIVE,

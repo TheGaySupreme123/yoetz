@@ -40,7 +40,7 @@ from yoetz.domain.observation import (
     observation_ingest_result_to_json,
 )
 from yoetz.protocol.canonical import JsonValue
-from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 from yoetz.protocol.models import StartRequest
 
 _KEY = b"k" * 32
@@ -955,15 +955,13 @@ def test_issue_607_all_host_hook_shapes_keep_pairing_honest(tmp_path: Path) -> N
 
     envelopes = store.list_envelopes(workspace)
     assert len(envelopes) == 7
-    assert all(
-        "unpaired_event" not in envelope.gap_codes
-        for envelope in envelopes[:4]
-    )
+    assert all("unpaired_event" not in envelope.gap_codes for envelope in envelopes[:4])
     assert "unpaired_event" not in envelopes[5].gap_codes
     assert "unpaired_event" in envelopes[6].gap_codes
-    assert ObservationGapCode.UNPAIRED_EVENT.value in store.status(
-        ObservationStatusQuery(workspace)
-    ).gaps
+    assert (
+        ObservationGapCode.UNPAIRED_EVENT.value
+        in store.status(ObservationStatusQuery(workspace)).gaps
+    )
 
 
 def test_unpaired_event_gap_survives_an_unrelated_pair(tmp_path: Path) -> None:
@@ -1036,6 +1034,58 @@ def test_historical_host_pairing_gap_resolves_without_erasing_history(
     assert ObservationGapCode.UNPAIRED_EVENT.value in state["gaps"]
 
 
+def test_pairing_history_fence_survives_a_pre11_writer_round_trip(tmp_path: Path) -> None:
+    """A downgraded writer cannot turn lost orphan provenance into a clear gap."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment("claude-downgrade-fence")
+    envelope = map_hook_payload_to_envelope(
+        "PostToolUse",
+        {
+            "session_id": "claude-downgrade-fence",
+            "tool_name": "shell",
+            "tool_use_id": "call-downgrade-fence",
+        },
+        session_commitment=session,
+        event_ordinal=1,
+        key_material=store.key_material(),
+        source=ObservationSource.CLAUDE_HOOK,
+        gap_codes=(ObservationGapCode.UNPAIRED_EVENT.value,),
+    )
+    assert store.ingest(envelope, workspace_commitment=workspace).disposition.value == "accepted"
+    # Simulate an older paired writer having recorded a true orphan before the
+    # host's legacy post-only interpretation was applied.
+    store.note_unpaired_event(
+        workspace,
+        source=ObservationSource.CLAUDE_HOOK,
+        session_commitment=session,
+        source_generation=envelope.cursor.source_generation,
+        source_identity=envelope.source_identity,
+    )
+    state_path = next((tmp_path / "observation" / "workspaces").glob("*.json"))
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["schema"] = "yoetz.observation-local/10"
+    state.pop("pairing_state_unknown", None)
+    state.pop("unpaired_scopes", None)
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    reopened = LocalObservationStore(_state=tmp_path)
+    assert (
+        ObservationGapCode.UNPAIRED_EVENT.value
+        in reopened.status(ObservationStatusQuery(workspace)).gaps
+    )
+    reopened.note_coverage_gap(workspace, ObservationGapCode.SERVICE_UNAVAILABLE.value)
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert persisted["schema"] == "yoetz.observation-local/11"
+    assert persisted["pairing_state_unknown"] is True
+    assert (
+        ObservationGapCode.UNPAIRED_EVENT.value
+        in reopened.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+
 def test_codex_pairing_contract_cannot_be_overridden_by_payload_marker(tmp_path: Path) -> None:
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
@@ -1056,9 +1106,10 @@ def test_codex_pairing_contract_cannot_be_overridden_by_payload_marker(tmp_path:
         _state=tmp_path,
         skip_service=True,
     )
-    assert ObservationGapCode.UNPAIRED_EVENT.value in store.status(
-        ObservationStatusQuery(workspace)
-    ).gaps
+    assert (
+        ObservationGapCode.UNPAIRED_EVENT.value
+        in store.status(ObservationStatusQuery(workspace)).gaps
+    )
 
 
 def test_pairing_admission_serializes_shared_pre_and_two_posts(tmp_path: Path) -> None:
@@ -1096,7 +1147,9 @@ def test_pairing_admission_serializes_shared_pre_and_two_posts(tmp_path: Path) -
 
     posts = (envelope("PostToolUse", 2), envelope("PostToolUse", 3))
 
-    def ingest(post: ObservationEnvelope) -> tuple[ObservationIngestDisposition, ObservationEnvelope]:
+    def ingest(
+        post: ObservationEnvelope,
+    ) -> tuple[ObservationIngestDisposition, ObservationEnvelope]:
         result, admitted = store.ingest_with_pairing(
             post,
             workspace_commitment=workspace,
@@ -1126,6 +1179,48 @@ def test_pairing_admission_serializes_shared_pre_and_two_posts(tmp_path: Path) -
         )
         is False
     )
+
+
+def test_pairing_admission_derives_contract_from_envelope(tmp_path: Path) -> None:
+    """Callers cannot mark a paired envelope post-only or switch its lane."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment("codex-contract-validation")
+    envelope = map_hook_payload_to_envelope(
+        "PreToolUse",
+        _codex_0146_payload("PreToolUse", "contract-call"),
+        session_commitment=session,
+        event_ordinal=1,
+        key_material=store.key_material(),
+    )
+
+    def admit(
+        *,
+        pairing_mode: str = "paired",
+        correlation_id: str | None = "contract-call",
+        is_pre_event: bool = True,
+    ) -> object:
+        return store.ingest_with_pairing(
+            envelope,
+            workspace_commitment=workspace,
+            pairing_mode=pairing_mode,
+            correlation_id=correlation_id,
+            source=ObservationSource.CODEX_HOOK,
+            session_commitment=session,
+            source_generation=envelope.cursor.source_generation,
+            is_pre_event=is_pre_event,
+            is_post_event=False,
+        )
+
+    with pytest.raises(ProtocolValueError):
+        admit(pairing_mode="post_only")
+    with pytest.raises(ProtocolValueError):
+        admit(correlation_id="other-call")
+    with pytest.raises(ProtocolValueError):
+        admit(is_pre_event=False)
+    assert store.list_envelopes(workspace) == ()
 
 
 def test_reordered_post_then_pre_keeps_the_orphan_diagnostic(tmp_path: Path) -> None:
@@ -1172,9 +1267,10 @@ def test_reordered_post_then_pre_keeps_the_orphan_diagnostic(tmp_path: Path) -> 
     )
     assert pre_result.disposition is ObservationIngestDisposition.ACCEPTED
     assert ObservationGapCode.UNPAIRED_EVENT.value not in admitted_pre.gap_codes
-    assert ObservationGapCode.UNPAIRED_EVENT.value in store.status(
-        ObservationStatusQuery(workspace)
-    ).gaps
+    assert (
+        ObservationGapCode.UNPAIRED_EVENT.value
+        in store.status(ObservationStatusQuery(workspace)).gaps
+    )
 
 
 def test_duplicate_post_does_not_consume_orphan_pairing_state(tmp_path: Path) -> None:
@@ -1224,13 +1320,18 @@ def test_duplicate_post_does_not_consume_orphan_pairing_state(tmp_path: Path) ->
         )
         return result.disposition
 
+    def run_duplicate(_unused: int) -> ObservationIngestDisposition:
+        del _unused
+        return ingest_duplicate()
+
     with ThreadPoolExecutor(max_workers=2) as pool:
-        dispositions = tuple(pool.map(lambda _unused: ingest_duplicate(), (0, 1)))
+        dispositions = tuple(pool.map(run_duplicate, (0, 1)))
     assert sorted(disposition.value for disposition in dispositions) == ["accepted", "duplicate"]
     assert "unpaired_event" not in store.list_envelopes(workspace)[-1].gap_codes
-    assert ObservationGapCode.UNPAIRED_EVENT.value not in store.status(
-        ObservationStatusQuery(workspace)
-    ).gaps
+    assert (
+        ObservationGapCode.UNPAIRED_EVENT.value
+        not in store.status(ObservationStatusQuery(workspace)).gaps
+    )
 
 
 def test_yoetz_tool_still_ingests_but_skips_advice_loop(tmp_path: Path) -> None:

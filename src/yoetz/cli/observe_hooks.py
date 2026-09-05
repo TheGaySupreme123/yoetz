@@ -468,12 +468,15 @@ def _bind_cursor_session_alias(conversation: str, session: str, *, _state: Path 
         return
 
 
-def _cursor_capability_profile_id(cursor_version: object) -> str:
-    """Map an exact Cursor version to its reviewed profile, else stay untested.
+def _cursor_capability_profile_id(cursor_version: object) -> str | None:
+    """Map an exact Cursor version to its reviewed profile.
 
     Hook payloads may report a version from any Cursor surface. Only the IDE
     profile owns the reviewed native hook set; the recognized CLI profile has
-    no hook cell and therefore remains ``untested`` at hook ingress. Importing
+    no hook cell and therefore remains ``untested`` at hook ingress. An omitted
+    version returns ``None`` so the closed pairing contract can apply the
+    installed legacy carrier fallback; a supplied but unknown version remains
+    explicitly untested and uses the conservative paired contract. Importing
     the adapter here would pull in the full plugin/rendering stack, so keep the
     fail-closed table local and never infer support for a neighboring surface
     or version.
@@ -481,7 +484,7 @@ def _cursor_capability_profile_id(cursor_version: object) -> str:
 
     version = _token_or_none(cursor_version)
     if version is None:
-        return _CURSOR_UNTESTED_PROFILE_ID
+        return None
     return _CURSOR_VERSION_TO_PROFILE.get(version, _CURSOR_UNTESTED_PROFILE_ID)
 
 
@@ -2872,18 +2875,19 @@ _CLAUDE_VERSION_TO_PROFILE: Final = {
 }
 
 
-def _claude_capability_profile_id(claude_version: object) -> str:
-    """Map an exact evidenced Claude version to its reviewed profile, else stay untested.
+def _claude_capability_profile_id(claude_version: object) -> str | None:
+    """Map an exact evidenced Claude version to its reviewed profile.
 
     The hook payload is the only version evidence this ingress has. A payload
-    that names no version, or a neighboring version whose native contract was
-    never proven, must not emit observations labeled with the evidenced
-    ``2.1.241`` profile; the fail-closed table never infers a range.
+    that names no version uses the omitted-profile compatibility path. A
+    neighboring version whose native contract was never proven stays
+    explicitly untested and uses the conservative paired contract; the
+    fail-closed table never infers a range.
     """
 
     token = _token_or_none(claude_version)
     if token is None:
-        return _CLAUDE_UNTESTED_PROFILE_ID
+        return None
     return _CLAUDE_VERSION_TO_PROFILE.get(token, _CLAUDE_UNTESTED_PROFILE_ID)
 
 
@@ -2961,20 +2965,19 @@ def handle_claude_observe(
         if session is None or len(session) > _MAX_TOKEN_CHARS - len(_CLAUDE_SESSION_PREFIX):
             hook_io.stdout_json({}, stdout)
             return 0
-        capability_profile_id = _claude_capability_profile_id(
-            payload.get("claude_code_version")
-        )
+        capability_profile_id = _claude_capability_profile_id(payload.get("claude_code_version"))
         pairing_mode, correlation_kind = observation_pairing_contract(
             "claude", capability_profile_id
         )
         structural: dict[str, JsonValue] = {
             "action": "claude_lifecycle",
-            "capability_profile_id": capability_profile_id,
             "pairing_mode": pairing_mode,
             "correlation_kind": correlation_kind,
             "hook_event_name": event_map[raw_event],
             "session_id": f"{_CLAUDE_SESSION_PREFIX}{session}",
         }
+        if capability_profile_id is not None:
+            structural["capability_profile_id"] = capability_profile_id
         if raw_event == "Stop" and payload.get("stop_hook_active") is True:
             structural["stop_hook_active"] = True
         if raw_event == "SessionStart":
@@ -3142,12 +3145,13 @@ def handle_cursor_observe(
                 if raw_event == "afterMCPExecution"
                 else "cursor_lifecycle"
             ),
-            "capability_profile_id": capability_profile_id,
             "pairing_mode": pairing_mode,
             "correlation_kind": correlation_kind,
             "hook_event_name": event_map[raw_event],
             "session_id": f"{_CURSOR_SESSION_PREFIX}{session}",
         }
+        if capability_profile_id is not None:
+            structural["capability_profile_id"] = capability_profile_id
         for source_key, target_key in (
             ("cursor_version", "cursor_version"),
             ("generation_id", "generation_id"),

@@ -660,6 +660,10 @@ class _WorkspaceState:
     frontier_motion_recency: int = 0
     open_pre: dict[str, str] | None = None
     unpaired_scopes: set[str] | None = None
+    # True when a state was written by a pre-/11 reader that could not retain
+    # scoped pairing provenance. It is deliberately sticky: a later save must
+    # not turn unknown history into proof that a gap was false.
+    pairing_state_unknown: bool = False
     stream_cursors: dict[str, ObservationCursor] | None = None
     stream_partials: dict[str, bytes] | None = None
     stream_call_tools: dict[str, dict[str, str]] | None = None
@@ -716,6 +720,8 @@ class _WorkspaceState:
             self.open_pre = {}
         if self.unpaired_scopes is None:
             self.unpaired_scopes = set()
+        if type(self.pairing_state_unknown) is not bool:
+            raise ProtocolValueError("invalid_event_value_type")
         if self.stream_cursors is None:
             self.stream_cursors = {}
         if self.stream_partials is None:
@@ -819,13 +825,40 @@ def _profile_harness(source: ObservationSource) -> str:
     return "codex"
 
 
+def _envelope_pairing_contract(
+    envelope: ObservationEnvelope,
+) -> tuple[str, str]:
+    profile_id = envelope.structural_payload.get("capability_profile_id")
+    return observation_pairing_contract(
+        _profile_harness(envelope.source), profile_id if type(profile_id) is str else None
+    )
+
+
+def _envelope_pairing_correlation(
+    envelope: ObservationEnvelope, correlation_kind: str
+) -> str | None:
+    """Derive the pairing identity from the admitted structural payload."""
+
+    structural = envelope.structural_payload
+    if correlation_kind == "none":
+        return None
+    for key in ("tool_use_id", "tool_call_id"):
+        value = structural.get(key)
+        if type(value) is str and value:
+            return value
+    if correlation_kind == "generation_id":
+        return None
+    for key in ("correlation_id", "parent_tool_call_id"):
+        value = structural.get(key)
+        if type(value) is str and value:
+            return value
+    return None
+
+
 def _is_post_only_profile(envelope: ObservationEnvelope) -> bool:
     """Recognize only an exact, reviewed post-only host/profile cell."""
 
-    profile_id = envelope.structural_payload.get("capability_profile_id")
-    mode, _correlation = observation_pairing_contract(
-        _profile_harness(envelope.source), profile_id if type(profile_id) is str else None
-    )
+    mode, _correlation = _envelope_pairing_contract(envelope)
     return mode == "post_only"
 
 
@@ -1040,6 +1073,7 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         frontier_motion_delivered=dict(state.frontier_motion_delivered or {}),
         open_pre=dict(state.open_pre or {}),
         unpaired_scopes=set(state.unpaired_scopes or ()),
+        pairing_state_unknown=state.pairing_state_unknown,
         stream_cursors=dict(state.stream_cursors or {}),
         stream_partials=dict(state.stream_partials or {}),
         stream_call_tools={
@@ -3495,6 +3529,85 @@ class LocalObservationStore:
         is_pre_event: bool,
         is_post_event: bool,
     ) -> tuple[ObservationIngestResult, ObservationEnvelope]:
+        """Atomically admit one hook envelope and update its pairing state.
+
+        The batch is owned here when a direct caller has not already opened
+        one. Hook ingress opens an outer batch so its outbox enqueue remains in
+        the same local transaction; nested use keeps that transaction intact.
+        """
+
+        if type(envelope) is not ObservationEnvelope:
+            raise _error(
+                PublicErrorCode.INVALID_REQUEST,
+                "Observation envelope is invalid.",
+                retryable=False,
+            )
+        if type(workspace_commitment) is not str:
+            raise _error(
+                PublicErrorCode.INVALID_REQUEST,
+                "Observation workspace is invalid.",
+                retryable=False,
+            )
+        try:
+            validate_commitment(workspace_commitment)
+        except ProtocolValueError as exc:
+            raise _error(
+                PublicErrorCode.INVALID_REQUEST,
+                "Observation workspace is invalid.",
+                retryable=False,
+            ) from exc
+        expected_mode, expected_kind = _envelope_pairing_contract(envelope)
+        expected_correlation = _envelope_pairing_correlation(envelope, expected_kind)
+        expected_pre = envelope.event_kind in {
+            "PreToolUse",
+            "PreCompact",
+            "SubagentStart",
+            "PermissionRequest",
+        }
+        expected_post = envelope.event_kind in {
+            "PostToolUse",
+            "PostCompact",
+            "SubagentStop",
+        }
+        if (
+            source is not envelope.source
+            or session_commitment != envelope.session_commitment
+            or type(source_generation) is not int
+            or source_generation != envelope.cursor.source_generation
+            or type(is_pre_event) is not bool
+            or type(is_post_event) is not bool
+            or is_pre_event is not expected_pre
+            or is_post_event is not expected_post
+            or pairing_mode != expected_mode
+            or correlation_id != expected_correlation
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        with self.batched(workspace_commitment):
+            return self._ingest_with_pairing(
+                envelope,
+                workspace_commitment=workspace_commitment,
+                pairing_mode=expected_mode,
+                correlation_id=expected_correlation,
+                source=envelope.source,
+                session_commitment=envelope.session_commitment,
+                source_generation=envelope.cursor.source_generation,
+                is_pre_event=expected_pre,
+                is_post_event=expected_post,
+            )
+
+    def _ingest_with_pairing(
+        self,
+        envelope: ObservationEnvelope,
+        *,
+        workspace_commitment: str,
+        pairing_mode: str,
+        correlation_id: str | None,
+        source: ObservationSource,
+        session_commitment: str,
+        source_generation: int,
+        is_pre_event: bool,
+        is_post_event: bool,
+    ) -> tuple[ObservationIngestResult, ObservationEnvelope]:
         """Admit one hook envelope and update its pairing state atomically.
 
         Pairing is part of durable admission, rather than a probe performed
@@ -3504,9 +3617,9 @@ class LocalObservationStore:
         envelope, outbox row, and materialized receipt on the same side of a
         concurrent duplicate/reorder race.
 
-        ``handle_observe`` normally calls this inside ``batched``; the nested
-        store lock is still required so direct callers get the same
-        interprocess atomicity.
+        The public wrapper owns the batch for direct callers; this internal
+        method runs inside that batch and keeps the lock held through the
+        envelope rewrite.
         """
 
         if type(envelope) is not ObservationEnvelope:
@@ -4161,6 +4274,7 @@ class LocalObservationStore:
             prior is None
             or not prior.active
             or state.unpaired_scopes
+            or state.pairing_state_unknown
             or state.envelopes_truncated
         ):
             return False
@@ -4169,13 +4283,9 @@ class LocalObservationStore:
             for envelope in (state.envelopes or ())
             if ObservationGapCode.UNPAIRED_EVENT.value in envelope.gap_codes
         ]
-        if not candidates or not all(
-            _is_post_only_profile(envelope) for envelope in candidates
-        ):
+        if not candidates or not all(_is_post_only_profile(envelope) for envelope in candidates):
             return False
-        LocalObservationStore._resolve_gap_state(
-            state, ObservationGapCode.UNPAIRED_EVENT.value
-        )
+        LocalObservationStore._resolve_gap_state(state, ObservationGapCode.UNPAIRED_EVENT.value)
         return True
 
     def _current_gaps(
@@ -4285,7 +4395,8 @@ class LocalObservationStore:
             )
         payload: dict[str, JsonValue] = {
             # /11 adds source/session/generation-scoped paired-profile orphan
-            # identities and retention provenance. /10 adds generation-fenced
+            # identities, retention provenance, and pairing-history fencing.
+            # /10 adds generation-fenced
             # deferred host-session lifecycle intents.
             # /9 generation-fences call-id pairing and stream file identity. /8
             # persisted unfenced call-id to tool-name pairing for rollout outputs.
@@ -4295,6 +4406,7 @@ class LocalObservationStore:
             # quarantine entry and the reclaimed counter. Readers tolerate both directions:
             # unknown keys are ignored and missing keys default safely.
             "schema": "yoetz.observation-local/11",
+            "pairing_state_unknown": state.pairing_state_unknown,
             "workspace_commitment": workspace,
             "consent": consent_json,
             "session_workspaces": JsonObject(
@@ -4630,7 +4742,7 @@ class LocalObservationStore:
         for code in cast(tuple[str, ...], gaps_raw):
             if type(code) is str and code not in gap_history:
                 gap_history[code] = _GapState(legacy_seen, legacy_seen)
-        # /10 and earlier did not persist retention provenance.  Their
+        # /10 and earlier did not persist retention provenance. Their
         # truncation gap is the only durable indication that older envelope
         # history may have been evicted, so preserve that uncertainty when
         # deciding whether a historical pairing diagnostic can be retired.
@@ -4789,6 +4901,15 @@ class LocalObservationStore:
         )
         if len(unpaired_scopes) > _MAX_UNPAIRED_SCOPES:
             unpaired_scopes = set(sorted(unpaired_scopes, key=str.encode)[:_MAX_UNPAIRED_SCOPES])
+        raw_pairing_state_unknown = raw.get("pairing_state_unknown")
+        # A pre-/11 writer can read a /11 file and save it again while dropping
+        # the scoped orphan set. Missing or malformed provenance is therefore
+        # incomplete history, even when the file claims /11.
+        pairing_state_unknown = not (
+            raw.get("schema") == "yoetz.observation-local/11"
+            and type(raw_pairing_state_unknown) is bool
+            and raw_pairing_state_unknown is False
+        )
         last_receipt = raw.get("last_receipt")
         envelopes: list[ObservationEnvelope] = []
         for item in cast(tuple[JsonValue, ...] | list[JsonValue], envelopes_raw):
@@ -4963,6 +5084,7 @@ class LocalObservationStore:
             frontier_motion_recency=frontier_motion_recency,
             open_pre=open_pre,
             unpaired_scopes=unpaired_scopes,
+            pairing_state_unknown=pairing_state_unknown,
             stream_cursors=stream_cursors,
             stream_partials=stream_partials,
             stream_call_tools=stream_call_tools,

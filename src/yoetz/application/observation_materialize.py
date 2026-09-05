@@ -244,9 +244,7 @@ def _pairing_contract(
         else "codex"
     )
     profile_id = payload.get("capability_profile_id")
-    return observation_pairing_contract(
-        harness, profile_id if type(profile_id) is str else None
-    )
+    return observation_pairing_contract(harness, profile_id if type(profile_id) is str else None)
 
 
 def _correlation(
@@ -353,6 +351,16 @@ def _materialization_call_source(
         f"{envelope.session_commitment}:{envelope.cursor.source_generation}:"
         f"{correlation}:{family}"
     )
+
+
+def _observation_host_label(source: ObservationSource) -> str:
+    """Name the host that supplied a native observation in user-facing text."""
+
+    if source is ObservationSource.CLAUDE_HOOK:
+        return "Claude Code hook"
+    if source is ObservationSource.CURSOR_HOOK:
+        return "Cursor hook"
+    return "Codex hook"
 
 
 def _coverage_for(
@@ -673,9 +681,7 @@ def materialize_observation_envelope(
     effective_gaps = tuple(
         gap
         for gap in envelope.gap_codes
-        if not (
-            gap == ObservationGapCode.UNPAIRED_EVENT.value and pairing_mode == "post_only"
-        )
+        if not (gap == ObservationGapCode.UNPAIRED_EVENT.value and pairing_mode == "post_only")
     )
     materialized_envelope = (
         envelope
@@ -820,7 +826,9 @@ def materialize_observation_envelope(
                     else f"Unpaired observed tool result exit={exit_status}"
                 )
                 if exit_status is not None
-                else "Observed post-only tool result" if post_only else "Unpaired observed tool result"
+                else "Observed post-only tool result"
+                if post_only
+                else "Unpaired observed tool result"
             )
             drafts.append(
                 _draft(
@@ -847,9 +855,7 @@ def materialize_observation_envelope(
             merged_gaps = (
                 gaps
                 if post_only
-                else tuple(
-                    sorted({*gaps, ObservationGapCode.UNPAIRED_EVENT.value}, key=str.encode)
-                )
+                else tuple(sorted({*gaps, ObservationGapCode.UNPAIRED_EVENT.value}, key=str.encode))
             )
             return MaterializedObservationBatch(tuple(drafts), coverage, channel, merged_gaps, None)
 
@@ -908,7 +914,7 @@ def materialize_observation_envelope(
                     (
                         f"Observed {action_kind.value} via post-only hook"
                         if pairing_mode == "post_only"
-                        else f"Observed {action_kind.value} via Codex hook"
+                        else f"Observed {action_kind.value} via {_observation_host_label(envelope.source)}"
                     ),
                     command=command,
                 ),

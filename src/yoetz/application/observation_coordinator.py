@@ -172,6 +172,33 @@ _ADVICE_FINDING_KIND_BY_RULE: Final = MappingProxyType(
     }
 )
 
+_LEGACY_UNPAIRED_REPLAY_PROFILE: Final = "legacy-paired-replay"
+
+
+def _legacy_unpaired_replay_envelope(
+    envelope: ObservationEnvelope,
+) -> ObservationEnvelope | None:
+    """Return a synthetic pre-#607 pairing view for historical role recovery.
+
+    Before host/profile pairing was explicit, every post with an unpaired gap
+    materialized as ``unpaired_evidence``. A current Claude/Cursor profile can
+    materialize the same retained envelope as a post-only action/result, so
+    retries need the old role set while probing pre-1.6 operation identities.
+    The synthetic profile is never persisted or sent across the wire.
+    """
+
+    if ObservationGapCode.UNPAIRED_EVENT.value not in envelope.gap_codes:
+        return None
+    structural = dict(envelope.structural_payload)
+    structural.update(
+        {
+            "capability_profile_id": _LEGACY_UNPAIRED_REPLAY_PROFILE,
+            "pairing_mode": "paired",
+            "correlation_kind": "tool_call_id",
+        }
+    )
+    return replace(envelope, structural_payload=JsonObject(structural))
+
 
 def _materialized_advice_items(items: Sequence[AdviceItem]) -> tuple[AdviceItem, ...]:
     """Keep advice that describes repairable work; machine conditions remain advice only."""
@@ -480,6 +507,8 @@ class ObservationCoordinator:
             mapping = self.mapping_loader(codex_session_id, _state=self.state_root)
             if mapping is None:
                 continue
+            predecessor_session_id = mapping.yoetz_session_id
+            predecessor_writer_id = mapping.yoetz_writer_id
             runtime: TaskRuntime | None = None
             try:
                 runtime, mapping = await self._route_observation_mapping(mapping)
@@ -495,7 +524,8 @@ class ObservationCoordinator:
                     runtime,
                     workspace,
                     store,
-                    legacy_writer_id=mapping.yoetz_writer_id,
+                    legacy_session_id=predecessor_session_id,
+                    legacy_writer_id=predecessor_writer_id,
                 )
                 if worker is None:
                     continue
@@ -504,7 +534,7 @@ class ObservationCoordinator:
                     bound_workspace: str = workspace,
                     bound_runtime: TaskRuntime = runtime,
                     bound_store: TaskObservationPort = store,
-                    bound_legacy_writer_id: str = mapping.yoetz_writer_id,
+                    bound_legacy_writer_id: str = predecessor_writer_id,
                 ) -> None:
                     await self._run_advice(
                         bound_workspace,
@@ -574,6 +604,8 @@ class ObservationCoordinator:
         mapping = self.mapping_loader(codex_session_id, _state=self.state_root)
         if mapping is None:
             return _reject(ObservationGapCode.MAPPING_MISSING.value)
+        predecessor_session_id = mapping.yoetz_session_id
+        predecessor_writer_id = mapping.yoetz_writer_id
 
         workspace = await self._local(
             partial(self.local.find_workspace_for_codex_session, codex_session_id)
@@ -664,6 +696,25 @@ class ObservationCoordinator:
                     )
                     if core_batch.skip_reason is None and core_batch.drafts:
                         replay_role_sets.append(tuple(item.role for item in core_batch.drafts))
+                    # A historical Claude/Cursor post-only false positive was
+                    # committed as unpaired evidence before the explicit host
+                    # contract existed. Rebuild that role set from the
+                    # retained gap itself, even when no captured manifest is
+                    # available to supply a replay candidate.
+                    legacy_unpaired = _legacy_unpaired_replay_envelope(envelope)
+                    if legacy_unpaired is not None:
+                        legacy_core_batch = materialize_observation_envelope(
+                            legacy_unpaired,
+                            task_id=runtime.task_id,
+                            captured_content=(),
+                        )
+                        legacy_roles = tuple(item.role for item in legacy_core_batch.drafts)
+                        if (
+                            legacy_core_batch.skip_reason is None
+                            and legacy_roles
+                            and legacy_roles not in replay_role_sets
+                        ):
+                            replay_role_sets.append(legacy_roles)
                     for candidate in replay_content_candidates:
                         replay_envelope = replace(
                             envelope,
@@ -686,12 +737,31 @@ class ObservationCoordinator:
                             and roles not in replay_role_sets
                         ):
                             replay_role_sets.append(roles)
+                        if legacy_unpaired is not None:
+                            legacy_replay_batch = materialize_observation_envelope(
+                                replace(
+                                    legacy_unpaired,
+                                    content_object_refs=replay_envelope.content_object_refs,
+                                ),
+                                task_id=runtime.task_id,
+                                captured_content=candidate,
+                            )
+                            legacy_replay_roles = tuple(
+                                item.role for item in legacy_replay_batch.drafts
+                            )
+                            if (
+                                legacy_replay_batch.skip_reason is None
+                                and legacy_replay_roles
+                                and legacy_replay_roles not in replay_role_sets
+                            ):
+                                replay_role_sets.append(legacy_replay_roles)
                     stage = "ledger_append"
                     claim = await self._append_materialized(
                         runtime,
                         envelope,
                         batch,
-                        legacy_writer_id=mapping.yoetz_writer_id,
+                        legacy_session_id=predecessor_session_id,
+                        legacy_writer_id=predecessor_writer_id,
                         replay_draft_role_sets=tuple(replay_role_sets),
                     )
                     if claim is not None:
@@ -881,7 +951,8 @@ class ObservationCoordinator:
                                     runtime,
                                     envelope,
                                     correction,
-                                    legacy_writer_id=mapping.yoetz_writer_id,
+                                    legacy_session_id=predecessor_session_id,
+                                    legacy_writer_id=predecessor_writer_id,
                                 )
                                 if corrected is not None:
                                     (
@@ -921,14 +992,15 @@ class ObservationCoordinator:
                     store,
                     envelope,
                     codex_session_id=codex_session_id,
-                    legacy_writer_id=mapping.yoetz_writer_id,
+                    legacy_session_id=predecessor_session_id,
+                    legacy_writer_id=predecessor_writer_id,
                 )
                 stage = "advice"
                 await self._run_advice(
                     workspace,
                     runtime,
                     store,
-                    legacy_writer_id=mapping.yoetz_writer_id,
+                    legacy_writer_id=predecessor_writer_id,
                     session_commitment=envelope.session_commitment,
                 )
                 return result
@@ -1186,6 +1258,7 @@ class ObservationCoordinator:
         envelope: ObservationEnvelope,
         batch: MaterializedObservationBatch,
         *,
+        legacy_session_id: str | None = None,
         legacy_writer_id: str | None = None,
         replay_draft_role_sets: tuple[tuple[str, ...], ...] = (),
     ) -> tuple[str, str, AppendResult | None, str, tuple[str, ...]] | None:
@@ -1195,9 +1268,9 @@ class ObservationCoordinator:
         logical_identity = canonical_logical_identity(envelope)
         draft_roles = tuple(item.role for item in batch.drafts)
         candidate_role_sets = tuple(dict.fromkeys((draft_roles, *replay_draft_role_sets)))
-        writer_ids = [writer_id]
+        writer_routes = [(runtime.session_id, writer_id)]
         if legacy_writer_id is not None and legacy_writer_id != writer_id:
-            writer_ids.append(legacy_writer_id)
+            writer_routes.append((legacy_session_id or runtime.session_id, legacy_writer_id))
         # Check the stable operation identity before staging payloads. A replay
         # after "ledger committed, local outbox not acknowledged" must not
         # create orphan encrypted objects on every retry.
@@ -1249,17 +1322,17 @@ class ObservationCoordinator:
             # keeps replay probes deterministic while still finding rows
             # written before the source/session identity was widened.
             for legacy_identity in dict.fromkeys(legacy_identities):
-                candidate_writer_ids = (
-                    writer_ids
+                candidate_writer_routes = (
+                    writer_routes
                     if mapping_version in SESSION_BOUND_MAPPING_VERSIONS
-                    else (writer_id,)
+                    else ((runtime.session_id, writer_id),)
                 )
-                for candidate_writer_id in candidate_writer_ids:
+                for candidate_session_id, candidate_writer_id in candidate_writer_routes:
                     for candidate_roles in candidate_role_sets:
                         digest_kwargs: dict[str, str] = {}
                         if mapping_version in SESSION_BOUND_MAPPING_VERSIONS:
                             digest_kwargs = {
-                                "session_id": runtime.session_id,
+                                "session_id": candidate_session_id,
                                 "writer_id": candidate_writer_id,
                             }
                         candidate_digest = observation_operation_digest(
@@ -1280,6 +1353,12 @@ class ObservationCoordinator:
                             )
                         )
                         if existing is not None:
+                            if existing.request_digest != candidate_digest:
+                                raise PublicOperationError(
+                                    PublicErrorCode.IDEMPOTENCY_CONFLICT,
+                                    "Observation operation identity is already committed with other content.",
+                                    retryable=False,
+                                )
                             return (
                                 candidate_operation_id,
                                 candidate_digest,
@@ -1503,6 +1582,7 @@ class ObservationCoordinator:
         runtime: TaskRuntime,
         completed: CompletedApprovedCheck,
         *,
+        legacy_session_id: str | None = None,
         legacy_writer_id: str | None = None,
     ) -> None:
         """Append one idempotent service-owned action/evidence/result graph."""
@@ -1536,7 +1616,7 @@ class ObservationCoordinator:
                         "approval_commitment": completed.job.approval_commitment,
                         "result_digest": result.result_digest,
                         "task_id": runtime.task_id,
-                        "session_id": runtime.session_id,
+                        "session_id": legacy_session_id or runtime.session_id,
                         "writer_id": legacy_writer_id,
                     }
                 )
@@ -2175,6 +2255,7 @@ class ObservationCoordinator:
         envelope: ObservationEnvelope,
         *,
         codex_session_id: str | None = None,
+        legacy_session_id: str | None = None,
         legacy_writer_id: str | None = None,
     ) -> None:
         """Capture subject state, enqueue durable work, wake the supervisor.
@@ -2189,6 +2270,7 @@ class ObservationCoordinator:
             store,
             envelope,
             codex_session_id=codex_session_id,
+            legacy_session_id=legacy_session_id,
             legacy_writer_id=legacy_writer_id,
         )
         if worker is None:
@@ -2208,6 +2290,7 @@ class ObservationCoordinator:
                     deferred_runtime,
                     workspace,
                     deferred_store,
+                    legacy_session_id=legacy_session_id,
                     legacy_writer_id=legacy_writer_id,
                 )
                 if deferred_worker is None:
@@ -2252,6 +2335,7 @@ class ObservationCoordinator:
         envelope: ObservationEnvelope,
         *,
         codex_session_id: str | None = None,
+        legacy_session_id: str | None = None,
         legacy_writer_id: str | None = None,
     ) -> ObservationVerificationWorker | None:
         """Build a worker and enqueue if subject state changed; never run checks here."""
@@ -2377,7 +2461,10 @@ class ObservationCoordinator:
             now=now_wire,
             lease_expires_at=lease_expiry,
             materialize_result=lambda completed: self._materialize_approved_check(
-                runtime, completed, legacy_writer_id=legacy_writer_id
+                runtime,
+                completed,
+                legacy_session_id=legacy_session_id,
+                legacy_writer_id=legacy_writer_id,
             ),
         )
         worker.enqueue_if_changed(
@@ -2532,6 +2619,7 @@ class ObservationCoordinator:
         workspace: str,
         store: TaskObservationPort,
         *,
+        legacy_session_id: str | None = None,
         legacy_writer_id: str | None = None,
     ) -> ObservationVerificationWorker | None:
         """Rebuild a drain worker for already-pending durable jobs (no enqueue)."""
@@ -2608,7 +2696,10 @@ class ObservationCoordinator:
             now=now_wire,
             lease_expires_at=lease_expiry,
             materialize_result=lambda completed: self._materialize_approved_check(
-                runtime, completed, legacy_writer_id=legacy_writer_id
+                runtime,
+                completed,
+                legacy_session_id=legacy_session_id,
+                legacy_writer_id=legacy_writer_id,
             ),
         )
 
@@ -2949,9 +3040,22 @@ class ObservationCoordinator:
         # events are already in the ledger (#560).
         existing = await runtime.ledger.lookup_task_operation(runtime.writer_id, operation_id)
         if existing is not None:
+            if existing.request_digest != request_digest_value:
+                raise PublicOperationError(
+                    PublicErrorCode.IDEMPOTENCY_CONFLICT,
+                    "Observation advice identity is already committed with other content.",
+                    retryable=False,
+                )
             return
         if legacy_writer_id is not None and legacy_writer_id != runtime.writer_id:
-            if await runtime.ledger.lookup_operation(legacy_writer_id, operation_id) is not None:
+            legacy_existing = await runtime.ledger.lookup_operation(legacy_writer_id, operation_id)
+            if legacy_existing is not None:
+                if legacy_existing.request_digest != request_digest_value:
+                    raise PublicOperationError(
+                        PublicErrorCode.IDEMPOTENCY_CONFLICT,
+                        "Observation advice identity is already committed with other content.",
+                        retryable=False,
+                    )
                 return
         entries: list[AppendEntry] = []
         object_refs: list[ObjectRef] = []

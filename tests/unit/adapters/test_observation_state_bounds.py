@@ -387,9 +387,10 @@ def test_pairing_history_does_not_reconcile_after_envelope_eviction(
         )
     )
 
-    assert ObservationGapCode.UNPAIRED_EVENT.value in store.status(
-        ObservationStatusQuery(workspace)
-    ).gaps
+    assert (
+        ObservationGapCode.UNPAIRED_EVENT.value
+        in store.status(ObservationStatusQuery(workspace)).gaps
+    )
 
 
 def test_store_stage_timings_attribute_hydrate_encode_write(tmp_path: Path) -> None:

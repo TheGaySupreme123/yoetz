@@ -62,7 +62,6 @@ def test_claude_hook_ingress_retains_only_closed_structural_mcp_fields(
     assert isinstance(sanitized, Mapping)
     assert sanitized == {
         "action": "claude_mcp_success",
-        "capability_profile_id": "untested",
         "correlation_kind": "tool_call_id",
         "hook_event_name": "PostToolUse",
         "pairing_mode": "post_only",
@@ -270,11 +269,12 @@ def test_claude_capability_profile_requires_exact_evidenced_version(
     monkeypatch.setattr(observe_hooks, "handle_observe", fake_handle_observe)
     for version, expected in (
         ("2.1.241", "claude-code-cli-local-project-2.1.241"),
-        # A neighboring version whose contract was never proven, and a payload
-        # naming no version at all, must both stay explicitly untested rather
-        # than emit evidence for the 2.1.241 profile.
+        # A neighboring version whose contract was never proven stays
+        # explicitly untested rather than emitting evidence for the 2.1.241
+        # profile. An omitted version uses the legacy carrier fallback and is
+        # therefore represented by an omitted profile field.
         ("2.1.240", "untested"),
-        (None, "untested"),
+        (None, None),
     ):
         payload: dict[str, JsonValue] = {
             "hook_event_name": "Stop",
@@ -290,7 +290,10 @@ def test_claude_capability_profile_requires_exact_evidenced_version(
             )
             == 0
         )
-        assert captured[-1]["capability_profile_id"] == expected
+        assert captured[-1].get("capability_profile_id") == expected
+        assert captured[-1]["pairing_mode"] == (
+            "post_only" if version in {"2.1.241", None} else "paired"
+        )
 
 
 def test_claude_read_guidance_calls_survive_the_scoped_ingress_allowlist(
