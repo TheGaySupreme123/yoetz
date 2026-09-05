@@ -114,4 +114,12 @@ def test_cursor_cli_preview_binds_ordinary_profile_without_installing(tmp_path: 
         json.loads(structural.stdout)["artifact_digest"]
         != json.loads(ordinary.stdout)["artifact_digest"]
     )
+    assert json.loads(ordinary.stdout)["observation_profile"] == "cursor-ordinary-observation-v1"
+    status_args = args.copy()
+    status_args[3] = "status"
+    status = CliRunner().invoke(app, [*status_args, "--observation-profile", "ordinary"])
+    assert status.exit_code == 0, status.output
+    body = json.loads(status.stdout)
+    assert body["requested_observation_profile"] == "cursor-ordinary-observation-v1"
+    assert body["installed_observation_profile"] is None
     assert not (config / "plugins").exists()

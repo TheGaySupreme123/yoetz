@@ -303,6 +303,9 @@ preview/install/status commands. Repeat the same profile when applying an exact 
 return to structural hooks, preview a replacement with `--observation-profile structural` and
 apply that exact preview. Portable artifacts reject ordinary observation; selecting a native
 artifact does not grant content capture.
+Preview names the selected profile. Status reports the requested profile and confirms an installed
+profile only when its verified marker and artifact digest match; otherwise that installed value is
+unknown rather than inferred from the request.
 
 Native content is a second, per-host consent arm. After granting structural observation, enable or
 revoke it with:

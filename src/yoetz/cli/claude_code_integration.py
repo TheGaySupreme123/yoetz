@@ -260,7 +260,19 @@ def run_claude_code_plugin_command(
         )
         status = status_claude_code_plugin(target, artifact)
         if command == "status":
-            _emit(_status_body(status), json_output=json_output)
+            _emit(
+                {
+                    **_status_body(status),
+                    "requested_observation_profile": artifact.plan.host_extension_profile,
+                    "installed_observation_profile": (
+                        artifact.plan.host_extension_profile
+                        if status.marker_valid
+                        and status.installed_digest == artifact.artifact_digest
+                        else None
+                    ),
+                },
+                json_output=json_output,
+            )
             return 0
         action_name = requested_action if command == "preview" else command
         if action_name is None:
@@ -289,6 +301,7 @@ def run_claude_code_plugin_command(
                         admission_cleanup_preview("claude", project) if reverse_admission else None
                     ),
                     "artifact_digest": preview.artifact_digest,
+                    "observation_profile": artifact.plan.host_extension_profile,
                     "authorization": {
                         "operation": "plugin_artifact_apply",
                         "prepare_command": [
@@ -347,6 +360,7 @@ def run_claude_code_plugin_command(
                     else None
                 ),
                 "artifact_digest": result.artifact_digest,
+                "requested_observation_profile": artifact.plan.host_extension_profile,
                 "changed_files": list(result.changed_files),
                 "enabled": result.enabled,
                 "installed_digest": result.installed_digest,

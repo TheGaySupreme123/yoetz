@@ -204,6 +204,9 @@ preview/install/update/status commands, or on `yoetz integrate claude plugin exp
 development directory. Repeat the same profile when applying an exact preview. To return to
 scoped structural hooks, preview and apply an update with `--observation-profile structural`.
 Artifact selection does not grant content capture.
+Preview names the selected profile. Status reports the requested profile and confirms an installed
+profile only when its verified marker and artifact digest match; otherwise that installed value is
+unknown rather than inferred from the request.
 
 Native content remains a second, per-host consent arm. After granting structural observation, an
 operator can enable and later revoke it with the user-facing commands below:

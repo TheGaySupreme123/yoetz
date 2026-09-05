@@ -234,7 +234,19 @@ def run_cursor_plugin_command(
         project = None if project_root is None else project_root.expanduser().absolute()
         status = status_cursor_plugin(target, artifact, project_root=project)
         if command == "status":
-            _emit(_status_body(status), json_output=json_output)
+            _emit(
+                {
+                    **_status_body(status),
+                    "requested_observation_profile": artifact.plan.host_extension_profile,
+                    "installed_observation_profile": (
+                        artifact.plan.host_extension_profile
+                        if status.marker_valid
+                        and status.installed_digest == artifact.artifact_digest
+                        else None
+                    ),
+                },
+                json_output=json_output,
+            )
             return 0
 
         request = _request(request_value)
@@ -274,6 +286,7 @@ def run_cursor_plugin_command(
                         else None
                     ),
                     "artifact_digest": preview.artifact_digest,
+                    "observation_profile": artifact.plan.host_extension_profile,
                     "authorization": {
                         "operation": "plugin_artifact_apply",
                         "prepare_command": [
@@ -344,6 +357,7 @@ def run_cursor_plugin_command(
                     else None
                 ),
                 "artifact_digest": result.artifact_digest,
+                "requested_observation_profile": artifact.plan.host_extension_profile,
                 "changed_files": list(result.changed_files),
                 "format_profile": result.format_profile.value,
                 "installed_digest": result.installed_digest,
