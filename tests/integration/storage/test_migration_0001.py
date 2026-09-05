@@ -7,6 +7,7 @@ import pytest
 
 from yoetz.adapters.sqlite.migrations import (
     BUNDLE_MIGRATIONS,
+    current_schema_version,
     initialize_bundle,
     initialize_catalog,
     run_migrations,
@@ -42,7 +43,8 @@ def test_fresh_migrations_install_identified_foreign_key_clean_schemas() -> None
     assert catalog.execute("PRAGMA foreign_key_check").fetchone() is None
 
     assert bundle.execute("PRAGMA application_id").fetchone() == (0x594F4554,)
-    assert bundle.execute("PRAGMA user_version").fetchone() == (9,)
+    current = current_schema_version(BUNDLE_MIGRATIONS)
+    assert bundle.execute("PRAGMA user_version").fetchone() == (current,)
     assert bundle.execute("PRAGMA foreign_keys").fetchone() == (1,)
     assert bundle.execute("PRAGMA trusted_schema").fetchone() == (0,)
     assert bundle.execute("PRAGMA foreign_key_check").fetchone() is None
@@ -52,7 +54,7 @@ def test_fresh_migrations_install_identified_foreign_key_clean_schemas() -> None
     ).fetchone() == ("1",)
     assert bundle.execute(
         "SELECT value FROM bundle_meta WHERE key = 'storage_schema_version'"
-    ).fetchone() == ("9",)
+    ).fetchone() == (str(current),)
     assert bundle.execute(
         "SELECT 1 FROM sqlite_schema WHERE name = 'observation_consent'"
     ).fetchone() == (1,)
@@ -82,7 +84,7 @@ def test_bundle_run_migrations_applies_0002_from_schema_version_one() -> None:
 
     report = run_migrations(bundle, BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
     assert report.from_version == 1
-    assert report.to_version == 9
+    assert report.to_version == current_schema_version(BUNDLE_MIGRATIONS)
     assert report.applied_versions == (
         "0002",
         "0003",
@@ -92,11 +94,14 @@ def test_bundle_run_migrations_applies_0002_from_schema_version_one() -> None:
         "0007",
         "0008",
         "0009",
+        "0010",
     )
-    assert bundle.execute("PRAGMA user_version").fetchone() == (9,)
+    assert bundle.execute("PRAGMA user_version").fetchone() == (
+        current_schema_version(BUNDLE_MIGRATIONS),
+    )
     assert bundle.execute(
         "SELECT value FROM bundle_meta WHERE key = 'storage_schema_version'"
-    ).fetchone() == ("9",)
+    ).fetchone() == (str(current_schema_version(BUNDLE_MIGRATIONS)),)
     assert bundle.execute(
         "SELECT 1 FROM sqlite_schema WHERE name = 'observation_consent'"
     ).fetchone() == (1,)

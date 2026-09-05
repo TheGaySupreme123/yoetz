@@ -287,8 +287,35 @@ and keep each support claim bounded by its actual proof facets.
 
 Cursor remains structural-only for issue #302: its native hooks retain digests and allowlisted
 outcome metadata but no captured content object, so they do not mint `observation_captured`
-evidence. Adding Cursor content capture requires a separately acknowledged capability/privacy
-expansion and exact host fixtures.
+evidence. The ordinary-work profile below is a separately acknowledged capability/privacy
+expansion; the default structural profile retains the boundary above.
+
+The default structural artifact remains unchanged. An explicitly rendered ordinary-work artifact
+uses `cursor-ordinary-observation-v1` and subscribes to Cursor's generic `preToolUse`,
+`postToolUse`, and `postToolUseFailure` events plus lifecycle signals. It leaves
+`beforeShellExecution`, `afterFileEdit`, and `afterMCPExecution` out of that subscription until a
+deduplication contract proves they are distinct from the generic stream. The hook command carries
+the exact profile id with `--observation-profile`; the id records the normalization contract and
+does not certify the installed Cursor build.
+
+Native content is a second, per-host consent arm. After granting structural observation, enable or
+revoke it with:
+
+```text
+yoetz observe content-enable --workspace /exact/project \
+  --profile cursor-ordinary-observation-v1
+yoetz observe content-status --workspace /exact/project --json
+yoetz observe content-disable --workspace /exact/project \
+  --profile cursor-ordinary-observation-v1
+```
+
+The service accepts Cursor chunks only when that exact profile is active in local consent and in
+the mapped task grant. A missing or mismatched profile drops plaintext chunks and records
+`content_capture_unavailable`; chunks are not written to the structural outbox. The installed
+Cursor IDE `3.19.7` fact is a candidate local host observation while this runbook's pinned
+compatibility cells remain unchanged; it cannot certify the ordinary profile without an exact
+isolated fixture and receipt evidence for native hook delivery, accepted content, semantic
+selection, and influence.
 
 Cursor has no `codex exec --json` import surface. Issue #301's bounded import authorization makes
 no Cursor adapter change; Cursor evidence continues through cooperative MCP and native

@@ -46,6 +46,10 @@ from yoetz.domain.observation import (
     observation_envelope_to_json,
     workspace_commitment_from_path,
 )
+from yoetz.domain.observation_profiles import (
+    is_content_capture_profile,
+    validate_content_capture_profile,
+)
 from yoetz.domain.values import (
     Frontier,
     JsonObject,
@@ -514,6 +518,19 @@ class LocalObservationConsent:
     granted_at: Timestamp
     revoked_at: Timestamp | None = None
     paused: bool = False
+    # Structural observation consent predates native ordinary-work capture.
+    # ``None`` is therefore meaningful: old grants must never be widened by a
+    # reader that learns about content profiles later.
+    content_capture_profiles: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        profiles = self.content_capture_profiles
+        if type(profiles) is not tuple or len(profiles) > 2:
+            raise ProtocolValueError("invalid_event_value_type")
+        if any(not is_content_capture_profile(profile) for profile in profiles):
+            raise ProtocolValueError("invalid_event_value_type")
+        if tuple(sorted(set(profiles), key=str.encode)) != profiles:
+            raise ProtocolValueError("invalid_event_value_type")
 
     @property
     def active(self) -> bool:
@@ -1109,6 +1126,22 @@ def _stream_profile_id_valid(profile_id: object) -> bool:
     )
 
 
+def _content_capture_profiles_from_json(row: Mapping[str, JsonValue]) -> tuple[str, ...]:
+    """Load the bounded plural consent arm, tolerating an early singular draft."""
+
+    raw = row.get("content_capture_profiles")
+    if raw is None:
+        legacy = row.get("content_capture_profile")
+        raw = () if legacy is None else (legacy,)
+    if not isinstance(raw, (tuple, list)):
+        return ()
+    profiles: list[str] = []
+    for value in cast(tuple[JsonValue, ...] | list[JsonValue], raw):
+        if type(value) is str and is_content_capture_profile(value):
+            profiles.append(value)
+    return tuple(sorted(set(profiles), key=str.encode))[:2]
+
+
 def _dedup_key(workspace: str, envelope: ObservationEnvelope) -> str:
     return canonical_digest(
         JsonObject(
@@ -1319,7 +1352,17 @@ class LocalObservationStore:
     def session_commitment(self, codex_session_id: str) -> str:
         return session_commitment_from_codex_id(self.key_material(), codex_session_id)
 
-    def grant_consent(self, workspace_commitment: str, granted_at: Timestamp | None = None) -> None:
+    def grant_consent(
+        self,
+        workspace_commitment: str,
+        granted_at: Timestamp | None = None,
+        *,
+        content_capture_profiles: tuple[str, ...] = (),
+    ) -> None:
+        if type(content_capture_profiles) is not tuple:
+            raise ProtocolValueError("invalid_event_value_type")
+        for profile in content_capture_profiles:
+            validate_content_capture_profile(profile)
         with self._lock:
             state = self._load(workspace_commitment)
             stamp = granted_at if granted_at is not None else _now()
@@ -1328,8 +1371,74 @@ class LocalObservationStore:
                 granted_at=stamp,
                 revoked_at=None,
                 paused=False,
+                content_capture_profiles=content_capture_profiles,
             )
             self._save(workspace_commitment, state)
+
+    def enable_content_capture(self, workspace_commitment: str, profile: str) -> None:
+        """Explicitly enable one versioned native-host content profile.
+
+        This is a second consent arm.  A historical structural grant remains
+        contentless until this operation is performed, and a revoked grant can
+        never be re-enabled without a fresh structural grant.
+        """
+
+        validate_content_capture_profile(profile)
+        with self._lock:
+            state = self._load(workspace_commitment)
+            consent = state.consent
+            if consent is None:
+                raise _error(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "Observation consent is missing.",
+                    retryable=False,
+                )
+            if consent.revoked_at is not None:
+                raise _error(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "Observation consent is revoked.",
+                    retryable=False,
+                )
+            profiles = tuple(
+                sorted(
+                    {*consent.content_capture_profiles, profile},
+                    key=str.encode,
+                )
+            )
+            state.consent = dataclasses.replace(consent, content_capture_profiles=profiles)
+            self._save(workspace_commitment, state)
+
+    def disable_content_capture(self, workspace_commitment: str, profile: str | None = None) -> None:
+        """Disable one native-host content arm, or all arms when omitted."""
+
+        if profile is not None:
+            validate_content_capture_profile(profile)
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            consent = state.consent
+            if consent is None:
+                raise _error(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "Observation consent is missing.",
+                    retryable=False,
+                )
+            profiles = (
+                ()
+                if profile is None
+                else tuple(
+                    item for item in consent.content_capture_profiles if item != profile
+                )
+            )
+            state.consent = dataclasses.replace(consent, content_capture_profiles=profiles)
+            self._save(workspace_commitment, state)
+
+    def content_capture_profiles(self, workspace_commitment: str) -> tuple[str, ...]:
+        """Return the persisted content arms, including while observation is paused."""
+
+        with self._lock:
+            consent = self._load(workspace_commitment).consent
+            return () if consent is None else consent.content_capture_profiles
 
     def bind_session(self, workspace_commitment: str, session_commitment: str) -> None:
         with self._lock:
@@ -3747,6 +3856,7 @@ class LocalObservationStore:
                 granted_at=consent.granted_at,
                 revoked_at=consent.revoked_at,
                 paused=True,
+                content_capture_profiles=consent.content_capture_profiles,
             )
             self._save(command.workspace_commitment, state)
             return self._status_unlocked(command.workspace_commitment)
@@ -3772,6 +3882,7 @@ class LocalObservationStore:
                 granted_at=consent.granted_at,
                 revoked_at=None,
                 paused=False,
+                content_capture_profiles=consent.content_capture_profiles,
             )
             self._save(command.workspace_commitment, state)
             return self._status_unlocked(command.workspace_commitment)
@@ -3794,6 +3905,7 @@ class LocalObservationStore:
                 granted_at=consent.granted_at,
                 revoked_at=revoked_at,
                 paused=True,
+                content_capture_profiles=(),
             )
             self._save(command.workspace_commitment, state)
             return self._status_unlocked(command.workspace_commitment)
@@ -4385,19 +4497,20 @@ class LocalObservationStore:
         assert state.codex_session_bindings is not None
         consent_json: JsonValue = None
         if consent is not None:
-            consent_json = JsonObject(
-                {
-                    "workspace_commitment": consent.workspace_commitment,
-                    "granted_at": consent.granted_at.wire,
-                    "revoked_at": None if consent.revoked_at is None else consent.revoked_at.wire,
-                    "paused": consent.paused,
-                }
-            )
+            consent_body: dict[str, JsonValue] = {
+                "workspace_commitment": consent.workspace_commitment,
+                "granted_at": consent.granted_at.wire,
+                "revoked_at": None if consent.revoked_at is None else consent.revoked_at.wire,
+                "paused": consent.paused,
+            }
+            if consent.content_capture_profiles:
+                consent_body["content_capture_profiles"] = consent.content_capture_profiles
+            consent_json = JsonObject(consent_body)
         payload: dict[str, JsonValue] = {
-            # /11 adds source/session/generation-scoped paired-profile orphan
-            # identities, retention provenance, and pairing-history fencing.
-            # /10 adds generation-fenced
-            # deferred host-session lifecycle intents.
+            # /12 adds the explicit native-host content-consent arm after /11's
+            # source/session/generation-scoped paired-profile orphan identities,
+            # retention provenance, and pairing-history fencing. /10 adds
+            # generation-fenced deferred host-session lifecycle intents.
             # /9 generation-fences call-id pairing and stream file identity. /8
             # persisted unfenced call-id to tool-name pairing for rollout outputs.
             # /7 attributes dropped stream-partial gaps per session. /6 adds one-shot
@@ -4405,7 +4518,7 @@ class LocalObservationStore:
             # corruption-session tracking. /3 added quarantined_at per
             # quarantine entry and the reclaimed counter. Readers tolerate both directions:
             # unknown keys are ignored and missing keys default safely.
-            "schema": "yoetz.observation-local/11",
+            "schema": "yoetz.observation-local/12",
             "pairing_state_unknown": state.pairing_state_unknown,
             "workspace_commitment": workspace,
             "consent": consent_json,
@@ -4668,6 +4781,7 @@ class LocalObservationStore:
                 granted_at=Timestamp(str(row["granted_at"])),
                 revoked_at=None if revoked is None else Timestamp(str(revoked)),
                 paused=bool(row.get("paused", False)),
+                content_capture_profiles=_content_capture_profiles_from_json(row),
             )
         session_workspaces = {
             str(key): str(value)

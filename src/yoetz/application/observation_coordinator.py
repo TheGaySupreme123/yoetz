@@ -114,6 +114,7 @@ from yoetz.domain.observation import (
     ObservationStatusQuery,
     observation_envelope_to_json,
 )
+from yoetz.domain.observation_profiles import content_capture_profile_matches_source
 from yoetz.domain.values import (
     Frontier,
     JsonObject,
@@ -634,8 +635,54 @@ class ObservationCoordinator:
                 runtime, mapping = await self._route_observation_mapping(mapping)
                 stage = "store_prepare"
                 store = self._observation_store(runtime)
-                store.grant_consent(workspace, consent.granted_at)
+                if consent.content_capture_profiles:
+                    store.grant_consent(
+                        workspace,
+                        consent.granted_at,
+                        content_capture_profiles=consent.content_capture_profiles,
+                    )
+                else:
+                    # Keep compatibility with test/reference task stores and
+                    # pre-0010 bundles for the historical structural arm. A
+                    # native content request still requires the new store API
+                    # below, so this fallback can never authorize content.
+                    try:
+                        store.grant_consent(
+                            workspace,
+                            consent.granted_at,
+                            content_capture_profiles=(),
+                        )
+                    except TypeError:
+                        store.grant_consent(workspace, consent.granted_at)
                 store.bind_session(workspace, request.envelope.session_commitment)
+                native_content_source = request.envelope.source in {
+                    ObservationSource.CLAUDE_HOOK,
+                    ObservationSource.CURSOR_HOOK,
+                }
+                requested_content_profile = request.content_capture_profile
+                if requested_content_profile is not None and (
+                    not native_content_source
+                    or not content_capture_profile_matches_source(
+                        request.envelope.source.value, requested_content_profile
+                    )
+                    or requested_content_profile not in consent.content_capture_profiles
+                ):
+                    # A client-supplied profile is an authorization assertion,
+                    # not a hint.  Refuse a source/profile or consent mismatch
+                    # before any content object can be staged.
+                    return _reject(ObservationGapCode.CONTENT_CAPTURE_PROFILE_MISMATCH.value)
+                content_authorized = not native_content_source
+                content_authorization_missing = False
+                if native_content_source and request.content_chunks:
+                    stored_profiles = store.content_capture_profiles(workspace)
+                    content_authorized = (
+                        requested_content_profile is not None
+                        and requested_content_profile in stored_profiles
+                        and content_capture_profile_matches_source(
+                            request.envelope.source.value, requested_content_profile
+                        )
+                    )
+                    content_authorization_missing = not content_authorized
                 (
                     captured_content,
                     replay_content_candidates,
@@ -646,12 +693,14 @@ class ObservationCoordinator:
                     store,
                     workspace=workspace,
                     envelope=request.envelope,
-                    chunks=request.content_chunks,
+                    chunks=request.content_chunks if content_authorized else (),
                 )
                 gaps = set(request.envelope.gap_codes)
                 if content_redacted:
                     gaps.add(ObservationGapCode.CONTENT_REDACTED.value)
                 if content_unavailable:
+                    gaps.add(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
+                if content_authorization_missing:
                     gaps.add(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
                 envelope = replace(
                     request.envelope,

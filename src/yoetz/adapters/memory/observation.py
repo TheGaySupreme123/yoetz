@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from yoetz.domain.observation import (
     ObservationControlCommand,
@@ -16,6 +16,10 @@ from yoetz.domain.observation import (
     ObservationSource,
     ObservationStatus,
     ObservationStatusQuery,
+)
+from yoetz.domain.observation_profiles import (
+    is_content_capture_profile,
+    validate_content_capture_profile,
 )
 from yoetz.domain.values import JsonObject, Timestamp
 from yoetz.protocol.canonical import canonical_digest, canonical_encode
@@ -38,6 +42,19 @@ class MemoryObservationConsent:
     granted_at: Timestamp
     revoked_at: Timestamp | None = None
     paused: bool = False
+    content_capture_profiles: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if type(self.content_capture_profiles) is not tuple or len(
+            self.content_capture_profiles
+        ) > 2:
+            raise ValueError("invalid_content_capture_profiles")
+        if any(not is_content_capture_profile(item) for item in self.content_capture_profiles):
+            raise ValueError("invalid_content_capture_profiles")
+        if tuple(sorted(set(self.content_capture_profiles), key=str.encode)) != (
+            self.content_capture_profiles
+        ):
+            raise ValueError("invalid_content_capture_profiles")
 
     @property
     def active(self) -> bool:
@@ -104,12 +121,76 @@ class MemoryObservationStore:
         self._state = state if state is not None else MemoryObservationState()
         self._lock = asyncio.Lock()
 
-    def grant_consent(self, workspace_commitment: str, granted_at: Timestamp) -> None:
+    def grant_consent(
+        self,
+        workspace_commitment: str,
+        granted_at: Timestamp,
+        *,
+        content_capture_profiles: tuple[str, ...] = (),
+    ) -> None:
+        if type(content_capture_profiles) is not tuple:
+            raise ValueError("invalid_content_capture_profiles")
+        for profile in content_capture_profiles:
+            validate_content_capture_profile(profile)
         self._state.consent[workspace_commitment] = MemoryObservationConsent(
             workspace_commitment=workspace_commitment,
             granted_at=granted_at,
             revoked_at=None,
             paused=False,
+            content_capture_profiles=content_capture_profiles,
+        )
+
+    def content_capture_profiles(self, workspace_commitment: str) -> tuple[str, ...]:
+        consent = self._state.consent.get(workspace_commitment)
+        return () if consent is None else consent.content_capture_profiles
+
+    def enable_content_capture(self, workspace_commitment: str, profile: str) -> None:
+        """Enable one explicit native-host content arm on a live grant."""
+
+        validate_content_capture_profile(profile)
+        consent = self._state.consent.get(workspace_commitment)
+        if consent is None:
+            raise _error(
+                PublicErrorCode.INVALID_REQUEST,
+                "Observation consent is missing.",
+                retryable=False,
+            )
+        if consent.revoked_at is not None:
+            raise _error(
+                PublicErrorCode.INVALID_REQUEST,
+                "Observation consent is revoked.",
+                retryable=False,
+            )
+        profiles = tuple(
+            sorted({*consent.content_capture_profiles, profile}, key=str.encode)
+        )
+        self._state.consent[workspace_commitment] = replace(
+            consent, content_capture_profiles=profiles
+        )
+
+    def disable_content_capture(
+        self, workspace_commitment: str, profile: str | None = None
+    ) -> None:
+        """Disable one native-host content arm, or all arms when omitted."""
+
+        if profile is not None:
+            validate_content_capture_profile(profile)
+        consent = self._state.consent.get(workspace_commitment)
+        if consent is None:
+            raise _error(
+                PublicErrorCode.INVALID_REQUEST,
+                "Observation consent is missing.",
+                retryable=False,
+            )
+        profiles = (
+            ()
+            if profile is None
+            else tuple(
+                item for item in consent.content_capture_profiles if item != profile
+            )
+        )
+        self._state.consent[workspace_commitment] = replace(
+            consent, content_capture_profiles=profiles
         )
 
     def bind_session(self, workspace_commitment: str, session_commitment: str) -> None:
@@ -254,6 +335,7 @@ class MemoryObservationStore:
                 granted_at=consent.granted_at,
                 revoked_at=consent.revoked_at,
                 paused=True,
+                content_capture_profiles=consent.content_capture_profiles,
             )
             return self._status_unlocked(command.workspace_commitment)
 
@@ -283,6 +365,7 @@ class MemoryObservationStore:
                 granted_at=consent.granted_at,
                 revoked_at=None,
                 paused=False,
+                content_capture_profiles=consent.content_capture_profiles,
             )
             return self._status_unlocked(command.workspace_commitment)
 
@@ -303,6 +386,7 @@ class MemoryObservationStore:
                 granted_at=consent.granted_at,
                 revoked_at=revoked_at,
                 paused=True,
+                content_capture_profiles=(),
             )
             # Evidence retained: envelopes/dedup/cursors remain.
             return self._status_unlocked(command.workspace_commitment)

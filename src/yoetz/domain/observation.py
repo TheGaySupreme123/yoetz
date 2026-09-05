@@ -13,6 +13,10 @@ from enum import Enum
 from types import MappingProxyType, NotImplementedType
 from typing import Final, Literal, cast
 
+from yoetz.domain.observation_profiles import (
+    is_content_capture_profile,
+    validate_content_capture_profile,
+)
 from yoetz.domain.values import (
     FindingId,
     JsonObject,
@@ -78,6 +82,8 @@ __all__ = [
     "observation_status_to_json",
     "stream_line_commitment",
     "workspace_commitment_from_path",
+    "is_content_capture_profile",
+    "validate_content_capture_profile",
 ]
 
 _MAX_SAFE_INTEGER: Final = 9_007_199_254_740_991
@@ -234,6 +240,7 @@ class ObservationGapCode(str, Enum):  # noqa: UP042 - exact durable wire enum
     OBSERVATION_STORAGE_CORRUPT = "observation_storage_corrupt"
     QUARANTINE_DETAIL_EVICTED = "quarantine_detail_evicted"
     CONTENT_CAPTURE_UNAVAILABLE = "content_capture_unavailable"
+    CONTENT_CAPTURE_PROFILE_MISMATCH = "content_capture_profile_mismatch"
     CONTENT_UNSELECTED = "content_unselected"
     CONTENT_REDACTED = "content_redacted"
     POLICY_UNTRUSTED = "policy_untrusted"
@@ -925,6 +932,10 @@ class ObservationIngestRequest:
     codex_session_id: str
     envelope: ObservationEnvelope
     content_chunks: tuple[ObservationContentChunk, ...] = ()
+    # Native Claude/Cursor content is admitted only with the exact profile
+    # explicitly enabled by the user.  Codex's historical session-stream
+    # content remains profile-less for backward compatibility.
+    content_capture_profile: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.codex_session_id) is not str or not self.codex_session_id:
@@ -940,6 +951,11 @@ class ObservationIngestRequest:
         if type(self.envelope) is not ObservationEnvelope:
             raise _invalid()
         object.__setattr__(self, "content_chunks", _content_chunks(self.content_chunks))
+        if self.content_capture_profile is not None:
+            try:
+                validate_content_capture_profile(self.content_capture_profile)
+            except ProtocolValueError as exc:
+                raise _invalid() from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -1235,6 +1251,8 @@ def observation_ingest_request_to_json(value: ObservationIngestRequest) -> JsonO
         payload["content_chunks"] = tuple(
             observation_content_chunk_to_json(item) for item in value.content_chunks
         )
+    if value.content_capture_profile is not None:
+        payload["content_capture_profile"] = value.content_capture_profile
     return JsonObject(payload)
 
 
@@ -1246,6 +1264,7 @@ def observation_ingest_request_from_json(value: JsonValue) -> ObservationIngestR
         "codex_session_id",
         "envelope",
         "content_chunks",
+        "content_capture_profile",
     }:
         raise _invalid()
     envelope_raw = source["envelope"]
@@ -1263,6 +1282,11 @@ def observation_ingest_request_from_json(value: JsonValue) -> ObservationIngestR
         content_chunks=tuple(
             observation_content_chunk_from_json(item)
             for item in cast(tuple[JsonValue, ...], chunks_raw)
+        ),
+        content_capture_profile=(
+            None
+            if source.get("content_capture_profile") is None
+            else cast(str, source["content_capture_profile"])
         ),
     )
 

@@ -55,6 +55,7 @@ from yoetz.domain.observation import (
     observation_ingest_result_from_json,
     observation_status_to_json,
 )
+from yoetz.domain.observation_profiles import validate_content_capture_profile
 from yoetz.domain.values import JsonObject
 from yoetz.domain.values import JsonValue as DomainJsonValue
 from yoetz.ports.control import ControlClientKind, ControlError
@@ -66,6 +67,9 @@ from yoetz.service.client import connect_service_on_demand
 
 __all__ = [
     "grant_observation",
+    "enable_observation_content",
+    "disable_observation_content",
+    "observation_content_status",
     "drain_observation",
     "observe_checks_preview",
     "observe_checks_revoke",
@@ -297,6 +301,7 @@ def observe_status(
     root = _resolve_workspace(workspace)
     commitment = store.workspace_commitment(str(root))
     consent = store.consent_for(commitment)
+    content_profiles = () if consent is None else consent.content_capture_profiles
     with contextlib.suppress(Exception):
         store.refresh_advice(commitment)
     status = store.status(ObservationStatusQuery(commitment))
@@ -359,6 +364,7 @@ def observe_status(
             {
                 "workspace_commitment": commitment,
                 "consent": consent_label,
+                "content_capture_profiles": content_profiles,
                 "status": observation_status_to_json(status),
                 "advice": advice_payload,
                 "undelivered_count": undelivered,
@@ -380,6 +386,7 @@ def observe_status(
     payload: dict[str, JsonValue] = {
         "workspace_commitment": commitment,
         "consent": consent_label,
+        "content_profiles": ",".join(content_profiles) if content_profiles else "none",
         "lifecycle": status.lifecycle.value,
         "lag_events": status.lag_events,
         "undelivered": (
@@ -718,6 +725,90 @@ def grant_observation(*, workspace: str, _state: Path | None = None) -> int:
     store.grant_consent(commitment)
     # Never log the raw path — only the commitment.
     typer.echo(f"observation_consent_granted:{commitment}")
+    return 0
+
+
+@_bounded_operation("content_enable")
+def enable_observation_content(
+    *, profile: str, workspace: str, _state: Path | None = None, json_output: bool = False
+) -> int:
+    """Enable one explicit native-host content profile for a consented workspace."""
+
+    validate_content_capture_profile(profile)
+    store = LocalObservationStore(_state=_state)
+    commitment = store.workspace_commitment(str(_resolve_workspace(workspace)))
+    store.enable_content_capture(commitment, profile)
+    if json_output:
+        _emit(
+            {
+                "workspace_commitment": commitment,
+                "content_capture_profile": profile,
+                "content_capture_profiles": store.content_capture_profiles(commitment),
+                "enabled": True,
+            },
+            json_output=True,
+        )
+    else:
+        typer.echo(f"observation_content_capture_enabled:{profile}")
+    return 0
+
+
+@_bounded_operation("content_disable")
+def disable_observation_content(
+    *,
+    workspace: str,
+    profile: str | None = None,
+    _state: Path | None = None,
+    json_output: bool = False,
+) -> int:
+    """Disable one native-host content profile, or all profiles when omitted."""
+
+    if profile is not None:
+        validate_content_capture_profile(profile)
+    store = LocalObservationStore(_state=_state)
+    commitment = store.workspace_commitment(str(_resolve_workspace(workspace)))
+    store.disable_content_capture(commitment, profile)
+    profiles = store.content_capture_profiles(commitment)
+    if json_output:
+        _emit(
+            {
+                "workspace_commitment": commitment,
+                "content_capture_profile": profile,
+                "content_capture_profiles": profiles,
+                "enabled": bool(profiles),
+            },
+            json_output=True,
+        )
+    else:
+        typer.echo(
+            "observation_content_capture_disabled:"
+            + (profile if profile is not None else "all")
+        )
+    return 0
+
+
+@_bounded_operation("content_status")
+def observation_content_status(
+    *, workspace: str, json_output: bool, _state: Path | None = None
+) -> int:
+    """Show the exact native-host content arms enabled for a workspace."""
+
+    store = LocalObservationStore(_state=_state)
+    commitment = store.workspace_commitment(str(_resolve_workspace(workspace)))
+    consent = store.consent_for(commitment)
+    profiles = () if consent is None else consent.content_capture_profiles
+    payload = {
+        "workspace_commitment": commitment,
+        "content_capture_profiles": profiles,
+        "enabled": bool(profiles) and consent is not None and consent.active,
+    }
+    if json_output:
+        _emit(payload, json_output=True)
+    else:
+        typer.echo(
+            "observation_content_capture_status:"
+            + (", ".join(profiles) if profiles else "disabled")
+        )
     return 0
 
 

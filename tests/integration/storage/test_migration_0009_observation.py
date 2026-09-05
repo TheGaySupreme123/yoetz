@@ -104,8 +104,8 @@ def test_schema_eight_rejects_the_host_hook_sources(source: str) -> None:
 def test_schema_eight_upgrade_preserves_rows_and_admits_every_source() -> None:
     db = _schema_eight()
     report = run_migrations(db, BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
-    assert report.applied_versions == ("0009",)
-    assert db.execute("PRAGMA user_version").fetchone() == (9,)
+    assert report.applied_versions == ("0009", "0010")
+    assert db.execute("PRAGMA user_version").fetchone() == (10,)
     assert db.execute("PRAGMA foreign_key_check").fetchall() == []
 
     # Existing rows, their ids, and the receipt index survive the rebuild.
