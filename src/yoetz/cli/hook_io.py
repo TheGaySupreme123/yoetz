@@ -156,11 +156,12 @@ def cursor_context_output(
     """Return the Cursor-native stdout object for one raw hook event.
 
     Cursor's output contract is independent from the Codex hook contract:
-    ``sessionStart`` accepts ``additional_context``, while ``stop`` can
-    optionally submit a ``followup_message``.  Stop follow-ups are disabled
-    by default because Cursor treats them as a new user message.  The other
-    Cursor hook events currently have no consumable output channel and emit
-    ``{}``.
+    ``sessionStart`` and successful ``postToolUse`` accept
+    ``additional_context``, while ``stop`` can optionally submit a
+    ``followup_message``.  Stop follow-ups are disabled by default because
+    Cursor treats them as a new user message.  ``postToolUseFailure`` and the
+    other Cursor hook events currently have no consumable output channel and
+    emit ``{}``.
     """
 
     bounded = text.strip()
@@ -168,7 +169,7 @@ def cursor_context_output(
         return {}
     if len(bounded) > _MAX_CONTEXT_CHARS:
         bounded = bounded[:_MAX_CONTEXT_CHARS]
-    if raw_event == "sessionStart":
+    if raw_event in {"sessionStart", "postToolUse"}:
         return {"additional_context": bounded}
     if raw_event == "stop" and allow_stop_followup:
         return {"followup_message": bounded}
