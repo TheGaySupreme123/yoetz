@@ -1765,6 +1765,13 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
             typer.Option("--project-root", help="Exact trusted project for MCP source checks."),
         ] = None,
         format_name: Annotated[str, typer.Option("--format", help="portable or native")] = "native",
+        observation_profile: Annotated[
+            str,
+            typer.Option(
+                "--observation-profile",
+                help="structural or ordinary native hooks; content capture requires separate consent.",
+            ),
+        ] = "structural",
         ownership_name: Annotated[
             str,
             typer.Option("--mcp-ownership", help="external-registration or plugin-managed"),
@@ -1810,6 +1817,10 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
         if harness in _PLUGIN_HOSTS and harness not in _PLUGIN_COMMAND_HOSTS[command_name]:
             _refuse_unsupported_plugin_command(harness, command_name)
             return
+        if observation_profile not in {"structural", "ordinary"}:
+            raise typer.BadParameter("--observation-profile must be structural or ordinary")
+        if observation_profile == "ordinary" and (harness == "codex" or format_name != "native"):
+            raise typer.BadParameter("ordinary observation requires native Claude or Cursor")
         if harness == "codex":
             module = importlib.import_module("yoetz.cli.codex_plugin")
             operation = cast(Callable[..., int], getattr(module, "run_codex_plugin_command"))
@@ -1839,6 +1850,7 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
                 "cursor_config_root": cursor_config_root,
                 "project_root": project_root,
                 "format_name": format_name,
+                "observation_profile": observation_profile,
                 "ownership_name": ownership_name,
                 "route_profile": route_profile,
                 "requested_action": requested_action,
@@ -1858,6 +1870,7 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
                     ownership_name=ownership_name,
                     route_profile=route_profile,
                     development_enabled=development_enabled,
+                    observation_profile=observation_profile,
                     json_output=json_output,
                 )
             )
@@ -1887,6 +1900,7 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
                 "marketplace_root": marketplace_root,
                 "project_root": project_root,
                 "format_name": format_name,
+                "observation_profile": observation_profile,
                 "ownership_name": ownership_name,
                 "route_profile": route_profile,
                 "requested_action": requested_action,

@@ -298,6 +298,12 @@ deduplication contract proves they are distinct from the generic stream. The hoo
 the exact profile id with `--observation-profile`; the id records the normalization contract and
 does not certify the installed Cursor build.
 
+Select these hooks with `--observation-profile ordinary` on the existing native Cursor plugin
+preview/install/status commands. Repeat the same profile when applying an exact preview. To
+return to structural hooks, preview a replacement with `--observation-profile structural` and
+apply that exact preview. Portable artifacts reject ordinary observation; selecting a native
+artifact does not grant content capture.
+
 Native content is a second, per-host consent arm. After granting structural observation, enable or
 revoke it with:
 

@@ -199,6 +199,12 @@ deduplication contract proves those signals add distinct work. The hook command 
 profile id with `--observation-profile`; the id is a mapping contract, not a claim about the
 installed Claude version.
 
+Select these hooks with `--observation-profile ordinary` on the existing Claude plugin
+preview/install/update/status commands, or on `yoetz integrate claude plugin export` for a
+development directory. Repeat the same profile when applying an exact preview. To return to
+scoped structural hooks, preview and apply an update with `--observation-profile structural`.
+Artifact selection does not grant content capture.
+
 Native content remains a second, per-host consent arm. After granting structural observation, an
 operator can enable and later revoke it with the user-facing commands below:
 

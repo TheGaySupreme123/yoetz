@@ -790,6 +790,11 @@ def render_cursor_plugin(
     if observation_profile not in {"structural", "ordinary"}:
         raise ValueError("cursor_observation_profile_invalid")
     resources = PackagedPortableResources() if source is None else source
+    if (
+        observation_profile == "ordinary"
+        and format_profile is not PluginFormatProfile.CURSOR_PLUGIN_NATIVE
+    ):
+        raise ValueError("cursor_observation_profile_unsupported")
     if format_profile is PluginFormatProfile.AGENT_PLUGINS_1:
         rendered: RenderedPortablePlugin = build_portable_plugin_plan(
             mcp_ownership=mcp_ownership,
