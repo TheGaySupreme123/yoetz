@@ -16,6 +16,7 @@ from yoetz.application.recommendations import (
 )
 from yoetz.cli import observe_hooks
 from yoetz.domain.observation import ObservationSource
+from yoetz.domain.observation_profiles import CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
 from yoetz.kernel.policies.observation_advice import ObservationCompositionFact
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 
@@ -670,6 +671,128 @@ def test_cursor_advice_delivery_stays_pending_until_session_start(
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    ("event_name", "event_fields", "delivers_advice"),
+    [
+        (
+            "postToolUse",
+            {
+                "tool_name": "Shell",
+                # Cursor's command result carries only the nonzero exit code;
+                # the host does not send a separate success/result_status flag.
+                "tool_output": '{"exitCode":7}',
+            },
+            True,
+        ),
+        (
+            "postToolUseFailure",
+            {
+                "tool_name": "Shell",
+                "error_message": "command failed",
+                "failure_type": "error",
+            },
+            False,
+        ),
+        (
+            "afterMCPExecution",
+            {"tool_name": "MCP:fixture_echo", "result_json": "fixture result"},
+            False,
+        ),
+    ],
+)
+def test_cursor_ordinary_advice_delivery_matches_native_output_channels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    event_name: str,
+    event_fields: dict[str, JsonValue],
+    delivers_advice: bool,
+) -> None:
+    """Only ordinary postToolUse can consume advice on Cursor's native channel."""
+
+    monkeypatch.delenv("CURSOR_PROJECT_DIR", raising=False)
+    store, commitment = _consented_store(tmp_path)
+    lease_calls: list[str] = []
+    original_lease = LocalObservationStore.advice_delivery_lease
+
+    def tracked_lease(self: LocalObservationStore, workspace: str) -> object:
+        lease_calls.append(workspace)
+        return original_lease(self, workspace)
+
+    monkeypatch.setattr(LocalObservationStore, "advice_delivery_lease", tracked_lease)
+    session = "cursor-ordinary-advice"
+    session_commitment = store.session_commitment(f"cursor:{session}")
+
+    # Seed a real task-scoped, transient failed-command finding. The loop
+    # guard leaves it pending, while the later native hook is the event under
+    # test. Standing provider configuration advice is intentionally excluded
+    # from PostToolUse cadence.
+    seed_out = io.BytesIO()
+    assert (
+        observe_hooks.handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=canonical_encode(
+                {
+                    "session_id": f"cursor:{session}",
+                    "hook_event_name": "PostToolUse",
+                    "capability_profile_id": CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+                    "tool_call_id": "seed-failed-command",
+                    "tool_name": "shell",
+                    "exit_status": 7,
+                    "stop_hook_active": True,
+                }
+            ),
+            stdout=seed_out,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+            source=ObservationSource.CURSOR_HOOK,
+            _output_event_name="postToolUse",
+            _content_capture_profile=CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+        )
+        == 0
+    )
+    assert seed_out.getvalue() == b"{}\n"
+    assert store.peek_advice_for_delivery(commitment, session_commitment=session_commitment)
+    assert lease_calls == []
+
+    output = io.BytesIO()
+    payload: dict[str, JsonValue] = {
+        "conversation_id": session,
+        "hook_event_name": event_name,
+        "cursor_version": "3.17.8",
+        **event_fields,
+    }
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name=event_name,
+            stdin_bytes=canonical_encode(payload),
+            stdout=output,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+            observation_profile=CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+        )
+        == 0
+    )
+
+    emitted = json.loads(output.getvalue())
+    if delivers_advice:
+        assert emitted == {"additional_context": emitted["additional_context"]}
+        assert "resolve_failed_command" in emitted["additional_context"]
+        assert lease_calls == [commitment]
+        assert (
+            store.peek_advice_for_delivery(
+                commitment,
+                session_commitment=session_commitment,
+            )
+            is None
+        )
+    else:
+        assert emitted == {}
+        assert lease_calls == []
+        assert store.peek_advice_for_delivery(commitment, session_commitment=session_commitment)
 
 
 def test_cursor_workspace_diagnostics_distinguish_unconsented_and_unresolvable(
