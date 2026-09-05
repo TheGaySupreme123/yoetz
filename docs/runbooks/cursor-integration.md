@@ -302,6 +302,12 @@ the portable CLI artifact therefore advertises no hooks. SDK fixture metadata ad
 capability; the SDKs' file-based hook contract is not execution evidence. Hooks call
 `yoetz hooks cursor-observe`, are fail-open, and never enforce Cursor work.
 
+Cursor's installed hook profile is post-only. `generation_id` identifies the
+host turn/conversation and remains metadata; it is never used as a tool-call
+identity or to synthesize a missing `PreToolUse`. A future paired Cursor
+profile must be an exact capability-profile table entry and declare a real
+tool-call identity before pairing is enabled.
+
 Native hook artifacts and the plugin-owned `mcp.json` resolve the invoking `yoetz` launcher to
 one exact command at render time. A
 console-script invocation resolves to that absolute executable; the documented `python -m yoetz`
@@ -357,13 +363,13 @@ explicit `start` maps it. For `vault_locked` on a never-initialized install, tha
 `start` returns the typed `vault_initialization_required` continuation (see Troubleshooting)
 rather than a dead end.
 
-Busy host lifecycle changes are durable local work. State schema `/10` adds bounded pending
+Busy host lifecycle changes are durable local work. State schema `/11` adds bounded pending
 session-lifecycle intents, and a READY or hook drain reconciles them under the workspace and
 session reservations before routing their rows; busy mapping writes use an atomic per-session
 handoff. Upgrade this state quiescently: stop the older Yoetz service and Cursor hooks, install
-the new runtime, then restart the service and all Cursor integrations before writing `/10` state.
-Mixed old and new writers are unsupported because a `/9` writer ignores the new field and can
-erase a deferred intent when it saves.
+the new runtime, then restart the service and all Cursor integrations before writing `/11` state.
+Mixed old and new writers are unsupported because a `/10` writer ignores the new pairing fields and
+can erase a deferred intent when it saves.
 
 The native Cursor MCP bridge has a separate workspace binding. It does not use the helper's process
 CWD, because a Cursor MCP child can be launched from the user home directory. On the first workflow

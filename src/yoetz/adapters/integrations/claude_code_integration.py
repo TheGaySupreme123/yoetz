@@ -110,6 +110,8 @@ _CLAUDE_HOOK_PROFILE: Final = HarnessHookProfile(
     # unpopulated until each event has installed-host delivery, privacy, and
     # accepted-observation evidence.
     observation_events=(),
+    pairing_mode="post_only",
+    correlation_kind="tool_call_id",
 )
 CLAUDE_CODE_HARNESS_PROFILE: Final = HarnessProfile(
     harness_id=HarnessId.CLAUDE,

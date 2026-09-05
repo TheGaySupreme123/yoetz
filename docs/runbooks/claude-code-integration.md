@@ -248,13 +248,13 @@ result remains the recovery path, not a substitute proof that natural auto-attac
 `vault_locked` on a never-initialized install, that explicit `start` returns the typed
 `vault_initialization_required` continuation (see the proof checklist) rather than a dead end.
 
-Busy host lifecycle changes are durable local work. State schema `/10` adds bounded pending
+Busy host lifecycle changes are durable local work. State schema `/11` adds bounded pending
 session-lifecycle intents, and a READY or hook drain reconciles them under the workspace and
 session reservations before routing their rows; busy mapping writes use an atomic per-session
 handoff. Upgrade this state quiescently: stop the older Yoetz service and Claude Code hooks,
 install the new runtime, then restart the service and all Claude Code integrations before writing
-`/10` state. Mixed old and new writers are unsupported because a `/9` writer ignores the new field
-and can erase a deferred intent when it saves.
+`/11` state. Mixed old and new writers are unsupported because a `/10` writer ignores the new
+pairing fields and can erase a deferred intent when it saves.
 
 The shared `observe status` CLI maps an unsafe state/lock path to `storage_unsafe`, bounded
 open/permission/read-only/missing-parent/lock-acquisition failures to `storage_unavailable`, and
@@ -290,7 +290,9 @@ observing itself (issue #564). The shared self-observation policy applies: a `Po
 `mcp__plugin_yoetz_yoetz__status`, `_receipt`, or `_read_guidance` is ingested into the bounded
 local store but not enqueued for delivery; a `PostToolUse` of `_start`, `_publish_work`, `_check`,
 or `_respond` enqueues one row; every `PostToolUseFailure` enqueues one row. Claude sends no
-`PreToolUse` on this profile, so there is no pre-event to hold back. The `PostToolUse` advice
+`PreToolUse` on this profile, so its reviewed pairing contract is post-only and there is no
+pre-event to hold back. Its `tool_use_id`, when present, identifies the observed result; no
+missing-pre gap is created for a legacy post-only hook. The `PostToolUse` advice
 channel is unchanged by this policy; only outbox delivery is governed. The manual
 `yoetz observe drain --json` reports `terminal: drained` once nothing is pending.
 

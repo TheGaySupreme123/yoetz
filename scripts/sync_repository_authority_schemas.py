@@ -424,6 +424,31 @@ def _claim_v24_request() -> dict[str, Any]:
                 "enum": ["generic", "codex", "claude", "cursor"],
                 "type": "string",
             }
+    # Host/profile pairing metadata is likewise new to the current schema.
+    # Keep the local observation envelope's structural keys closed for every
+    # released request version while allowing the issue #607 ingress contract
+    # through the active 2.4 control path.
+    structural_properties = generated["$defs"]["observation_envelope"]["properties"][
+        "structural_payload"
+    ]["properties"]
+    structural_properties.update(
+        {
+            "pairing_mode": {
+                "enum": ["paired", "post_only"],
+                "type": "string",
+            },
+            "correlation_kind": {
+                "enum": ["tool_call_id", "generation_id", "none"],
+                "type": "string",
+            },
+            "generation_id": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$",
+                "type": "string",
+            },
+        }
+    )
     _replace_schema_ref(
         generated,
         "https://schemas.yoetz.dev/0.1/operations/publish-work-request-1.0.0.schema.json",
