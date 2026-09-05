@@ -484,7 +484,7 @@ def test_v23_updates_only_the_status_operation_schema_refs() -> None:
         assert (_ROOT / filename).read_bytes() == _PACKAGE_ROOT.joinpath(filename).read_bytes()
 
 
-def test_v24_updates_only_publish_provenance_and_privacy_policy_contracts() -> None:
+def test_v24_updates_publish_privacy_and_serving_host_contracts() -> None:
     request_v23 = cast(
         dict[str, Any],
         strict_json_parse((_ROOT / "control-request-2.3.0.schema.json").read_bytes()),
@@ -508,6 +508,20 @@ def test_v24_updates_only_publish_provenance_and_privacy_policy_contracts() -> N
     new_result_id = result_v24.pop("$id")
     assert "publish-work-request-1.0.0.schema.json" in str(request_v23)
     assert "publish-work-request-1.1.0.schema.json" in str(request_v24)
+
+    request_v24_check = next(
+        branch
+        for branch in cast(list[dict[str, Any]], request_v24["oneOf"])
+        if cast(dict[str, Any], branch["properties"]).get("method") == {"const": "check"}
+    )
+    check_properties = cast(dict[str, Any], request_v24_check["properties"])
+    assert check_properties["host_profile"] == {
+        "enum": ["generic", "codex", "claude", "cursor"],
+        "type": "string",
+    }
+    # Serving-host identity is the only check-envelope addition in the current
+    # unreleased 2.4 schema; remove it before comparing the inherited contract.
+    del check_properties["host_profile"]
 
     policy_ref = "https://schemas.yoetz.dev/0.1/privacy/privacy-policy-1.0.0.schema.json"
     policy_union = [
