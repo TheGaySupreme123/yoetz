@@ -16,12 +16,16 @@ from yoetz.adapters.integrations.codex_lifecycle import (
     acquire_session_lock,
     acquire_workspace_recovery_lock,
 )
-from yoetz.adapters.integrations.observation_local import LocalObservationStore
+from yoetz.adapters.integrations.observation_local import (
+    LocalObservationStore,
+    PendingSessionLifecycle,
+)
+from yoetz.application.observation_drain import ObservationOutboxSweeper
 from yoetz.cli import observe_hooks as observe_hooks_module
 from yoetz.cli.observe_hooks import ServiceConnector, handle_observe
 from yoetz.domain.observation import (
-    ObservationEnvelope,
     ObservationIngestDisposition,
+    ObservationIngestRequest,
     ObservationIngestResult,
     ObservationSource,
     observation_ingest_result_to_json,
@@ -102,33 +106,15 @@ class _RecoveryBarrierClient:
         return None
 
 
-class _StartOkClient:
-    """Return a real start-shaped response and acknowledge a bounded outbox drain."""
+class _DuplicateCoordinator:
+    """A service-side sweep participant that acknowledges retained envelopes."""
 
     def __init__(self) -> None:
-        self.requests: list[StartRequest] = []
-        self.observation_ingest_calls: list[object] = []
+        self.requests: list[ObservationIngestRequest] = []
 
-    async def start(self, request: object, *, deadline_ms: int | None = None) -> object:
-        del deadline_ms
-        assert isinstance(request, StartRequest)
-        assert request.mode == "create_or_attach"
+    async def ingest_request(self, request: ObservationIngestRequest) -> ObservationIngestResult:
         self.requests.append(request)
-        return SimpleNamespace(
-            ok=True,
-            frontier=SimpleNamespace(sequence="3", head_digest="sha256:" + "a" * 64),
-            **_SUCCESSOR_IDS,
-        )
-
-    async def observation_ingest(self, body: object, *, deadline_ms: int) -> object:
-        del deadline_ms
-        self.observation_ingest_calls.append(body)
-        return observation_ingest_result_to_json(
-            ObservationIngestResult(ObservationIngestDisposition.DUPLICATE, None, None)
-        )
-
-    async def close(self) -> None:
-        return None
+        return ObservationIngestResult(ObservationIngestDisposition.DUPLICATE, None, None)
 
 
 def _connector(client: object) -> ServiceConnector:
@@ -189,6 +175,14 @@ def _yoetz_mutation_tool(source: ObservationSource) -> str:
     return "mcp__yoetz__publish_work"
 
 
+def _yoetz_read_tool(source: ObservationSource) -> str:
+    if source is ObservationSource.CLAUDE_HOOK:
+        return "mcp__plugin_yoetz_yoetz__status"
+    if source is ObservationSource.CURSOR_HOOK:
+        return "yoetz:status"
+    return "mcp__yoetz__status"
+
+
 def _assert_retained_for_session(
     store: LocalObservationStore,
     workspace: str,
@@ -204,6 +198,43 @@ def _assert_retained_for_session(
     ]
     assert retained
     assert retained[-1].event_kind == event_kind
+
+
+def _run_service_sweep(store: LocalObservationStore, coordinator: _DuplicateCoordinator) -> None:
+    """Run the same bounded service sweeper used by READY maintenance."""
+
+    async def run() -> None:
+        sweeper = ObservationOutboxSweeper(store, coordinator)
+        try:
+            await sweeper.sweep()
+        finally:
+            sweeper.close()
+
+    asyncio.run(run())
+
+
+def _pending_intent(
+    store: LocalObservationStore,
+    workspace: str,
+    session_id: str,
+    *,
+    event_kind: str,
+    target_generation: int,
+    clear_mapping: bool = False,
+) -> PendingSessionLifecycle:
+    """Return one exact deferred lifecycle intent from the durable store."""
+
+    intents = store.list_pending_session_lifecycles(workspace, session_id)
+    assert intents == (
+        PendingSessionLifecycle(
+            codex_session_id=session_id,
+            session_commitment=store.session_commitment(session_id),
+            event_kind=event_kind,
+            target_generation=target_generation,
+            clear_mapping=clear_mapping,
+        ),
+    )
+    return intents[0]
 
 
 @pytest.mark.parametrize(
@@ -239,7 +270,9 @@ def test_new_session_during_recovery_is_retained_until_membership_can_bind(
                     _state=state,
                     connect=_connector(client),
                     source=source,
-                    _output_event_name="sessionStart" if source is ObservationSource.CURSOR_HOOK else None,
+                    _output_event_name="sessionStart"
+                    if source is ObservationSource.CURSOR_HOOK
+                    else None,
                 )
             )
         except BaseException as error:  # pragma: no cover - surfaced by the assertion below
@@ -278,7 +311,14 @@ def test_new_session_during_recovery_is_retained_until_membership_can_bind(
 
     after = LocalObservationStore(_state=state)
     assert successor in after.codex_sessions_for_workspace(workspace)
-    assert raw_session not in after.codex_sessions_for_workspace(workspace)
+    # Recovery's own hook may already drain this row; if it returned before a
+    # drain slot, the READY sweeper is the durable no-follow-up recovery path.
+    coordinator = _DuplicateCoordinator()
+    _run_service_sweep(after, coordinator)
+    converged = LocalObservationStore(_state=state)
+    assert raw_session in converged.codex_sessions_for_workspace(workspace)
+    assert converged.list_pending_outbox_rows(workspace) == ()
+    _assert_retained_for_session(converged, workspace, raw_session, event_kind="PostToolUse")
     successor_mapping = observe_hooks_module.load_mapping(successor, _state=state)
     assert successor_mapping is not None
     assert successor_mapping.yoetz_session_id == _SUCCESSOR_IDS["session_id"]
@@ -310,7 +350,13 @@ def test_session_lock_owned_still_requires_workspace_reservation(
                     event_name="SessionStart",
                     stdin_bytes=json.dumps(
                         {
-                            **json.loads(_payload(session_id, "SessionStart")),
+                            **json.loads(
+                                _payload(
+                                    session_id,
+                                    "SessionStart",
+                                    tool_name=_yoetz_read_tool(source),
+                                )
+                            ),
                             "source": "clear",
                         }
                     ).encode(),
@@ -326,10 +372,38 @@ def test_session_lock_owned_still_requires_workspace_reservation(
                 )
                 == 0
             )
+            _pending_intent(
+                store,
+                workspace,
+                session_id,
+                event_kind="SessionStart",
+                target_generation=1,
+                clear_mapping=True,
+            )
 
     after = LocalObservationStore(_state=state)
     assert session_id not in after.codex_sessions_for_workspace(workspace)
     _assert_retained_for_session(after, workspace, session_id, event_kind="SessionStart")
+    assert len(after.list_pending_outbox_rows(workspace)) == 1
+    assert workspace in after.pending_workspaces()
+    coordinator = _DuplicateCoordinator()
+    _run_service_sweep(after, coordinator)
+    converged = LocalObservationStore(_state=state)
+    assert session_id in converged.codex_sessions_for_workspace(workspace)
+    assert converged.list_pending_session_lifecycles(workspace) == ()
+    assert converged.list_pending_outbox_rows(workspace) == ()
+    assert workspace not in converged.pending_workspaces()
+    assert len(coordinator.requests) == 1
+    generation = converged.current_session_generation(
+        workspace, converged.session_commitment(session_id)
+    )
+    _run_service_sweep(converged, coordinator)
+    repeated = LocalObservationStore(_state=state)
+    assert (
+        repeated.current_session_generation(workspace, repeated.session_commitment(session_id))
+        == generation
+    )
+    assert len(coordinator.requests) == 1
 
 
 @pytest.mark.parametrize(
@@ -416,6 +490,13 @@ def test_busy_session_start_is_retained_and_explains_unmapped_membership(
             )
             == 0
         )
+        _pending_intent(
+            store,
+            workspace,
+            session_id,
+            event_kind="SessionStart",
+            target_generation=1,
+        )
 
     after = LocalObservationStore(_state=state)
     assert session_id not in after.codex_sessions_for_workspace(workspace)
@@ -431,19 +512,17 @@ def test_busy_session_start_is_retained_and_explains_unmapped_membership(
 )
 def test_session_start_reconciles_deferred_membership_and_drains_without_followup_hook(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     source: ObservationSource,
     harness_id: Literal["claude", "codex", "cursor"],
     prefix: str,
 ) -> None:
-    """A SessionStart that loses reservation ownership repairs itself before returning."""
+    """A retained SessionStart is repaired by the READY sweep after contention clears."""
 
     del harness_id
     state, workspace_dir, store, workspace = _workspace_and_store(tmp_path)
     session_id = f"{prefix}session-start-reconcile-race"
     held = threading.Event()
     release = threading.Event()
-    holder_released = threading.Event()
     holder_errors: list[BaseException] = []
 
     def hold_workspace_reservation() -> None:
@@ -454,8 +533,6 @@ def test_session_start_reconciles_deferred_membership_and_drains_without_followu
                 assert release.wait(5)
         except BaseException as error:  # pragma: no cover - surfaced by the assertion below
             holder_errors.append(error)
-        finally:
-            holder_released.set()
 
     holder = threading.Thread(target=hold_workspace_reservation)
     holder.start()
@@ -483,68 +560,55 @@ def test_session_start_reconciles_deferred_membership_and_drains_without_followu
     )
     assert len(store.list_pending_outbox_rows(workspace)) == 1
 
-    original_ingest = LocalObservationStore.ingest
-    ingest_seen = threading.Event()
+    # SessionStart itself is retained as a durable outbox row. No second host
+    # event is needed to trigger its membership repair.
+    assert (
+        handle_observe(
+            event_name="SessionStart",
+            stdin_bytes=_payload(session_id, "SessionStart"),
+            stdout=io.BytesIO(),
+            workspace=str(workspace_dir.resolve()),
+            _state=state,
+            skip_service=True,
+            source=source,
+            _output_event_name="sessionStart" if source is ObservationSource.CURSOR_HOOK else None,
+        )
+        == 0
+    )
+    during = LocalObservationStore(_state=state)
+    assert session_id not in during.codex_sessions_for_workspace(workspace)
+    assert len(during.list_pending_outbox_rows(workspace)) == 2
+    _pending_intent(
+        during,
+        workspace,
+        session_id,
+        event_kind="SessionStart",
+        target_generation=1,
+    )
+    assert workspace in during.pending_workspaces()
 
-    def release_after_ingest(
-        target: LocalObservationStore,
-        envelope: ObservationEnvelope,
-        *,
-        workspace_commitment: str | None = None,
-    ) -> ObservationIngestResult:
-        try:
-            return original_ingest(
-                target,
-                envelope,
-                workspace_commitment=workspace_commitment,
-            )
-        finally:
-            # The hook has captured its SessionStart while the reservation is held;
-            # releasing now lets the same invocation perform its post-capture repair.
-            release.set()
-            assert holder_released.wait(5)
-            ingest_seen.set()
-
-    monkeypatch.setattr(LocalObservationStore, "ingest", release_after_ingest)
-    client = _StartOkClient()
-    results: list[int] = []
-    errors: list[BaseException] = []
-
-    def run_session_start() -> None:
-        try:
-            results.append(
-                handle_observe(
-                    event_name="SessionStart",
-                    stdin_bytes=_payload(session_id, "SessionStart"),
-                    stdout=io.BytesIO(),
-                    workspace=str(workspace_dir.resolve()),
-                    _state=state,
-                    connect=_connector(client),
-                    source=source,
-                    _output_event_name="sessionStart"
-                    if source is ObservationSource.CURSOR_HOOK
-                    else None,
-                )
-            )
-        except BaseException as error:  # pragma: no cover - surfaced by the assertion below
-            errors.append(error)
-
-    worker = threading.Thread(target=run_session_start)
-    worker.start()
-    assert ingest_seen.wait(5), "SessionStart did not reach local ingest"
-    worker.join(5)
+    release.set()
     holder.join(5)
-    assert not worker.is_alive(), "SessionStart did not finish after reservation release"
     assert not holder.is_alive(), "reservation holder did not release"
     assert holder_errors == []
-    assert errors == []
-    assert results == [0]
 
+    coordinator = _DuplicateCoordinator()
+    _run_service_sweep(store, coordinator)
     after = LocalObservationStore(_state=state)
     assert session_id in after.codex_sessions_for_workspace(workspace)
     assert after.list_pending_outbox_rows(workspace) == ()
-    assert client.observation_ingest_calls
+    assert after.list_pending_session_lifecycles(workspace) == ()
+    assert workspace not in after.pending_workspaces()
+    assert len(coordinator.requests) == 2
     _assert_retained_for_session(after, workspace, session_id, event_kind="SessionStart")
+    generation = after.current_session_generation(workspace, after.session_commitment(session_id))
+    _run_service_sweep(after, coordinator)
+    repeated = LocalObservationStore(_state=state)
+    assert (
+        repeated.current_session_generation(workspace, repeated.session_commitment(session_id))
+        == generation
+    )
+    assert len(coordinator.requests) == 2
 
 
 @pytest.mark.parametrize(
@@ -564,6 +628,7 @@ def test_busy_resume_clears_ended_lifecycle_without_followup_hook(
     state, workspace_dir, store, workspace = _workspace_and_store(tmp_path)
     session_id = f"{prefix}resume-ended-race"
     session_commitment = store.bind_codex_session(workspace, session_id)
+    assert store.begin_session_generation(workspace, session_commitment) == 1
     store.note_session_end(workspace, session_commitment)
     assert store.codex_session_ended(workspace, session_id)
 
@@ -589,10 +654,104 @@ def test_busy_resume_clears_ended_lifecycle_without_followup_hook(
             )
             == 0
         )
+        during = LocalObservationStore(_state=state)
+        assert during.codex_session_ended(workspace, session_id)
+        assert len(during.list_pending_outbox_rows(workspace)) == 1
+        _pending_intent(
+            during,
+            workspace,
+            session_id,
+            event_kind="SessionStart",
+            target_generation=2,
+        )
 
+    coordinator = _DuplicateCoordinator()
+    _run_service_sweep(store, coordinator)
     after = LocalObservationStore(_state=state)
     _assert_retained_for_session(after, workspace, session_id, event_kind="SessionStart")
     assert not after.codex_session_ended(workspace, session_id)
+    assert after.list_pending_outbox_rows(workspace) == ()
+    assert after.list_pending_session_lifecycles(workspace) == ()
+    assert len(coordinator.requests) == 1
+    generation = after.current_session_generation(workspace, session_commitment)
+    _run_service_sweep(after, coordinator)
+    repeated = LocalObservationStore(_state=state)
+    assert repeated.current_session_generation(workspace, session_commitment) == generation
+    assert len(coordinator.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("source", "harness_id", "prefix"),
+    _HOST_CASES,
+    ids=("codex", "claude", "cursor"),
+)
+def test_legacy_ended_resume_uses_implicit_generation_without_followup_hook(
+    tmp_path: Path,
+    source: ObservationSource,
+    harness_id: Literal["claude", "codex", "cursor"],
+    prefix: str,
+) -> None:
+    """A pre-counter ended session resumes at its historical implicit generation one."""
+
+    del harness_id
+    state, workspace_dir, store, workspace = _workspace_and_store(tmp_path)
+    session_id = f"{prefix}legacy-resume-race"
+    session_commitment = store.bind_codex_session(workspace, session_id)
+    # Older local state has no persisted session_generations entry.  Its public
+    # generation is nevertheless one, and a deferred resume must preserve that
+    # value rather than manufacturing generation two.
+    store.note_session_end(workspace, session_commitment)
+    assert store.current_session_generation(workspace, session_commitment) == 1
+    assert store.codex_session_ended(workspace, session_id)
+
+    with acquire_workspace_recovery_lock(workspace, _state=state) as workspace_owned:
+        assert workspace_owned
+        assert (
+            handle_observe(
+                event_name="SessionStart",
+                stdin_bytes=json.dumps(
+                    {
+                        **json.loads(_payload(session_id, "SessionStart")),
+                        "source": "resume",
+                    }
+                ).encode(),
+                stdout=io.BytesIO(),
+                workspace=str(workspace_dir.resolve()),
+                _state=state,
+                skip_service=True,
+                source=source,
+                _output_event_name="sessionStart"
+                if source is ObservationSource.CURSOR_HOOK
+                else None,
+            )
+            == 0
+        )
+        during = LocalObservationStore(_state=state)
+        assert during.codex_session_ended(workspace, session_id)
+        assert len(during.list_pending_outbox_rows(workspace)) == 1
+        _pending_intent(
+            during,
+            workspace,
+            session_id,
+            event_kind="SessionStart",
+            target_generation=1,
+        )
+
+    coordinator = _DuplicateCoordinator()
+    _run_service_sweep(store, coordinator)
+    after = LocalObservationStore(_state=state)
+    _assert_retained_for_session(after, workspace, session_id, event_kind="SessionStart")
+    assert not after.codex_session_ended(workspace, session_id)
+    assert after.current_session_generation(workspace, session_commitment) == 1
+    assert after.list_pending_outbox_rows(workspace) == ()
+    assert after.list_pending_session_lifecycles(workspace) == ()
+    assert len(coordinator.requests) == 1
+
+    _run_service_sweep(after, coordinator)
+    repeated = LocalObservationStore(_state=state)
+    assert not repeated.codex_session_ended(workspace, session_id)
+    assert repeated.current_session_generation(workspace, session_commitment) == 1
+    assert len(coordinator.requests) == 1
 
 
 @pytest.mark.parametrize(
@@ -630,8 +789,123 @@ def test_busy_session_end_records_lifecycle_without_a_followup_hook(
             )
             == 0
         )
+        during = LocalObservationStore(_state=state)
+        assert not during.codex_session_ended(workspace, session_id)
+        assert len(during.list_pending_outbox_rows(workspace)) == 1
+        _pending_intent(
+            during,
+            workspace,
+            session_id,
+            event_kind="SessionEnd",
+            target_generation=1,
+        )
 
+    coordinator = _DuplicateCoordinator()
+    _run_service_sweep(store, coordinator)
     after = LocalObservationStore(_state=state)
     _assert_retained_for_session(after, workspace, session_id, event_kind="SessionEnd")
     assert after.codex_session_ended(workspace, session_id)
     assert session_commitment == after.session_commitment(session_id)
+    assert after.list_pending_outbox_rows(workspace) == ()
+    assert after.list_pending_session_lifecycles(workspace) == ()
+    assert len(coordinator.requests) == 1
+    generation = after.current_session_generation(workspace, session_commitment)
+    _run_service_sweep(after, coordinator)
+    repeated = LocalObservationStore(_state=state)
+    assert repeated.current_session_generation(workspace, session_commitment) == generation
+    assert len(coordinator.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("source", "harness_id", "prefix"),
+    _HOST_CASES,
+    ids=("codex", "claude", "cursor"),
+)
+def test_queued_start_then_end_does_not_resurrect_a_session(
+    tmp_path: Path,
+    source: ObservationSource,
+    harness_id: Literal["claude", "codex", "cursor"],
+    prefix: str,
+) -> None:
+    """A FIFO Start/End pair applies once and leaves the session ended."""
+
+    del harness_id
+    state, workspace_dir, store, workspace = _workspace_and_store(tmp_path)
+    session_id = f"{prefix}queued-start-end-race"
+    held = threading.Event()
+    release = threading.Event()
+    holder_errors: list[BaseException] = []
+
+    def hold_workspace_reservation() -> None:
+        try:
+            with acquire_workspace_recovery_lock(workspace, _state=state) as owned:
+                assert owned
+                held.set()
+                assert release.wait(5)
+        except BaseException as error:  # pragma: no cover - surfaced by the assertion below
+            holder_errors.append(error)
+
+    holder = threading.Thread(target=hold_workspace_reservation)
+    holder.start()
+    assert held.wait(5)
+
+    for event_name in ("SessionStart", "SessionEnd"):
+        assert (
+            handle_observe(
+                event_name=event_name,
+                stdin_bytes=_payload(session_id, event_name),
+                stdout=io.BytesIO(),
+                workspace=str(workspace_dir.resolve()),
+                _state=state,
+                skip_service=True,
+                source=source,
+                _output_event_name={
+                    "SessionStart": "sessionStart",
+                    "SessionEnd": "sessionEnd",
+                }[event_name]
+                if source is ObservationSource.CURSOR_HOOK
+                else None,
+            )
+            == 0
+        )
+
+    during = LocalObservationStore(_state=state)
+    assert session_id not in during.codex_sessions_for_workspace(workspace)
+    assert [intent.event_kind for intent in during.list_pending_session_lifecycles(workspace)] == [
+        "SessionStart",
+        "SessionEnd",
+    ]
+    assert [
+        intent.target_generation for intent in during.list_pending_session_lifecycles(workspace)
+    ] == [
+        1,
+        1,
+    ]
+    assert len(during.list_pending_outbox_rows(workspace)) == 2
+    assert workspace in during.pending_workspaces()
+
+    release.set()
+    holder.join(5)
+    assert not holder.is_alive(), "reservation holder did not release"
+    assert holder_errors == []
+
+    coordinator = _DuplicateCoordinator()
+    _run_service_sweep(store, coordinator)
+    after = LocalObservationStore(_state=state)
+    session_commitment = after.session_commitment(session_id)
+    assert session_id in after.codex_sessions_for_workspace(workspace)
+    assert after.codex_session_ended(workspace, session_id)
+    assert after.current_session_generation(workspace, session_commitment) == 1
+    assert after.list_pending_session_lifecycles(workspace) == ()
+    assert after.list_pending_outbox_rows(workspace) == ()
+    assert workspace not in after.pending_workspaces()
+    assert [request.envelope.event_kind for request in coordinator.requests] == [
+        "SessionStart",
+        "SessionEnd",
+    ]
+
+    _run_service_sweep(after, coordinator)
+    repeated = LocalObservationStore(_state=state)
+    assert repeated.codex_session_ended(workspace, session_id)
+    assert repeated.current_session_generation(workspace, session_commitment) == 1
+    assert len(coordinator.requests) == 2
