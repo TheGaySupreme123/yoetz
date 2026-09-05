@@ -161,7 +161,7 @@ fully quit Cursor.
 
 Decision for Cursor: not supported here — no additional state-root applied-route record
 at this time. The plugin-managed `mcp.json` entry already binds the route profile (the exact
-serve arguments, including `--semantic off` for strict) and the `/2` marker records the same
+serve arguments, including `--semantic off` for strict) and the `/3` marker records the same
 launcher the native hooks use; the live binding and launcher read-backs above remain the
 authority for which route this host serves. A stale serving process shows as
 `executable_mismatch` / `full_restart_required`, not as applied-vs-serving drift. If a
