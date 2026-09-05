@@ -45,9 +45,10 @@ class MemoryObservationConsent:
     content_capture_profiles: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if type(self.content_capture_profiles) is not tuple or len(
-            self.content_capture_profiles
-        ) > 2:
+        if (
+            type(self.content_capture_profiles) is not tuple
+            or len(self.content_capture_profiles) > 2
+        ):
             raise ValueError("invalid_content_capture_profiles")
         if any(not is_content_capture_profile(item) for item in self.content_capture_profiles):
             raise ValueError("invalid_content_capture_profiles")
@@ -161,9 +162,7 @@ class MemoryObservationStore:
                 "Observation consent is revoked.",
                 retryable=False,
             )
-        profiles = tuple(
-            sorted({*consent.content_capture_profiles, profile}, key=str.encode)
-        )
+        profiles = tuple(sorted({*consent.content_capture_profiles, profile}, key=str.encode))
         self._state.consent[workspace_commitment] = replace(
             consent, content_capture_profiles=profiles
         )
@@ -185,9 +184,7 @@ class MemoryObservationStore:
         profiles = (
             ()
             if profile is None
-            else tuple(
-                item for item in consent.content_capture_profiles if item != profile
-            )
+            else tuple(item for item in consent.content_capture_profiles if item != profile)
         )
         self._state.consent[workspace_commitment] = replace(
             consent, content_capture_profiles=profiles

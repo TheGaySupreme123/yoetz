@@ -186,11 +186,7 @@ class SqliteObservationStore:
                 retryable=False,
             )
         consent = self._require_consent(workspace_commitment)
-        profiles = (
-            ()
-            if profile is None
-            else tuple(item for item in consent[3] if item != profile)
-        )
+        profiles = () if profile is None else tuple(item for item in consent[3] if item != profile)
         with self._db:
             self._db.execute(
                 "UPDATE observation_consent SET content_capture_profiles_json=? "
@@ -200,7 +196,9 @@ class SqliteObservationStore:
 
     def _content_capture_column_present(self) -> bool:
         rows = self._db.execute("PRAGMA table_info(observation_consent)").fetchall()
-        return any(type(row[1]) is str and row[1] == "content_capture_profiles_json" for row in rows)
+        return any(
+            type(row[1]) is str and row[1] == "content_capture_profiles_json" for row in rows
+        )
 
     def bind_session(self, workspace_commitment: str, session_commitment: str) -> None:
         consent = self._consent_row(workspace_commitment)
@@ -1172,9 +1170,7 @@ class SqliteObservationStore:
                     (combined, workspace, logical_identity),
                 )
 
-    def _consent_row(
-        self, workspace: str
-    ) -> tuple[str | None, bool, str, tuple[str, ...]] | None:
+    def _consent_row(self, workspace: str) -> tuple[str | None, bool, str, tuple[str, ...]] | None:
         if self._content_capture_column_present():
             row = self._db.execute(
                 "SELECT revoked_at, paused, granted_at, content_capture_profiles_json "
@@ -1197,24 +1193,18 @@ class SqliteObservationStore:
         if type(raw_profiles) is str:
             try:
                 parsed = strict_json_parse(raw_profiles.encode("utf-8"))
-            except (ValueError, ProtocolValueError):
+            except ValueError, ProtocolValueError:
                 parsed = ()
             if isinstance(parsed, (tuple, list)):
                 profiles = tuple(
                     sorted(
-                        {
-                            cast(str, item)
-                            for item in parsed
-                            if is_content_capture_profile(item)
-                        },
+                        {cast(str, item) for item in parsed if is_content_capture_profile(item)},
                         key=str.encode,
                     )
                 )[:2]
         return revoked_at, paused, granted_at, profiles
 
-    def _require_consent(
-        self, workspace: str
-    ) -> tuple[str | None, bool, str, tuple[str, ...]]:
+    def _require_consent(self, workspace: str) -> tuple[str | None, bool, str, tuple[str, ...]]:
         consent = self._consent_row(workspace)
         if consent is None:
             raise _error(

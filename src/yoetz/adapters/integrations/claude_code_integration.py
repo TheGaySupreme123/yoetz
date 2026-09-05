@@ -688,9 +688,7 @@ def _hooks_json(
             "PermissionRequest": [{"hooks": [hook("PermissionRequest")]}],
             "PreToolUse": [{"hooks": [hook("PreToolUse")], "matcher": ".*"}],
             "PostToolUse": [{"hooks": [hook("PostToolUse")], "matcher": ".*"}],
-            "PostToolUseFailure": [
-                {"hooks": [hook("PostToolUseFailure")], "matcher": ".*"}
-            ],
+            "PostToolUseFailure": [{"hooks": [hook("PostToolUseFailure")], "matcher": ".*"}],
             "SessionEnd": [{"hooks": [hook("SessionEnd")]}],
             "SessionStart": [
                 {"hooks": [hook("SessionStart")], "matcher": "startup|resume|clear|compact|fork"}
@@ -766,9 +764,7 @@ def render_claude_code_plugin(
     }
     members: dict[str, bytes] = {
         ".claude-plugin/plugin.json": canonical_encode(manifest),
-        "hooks/hooks.json": _hooks_json(
-            resolved_launcher, observation_profile=observation_profile
-        ),
+        "hooks/hooks.json": _hooks_json(resolved_launcher, observation_profile=observation_profile),
         "skills/yoetz/SKILL.md": resources.read_bytes("skills/portable/yoetz/SKILL.md"),
     }
     for name in _GUIDANCE_NAMES:

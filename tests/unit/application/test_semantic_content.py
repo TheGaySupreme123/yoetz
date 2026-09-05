@@ -90,8 +90,10 @@ class _Objects:
 
     async def open_verified(self, _ref: ObjectRef):
         self.open_calls += 1
-        yield self.wrapper if _ref.object_id == self.ref.object_id else self.wrappers.get(
-            _ref.object_id, self.wrapper
+        yield (
+            self.wrapper
+            if _ref.object_id == self.ref.object_id
+            else self.wrappers.get(_ref.object_id, self.wrapper)
         )
 
 
@@ -297,8 +299,7 @@ def _fixture(
 def _multipart_fixture() -> tuple[FrozenCase, TaskRuntime, _Objects]:
     base_frozen, base_runtime, base_objects, _observation, base_envelope = _fixture()
     object_values = tuple(
-        object_id(f"obj_00000000-0000-4000-8000-00000000040{index}")
-        for index in range(1, 5)
+        object_id(f"obj_00000000-0000-4000-8000-00000000040{index}") for index in range(1, 5)
     )
     chunks = (
         (ObservationContentKind.TOOL_OUTPUT, "claude-phase-1:tool-output", b"group-a-0:"),
@@ -459,9 +460,7 @@ async def test_resolver_admits_multipart_groups_atomically_under_part_bound() ->
     # no fragment is opened merely because its ID sorts early.
     assert len(resolved.content) == 2
     assert b"group-a-0:" in resolved.content[0].content
-    assert b"planted-defect-marker" in b"".join(
-        item.content for item in resolved.content
-    )
+    assert b"planted-defect-marker" in b"".join(item.content for item in resolved.content)
     assert len(objects.resolve_calls) == 2
     assert objects.open_calls == 2
     assert "content_unselected" in resolved.gaps

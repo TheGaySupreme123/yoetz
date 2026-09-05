@@ -13,9 +13,7 @@ from typing import Final
 
 from yoetz.protocol.errors import ProtocolValueError
 
-CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID: Final = (
-    "claude-code-ordinary-observation-v1"
-)
+CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID: Final = "claude-code-ordinary-observation-v1"
 CLAUDE_CODE_ORDINARY_HOOK_MAPPING_VERSION: Final = "claude-code-hooks-ordinary-v1"
 CURSOR_ORDINARY_OBSERVATION_PROFILE_ID: Final = "cursor-ordinary-observation-v1"
 CURSOR_ORDINARY_HOOK_MAPPING_VERSION: Final = "cursor-hooks-ordinary-v1"

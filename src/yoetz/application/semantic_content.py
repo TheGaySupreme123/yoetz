@@ -138,10 +138,7 @@ def _local_capture_fence(
     ):
         return None, {ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value}, True
     profiles = cast(tuple[object, ...], raw_profiles)
-    if (
-        len(profiles) > 2
-        or any(type(profile) is not str for profile in profiles)
-    ):
+    if len(profiles) > 2 or any(type(profile) is not str for profile in profiles):
         return None, {ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value}, True
     profile_values = tuple(cast(str, profile) for profile in profiles)
     if (
@@ -151,15 +148,19 @@ def _local_capture_fence(
         return None, {ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value}, True
     try:
         generation = validate_sha256_digest(generation)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None, {ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value}, True
-    return _LocalCaptureFence(
-        generation,
-        active,
-        revoked,
-        runtime_enabled,
-        profile_values,
-    ), set(), True
+    return (
+        _LocalCaptureFence(
+            generation,
+            active,
+            revoked,
+            runtime_enabled,
+            profile_values,
+        ),
+        set(),
+        True,
+    )
 
 
 def _local_capture_fence_current(
@@ -179,6 +180,7 @@ def _local_capture_fence_current(
             return False
     current, _gaps, _provided = _local_capture_fence(local_observation, workspace)
     return current is not None and current == fence and current.active
+
 
 type _CandidateRow = tuple[str, EvidenceRecordedPayload, EvidenceProjectionRecord]
 type _PendingRow = tuple[
@@ -237,12 +239,14 @@ class CapturedContentResolution:
         if self.local_fence_generation is not None:
             try:
                 validate_sha256_digest(self.local_fence_generation)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 raise ValueError("semantic_content_resolution_invalid") from None
         if (
             type(self.local_fence_profiles) is not tuple
             or len(self.local_fence_profiles) > 2
-            or any(profile not in _AUTHORIZED_CAPTURE_PROFILES for profile in self.local_fence_profiles)
+            or any(
+                profile not in _AUTHORIZED_CAPTURE_PROFILES for profile in self.local_fence_profiles
+            )
             or tuple(sorted(set(self.local_fence_profiles), key=str.encode))
             != self.local_fence_profiles
         ):
@@ -910,10 +914,7 @@ async def resolve_captured_semantic_content(
     admitted_parts = 0
     for rows in complete_groups:
         group_bytes = sum(row[-1].content_bytes or 0 for row in rows)
-        if (
-            admitted_parts + len(rows) > max_parts
-            or admitted_bytes + group_bytes > max_total_bytes
-        ):
+        if admitted_parts + len(rows) > max_parts or admitted_bytes + group_bytes > max_total_bytes:
             gaps.add(ObservationGapCode.CONTENT_UNSELECTED.value)
             continue
         admitted_bytes += group_bytes
@@ -924,15 +925,12 @@ async def resolve_captured_semantic_content(
     admitted_phase_bindings: dict[str, str] = {}
 
     def _open_fence_current() -> bool:
-        return (
-            not local_fence_provided
-            or (
-                local_fence is not None
-                and _local_capture_fence_current(
-                    local_observation,
-                    workspace_commitment,
-                    local_fence,
-                )
+        return not local_fence_provided or (
+            local_fence is not None
+            and _local_capture_fence_current(
+                local_observation,
+                workspace_commitment,
+                local_fence,
             )
         )
 
