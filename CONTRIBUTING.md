@@ -32,7 +32,9 @@ check outcome is a documentation change too.
    - release pipelines and packaging surfaces;
    - new ADRs or flips in [`docs/OPEN_QUESTIONS.md`](docs/OPEN_QUESTIONS.md).
 
-   Maintainer acknowledgement on the issue is required before you open a PR in those areas. Docs
+   Maintainer acknowledgement on the issue is required before you open a PR in those areas. An
+   explicit maintainer request for the scoped work counts: record it on the issue without asking
+   again. It does not authorize runtime, credential, disclosure, or destructive actions. Docs
    clarifications, typo fixes, and narrowly scoped bugfixes outside those areas may proceed once the
    issue exists.
 4. Use the exact names already registered in [`docs/INTERFACES.md`](docs/INTERFACES.md) for anything

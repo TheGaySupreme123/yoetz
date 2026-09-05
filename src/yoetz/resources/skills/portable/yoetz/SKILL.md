@@ -9,11 +9,14 @@ Use Yoetz for material multi-step, resumable, delegated, or verification-heavy w
 local work ledger and deterministic checker: it records only what participants publish and does
 not observe the workspace, enforce a process, authenticate authorship, or prove correctness.
 
-Before the first workflow call, read [workflow.md](references/workflow.md) and
-[coverage-and-receipts.md](references/coverage-and-receipts.md). Before publishing work, read
+Before the first `start`, read [workflow.md](references/workflow.md). Before the first `check`,
+read [coverage-and-receipts.md](references/coverage-and-receipts.md). Before publishing work, read
 [publication-policy.md](references/publication-policy.md). If request schema metadata is missing
 or a request is rejected, use [request-templates.md](references/request-templates.md). The
-non-negotiable safety floor is [agent-instructions.md](references/agent-instructions.md).
+non-negotiable safety floor is [agent-instructions.md](references/agent-instructions.md). Before
+setup/settings, credential/vault operations, import, or recommendation decisions, read the Setup
+and consent / Recommendations sections in [request templates](references/request-templates.md).
+These procedures are conditional; installation grants no authority to perform them.
 
 The normal sequence is:
 
@@ -34,14 +37,16 @@ coverage, or completion proof. MCP ownership is mode-specific and exclusive:
 - `plugin_managed` includes the selected `mcp.json` route; this plugin is the sole owner, so do not
   keep a duplicate native, project, user, or global registration.
 
-Installed plugin bytes are not live MCP runtime. After replace, query
+The following recovery applies only to **Cursor**. Installed plugin bytes are not live MCP runtime.
+After a Cursor plugin replacement, query
 `yoetz integrate cursor plugin status` and read `mcp.route_profile` plus `mcp.runtime`. If a
 `semantic_required` check returns `blocked_by_policy` / `route_semantic_ceiling` while installed
 status is `policy`, or `mcp.runtime.activation` is `full_restart_required`, that is an activation
 mismatch: fully quit Cursor (Reload Window is not enough), then continue only after live runtime
 matches the installed policy route. Do not mint a fresh semantic check against the stale process,
 and do not change privacy settings. A live installed strict route remains the ordinary terminal
-ceiling.
+ceiling. For Claude Code, follow its own reported host continuation; do not run Cursor commands
+or quit another host.
 
 Delegation after an outage: if `start` (or any call) returned `safe_details.availability:
 terminal_unavailable`, that state belongs to the host binding, and later calls under a new

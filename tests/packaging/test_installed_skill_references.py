@@ -17,6 +17,7 @@ from typing import Final
 
 import pytest
 
+from yoetz.adapters.integrations.codex_skill import load_packaged_skill_members
 from yoetz.mcp.resources import GUIDANCE_RESOURCES, read_resource
 
 _PACKAGED_ROOT: Final = Path(__file__).resolve().parents[2] / "src" / "yoetz" / "resources"
@@ -59,9 +60,8 @@ def test_step_zero_stops_on_an_empty_guidance_read() -> None:
     assert "Initialize `instructions` already include `agent-instructions.md`;" in collapsed
     assert "`workflow.md`, and `coverage-and-receipts.md`" not in collapsed
     assert "Both are already in initialize `instructions`" not in collapsed
-    assert "Neither is in initialize `instructions`; read both before the first `start`" in (
-        collapsed
-    )
+    assert "Coverage and setup details are not prerequisites" in collapsed
+    assert "Before the first `check`" in collapsed
 
 
 def test_step_zero_does_not_use_resources_list_for_discovery() -> None:
@@ -86,16 +86,30 @@ def test_every_yoetz_uri_the_skill_names_is_a_registered_readable_resource() -> 
         assert read_resource(uri), f"registered but unreadable: {uri}"
 
 
-def test_the_skill_has_no_relative_file_links_that_are_not_packaged() -> None:
-    text = _skill_text()
-    unresolved: list[str] = []
-    for target in _MARKDOWN_LINK.findall(text):
-        link = target.split("#", 1)[0].strip()
-        if not link or link.startswith(("http://", "https://", "yoetz://", "mailto:")):
-            continue
-        if not (_PACKAGED_SKILL.parent / link).resolve().is_file():
-            unresolved.append(link)
-    assert unresolved == [], f"skill links files absent from the installed tree: {unresolved}"
+def test_installed_guidance_links_and_explicit_anchors_resolve() -> None:
+    members = load_packaged_skill_members()
+    # Portable hosts install this skill with the same canonical references.
+    documents = {
+        name: data.decode("utf-8") for name, data in members.items() if name.endswith(".md")
+    }
+    documents["portable-SKILL.md"] = (_PACKAGED_ROOT / "skills/portable/yoetz/SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    for name, text in documents.items():
+        for target in _MARKDOWN_LINK.findall(text):
+            if target.startswith(("http://", "https://", "yoetz://", "mailto:")):
+                continue
+            relative, _, anchor = target.partition("#")
+            resolved = str(Path(name).parent / relative) if relative else name
+            assert resolved in documents, f"{name}: missing installed reference {target}"
+            if anchor:
+                destination = documents[resolved]
+                headings = {
+                    re.sub(r"[^a-z0-9 -]", "", line.lstrip("# ").lower()).replace(" ", "-")
+                    for line in destination.splitlines()
+                    if line.startswith("#")
+                }
+                assert f'id="{anchor}"' in destination or anchor in headings, (name, target)
 
 
 @pytest.mark.parametrize("resource", GUIDANCE_RESOURCES, ids=lambda item: item.logical_name)
@@ -110,49 +124,18 @@ def test_every_registered_guidance_resource_is_readable_offline(resource: object
     assert packaged.read_bytes() == payload
 
 
-def test_the_skill_states_how_often_to_call_each_operation() -> None:
-    """Knowing *when* to activate is not enough; the dogfood agent had to infer cadence.
+def test_skill_routes_to_the_readable_cadence_owner() -> None:
+    """The entrypoint routes to one maintained cadence, rather than copying its whole table."""
 
-    The skill is the only always-available surface that can answer "how often", so every operation
-    has to be named there with a frequency, not merely described.
-    """
-
-    text = _skill_text()
+    skill = _skill_text()
+    assert "yoetz://guidance/workflow.md" in skill
+    workflow = read_resource("yoetz://guidance/workflow.md").decode("utf-8")
     for operation in ("start", "publish_work", "status", "check", "respond", "receipt"):
-        assert f"`{operation}`" in text, f"the skill never names {operation}"
-    for cadence_marker in (
-        "Once per task",
-        "One batch per material transition",
-        "Once at the end",
-        "never one per file, tool call, or message",
-    ):
-        assert cadence_marker in text, f"the skill states no cadence for: {cadence_marker!r}"
-
-
-def test_check_cadence_nudge_is_mirrored_from_workflow() -> None:
-    skill = _skill_text()
-    workflow = read_resource("yoetz://guidance/workflow.md").decode("utf-8")
+        assert f"`{operation}`" in skill
+        assert _cadence_row(workflow, operation)
     cadence = _cadence_row(workflow, "check")
-
-    assert _cadence_row(skill, "check") == cadence
-    for marker in (
-        "Also consider a check when you move between subtasks or phases",
-        "`deterministic_only` is local and fast",
-        "reserve semantic review for the claim unless the transition itself warrants it",
-        "A check with no new events since the last one adds nothing",
-    ):
-        assert marker in cadence
-    assert (
-        "- [ ] after a material subtask or phase transition, consider a deliberate-mode check"
-        in skill
-    )
-
-
-def test_respond_cadence_is_mirrored_from_workflow() -> None:
-    skill = _skill_text()
-    workflow = read_resource("yoetz://guidance/workflow.md").decode("utf-8")
-
-    assert _cadence_row(skill, "respond") == _cadence_row(workflow, "respond")
+    assert "A check with no new events since the last one adds nothing" in cadence
+    assert "not the finding's `subject_frontier`" in _cadence_row(workflow, "respond")
 
 
 def test_the_skill_does_not_promise_that_responding_clears_a_finding() -> None:

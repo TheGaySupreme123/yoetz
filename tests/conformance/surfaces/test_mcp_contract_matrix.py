@@ -284,8 +284,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:de1d9f9bd2f821bbf0cdf2ff64616213b2def4ad9d6952fbd1a485508700706c",
-        "strict": "sha256:1910d370ae257ff094984bf98ec5390added1cce159d5f045f10a7eafe44dcce",
+        "policy": "sha256:ad0ca4799e3e65dd066f4f2d2fc09914837f0b355e1026497c4795661a2e3897",
+        "strict": "sha256:55036b770bde8e664f409c84fbc37704345c3fa0fdfefc9f49d33fe9a4fe4cd3",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -295,8 +295,9 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     # The check descriptor carries the full mode decision rule, including semantic_required.
     check_description = descriptor_for("check").description
     assert "semantic_if_configured for most material implementation" in check_description
-    assert "semantic_required when the claim depends on qualitative correctness" in (
-        check_description
+    assert (
+        "semantic_required when explicitly required by the user, effective verification policy"
+        in (check_description)
     )
     assert "Omitting mode resolves through the configured verification policy" in check_description
     respond_description = descriptor_for("respond").description

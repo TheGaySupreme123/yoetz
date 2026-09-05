@@ -18,7 +18,9 @@ def test_shared_guidance_makes_conversation_primary_and_user_choice_final() -> N
     guidance = _text("guidance/agent-instructions.md")
     skill = _text("skills/codex/yoetz/SKILL.md")
 
-    for surface in (guidance, skill):
+    for entrypoint in (guidance, skill):
+        assert "yoetz://guidance/request-templates.md" in entrypoint
+    for surface in (_text("guidance/request-templates.md"),):
         collapsed = " ".join(surface.split())
         assert "Normal conversation is the primary" in collapsed
         assert "recommend `expanded_review` first" in collapsed

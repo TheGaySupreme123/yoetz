@@ -13,7 +13,9 @@ For public behavior, resolve in this order:
 3. the code and the tests that lock it.
 
 For exact wire shape and byte identity, [`schemas/`](schemas/) and [`fixtures/`](fixtures/) win over
-prose. Start at [`docs/architecture.md`](docs/architecture.md) to find the owning module.
+prose. When the owning module is unclear, use [`docs/architecture.md`](docs/architecture.md).
+Read the relevant authority when a change touches its contract; small edits do not require a full
+architecture or documentation tour.
 
 Do not invent behavior that contradicts those authorities. When behavior changes, update the ADR or
 affected `docs/` page in the same change.
@@ -35,7 +37,17 @@ ripple below. Full map: [`docs/architecture.md`](docs/architecture.md); shared v
 1. Search issues/PRs for duplicates.
 2. Open an issue before coding; link it from the PR.
 3. For design-gated areas (protocol, privacy/egress, storage/durability, release/packaging, ADR or
-   `OPEN_QUESTIONS` flips), wait for maintainer acknowledgement on the issue before opening a PR.
+   `OPEN_QUESTIONS` flips), record maintainer acknowledgement on the issue before opening a PR.
+   An explicit maintainer request for that scoped work counts; record it without asking again.
+   This does not grant runtime, credential, disclosure, or destructive-action authority.
+
+## Complete authorized work
+
+Within the requested scope, complete implementation, relevant documentation, and focused
+verification. Fix regressions caused by the change and rerun affected checks without asking again.
+Stop for a specific unmet authority requirement or a material scope decision. Report completed
+work and any unmet acceptance criterion separately; do not stop merely at a first implementation.
+Keep the PR, live-state, and exact consent boundaries below.
 
 ## Ways to hurt yourself
 
@@ -61,14 +73,15 @@ ripple below. Full map: [`docs/architecture.md`](docs/architecture.md); shared v
    sockets beneath the working tree, and a long path fails as `endpoint_unsafe`
    (`AF_UNIX path too long`).
 4. **Edit sources, not mirrors.** `guidance/`, `schemas/`, `migrations/`, `support/`, and
-   `skills/codex/` at the repo root are the sources; `src/yoetz/resources/` and the committed
+   `skills/` at the repo root are the sources; `src/yoetz/resources/` and the committed
    `.agents/` trees are generated. `scripts/sync_resource_ripple.py` converges the package mirror
    but does not re-render `.agents/`; `tests/packaging/test_committed_*_tree.py` gates both.
 
 ## Hit every surface
 
 The most common defect here is a change that works on the path you tested and is missing everywhere
-else. Before calling work done, walk this list and say which entries applied:
+else. Apply the relevant entries when a change affects behavior or delivery. Report material
+coverage decisions and gaps; do not recite unrelated entries for every task:
 
 - **Hosts.** Codex, Claude Code, and Cursor each have an integration adapter under
   `src/yoetz/adapters/integrations/`. Host-shaped features need a decision per host, even if the
@@ -95,13 +108,16 @@ uv sync
 uv run pytest <path-to-touched-tests>
 ```
 
-Use Ruff and the pinned npm Pyright (`npx --no-install pyright`) from repository metadata. Prefer the
+For Python changes, use Ruff and the pinned npm Pyright (`npx --no-install pyright`) from
+repository metadata. For prose-only changes, verify relevant facts and links plus `git diff --check`;
+shipped guidance still needs its resource and integration packaging checks. Run `uv sync` when the
+environment needs setup or dependency synchronization, not before every edit. Prefer the
 smallest relevant test slice: the touched module family under `tests/unit/`, plus
 `tests/conformance/` when a runtime or storage boundary moves. Do not run the full suite unless
 asked; CI owns it.
 
 - New tests wait on receipts, diagnostics, and worker drains, never on sleeps. A test that needs a
-  timeout to pass is wrong.
+  sleep to infer success is wrong; bounded waits may fail on a deadline while observing real state.
 - `tests/packaging/` spawns real CLIs and shares install roots under `~/.yz-*`; never run it
   concurrently with another pytest run, and re-run a failure solo before believing it.
 - The `endpoint_unsafe` family (`tests/integration/service/test_local_control_channel.py` and
@@ -120,7 +136,8 @@ uv run python scripts/sync_resource_ripple.py --check
 
 - Never open a PR unless the maintainer explicitly asks for one.
 - Conventional-commit titles in plain language: `fix(receipts): sectional markdown/text receipts`.
-- One concern per PR. If the description says "also", split it.
+- One concern per PR. Split unrelated behavior changes; keep supporting docs, tests, and generated
+  artifacts with the change they support.
 - Body: the problem in a sentence or two, how you fixed it, the verification commands you ran, and
   the model and harness that did the work. Use the repository template.
 - When babysitting a PR: poll checks and comments newer than the last push, verify each bot
