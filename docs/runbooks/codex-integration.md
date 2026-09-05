@@ -1,5 +1,23 @@
 # Codex integration runbook
 
+## Conditional agent guidance
+
+The skill keeps its activation boundary, core workflow, and safety floor in the entrypoint.
+Read workflow guidance before `start`, publication policy before `publish_work`, and coverage
+and receipts before `check`. Setup/consent, vault/credential operations, transcript import, and
+recommendation decisions route to the corresponding sections of request templates only when
+needed. Already-read guidance need not be fetched again while present in context.
+
+Ordinary material claims use `semantic_if_configured`; `semantic_required` follows an explicit
+user requirement, effective policy, or named acceptance criterion requiring independent semantic
+judgment. Preserve required review and all host/disclosure approval boundaries. Installed guidance
+bytes alone prove neither activation nor semantic dispatch.
+
+The Codex skill routes to the existing five MCP guidance URIs with installed reference fallbacks.
+The server initializes only the safety floor. Consumer source-inspection restrictions do not
+prohibit developing or debugging Yoetz itself against isolated test state.
+
+
 This runbook guides you through previewing, installing, checking, replacing, and removing the
 canonical Yoetz Codex skill in one explicitly trusted project, while preserving any files you have
 modified. It also separates four facts that are easy to conflate: skill/source installation, Codex

@@ -467,3 +467,18 @@ operation schema and adds no MCP tool. An exact successful scoped `start` `PostT
 Claude host session to that cooperative task by transiently extracting and validating only the
 start result's structural task/session/writer identifiers and frontier. Raw result content is not
 retained or admitted into observation evidence.
+
+
+## Instruction loading clarification (issue #613)
+
+Tier 0 remains the intake cue and safety floor. The skill routes through the existing five
+registered guidance resources: workflow before start, publication policy before publish, and
+coverage/receipts before check. Setup, consent, credential/vault and import procedures live in
+request templates and load only for those operations; recovery details load on a corresponding
+error or continuation. They remain available through MCP and installed reference copies.
+
+This changes instruction placement and authoring guidance, not runtime authority or wire schemas.
+Required semantic review follows an explicit user requirement, effective verification policy,
+or a named acceptance criterion requiring independent semantic judgment. Qualitative work alone
+does not turn an optional review into a requirement. A required review cannot be silently
+replaced with deterministic coverage, and every host and Yoetz approval boundary still applies.
