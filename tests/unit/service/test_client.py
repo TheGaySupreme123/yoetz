@@ -480,6 +480,24 @@ async def test_connect_timeout_does_not_wait_for_never_closing_accepted_stream(
     assert spawned == 0
 
 
+def test_on_demand_service_environment_forwards_the_pinned_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A pinned runtime spawns its service with the resolved root made explicit (issue #604)."""
+
+    import yoetz.service.client as client_module
+    from yoetz.config.paths import ISOLATED_ROOT_ENV
+
+    monkeypatch.delenv(ISOLATED_ROOT_ENV, raising=False)
+    monkeypatch.setattr(client_module, "isolated_root", lambda: tmp_path / "pinned")
+    environment = client_module._service_environment()  # pyright: ignore[reportPrivateUsage]
+    assert environment[ISOLATED_ROOT_ENV] == str(tmp_path / "pinned")
+
+    monkeypatch.setattr(client_module, "isolated_root", lambda: None)
+    forwarded = client_module._service_environment()  # pyright: ignore[reportPrivateUsage]
+    assert ISOLATED_ROOT_ENV not in forwarded
+
+
 def test_on_demand_service_environment_strips_secret_shaped_names(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

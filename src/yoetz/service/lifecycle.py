@@ -9,8 +9,9 @@ import hashlib
 import hmac
 import math
 import os
+import re
 import stat
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -53,8 +54,11 @@ IDLE_STOP_SECONDS: Final = 7_200
 # One name for the per-user singleton lock file, so the daemon that takes it and the CLI that
 # reports on its holder can never disagree about which file that is.
 SINGLETON_LOCK_NAME: Final = "service.lock"
-# pid + instance id + service version + schema-manifest digest, canonical JSON, one line.
+# pid + instance id + service version + schema-manifest digest + instance lifecycle + source
+# ref, canonical JSON, one line.
 _MAX_SINGLETON_HOLDER_BYTES: Final = 512
+_HOLDER_LIFECYCLES: Final = frozenset({"persistent", "disposable"})
+_HOLDER_SOURCE_REF: Final = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$", re.ASCII)
 _DEFAULT_IDLE_SECONDS: Final = 3_600
 _IDLE_POLICY_DOMAIN: Final = "yoetz/idle-relock-policy-change/v1\x00"
 _LIFECYCLE_REASONS: Final = frozenset(
@@ -220,8 +224,20 @@ class ServiceLifecycle:
         lock_drain_seconds: float = float(LOCK_DRAIN_SECONDS),
         stop_drain_seconds: float = float(STOP_DRAIN_SECONDS),
         idle_stop_seconds: float = float(IDLE_STOP_SECONDS),
+        holder_identity: Mapping[str, str] | None = None,
     ) -> None:
         validate_sha256_digest(process_start_identity_commitment)
+        # Only the closed instance-identity fields may ride in the lock stamp (issue #604); the
+        # stamp names what holds the singleton, it never carries content.
+        stamped: dict[str, str] = {}
+        for name, value in (holder_identity or {}).items():
+            if name == "instance_lifecycle" and value in _HOLDER_LIFECYCLES:
+                stamped[name] = value
+            elif name == "source_ref" and _HOLDER_SOURCE_REF.match(value):
+                stamped[name] = value
+            else:
+                raise ValueError("holder_identity_invalid")
+        self._holder_identity = stamped
         if instance_id is not None:
             validate_id(IdKind.SERVICE_INSTANCE, instance_id)
         for value in (lock_drain_seconds, stop_drain_seconds, idle_stop_seconds):
@@ -632,6 +648,7 @@ class ServiceLifecycle:
         """
 
         body: dict[str, JsonValue] = {"instance_id": self._instance_id, "pid": os.getpid()}
+        body.update(self._holder_identity)
         # Version and schema-manifest identity let a client whose hello this service will
         # reject (an upgraded installation talking to a stale process) name what it found and
         # decide whether the holder is a supersede candidate, without a compatible channel.
@@ -663,13 +680,17 @@ class SingletonHolder:
     """Advisory identity of the live process stamped in the singleton lock file.
 
     ``schema_manifest_digest`` and ``service_version`` are absent for holders stamped by
-    installations that predate the identity fields; they are never inferred.
+    installations that predate the identity fields; they are never inferred. ``instance_lifecycle``
+    and ``source_ref`` name the holder's instance identity (issue #604) and are absent for the
+    everyday (permanent) install and for holders stamped before that contract.
     """
 
     pid: int
     instance_id: str | None
     schema_manifest_digest: str | None
     service_version: str | None
+    instance_lifecycle: str | None = None
+    source_ref: str | None = None
 
 
 def probe_singleton_holder(path: Path) -> int | None:
@@ -729,11 +750,15 @@ def probe_singleton_holder_identity(path: Path) -> SingletonHolder | None:
             validate_sha256_digest(digest)
         except Exception:
             digest = None
+    lifecycle = stamp.get("instance_lifecycle")
+    source_ref = stamp.get("source_ref")
     return SingletonHolder(
         pid,
         instance_id if type(instance_id) is str and len(instance_id) <= 64 else None,
         digest if type(digest) is str else None,
         version if type(version) is str and 0 < len(version) <= 128 else None,
+        lifecycle if type(lifecycle) is str and lifecycle in _HOLDER_LIFECYCLES else None,
+        source_ref if type(source_ref) is str and _HOLDER_SOURCE_REF.match(source_ref) else None,
     )
 
 

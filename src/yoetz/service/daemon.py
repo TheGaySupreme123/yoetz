@@ -59,11 +59,14 @@ from yoetz.application.service import (
     internal_control_json,
     resolve_client_disclosure_sink,
 )
+from yoetz.config.installation import read_instance_identity, verify_instance_binding
 from yoetz.config.load import load_config
 from yoetz.config.models import YoetzConfig
 from yoetz.config.paths import (
     bundle_root,
     ensure_owner_only_dir,
+    isolated_root,
+    read_runtime_pin,
     service_generation_path,
     state_dir,
     unlock_throttle_path,
@@ -2119,11 +2122,20 @@ class _InstallationStateStore:
         throttle_path: Path,
         generation_path: Path,
         recovery_sets: InstallationRecoverySetStore | None = None,
+        *,
+        instance_installation_id: str | None = None,
     ) -> None:
         self._path = path
         self._throttle_path = throttle_path
         self._generation_path = generation_path
         self._recovery_sets = recovery_sets
+        # The instance-identity marker (issue #604) is minted before the first service start, so
+        # it is the highest-precedence candidate; every later record must agree with it.
+        self._instance_installation_id = (
+            None
+            if instance_installation_id is None
+            else validate_id(IdKind.INSTALLATION, instance_installation_id)
+        )
 
     def load(self, *, reconcile: bool = True) -> _InstallationState | None:
         if reconcile:
@@ -2174,6 +2186,8 @@ class _InstallationStateStore:
 
     def select_installation_id(self, state: _InstallationState | None) -> str:
         candidates: list[str] = []
+        if self._instance_installation_id is not None:
+            candidates.append(self._instance_installation_id)
         if state is not None:
             candidates.append(state.installation_id)
         throttle = self._provisional_throttle()
@@ -3636,6 +3650,17 @@ async def _production_composition(
 
     config = _config or load_config({}, os.environ, None)
     paths = _paths or _ProductionPaths.canonical(config)
+    clock = _SystemClock()
+    # Instance identity gate (issue #604): an expired disposable instance, a re-pointed runtime
+    # pin, or a labeled instance outside its isolated root is refused before the singleton is
+    # taken, so the refusal can never replace or contend with another instance's service.
+    instance_identity = read_instance_identity(paths.state)
+    verify_instance_binding(
+        instance_identity,
+        isolated=isolated_root() is not None,
+        pin=read_runtime_pin(),
+        now=clock.now_utc(),
+    )
     ensure_owner_only_dir(paths.bundle)
     recovery_sets = InstallationRecoverySetStore(paths.bundle)
     marker_store = _InstallationStateStore(
@@ -3643,13 +3668,20 @@ async def _production_composition(
         paths.throttle,
         paths.generation,
         recovery_sets,
+        instance_installation_id=(
+            None if instance_identity is None else instance_identity.installation_id
+        ),
     )
     # Initial identity discovery is read-only. Reconciliation mutates retained authority and must
     # wait until this process owns the singleton; otherwise a losing second start could interfere
     # with the live service's recovery transaction.
     marker = marker_store.load(reconcile=False)
     installation_id = marker_store.select_installation_id(marker)
-    clock = _SystemClock()
+    holder_identity: dict[str, str] | None = None
+    if instance_identity is not None:
+        holder_identity = {"instance_lifecycle": instance_identity.lifecycle}
+        if instance_identity.source_ref is not None:
+            holder_identity["source_ref"] = instance_identity.source_ref
     production_binders = _binders is None
     listeners = _ProductionListeners(
         _binders
@@ -3669,6 +3701,7 @@ async def _production_composition(
         endpoint_publisher=listeners.bind,
         endpoint_cleanup=listeners.close,
         close_ready_composition=ready_close_relay,
+        holder_identity=holder_identity,
     )
     secret_memory: LocalSecretMemory | None = None
     vault: VaultService | None = None

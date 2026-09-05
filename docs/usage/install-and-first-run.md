@@ -172,6 +172,28 @@ run the deterministic packs only and say so in their coverage vector.
 That state is fully useful: the ledger, deterministic checks, findings, and receipts all work. You
 opt into external review deliberately, or never.
 
+## More than one Yoetz on one machine
+
+Your everyday installation is the **permanent** instance: it uses the platform's own application
+directories and nothing else touches them. To try a change, reproduce a defect, or run a test
+against a real installed Yoetz without disturbing that installation, create a separate instance
+with its own root, service, and vault:
+
+```text
+yoetz instance create --root ~/.yz-try/state --lifecycle disposable --expires-in 8 --bind-runtime
+yoetz instance status --json
+yoetz instance dispose --root ~/.yz-try/state
+```
+
+`--bind-runtime` pins the Yoetz you ran to that root, so it keeps using its own state even when a
+program starts it without the `YOETZ_ISOLATED_ROOT` variable; a different root in the variable is
+refused rather than obeyed. `status` never prints paths, only digests, and reports whether the
+instance is `permanent`, `persistent`, `disposable`, or an older unlabeled isolated root, and
+whether it has expired. `dispose` removes only a root that carries such an instance record, stops
+only the service holding that root, and can be repeated safely; it will not remove your everyday
+installation. Contributors building instances from source use the procedure in the project's
+contributor documentation.
+
 ## After setup
 
 Bare `yoetz` opens the interface. Type `/` for commands — `/status` for layered readiness,

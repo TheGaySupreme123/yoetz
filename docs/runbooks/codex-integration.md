@@ -612,6 +612,17 @@ Before a dogfood model task, use the app-server capture in the parity runbook to
 registered child and satisfy `mcp_child_isolation`; registration status alone is not child-start
 evidence.
 
+A pinned test instance (ADR-028, issue #604) is the second guard for the registered child: when the
+registration's `command` is the absolute launcher of a runtime created with
+`yoetz instance create --bind-runtime`, the child resolves that instance's root even if the `env`
+block is lost, and a different root in the environment is refused as `isolation_root_conflict`
+rather than obeyed. The `--env` binding, `isolation_binding=isolated_exact`, and the
+`mcp_child_isolation` facet remain required and unchanged. The everyday Codex registration must
+name the everyday launcher by absolute path: a bare `command = "yoetz"` resolves through `PATH`,
+and a test runtime earlier on `PATH` then reaches the everyday endpoint, answers
+`service_incompatible`, and its `yoetz service restart` advice supersedes the everyday service —
+the failure recorded on issue #604. See [`test-instances.md`](test-instances.md).
+
 ## Subscription evaluator is a separate Codex role
 
 Codex may be both the host carrying Yoetz and the selected external semantic evaluator, but those

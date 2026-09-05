@@ -136,6 +136,13 @@ integrate_admission_app = typer.Typer(
 )
 setup_app = typer.Typer(help="Guided first-run harness and provider setup.", no_args_is_help=True)
 service_app = typer.Typer(help="Manage the foreground local service.", no_args_is_help=True)
+instance_app = typer.Typer(
+    help=(
+        "Create, inspect, and dispose independent Yoetz instances (persistent development "
+        "instances and disposable test snapshots with their own root, service, and vault)."
+    ),
+    no_args_is_help=True,
+)
 auto_unlock_app = typer.Typer(
     help="Inspect or repair restart-safe passphrase unlock.", no_args_is_help=True
 )
@@ -197,6 +204,7 @@ integrate_app.add_typer(integrate_plugin_app, name="plugin")
 integrate_app.add_typer(integrate_admission_app, name="admission")
 app.add_typer(setup_app, name="setup")
 app.add_typer(service_app, name="service")
+app.add_typer(instance_app, name="instance")
 service_app.add_typer(auto_unlock_app, name="auto-unlock")
 service_app.add_typer(recovery_app, name="recovery")
 app.add_typer(provider_app, name="provider")
@@ -1322,12 +1330,18 @@ def service_run() -> None:
         raise typer.Exit(exit_code_for(PublicErrorCode.SERVICE_UNAVAILABLE)) from None
 
     # Free at this point: the daemon import above already composed the lifecycle module.
+    from yoetz.config.installation import InstanceIdentityError
+    from yoetz.config.paths import PathSafetyError
     from yoetz.service.lifecycle import LifecycleError
 
     try:
         daemon_main()
     except LifecycleError as error:
         _finish(_lifecycle_failure(error))
+    except (InstanceIdentityError, PathSafetyError) as error:
+        # An instance whose identity, pin, root, or lifetime cannot be trusted is refused before
+        # the singleton is taken (issue #604); name the condition, never a traceback.
+        _finish(_instance_failure(error))
 
 
 @service_app.command("isolation")
@@ -1340,6 +1354,7 @@ def service_isolation(json_output: _JSON = False) -> None:
     """
 
     from yoetz.cli.isolation_status import isolation_report
+    from yoetz.config.installation import InstanceIdentityError
     from yoetz.config.models import ConfigError
     from yoetz.config.paths import PathSafetyError
 
@@ -1351,9 +1366,157 @@ def service_isolation(json_output: _JSON = False) -> None:
     except ConfigError as error:
         _stderr(f"isolation_unprovable: {error.reason_code}")
         _finish(2)
+    except InstanceIdentityError as error:
+        _stderr(f"isolation_unprovable: {error.reason}")
+        _finish(2)
     else:
         _human_or_json(cast(JsonValue, dict(report)), json_output=json_output)
         _finish(0)
+
+
+def _instance_failure(error: BaseException) -> int:
+    """Report a bounded instance-identity or isolation-root refusal (issue #604)."""
+
+    from yoetz.cli.exits import INSTANCE_PUBLIC_CODES
+    from yoetz.cli.instance import instance_failure_line
+    from yoetz.config.installation import InstanceIdentityError
+    from yoetz.config.paths import PathSafetyError
+
+    if isinstance(error, InstanceIdentityError):
+        reason = error.reason
+    elif isinstance(error, PathSafetyError):
+        reason = error.reason_code
+    else:
+        _stderr("internal_error: the command could not be completed")
+        return exit_code_for(PublicErrorCode.INTERNAL_ERROR)
+    _stderr(instance_failure_line(error))
+    return exit_code_for(INSTANCE_PUBLIC_CODES.get(reason, PublicErrorCode.STORAGE_UNSAFE))
+
+
+def _run_instance_operation(operation: Callable[[], object], *, json_output: bool) -> None:
+    from yoetz.config.installation import InstanceIdentityError
+    from yoetz.config.paths import PathSafetyError
+
+    try:
+        result = operation()
+    except (InstanceIdentityError, PathSafetyError) as error:
+        _finish(_instance_failure(error))
+    else:
+        _human_or_json(cast(JsonValue, result), json_output=json_output)
+        _finish(0)
+
+
+_INSTANCE_ROOT_OPTION = Annotated[
+    Path,
+    typer.Option(
+        "--root",
+        help="Absolute isolated root the instance owns (created by 'create', removed by 'dispose').",
+    ),
+]
+
+
+@instance_app.command("create")
+def instance_create(
+    root: _INSTANCE_ROOT_OPTION,
+    lifecycle: Annotated[
+        Literal["persistent", "disposable"],
+        typer.Option(
+            "--lifecycle",
+            help="persistent: a kept development instance; disposable: a bounded test snapshot.",
+        ),
+    ],
+    source_ref: Annotated[
+        str | None,
+        typer.Option(
+            "--source-ref", help="Exact 40/64-hex source revision the runtime was built from."
+        ),
+    ] = None,
+    source_state: Annotated[
+        Literal["clean", "modified", "unknown"],
+        typer.Option("--source-state", help="Whether that revision's tree was clean when built."),
+    ] = "unknown",
+    package_digest: Annotated[
+        str | None,
+        typer.Option("--package-digest", help="sha256:<hex> of the installed wheel, when known."),
+    ] = None,
+    expires_in: Annotated[
+        float | None,
+        typer.Option("--expires-in", help="Hours until a disposable instance stops serving."),
+    ] = None,
+    expires_at: Annotated[
+        str | None,
+        typer.Option("--expires-at", help="RFC 3339 UTC millisecond time the instance expires."),
+    ] = None,
+    bind_runtime: Annotated[
+        bool,
+        typer.Option(
+            "--bind-runtime",
+            help=(
+                "Pin this runtime (its virtual environment) to the root so it resolves the root "
+                "even without YOETZ_ISOLATED_ROOT."
+            ),
+        ),
+    ] = False,
+    json_output: _JSON = False,
+) -> None:
+    """Create an isolated instance root with a sealed identity; connection-free."""
+
+    from datetime import UTC, datetime
+
+    from yoetz.cli.instance import create_instance, parse_expiry
+
+    def operation() -> object:
+        now = datetime.now(UTC)
+        return create_instance(
+            root=root,
+            lifecycle=lifecycle,
+            now=now,
+            expires_at=parse_expiry(now=now, expires_in_hours=expires_in, expires_at=expires_at),
+            source_ref=source_ref,
+            source_state=source_state,
+            package_digest=package_digest,
+            bind_runtime=bind_runtime,
+        )
+
+    _run_instance_operation(operation, json_output=json_output)
+
+
+@instance_app.command("status")
+def instance_status_command(json_output: _JSON = False) -> None:
+    """Report this runtime's instance (mode, binding, lifecycle, provenance); digest-only."""
+
+    from yoetz.cli.instance import instance_status
+
+    _run_instance_operation(instance_status, json_output=json_output)
+
+
+@instance_app.command("dispose")
+def instance_dispose(
+    root: _INSTANCE_ROOT_OPTION,
+    retain_logs: Annotated[
+        Path | None,
+        typer.Option(
+            "--retain-logs",
+            help="Directory that receives a copy of the instance's log files before removal.",
+        ),
+    ] = None,
+    no_stop: Annotated[
+        bool,
+        typer.Option(
+            "--no-stop",
+            help="Refuse instead of stopping a service that still holds the root's singleton.",
+        ),
+    ] = False,
+    json_output: _JSON = False,
+) -> None:
+    """Remove one persistent or disposable instance root; repeated calls are a no-op."""
+
+    from yoetz.cli.instance import dispose_instance
+
+    _run_instance_operation(
+        lambda: dispose_instance(root=root, retain_logs=retain_logs, stop_service=not no_stop),
+        json_output=json_output,
+    )
 
 
 @service_app.command("diagnostics")

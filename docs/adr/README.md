@@ -30,6 +30,7 @@ ADR wins; when an ADR and the code disagree, that is a bug in one of them and wo
 | [023](ADR-023-portable-plugin-carrier-host-activation.md) | Portable plugin carrier and host activation |
 | [025](ADR-025-versioned-claim-correction.md) | Versioned append-only claim correction |
 | [026](ADR-026-isolated-root-runtime-identity.md) | Exact-target isolated-root runtime identity |
+| [028](ADR-028-instance-identity-and-runtime-pinned-roots.md) | Instance identity and runtime-pinned isolated roots |
 
 Unresolved gates are centralized in [`docs/OPEN_QUESTIONS.md`](../OPEN_QUESTIONS.md), not scattered
 through individual ADRs.

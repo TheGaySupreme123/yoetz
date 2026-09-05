@@ -52,6 +52,22 @@ The pinned toolchain is Ruff for lint/format and the official npm-distributed Py
 (`npx --no-install pyright`) in strict mode for type checking; Node/npm are contributor and CI
 prerequisites only, never an end-user runtime requirement.
 
+### Testing against a real installed Yoetz without touching your own
+
+When a change needs an installed launcher, a running service, a host registration, or an upgrade
+path — not just `uv run pytest` — provision an independent test instance instead of using your
+everyday installation:
+
+```text
+uv run python scripts/provision_test_instance.py create --tag <name> --lifecycle disposable
+uv run python scripts/provision_test_instance.py dispose --tag <name>
+```
+
+It builds a wheel from the exact revision, installs it into its own runtime, and pins that runtime
+to its own root, service, and vault, so it can never reach the everyday install even when a host
+drops the environment. Procedure, constraints, and concurrency rules:
+[`docs/runbooks/test-instances.md`](docs/runbooks/test-instances.md) (ADR-028).
+
 ### Packaged resource ripple
 
 Resource inventory changes feed the package manifest, version-manifest schema, schema inventory,

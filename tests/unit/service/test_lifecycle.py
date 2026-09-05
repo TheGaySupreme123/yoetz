@@ -393,6 +393,56 @@ async def test_singleton_stamp_names_the_holder_installation_identity(tmp_path: 
     assert probe_singleton_holder_identity(path) is None
 
 
+@pytest.mark.anyio
+async def test_singleton_stamp_carries_the_instance_lifecycle_and_source_ref(
+    tmp_path: Path,
+) -> None:
+    """A refused client, or ``yoetz instance status``, can name what kind of instance holds
+    the singleton (issue #604); only the closed fields ride in the stamp."""
+
+    path = tmp_path / "service.lock"
+    source_ref = "c3d553611c998df32a72c64337d1e8231560a37d"
+    lifecycle = _lifecycle(
+        _Clock(),
+        singleton_lock_path=path,
+        holder_identity={"instance_lifecycle": "disposable", "source_ref": source_ref},
+    )
+    await lifecycle.acquire_singleton()
+    try:
+        holder = probe_singleton_holder_identity(path)
+        assert holder is not None
+        assert holder.instance_lifecycle == "disposable"
+        assert holder.source_ref == source_ref
+    finally:
+        await lifecycle.transition(ServiceState.LOCKED)
+        await lifecycle.close()
+
+    with pytest.raises(ValueError, match="holder_identity_invalid"):
+        _lifecycle(_Clock(), singleton_lock_path=path, holder_identity={"instance_lifecycle": "x"})
+    with pytest.raises(ValueError, match="holder_identity_invalid"):
+        _lifecycle(_Clock(), singleton_lock_path=path, holder_identity={"other": "value"})
+
+
+def test_holder_probe_drops_malformed_instance_identity_fields(tmp_path: Path) -> None:
+    path = tmp_path / "service.lock"
+    path.write_bytes(
+        canonical_encode(
+            {
+                "instance_id": "svc_legacy",
+                "pid": os.getpid(),
+                "instance_lifecycle": "permanent",
+                "source_ref": "HEAD",
+            }
+        )
+        + b"\n"
+    )
+    path.chmod(0o600)
+    holder = probe_singleton_holder_identity(path)
+    assert holder is not None
+    assert holder.instance_lifecycle is None
+    assert holder.source_ref is None
+
+
 def test_holder_identity_probe_tolerates_legacy_and_malformed_identity_fields(
     tmp_path: Path,
 ) -> None:

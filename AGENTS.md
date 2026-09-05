@@ -47,6 +47,16 @@ ripple below. Full map: [`docs/architecture.md`](docs/architecture.md); shared v
    copy); the copy must sit in a symlink-free, mode-0700 directory — not `/tmp`, which macOS
    resolves through a symlink and the runtime refuses as `path_contains_symlink`. Copy in, never
    symlink, never copy back. Copying vault material needs maintainer sign-off first.
+   For anything that needs an installed launcher, a running service, a host registration, or an
+   upgrade path, provision an independent test instance instead
+   (`scripts/provision_test_instance.py`, [`docs/runbooks/test-instances.md`](docs/runbooks/test-instances.md),
+   ADR-028): it builds a wheel from the exact revision, installs it into its own runtime, and pins
+   that runtime to its own root, service, and vault, so a dropped `YOETZ_ISOLATED_ROOT`, a hook,
+   or a `PATH` that lists the test runtime first can no longer reach the live singleton. Setting
+   `YOETZ_ISOLATED_ROOT` alone (ADR-026) still isolates an explicitly exported process tree but
+   not a bare launcher; a bare `yoetz` resolved through `PATH` in a host registration is how the
+   live service got superseded by a test build (issue #604). Register hosts with absolute
+   launcher paths.
 2. **Never kill the service by pattern.** `pkill -f yoetz`, `pgrep | kill`, or killing a PID matched
    on a path also hits the user's real service and the hook/bridge processes, whose argv carries
    this checkout's path. Stop only a PID you spawned, or use the sanctioned path: `yoetz service
@@ -103,7 +113,14 @@ asked; CI owns it.
 - New tests wait on receipts, diagnostics, and worker drains, never on sleeps. A test that needs a
   timeout to pass is wrong.
 - `tests/packaging/` spawns real CLIs and shares install roots under `~/.yz-*`; never run it
-  concurrently with another pytest run, and re-run a failure solo before believing it.
+  concurrently with another pytest run, and re-run a failure solo before believing it. That
+  restriction is unchanged by ADR-028: instance pinning makes the *instances* independent, not
+  the shared `~/.yz-*` base those tests still create and delete.
+- Run any test that spawns a real service (`tests/subprocess/`, `tests/packaging/`) with
+  `YOETZ_ISOLATED_ROOT` unset in the invoking shell (`env -u YOETZ_ISOLATED_ROOT uv run pytest
+  …`) unless the test itself owns that root: an inherited root makes the spawned children
+  resolve someone else's instance. Pinned test-instance launchers are immune; the checkout's
+  `.venv` is unpinned by design.
 - The `endpoint_unsafe` family (`tests/integration/service/test_local_control_channel.py` and
   friends) is environment-dependent, not a standing baseline: re-run from a short checkout path
   before blaming a change.

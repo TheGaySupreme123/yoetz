@@ -9,6 +9,7 @@ from yoetz.protocol.errors import PublicErrorCode
 
 __all__ = [
     "CEREMONY_REFUSAL_MESSAGES",
+    "INSTANCE_PUBLIC_CODES",
     "LIFECYCLE_PUBLIC_CODES",
     "PUBLIC_EXIT_CODES",
     "REMEDIATION_MESSAGES",
@@ -85,6 +86,30 @@ def lifecycle_public_code(reason: str) -> PublicErrorCode | None:
     """Return the public outcome for a bounded lifecycle reason, or None when unmapped."""
 
     return LIFECYCLE_PUBLIC_CODES.get(reason)
+
+
+# Instance-identity and isolation-root refusals (issue #604). A usage-shaped refusal (the operator
+# named a root that cannot be created or disposed) exits 2; a runtime whose identity, pin, or root
+# cannot be trusted exits 20 as an unsafe-storage condition; an owned service still holding the
+# root's singleton is a busy resource, like ``service_already_running``.
+INSTANCE_PUBLIC_CODES: Final = MappingProxyType(
+    {
+        "instance_absent": PublicErrorCode.INVALID_REQUEST,
+        "instance_exists": PublicErrorCode.INVALID_REQUEST,
+        "instance_expiry_invalid": PublicErrorCode.INVALID_REQUEST,
+        "instance_not_disposable": PublicErrorCode.INVALID_REQUEST,
+        "instance_root_invalid": PublicErrorCode.INVALID_REQUEST,
+        "instance_root_too_long": PublicErrorCode.INVALID_REQUEST,
+        "instance_expired": PublicErrorCode.SERVICE_UNAVAILABLE,
+        "instance_identity_invalid": PublicErrorCode.STORAGE_UNSAFE,
+        "instance_lifecycle_requires_isolated_root": PublicErrorCode.STORAGE_UNSAFE,
+        "installation_identity_mismatch": PublicErrorCode.STORAGE_UNSAFE,
+        "isolation_root_conflict": PublicErrorCode.STORAGE_UNSAFE,
+        "runtime_pin_conflict": PublicErrorCode.STORAGE_UNSAFE,
+        "runtime_pin_invalid": PublicErrorCode.STORAGE_UNSAFE,
+        "instance_service_running": PublicErrorCode.BUNDLE_BUSY,
+    }
+)
 
 
 # A confidential ceremony the service answered and *declined* is not an unavailable service.
@@ -296,6 +321,63 @@ REMEDIATION_MESSAGES: Final = MappingProxyType(
             "unsafe; pass the resolved path of a directory owned by the current user (host hooks "
             "render it from CLAUDE_PROJECT_DIR or CURSOR_PROJECT_DIR, so check that variable "
             "when a hook reports this)"
+        ),
+        # Instance identity and runtime pin (issue #604).
+        "instance_identity_invalid": (
+            "the instance-identity marker in this root's state directory is malformed, "
+            "foreign-owned, or not owner-only; dispose the instance with "
+            "'yoetz instance dispose --root <root>' and create it again"
+        ),
+        "instance_expired": (
+            "this disposable instance is past its recorded expiry and will not serve; dispose it "
+            "with 'yoetz instance dispose --root <root>' and create a fresh one"
+        ),
+        "instance_lifecycle_requires_isolated_root": (
+            "a persistent or disposable instance marker was found in ambient state; a labeled "
+            "instance only runs under its own YOETZ_ISOLATED_ROOT or runtime pin"
+        ),
+        "installation_identity_mismatch": (
+            "the runtime pin, the instance-identity marker, and the service generation record do "
+            "not name one installation; the runtime was re-pointed or the root was replaced. "
+            "Dispose and recreate the instance, or remove the stale pin from the runtime"
+        ),
+        "isolation_root_conflict": (
+            "YOETZ_ISOLATED_ROOT names a different root than this runtime's pin; unset the "
+            "variable to use the pinned root, or run the runtime that belongs to that root"
+        ),
+        "runtime_pin_invalid": (
+            "this runtime's yoetz-instance-pin.json is unreadable, foreign-owned, writable by "
+            "others, or malformed; remove it or recreate the instance with --bind-runtime"
+        ),
+        "runtime_pin_conflict": (
+            "this runtime is already pinned to another root; dispose that instance from this "
+            "runtime or provision a separate runtime for the new root"
+        ),
+        "instance_root_invalid": (
+            "the instance root must be an absolute path whose parent exists, owned by the "
+            "current user, outside shared temp, repositories, sync folders, and the home root, "
+            "and either absent or an empty directory"
+        ),
+        "instance_root_too_long": (
+            "the instance root is too long for the Unix control sockets that bind beneath it; "
+            "choose a shorter path such as ~/.yz-<tag>/state"
+        ),
+        "instance_expiry_invalid": (
+            "--expires-in/--expires-at must name a future time within 30 days and applies only "
+            "to a disposable instance"
+        ),
+        "instance_exists": (
+            "that root already carries an instance-identity marker; dispose it first or choose "
+            "another root"
+        ),
+        "instance_not_disposable": (
+            "that root carries no persistent or disposable instance marker, so this command will "
+            "not remove it; the everyday (permanent) install and unlabeled ADR-026 roots are "
+            "never disposed by 'yoetz instance dispose'"
+        ),
+        "instance_service_running": (
+            "a service still holds that root's singleton and did not release it within the "
+            "bounded stop window; stop it with that runtime's 'yoetz service stop', then retry"
         ),
     }
 )
