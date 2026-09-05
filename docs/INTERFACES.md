@@ -1630,10 +1630,12 @@ and `task`. Membership rows carry append-only generations. Repository or workspa
 are membership facts and never the project's identity.
 
 **Lineage names and facts.** A child is a real task (`tsk_`) with its own bundle. The catalog holds
-`parent_task_id`, `depth`, `lineage_digest`, `origin`, `acceptance`, and `work_state`; session
-health remains per session. Work lifecycle is `open | closed | cancelled | abandoned | written_off`;
-session health is `active | contact_lost | ended`; receipt history is the latest receipt and its
-frontier. The task's explicit work publication owns `closed`, a parent action owns `cancelled` and
+`parent_task_id`, `depth`, `lineage_digest`, `origin`, `acceptance`, and `work_state`; nesting is
+recorded to any depth while presentation remains one level, and session health remains per session.
+Work lifecycle is `open | closed | cancelled | abandoned | written_off`; session health is
+`active | contact_lost | ended`; receipt history is service-owned by receipt finalization and
+records the latest receipt and its frontier. The task's explicit work publication owns `closed`, a
+parent action on accepted work owns `cancelled` and
 `written_off`, and the recorded service abandonment policy owns `abandoned`; a receipt request
 never closes work. The service records `active` for a held lease, `contact_lost` when it expires
 without a host end event, and `ended` only for a host end event or explicit end. A missing host end
@@ -1646,7 +1648,8 @@ and accepted relationships cannot later be rejected. `mode=delegate` creates `pa
 `accepted` atomically. A host-observed signal is first a provisional annotation under one
 correlation identity with pending acceptance and no bundle; it becomes one child only when accepted
 delegation or cooperative self-registration binds to it. Host mapping remains evidence-gated in
-#506–#508.
+#506–#508. The service owns child-dependency manifest stamping; host-observation inputs can enter
+only through that service path, and ordinary client publication cannot self-award a manifest.
 
 **Frozen rollup.** Before a parent check or receipt uses a child, the parent ledger records a
 `child-dependencies-recorded` manifest containing child identity, origin, acceptance, frontier,
@@ -1665,8 +1668,9 @@ prohibited in increment A. `AuthorizationScope.contains()` stays unchanged.
 
 **Project birth and coordination.** The second concurrent live task in one repository materializes
 an implicit repository project. General or multi-repository projects are explicit and amendable;
-implicit projects persist when concurrency drops to one. A repository may opt out of automatic
-grouping and cross-task disclosure without erasing accepted delegations, obligations, or receipt
+implicit projects persist when concurrency drops to one. A repository may opt out through
+`projects.auto_grouping` of automatic grouping and cross-task disclosure without erasing accepted
+delegations, obligations, or receipt
 dependencies. A fact enters coordination only when its source workspace consent is active; consent
 for one worktree never covers another. General or cross-repository coordination requires a
 generation-bound `coordination_grants` authorization checked at admission and delivery. External

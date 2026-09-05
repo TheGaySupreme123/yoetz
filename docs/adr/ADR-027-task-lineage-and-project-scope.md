@@ -69,10 +69,12 @@ tool, or populate a host capability cell.
    Its only transitions are `pending → accepted` and `pending → rejected`; an accepted
    relationship can never become rejected. `mode=delegate` creates `parent_minted` plus
    `accepted` atomically. Only the service and host-observation paths may stamp `host_observed`;
-   ordinary publication cannot award it or rewrite an origin.
+   ordinary publication cannot award it or rewrite an origin. The service owns child-dependency
+   manifest stamping; ordinary client fields cannot self-award a manifest.
 
 5. **Parent results use frozen dependency manifests (C5/D12).** Before a parent check or receipt
-   uses child facts, a `child-dependencies-recorded` manifest is written to the parent ledger. The
+   uses child facts, a `child-dependencies-recorded` manifest is written to the parent ledger by
+   the service-owned stamping path. The
    manifest carries the child identity, origin, acceptance, child frontier, check/receipt identity,
    coverage, findings state, `lineage_authority_revision`, and an optional project
    `membership_generation`. The pure kernel evaluates only that recorded snapshot, never a live
@@ -128,8 +130,9 @@ than implementation notes.
 1. **A child is a real task with its own bundle.** The layout remains `catalog.sqlite3` plus
    `tasks/<task-id>/`; a child is another `tsk_` with another bundle. The catalog records
    `parent_task_id`, `depth` (0 for a root), `lineage_digest`, `origin`, `acceptance`, and
-   `work_state`. Session health is a per-session fact, not a route shortcut. Clients never open a
-   sibling or child bundle; the service projects their permitted views.
+   `work_state`. Nesting is recorded to any depth; presentation remains one level. Session health
+   is a per-session fact, not a route shortcut. Clients never open a sibling or child bundle; the
+   service projects their permitted views.
 
 2. **Creation paths have unequal provenance.** `parent_minted` is the blessed path: the parent
    service call allocates the child and records the edge. `self_registered` is the fallback: a
@@ -164,7 +167,8 @@ than implementation notes.
 6. **Project birth and opt-out are repository-scoped.** The second concurrent live task in one
    repository materializes an implicit repository project. A general or multi-repository project
    is created explicitly. An implicit project persists when concurrency drops to one. A repository
-   may opt out of automatic grouping and cross-task disclosure; opting out never erases accepted
+   may opt out through `projects.auto_grouping` of automatic grouping and cross-task disclosure;
+   opting out never erases accepted
    delegations, obligations, or recorded receipt dependencies. Project management is #505.
 
 7. **Coordination is local and generation-bound.** A fact from a member task enters coordination
