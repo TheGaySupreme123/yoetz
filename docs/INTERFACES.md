@@ -41,6 +41,11 @@ CSPRNG. Opaque, case-sensitive, never parsed for order or meaning.
 | `egress_receipt` | `egr_` | trusted local service privacy audit |
 | `actor` | `agt_` (convention) | caller-asserted; format-validated only |
 
+**Accepted, not yet generated (ADR-027, issue #494).** `IdKind.project` uses prefix `prj_` and is
+server-generated under the same `<prefix>_<lowercase UUIDv4>` rule. Wire admission, catalog
+minting, and `new_id(IdKind.PROJECT)` land in #495/#496. Until then the live enum and
+`PREFIX_BY_KIND` map stay exactly the table above.
+
 For `publish_work`, public event IDs are caller-generated and stable across retry. The lifecycle,
 response, check, finding, and receipt events created by the engine receive IDs from the injected
 `IdPort`. A resumable operation persists those allocated IDs before the first retry boundary, so a
@@ -102,9 +107,12 @@ repository_identity_required` (the control handshake carried no workspace locato
 the route holds no repository binding); neither discloses a commitment, and a hook uses the reason
 to keep a live mapping out of the `mapping_stale` class (issue #578). The separate
 `workspace_task_exists` conflict deliberately carries no task selector or count: possession of a
-workspace reference alone is not authority to discover or attach another task. A host hook may
-recover from that exact conflict only with a validated selector it already holds in the private
-local lifecycle store; the public error remains unchanged and reveals no binding. For MCP
+workspace reference alone is not authority to discover or attach another task. Once a live,
+consented project membership is implemented, its service-side `status` projection may disclose
+bounded sibling task identity and state; membership still never authorizes attach, resume, or task
+selection. A host hook may recover from that exact conflict only with a validated selector it
+already holds in the private local lifecycle store; the public error remains unchanged and reveals
+no binding. For MCP
 `INVALID_REQUEST` validation failures, `safe_details` may also carry parallel `fields` and
 `reasons` arrays: each entry is an allowlisted JSON pointer and a closed reason token for that
 location (same index order; at most eight locations). `reason_code` may co-occur with
@@ -1572,10 +1580,11 @@ external_ref_commitment?)` contains only domain-separated installation-keyed HMA
 The application builds the start `request_digest` from those commitments plus nonsecret logical
 fields. `reserve_or_resume` recomputes/verifies them before idempotency or route lookup, preventing
 low-entropy plaintext from leaking through an unkeyed structural request digest. `workspace_ref`
-is the caller-declared project identity and `external_ref` the stable task identity within that project;
+is the caller-declared workspace or working-tree identity and `external_ref` the stable task identity within that workspace;
 together they are the attach selector when `session_id` is absent (`mode=create_or_attach` or
 `attach` with the pair). The `workspace_ref_commitment` is a keyed HMAC of the exact caller
-string, so the single-task-per-workspace invariant below holds per spelling, not per repository:
+string, so the single-task-per-workspace invariant below holds per spelling, not per repository,
+and remains executable until #497:
 hook auto-attach on every host commits the canonical absolute repository root (a linked worktree
 is its own root), the packaged guidance and the `start` tool description tell agents to use that
 same root and never a remote URL, and the SessionStart context names the mapped `session_id` and
@@ -1604,6 +1613,91 @@ or implements the multi-task workspace admission planned by #494/#497/#498. Raw 
 durable state — only the commitments do. This
 model/agent-controlled `workspace_ref_commitment` is an attachment selector, not a
 repository-privacy commitment, and cannot select or inherit disclosure authority.
+
+### Task lineage and project scope (ADR-027)
+
+Ratified identity and consent bounds; not yet generated, stored, or admitted. The current
+four-kind `AuthorizationScopeKind` and structural `contains()` remain the executable privacy
+contract. Wire fields land in #495, catalog columns and the storage ownership inventory in #496,
+admission in #497, service-wide multiplicity audit in #498, delegation lifecycle in #499, receipt
+rollup and check/status child views in #500/#501, and local coordination grants in #502. Packaged
+guidance is not rewritten here because this ADR adds no agent behavior.
+
+**Project identifier.** Accepted `IdKind.project` uses prefix `prj_` (see Identifiers). A project
+is host-agnostic and is a grouping object, not an egress scope. Its initial kinds are `repository`
+(implicit) and `general` (explicit, amendable); membership kinds are `repository`, `workspace`,
+and `task`. Membership rows carry append-only generations. Repository or workspace commitments
+are membership facts and never the project's identity.
+
+**Lineage names and facts.** A child is a real task (`tsk_`) with its own bundle. The catalog holds
+`parent_task_id`, `depth`, `lineage_digest`, `origin`, `acceptance`, and `work_state`; nesting is
+recorded to any supported depth within #499's configured depth and fan-out ceilings (with typed
+refusals), while presentation remains one level and session health remains per session.
+Work lifecycle is `open | closed | cancelled | abandoned | written_off`; session health is
+`active | contact_lost | ended`; receipt history is service-owned by receipt finalization and
+records the latest receipt and its frontier. The task's explicit work publication owns `closed`, a
+parent action on accepted work owns `cancelled` and
+`written_off`, and the recorded service abandonment policy owns `abandoned`; a receipt request
+never closes work. The service records `active` for a held lease, `contact_lost` when it expires
+without a host end event, and `ended` only for a host end event or explicit end. A missing host end
+event never establishes permanent liveness. A live task is work `open` with at least one active
+session.
+
+**Origin, acceptance, and creation.** `origin` is immutable: `parent_minted | self_registered |
+host_observed`. Acceptance is parent-controlled: `pending → accepted` or `pending → rejected`,
+and accepted relationships cannot later be rejected. `mode=delegate` creates `parent_minted` plus
+`accepted` atomically. A host-observed signal is first a provisional annotation under one
+correlation identity with pending acceptance and no bundle; it becomes one child only when accepted
+delegation or cooperative self-registration binds to it. Host mapping remains evidence-gated in
+#506–#508. The service owns child-dependency manifest stamping; host-observation inputs can enter
+only through that service path, and ordinary client publication cannot self-award a manifest.
+
+**Frozen rollup.** Before a parent check or receipt uses a child, the parent ledger records a
+`child-dependencies-recorded` manifest containing child identity, origin, acceptance, frontier,
+check/receipt identity, coverage, findings state, `lineage_authority_revision`, and optional
+`membership_generation`. The lineage coordinator records changed child facts; receipt generation
+only reuses recorded manifests and never records or refreshes one (#500). The parent receipt
+projects direct children one level: current actionable findings on accepted children block
+clean-completion wording, while the receipt is still produced and names the child and finding.
+Pending-acceptance children and informational findings annotate only; accepted live children are
+open gaps and accepted abandoned children are incomplete gaps. A grandchild is visible only through
+its parent. Only a new manifest and qualifying recheck can clear a live-child gap in a later receipt.
+
+**Lineage disclosure authority.** An accepted edge authorizes only (1) a service-side child read
+to build the frozen manifest, (2) disclosure of bounded structural manifest facts into the parent
+agent context, and (3) child-derived structural input to a parent semantic check. Each channel
+keeps the child's provenance, category, never-send, task-scope, minimization, and authorization
+restrictions. Project membership is unnecessary for lineage; cross-repository lineage is
+prohibited in increment A. `AuthorizationScope.contains()` stays unchanged.
+
+**Project birth and coordination.** With `projects.auto_grouping` enabled, the second concurrent
+live task in one repository materializes an implicit repository project. When disabled, the task
+is admitted without creating a project row (#497). General or multi-repository projects are explicit
+and amendable; implicit projects persist when concurrency drops to one. A repository may opt out through
+`projects.auto_grouping` of automatic grouping and cross-task disclosure without erasing accepted
+delegations, obligations, or receipt
+dependencies. A fact enters coordination only when its source workspace consent is active; consent
+for one worktree never covers another. General or cross-repository coordination requires a
+generation-bound `coordination_grants` authorization checked at admission and delivery. External
+semantic dispatch bundling content from two repositories is outside this series.
+
+**Bounded reversal and retired guards.** Once project membership and its service-side `status`
+projection exist, membership in a live, consented project may disclose bounded sibling task
+identity and state. It never authorizes attach, resume, or task selection and never widens content
+or egress authority. Until then, possession of a workspace reference alone remains insufficient
+to discover or attach another task. `workspace_task_exists` remains live on automatic
+`create_or_attach` until #497; explicit `mode=create` already admits a sibling. Only the #498
+inventory may designate shared-mutable state for relocation; task-owned 0004 inspection snapshots
+and session advice remain bundle-resident unless that inventory proves otherwise.
+
+**No new tools and future boundaries.** The series adds no MCP tool. Its seven existing model-facing
+operations are `start`, `publish_work`, `check`, `status`, `receipt`, `respond`, and `read_guidance`;
+lineage/project behavior composes those operations without adding another one. The 2026-09-05
+pre-trim measurement recorded an advertised surface of 204,404 bytes (policy) and 204,658 bytes
+(strict) against 205,000 bytes; those values are a reviewed budget snapshot rather than a claim
+about the current post-merge surface. #504 step 0 trims descriptors/instructions before schema
+growth. No code, catalog rows, wire schemas, host mapping, automatic admission, or capability claim
+ships in this ADR.
 
 ### Immutable objects and keys
 
@@ -2356,7 +2450,8 @@ The closed privacy enums are:
   `claim_text`, `obligation_text`, `decision_excerpt`, `evidence_excerpt`, `finding_summary`,
   `command_metadata`, `diff_metadata`, `repository_excerpt`, `transcript_excerpt`,
   `diagnostic_metadata`;
-- `AuthorizationScopeKind`: `machine`, `workspace`, `task`, `request`;
+- `AuthorizationScopeKind`: `machine`, `workspace`, `task`, `request`. Project membership is a
+  grouping and coordination boundary; it does not add an egress scope kind;
 - `RepositoryPrivacyAuthority.grant_state`: `granted`, `missing`;
 - `RepositoryPrivacyAuthority.migration_state`: `not_applicable`, `legacy_route_available`,
   `first_repository_available`, `consumed`;
@@ -3164,7 +3259,7 @@ Independent verification support (local control, not MCP):
   that return `additionalContext` or a Stop `decision: block` stay synchronous with the same bound,
   and `SessionEnd` keeps the host-clamped 3 seconds (ingest/drain only; it is not an advice channel).
 
-Observation consent is one project-level confirmation recorded as a private workspace commitment.
+Observation consent is one workspace-level confirmation recorded as a private workspace commitment.
 Consent, status, pause, resume, revoke, setup probes, and hook ingress all canonicalize an explicit
 Git subdirectory to the same nearest safe Git project root; a non-Git directory remains its exact
 safe locator. There is no ancestor-commitment fallback. A legacy grant recorded against an exact

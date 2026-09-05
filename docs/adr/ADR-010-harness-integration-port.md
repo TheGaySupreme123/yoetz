@@ -335,7 +335,7 @@ current advice without rewriting `0003`. Migration `0009` rebuilds the `0002` cu
 tables so their source CHECK admits `claude_hook` and `cursor_hook` beside the Codex sources: the
 domain enum is the closed set and the DDL follows it, never the reverse (issue #576). Repositories own those tables; coordinators do not issue
 private SQL.
-Observation consent is project-level and separate from egress consent. The plaintext local boundary
+Observation consent is workspace-level and separate from egress consent. The plaintext local boundary
 records a private workspace commitment, structural outbox/quarantine evidence, and encrypted object
 identities—never raw task content or a raw path in logs/status/SQLite.
 Hook ingress and every consent/control lifecycle entry point derive that commitment from one shared

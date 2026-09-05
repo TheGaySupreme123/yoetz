@@ -51,6 +51,20 @@ fault/contention matrix on both advertised platforms.
    terminal observation quarantine contains that delivery lane while preserving the original
    storage recovery contract.
 
+## Amendment — task lineage and project metadata (2026-09-05, issue #494 / ADR-027)
+
+Decision 4 is unchanged: the on-disk layout remains `catalog.sqlite3` + `tasks/<task-id>/`, and
+one task still owns one bundle. Lineage (`parent_task_id`, depth, lineage digest, origin,
+acceptance, and work state) and project membership are catalog metadata, not a second ledger
+inside the parent bundle. A child is a separate bundle. Clients never open sibling or child
+bundles (ADR-008). The #498 ownership inventory decides which workspace-keyed stores are
+task-owned provenance and which are shared mutable coordination state. Expected shared-mutable
+candidates are migration-0004 workspace-to-session routing and the migration-0003 verification-job
+scheduling authority (including the per-workspace running-job uniqueness); only inventory-designated
+state may move under ADR-027 / issue #496. Job results, inspection snapshots, and session advice
+remain task-owned unless that inventory proves otherwise. This decision introduces no shared
+writable ledger.
+
 ## Consequences
 
 Platform wheels (not pure-Python) on macOS arm64 + manylinux_2_28 x86_64; Yoetz owns security
