@@ -25,7 +25,11 @@ from yoetz.ports.control import (
 )
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.errors import PublicErrorCode
-from yoetz.protocol.schemas import load_schema_catalog, validate_schema_instance
+from yoetz.protocol.schemas import (
+    SchemaInstanceInvalid,
+    load_schema_catalog,
+    validate_schema_instance,
+)
 from yoetz.service.control_protocol import (
     CONTROL_PROTOCOL_VERSION,
     MAX_ACTIVE_REQUESTS_PER_SESSION,
@@ -387,11 +391,19 @@ def test_private_mcp_route_profile_round_trips_only_for_check_and_status() -> No
         host_profile="codex",
     )
 
-    parsed = parse_control_request(decode_control_frame(encode_control_frame(request)))
+    wire = decode_control_frame(encode_control_frame(request))
+    parsed = parse_control_request(wire)
 
     assert isinstance(parsed, ControlCallRequest)
     assert parsed.route_profile == "strict"
     assert parsed.host_profile == "codex"
+    legacy_wire = dict(wire)
+    legacy_wire.pop("host_profile")
+    for version in ("1.0.0", "2.0.0", "2.1.0", "2.2.0", "2.3.0"):
+        validate_schema_instance("control-request", version, legacy_wire)
+        with pytest.raises(SchemaInstanceInvalid):
+            validate_schema_instance("control-request", version, wire)
+    validate_schema_instance("control-request", "2.4.0", wire)
     with pytest.raises(ValueError, match="control_route_profile_invalid"):
         ControlCallRequest(
             kind="call",

@@ -382,13 +382,14 @@ def _claude_result() -> dict[str, Any]:
 
 def _replace_schema_ref(value: Any, old: str, new: str) -> None:
     if isinstance(value, dict):
-        for key, member in value.items():
+        mapping = cast(dict[str, Any], value)
+        for key, member in mapping.items():
             if key == "$ref" and member == old:
-                value[key] = new
+                mapping[key] = new
             else:
                 _replace_schema_ref(member, old, new)
     elif isinstance(value, list):
-        for member in value:
+        for member in cast(list[Any], value):
             _replace_schema_ref(member, old, new)
 
 
@@ -414,6 +415,15 @@ def _status_v23_result() -> dict[str, Any]:
 
 def _claim_v24_request() -> dict[str, Any]:
     generated = _with_id("control-request", "2.4.0", _status_v23_request())
+    # Serving-host identity is new to the current, unreleased control schema.
+    # Keep released 1.0/2.0 bytes and earlier request versions unchanged.
+    for branch in generated["oneOf"]:
+        properties = branch.get("properties", {})
+        if properties.get("method", {}).get("const") == "check":
+            properties["host_profile"] = {
+                "enum": ["generic", "codex", "claude", "cursor"],
+                "type": "string",
+            }
     _replace_schema_ref(
         generated,
         "https://schemas.yoetz.dev/0.1/operations/publish-work-request-1.0.0.schema.json",
@@ -422,19 +432,20 @@ def _claim_v24_request() -> dict[str, Any]:
 
     def admit_policy_versions(value: Any) -> None:
         if isinstance(value, dict):
-            if value.get("$ref") == _PRIVACY_POLICY:
-                value.pop("$ref")
-                value["anyOf"] = [
+            mapping = cast(dict[str, Any], value)
+            if mapping.get("$ref") == _PRIVACY_POLICY:
+                mapping.pop("$ref")
+                mapping["anyOf"] = [
                     {"$ref": _PRIVACY_POLICY},
                     {
                         "$ref": "https://schemas.yoetz.dev/0.1/privacy/privacy-policy-1.1.0.schema.json"
                     },
                 ]
             else:
-                for child in value.values():
+                for child in mapping.values():
                     admit_policy_versions(child)
         elif isinstance(value, list):
-            for child in value:
+            for child in cast(list[Any], value):
                 admit_policy_versions(child)
 
     admit_policy_versions(generated)

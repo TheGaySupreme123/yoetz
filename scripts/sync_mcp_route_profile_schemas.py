@@ -2,8 +2,7 @@
 
 The public operation models intentionally differ from several internal dataclasses, so these
 reviewed schemas cannot be replaced by an unmodified Pydantic introspection result. This script
-applies the reviewed route and serving-host wire changes and refreshes their schema-manifest byte
-identities.
+applies the four bounded wire changes and refreshes their schema-manifest byte identities.
 """
 
 from __future__ import annotations
@@ -18,10 +17,6 @@ from yoetz.protocol.canonical import JsonValue, canonical_encode
 
 _ROUTE_PROFILE_SCHEMA: dict[str, JsonValue] = {
     "enum": ["policy", "strict"],
-    "type": "string",
-}
-_HOST_PROFILE_SCHEMA: dict[str, JsonValue] = {
-    "enum": ["generic", "codex", "claude", "cursor"],
     "type": "string",
 }
 _TARGETS = (
@@ -117,11 +112,6 @@ def _sync_control_request(document: dict[str, JsonValue]) -> None:
         if existing is not None and existing != _ROUTE_PROFILE_SCHEMA:
             raise RuntimeError("control_route_profile_schema_changed")
         properties["route_profile"] = copy.deepcopy(_ROUTE_PROFILE_SCHEMA)
-        if method == "check":
-            existing_host = properties.get("host_profile")
-            if existing_host is not None and existing_host != _HOST_PROFILE_SCHEMA:
-                raise RuntimeError("control_host_profile_schema_changed")
-            properties["host_profile"] = copy.deepcopy(_HOST_PROFILE_SCHEMA)
         updated.add(method)
     if updated != {"check", "status"}:
         raise RuntimeError("control_route_profile_methods_missing")
