@@ -231,7 +231,7 @@ def test_fresh_catalog_and_bundle_initialize_at_current_schema_version(
         "catalog_state": "current",
         "catalog_version": 3,
         "bundle_state": "current",
-        "bundle_version": 9,
+        "bundle_version": 10,
     }
 
 
