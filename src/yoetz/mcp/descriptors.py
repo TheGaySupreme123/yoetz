@@ -1463,7 +1463,9 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "publish_work",
         "Publish recorded work",
         "Records a bounded batch of agent-published work events and returns the accepted event "
-        "range and coverage. It has no information about work outside that batch. Every set-valued "
+        "range and coverage. This appends records to the local Yoetz ledger; it "
+        "does not publish to GitHub or run a semantic evaluation. It has no information about "
+        "work outside that batch. Every set-valued "
         "reference list in a draft envelope or payload (obligation_refs, obligation_ids, "
         "supporting_refs, and the other canonical set fields) is admitted only when its members "
         "are unique and already in ascending ASCII order; uniqueItems does not express order, and "
@@ -1559,8 +1561,10 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "respond",
         "Respond to a finding",
         "Records an acknowledgement, provenance dispute, or rejection for one finding at the "
-        "result frontier of the check that returned it, not its subject_frontier. It does not "
-        "resolve other findings or establish that underlying work changed. "
+        "result frontier of the check that returned it, not its subject_frontier. This appends one "
+        "finding-response record to the local Yoetz ledger; it does not publish to "
+        "GitHub or run a semantic evaluation. It does not resolve other findings or establish "
+        "that underlying work changed. "
         "A provenance_disputed response contests the finding's authorship or provenance premise "
         "rather than its conclusion, requires a reason, and never resolves the finding. "
         "Bounded waiver is reserved for an authorized local-CLI human and is not an agent option. "
@@ -1678,9 +1682,9 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "policy": MappingProxyType(
             {
                 "start": "sha256:ac5c4ac0bd12f67e08437f3aea4b7bc328c060f08809ef6f20e86b879d683a29",
-                "publish_work": "sha256:676036fa37e435770bb9d96d9ecb4a09121337576437023e3af5a4c4f8bbbad5",
+                "publish_work": "sha256:189ff72e5023b7e723d2002a9c5097102c3e5fdf0a6382720a1cfc676b993e98",
                 "check": "sha256:3175800b79a9ea035fabde6c64227ff8a0c9783a4f5d13a29a7a9b80e91c41a2",
-                "respond": "sha256:669697ed16dc7cbb14bab5528a5e06d7782d3ce7b943b2a9036ae1dfd5ca8717",
+                "respond": "sha256:6003245eb4b02e6a81fa4f1083bfa00da675ec247398e302bcfbd2b82219664c",
                 "status": "sha256:e4798c4fedc7cb6bc7dda204b52ec2734b9dc319c27ca3834bdbaadd5c2613e4",
                 "receipt": "sha256:cf4b426af9764747848d3334d0671d0d0961ab5c86173d70c067222e9feb5ee2",
                 "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
@@ -1689,9 +1693,9 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "strict": MappingProxyType(
             {
                 "start": "sha256:ac5c4ac0bd12f67e08437f3aea4b7bc328c060f08809ef6f20e86b879d683a29",
-                "publish_work": "sha256:676036fa37e435770bb9d96d9ecb4a09121337576437023e3af5a4c4f8bbbad5",
+                "publish_work": "sha256:189ff72e5023b7e723d2002a9c5097102c3e5fdf0a6382720a1cfc676b993e98",
                 "check": "sha256:b1cf1b1554d437b315f10f38080590b919c355b38f678bdcc458cd78620e1d60",
-                "respond": "sha256:669697ed16dc7cbb14bab5528a5e06d7782d3ce7b943b2a9036ae1dfd5ca8717",
+                "respond": "sha256:6003245eb4b02e6a81fa4f1083bfa00da675ec247398e302bcfbd2b82219664c",
                 "status": "sha256:e4798c4fedc7cb6bc7dda204b52ec2734b9dc319c27ca3834bdbaadd5c2613e4",
                 "receipt": "sha256:cf4b426af9764747848d3334d0671d0d0961ab5c86173d70c067222e9feb5ee2",
                 "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
@@ -1701,8 +1705,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:5795465d4e1890f9c8ded84afbc916c4c7d4d4bdc0b1853a7aae52ad0bc1c2e2",
-        "strict": "sha256:c90fb52fbd0511dcaffc0f8d60e31f6b0a6fd167a01f47b3ee2f2efc0952a40f",
+        "policy": "sha256:d4581664b6746ae6862d05ff032f1edee83c4d298c4421df0183fb360d8b7c93",
+        "strict": "sha256:ae74c5d65e11b97ae2785484c0ceffd17e4417251382904837a0c71c63bd20dd",
     }
 )
 

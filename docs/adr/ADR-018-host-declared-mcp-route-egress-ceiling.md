@@ -135,7 +135,8 @@ no privacy, disclosure, credential, or human-review gate. Yoetz records a Claude
 `PermissionDenied` on a scoped `check` as a payload-free `host_auto_review_denied` diagnostic;
 Codex and Cursor expose no typed denial and that gap is documented. Rejected: shipping a
 `PermissionRequest` / `beforeMCPExecution` hook that approves Yoetz's own tool (inverts the
-authority this ADR keeps with the host), widening admission to the other tools (they need none),
+authority this ADR keeps with the host), widening the egress admission entry to the other tools
+(their local or read-only effects do not invoke a provider, but a host may still review them),
 customizing a host's reviewer policy on the user's behalf, and relaying "the user authorized this"
 through the agent (the prompt-injection shape #187 forbids).
 

@@ -284,8 +284,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:5795465d4e1890f9c8ded84afbc916c4c7d4d4bdc0b1853a7aae52ad0bc1c2e2",
-        "strict": "sha256:c90fb52fbd0511dcaffc0f8d60e31f6b0a6fd167a01f47b3ee2f2efc0952a40f",
+        "policy": "sha256:d4581664b6746ae6862d05ff032f1edee83c4d298c4421df0183fb360d8b7c93",
+        "strict": "sha256:ae74c5d65e11b97ae2785484c0ceffd17e4417251382904837a0c71c63bd20dd",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -302,6 +302,10 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     respond_description = descriptor_for("respond").description
     assert "result frontier of the check that returned it" in respond_description
     assert "not its subject_frontier" in respond_description
+    for local_description in (descriptor_for("publish_work").description, respond_description):
+        assert "local Yoetz ledger" in local_description
+        assert "does not publish to GitHub" in local_description
+        assert "run a semantic evaluation" in local_description
     assert descriptor_for("start").description.startswith(
         "Call for material multi-step, delegated, resumable, or verification-heavy work"
     )

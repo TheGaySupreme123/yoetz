@@ -175,6 +175,23 @@ server the same way is undocumented and unverified; the acceptance cell in issue
 `status` reports `partial` when only one of the two files carries the entry. A wildcard
 (`yoetz:*`, `*:*`, `Mcp(*:*)`) or a CLI deny rule is `foreign` and never edited.
 
+The other workflow calls have a local effect: `start`, `publish_work`, `respond`, and `receipt`
+append or read records in the local Yoetz ledger, while `status` and `read_guidance` read local or
+packaged state. None of these calls publishes to GitHub or invokes a semantic provider. This
+describes the effect after Yoetz receives the call; it does not predict Cursor's admission decision.
+Cursor Auto-review may still hold a non-allowlisted local call as a shared-state or external-workflow
+action, and Cursor provides no hook event for that classifier decision.
+
+For a held local call, use Cursor's visible approval control for that exact call if the workflow is
+authorized to continue. A hold before invocation is not a Yoetz result and creates no operation,
+semantic status, provider attempt, or receipt. After approval, let Cursor execute the exact held
+call and continue from its returned result. If Cursor requires resubmission or the response is
+missing, retry the same request body and `request_id`. If the call may have started but its result
+is ambiguous, use `status view=operation` with the original request identity or replay that same
+request according to the operation's recovery instructions. Do not mint a replacement request or
+duplicate event identity. This recovery procedure does not change Cursor's Auto-review settings or
+prove that a future call will be admitted.
+
 A mutating preview warns `host_config_not_compare_and_swap`; keep Cursor and other settings writers
 quiescent during apply. Yoetz rechecks each exact preimage immediately before its atomic mutation
 and verifies the combined result, but ordinary files cannot exclude a non-cooperating same-UID
@@ -185,9 +202,9 @@ Reverse: `admission revoke`; `plugin remove` and an install/replace onto the str
 the entry when `--project-root` is given and report `admission_cleanup`; a privacy commit that
 stops external review sweeps it; `provider status` reports `host_admission_drift`. That report
 walks from the launch directory to the repository root, so a subdirectory cwd does not read as
-`absent`. Cursor
-publishes no hook for a classifier denial, so a held check is visible only through the #187
-pause/approval flow; that gap is documented, not diagnosed.
+`absent`. Cursor publishes no hook for a classifier denial. A held `check` is visible only through
+the #187 pause/approval flow, while a held local call has no Yoetz-side denial diagnostic; that
+gap is documented, not diagnosed.
 
 ## Upgrading Yoetz under a running service
 
