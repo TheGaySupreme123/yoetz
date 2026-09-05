@@ -298,6 +298,14 @@ deduplication contract proves they are distinct from the generic stream. The hoo
 the exact profile id with `--observation-profile`; the id records the normalization contract and
 does not certify the installed Cursor build.
 
+The ordinary `postToolUse` path emits queued advice through the documented
+[`additional_context` output](https://cursor.com/docs/hooks#posttooluse), including when a
+command's exit is unknown or nonzero. Advice is marked delivered only after successful stdout
+emission. `postToolUseFailure` has no consumable output, so its advice remains pending for a later
+supported event. Legacy edit/MCP hooks keep their existing output behavior, and automatic Stop
+follow-up messages remain disabled. Hook success never substitutes for an explicit command/test
+exit fact.
+
 Select these hooks with `--observation-profile ordinary` on the existing native Cursor plugin
 preview/install/status commands. Repeat the same profile when applying an exact preview. To
 return to structural hooks, preview a replacement with `--observation-profile structural` and

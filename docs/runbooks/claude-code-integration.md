@@ -199,6 +199,15 @@ deduplication contract proves those signals add distinct work. The hook command 
 profile id with `--observation-profile`; the id is a mapping contract, not a claim about the
 installed Claude version.
 
+The [Claude hook contract](https://code.claude.com/docs/en/hooks) keeps permission
+requests separate from tool execution. `PermissionRequest` has no tool-call identifier, so Yoetz
+retains an uncorrelated permission event without inventing a tool action. `PermissionDenied`
+reports auto-mode refusals; it does not cover manual dialog denial, deny rules, or a pre-tool hook
+blocking execution. `StopFailure` records an API-failed turn without ending the observed session,
+and emits no advice output. Cancellation and process outcomes are retained only when explicit
+native fields supply them; a successful shell tool call without an exit fact leaves command/test
+outcome unknown. These decisions do not add filesystem or batch observation.
+
 Select these hooks with `--observation-profile ordinary` on the existing Claude plugin
 preview/install/update/status commands, or on `yoetz integrate claude plugin export` for a
 development directory. Repeat the same profile when applying an exact preview. To return to

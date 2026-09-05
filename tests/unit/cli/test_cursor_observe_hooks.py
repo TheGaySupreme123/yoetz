@@ -687,6 +687,11 @@ def test_cursor_advice_delivery_stays_pending_until_session_start(
             True,
         ),
         (
+            "postToolUse",
+            {"tool_name": "Read", "tool_output": "{}"},
+            True,
+        ),
+        (
             "postToolUseFailure",
             {
                 "tool_name": "Shell",
