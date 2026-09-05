@@ -83,6 +83,14 @@ reverse-chronological released versions.
 
 ### Added
 
+- ADR-027 ratifies task lineage and first-class project scope: child tasks are own bundles with
+  catalog-held parent, depth, and creation provenance; receipts roll up one level by severity;
+  `prj_` is the accepted project id; same-workspace coordination inherits the existing workspace
+  grant, and cross-workspace work needs an explicit project-scope grant.
+  `workspace_task_exists` and bundle-resident workspace-keyed observation state
+  (`migrations/bundle/0004.sql`) are named for retirement, with replacement invariants, in
+  #496/#497. No wire, catalog, or admission change ships in this change (issue #494).
+
 - Agents can now set up or change semantic review through normal conversation. When a user
   explicitly wants semantic review, the agent recommends Expanded review first, explains the
   lower-disclosure Assisted, Metadata-only, and Private alternatives, shows one complete frozen

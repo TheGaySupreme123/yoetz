@@ -398,6 +398,19 @@ case → single-use authorization → bounded gateway → bound sink/provider �
     digests, expiry, denial, crash rollback, or exhausted entitlements leave the prior rows unchanged
     and external LLM admission blocked.
 
+18. **Project scope on the authorization lattice (2026-09-05, issue #494 / ADR-027):**
+    `AuthorizationScopeKind` gains `project` between `machine` and `workspace`. A project scope
+    carries `installation_id` and `project_id` (`prj_`). `contains()` is membership-aware: a
+    machine scope contains a project; a project contains a workspace, task, or request whose
+    catalog membership belongs to that project; a workspace scope never contains a project.
+    Same-workspace coordination under an implicit `workspace_bound` project inherits the existing
+    workspace grant and needs no new ceremony. A `general` or otherwise cross-workspace project
+    requires an explicit project-scope grant before coordination, rollup projection across those
+    workspaces, or membership mutation. Overlay storage, the ceremony, and the live enum change
+    are issue #502 / #495. Today's four-kind structural `contains()` remains executable until
+    then. Decision 16's observation consent — one confirmation via a private workspace
+    commitment — is unchanged and is not this `prj_` object (resolved F-021).
+
 ### Human involvement under the recommended recipe
 
 An agent may guide the owner to a trusted ceremony but cannot stand in for it. Both a nonterminal

@@ -41,6 +41,11 @@ CSPRNG. Opaque, case-sensitive, never parsed for order or meaning.
 | `egress_receipt` | `egr_` | trusted local service privacy audit |
 | `actor` | `agt_` (convention) | caller-asserted; format-validated only |
 
+**Accepted, not yet generated (ADR-027, issue #494).** `IdKind.project` uses prefix `prj_` and is
+server-generated under the same `<prefix>_<lowercase UUIDv4>` rule. Wire admission, catalog
+minting, and `new_id(IdKind.PROJECT)` land in #495/#496. Until then the live enum and
+`PREFIX_BY_KIND` map stay exactly the table above.
+
 For `publish_work`, public event IDs are caller-generated and stable across retry. The lifecycle,
 response, check, finding, and receipt events created by the engine receive IDs from the injected
 `IdPort`. A resumable operation persists those allocated IDs before the first retry boundary, so a
@@ -1575,7 +1580,8 @@ low-entropy plaintext from leaking through an unkeyed structural request digest.
 is the caller-declared project identity and `external_ref` the stable task identity within that project;
 together they are the attach selector when `session_id` is absent (`mode=create_or_attach` or
 `attach` with the pair). The `workspace_ref_commitment` is a keyed HMAC of the exact caller
-string, so the single-task-per-workspace invariant below holds per spelling, not per repository:
+string, so the single-task-per-workspace invariant below holds per spelling, not per repository,
+and remains executable until #497:
 hook auto-attach on every host commits the canonical absolute repository root (a linked worktree
 is its own root), the packaged guidance and the `start` tool description tell agents to use that
 same root and never a remote URL, and the SessionStart context names the mapped `session_id` and
@@ -1604,6 +1610,79 @@ or implements the multi-task workspace admission planned by #494/#497/#498. Raw 
 durable state — only the commitments do. This
 model/agent-controlled `workspace_ref_commitment` is an attachment selector, not a
 repository-privacy commitment, and cannot select or inherit disclosure authority.
+
+### Task lineage and project scope (ADR-027)
+
+Ratified identity and consent bounds; not yet generated, stored, or admitted. Wire fields land in
+#495, catalog columns and the bundle-0004 relocation in #496, admission in #497, service-wide
+single-task audit in #498, delegation lifecycle in #499, receipt rollup and check/status child
+views in #500/#501, and the authorization-lattice ceremony in #502. Until those issues land,
+`workspace_task_exists` and the four-kind `AuthorizationScopeKind` remain the executable
+contract. Packaged guidance is not rewritten here.
+
+**Project identifier.** Accepted `IdKind.project` uses prefix `prj_` (see Identifiers). A project
+is host-agnostic. Kind is `workspace_bound` (implicit) or `general` (explicit, amendable).
+Membership kinds begin as `workspace` (trusted `repository_privacy_commitment`, never public
+`workspace_ref`) and `task`; further non-filesystem kinds may be added later without changing the
+project id. Workspace or git binding is one membership kind, not the object's identity.
+
+**Lineage names.** A child is a real task (`tsk_`) with its own bundle. The catalog holds
+`parent_task_id` (nullable `tsk_`), `lineage_depth` (non-negative integer; a root is 0), and
+`lineage_creation_provenance` (`parent_minted` | `child_self_registered`). Nesting may be
+recorded to any depth. ADR-003 layout is unchanged: one task per bundle.
+
+**Lineage creation.** `parent_minted` is the blessed path: the parent service call allocates the
+child and records the edge. `child_self_registered` is the fallback: a child `start` names a
+parent task the caller already holds; the edge is recorded with weaker, receipt-visible
+provenance. Host delegate signals (`SubagentStart` / `SubagentStop`, Claude Code Task-tool,
+Cursor subagent) do not mint children until #506–#508, and those issues remain evidence-gated
+under E-013.
+
+**Child lifecycle.** In addition to ordinary `TaskRouteState`, a lineage child has a catalog
+lifecycle of `live`, `complete`, `abandoned`, or `cancelled`. `abandoned` is a terminal
+incomplete state. A live child is a recorded open gap on the parent; an abandoned child is a
+recorded incomplete gap. Cancellation is a recorded terminal close that is not completion.
+
+**Receipt rollup.** Parent receipt projection is one-level and severity-dependent. Actionable
+current findings on a direct child block the parent receipt; informational child findings
+annotate. Grandchildren are visible only through their parent. Rollup is a service-side
+projection (ADR-008): a client never opens a child or sibling bundle.
+
+**Project birth.** Hybrid: the second concurrent live task in a workspace materializes an
+implicit `workspace_bound` project; a `general` or multi-repo project is created explicitly. An
+implicit project persists when concurrency later drops to one task; dissolve is #505.
+
+**Consent.** `AuthorizationScopeKind` gains `project` between `machine` and `workspace`. A
+project scope carries `installation_id` and `project_id`. `contains()` is membership-aware and
+is not decidable from the scope tuple alone: `machine` contains `project`; `project` contains a
+`workspace`, `task`, or `request` whose catalog membership belongs to that project; `workspace`
+never contains `project`. Same-workspace coordination under a `workspace_bound` project inherits
+the existing workspace grant and needs no new ceremony. A `general` or otherwise
+cross-workspace project requires an explicit project-scope grant before coordination, rollup
+projection across those workspaces, or membership mutation. F-021's "project-level confirmation"
+remains the existing workspace observation consent (a private workspace commitment), not this
+`prj_` object.
+
+**Retired guards and replacement invariants.**
+
+- `workspace_task_exists` (live until #497): today a new `external_ref` in a workspace that
+  already has a non-quarantined task conflicts and discloses no selector. Replacement
+  invariant: attach uniqueness stays `(workspace_ref_commitment, external_ref_commitment)`;
+  many live tasks may share a workspace; the second live task materializes the implicit
+  project. `mode=create` as an explicit-sibling hatch is re-specified in #497. Hook
+  auto-attach recovery that today requires the workspace's sole non-quarantined route is
+  re-specified there as well.
+- Bundle-resident workspace-keyed observation state from `migrations/bundle/0004.sql`
+  (`observation_inspection_snapshots`, `observation_workspace_session_routes`,
+  `observation_session_advice`): replacement home is the catalog or project store (#496). The
+  observation writer remains per task and session (ADR-022).
+- `list_workspace_task_ids` generalizes toward project membership listing in #496; it is not a
+  public MCP surface.
+
+**Bounded reversal of #250 / #352.** Cross-task state exists only as catalog lineage, project
+membership, and service-side rollup or coordination under the consent lattice above. Each task
+keeps its own ledger and writers. There is no shared writable ledger. ADR-022 decision 14
+remains: a mapped session's advice snapshot is never silently fed a workspace-wide aggregate.
 
 ### Immutable objects and keys
 
@@ -2356,7 +2435,8 @@ The closed privacy enums are:
   `claim_text`, `obligation_text`, `decision_excerpt`, `evidence_excerpt`, `finding_summary`,
   `command_metadata`, `diff_metadata`, `repository_excerpt`, `transcript_excerpt`,
   `diagnostic_metadata`;
-- `AuthorizationScopeKind`: `machine`, `workspace`, `task`, `request`;
+- `AuthorizationScopeKind`: `machine`, `workspace`, `task`, `request`. ADR-027 accepts `project`
+  between `machine` and `workspace`; the live enum stays four-valued until #495/#502;
 - `RepositoryPrivacyAuthority.grant_state`: `granted`, `missing`;
 - `RepositoryPrivacyAuthority.migration_state`: `not_applicable`, `legacy_route_available`,
   `first_repository_available`, `consumed`;
@@ -2577,6 +2657,11 @@ from a deeper kind are forbidden at shallower scope, and a generic `scope_ref` i
 privacy authority, `workspace_ref_commitment` is populated from the trusted
 `repository_privacy_commitment`, not from `StartIdentityInput.workspace_ref`; the shared wire field
 name does not make those two commitment domains substitutable.
+ADR-027 accepts a fifth kind, `project`, between `machine` and `workspace`: that scope carries
+`installation_id` and `project_id` and no workspace, task, or request field. Its `contains()`
+relation is membership-aware (a project contains member workspaces, tasks, and requests; a
+workspace never contains a project) and is not decidable from the scope tuple alone. The live
+type and structural `contains()` stay four-kind until #495/#502.
 
 Every installed external endpoint profile also carries a nonsecret, versioned
 `ProviderDataUseProfile`: `data_use_profile_id`, `data_use_profile_version`,

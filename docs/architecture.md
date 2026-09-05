@@ -146,7 +146,10 @@ These are enforced in code and locked by tests; they are the reason the system i
 
 One SQLite bundle per task holds structural rows; content-bearing material lives in the encrypted
 object store and is referenced by digest. Migrations under `migrations/` are append-only and CI
-enforces that ([ADR-003](adr/ADR-003-storage-sqlite-durability.md)). Recovery paths — backup,
+enforces that ([ADR-003](adr/ADR-003-storage-sqlite-durability.md)). Task lineage and first-class
+projects ([ADR-027](adr/ADR-027-task-lineage-and-project-scope.md)) do not change that layout: a
+child is another bundle, and lineage or project membership lives in the catalog. The service, not
+a client, projects parent rollup and project status. Recovery paths — backup,
 restore, migrate, quarantine — are documented in [`docs/runbooks/`](runbooks/).
 Observation migration 0008 adds only nullable digest/byte bindings for the secret-scanned inner
 content; it adds no plaintext column and leaves older unbound rows readable at weaker coverage.
