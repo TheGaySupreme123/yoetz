@@ -3344,12 +3344,11 @@ class StatusAdviceItemModel(_ClosedModel):
             self.coordination_detection_id,
             self.coordination_membership_generation,
             self.coordination_counterpart_task_id,
+            self.coordination_resource_paths,
         )
         if any(value is not None for value in selector_values):
             if not all(value is not None for value in selector_values):
                 raise ValueError("coordination_advice_selector_incomplete")
-            if self.coordination_resource_paths is None:
-                raise ValueError("coordination_advice_resources_missing")
         if isinstance(self.coordination_resource_paths, OmittedContentModel):
             if self.coordination_resource_paths.category is not DataCategory.REPOSITORY_EXCERPT:
                 raise ValueError("coordination_advice_omission_category_invalid")

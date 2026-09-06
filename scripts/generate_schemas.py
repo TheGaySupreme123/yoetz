@@ -2355,7 +2355,15 @@ def _status_result_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     )
     advice_item["allOf"] = [
         {
-            "if": {"required": ["coordination_project_id"]},
+            "if": {
+                "anyOf": [
+                    {"required": ["coordination_counterpart_task_id"]},
+                    {"required": ["coordination_detection_id"]},
+                    {"required": ["coordination_membership_generation"]},
+                    {"required": ["coordination_project_id"]},
+                    {"required": ["coordination_resource_paths"]},
+                ]
+            },
             "then": {
                 "required": [
                     "coordination_counterpart_task_id",

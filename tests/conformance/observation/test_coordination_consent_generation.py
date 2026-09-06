@@ -29,7 +29,7 @@ from yoetz.application.projects import (
 from yoetz.application.start import StartInternalResult
 from yoetz.domain.coordination import MemberKind
 from yoetz.domain.observation import ObservationRevokeCommand
-from yoetz.ports.control import RepositoryPrivacyContext
+from yoetz.ports.control import ControlError, RepositoryPrivacyContext
 from yoetz.ports.start_catalog import TaskRouteState, TaskSourceProvenance
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id
@@ -306,7 +306,19 @@ async def test_empty_durable_plan_is_reused_after_apply_crash(tmp_path: Path) ->
     assert local.pending_consent_revocation(workspace) is None
 
 
-async def test_ready_revoke_fences_tasks_without_host_lifecycle_mappings(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "failure_point",
+    (
+        None,
+        "recovery_routes",
+        "task_source_provenance",
+        "missing_session_binding",
+        "missing_task_source_provenance",
+    ),
+)
+async def test_ready_revoke_fences_tasks_without_host_lifecycle_mappings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_point: str | None
+) -> None:
     """READY enumerates authenticated task routes when no hook mapping exists yet."""
 
     workspace = (tmp_path / "workspace").resolve()
@@ -330,6 +342,19 @@ async def test_ready_revoke_fences_tasks_without_host_lifecycle_mappings(tmp_pat
             )
             tasks.append(result)
 
+        # A distinct active task without workspace identity cannot have contributed source
+        # facts.  Its encrypted locator and catalog provenance must agree before it is skipped.
+        await service.app.start(
+            StartRequest.model_validate(
+                {
+                    **_identity(),
+                    "mode": "create",
+                    "task_title": "Workspace-free task",
+                    "requested_view": "compact",
+                }
+            )
+        )
+
         assert tasks[0].task_id is not None
         project_ids = await service.app.start_catalog.list_task_project_ids(tasks[0].task_id)
         assert len(project_ids) == 1
@@ -338,6 +363,35 @@ async def test_ready_revoke_fences_tasks_without_host_lifecycle_mappings(tmp_pat
         local = LocalObservationStore(_state=service.root / "state")
         local_workspace = local.workspace_commitment(str(workspace))
         local.grant_consent(local_workspace)
+
+        if failure_point is not None:
+
+            async def unavailable(*_args: object, **_kwargs: object) -> object:
+                if failure_point.startswith("missing_"):
+                    return None
+                raise PublicOperationError(
+                    PublicErrorCode.SERVICE_UNAVAILABLE,
+                    "Injected source enumeration failure.",
+                    retryable=True,
+                )
+
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    service.app.start_catalog,
+                    failure_point.removeprefix("missing_"),
+                    unavailable,
+                )
+                with pytest.raises(ControlError) as unavailable_result:
+                    await service.app.observation_revoke(
+                        {"workspace_commitment": local_workspace, "retain_evidence": True}
+                    )
+                assert unavailable_result.value.reason == "service_unavailable"
+                assert unavailable_result.value.retryable is True
+            pending = local.pending_consent_revocation(local_workspace)
+            assert pending is not None and pending[1] is None
+            with pytest.raises(PublicOperationError) as grant_blocked:
+                local.grant_consent(local_workspace)
+            assert grant_blocked.value.code is PublicErrorCode.SESSION_CONFLICT
 
         await service.app.observation_revoke(
             {

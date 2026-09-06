@@ -3591,19 +3591,29 @@ async def provide_service_ready_context(
         service-private callback.
         """
 
+        def unavailable() -> PublicOperationError:
+            return PublicOperationError(
+                PublicErrorCode.SERVICE_UNAVAILABLE,
+                "Source consent task enumeration is unavailable.",
+                retryable=True,
+            )
+
         try:
             route = await catalog.task_route(task_id)
             provenance = await catalog.task_source_provenance(task_id)
-            if (
-                route is None
-                or route.state is not TaskRouteState.ACTIVE
-                or provenance is None
-                or provenance.workspace_ref_commitment is None
-            ):
+            if route is None:
+                raise unavailable()
+            if route.state is not TaskRouteState.ACTIVE:
                 return None
+            if provenance is None:
+                raise unavailable()
             binding = await catalog.session_binding(route.session_id)
-            if binding is None or binding.task_id != task_id:
-                return None
+            if (
+                binding is None
+                or binding.task_id != task_id
+                or binding.session_id != route.session_id
+            ):
+                raise unavailable()
             leased = await runtime.route(
                 RouteCommand(
                     route.session_id,
@@ -3619,15 +3629,19 @@ async def provide_service_ready_context(
             ):
                 if type(leased) is TaskRuntime:
                     await runtime.release(leased)
-                return None
+                raise unavailable()
             try:
                 opened: SessionOpenedPayload | None = None
                 async for record in leased.ledger.load_events(leased.session_id):
                     if isinstance(record.payload, SessionOpenedPayload):
                         opened = record.payload
                         break
-                if opened is None or opened.workspace_ref is None:
-                    return None
+                if opened is None:
+                    raise unavailable()
+                if opened.workspace_ref is None:
+                    if provenance.workspace_ref_commitment is None:
+                        return None
+                    raise unavailable()
                 identity = await catalog.commit_identity(
                     StartIdentityInput(
                         opened.task_title,
@@ -3636,7 +3650,7 @@ async def provide_service_ready_context(
                     )
                 )
                 if identity.workspace_ref_commitment != provenance.workspace_ref_commitment:
-                    return None
+                    raise unavailable()
                 latest = await catalog.task_route(task_id)
                 if (
                     latest is None
@@ -3645,12 +3659,18 @@ async def provide_service_ready_context(
                     or latest.route_generation != route.route_generation
                     or latest.route_identity_digest != route.route_identity_digest
                 ):
-                    return None
+                    raise unavailable()
                 return local_observation.workspace_commitment(opened.workspace_ref)
             finally:
                 await runtime.release(leased)
-        except TypeError, ValueError, PublicOperationError:
-            return None
+        except PublicOperationError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise PublicOperationError(
+                PublicErrorCode.SERVICE_UNAVAILABLE,
+                "Source consent task enumeration is unavailable.",
+                retryable=True,
+            ) from exc
 
     async def _plan_source_consent_invalidation(
         task_ids: tuple[str, ...], workspace_commitment: str, revocation_token: str
@@ -3662,8 +3682,20 @@ async def provide_service_ready_context(
         if callable(route_loader):
             try:
                 routes = await cast(Callable[[], Awaitable[tuple[TaskRoute, ...]]], route_loader)()
-            except Exception:
-                routes = ()
+            except PublicOperationError:
+                raise
+            except Exception as exc:
+                raise PublicOperationError(
+                    PublicErrorCode.SERVICE_UNAVAILABLE,
+                    "Source consent task enumeration is unavailable.",
+                    retryable=True,
+                ) from exc
+            if type(routes) is not tuple or any(type(route) is not TaskRoute for route in routes):
+                raise PublicOperationError(
+                    PublicErrorCode.SERVICE_UNAVAILABLE,
+                    "Source consent task enumeration is unavailable.",
+                    retryable=True,
+                )
             for route in routes:
                 if route.state is not TaskRouteState.ACTIVE:
                     continue

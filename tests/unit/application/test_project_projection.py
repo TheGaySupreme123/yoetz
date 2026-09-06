@@ -17,6 +17,7 @@ from yoetz.application.project_projection import (
     hydrate_project_status_text,
     hydrate_status_advice_coordination_resources,
     revalidate_project_status_sources,
+    revalidate_status_advice_sources,
     source_denied_project_items,
 )
 from yoetz.application.projects import (
@@ -279,6 +280,65 @@ async def test_advice_coordination_selector_hydrates_for_recipient_or_omits() ->
         "category": "repository_excerpt",
         "reason": "local_disclosure_not_authorized",
     }
+
+
+async def test_advice_revalidation_fences_revoked_selector_with_existing_omission() -> None:
+    detection_id = "evt_59000000-0000-4000-8000-000000000006"
+    omission = {
+        "omitted": True,
+        "category": "repository_excerpt",
+        "reason": "local_disclosure_not_authorized",
+    }
+    source: dict[str, JsonValue] = {
+        "task_id": _TASK,
+        "view": "advice",
+        "page": {
+            "projection_format": "yoetz.advice-snapshot/1",
+            "next_cursor": None,
+            "items": [
+                {
+                    "finding_id": "fnd_59000000-0000-4000-8000-000000000007",
+                    "rule_code": "coordination_overlap",
+                    "priority": 50,
+                    "evidence_commitments": ("sha256:" + "a" * 64,),
+                    "coverage": {},
+                    "freshness_frontier": "membership_generation:3",
+                    "verification_state": "not_required",
+                    "semantic_state": "disabled",
+                    "recommended_next_action": "review_coordination_advice",
+                    "coordination_project_id": _PROJECT,
+                    "coordination_detection_id": detection_id,
+                    "coordination_membership_generation": "3",
+                    "coordination_counterpart_task_id": _OWNER,
+                    "coordination_resource_paths": omission,
+                }
+            ],
+        },
+    }
+    projects = AsyncMock(spec=ProjectApplication)
+    projects.catalog = SimpleNamespace(list_task_project_ids=AsyncMock(return_value=(_PROJECT,)))
+    projects.coordination_advice_for.return_value = (
+        SimpleNamespace(
+            target_task_id=_TASK,
+            project_id=_PROJECT,
+            detection_id=detection_id,
+            membership_generation=3,
+            counterpart_task_id=_OWNER,
+        ),
+    )
+    projects.coordination_resource_detail_for.return_value = SimpleNamespace(
+        counterpart_task_id=_OWNER,
+        resource_paths=None,
+    )
+    await revalidate_status_advice_sources(
+        cast(ProjectApplication, projects), source, LocalDisclosureSink.AGENT_CONTEXT
+    )
+
+    projects.coordination_advice_for.return_value = ()
+    with pytest.raises(ControlError, match="privacy_projection_unavailable"):
+        await revalidate_status_advice_sources(
+            cast(ProjectApplication, projects), source, LocalDisclosureSink.AGENT_CONTEXT
+        )
 
 
 async def test_unattributed_project_text_cannot_reach_the_recipient_projection() -> None:

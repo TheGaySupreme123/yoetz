@@ -2641,6 +2641,23 @@ class ProjectApplication:
                     None,
                     False,
                 )
+        owner_provenance_after = await self.catalog.task_source_provenance(owner)
+        owner_route_after = await self.catalog.task_route_generation(owner)
+        if (
+            owner_provenance_after is None
+            or owner_provenance_after.route_generation != reference.route_generation
+            or owner_provenance_after.workspace_ref_commitment
+            != owner_provenance.workspace_ref_commitment
+            or owner_route_after != reference.route_generation
+        ):
+            return CoordinationResourceProjection(
+                detection.detection_id,
+                project_id_value,
+                generation,
+                counterpart,
+                None,
+                False,
+            )
         latest = await self._project_or_error(project_id_value)
         if latest.dissolved_at is not None or latest.membership_generation != generation:
             return CoordinationResourceProjection(

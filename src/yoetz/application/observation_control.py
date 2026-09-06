@@ -51,17 +51,19 @@ def _as_json_object(request: object) -> JsonObject:
     try:
         normalized = freeze_json(request)
     except ProtocolValueError as exc:
-        raise ControlError("invalid_request") from exc
+        raise ControlError("frame_invalid") from exc
     if type(normalized) is not JsonObject:
-        raise ControlError("invalid_request")
+        raise ControlError("frame_invalid")
     return normalized
 
 
 def _map_public_error(error: PublicOperationError) -> ControlError:
     code = error.code.value.lower()
     if code in {"invalid_request", "session_conflict"}:
-        return ControlError(code, retryable=False)
-    return ControlError("invalid_request", retryable=False)
+        return ControlError("frame_invalid", retryable=False)
+    if code in {"service_unavailable", "vault_locked"}:
+        return ControlError(code, retryable=error.retryable)
+    return ControlError("internal_error", retryable=error.retryable)
 
 
 def build_observation_support_handlers(
@@ -75,15 +77,15 @@ def build_observation_support_handlers(
             if "codex_session_id" in body and hasattr(port, "ingest_request"):
                 ingest_request = observation_ingest_request_from_json(body)
                 if type(ingest_request) is not ObservationIngestRequest:
-                    raise ControlError("invalid_request")
+                    raise ControlError("frame_invalid")
                 result = await cast(ObservationIngestPort, port).ingest_request(ingest_request)
             else:
                 envelope = observation_envelope_from_json(body)
                 if type(envelope) is not ObservationEnvelope:
-                    raise ControlError("invalid_request")
+                    raise ControlError("frame_invalid")
                 result = await cast(ObservationPort, port).ingest(envelope)
         except ProtocolValueError as exc:
-            raise ControlError("invalid_request") from exc
+            raise ControlError("frame_invalid") from exc
         except PublicOperationError as exc:
             raise _map_public_error(exc) from exc
         return observation_ingest_result_to_json(result)
@@ -92,9 +94,9 @@ def build_observation_support_handlers(
         try:
             query = observation_status_query_from_json(_as_json_object(request))
         except ProtocolValueError as exc:
-            raise ControlError("invalid_request") from exc
+            raise ControlError("frame_invalid") from exc
         if type(query) is not ObservationStatusQuery:
-            raise ControlError("invalid_request")
+            raise ControlError("frame_invalid")
         try:
             result = await port.status(query)
         except PublicOperationError as exc:
@@ -105,9 +107,9 @@ def build_observation_support_handlers(
         try:
             command = observation_control_command_from_json(_as_json_object(request))
         except ProtocolValueError as exc:
-            raise ControlError("invalid_request") from exc
+            raise ControlError("frame_invalid") from exc
         if type(command) is not ObservationControlCommand:
-            raise ControlError("invalid_request")
+            raise ControlError("frame_invalid")
         try:
             result = await port.pause(command)
         except PublicOperationError as exc:
@@ -118,9 +120,9 @@ def build_observation_support_handlers(
         try:
             command = observation_control_command_from_json(_as_json_object(request))
         except ProtocolValueError as exc:
-            raise ControlError("invalid_request") from exc
+            raise ControlError("frame_invalid") from exc
         if type(command) is not ObservationControlCommand:
-            raise ControlError("invalid_request")
+            raise ControlError("frame_invalid")
         try:
             result = await port.resume(command)
         except PublicOperationError as exc:
@@ -131,9 +133,9 @@ def build_observation_support_handlers(
         try:
             command = observation_revoke_command_from_json(_as_json_object(request))
         except ProtocolValueError as exc:
-            raise ControlError("invalid_request") from exc
+            raise ControlError("frame_invalid") from exc
         if type(command) is not ObservationRevokeCommand:
-            raise ControlError("invalid_request")
+            raise ControlError("frame_invalid")
         try:
             result = await port.revoke(command)
         except PublicOperationError as exc:

@@ -1084,6 +1084,48 @@ def test_result_support_models_match_frozen_schemas(
     _assert_model_contract(getattr(models, model_name), schema_path, def_name)
 
 
+def test_coordination_advice_selector_and_resources_are_atomic() -> None:
+    models = _models_module()
+    selector_fields = {
+        "coordination_project_id": "prj_59000000-0000-4000-8000-000000000001",
+        "coordination_detection_id": "evt_59000000-0000-4000-8000-000000000002",
+        "coordination_membership_generation": "3",
+        "coordination_counterpart_task_id": "tsk_59000000-0000-4000-8000-000000000003",
+        "coordination_resource_paths": {
+            "omitted": True,
+            "category": "repository_excerpt",
+            "reason": "local_disclosure_not_authorized",
+        },
+    }
+    base = {
+        "finding_id": "fnd_59000000-0000-4000-8000-000000000004",
+        "rule_code": "coordination_overlap",
+        "priority": 50,
+        "evidence_commitments": ("sha256:" + "a" * 64,),
+        "coverage": {
+            "publication_channels": ["local_cli"],
+            "authorship_assurance": "self_asserted",
+            "artifact_observation": "published_only",
+            "evidence_immutability": "mutable_reference",
+            "ledger_freshness": "current",
+            "check_types": ["none"],
+            "known_gaps": [],
+        },
+        "freshness_frontier": "membership_generation:3",
+        "verification_state": "not_required",
+        "semantic_state": "disabled",
+        "recommended_next_action": "review_coordination_advice",
+    }
+    names = tuple(selector_fields)
+    for mask in range(1, (1 << len(names)) - 1):
+        partial = {
+            name: selector_fields[name] for index, name in enumerate(names) if mask & (1 << index)
+        }
+        with pytest.raises(ValidationError, match="coordination_advice_selector_incomplete"):
+            models.StatusAdviceItemModel.model_validate({**base, **partial})
+    models.StatusAdviceItemModel.model_validate({**base, **selector_fields})
+
+
 def test_result_roots_are_object_valued_root_models() -> None:
     models = _models_module()
     for model_name in _ROOT_RESULT_MODEL_NAMES:

@@ -585,7 +585,15 @@ async def test_coordination_resource_detail_requires_both_source_owner_policies(
     workspace_left = _commitment("9")
     workspace_right = _commitment("a")
     repository = _commitment("b")
-    catalog = _Catalog(
+
+    class _RotatingCatalog(_Catalog):
+        route_generation = 1
+
+        async def task_route_generation(self, task_id: str) -> int:
+            del task_id
+            return self.route_generation
+
+    catalog = _RotatingCatalog(
         {
             left_task: _provenance(left_task, workspace_left, repository),
             right_task: _provenance(right_task, workspace_right, repository),
@@ -737,6 +745,31 @@ async def test_coordination_resource_detail_requires_both_source_owner_policies(
     assert case_insensitive is not None
     assert case_insensitive.resource_paths == ("Src/A.py",)
     assert case_insensitive.source_disclosure_permitted is True
+
+    class _RotatingDetailReader:
+        async def read_details(self, reference: ProjectTextRef) -> JsonObject:
+            assert reference == detail_ref
+            catalog.route_generation = 2
+            return JsonObject(
+                {
+                    "left_resources": ("Src/A.py",),
+                    "right_resources": ("src/a.py",),
+                    "case_sensitive": False,
+                }
+            )
+
+    resource_calls.clear()
+    app.coordination_detail_reader = _RotatingDetailReader()
+    rotated_after_read = await app.coordination_resource_detail_for(
+        left_task,
+        project=project.project_id,
+        detection_id=case_insensitive_detection_id,
+        sink=LocalDisclosureSink.AGENT_CONTEXT,
+    )
+    assert rotated_after_read is not None
+    assert rotated_after_read.resource_paths is None
+    assert rotated_after_read.source_disclosure_permitted is False
+    assert resource_calls == [left_task, right_task, left_task, right_task]
 
 
 @pytest.mark.anyio

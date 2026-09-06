@@ -269,6 +269,65 @@ async def revalidate_status_advice_sources(
     refreshed_page = materialized.get("page")
     if not isinstance(page, Mapping) or not isinstance(refreshed_page, Mapping):
         raise ControlError("privacy_projection_unavailable", retryable=True)
+    typed_page = cast(Mapping[str, JsonValue], page)
+    page_items = typed_page.get("items")
+    requester = source.get("task_id")
+    if type(requester) is not str:
+        raise ControlError("privacy_projection_unavailable", retryable=True)
+    source_selectors: set[tuple[str, str, int, str]] = set()
+    if type(page_items) not in {tuple, list}:
+        raise ControlError("privacy_projection_unavailable", retryable=True)
+    for raw_item in cast(Sequence[JsonValue], page_items):
+        if not isinstance(raw_item, Mapping):
+            raise ControlError("privacy_projection_unavailable", retryable=True)
+        item = cast(Mapping[str, JsonValue], raw_item)
+        detection_id = item.get("coordination_detection_id")
+        if detection_id is None:
+            continue
+        item_project = item.get("coordination_project_id")
+        item_generation = item.get("coordination_membership_generation")
+        counterpart = item.get("coordination_counterpart_task_id")
+        if (
+            type(item_project) is not str
+            or type(detection_id) is not str
+            or type(item_generation) is not str
+            or type(counterpart) is not str
+        ):
+            raise ControlError("privacy_projection_unavailable", retryable=True)
+        try:
+            numeric_generation = int(item_generation)
+        except ValueError as exc:
+            raise ControlError("privacy_projection_unavailable", retryable=True) from exc
+        source_selectors.add((item_project, detection_id, numeric_generation, counterpart))
+    try:
+        current_project_ids = await projects.catalog.list_task_project_ids(requester)
+    except ProjectCommandError as exc:
+        raise ControlError("privacy_projection_unavailable", retryable=True) from exc
+    current_selectors: set[tuple[str, str, int, str]] = set()
+    for current_project in current_project_ids:
+        try:
+            advice_rows = await projects.coordination_advice_for(
+                requester,
+                project=current_project,
+            )
+        except ProjectCommandError as exc:
+            raise ControlError("privacy_projection_unavailable", retryable=True) from exc
+        for advice in advice_rows:
+            if advice.target_task_id != requester:
+                continue
+            current_selectors.add(
+                (
+                    advice.project_id,
+                    advice.detection_id,
+                    advice.membership_generation,
+                    advice.counterpart_task_id,
+                )
+            )
+    # Advice pages are request-limited and carry no cursor for rows beyond that bound.  Every
+    # selector emitted in this page must still be an exact current tuple; newer rows may exist
+    # outside the page and do not invalidate the already-bounded response.
+    if not source_selectors <= current_selectors:
+        raise ControlError("privacy_projection_unavailable", retryable=True)
     if canonical_encode(page.get("items")) != canonical_encode(refreshed_page.get("items")):
         raise ControlError("privacy_projection_unavailable", retryable=True)
 
