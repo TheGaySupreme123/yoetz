@@ -114,10 +114,12 @@ MCP registration is a separate step from skill installation:
 
 ```text
 codex mcp get yoetz --json
-codex mcp add yoetz -- yoetz mcp serve
+codex mcp add yoetz -- yoetz mcp serve --host codex
 ```
 
-Codex uses the generic MCP host profile (not `--host cursor`). Decision for Codex (issue #579):
+Codex uses the explicit `--host codex` serving identity. This declaration binds route-drift
+diagnostics to the Codex carrier; it does not grant host admission or current-chat attestation,
+which retain their independent client allowlist. Decision for Codex (issue #579):
 supported here — the same bounded text `Reason:` clause as Claude Code names frozen `reason_code`
 and `field` on `EVENT_INVALID`, because this host also relies on the privacy-minimized summary
 rather than a full JSON text copy.
@@ -297,7 +299,7 @@ lives in `mcp status` and `provider status`. An accepted install that had nothin
 (`action: noop`) still refreshes the record, so a deliberate re-registration of the route the
 host already serves never leaves an earlier entry behind to report as drift.
 
-The MCP bridge (`yoetz mcp serve`) is the sole emitter of the closed `registration_drift`
+The MCP bridge (`yoetz mcp serve --host codex`) is the sole emitter of the closed `registration_drift`
 hook diagnostic: at startup it compares its own serving argv against the applied record and
 records the mismatch under the `mcp_serve` event. The hook paths deliberately emit nothing.
 A hook process has no serving route of its own, so the only comparison available there is a
@@ -381,7 +383,7 @@ YOETZ_CODEX_SCRATCH="$(mktemp -d /private/tmp/yoetz-codex-boundary.XXXXXX)"
 
 CODEX_TESTING_HOME="$YOETZ_CODEX_SCRATCH" codex-testing mcp add \
   --env UV_CACHE_DIR="$YOETZ_CODEX_SCRATCH/uv-cache" \
-  yoetz -- uv --directory /absolute/path/to/yoetz-core run yoetz mcp serve --semantic off
+  yoetz -- uv --directory /absolute/path/to/yoetz-core run yoetz mcp serve --host codex --semantic off
 
 CODEX_TESTING_HOME="$YOETZ_CODEX_SCRATCH" codex-testing mcp get yoetz
 

@@ -23,6 +23,7 @@ from yoetz.ports.control import (
     ControlMethod,
     ControlRequest,
     ControlResult,
+    McpHostProfile,
     ProjectionRenderMode,
     RepositoryPrivacyContext,
     ServiceState,
@@ -640,6 +641,10 @@ def parse_control_request(frame: ControlFrame) -> ControlRequest:
             body=body,
             deadline_ms=cast(int | None, deadline),
             route_profile=cast(Literal["policy", "strict"] | None, wire.get("route_profile")),
+            host_profile=cast(
+                McpHostProfile | None,
+                wire.get("host_profile"),
+            ),
         )
     except KeyError, TypeError, ValueError:
         raise ControlProtocolError("frame_invalid") from None

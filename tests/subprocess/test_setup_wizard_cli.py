@@ -23,7 +23,11 @@ from yoetz.adapters.integrations.codex_marketplace import (
 from yoetz.adapters.integrations.codex_mcp import CodexMcpAdapter, CommandOutput
 from yoetz.application.harness_mcp import HarnessMcpService
 from yoetz.ports.control import ControlClientKind, ControlError
-from yoetz.ports.harness_mcp import HarnessBinary
+from yoetz.ports.harness_mcp import (
+    MCP_SERVE_COMMAND,
+    MCP_STRICT_SERVE_COMMAND,
+    HarnessBinary,
+)
 from yoetz.ports.integrations import (
     HarnessId,
     IntegrationError,
@@ -75,10 +79,8 @@ class _ScriptedRunner:
 def _yoetz_entry(
     route_profile: Literal["policy", "strict"] = "strict",
 ) -> CommandOutput:
-    args = ["mcp", "serve"]
-    if route_profile == "strict":
-        args.extend(["--semantic", "off"])
-    return CommandOutput(0, json.dumps({"command": "yoetz", "args": args}).encode())
+    command = MCP_STRICT_SERVE_COMMAND if route_profile == "strict" else MCP_SERVE_COMMAND
+    return CommandOutput(0, json.dumps({"command": command[0], "args": list(command[1:])}).encode())
 
 
 def _absent_mcp() -> list[CommandOutput]:
@@ -760,13 +762,9 @@ async def test_a_preview_and_apply_on_the_same_route_register(
     record = read_applied_route(_state=cast(Path, wizard_env["isolated_state"]))
     assert record is not None
     assert record["applied_profile"] == "strict"
-    assert record["applied_serve_command"] == ["yoetz", "mcp", "serve", "--semantic", "off"]
+    assert record["applied_serve_command"] == list(MCP_STRICT_SERVE_COMMAND)
     assert record["observed_serve_command_post_write"] == [
-        "yoetz",
-        "mcp",
-        "serve",
-        "--semantic",
-        "off",
+        *MCP_STRICT_SERVE_COMMAND,
     ]
 
 
@@ -816,7 +814,7 @@ def test_interactive_wizard_selects_harness_then_installation_and_requires_y_or_
     assert "Choose how Yoetz should review work:" in result.stdout
     assert "complete Yoetz Codex project integration" in result.stdout
     assert "MCP server name: yoetz" in result.stdout
-    assert "Command: yoetz mcp serve --semantic off" in result.stdout
+    assert "Command: yoetz mcp serve --host codex --semantic off" in result.stdout
     assert "Codex executable: /b/codex" in result.stdout
     assert "Confirm Codex project setup? [Y/N]" in result.stdout
     assert "Observation consent for this workspace" in result.stdout
@@ -1320,7 +1318,7 @@ def test_integrate_mcp_remove_owned_entry(wizard_env: dict[str, object]) -> None
     preview = json.loads(previewed.stdout)
     assert preview["action"] == "unregister"
     assert preview["route_profile"] == "strict"
-    assert preview["serve_command"] == ["yoetz", "mcp", "serve", "--semantic", "off"]
+    assert preview["serve_command"] == list(MCP_STRICT_SERVE_COMMAND)
     assert preview["warnings"] == ["host_remove_not_compare_and_swap"]
     assert preview["preview_digest"].startswith("sha256:")
 
@@ -1379,7 +1377,7 @@ def test_integrate_mcp_interactive_remove_surfaces_complete_warning_bound_previe
     result = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "remove"])
 
     assert result.exit_code == 0, (result.output, result.exception)
-    assert "Command: yoetz mcp serve --semantic off" in result.output
+    assert "Command: yoetz mcp serve --host codex --semantic off" in result.output
     assert "MCP route profile: strict" in result.output
     assert "Warning: host_remove_not_compare_and_swap" in result.output
     assert "Preview digest: sha256:" in result.output
@@ -1509,7 +1507,7 @@ def test_non_interactive_accept_preserves_existing_policy_route(
     assert report["registration"]["outcome"] == "already_registered"
     assert report["registration"]["route_profile"] == "policy"
     assert report["registration"]["route_profile_before"] == "policy"
-    assert report["registration"]["serve_command"] == ["yoetz", "mcp", "serve"]
+    assert report["registration"]["serve_command"] == list(MCP_SERVE_COMMAND)
     # No mutating ``mcp add`` ever ran: the existing policy route survives.
     for calls in cast(list[list[tuple[str, ...]]], wizard_env["calls"]):
         assert all(call[1:3] == ("mcp", "get") for call in calls)

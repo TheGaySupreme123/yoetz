@@ -1399,10 +1399,10 @@ def mcp_serve(
         ),
     ] = "on",
     host: Annotated[
-        Literal["generic", "cursor"],
+        Literal["generic", "codex", "claude", "cursor"],
         typer.Option(
             "--host",
-            help="MCP result presentation profile for the exact local host.",
+            help="MCP serving identity for the exact local host; generic leaves host unknown.",
         ),
     ] = "generic",
 ) -> None:

@@ -29,6 +29,10 @@ portable and Codex/Cursor projections. Yoetz writes no credentials, endpoints, u
 vault, receipt, or provider state into the plugin, `${CLAUDE_PLUGIN_ROOT}`, or
 `${CLAUDE_PLUGIN_DATA}`.
 
+The plugin-owned `.mcp.json` starts the bridge with the explicit `--host claude` identity (and
+`--semantic off` for the strict route). This identifies the serving carrier for diagnostics; it
+does not grant host admission or agent-chat attestation.
+
 ## Explicit roots
 
 Choose an exact trusted project, exact resolved Claude executable, isolated Claude config/cache,
@@ -139,12 +143,12 @@ The validator covers the default manifest/hooks/skill paths. Yoetz separately va
 
 ## Applied-route drift decision (issue #537)
 
-Decision for Claude Code: not supported here — no additional state-root applied-route record
-at this time. The plugin-managed `.mcp.json` already binds the route profile and the artifact
-digest in its in-tree marker, and the live file reads remain the authority for which route
-this host serves; a stale serving process is detected through the existing activation and
-ownership read-backs, not through a second record. If a ceiling check ever needs an
-applied-vs-serving distinction on this host, that is a separate design-gated change.
+Decision for Claude Code: no Codex applied-route record is used here. The explicit `--host claude`
+identity prevents the Codex-only drift comparison from being applied to this host. The
+plugin-managed `.mcp.json` still binds the route profile and artifact digest in its in-tree marker,
+and live file reads remain the authority for which route this host serves; activation and ownership
+read-backs cover stale plugin processes. A generic legacy `.mcp.json` remains readable during
+upgrade/remove but is unproven until the plugin is re-rendered.
 
 ## Enable, trust, reload, and activation
 
@@ -164,7 +168,7 @@ The skill name is `/yoetz:yoetz`. The MCP server is `plugin:yoetz:yoetz`, and ca
 `mcp__plugin_yoetz_yoetz__<operation>`. A live proof needs a fresh session and correlated
 `start`/`status` call through that scoped name; a list/details/MCP handshake alone is insufficient.
 
-Claude Code's generic MCP profile (`yoetz mcp serve` without `--host cursor`) delivers
+Claude Code's native MCP profile (`yoetz mcp serve --host claude`) delivers
 `structuredContent` for successful tools but only the bounded text `content` for `isError`
 results. Cooperative `EVENT_INVALID` therefore cannot rely on `safe_details` reaching the model.
 Decision for Claude Code (issue #579): supported here — the text summary names frozen

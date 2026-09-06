@@ -40,6 +40,7 @@ from yoetz.ports.control import (
     ControlClientKind,
     ControlError,
     ControlMethod,
+    McpHostProfile,
     ProjectionRenderMode,
     RepositoryPrivacyContext,
 )
@@ -924,6 +925,7 @@ class Application:
         request: CheckRequest,
         *,
         route_profile: Literal["policy", "strict"] = "policy",
+        host_profile: McpHostProfile = "generic",
         repository_privacy_context: RepositoryPrivacyContext | None = None,
     ) -> CheckCommitResult | CheckAwaitingHuman:
         from yoetz.application.check import execute_check
@@ -938,6 +940,7 @@ class Application:
             self,  # pyright: ignore[reportArgumentType]
             request,
             route_profile=route_profile,
+            host_profile=host_profile,
         )
 
     async def respond(

@@ -54,6 +54,7 @@ from yoetz.ports.control import (
     ControlError,
     ControlMethod,
     ControlResult,
+    McpHostProfile,
     McpRouteProfile,
     ProjectionRenderMode,
     ServiceStatus,
@@ -840,6 +841,7 @@ class ServiceClient(ControlClientPort):
         *,
         deadline_ms: int | None = None,
         route_profile: McpRouteProfile | None = None,
+        host_profile: McpHostProfile | None = None,
     ) -> object:
         request = ControlCallRequest(
             kind="call",
@@ -851,6 +853,7 @@ class ServiceClient(ControlClientPort):
             body=body,
             deadline_ms=deadline_ms,
             route_profile=route_profile,
+            host_profile=host_profile,
         )
         result = await self.call(request)
         if result.outcome == "error":
@@ -879,6 +882,7 @@ class ServiceClient(ControlClientPort):
         *,
         deadline_ms: int | None = None,
         route_profile: McpRouteProfile | None = None,
+        host_profile: McpHostProfile | None = None,
     ) -> CheckResult:
         return cast(
             CheckResult,
@@ -887,6 +891,7 @@ class ServiceClient(ControlClientPort):
                 request,
                 deadline_ms=deadline_ms,
                 route_profile=route_profile,
+                host_profile=host_profile,
             ),
         )
 

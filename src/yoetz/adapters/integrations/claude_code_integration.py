@@ -634,7 +634,7 @@ def _inventory(members: Mapping[str, bytes]) -> tuple[ManagedPluginFile, ...]:
 
 
 def _mcp_json(route_profile: Literal["strict", "policy"], yoetz_launcher: tuple[str, ...]) -> bytes:
-    args = [*yoetz_launcher[1:], "mcp", "serve"]
+    args = [*yoetz_launcher[1:], "mcp", "serve", "--host", "claude"]
     if route_profile == "strict":
         args.extend(("--semantic", "off"))
     return canonical_encode(
@@ -1087,7 +1087,9 @@ def _route_profile(
 
     An exact route launches either a bare ``yoetz`` console script (external registrations
     the owner wrote by hand) or this artifact's exact bound launcher (plugin-owned entries and
-    launcher-bound external registrations), followed by the exact ``mcp serve`` arguments.
+    launcher-bound external registrations), followed by the exact Claude ``mcp serve`` arguments.
+    The pre-host-identity bare forms remain readable for an upgrade/remove transition but are
+    never emitted by the renderer.
     """
 
     if entry is None or set(entry) != {"args", "command", "type"}:
@@ -1108,9 +1110,15 @@ def _route_profile(
     if args[: len(prefix)] != prefix:
         return None
     rest = args[len(prefix) :]
-    if rest == ("mcp", "serve"):
+    if rest in {
+        ("mcp", "serve", "--host", "claude"),
+        ("mcp", "serve"),
+    }:
         return "policy"
-    if rest == ("mcp", "serve", "--semantic", "off"):
+    if rest in {
+        ("mcp", "serve", "--host", "claude", "--semantic", "off"),
+        ("mcp", "serve", "--semantic", "off"),
+    }:
         return "strict"
     return None
 
