@@ -115,6 +115,7 @@ from yoetz.domain.observation import (
     ObservationStatusQuery,
     observation_envelope_to_json,
 )
+from yoetz.domain.observation_profiles import content_capture_profile_matches_source
 from yoetz.domain.values import (
     Frontier,
     JsonObject,
@@ -740,24 +741,142 @@ class ObservationCoordinator:
                 )
                 stage = "store_prepare"
                 store = self._observation_store(runtime)
-                store.grant_consent(workspace, consent.granted_at)
+                if consent.content_capture_profiles:
+                    store.grant_consent(
+                        workspace,
+                        consent.granted_at,
+                        content_capture_profiles=consent.content_capture_profiles,
+                    )
+                else:
+                    # Keep compatibility with test/reference task stores and
+                    # pre-0010 bundles for the historical structural arm. A
+                    # native content request still requires the new store API
+                    # below, so this fallback can never authorize content.
+                    try:
+                        store.grant_consent(
+                            workspace,
+                            consent.granted_at,
+                            content_capture_profiles=(),
+                        )
+                    except TypeError:
+                        store.grant_consent(workspace, consent.granted_at)
                 store.bind_session(workspace, request.envelope.session_commitment)
-                (
-                    captured_content,
-                    replay_content_candidates,
-                    content_redacted,
-                    content_unavailable,
-                ) = await self._capture_content(
-                    runtime,
-                    store,
-                    workspace=workspace,
-                    envelope=request.envelope,
-                    chunks=request.content_chunks,
+                native_content_source = request.envelope.source in {
+                    ObservationSource.CLAUDE_HOOK,
+                    ObservationSource.CURSOR_HOOK,
+                }
+                requested_content_profile = request.content_capture_profile
+                if requested_content_profile is not None and (
+                    not native_content_source
+                    or not content_capture_profile_matches_source(
+                        request.envelope.source.value, requested_content_profile
+                    )
+                    or requested_content_profile not in consent.content_capture_profiles
+                ):
+                    # A client-supplied profile is an authorization assertion,
+                    # not a hint.  Refuse a source/profile or consent mismatch
+                    # before any content object can be staged.
+                    return _reject(ObservationGapCode.CONTENT_CAPTURE_PROFILE_MISMATCH.value)
+                content_authorized = not native_content_source
+                content_authorization_missing = False
+                content_capture_blocked = False
+                capture_fence: Callable[[], Awaitable[bool]] | None = None
+                native_content_requested = native_content_source and bool(
+                    request.content_chunks or request.envelope.content_object_refs
                 )
+                fence_generation: str | None = None
+                fence_profiles: tuple[str, ...] = ()
+                if native_content_requested:
+                    # The initial consent read above admits the structural
+                    # event, but native plaintext capture needs the latest
+                    # owner-private authority.  This closes the queueing gap
+                    # where a runtime disable or profile change lands after
+                    # the request entered the coordinator.
+                    authority = await self._local(
+                        partial(self.local.content_capture_authority, workspace)
+                    )
+                    if (
+                        authority is None
+                        or not authority.active
+                        or not authority.runtime_enabled
+                        or not authority.profiles
+                    ):
+                        content_capture_blocked = True
+                    else:
+                        fence_generation = authority.generation
+                        fence_profiles = authority.profiles
+                        assert fence_generation is not None
+
+                        async def current_capture_fence() -> bool:
+                            return await self._local(
+                                partial(
+                                    self.local.content_capture_authority_is_current,
+                                    workspace,
+                                    fence_generation,
+                                    fence_profiles,
+                                )
+                            )
+
+                        capture_fence = current_capture_fence
+                if native_content_source and request.content_chunks:
+                    stored_profiles = store.content_capture_profiles(workspace)
+                    content_authorized = (
+                        requested_content_profile is not None
+                        and requested_content_profile in stored_profiles
+                        and requested_content_profile in fence_profiles
+                        and content_capture_profile_matches_source(
+                            request.envelope.source.value, requested_content_profile
+                        )
+                    )
+                    content_authorization_missing = not content_authorized
+                if native_content_requested and not content_capture_blocked:
+                    assert capture_fence is not None
+                    if not await capture_fence():
+                        content_capture_blocked = True
+                        content_authorized = False
+                        content_authorization_missing = True
+                if content_capture_blocked:
+                    # Keep the structural envelope admissible, but never let a
+                    # stale queued request reopen or stage captured plaintext.
+                    captured_content = ()
+                    replay_content_candidates = ()
+                    content_redacted = False
+                    content_unavailable = True
+                else:
+                    capture_chunks = request.content_chunks if content_authorized else ()
+                    if capture_fence is None:
+                        (
+                            captured_content,
+                            replay_content_candidates,
+                            content_redacted,
+                            content_unavailable,
+                        ) = await self._capture_content(
+                            runtime,
+                            store,
+                            workspace=workspace,
+                            envelope=request.envelope,
+                            chunks=capture_chunks,
+                        )
+                    else:
+                        (
+                            captured_content,
+                            replay_content_candidates,
+                            content_redacted,
+                            content_unavailable,
+                        ) = await self._capture_content(
+                            runtime,
+                            store,
+                            workspace=workspace,
+                            envelope=request.envelope,
+                            chunks=capture_chunks,
+                            capture_fence=capture_fence,
+                        )
                 gaps = set(request.envelope.gap_codes)
                 if content_redacted:
                     gaps.add(ObservationGapCode.CONTENT_REDACTED.value)
                 if content_unavailable:
+                    gaps.add(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
+                if content_authorization_missing:
                     gaps.add(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
                 envelope = replace(
                     request.envelope,
@@ -2071,6 +2190,7 @@ class ObservationCoordinator:
         workspace: str,
         envelope: ObservationEnvelope,
         chunks: tuple[ObservationContentChunk, ...],
+        capture_fence: Callable[[], Awaitable[bool]] | None = None,
     ) -> tuple[
         tuple[ObservationContentManifest, ...],
         tuple[tuple[ObservationContentManifest, ...], ...],
@@ -2100,6 +2220,16 @@ class ObservationCoordinator:
         any_redacted = False
         any_unavailable = False
 
+        async def capture_fence_current() -> bool:
+            """Check the native capture fence before any persisted plaintext boundary."""
+
+            if capture_fence is None:
+                return True
+            try:
+                return await capture_fence()
+            except Exception:
+                return False
+
         async def verify_manifest(
             loaded: ObservationContentManifest,
         ) -> tuple[ObservationContentManifest, bool, bool]:
@@ -2108,6 +2238,8 @@ class ObservationCoordinator:
             if loaded.envelope_digest is None:
                 return loaded, False, False
             try:
+                if not await capture_fence_current():
+                    return loaded, False, False
                 ref = await runtime.objects.resolve_verified(
                     loaded.object_id, loaded.envelope_digest
                 )
@@ -2123,6 +2255,8 @@ class ObservationCoordinator:
                         return loaded, False, False
                 material = bytes(raw)
                 if len(material) != ref.plaintext_size:
+                    return loaded, False, False
+                if not await capture_fence_current():
                     return loaded, False, False
                 parsed = strict_json_parse(material)
                 expected_keys = {
@@ -2141,6 +2275,7 @@ class ObservationCoordinator:
                     or set(parsed) != expected_keys
                     or canonical_encode(parsed) != material
                     or parsed.get("format") != "yoetz.observation-content/1"
+                    or parsed.get("media_type") != "text/plain"
                     or type(parsed.get("content_b64")) is not str
                     or type(parsed.get("redacted")) is not bool
                 ):
@@ -2299,6 +2434,10 @@ class ObservationCoordinator:
         # operation identity. The existing set remains authoritative.
         freeze_roles = bool(primary_recovered)
         for chunk in chunks:
+            if chunk.media_type != "text/plain":
+                any_unavailable = True
+                await note_unavailable()
+                continue
             existing = store.content_manifest_object_id(
                 workspace=workspace,
                 logical_identity=content_identity,
@@ -2318,6 +2457,10 @@ class ObservationCoordinator:
                         any_redacted = any_redacted or verified.redacted
                     continue
             if freeze_roles:
+                any_unavailable = True
+                await note_unavailable()
+                continue
+            if not await capture_fence_current():
                 any_unavailable = True
                 await note_unavailable()
                 continue
@@ -2363,10 +2506,19 @@ class ObservationCoordinator:
                     runtime.task_id,
                     self.clock.now_utc(),
                 )
+                if not await capture_fence_current():
+                    any_unavailable = True
+                    await note_unavailable()
+                    continue
                 staged = await runtime.objects.stage(
                     ObjectSource(data=manifest_bytes, declared_size=len(manifest_bytes)),
                     metadata,
                 )
+                if not await capture_fence_current():
+                    await runtime.objects.abandon(staged)
+                    any_unavailable = True
+                    await note_unavailable()
+                    continue
                 ref = await runtime.objects.finalize(staged)
             else:
                 loaded = store.load_content_manifest(existing)

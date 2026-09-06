@@ -32,12 +32,16 @@ from yoetz.domain.observation import (
     observation_envelope_from_json,
     observation_envelope_to_json,
 )
+from yoetz.domain.observation_profiles import (
+    is_content_capture_profile,
+    validate_content_capture_profile,
+)
 from yoetz.domain.values import JsonObject, JsonValue, Timestamp, format_rfc3339_millis
 from yoetz.kernel.policies.observation_advice import ObservationCheckFact
 from yoetz.ports.objects import ObjectRef
 from yoetz.ports.observation import ObservationLogicalIdentityClaim
 from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
-from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 
 __all__ = ["SqliteObservationStore"]
 
@@ -95,15 +99,107 @@ class SqliteObservationStore:
         # Session → workspace binding kept in-process; durable sessions appear via cursors/events.
         self._session_workspaces: dict[str, str] = {}
 
-    def grant_consent(self, workspace_commitment: str, granted_at: Timestamp) -> None:
+    def grant_consent(
+        self,
+        workspace_commitment: str,
+        granted_at: Timestamp,
+        *,
+        content_capture_profiles: tuple[str, ...] = (),
+    ) -> None:
+        if type(content_capture_profiles) is not tuple or len(content_capture_profiles) > 2:
+            raise ValueError("invalid_content_capture_profiles")
+        if tuple(sorted(set(content_capture_profiles), key=str.encode)) != content_capture_profiles:
+            raise ValueError("invalid_content_capture_profiles")
+        for profile in content_capture_profiles:
+            validate_content_capture_profile(profile)
+        if not self._content_capture_column_present():
+            if content_capture_profiles:
+                raise _error(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "Task bundle does not support native content consent.",
+                    retryable=False,
+                )
+            # A pre-0010 task bundle can still accept the historical structural
+            # consent. It can never authorize the new content arm.
+            with self._db:
+                self._db.execute(
+                    "INSERT INTO observation_consent(workspace_commitment, granted_at, revoked_at, paused) "
+                    "VALUES (?, ?, NULL, 0) "
+                    "ON CONFLICT(workspace_commitment) DO UPDATE SET "
+                    "granted_at=excluded.granted_at, revoked_at=NULL, paused=0",
+                    (workspace_commitment, granted_at.wire),
+                )
+            return
+        profiles_json = canonical_encode(content_capture_profiles).decode("ascii")
         with self._db:
             self._db.execute(
-                "INSERT INTO observation_consent(workspace_commitment, granted_at, revoked_at, paused) "
-                "VALUES (?, ?, NULL, 0) "
+                "INSERT INTO observation_consent(workspace_commitment, granted_at, revoked_at, paused, "
+                "content_capture_profiles_json) VALUES (?, ?, NULL, 0, ?) "
                 "ON CONFLICT(workspace_commitment) DO UPDATE SET "
-                "granted_at=excluded.granted_at, revoked_at=NULL, paused=0",
-                (workspace_commitment, granted_at.wire),
+                "granted_at=excluded.granted_at, revoked_at=NULL, paused=0, "
+                "content_capture_profiles_json=excluded.content_capture_profiles_json",
+                (workspace_commitment, granted_at.wire, profiles_json),
             )
+
+    def content_capture_profiles(self, workspace_commitment: str) -> tuple[str, ...]:
+        consent = self._consent_row(workspace_commitment)
+        return () if consent is None else consent[3]
+
+    def enable_content_capture(self, workspace_commitment: str, profile: str) -> None:
+        """Enable one explicit native-host content arm on a live task grant."""
+
+        validate_content_capture_profile(profile)
+        if not self._content_capture_column_present():
+            raise _error(
+                PublicErrorCode.INVALID_REQUEST,
+                "Task bundle does not support native content consent.",
+                retryable=False,
+            )
+        consent = self._require_consent(workspace_commitment)
+        if consent[0] is not None:
+            raise _error(
+                PublicErrorCode.INVALID_REQUEST,
+                "Observation consent is revoked.",
+                retryable=False,
+            )
+        profiles = tuple(sorted({*consent[3], profile}, key=str.encode))
+        with self._db:
+            self._db.execute(
+                "UPDATE observation_consent SET content_capture_profiles_json=? "
+                "WHERE workspace_commitment=?",
+                (canonical_encode(profiles).decode("ascii"), workspace_commitment),
+            )
+
+    def disable_content_capture(
+        self, workspace_commitment: str, profile: str | None = None
+    ) -> None:
+        """Disable one native-host content arm, or all arms when omitted."""
+
+        if profile is not None:
+            validate_content_capture_profile(profile)
+        if not self._content_capture_column_present():
+            if profile is None:
+                self._require_consent(workspace_commitment)
+                return
+            raise _error(
+                PublicErrorCode.INVALID_REQUEST,
+                "Task bundle does not support native content consent.",
+                retryable=False,
+            )
+        consent = self._require_consent(workspace_commitment)
+        profiles = () if profile is None else tuple(item for item in consent[3] if item != profile)
+        with self._db:
+            self._db.execute(
+                "UPDATE observation_consent SET content_capture_profiles_json=? "
+                "WHERE workspace_commitment=?",
+                (canonical_encode(profiles).decode("ascii"), workspace_commitment),
+            )
+
+    def _content_capture_column_present(self) -> bool:
+        rows = self._db.execute("PRAGMA table_info(observation_consent)").fetchall()
+        return any(
+            type(row[1]) is str and row[1] == "content_capture_profiles_json" for row in rows
+        )
 
     def bind_session(self, workspace_commitment: str, session_commitment: str) -> None:
         consent = self._consent_row(workspace_commitment)
@@ -145,7 +241,7 @@ class SqliteObservationStore:
                     ObservationGapCode.CONSENT_MISSING.value,
                     None,
                 )
-            revoked_at, paused, _granted = consent
+            revoked_at, paused, _granted, _profiles = consent
             if revoked_at is not None:
                 return ObservationIngestResult(
                     ObservationIngestDisposition.REJECTED,
@@ -271,11 +367,19 @@ class SqliteObservationStore:
             revoked_at = self._last_receipt(command.workspace_commitment)
             stamp = revoked_at if revoked_at is not None else consent[2]
             with self._db:
-                self._db.execute(
-                    "UPDATE observation_consent SET revoked_at = ?, paused = 1 "
-                    "WHERE workspace_commitment = ?",
-                    (stamp, command.workspace_commitment),
-                )
+                if self._content_capture_column_present():
+                    self._db.execute(
+                        "UPDATE observation_consent SET revoked_at = ?, paused = 1, "
+                        "content_capture_profiles_json = '[]' "
+                        "WHERE workspace_commitment = ?",
+                        (stamp, command.workspace_commitment),
+                    )
+                else:
+                    self._db.execute(
+                        "UPDATE observation_consent SET revoked_at = ?, paused = 1 "
+                        "WHERE workspace_commitment = ?",
+                        (stamp, command.workspace_commitment),
+                    )
                 self._db.execute(
                     "UPDATE observation_workspace_bindings SET active=0, revoked_at=? "
                     "WHERE workspace_commitment=? AND active=1",
@@ -387,6 +491,37 @@ class SqliteObservationStore:
         if row is None or type(row[0]) is not str:
             return None
         return row[0]
+
+    def observation_route_for_session(
+        self, *, workspace: str, yoetz_session_id: str
+    ) -> tuple[str, str, bool] | None:
+        """Return the durable session route with task and active state.
+
+        Historical route rows remain readable for observation-advice recovery, so
+        ``codex_session_commitment_for_session`` intentionally keeps that older
+        behavior. Semantic captured-content selection needs the stronger tuple
+        to verify that the routed task matches the runtime before opening an
+        object.
+        """
+
+        try:
+            row = self._db.execute(
+                "SELECT codex_session_commitment, yoetz_task_id, active "
+                "FROM observation_workspace_session_routes "
+                "WHERE workspace_commitment = ? AND yoetz_session_id = ?",
+                (workspace, yoetz_session_id),
+            ).fetchone()
+        except Exception:
+            return None
+        if (
+            row is None
+            or type(row[0]) is not str
+            or type(row[1]) is not str
+            or type(row[2]) is not int
+            or row[2] not in {0, 1}
+        ):
+            return None
+        return row[0], row[1], bool(row[2])
 
     def workspace_for_yoetz_session(self, yoetz_session_id: str) -> str | None:
         try:
@@ -1055,20 +1190,41 @@ class SqliteObservationStore:
             )
         return cast(ObservationLogicalIdentityClaim, tuple(row))
 
-    def _consent_row(self, workspace: str) -> tuple[str | None, bool, str] | None:
-        row = self._db.execute(
-            "SELECT revoked_at, paused, granted_at FROM observation_consent "
-            "WHERE workspace_commitment = ?",
-            (workspace,),
-        ).fetchone()
+    def _consent_row(self, workspace: str) -> tuple[str | None, bool, str, tuple[str, ...]] | None:
+        if self._content_capture_column_present():
+            row = self._db.execute(
+                "SELECT revoked_at, paused, granted_at, content_capture_profiles_json "
+                "FROM observation_consent WHERE workspace_commitment = ?",
+                (workspace,),
+            ).fetchone()
+        else:
+            row = self._db.execute(
+                "SELECT revoked_at, paused, granted_at FROM observation_consent "
+                "WHERE workspace_commitment = ?",
+                (workspace,),
+            ).fetchone()
         if row is None:
             return None
         revoked_at = row[0] if type(row[0]) is str else None
         paused = bool(row[1])
         granted_at = cast(str, row[2])
-        return revoked_at, paused, granted_at
+        profiles: tuple[str, ...] = ()
+        raw_profiles = row[3] if len(row) > 3 else None
+        if type(raw_profiles) is str:
+            try:
+                parsed = strict_json_parse(raw_profiles.encode("utf-8"))
+            except ValueError, ProtocolValueError:
+                parsed = ()
+            if isinstance(parsed, (tuple, list)):
+                profiles = tuple(
+                    sorted(
+                        {cast(str, item) for item in parsed if is_content_capture_profile(item)},
+                        key=str.encode,
+                    )
+                )[:2]
+        return revoked_at, paused, granted_at, profiles
 
-    def _require_consent(self, workspace: str) -> tuple[str | None, bool, str]:
+    def _require_consent(self, workspace: str) -> tuple[str | None, bool, str, tuple[str, ...]]:
         consent = self._consent_row(workspace)
         if consent is None:
             raise _error(

@@ -237,7 +237,9 @@ def test_observe_hook_execution_modes_use_async_only_on_capable_hosts() -> None:
     # an event to ADVICE_SAFE_EVENTS while it is still declared async here,
     # Codex would silently drop its advice or decision.
     assert set(pure_ingress) == (
-        SUPPORTED_HOOK_EVENTS - ADVICE_SAFE_EVENTS - {"UserPromptSubmit", "SessionEnd"}
+        SUPPORTED_HOOK_EVENTS
+        - ADVICE_SAFE_EVENTS
+        - {"UserPromptSubmit", "SessionEnd", "PermissionDecision"}
     )
     for event in pure_ingress:
         handler = _observe_handler(parsed, event)

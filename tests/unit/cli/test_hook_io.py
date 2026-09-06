@@ -50,6 +50,12 @@ def test_cursor_session_start_emits_cursor_native_additional_context() -> None:
     }
 
 
+def test_cursor_post_tool_use_emits_cursor_native_additional_context() -> None:
+    assert cursor_context_output("postToolUse", "  bounded advice  ") == {
+        "additional_context": "bounded advice"
+    }
+
+
 def test_cursor_stop_does_not_auto_submit_a_followup_message() -> None:
     assert cursor_context_output("stop", "submit this as a new user message") == {}
 
@@ -61,13 +67,26 @@ def test_cursor_stop_followup_is_explicitly_opt_in() -> None:
 
 
 def test_cursor_outputless_and_unknown_events_emit_empty_object() -> None:
-    for event in ("afterFileEdit", "afterMCPExecution", "sessionEnd", "unknown"):
+    for event in (
+        "postToolUseFailure",
+        "afterFileEdit",
+        "afterMCPExecution",
+        "sessionEnd",
+        "unknown",
+    ):
         assert cursor_context_output(event, "advice that has no output channel") == {}
 
 
 def test_cursor_context_is_bounded_by_the_codex_context_limit() -> None:
     advice = "x" * 2_001
     assert cursor_context_output("sessionStart", advice) == {"additional_context": "x" * 2_000}
+    assert cursor_context_output("postToolUse", advice) == {"additional_context": "x" * 2_000}
+
+
+def test_cursor_post_tool_use_stdout_is_canonical_and_bounded() -> None:
+    stream = io.BytesIO()
+    assert stdout_json(cursor_context_output("postToolUse", "  bounded advice  "), stream)
+    assert stream.getvalue() == b'{"additional_context":"bounded advice"}\n'
 
 
 def test_codex_context_output_keeps_canonical_stdout_bytes() -> None:

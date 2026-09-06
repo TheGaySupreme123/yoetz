@@ -21,6 +21,10 @@ _DIGEST: Final[dict[str, Any]] = {
     "pattern": "^sha256:[0-9a-f]{64}$",
     "type": "string",
 }
+_ORDINARY_CONTENT_CAPTURE_PROFILES: Final = (
+    "claude-code-ordinary-observation-v1",
+    "cursor-ordinary-observation-v1",
+)
 
 
 def _load(name: str) -> dict[str, Any]:
@@ -474,6 +478,15 @@ def _claim_v24_request() -> dict[str, Any]:
                 admit_policy_versions(child)
 
     admit_policy_versions(generated)
+    # The ordinary native-host content arm is a new optional request member.
+    # Keep the released and intermediate control schemas byte-identical: only
+    # the current unreleased 2.4 request may carry this authorization-bound
+    # profile selector.
+    ingest = generated["$defs"]["observation_ingest_body"]
+    ingest["properties"]["content_capture_profile"] = {
+        "enum": list(_ORDINARY_CONTENT_CAPTURE_PROFILES),
+        "type": "string",
+    }
     return generated
 
 

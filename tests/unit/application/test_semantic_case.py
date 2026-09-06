@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import cast
 
 import pytest
@@ -29,6 +31,8 @@ from yoetz.application.check import (
 from yoetz.application.semantic_case import (
     OVER_CASE_ITEM_LIMIT_REASON,
     REVIEW_PACKET_ITEM_ID,
+    CapturedContentScope,
+    CapturedSemanticContent,
     bounded_case_envelope,
     build_semantic_case,
     review_selection_digest,
@@ -50,6 +54,7 @@ from yoetz.domain.events import (
     PlanPublishedPayload,
 )
 from yoetz.domain.findings import Finding
+from yoetz.domain.observation import ObservationContentKind, ObservationContentManifest
 from yoetz.domain.privacy import (
     AuthorizationScope,
     AuthorizationScopeKind,
@@ -66,9 +71,10 @@ from yoetz.kernel.deterministic_checks import (
 )
 from yoetz.kernel.projections import EvidenceProjectionRecord
 from yoetz.kernel.reducers import replay
+from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef
 from yoetz.ports.semantic import ExcerptDigestProvenance, SemanticCase
 from yoetz.protocol.canonical import JsonValue, strict_json_parse
-from yoetz.protocol.coverage import EvidenceImmutability
+from yoetz.protocol.coverage import EvidenceImmutability, LedgerFreshness
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import MAX_REVIEW_TEXT_BYTES, DataCategory
 
@@ -139,6 +145,9 @@ def _build(
     *,
     findings: Sequence[Finding] = (),
     dependency: str = "sha256:" + "b" * 64,
+    captured_content: Sequence[CapturedSemanticContent] = (),
+    captured_content_scope: CapturedContentScope | None = None,
+    captured_content_gaps: Sequence[str] = (),
 ) -> SemanticCase:
     return build_semantic_case(
         case_id="cas_10000000-0000-4000-8000-000000000001",
@@ -149,7 +158,89 @@ def _build(
         review_selection=ReviewSelectionPolicy.for_profile(profile),
         policy_id="pvy_10000000-0000-4000-8000-000000000001",
         policy_version="1",
+        captured_content=captured_content,
+        captured_content_scope=captured_content_scope,
+        captured_content_gaps=captured_content_gaps,
     )
+
+
+def _captured_case_values(
+    content: bytes = b"planted-defect-marker: missing validation",
+    *,
+    redacted: bool = False,
+    phase_identity: str = "sha256:" + "4" * 64,
+) -> tuple[DeterministicCase, CapturedSemanticContent, CapturedContentScope]:
+    base = _case_with_material(with_evidence=True)
+    object_value = object_id("obj_00000000-0000-4000-8000-000000000302")
+    content_digest = "sha256:" + hashlib.sha256(content).hexdigest()
+    payload = EvidenceRecordedPayload(
+        evidence_id=evd(1),
+        evidence_kind=EvidenceKind.OTHER,
+        strength=EvidenceImmutability.IMMUTABLE_SNAPSHOT,
+        observed_at=timestamp_from_string("2026-07-01T00:00:00.000Z"),
+        captured_object_id=object_value,
+        content_digest=content_digest,
+        description="Observation-captured tool output bytes part=1/1",
+        digest_binding=EvidenceDigestBinding(
+            subject=EvidenceDigestSubject.BOUNDED_EXCERPT,
+            content_availability=EvidenceContentAvailability.CAPTURED,
+            byte_count=len(content),
+            provenance=EvidenceDigestProvenance.OBSERVATION_CAPTURED,
+        ),
+    )
+    observed = make_case(
+        plans=base.projection.plans,
+        obligations=base.projection.obligations,
+        claims=base.projection.claims,
+        evidence={evd(1): evidence_record(payload, 4)},
+        extra_refs=(clm(1), obl(1), evd(1)),
+    )
+    envelope_digest = "sha256:" + "5" * 64
+    object_ref = ObjectRef(
+        object_id=object_value,
+        plaintext_size=1_024,
+        commitment="hmac-sha256:" + "6" * 64,
+        envelope_digest=envelope_digest,
+        encryption_format="yoetz-object/1",
+        key_slot="task",
+        metadata=ObjectMetadata(
+            ObjectKind.CAPTURED_CONTENT,
+            "application/vnd.yoetz.observation-content+json",
+            "tsk_10000000-0000-4000-8000-000000000001",
+            datetime(2026, 7, 1, tzinfo=UTC),
+        ),
+    )
+    manifest = ObservationContentManifest(
+        object_id=object_value,
+        envelope_digest=envelope_digest,
+        content_kind=ObservationContentKind.TOOL_OUTPUT,
+        part_index=0,
+        part_count=1,
+        redacted=redacted,
+        content_digest=content_digest,
+        content_bytes=len(content),
+        correlation_identity="tool-use-1",
+        source_commitment="hmac-sha256:" + "7" * 64,
+    )
+    captured = CapturedSemanticContent(
+        object_ref=object_ref,
+        manifest=manifest,
+        content=content,
+        task_id="tsk_10000000-0000-4000-8000-000000000001",
+        session_id="ses_10000000-0000-4000-8000-000000000001",
+        workspace_commitment="hmac-sha256:" + "8" * 64,
+        phase_identity=phase_identity,
+        capture_profile="claude-code-ordinary-observation-v1",
+        capture_gaps=("content_redacted",) if redacted else (),
+    )
+    scope = CapturedContentScope(
+        task_id=captured.task_id,
+        session_id=captured.session_id,
+        workspace_commitment=captured.workspace_commitment,
+        authorized_profiles=("claude-code-ordinary-observation-v1",),
+        phase_bindings=((str(evd(1)), phase_identity),),
+    )
+    return observed, captured, scope
 
 
 def test_structural_profile_sends_no_prose_and_declares_omitted_sections() -> None:
@@ -478,6 +569,127 @@ def test_observation_captured_excerpt_exposes_provenance_not_stored_object_bytes
         Mapping[str, object], cast(Mapping[str, object], rows[0])["digest_provenance"]
     )
     assert provenance["provenance"] == "observation_captured"
+
+
+def test_authenticated_captured_bytes_reach_selected_case_and_prepared_packet() -> None:
+    case, captured, scope = _captured_case_values()
+    semantic = _build(
+        case,
+        ReviewContextProfile.ASSISTED,
+        findings=_findings_for(case),
+        captured_content=(captured,),
+        captured_content_scope=scope,
+    )
+
+    excerpt = next(item for item in semantic.items if item.item_id == f"excerpt-{evd(1)}")
+    assert excerpt.content == captured.content
+    assert semantic.packet.targeted_excerpts[0].content_visibility == "available"
+    # The pre-egress case envelope is structural metadata only.
+    assert captured.content not in bounded_case_envelope(semantic)
+
+    # The privacy-approved projection is the first point at which the actual
+    # authenticated retained bytes are assembled into the provider packet.
+    prepared = semantic_case_to_prepared_payload(
+        semantic,
+        {item.item_id for item in semantic.items},
+    )
+    assert captured.content in prepared
+
+
+def test_wrong_phase_captured_bytes_are_excluded_even_with_valid_digest() -> None:
+    case, captured, scope = _captured_case_values()
+    wrong_phase = replace(captured, phase_identity="sha256:" + "9" * 64)
+    semantic = _build(
+        case,
+        ReviewContextProfile.ASSISTED,
+        findings=_findings_for(case),
+        captured_content=(wrong_phase,),
+        captured_content_scope=scope,
+    )
+
+    excerpt = next(item for item in semantic.items if item.item_id == f"excerpt-{evd(1)}")
+    assert excerpt.content != captured.content
+    assert captured.content not in semantic_case_to_prepared_payload(
+        semantic,
+        {item.item_id for item in semantic.items},
+    )
+    assert "content_unselected" in semantic.packet.coverage.known_gaps
+
+
+def test_redacted_captured_bytes_remain_available_with_explicit_gap() -> None:
+    case, captured, scope = _captured_case_values(redacted=True)
+    semantic = _build(
+        case,
+        ReviewContextProfile.ASSISTED,
+        findings=_findings_for(case),
+        captured_content=(captured,),
+        captured_content_scope=scope,
+    )
+
+    excerpt = next(item for item in semantic.items if item.item_id == f"excerpt-{evd(1)}")
+    assert excerpt.content == captured.content
+    assert "content_redacted" in semantic.packet.coverage.known_gaps
+
+
+def test_selection_clipping_marks_partial_coverage_only_when_excerpt_is_admitted() -> None:
+    case, captured, scope = _captured_case_values()
+    selection = replace(
+        ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED),
+        max_excerpt_bytes=8,
+    )
+    semantic = build_semantic_case(
+        case_id="cas_10000000-0000-4000-8000-000000000001",
+        frozen_case=case,
+        dependency_digest="sha256:" + "b" * 64,
+        findings=_findings_for(case),
+        review_context_profile=ReviewContextProfile.EXPANDED,
+        review_selection=selection,
+        policy_id="pvy_10000000-0000-4000-8000-000000000001",
+        policy_version="1",
+        captured_content=(captured,),
+        captured_content_scope=scope,
+    )
+    assert semantic.packet.coverage.ledger_freshness is LedgerFreshness.PARTIAL
+    assert "truncated_payload" in semantic.packet.coverage.known_gaps
+    excerpt = semantic.packet.targeted_excerpts[0]
+    assert excerpt.content_bytes == 8
+
+    omitted_selection = replace(selection, max_total_excerpt_bytes=1)
+    omitted = build_semantic_case(
+        case_id="cas_10000000-0000-4000-8000-000000000001",
+        frozen_case=case,
+        dependency_digest="sha256:" + "b" * 64,
+        findings=_findings_for(case),
+        review_context_profile=ReviewContextProfile.EXPANDED,
+        review_selection=omitted_selection,
+        policy_id="pvy_10000000-0000-4000-8000-000000000001",
+        policy_version="1",
+        captured_content=(captured,),
+        captured_content_scope=scope,
+    )
+    assert "truncated_payload" not in omitted.packet.coverage.known_gaps
+    assert "content_unselected" in omitted.packet.coverage.known_gaps
+    assert "content_capture_unavailable" not in omitted.packet.coverage.known_gaps
+
+
+def test_captured_content_input_is_bounded_before_grouping() -> None:
+    case, captured, scope = _captured_case_values()
+    with pytest.raises(ValueError, match="over_limit"):
+        _build(
+            case,
+            ReviewContextProfile.ASSISTED,
+            captured_content=tuple(captured for _ in range(65)),
+            captured_content_scope=scope,
+        )
+
+    large_case, large_capture, large_scope = _captured_case_values(b"x" * 300_000)
+    with pytest.raises(ValueError, match="over_limit"):
+        _build(
+            large_case,
+            ReviewContextProfile.ASSISTED,
+            captured_content=tuple(large_capture for _ in range(7)),
+            captured_content_scope=large_scope,
+        )
 
 
 def test_assisted_legacy_digest_is_an_explicit_omission() -> None:

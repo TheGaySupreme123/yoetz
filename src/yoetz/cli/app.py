@@ -796,13 +796,24 @@ def hooks_cursor_observe(
             ),
         ),
     ] = None,
+    observation_profile: Annotated[
+        str | None,
+        typer.Option(
+            "--observation-profile",
+            help="Exact profile emitted by the rendered native Cursor artifact.",
+        ),
+    ] = None,
 ) -> None:
     """Privacy-minimized, fail-open observation ingress for local Cursor hooks."""
 
     try:
         module = importlib.import_module("yoetz.cli.observe_hooks")
         handler = cast(Callable[..., int], getattr(module, "handle_cursor_observe"))
-        handler(event_name=event, workspace=workspace)
+        handler(
+            event_name=event,
+            workspace=workspace,
+            observation_profile=observation_profile,
+        )
     except BaseException:
         try:
             _stdout_json({})
@@ -823,13 +834,24 @@ def hooks_claude_observe(
             ),
         ),
     ] = None,
+    observation_profile: Annotated[
+        str | None,
+        typer.Option(
+            "--observation-profile",
+            help="Exact profile emitted by the rendered native Claude artifact.",
+        ),
+    ] = None,
 ) -> None:
     """Privacy-minimized, fail-open observation ingress for Claude Code hooks."""
 
     try:
         module = importlib.import_module("yoetz.cli.observe_hooks")
         handler = cast(Callable[..., int], getattr(module, "handle_claude_observe"))
-        handler(event_name=event, workspace=workspace)
+        handler(
+            event_name=event,
+            workspace=workspace,
+            observation_profile=observation_profile,
+        )
     except BaseException:
         try:
             _stdout_json({})
@@ -934,6 +956,62 @@ def observe_grant_cmd(
     """One-time observation consent; stores a private workspace commitment only."""
 
     _finish(_observe_operation("grant_observation")(workspace=workspace))
+
+
+@observe_app.command("content-enable")
+def observe_content_enable_cmd(
+    workspace: Annotated[str, typer.Option("--workspace", help="Workspace path to consent.")],
+    profile: Annotated[
+        str,
+        typer.Option(
+            "--profile",
+            help=(
+                "Versioned native-host content profile; use the exact profile emitted by the "
+                "host integration renderer."
+            ),
+        ),
+    ],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Enable one versioned native-host content capture arm."""
+
+    _finish(
+        _observe_operation("enable_observation_content")(
+            workspace=workspace, profile=profile, json_output=json_output
+        )
+    )
+
+
+@observe_app.command("content-disable")
+def observe_content_disable_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+    profile: Annotated[
+        str | None,
+        typer.Option("--profile", help="Disable one profile; omit to disable all profiles."),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Disable one native-host content arm or all native-host content capture."""
+
+    _finish(
+        _observe_operation("disable_observation_content")(
+            workspace=workspace, profile=profile, json_output=json_output
+        )
+    )
+
+
+@observe_app.command("content-status")
+def observe_content_status_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Show exact native-host content arms and their active state."""
+
+    _finish(
+        _observe_operation("observation_content_status")(
+            workspace=workspace, json_output=json_output
+        )
+    )
 
 
 @observe_app.command("pause")
@@ -1687,6 +1765,13 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
             typer.Option("--project-root", help="Exact trusted project for MCP source checks."),
         ] = None,
         format_name: Annotated[str, typer.Option("--format", help="portable or native")] = "native",
+        observation_profile: Annotated[
+            str,
+            typer.Option(
+                "--observation-profile",
+                help="structural or ordinary native hooks; content capture requires separate consent.",
+            ),
+        ] = "structural",
         ownership_name: Annotated[
             str,
             typer.Option("--mcp-ownership", help="external-registration or plugin-managed"),
@@ -1732,6 +1817,10 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
         if harness in _PLUGIN_HOSTS and harness not in _PLUGIN_COMMAND_HOSTS[command_name]:
             _refuse_unsupported_plugin_command(harness, command_name)
             return
+        if observation_profile not in {"structural", "ordinary"}:
+            raise typer.BadParameter("--observation-profile must be structural or ordinary")
+        if observation_profile == "ordinary" and (harness == "codex" or format_name != "native"):
+            raise typer.BadParameter("ordinary observation requires native Claude or Cursor")
         if harness == "codex":
             module = importlib.import_module("yoetz.cli.codex_plugin")
             operation = cast(Callable[..., int], getattr(module, "run_codex_plugin_command"))
@@ -1761,6 +1850,7 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
                 "cursor_config_root": cursor_config_root,
                 "project_root": project_root,
                 "format_name": format_name,
+                "observation_profile": observation_profile,
                 "ownership_name": ownership_name,
                 "route_profile": route_profile,
                 "requested_action": requested_action,
@@ -1780,6 +1870,7 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
                     ownership_name=ownership_name,
                     route_profile=route_profile,
                     development_enabled=development_enabled,
+                    observation_profile=observation_profile,
                     json_output=json_output,
                 )
             )
@@ -1809,6 +1900,7 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
                 "marketplace_root": marketplace_root,
                 "project_root": project_root,
                 "format_name": format_name,
+                "observation_profile": observation_profile,
                 "ownership_name": ownership_name,
                 "route_profile": route_profile,
                 "requested_action": requested_action,
