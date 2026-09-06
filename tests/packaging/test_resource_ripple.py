@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -111,7 +112,13 @@ def _run_resource_manifest(*arguments: str, repo_root: Path) -> subprocess.Compl
         source_root if not existing else os.pathsep.join((source_root, existing))
     )
     return subprocess.run(
-        [sys.executable, str(_REPO_ROOT / "scripts/verify_resource_manifest.py"), *arguments],
+        [
+            sys.executable,
+            str(_REPO_ROOT / "scripts/verify_resource_manifest.py"),
+            *arguments,
+            "--repo-root",
+            str(repo_root),
+        ],
         cwd=repo_root,
         env=environment,
         capture_output=True,
@@ -119,6 +126,19 @@ def _run_resource_manifest(*arguments: str, repo_root: Path) -> subprocess.Compl
         text=True,
         timeout=120,
     )
+
+
+def _load_resource_manifest_module() -> Any:
+    spec = importlib.util.spec_from_file_location(
+        "_yoetz_test_verify_resource_manifest",
+        _REPO_ROOT / "scripts/verify_resource_manifest.py",
+    )
+    if spec is None or spec.loader is None:
+        raise AssertionError("could not load verify_resource_manifest.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_real_checkout_passes_the_single_ci_entrypoint() -> None:
@@ -164,7 +184,7 @@ def test_sync_retires_prior_inventory_file_before_manifest_publish_and_retries(
 ) -> None:
     """An interrupted retirement leaves an old manifest that a retry can converge."""
 
-    from scripts import verify_resource_manifest as resource_manifest
+    resource_manifest = _load_resource_manifest_module()
 
     resource_root = tmp_path / "src/yoetz/resources"
     stale_relative = "fixtures/replay/retired.case.json"
