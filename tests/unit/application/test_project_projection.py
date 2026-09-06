@@ -46,6 +46,7 @@ from yoetz.domain.privacy import (
 )
 from yoetz.ports.control import ControlError
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
+from yoetz.protocol.models import OmittedContentModel, StatusProjectDetectionModel
 
 pytestmark = pytest.mark.anyio
 
@@ -212,6 +213,7 @@ async def test_coordination_resource_hydration_is_sink_and_generation_bound() ->
         "category": "repository_excerpt",
         "reason": "local_disclosure_not_authorized",
     }
+    StatusProjectDetectionModel.model_validate(denied_rows[0])
 
 
 async def test_advice_coordination_selector_hydrates_for_recipient_or_omits() -> None:
@@ -280,6 +282,7 @@ async def test_advice_coordination_selector_hydrates_for_recipient_or_omits() ->
         "category": "repository_excerpt",
         "reason": "local_disclosure_not_authorized",
     }
+    OmittedContentModel.model_validate(denied_item["coordination_resource_paths"])
 
 
 async def test_advice_revalidation_fences_revoked_selector_with_existing_omission() -> None:

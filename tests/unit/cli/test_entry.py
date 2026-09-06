@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Iterator
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -12,6 +14,47 @@ import yoetz.cli.observe_hooks as observe_hooks
 import yoetz.config.paths as paths
 import yoetz.service.client as client_module
 from yoetz.ports.control import ServiceState, ServiceStatus
+
+
+@pytest.fixture
+def isolated_cli_modules() -> Iterator[None]:
+    """Temporarily remove the full Typer graph without poisoning later test imports.
+
+    The fast path must prove that ``yoetz.cli.app`` is absent while it connects.  Restoring both
+    ``sys.modules`` and the package attributes matters because another test may already hold a
+    function imported from the original module; leaving a newly re-imported module attached to the
+    package makes string-based monkeypatching target a different module instance.
+    """
+
+    package = sys.modules["yoetz.cli"]
+    module_names = ("yoetz.cli.app", "yoetz.cli.project")
+    sentinel = object()
+    saved_modules: dict[str, ModuleType | None] = {
+        name: sys.modules.get(name) for name in module_names
+    }
+    saved_attributes: dict[str, object] = {
+        name.rsplit(".", 1)[-1]: getattr(package, name.rsplit(".", 1)[-1], sentinel)
+        for name in module_names
+    }
+    for name in module_names:
+        sys.modules.pop(name, None)
+        attribute = name.rsplit(".", 1)[-1]
+        if hasattr(package, attribute):
+            delattr(package, attribute)
+    try:
+        yield
+    finally:
+        for name, module in saved_modules.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+        for attribute, value in saved_attributes.items():
+            if value is sentinel:
+                if hasattr(package, attribute):
+                    delattr(package, attribute)
+            else:
+                setattr(package, attribute, value)
 
 
 def test_observe_fast_path_propagates_handler_exit_code(
@@ -62,10 +105,11 @@ def test_service_status_fast_path_falls_through_for_help_and_unknown_options() -
 
 
 def test_service_status_fast_path_connects_before_loading_full_cli(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    isolated_cli_modules: None,
 ) -> None:
-    for module_name in ("yoetz.cli.app", "yoetz.cli.project"):
-        sys.modules.pop(module_name, None)
+    del isolated_cli_modules
     closed = False
     status = ServiceStatus(
         protocol_version="1.0",
@@ -108,10 +152,12 @@ def test_service_status_fast_path_connects_before_loading_full_cli(
 
 
 def test_service_status_fast_path_preserves_silent_service_guidance(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    isolated_cli_modules: None,
 ) -> None:
-    for module_name in ("yoetz.cli.app", "yoetz.cli.project"):
-        sys.modules.pop(module_name, None)
+    del isolated_cli_modules
     root = tmp_path
 
     def state_dir(**_kwargs: object) -> Path:

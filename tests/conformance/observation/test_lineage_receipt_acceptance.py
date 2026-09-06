@@ -18,7 +18,7 @@ from typing import cast
 
 import pytest
 
-from builders.multi_agent import multi_agent_service
+from builders.multi_agent import multi_agent_service, private_service_root
 from yoetz.adapters.sqlite.connection import open_read_only
 from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.application.check import FinalSemanticEvaluation
@@ -916,134 +916,136 @@ async def test_parent_receipt_reconstructs_from_copied_parent_bundle_without_chi
         assert source_bundle.is_dir()
         await service.app.close()
 
-        standalone_root = tmp_path / "standalone"
-        copied_bundle = standalone_root / route.bundle_relpath
-        copied_bundle.parent.mkdir(parents=True)
-        shutil.copytree(source_bundle, copied_bundle)
-        owned_root = standalone_root / "owned_objects"
-        owned_root.mkdir()
-        for object_id, data in owned_objects.items():
-            (owned_root / f"{object_id}.bin").write_bytes(data)
-        assert not (standalone_root / "tasks" / child.task_id).exists()
+        with private_service_root() as standalone_root:
+            copied_bundle = standalone_root / route.bundle_relpath
+            copied_bundle.parent.mkdir(parents=True)
+            shutil.copytree(source_bundle, copied_bundle)
+            owned_root = standalone_root / "owned_objects"
+            owned_root.mkdir()
+            for object_id, data in owned_objects.items():
+                (owned_root / f"{object_id}.bin").write_bytes(data)
+            assert not (standalone_root / "tasks" / child.task_id).exists()
 
-        class _CopiedObjects:
-            def __init__(self, *, reject_object_id: str | None = None) -> None:
-                self._reject_object_id = reject_object_id
+            class _CopiedObjects:
+                def __init__(self, *, reject_object_id: str | None = None) -> None:
+                    self._reject_object_id = reject_object_id
 
-            def open_verified(self, ref: object):
-                async def _read() -> object:
-                    object_id = cast(str, getattr(ref, "object_id"))
-                    if object_id == self._reject_object_id:
-                        raise AssertionError("stored receipt object accessed during reconstruction")
-                    yield (owned_root / f"{object_id}.bin").read_bytes()
+                def open_verified(self, ref: object):
+                    async def _read() -> object:
+                        object_id = cast(str, getattr(ref, "object_id"))
+                        if object_id == self._reject_object_id:
+                            raise AssertionError(
+                                "stored receipt object accessed during reconstruction"
+                            )
+                        yield (owned_root / f"{object_id}.bin").read_bytes()
 
-                return _read()
+                    return _read()
 
-        copied_objects = _CopiedObjects()
-        copied_db = open_read_only(copied_bundle / "ledger.sqlite3")
-        try:
-            copied_ledger = SqliteLedger(
-                db=copied_db,
-                task_id=parent.task_id,
-                ownership_fence=OwnershipFence(
-                    "svc_00000000-0000-4000-8000-000000000001",
-                    1,
-                    1,
-                    "standalone-replay-nonce",
-                ),
-                clock=service.clock,
-                ids=IdPort(),
-                objects=cast(ObjectStorePort, copied_objects),
-            )
-            standalone_runtime = cast(
-                TaskRuntime,
-                SimpleNamespace(
-                    task_id=parent.task_id,
-                    session_id=parent.session_id,
-                    ledger=copied_ledger,
-                    objects=copied_objects,
-                ),
-            )
-            replay_request = ReceiptRequest.model_validate(
-                {
-                    **_identity(),
-                    "request_id": receipt_request_id,
-                    "task_id": parent.task_id,
-                    "session_id": parent.session_id,
-                    "writer_id": parent.writer_id,
-                    "expected_frontier": _frontier_json(checked.result_frontier),
-                    "format": "json",
-                    "include": "standard",
-                    "redaction_profile": "default_local_export",
-                }
-            )
-            copied_operation = await copied_ledger.lookup_operation(
-                parent.writer_id, receipt_request_id
-            )
-            assert copied_operation is not None
-            replayed = await _replay_result(
-                standalone_runtime,
-                replay_request,
-                copied_operation,
-            )
-
-            # Reconstruct the document from the copied parent event prefix itself.  This second
-            # ledger has the same SQLite bytes but refuses the stored receipt object, so this path
-            # proves the projection/case/context/receipt builders rather than object replay.
-            ledger_only_objects = _CopiedObjects(reject_object_id=receipt_ref.object_id)
-            ledger_only_db = open_read_only(copied_bundle / "ledger.sqlite3")
+            copied_objects = _CopiedObjects()
+            copied_db = open_read_only(copied_bundle / "ledger.sqlite3")
             try:
-                ledger_only = SqliteLedger(
-                    db=ledger_only_db,
+                copied_ledger = SqliteLedger(
+                    db=copied_db,
                     task_id=parent.task_id,
                     ownership_fence=OwnershipFence(
                         "svc_00000000-0000-4000-8000-000000000001",
                         1,
                         1,
-                        "standalone-ledger-reconstruction-nonce",
+                        "standalone-replay-nonce",
                     ),
                     clock=service.clock,
                     ids=IdPort(),
-                    objects=cast(ObjectStorePort, ledger_only_objects),
+                    objects=cast(ObjectStorePort, copied_objects),
                 )
-                original_document = receipt_document_from_json(original.document)
-                subject_frontier = original_document.subject_frontier
-                assert subject_frontier == checked.result_frontier
-                subject_records = tuple(
-                    [
-                        record
-                        async for record in ledger_only.load_events(
-                            parent.session_id,
-                            through=subject_frontier.sequence,
-                        )
-                    ]
+                standalone_runtime = cast(
+                    TaskRuntime,
+                    SimpleNamespace(
+                        task_id=parent.task_id,
+                        session_id=parent.session_id,
+                        ledger=copied_ledger,
+                        objects=copied_objects,
+                    ),
                 )
-                projection = replay(subject_records)
-                availability = await ledger_only.load_case_availability(
-                    parent.session_id,
-                    subject_frontier,
-                    projection,
+                replay_request = ReceiptRequest.model_validate(
+                    {
+                        **_identity(),
+                        "request_id": receipt_request_id,
+                        "task_id": parent.task_id,
+                        "session_id": parent.session_id,
+                        "writer_id": parent.writer_id,
+                        "expected_frontier": _frontier_json(checked.result_frontier),
+                        "format": "json",
+                        "include": "standard",
+                        "redaction_profile": "default_local_export",
+                    }
                 )
-                case = build_deterministic_case(projection, subject_records, availability)
-                context = _context(projection, subject_frontier, case, subject_records)
-                reconstructed_document = build_receipt(
-                    context,
-                    original_document.receipt_id,
-                    original_document.task_id,
-                    original_document.session_id,
-                    original_document.generated_at,
-                    original_document.versions,
-                    ReceiptRedactionProfile.DEFAULT_LOCAL_EXPORT,
-                    ReceiptInclude.STANDARD,
+                copied_operation = await copied_ledger.lookup_operation(
+                    parent.writer_id, receipt_request_id
                 )
-            finally:
-                ledger_only_db.close()
-        finally:
-            copied_db.close()
+                assert copied_operation is not None
+                replayed = await _replay_result(
+                    standalone_runtime,
+                    replay_request,
+                    copied_operation,
+                )
 
-        assert replayed.receipt_digest == original.receipt_digest
-        assert replayed.document == original.document
-        original_wire = cast(JsonValue, receipt_document_to_json(original_document))
-        reconstructed_wire = cast(JsonValue, receipt_document_to_json(reconstructed_document))
-        assert canonical_encode(reconstructed_wire) == canonical_encode(original_wire)
-        assert canonical_digest(reconstructed_wire) == original.receipt_digest
+                # Reconstruct the document from the copied parent event prefix itself.  This second
+                # ledger has the same SQLite bytes but refuses the stored receipt object, so this path
+                # proves the projection/case/context/receipt builders rather than object replay.
+                ledger_only_objects = _CopiedObjects(reject_object_id=receipt_ref.object_id)
+                ledger_only_db = open_read_only(copied_bundle / "ledger.sqlite3")
+                try:
+                    ledger_only = SqliteLedger(
+                        db=ledger_only_db,
+                        task_id=parent.task_id,
+                        ownership_fence=OwnershipFence(
+                            "svc_00000000-0000-4000-8000-000000000001",
+                            1,
+                            1,
+                            "standalone-ledger-reconstruction-nonce",
+                        ),
+                        clock=service.clock,
+                        ids=IdPort(),
+                        objects=cast(ObjectStorePort, ledger_only_objects),
+                    )
+                    original_document = receipt_document_from_json(original.document)
+                    subject_frontier = original_document.subject_frontier
+                    assert subject_frontier == checked.result_frontier
+                    subject_records = tuple(
+                        [
+                            record
+                            async for record in ledger_only.load_events(
+                                parent.session_id,
+                                through=subject_frontier.sequence,
+                            )
+                        ]
+                    )
+                    projection = replay(subject_records)
+                    availability = await ledger_only.load_case_availability(
+                        parent.session_id,
+                        subject_frontier,
+                        projection,
+                    )
+                    case = build_deterministic_case(projection, subject_records, availability)
+                    context = _context(projection, subject_frontier, case, subject_records)
+                    reconstructed_document = build_receipt(
+                        context,
+                        original_document.receipt_id,
+                        original_document.task_id,
+                        original_document.session_id,
+                        original_document.generated_at,
+                        original_document.versions,
+                        ReceiptRedactionProfile.DEFAULT_LOCAL_EXPORT,
+                        ReceiptInclude.STANDARD,
+                    )
+                finally:
+                    ledger_only_db.close()
+            finally:
+                copied_db.close()
+
+            assert replayed.receipt_digest == original.receipt_digest
+            assert replayed.document == original.document
+            original_wire = cast(JsonValue, receipt_document_to_json(original_document))
+            reconstructed_wire = cast(JsonValue, receipt_document_to_json(reconstructed_document))
+            assert canonical_encode(reconstructed_wire) == canonical_encode(original_wire)
+            assert canonical_digest(reconstructed_wire) == original.receipt_digest

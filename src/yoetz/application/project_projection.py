@@ -17,7 +17,6 @@ from yoetz.domain.privacy import (
     DataCategory,
     LocalDisclosureSink,
 )
-from yoetz.domain.values import JsonObject
 from yoetz.ports.control import ControlError
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.models import ProjectTextRefModel
@@ -237,13 +236,11 @@ async def hydrate_status_advice_coordination_resources(
             or detail.resource_paths is None
             or detail.counterpart_task_id != counterpart
         ):
-            row["coordination_resource_paths"] = JsonObject(
-                {
-                    "omitted": True,
-                    "category": "repository_excerpt",
-                    "reason": "local_disclosure_not_authorized",
-                }
-            )
+            row["coordination_resource_paths"] = {
+                "omitted": True,
+                "category": "repository_excerpt",
+                "reason": "local_disclosure_not_authorized",
+            }
         else:
             row["coordination_resource_paths"] = detail.resource_paths
         hydrated.append(row)

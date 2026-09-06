@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
 
@@ -363,7 +364,13 @@ async def project_status_snapshot(
         )
     detection_rows: list[StatusProjectDetectionModel] = []
     for item in latest.detections:
-        wire = dict(item)
+        wire: dict[str, object] = dict(item)
+        # The project application keeps the internal snapshot deeply frozen.  Normalize only the
+        # nested omission mapping at this strict model boundary; this preserves the exact marker
+        # while allowing the public model's ``OmittedContentModel`` branch to validate it.
+        resource_paths = wire.get("resource_paths")
+        if isinstance(resource_paths, Mapping):
+            wire["resource_paths"] = dict(cast(Mapping[str, object], resource_paths).items())
         # Coordination domain rows use integers internally; the closed status wire uses the
         # canonical integer-string representation shared by every public projection.
         resource_count = wire.get("resource_count")

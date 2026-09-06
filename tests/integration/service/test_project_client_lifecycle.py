@@ -551,6 +551,7 @@ async def test_project_lifecycle_uses_real_ready_client_and_exact_grant_retries(
             assert isinstance(advice_first_page, dict)
             advice_first_items = _wire_rows(cast(object, advice_first_page["items"]))
             assert len(advice_first_items) == 1
+            assert advice_first_items[0]["coordination_resource_paths"] == ["src/shared.py"]
             advice_second_body = {
                 **advice_body,
                 "request_id": new_id(IdKind.REQUEST),
@@ -565,15 +566,32 @@ async def test_project_lifecycle_uses_real_ready_client_and_exact_grant_retries(
             assert isinstance(advice_second_page, dict)
             advice_second_items = _wire_rows(cast(object, advice_second_page["items"]))
             assert len(advice_second_items) == 1
+            assert advice_second_items[0]["coordination_resource_paths"] == {
+                "omitted": True,
+                "category": "repository_excerpt",
+                "reason": "local_disclosure_not_authorized",
+            }
             assert advice_first_items[0]["finding_id"] == advice_second_items[0]["finding_id"]
 
-            status_body["request_id"] = new_id(IdKind.REQUEST)
-            status = await client.status(StatusRequest.model_validate(status_body))
+            denied_status_body = {
+                **status_body,
+                "request_id": new_id(IdKind.REQUEST),
+                "session_id": second.session_id,
+                "writer_id": second.writer_id,
+            }
+            status = await client_b.status(StatusRequest.model_validate(denied_status_body))
             status_wire = status.model_dump(mode="json", by_alias=True, exclude_none=False)
             page = status_wire["page"]
             assert isinstance(page, dict)
             members = _wire_rows(cast(object, page["members"]))
             assert {item["task_id"] for item in members} == {first.task_id, second.task_id}
+            detections = _wire_rows(cast(object, page["detections"]))
+            assert len(detections) == 1
+            assert detections[0]["resource_paths"] == {
+                "omitted": True,
+                "category": "repository_excerpt",
+                "reason": "local_disclosure_not_authorized",
+            }
 
             unlinked = await client.project(
                 JsonObject(

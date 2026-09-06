@@ -4278,7 +4278,15 @@ async def test_host_hook_row_refused_by_ledger_schema_quarantines_then_delivers_
 
     cell = _reattach_fixture(tmp_path, f"host-{source.value}")
     db, cell.store = _schema_eight_store()
-    envelope = _envelope(session=cell.session, identity=f"hook:{source.value}:1", source=source)
+    # Native Claude/Cursor hooks are post-only: their admitted result
+    # materializes as evidence_recorded rather than a fabricated action.
+    envelope = _envelope(
+        session=cell.session,
+        kind="PostToolUse",
+        identity=f"hook:{source.value}:1",
+        exit_status=1,
+        source=source,
+    )
 
     rejected = await cell.ingest(envelope)
 

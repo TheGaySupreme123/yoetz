@@ -19,7 +19,6 @@ from yoetz.domain.findings import FINDING_KIND_TRAITS, FindingOrigin
 from yoetz.domain.observation import AdviceSnapshot
 from yoetz.domain.values import (
     Frontier,
-    JsonObject,
     SemanticContinuation,
     disclosure_continuation,
     repository_grant_continuation,
@@ -308,13 +307,11 @@ async def _coordination_advice_status_items(
                     "coordination_detection_id": detection_id,
                     "coordination_membership_generation": str(generation),
                     "coordination_counterpart_task_id": counterpart,
-                    "coordination_resource_paths": JsonObject(
-                        {
-                            "omitted": True,
-                            "category": "repository_excerpt",
-                            "reason": "local_disclosure_not_authorized",
-                        }
-                    ),
+                    "coordination_resource_paths": {
+                        "omitted": True,
+                        "category": "repository_excerpt",
+                        "reason": "local_disclosure_not_authorized",
+                    },
                 }
             )
     return tuple(items[:limit])
