@@ -1593,9 +1593,18 @@ def build_semantic_case(
                     )
                     continue
                 linked = tuple(
-                    item
-                    for item in (ref, str(record.payload.action_id), str(record.source_event_id))
-                    if item in allowed
+                    sorted(
+                        {
+                            item
+                            for item in (
+                                ref,
+                                str(record.payload.action_id),
+                                str(record.source_event_id),
+                            )
+                            if item in allowed
+                        },
+                        key=str.encode,
+                    )
                 )[:16]
                 if not linked:
                     continue

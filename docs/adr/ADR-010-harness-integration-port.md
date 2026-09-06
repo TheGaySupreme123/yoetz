@@ -356,6 +356,11 @@ private SQL.
 Observation consent is project-level and separate from egress consent. The plaintext local boundary
 records a private workspace commitment, structural outbox/quarantine evidence, and encrypted object
 identities—never raw task content or a raw path in logs/status/SQLite.
+Semantic composition keeps this observation workspace commitment separate from the
+`TaskRoute.repository_privacy_commitment`: it derives the observation key only through the durable
+workspace-to-Yoetz-session route, verifies the route is for the exact runtime task, and repeats that
+check before disclosure. Missing or contradictory route membership is an explicit content gap; the
+privacy commitment is never used as an observation-workspace fallback.
 Hook ingress and every consent/control lifecycle entry point derive that commitment from one shared
 workspace canonicalizer: the nearest safe Git root for a Git subdirectory, or the exact safe
 directory for non-Git workspaces. Authority never searches ancestor commitments. Pre-existing

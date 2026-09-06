@@ -247,10 +247,14 @@ row, keeping a background sweep from consuming that row before the foreground co
 The reservation is nonblocking and is released on cancellation or after the bounded drain; a busy
 owner can still leave an explicit content gap. The hook commits its structural envelope, pairing,
 mapping, and outbox intent locally
-before attempting the bounded service drain. A content-bearing pass prioritizes the current row
-after its same-session FIFO prefix, within a one-second drain and sixteen-row bound. A healthy
-accepted drain forwards the transient chunks and exact profile to the service; a bounded service
-failure or completed cancellation path leaves the structural record plus an explicit content gap.
+before attempting the bounded service drain. Every ordinary-profile native pass except teardown
+`SessionEnd` has a one-second drain window even when its current structural row has no eligible
+chunks, such as a Yoetz-owned MCP mutation whose result is already durable elsewhere. When chunks
+exist, the pass prioritizes the current row after its same-session FIFO prefix, within that
+one-second drain and sixteen-row bound. Teardown keeps its host-clamped three-second hook and
+tighter ingest/drain window. A healthy accepted drain forwards the transient chunks and exact
+profile to the service; a bounded service failure or completed cancellation path leaves the
+structural record plus an explicit content gap.
 A hard process kill before that diagnostic path completes may lose transient content without a
 durable gap marker; making native plaintext survive that boundary requires a separate service-owned
 staging protocol. The current

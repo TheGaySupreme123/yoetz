@@ -3213,6 +3213,13 @@ requires authenticated captured-object provenance, case membership, source/sessi
 and the effective privacy selection. Captured bytes remain bounded advisory evidence; they do not
 prove that a command passed, a file was independently inspected, or a reviewer acted on the bytes.
 
+The repository privacy commitment on a `TaskRoute` is an egress-policy key, not an observation
+workspace key. Semantic composition resolves the observation workspace only from the durable
+workspace-to-Yoetz-session route, verifies that route's task matches the exact runtime task, and
+rechecks that binding before disclosure. An inactive historical route is usable only for the same
+task. An absent, ambiguous, or mismatched route leaves captured content unavailable; the privacy
+commitment cannot substitute for the observation workspace.
+
 Observation consent is one project-level confirmation recorded as a private workspace commitment.
 Consent, status, pause, resume, revoke, setup probes, and hook ingress all canonicalize an explicit
 Git subdirectory to the same nearest safe Git project root; a non-Git directory remains its exact

@@ -148,6 +148,7 @@ from yoetz.domain.values import (
     format_rfc3339_millis,
     parse_rfc3339_millis,
     repository_grant_continuation,
+    validate_commitment,
 )
 from yoetz.domain.values import (
     JsonValue as DomainJsonValue,
@@ -2359,6 +2360,55 @@ async def _recover_response_evaluation(
     return FinalSemanticEvaluation(status, reason, judgment=judgment, provenance=provenance)
 
 
+def _observation_workspace_for_runtime(runtime: TaskRuntime) -> str | None:
+    """Resolve the task's observation workspace through its durable session route.
+
+    ``TaskRoute.repository_privacy_commitment`` authorizes egress and is deliberately a
+    different commitment domain from the observation store's workspace key.  The latter is
+    selected only by the durable session route, then checked against the exact runtime task
+    before it is handed to the local consent fence.  An unavailable or contradictory route is
+    an observation-content gap, never a reason to try the privacy commitment as a fallback.
+    """
+
+    observation = runtime.observation
+    if observation is None:
+        return None
+    workspace_lookup = getattr(observation, "workspace_for_yoetz_session", None)
+    route_lookup = getattr(observation, "observation_route_for_session", None)
+    if not callable(workspace_lookup) or not callable(route_lookup):
+        return None
+    try:
+        workspace = workspace_lookup(runtime.session_id)
+    except Exception:
+        return None
+    if type(workspace) is not str:
+        return None
+    try:
+        validate_commitment(workspace)
+    except TypeError, ValueError:
+        return None
+    try:
+        route = route_lookup(workspace=workspace, yoetz_session_id=runtime.session_id)
+    except Exception:
+        return None
+    if type(route) is not tuple:
+        return None
+    route_values = cast(tuple[object, ...], route)
+    if (
+        len(route_values) != 3
+        or type(route_values[0]) is not str
+        or type(route_values[1]) is not str
+        or type(route_values[2]) is not bool
+        or route_values[1] != runtime.task_id
+    ):
+        return None
+    try:
+        validate_commitment(route_values[0])
+    except TypeError, ValueError:
+        return None
+    return workspace
+
+
 def _privacy_gated_semantic_evaluator(
     privacy: PrivacyCoordinator,
     clock: ClockPort,
@@ -2608,41 +2658,46 @@ def _privacy_gated_semantic_evaluator(
             captured_local_fence_generation: str | None = None
             captured_local_fence_profiles: tuple[str, ...] = ()
             captured_local_fence_required = False
+            captured_observation_workspace: str | None = None
             if (
                 runtime is not None
                 and "targeted_excerpts" in review_selection.sections
                 and review_selection.max_excerpts > 0
             ):
-                try:
-                    captured_resolution = await resolve_captured_semantic_content(
-                        runtime=runtime,
-                        frozen=FrozenCase(frozen.case, current_lease[0]),
-                        workspace_commitment=repository,
-                        local_observation=local_observation,
-                        max_parts=min(
-                            MAX_CAPTURED_SEMANTIC_CONTENT_PARTS,
-                            max(16, review_selection.max_excerpts * 16),
-                        ),
-                        max_total_bytes=MAX_CAPTURED_SEMANTIC_INPUT_BYTES,
-                    )
-                    captured_content = captured_resolution.content
-                    captured_content_scope = captured_resolution.scope
-                    captured_content_gaps = captured_resolution.gaps
-                    captured_local_fence_generation = captured_resolution.local_fence_generation
-                    captured_local_fence_profiles = captured_resolution.local_fence_profiles
-                    captured_local_fence_required = captured_resolution.local_fence_required
-                except Exception as exc:
-                    # Content is an additive evidence arm. A malformed or unavailable
-                    # retained object must leave the deterministic case usable while
-                    # carrying an explicit bounded coverage gap into the packet.
-                    record_unexpected_exception_without_raising(
-                        exc,
-                        component="semantic_composition",
-                        operation="semantic_content_resolution_failed",
-                        request_id=frozen.lease.operation_id,
-                    )
+                captured_observation_workspace = _observation_workspace_for_runtime(runtime)
+                if captured_observation_workspace is None:
                     captured_content_gaps = ("content_capture_unavailable",)
-                    captured_local_fence_required = False
+                else:
+                    try:
+                        captured_resolution = await resolve_captured_semantic_content(
+                            runtime=runtime,
+                            frozen=FrozenCase(frozen.case, current_lease[0]),
+                            workspace_commitment=captured_observation_workspace,
+                            local_observation=local_observation,
+                            max_parts=min(
+                                MAX_CAPTURED_SEMANTIC_CONTENT_PARTS,
+                                max(16, review_selection.max_excerpts * 16),
+                            ),
+                            max_total_bytes=MAX_CAPTURED_SEMANTIC_INPUT_BYTES,
+                        )
+                        captured_content = captured_resolution.content
+                        captured_content_scope = captured_resolution.scope
+                        captured_content_gaps = captured_resolution.gaps
+                        captured_local_fence_generation = captured_resolution.local_fence_generation
+                        captured_local_fence_profiles = captured_resolution.local_fence_profiles
+                        captured_local_fence_required = captured_resolution.local_fence_required
+                    except Exception as exc:
+                        # Content is an additive evidence arm. A malformed or unavailable
+                        # retained object must leave the deterministic case usable while
+                        # carrying an explicit bounded coverage gap into the packet.
+                        record_unexpected_exception_without_raising(
+                            exc,
+                            component="semantic_composition",
+                            operation="semantic_content_resolution_failed",
+                            request_id=frozen.lease.operation_id,
+                        )
+                        captured_content_gaps = ("content_capture_unavailable",)
+                        captured_local_fence_required = False
             semantic_case = build_semantic_case(
                 case_id=recovered_case_id or ids.new(IdKind.OUTBOUND_CASE),
                 frozen_case=frozen.case,
@@ -2769,7 +2824,16 @@ def _privacy_gated_semantic_evaluator(
                 async def _captured_content_fence_current() -> bool:
                     if not captured_local_fence_required:
                         return True
-                    if captured_local_fence_generation is None or local_observation is None:
+                    if (
+                        captured_local_fence_generation is None
+                        or captured_observation_workspace is None
+                        or local_observation is None
+                    ):
+                        return False
+                    if (
+                        _observation_workspace_for_runtime(runtime)
+                        != captured_observation_workspace
+                    ):
                         return False
                     checker = getattr(
                         local_observation,
@@ -2781,7 +2845,7 @@ def _privacy_gated_semantic_evaluator(
                     try:
                         return (
                             checker(
-                                repository,
+                                captured_observation_workspace,
                                 captured_local_fence_generation,
                                 captured_local_fence_profiles,
                             )

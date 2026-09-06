@@ -14,6 +14,7 @@ import hashlib
 import io
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -26,6 +27,7 @@ from tests.integration.objects.test_envelope_and_encrypted_files import (
     WrapKeyForObjectTest,
 )
 
+import integration.service.test_semantic_non_dispatch as semantic_non_dispatch
 from yoetz.adapters.integrations.codex_lifecycle import LifecycleMapping, store_mapping
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.adapters.objects.encrypted_files import EncryptedFilesObjectStore
@@ -33,6 +35,8 @@ from yoetz.adapters.sqlite import connection as sqlite_connection
 from yoetz.adapters.sqlite.migrations import initialize_bundle
 from yoetz.adapters.sqlite.observation import SqliteObservationStore
 from yoetz.adapters.sqlite.repository import SqliteLedger
+from yoetz.application.check import FinalSemanticEvaluation
+from yoetz.application.egress import PrivacyCoordinator
 from yoetz.application.observation_coordinator import ObservationCoordinator
 from yoetz.application.semantic_case import (
     build_semantic_case,
@@ -50,15 +54,21 @@ from yoetz.domain.observation_profiles import (
     CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
     CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
 )
-from yoetz.domain.privacy import ReviewContextProfile, ReviewSelectionPolicy
+from yoetz.domain.privacy import ProviderBinding, ReviewContextProfile, ReviewSelectionPolicy
 from yoetz.domain.values import JsonValue as DomainJsonValue
 from yoetz.domain.values import Timestamp, evidence_id
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.importer import ImporterPort
 from yoetz.ports.keys import BundleKeys
-from yoetz.ports.ledger import FrozenCase
-from yoetz.ports.objects import ObjectKind, ObjectRootSnapshot, ObjectStorePort
+from yoetz.ports.ledger import CheckPhase, FrozenCase
+from yoetz.ports.objects import (
+    ObjectKind,
+    ObjectMetadata,
+    ObjectRootSnapshot,
+    ObjectSource,
+    ObjectStorePort,
+)
 from yoetz.ports.runtime import (
     BundleRuntimePort,
     OwnershipFence,
@@ -67,6 +77,7 @@ from yoetz.ports.runtime import (
     StartCompletionEvidence,
     TaskRuntime,
 )
+from yoetz.ports.start_catalog import StartCatalogPort
 from yoetz.protocol.canonical import JsonValue as CanonicalJsonValue
 from yoetz.protocol.canonical import canonical_encode
 from yoetz.protocol.coverage import (
@@ -76,6 +87,7 @@ from yoetz.protocol.coverage import (
     PublicationChannel,
 )
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
+from yoetz.protocol.models import SemanticStatus
 
 _NOW = datetime(2026, 9, 5, 17, 0, tzinfo=UTC)
 _ZERO_DIGEST = "sha256:" + "0" * 64
@@ -169,6 +181,9 @@ class _ServiceClient:
 
 
 type _Connector = Callable[[object], Awaitable[_ServiceClient]]
+type _CompositionEvaluator = Callable[
+    [FrozenCase, tuple[object, ...], TaskRuntime], Awaitable[FinalSemanticEvaluation]
+]
 
 
 def _ids(kind: IdKind, seed: int) -> str:
@@ -352,6 +367,194 @@ def _reopen_runtime(
         observation=ledger.open_observation_store(),
     )
     return database, ledger, reopened
+
+
+async def _native_claude_case(
+    tmp_path: Path,
+    *,
+    marker: bytes,
+) -> tuple[
+    Path,
+    str,
+    LocalObservationStore,
+    SqliteObservationStore,
+    SqliteLedger,
+    TaskRuntime,
+    FrozenCase,
+]:
+    """Build one real captured Claude case for composition-level semantic tests."""
+
+    profile = CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+    (
+        project,
+        workspace,
+        session_commitment,
+        local,
+        observation,
+        ledger,
+        runtime,
+        _coordinator,
+        client,
+        connect,
+    ) = await _pipeline(
+        tmp_path,
+        codex_session_id="claude:composition-capture-session",
+        profile=profile,
+    )
+
+    def run_async(factory: Callable[[], Awaitable[object]]) -> object:
+        return asyncio.run(factory())
+
+    def run_hook(event_name: str, payload: Mapping[str, object]) -> int:
+        return handle_claude_observe(
+            event_name=event_name,
+            stdin_bytes=canonical_encode(cast(CanonicalJsonValue, payload)),
+            workspace=str(project),
+            _state=tmp_path / "state",
+            stdout=io.BytesIO(),
+            connect=cast(object, connect),  # type: ignore[arg-type]
+            run_async=run_async,
+            observation_profile=profile,
+        )
+
+    assert (
+        await asyncio.to_thread(
+            run_hook,
+            "PreToolUse",
+            {
+                "hook_event_name": "PreToolUse",
+                "session_id": "composition-capture-session",
+                "tool_name": "Bash",
+                "tool_use_id": "composition-tool-1",
+            },
+        )
+        == 0
+    )
+    assert (
+        await asyncio.to_thread(
+            run_hook,
+            "PostToolUse",
+            {
+                "hook_event_name": "PostToolUse",
+                "session_id": "composition-capture-session",
+                "tool_name": "Bash",
+                "tool_use_id": "composition-tool-1",
+                "tool_response": marker.decode("utf-8"),
+                "exit_status": 0,
+            },
+        )
+        == 0
+    )
+    assert len(client.requests) == 2
+    assert client.requests[1].content_chunks[0].content == marker
+
+    observation.record_workspace_session_route(
+        workspace=workspace,
+        yoetz_session_id=runtime.session_id,
+        yoetz_task_id=runtime.task_id,
+        yoetz_writer_id=cast(str, runtime.writer_id),
+        codex_session_commitment=session_commitment,
+        bound_at=Timestamp("2026-09-05T17:00:00.000Z"),
+    )
+    frontier = await ledger.load_frontier()
+    frozen = await ledger.freeze_case(
+        runtime.session_id,
+        cast(str, runtime.writer_id),
+        frontier.sequence,
+        _ids(IdKind.REQUEST, 24),
+        _ZERO_DIGEST,
+    )
+    assert isinstance(frozen, FrozenCase)
+    operation = await ledger.lookup_operation(
+        cast(str, runtime.writer_id), frozen.lease.operation_id
+    )
+    assert operation is not None and operation.resume_object_ref is not None
+    prior = operation.resume_object_ref
+    deterministic_payload = canonical_encode(
+        {
+            "schema_version": "1.0.0",
+            "request_id": frozen.lease.operation_id,
+            "request_digest": _ZERO_DIGEST,
+            "task_id": runtime.task_id,
+            "session_id": runtime.session_id,
+            "writer_id": cast(str, runtime.writer_id),
+            "subject_frontier": frozen.case.frontier.as_wire(),
+            "dependency_digest": frozen.lease.dependency_digest,
+            "prior_resume": {
+                "object_id": prior.object_id,
+                "envelope_digest": prior.envelope_digest,
+                "commitment": prior.commitment,
+            },
+            "policy_executions": (),
+            "assessments": (),
+        }
+    )
+    staged = await runtime.objects.stage(
+        ObjectSource(data=deterministic_payload, declared_size=len(deterministic_payload)),
+        ObjectMetadata(
+            ObjectKind.DETERMINISTIC_RESULT,
+            "application/vnd.yoetz.deterministic-result+json",
+            runtime.task_id,
+            _NOW,
+        ),
+    )
+    deterministic_result = await runtime.objects.finalize(staged)
+    lease = await ledger.advance_check_phase(
+        frozen.lease,
+        CheckPhase.RESERVED,
+        CheckPhase.LOCAL_READY,
+        deterministic_result,
+    )
+    lease = await ledger.advance_check_phase(
+        lease,
+        CheckPhase.LOCAL_READY,
+        CheckPhase.SEMANTIC_WAIT,
+    )
+    return project, workspace, local, observation, ledger, runtime, FrozenCase(frozen.case, lease)
+
+
+def _assisted_composition_evaluator(
+    privacy: object,
+    *,
+    runtime: TaskRuntime,
+    local_observation: object,
+    profile: ReviewContextProfile = ReviewContextProfile.ASSISTED,
+) -> _CompositionEvaluator:
+    baseline = semantic_non_dispatch._test_effective_policy()  # pyright: ignore[reportPrivateUsage]
+    assisted = replace(
+        baseline.policy,
+        review_context_profile=profile,
+        review_selection=ReviewSelectionPolicy.for_profile(profile),
+    )
+    policy_application = semantic_non_dispatch._PolicyApplication(  # pyright: ignore[reportPrivateUsage]
+        replace(baseline, policy=assisted), repository_granted=True
+    )
+    setattr(privacy, "policy_application", policy_application)
+    setattr(privacy, "terminal_provider_result", True)
+
+    async def resolve_provider() -> ProviderBinding:
+        return semantic_non_dispatch._PROVIDER  # pyright: ignore[reportPrivateUsage]
+
+    factory = cast(
+        Callable[..., _CompositionEvaluator],
+        getattr(
+            semantic_non_dispatch.ready_composition_module, "_privacy_gated_semantic_evaluator"
+        ),
+    )
+    return factory(
+        cast(PrivacyCoordinator, privacy),
+        semantic_non_dispatch.FixedClock(),
+        semantic_non_dispatch._INSTALLATION,  # pyright: ignore[reportPrivateUsage]
+        resolve_provider,
+        cast(
+            StartCatalogPort,
+            semantic_non_dispatch._Catalog(  # pyright: ignore[reportPrivateUsage]
+                semantic_non_dispatch._route_for(runtime.task_id, runtime.session_id)  # pyright: ignore[reportPrivateUsage]
+            ),
+        ),
+        semantic_non_dispatch.ready_composition_module.IdPort(),
+        local_observation=local_observation,
+    )
 
 
 @pytest.mark.anyio
@@ -623,6 +826,128 @@ async def test_ordinary_native_hook_content_reaches_prepared_semantic_packet(
         )
     finally:
         reopened_db.close(force=True)
+
+
+@pytest.mark.anyio
+async def test_ready_composition_selects_real_native_marker_with_distinct_commitments(
+    tmp_path: Path,
+) -> None:
+    marker = b"composition-real-native-marker: inspect this"
+    project, workspace, local, _observation, _ledger, runtime, frozen = await _native_claude_case(
+        tmp_path,
+        marker=marker,
+    )
+    del project
+    assert workspace != semantic_non_dispatch._REPOSITORY  # pyright: ignore[reportPrivateUsage]
+
+    privacy = semantic_non_dispatch._Privacy(  # pyright: ignore[reportPrivateUsage]
+        task_id=runtime.task_id
+    )
+    candidates: list[object] = []
+    original_evaluate = privacy.evaluate_semantic
+
+    async def record_candidate(candidate: object, deadline: object) -> object:
+        candidates.append(candidate)
+        return await original_evaluate(candidate, deadline)
+
+    setattr(privacy, "evaluate_semantic", record_candidate)
+    evaluator = _assisted_composition_evaluator(
+        privacy,
+        runtime=runtime,
+        local_observation=local,
+        profile=ReviewContextProfile.EXPANDED,
+    )
+
+    result = await evaluator(frozen, (), runtime)
+
+    assert result.status is SemanticStatus.UNAVAILABLE
+    assert candidates
+    excerpt_items = tuple(
+        item
+        for item in getattr(candidates[0], "items")
+        if cast(str, getattr(item, "origin_ref")).startswith("/case/excerpt/")
+    )
+    assert excerpt_items
+    assert any(marker in cast(bytes, getattr(item, "plaintext")) for item in excerpt_items)
+
+
+@pytest.mark.anyio
+async def test_ready_composition_route_loss_after_resolution_blocks_native_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = b"composition-route-loss-marker: inspect this"
+    (
+        project,
+        workspace,
+        local,
+        observation,
+        _ledger,
+        original_runtime,
+        frozen,
+    ) = await _native_claude_case(tmp_path, marker=marker)
+    del project
+
+    class _RouteLossObservation:
+        def __init__(self, delegate: SqliteObservationStore) -> None:
+            self.delegate = delegate
+            self.lost = False
+
+        def workspace_for_yoetz_session(self, session_id: str) -> str | None:
+            if self.lost:
+                return None
+            return self.delegate.workspace_for_yoetz_session(session_id)
+
+        def observation_route_for_session(
+            self, *, workspace: str, yoetz_session_id: str
+        ) -> tuple[str, str, bool] | None:
+            if self.lost:
+                return None
+            return self.delegate.observation_route_for_session(
+                workspace=workspace,
+                yoetz_session_id=yoetz_session_id,
+            )
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self.delegate, name)
+
+    routed_observation = _RouteLossObservation(observation)
+    runtime = replace(original_runtime, observation=routed_observation)
+    real_resolver = semantic_non_dispatch.ready_composition_module.resolve_captured_semantic_content
+
+    async def resolve_then_lose_route(**kwargs: object) -> object:
+        resolved = await real_resolver(
+            runtime=cast(TaskRuntime, kwargs["runtime"]),
+            frozen=cast(FrozenCase, kwargs["frozen"]),
+            workspace_commitment=cast(str, kwargs["workspace_commitment"]),
+            local_observation=kwargs.get("local_observation"),
+            max_parts=cast(int, kwargs["max_parts"]),
+            max_total_bytes=cast(int, kwargs["max_total_bytes"]),
+        )
+        routed_observation.lost = True
+        return resolved
+
+    monkeypatch.setattr(
+        semantic_non_dispatch.ready_composition_module,
+        "resolve_captured_semantic_content",
+        resolve_then_lose_route,
+    )
+    privacy = semantic_non_dispatch._Privacy(  # pyright: ignore[reportPrivateUsage]
+        task_id=runtime.task_id
+    )
+    evaluator = _assisted_composition_evaluator(
+        privacy,
+        runtime=runtime,
+        local_observation=local,
+        profile=ReviewContextProfile.EXPANDED,
+    )
+
+    result = await evaluator(frozen, (), runtime)
+
+    assert workspace != semantic_non_dispatch._REPOSITORY  # pyright: ignore[reportPrivateUsage]
+    assert routed_observation.lost
+    assert result.status is SemanticStatus.BLOCKED_BY_POLICY
+    assert privacy.calls == 0
 
 
 @pytest.mark.anyio

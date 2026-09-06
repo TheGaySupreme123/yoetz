@@ -12,6 +12,7 @@ from typing import cast
 import pytest
 
 from builders.policy_cases import (
+    act,
     clm,
     evd,
     evidence_record,
@@ -20,6 +21,7 @@ from builders.policy_cases import (
     obligation_record,
     plan_record,
     record,
+    res,
 )
 from builders.replay import replay_records
 from yoetz.application.check import (
@@ -41,8 +43,11 @@ from yoetz.application.semantic_case import (
 )
 from yoetz.domain.events import (
     MAX_TEXT_BYTES,
+    ActionKind,
+    ActionRecordedPayload,
     ClaimKind,
     ClaimRecordedPayload,
+    ClaimRecordedPayloadV1_1,
     EvidenceContentAvailability,
     EvidenceDigestBinding,
     EvidenceDigestProvenance,
@@ -52,6 +57,8 @@ from yoetz.domain.events import (
     ObligationPublishedPayload,
     ObligationStatus,
     PlanPublishedPayload,
+    ResultOutcome,
+    ResultRecordedPayload,
 )
 from yoetz.domain.findings import Finding
 from yoetz.domain.observation import ObservationContentKind, ObservationContentManifest
@@ -394,6 +401,80 @@ def test_assisted_profile_includes_only_linked_recorded_capped_excerpts() -> Non
     body = next(item for item in semantic.items if item.item_id == excerpt.excerpt_item_id)
     assert body.content == b"test output: 1 failed assertion"
     assert set(excerpt.linked_subject_refs) <= (semantic.frontier_refs | semantic.local_check_refs)
+
+
+def test_assisted_profile_canonicalizes_failure_excerpt_links_after_multiple_failures() -> None:
+    base = _case_with_material(with_evidence=True)
+    action_one = record(
+        ActionRecordedPayload(
+            action_id=act(1),
+            action_kind=ActionKind.OTHER,
+            description="First bounded attempt",
+            obligation_refs=(obl(1),),
+        ),
+        5,
+    )
+    result_one = record(
+        ResultRecordedPayload(
+            result_id=res(1),
+            action_id=act(1),
+            outcome=ResultOutcome.FAILURE,
+            summary="First attempt failed",
+        ),
+        6,
+    )
+    action_two = record(
+        ActionRecordedPayload(
+            action_id=act(2),
+            action_kind=ActionKind.OTHER,
+            description="Second bounded attempt",
+            obligation_refs=(obl(1),),
+        ),
+        7,
+    )
+    result_two = record(
+        ResultRecordedPayload(
+            result_id=res(2),
+            action_id=act(2),
+            outcome=ResultOutcome.FAILURE,
+            summary="Second attempt failed",
+        ),
+        8,
+    )
+    claim = record(
+        ClaimRecordedPayloadV1_1(
+            claim_id=clm(1),
+            claim_kind=ClaimKind.COMPLETION,
+            statement="Complete subject to two recorded limitations",
+            supporting_refs=(evd(1),),
+            obligation_refs=(obl(1),),
+            limitation_refs=(res(1), res(2)),
+        ),
+        9,
+    )
+    case = make_case(
+        plans=base.projection.plans,
+        obligations=base.projection.obligations,
+        actions={act(1): action_one, act(2): action_two},
+        results={res(1): result_one, res(2): result_two},
+        claims={clm(1): claim},
+        evidence=base.projection.evidence,
+        extra_refs=(clm(1), obl(1), evd(1), act(1), res(1), act(2), res(2)),
+    )
+
+    semantic = _build(case, ReviewContextProfile.ASSISTED)
+
+    failure_excerpts = [
+        excerpt for excerpt in semantic.packet.targeted_excerpts if excerpt.source_kind == "failure"
+    ]
+    assert len(failure_excerpts) == 2
+    for excerpt in failure_excerpts:
+        assert excerpt.linked_subject_refs == tuple(
+            sorted(excerpt.linked_subject_refs, key=str.encode)
+        )
+        assert set(excerpt.linked_subject_refs) <= (
+            semantic.frontier_refs | semantic.local_check_refs
+        )
 
 
 def _typed_digest_case(*, description: str | None) -> DeterministicCase:

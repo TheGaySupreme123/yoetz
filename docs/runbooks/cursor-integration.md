@@ -344,9 +344,13 @@ the mapped task grant. A missing or mismatched profile drops plaintext chunks an
 `content_capture_unavailable`; chunks are not written to the structural outbox. Authorized native
 hooks reserve the workspace drain before enqueueing the structural row, keeping a background sweep
 from consuming it before the foreground content attempt. The nonblocking reservation is released
-on cancellation or after the bounded drain; contention can still leave a content gap. A content-bearing
-pass prioritizes the current event after its same-session FIFO prefix, within a one-second drain and
-sixteen-row bound; a stale or blocked backlog produces the explicit gap when the hook completes.
+on cancellation or after the bounded drain; contention can still leave a content gap. Every
+ordinary-profile native pass except teardown `sessionEnd` has a one-second drain window even when
+its current structural row has no eligible chunks, such as a Yoetz-owned MCP mutation whose
+result is already durable elsewhere. When chunks exist, the pass prioritizes the current event
+after its same-session FIFO prefix, within that one-second drain and sixteen-row bound. Teardown
+keeps its host-clamped three-second hook and tighter ingest/drain window; a stale or blocked
+backlog produces the explicit gap when the hook completes.
 A hard process kill before that diagnostic path completes may lose transient content without a
 durable gap marker; making native plaintext survive that boundary requires a separate service-owned
 staging protocol. The installed

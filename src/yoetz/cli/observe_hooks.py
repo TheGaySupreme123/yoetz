@@ -149,10 +149,11 @@ _MAX_CONTENT_CHUNK: Final = 256 * 1024
 # is never silently dropped as if committed.
 _HOOK_DRAIN_BUDGET_SECONDS: Final = 0.20
 _HOOK_DRAIN_ROW_LIMIT: Final = 4
-# Native Claude/Cursor content is transient by design: it cannot be copied to
-# the structural outbox. Give a content-bearing pass a bounded chance to drain
-# the current event after its same-session structural prefix, while keeping the
-# host hook finite and leaving the service sweeper responsible for bulk work.
+# Native Claude/Cursor ordinary-profile content is transient by design: it cannot
+# be copied to the structural outbox. Give every ordinary-profile pass a bounded
+# chance to drain its structural RPC, and give content-bearing passes enough time
+# to deliver the current event after its same-session prefix; bulk work remains
+# the service sweeper's responsibility.
 _NATIVE_CONTENT_DRAIN_BUDGET_SECONDS: Final = 1.0
 _NATIVE_CONTENT_ROW_LIMIT: Final = 16
 # Codex hard-clamps SessionEnd hooks to 3 seconds. The default drain budget
@@ -2621,9 +2622,19 @@ def handle_observe(
                 and source in {ObservationSource.CLAUDE_HOOK, ObservationSource.CURSOR_HOOK}
                 else None
             )
+            # The ordinary native profile still needs the longer RPC window when the
+            # current row has no eligible chunks (for example, a Yoetz-owned MCP
+            # mutation, whose result is already durable elsewhere). Keep the content
+            # priority and 16-row selection tied to actual transient chunks; a
+            # contentless native row therefore keeps the ordinary four-row limit.
+            native_profile_drain = (
+                native_content_source
+                and _content_capture_profile is not None
+                and content_capture_profile_matches_source(source.value, _content_capture_profile)
+            )
             native_content_drain_budget = (
                 _NATIVE_CONTENT_DRAIN_BUDGET_SECONDS
-                if native_content_priority is not None
+                if native_profile_drain
                 else _HOOK_DRAIN_BUDGET_SECONDS
             )
 
@@ -3106,7 +3117,7 @@ def handle_observe(
             stages=stages,
             monotonic=_monotonic,
             _state=_state,
-            native_content=(native_content_priority is not None and resolved_event != "SessionEnd"),
+            native_content=(native_profile_drain and resolved_event != "SessionEnd"),
         )
         return 0
     except BaseException:
