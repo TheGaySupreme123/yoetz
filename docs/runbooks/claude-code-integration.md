@@ -220,7 +220,10 @@ and emits no advice output. The ordinary Claude mapping is
 fact, so a successful `Read`, `Bash`, or other tool result is recorded as success even when the
 native result has no exit field. Yoetz never fabricates `exit_status: 0`; an exit status is retained
 only when Claude supplies one. `PostToolUseFailure`, denial, interruption, error, invalid or
-unknown status, and conflicting fields override that event-level success. A background Bash launch
+unknown host status, and conflicting host fields override that event-level success. MCP result
+content is domain data: only its outer `isError`/`is_error` signal is an execution outcome; nested
+`status`, `outcome`, `success`, and exit-like fields cannot override Claude's host event.
+A background Bash launch
 is recorded as partial until the host supplies completion evidence. These decisions do not add
 filesystem or batch observation.
 
@@ -252,14 +255,17 @@ row, keeping a background sweep from consuming that row before the foreground co
 The reservation is nonblocking and is released on cancellation or after the bounded drain; a busy
 owner can still leave an explicit content gap. The hook commits its structural envelope, pairing,
 mapping, and outbox intent locally
-before attempting the bounded service drain. Every ordinary-profile native pass except teardown
-`SessionEnd` has a one-second drain window even when its current structural row has no eligible
-chunks, such as a Yoetz-owned MCP mutation whose result is already durable elsewhere. When chunks
-exist, the pass prioritizes the current row after its same-session FIFO prefix, within that
-one-second drain and sixteen-row bound. Teardown keeps its host-clamped three-second hook and
-tighter ingest/drain window, and skips local advice construction because the closing host cannot
-receive it. A healthy accepted drain forwards the transient chunks and exact
-profile to the service; a bounded service failure or completed cancellation path leaves the
+before attempting the bounded service drain. Teardown `SessionEnd` has no service drain:
+its local lifecycle and outbox intent are durable before the
+hook returns, and a later hook or the service sweeper retries delivery. With no later hook, a
+ready service's idle sweep interval is 60 seconds. Content-bearing
+ordinary-profile events retain a one-second drain window; contentless structural rows defer
+service delivery. When chunks exist, the pass prioritizes the current row after its same-session
+FIFO prefix, within that one-second drain
+and sixteen-row bound. Teardown keeps its host-clamped three-second hook and skips local advice
+construction because the closing host cannot receive it. A healthy accepted drain forwards the
+transient chunks and exact profile to the service; a bounded service failure or completed
+cancellation path leaves the
 structural record plus an explicit content gap.
 A hard process kill or service failure before authenticated service-side staging completes may
 lose transient content without a durable gap marker; there is no plaintext local spool or offline
@@ -272,6 +278,9 @@ ticket remains an honest content gap. The current installed Claude `2.1.261` pro
 host fact only; it does not certify this ordinary profile without an exact isolated fixture and a
 receipt that separately proves native hook delivery, accepted content, semantic selection, and any
 resulting influence.
+Native semantic selection uses the accepted tool event's durable session route and does not
+require an approved-check policy. Local capture consent and repository disclosure permission
+remain separate requirements.
 
 Claude Code has no `codex exec --json` import surface. Issue #301's bounded import authorization
 therefore makes no Claude adapter change; Claude evidence continues through cooperative MCP and
@@ -331,8 +340,9 @@ payload-free `hook_diagnostics` reason
 `privacy_authority_required`, `service_unavailable`, `vault_locked`, `timeout`, `storage_unsafe`,
 or `storage_corrupt`) and the session keeps an observation-only binding; `UserPromptSubmit` and
 `Stop` retry under the bounded budget, while teardown `SessionEnd` records its lifecycle intent and
-drains without spending an auto-attach retry. An explicit cooperative MCP `start` bound from its exact `PostToolUse`
-result remains the recovery path, not a substitute proof that natural auto-attach works. For
+defers service delivery without spending an auto-attach retry. An explicit cooperative MCP `start`
+bound from its exact `PostToolUse` result remains the recovery path, not a substitute proof that
+natural auto-attach works. For
 `vault_locked` on a never-initialized install, that explicit `start` returns the typed
 `vault_initialization_required` continuation (see the proof checklist) rather than a dead end.
 

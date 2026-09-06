@@ -3202,7 +3202,8 @@ Independent verification support (local control, not MCP):
   `"async": true` only when the exact probed Codex version supports registration; older or unknown
   hosts run them synchronously with the declared 10-second budget so no event is dropped. Handlers
   that return `additionalContext` or a Stop `decision: block` stay synchronous with the same bound,
-  and `SessionEnd` keeps the host-clamped 3 seconds (ingest/drain only; it is not an advice channel).
+  and `SessionEnd` keeps the host-clamped 3 seconds for local ingest only; its outbox intent is
+  retried by a later hook or the service sweeper, and it is not an advice channel.
 
 Native ordinary-work capture adds a separate, closed profile selection to that workspace consent.
 `LocalObservationConsent.content_capture_profiles` is a sorted set containing at most
@@ -3230,6 +3231,8 @@ workspace-to-Yoetz-session route, verifies that route's task matches the exact r
 rechecks that binding before disclosure. An inactive historical route is usable only for the same
 task. An absent, ambiguous, or mismatched route leaves captured content unavailable; the privacy
 commitment cannot substitute for the observation workspace.
+The coordinator records the accepted completed-tool session route before optional verification
+policy setup. Native captured-content selection does not require an approved-check policy.
 
 Observation consent is one project-level confirmation recorded as a private workspace commitment.
 Consent, status, pause, resume, revoke, setup probes, and hook ingress all canonicalize an explicit

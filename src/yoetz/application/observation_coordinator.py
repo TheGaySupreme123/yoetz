@@ -3160,6 +3160,23 @@ class ObservationCoordinator:
             envelope.event_kind, envelope.structural_payload
         ):
             return None
+        # Bind the service-owned task/session route before any optional verification setup.
+        # Policy loading and subject inspection are allowed to decline this event (for example
+        # when the workspace has no approved-check policy), but semantic captured-content
+        # selection still needs this durable task fence.  Recording it here keeps the route
+        # coupled to the accepted PostToolUse envelope instead of making content visibility
+        # depend on verification policy availability.
+        route_recorder = getattr(store, "record_workspace_session_route", None)
+        if callable(route_recorder) and type(runtime.writer_id) is str:
+            now = timestamp_from_datetime(self.clock.now_utc())
+            route_recorder(
+                workspace=workspace,
+                yoetz_session_id=runtime.session_id,
+                yoetz_task_id=runtime.task_id,
+                yoetz_writer_id=runtime.writer_id,
+                codex_session_commitment=envelope.session_commitment,
+                bound_at=now,
+            )
         required = (
             "workspace_locator_descriptor",
             "verification_repository",
@@ -3204,6 +3221,7 @@ class ObservationCoordinator:
                 )
             )
             return None
+        now = timestamp_from_datetime(self.clock.now_utc())
         if not await self._local(
             partial(self.local.policy_digest_is_trusted, workspace, policy.raw_digest)
         ):
@@ -3215,7 +3233,6 @@ class ObservationCoordinator:
                 )
             )
             return None
-        now = timestamp_from_datetime(self.clock.now_utc())
         if not store.policy_digest_is_trusted(workspace, policy.raw_digest):
             trust_payload = canonical_encode(
                 JsonObject(
@@ -3290,17 +3307,8 @@ class ObservationCoordinator:
             previous_subject_state_digest=store.latest_verification_subject_digest(workspace),
             subject_state_digest=current_digest,
         )
-        # Persist inspection snapshot + session route when their durable helpers exist.
-        route_recorder = getattr(store, "record_workspace_session_route", None)
-        if callable(route_recorder):
-            route_recorder(
-                workspace=workspace,
-                yoetz_session_id=runtime.session_id,
-                yoetz_task_id=runtime.task_id,
-                yoetz_writer_id=runtime.writer_id,
-                codex_session_commitment=envelope.session_commitment,
-                bound_at=now,
-            )
+        # Persist inspection snapshot after verification setup.  The session route is bound
+        # above, before policy loading, because policy setup is optional for content selection.
         inspect_recorder = getattr(store, "record_inspection_snapshot", None)
         inspect_loader = getattr(store, "load_inspection_snapshot", None)
         inspection_snapshot: ObservationInspectionSnapshot | None = None

@@ -318,6 +318,10 @@ intent close before the bounded service drain; advice-bearing events remain sync
 `additional_context` stays on the current hook response. Legacy edit/MCP hooks keep their existing
 output behavior, and automatic Stop follow-up messages remain disabled. Hook success never
 substitutes for an explicit command/test exit fact.
+For ordinary MCP tool events, `tool_output` contains tool-domain data. Only the outer MCP
+`isError`/`is_error` signal contributes execution status; nested `status`, `outcome`, `success`,
+and exit-like fields do not describe the host execution. Built-in shell outcomes retain their
+separate exit-status handling.
 
 Select these hooks with `--observation-profile ordinary` on the existing native Cursor plugin
 preview/install/status commands. Repeat the same profile when applying an exact preview. To
@@ -344,13 +348,15 @@ the mapped task grant. A missing or mismatched profile drops plaintext chunks an
 `content_capture_unavailable`; chunks are not written to the structural outbox. Authorized native
 hooks reserve the workspace drain before enqueueing the structural row, keeping a background sweep
 from consuming it before the foreground content attempt. The nonblocking reservation is released
-on cancellation or after the bounded drain; contention can still leave a content gap. Every
-ordinary-profile native pass except teardown `sessionEnd` has a one-second drain window even when
-its current structural row has no eligible chunks, such as a Yoetz-owned MCP mutation whose
-result is already durable elsewhere. When chunks exist, the pass prioritizes the current event
-after its same-session FIFO prefix, within that one-second drain and sixteen-row bound. Teardown
-keeps its host-clamped three-second hook and tighter ingest/drain window, and skips local advice
-construction because the closing host cannot receive it; a stale or blocked
+on cancellation or after the bounded drain; contention can still leave a content gap.
+Content-bearing ordinary-profile native passes have a one-second drain window. Contentless
+structural rows, including Yoetz-owned MCP mutations whose result is already durable elsewhere,
+defer service delivery. When chunks exist, the pass prioritizes the current event after its
+same-session FIFO prefix, within that one-second drain and sixteen-row bound. Teardown
+keeps its host-clamped three-second hook, records local lifecycle/outbox intent, and defers service
+delivery to a later hook or the sweeper (a ready service's idle sweep interval is 60 seconds);
+it skips local advice construction because the closing host
+cannot receive it. A stale or blocked
 backlog produces the explicit gap when the hook completes.
 A hard process kill or service failure before authenticated service-side staging completes may
 lose transient content without a durable gap marker; there is no plaintext local spool or offline
@@ -363,6 +369,9 @@ ticket remains an honest content gap. The installed Cursor IDE `3.19.7` fact is 
 host observation while this runbook's pinned compatibility cells remain unchanged; it cannot
 certify the ordinary profile without an exact isolated fixture and receipt evidence for native hook
 delivery, accepted content, semantic selection, and influence.
+Native semantic selection uses the accepted tool event's durable session route and does not
+require an approved-check policy. Local capture consent and repository disclosure permission
+remain separate requirements.
 
 Cursor has no `codex exec --json` import surface. Issue #301's bounded import authorization makes
 no Cursor adapter change; Cursor evidence continues through cooperative MCP and native

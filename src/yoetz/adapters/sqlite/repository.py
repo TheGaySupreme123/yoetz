@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final, Literal, cast
 
@@ -110,6 +110,14 @@ __all__ = ["CheckpointReport", "SqliteLedger"]
 
 _GENESIS_DIGEST: Final = "genesis"
 _CAPTURE_TICKET_SCHEMA_VERSION: Final = 11
+
+
+@dataclass(frozen=True, slots=True)
+class _FreezeReservation:
+    """SQLite-local view of the memory oracle's transient acquisition barrier."""
+
+    session_id: str
+    expires_at: datetime
 
 
 def _public_error(
@@ -1908,6 +1916,33 @@ class SqliteLedger:
         )
 
     @staticmethod
+    def _freeze_state_snapshot(state: MemoryLedgerState) -> tuple[object, ...]:
+        """Capture every durable state component that a staged freeze could overwrite.
+
+        The acquisition lock is intentionally released while the resume object is staged.  A
+        records-only comparison is insufficient during that window: semantic lifecycle writes
+        can advance operations, jobs, attempts, or object inventory without adding a ledger
+        record.  Copy each mutable map so in-place mutations on the stable state object remain
+        visible to the final compare.  Transient check reservations are merged separately because
+        another acquisition may legitimately arm one while this case is staging.
+        """
+
+        return (
+            state.records,
+            dict(state.operations),
+            dict(state.writers),
+            state.projection,
+            dict(state.frozen_cases),
+            dict(state.check_results),
+            dict(state.check_errors),
+            dict(state.jobs),
+            dict(state.job_by_case),
+            dict(state.attempts),
+            dict(state.disclosure_waits),
+            dict(state.object_refs),
+        )
+
+    @staticmethod
     def _adopt_state(target: MemoryLedgerState, source: MemoryLedgerState) -> None:
         """Adopt a durable clone without invalidating in-flight oracle state references."""
 
@@ -2032,17 +2067,35 @@ class SqliteLedger:
             operation_key = (writer_id, request_id)
             existing_operation = self._state.operations.get(operation_key)
             new_freeze = existing_operation is None
+            prior = self._state
+            baseline = self._freeze_state_snapshot(prior)
+            clone = self._clone_state()
+            reservation: _FreezeReservation | None = None
             if new_freeze:
                 pending_capture = self._pending_capture_ticket(self._task_id)
                 if pending_capture is not None:
                     raise _public_error(PublicErrorCode.OPERATION_PENDING, retryable=True)
-            prior = self._state
-            clone = self._clone_state()
-            # The repository lock is held across the oracle and durable
-            # mirror transaction.  Give the in-memory oracle a private
-            # transaction lock for this already-serialized call; passing
-            # ``self._lock`` here would re-enter the same asyncio lock and
-            # deadlock every real SQLite freeze.
+                now = self._terminal_at()
+                reservations = cast(dict[tuple[str, str], object], prior.check_reservations)
+                existing_reservation = reservations.get(operation_key)
+                if existing_reservation is not None and not isinstance(
+                    existing_reservation, _FreezeReservation
+                ):
+                    raise _public_error(PublicErrorCode.STORAGE_CORRUPT)
+                if existing_reservation is not None and existing_reservation.expires_at > now:
+                    raise _public_error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+
+                # Install the transient barrier in the live state before releasing the repository
+                # lock.  The clone deliberately precedes this write: the oracle must create its
+                # own reservation and later remove it, while concurrent append calls inspect the
+                # live reservation and either defer observation or advance the real frontier.
+                reservation = _FreezeReservation(session_id, now + timedelta(seconds=60))
+                reservations[operation_key] = reservation
+
+        try:
+            # Object staging is an awaitable boundary.  It must not retain the shared repository
+            # lock: observation append needs to see the reservation, and an agent append must be
+            # allowed to advance the frontier so final revalidation can return FRONTIER_CONFLICT.
             oracle = MemoryLedgerAdapter(
                 task_id=self._task_id,
                 ownership_fence=self._fence,
@@ -2056,18 +2109,57 @@ class SqliteLedger:
             result = await oracle.freeze_case(
                 session_id, writer_id, expected_frontier, request_id, request_digest
             )
-            if type(result) is FrozenCase:
+            async with self._lock:
+                current = self._state
+                reservations = cast(dict[tuple[str, str], object], current.check_reservations)
+                if reservation is not None and reservations.get(operation_key) is not reservation:
+                    raise _public_error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+
+                if self._freeze_state_snapshot(current) != baseline:
+                    if reservation is not None and reservations.get(operation_key) is reservation:
+                        reservations.pop(operation_key, None)
+                    # An append moved the ledger head, so retain the adapter-parity conflict
+                    # details. Other concurrent lifecycle mutations are retryable but do not
+                    # change the event frontier and must not be misreported as one.
+                    if current.records is not baseline[0]:
+                        raise _frontier_conflict(
+                            Frontier(current.projection.frontier, current.projection.head_digest)
+                        )
+                    raise _public_error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+
+                if type(result) is not FrozenCase:
+                    if reservation is not None and reservations.get(operation_key) is reservation:
+                        reservations.pop(operation_key, None)
+                    return result
+
+                # Keep reservations installed by another acquisition while adopting the durable
+                # clone. The local token is removed only by its owner, and this merge also avoids
+                # replacing a concurrently armed barrier with the clone's stale copy.
+                clone.check_reservations = cast(Any, dict(reservations))
+                if reservation is not None:
+                    clone.check_reservations.pop(operation_key, None)
                 try:
                     self._state = clone
                     self._sync_after_mutation_locked(
                         pending_capture_task_id=self._task_id if new_freeze else None,
                     )
                 except BaseException:
-                    self._state = prior
+                    if reservation is not None and reservations.get(operation_key) is reservation:
+                        reservations.pop(operation_key, None)
+                    self._state = current
                     raise
-                self._adopt_state(prior, clone)
-                self._state = prior
-            return result
+                self._adopt_state(current, clone)
+                self._state = current
+                return result
+        except BaseException:
+            if reservation is not None:
+                async with self._lock:
+                    reservations = cast(
+                        dict[tuple[str, str], object], self._state.check_reservations
+                    )
+                    if reservations.get(operation_key) is reservation:
+                        reservations.pop(operation_key, None)
+            raise
 
     async def advance_check_phase(
         self,

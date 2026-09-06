@@ -1,4 +1,4 @@
-"""Native ordinary-profile drain budget selection without transient content."""
+"""Native ordinary-profile drain selection without transient content."""
 
 from __future__ import annotations
 
@@ -26,26 +26,26 @@ from yoetz.domain.observation_profiles import (
             ObservationSource.CLAUDE_HOOK,
             CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
             "claude:budget-native",
-            1.0,
+            None,
         ),
         (
             ObservationSource.CURSOR_HOOK,
             CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
             "cursor:budget-native",
-            1.0,
+            None,
         ),
         (ObservationSource.CODEX_HOOK, None, "codex-budget-native", 0.2),
     ),
 )
-def test_native_profile_gets_longer_structural_drain_without_chunks(
+def test_contentless_native_rows_defer_service_drain(
     tmp_path: Path,
     source: ObservationSource,
     profile: str | None,
     session_id: str,
-    expected_budget: float,
+    expected_budget: float | None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Native RPCs need the content budget even when content extraction is intentionally empty."""
+    """Native structural rows stay durable locally when there are no transient chunks."""
 
     store = LocalObservationStore(_state=tmp_path)
     workspace_locator = str(tmp_path.resolve())
@@ -92,8 +92,12 @@ def test_native_profile_gets_longer_structural_drain_without_chunks(
     )
 
     assert code == 0
-    assert len(observed) == 1
-    assert observed[0]["budget_seconds"] == expected_budget
-    assert observed[0]["priority_source_identity"] is None
-    assert observed[0]["content_by_source_identity"] is None
-    assert timing_flags == [profile is not None]
+    if expected_budget is None:
+        assert observed == []
+        assert LocalObservationStore(_state=tmp_path).list_pending_outbox_rows(workspace)
+    else:
+        assert len(observed) == 1
+        assert observed[0]["budget_seconds"] == expected_budget
+        assert observed[0]["priority_source_identity"] is None
+        assert observed[0]["content_by_source_identity"] is None
+    assert timing_flags == [False]

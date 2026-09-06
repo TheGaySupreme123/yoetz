@@ -548,12 +548,18 @@ def test_cursor_ordinary_ingress_reads_json_string_outcomes_and_fails_closed(
     store.grant_consent(commitment)
     store.enable_content_capture(commitment, CURSOR_ORDINARY_OBSERVATION_PROFILE_ID)
 
-    def emit(event: str, output: JsonValue, call_id: str) -> None:
+    def emit(
+        event: str,
+        output: JsonValue,
+        call_id: str,
+        *,
+        tool_name: str = "shell",
+    ) -> None:
         payload: dict[str, JsonValue] = {
             "hook_event_name": event,
             "session_id": "cursor-real-ordinary",
             "conversation_id": "cursor-real-conversation",
-            "tool_name": "shell",
+            "tool_name": tool_name,
             "tool_use_id": call_id,
             "tool_output": output,
         }
@@ -596,6 +602,16 @@ def test_cursor_ordinary_ingress_reads_json_string_outcomes_and_fails_closed(
         '{"failure_type":"permission_denied","reason":"DENIAL_CANARY"}',
         "cursor-call-denied",
     )
+    emit("preToolUse", None, "cursor-call-mcp-domain", tool_name="MCP:fixture_echo")
+    emit(
+        "postToolUse",
+        (
+            '{"success":false,"exitCode":99,'
+            '"structuredContent":{"outcome":"rejected","status":"MCP_DOMAIN_CANARY"}}'
+        ),
+        "cursor-call-mcp-domain",
+        tool_name="MCP:fixture_echo",
+    )
 
     before_specialized = len(
         LocalObservationStore(_state=tmp_path / "state").list_envelopes(commitment)
@@ -620,7 +636,7 @@ def test_cursor_ordinary_ingress_reads_json_string_outcomes_and_fails_closed(
     )
 
     envelopes = LocalObservationStore(_state=tmp_path / "state").list_envelopes(commitment)
-    assert len(envelopes) == 10
+    assert len(envelopes) == 12
     failed = envelopes[1].structural_payload
     assert failed["tool_call_id"] == "cursor-call-failed"
     assert failed["success"] is False
@@ -641,6 +657,11 @@ def test_cursor_ordinary_ingress_reads_json_string_outcomes_and_fails_closed(
     assert denied["action"] == "cursor_tool_denied"
     assert denied["denied"] is True
     assert denied["result_status"] == "denied"
+    mcp_domain = envelopes[11].structural_payload
+    assert mcp_domain["action"] == "cursor_tool_outcome_unknown"
+    assert "success" not in mcp_domain
+    assert "exit_status" not in mcp_domain
+    assert "result_status" not in mcp_domain
     assert len(envelopes) == before_specialized
     state_bytes = b"".join(
         path.read_bytes()
@@ -651,6 +672,7 @@ def test_cursor_ordinary_ingress_reads_json_string_outcomes_and_fails_closed(
     assert b"CANCEL_CANARY" not in state_bytes
     assert b"TOOL_SUCCESS_ONLY_CANARY" not in state_bytes
     assert b"DENIAL_CANARY" not in state_bytes
+    assert b"MCP_DOMAIN_CANARY" not in state_bytes
     assert b"future-host-status" not in state_bytes
 
 
@@ -810,11 +832,12 @@ def test_claude_ordinary_posttooluse_event_success_preserves_unknown_boundaries(
         call_id: str,
         tool_input: Mapping[str, object],
         post_event: str = "PostToolUse",
+        tool_name: str = "Bash",
         **post_fields: object,
     ) -> None:
         base: dict[str, object] = {
             "session_id": "claude-native-contract",
-            "tool_name": "Bash",
+            "tool_name": tool_name,
             "tool_use_id": call_id,
         }
         emit(
@@ -891,6 +914,36 @@ def test_claude_ordinary_posttooluse_event_success_preserves_unknown_boundaries(
         {"command": "python3 -m unittest -v", "run_in_background": False},
         tool_response={"success": True, "status": "future-status"},
     )
+    pair(
+        "call-host-status",
+        {"command": "python3 -m unittest -v", "run_in_background": False},
+        status="future-host-status",
+        tool_response={"success": True},
+    )
+    pair(
+        "call-yoetz-accepted",
+        {},
+        tool_name="mcp__plugin_yoetz_yoetz__publish_work",
+        tool_response={"outcome": "accepted"},
+    )
+    pair(
+        "call-mcp-domain-rejection",
+        {},
+        tool_name="mcp__plugin_yoetz_yoetz__publish_work",
+        tool_response={
+            "success": False,
+            "structuredContent": {"outcome": "rejected"},
+        },
+    )
+    pair(
+        "call-mcp-error",
+        {},
+        tool_name="mcp__plugin_yoetz_yoetz__publish_work",
+        tool_response={
+            "isError": True,
+            "structuredContent": {"outcome": "rejected"},
+        },
+    )
 
     envelopes = LocalObservationStore(_state=tmp_path / "state").list_envelopes(commitment)
     read = envelopes[1].structural_payload
@@ -916,9 +969,30 @@ def test_claude_ordinary_posttooluse_event_success_preserves_unknown_boundaries(
     assert failure["result_status"] == "error"
 
     conflict = envelopes[9].structural_payload
-    assert conflict["action"] == "claude_tool_outcome_unknown"
-    assert "success" not in conflict
-    assert conflict["result_status"] == "unknown"
+    assert conflict["action"] == "claude_tool_success"
+    assert conflict["success"] is True
+    assert conflict["result_status"] == "success"
+
+    host_status = envelopes[11].structural_payload
+    assert host_status["action"] == "claude_tool_outcome_unknown"
+    assert "success" not in host_status
+    assert host_status["result_status"] == "unknown"
+
+    yoetz_accepted = envelopes[13].structural_payload
+    assert yoetz_accepted["action"] == "claude_tool_success"
+    assert yoetz_accepted["success"] is True
+    assert yoetz_accepted["result_status"] == "success"
+    assert "exit_status" not in yoetz_accepted
+
+    mcp_domain_rejection = envelopes[15].structural_payload
+    assert mcp_domain_rejection["action"] == "claude_tool_success"
+    assert mcp_domain_rejection["success"] is True
+    assert mcp_domain_rejection["result_status"] == "success"
+
+    mcp_error = envelopes[17].structural_payload
+    assert mcp_error["action"] == "claude_tool_failure"
+    assert mcp_error["success"] is False
+    assert mcp_error["result_status"] == "error"
 
 
 @pytest.mark.parametrize("host", ["claude", "cursor"])

@@ -86,5 +86,5 @@ def test_native_teardown_persists_end_and_outbox_without_advice_refresh(
     pending = reopened.list_pending_outbox_rows(workspace)
     assert len(pending) == 1
     assert pending[0].envelope.event_kind == "SessionEnd"
-    assert drains and drains[0]["budget_seconds"] == 0.15
+    assert drains == []
     assert json.loads(output.getvalue()) == {}

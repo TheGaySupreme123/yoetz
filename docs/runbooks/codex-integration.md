@@ -353,9 +353,9 @@ service cannot accept it during the bounded pass, a completed hook records
 diagnostic path completes may lose the transient content without a durable gap marker; making native
 plaintext survive that boundary requires a separate service-owned staging protocol. Advice selection
 remains after drain, and advice is committed only after the host output is emitted.
-`SessionEnd` records its lifecycle intent and attempts the tighter teardown drain without rebuilding
-local advice, because the closing host cannot receive it. The service refreshes advice when it
-drains the end event.
+`SessionEnd` records its lifecycle intent and defers service delivery without rebuilding local
+advice, because the closing host cannot receive it. A later hook or the service sweeper drains the
+end event and refreshes advice.
 The encrypted capture-ticket handoff is a Claude/Cursor ordinary-native-profile contract and does
 not change Codex's historical session-stream or structural-hook content path. Codex keeps its
 existing replay and content semantics; the shared operation-replay, source-generation fencing, and

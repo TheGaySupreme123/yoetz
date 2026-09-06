@@ -10,6 +10,7 @@ import pytest
 
 from integration.application.test_native_capture_pipeline import (
     _claude_hook_runner,  # pyright: ignore[reportPrivateUsage]
+    _pending_structural_request,  # pyright: ignore[reportPrivateUsage]
     _pipeline,  # pyright: ignore[reportPrivateUsage]
 )
 from yoetz.application.observation_materialize import observation_content_identity
@@ -64,7 +65,21 @@ async def test_interrupted_handoff_cannot_finalize_missing_content_group(tmp_pat
             )
             == 0
         )
-        request = client.requests[-1]
+        # Ordinary-native structural rows stay in the local outbox when the
+        # hook has no transient content.  Exercise the same service-shaped
+        # request without requiring a foreground drain just to obtain it.
+        request = _pending_structural_request(
+            local,
+            workspace,
+            codex_session_id="claude:expected-parts-crash",
+            event_kind="PreToolUse",
+        )
+        # The hook intentionally deferred this structural row to its local outbox.  Reproduce
+        # the old service-accepted prefix explicitly before installing the interrupted ticket;
+        # the final retry must then exercise duplicate reconciliation rather than a first append.
+        initial = await coordinator.ingest_request(request)
+        assert initial.disposition is ObservationIngestDisposition.ACCEPTED
+        assert client.requests == []
         source_commitment = request.envelope.cursor.last_source_commitment
         first_group = ObservationContentChunk(
             content_kind=ObservationContentKind.TOOL_INPUT,
@@ -114,7 +129,12 @@ async def test_interrupted_handoff_cannot_finalize_missing_content_group(tmp_pat
             content=b"changed-set-must-be-refused",
         )
         changed_retry = await coordinator.ingest_request(
-            replace(request, capture_only=True, content_chunks=(changed_group,))
+            replace(
+                request,
+                capture_only=True,
+                content_chunks=(changed_group,),
+                content_capture_profile=profile,
+            )
         )
         assert changed_retry.reason == "content_capture_unavailable"
         assert not observation.content_manifests_for_logical_identity(

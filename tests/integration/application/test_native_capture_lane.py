@@ -10,6 +10,7 @@ import pytest
 
 from integration.application.test_native_capture_pipeline import (
     _claude_hook_runner,  # pyright: ignore[reportPrivateUsage]
+    _pending_structural_request,  # pyright: ignore[reportPrivateUsage]
     _pipeline,  # pyright: ignore[reportPrivateUsage]
 )
 from yoetz.domain.observation import ObservationContentChunk, ObservationContentKind
@@ -26,7 +27,7 @@ async def test_capture_only_stages_while_structural_append_is_blocked(
     profile = CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
     (
         project,
-        _workspace,
+        workspace,
         _session_commitment,
         _local,
         _observation,
@@ -59,7 +60,13 @@ async def test_capture_only_stages_while_structural_append_is_blocked(
         )
         == 0
     )
-    structural_request = client.requests[-1]
+    structural_request = _pending_structural_request(
+        _local,
+        workspace,
+        codex_session_id="claude:capture-lane-gate",
+        event_kind="PreToolUse",
+    )
+    assert client.requests == []
     append_entered = asyncio.Event()
 
     async def blocked_append(*args: object, **kwargs: object) -> object:
@@ -75,6 +82,7 @@ async def test_capture_only_stages_while_structural_append_is_blocked(
     capture_request = replace(
         structural_request,
         capture_only=True,
+        content_capture_profile=profile,
         content_chunks=(
             ObservationContentChunk(
                 content_kind=ObservationContentKind.TOOL_INPUT,

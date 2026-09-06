@@ -157,10 +157,9 @@ _HOOK_DRAIN_ROW_LIMIT: Final = 4
 # the service sweeper's responsibility.
 _NATIVE_CONTENT_DRAIN_BUDGET_SECONDS: Final = 1.0
 _NATIVE_CONTENT_ROW_LIMIT: Final = 16
-# Codex hard-clamps SessionEnd hooks to 3 seconds. The default drain budget
-# plus ingest/encode overhead measured within ~0.5s of that ceiling on a
-# realistic store, so SessionEnd drains under a tighter budget: an undrained
-# row is retried on the next session's hooks, a SIGKILLed hook drains nothing.
+# Codex hard-clamps SessionEnd hooks to 3 seconds. Teardown records its local
+# lifecycle/outbox intent and defers service delivery to the next hook or
+# sweeper, so a cold service preflight cannot consume that host window.
 _SESSION_END_DRAIN_BUDGET_SECONDS: Final = 0.15
 # A run of consecutive service_unavailable rejections means the service is
 # struggling now; yield the pass and let a later hook retry rather than
@@ -177,7 +176,7 @@ _HOOK_CONNECT_PREFLIGHT_SECONDS: Final = 1.0
 # unmapped session stayed unmapped for its whole life and its outbox retried as
 # mapping_missing forever (#275). Low-frequency, once-per-turn events only --
 # never the PreToolUse/PostToolUse storm. SessionEnd is teardown-only and has a
-# three-second host clamp, so it records the lifecycle intent and drains pending
+# three-second host clamp, so it records the lifecycle intent and defers pending
 # rows but never spends the extra attach retry budget.
 _AUTO_ATTACH_RETRY_EVENTS: Final = frozenset({"UserPromptSubmit", "Stop"})
 _AUTO_ATTACH_RETRY_BUDGET_SECONDS: Final = 1.0
@@ -2668,15 +2667,18 @@ def handle_observe(
                 and source in {ObservationSource.CLAUDE_HOOK, ObservationSource.CURSOR_HOOK}
                 else None
             )
-            # The ordinary native profile still needs the longer RPC window when the
-            # current row has no eligible chunks (for example, a Yoetz-owned MCP
-            # mutation, whose result is already durable elsewhere). Keep the content
-            # priority and 16-row selection tied to actual transient chunks; a
-            # contentless native row therefore keeps the ordinary four-row limit.
+            # A contentless ordinary-native row has no transient bytes that need a foreground
+            # service handoff. Keep its local envelope/outbox intent and let a later hook or the
+            # sweeper deliver it; opening a fresh service connection here would add latency to
+            # self-observation and structural-only host events. Content-bearing native rows still
+            # use the longer foreground window and priority path.
             native_profile_drain = (
                 native_content_source
                 and _content_capture_profile is not None
                 and content_capture_profile_matches_source(source.value, _content_capture_profile)
+            )
+            defer_contentless_native_drain = (
+                native_profile_drain and content_map is None and resolved_event != "SessionStart"
             )
             native_content_drain_budget = (
                 _NATIVE_CONTENT_DRAIN_BUDGET_SECONDS
@@ -3007,7 +3009,15 @@ def handle_observe(
                                 "auto_attach_retry_failed", resolved_event, _state=_state
                             )
 
-        if not skip_service and resolved_event != "SessionStart":
+        # SessionEnd is teardown-only: its lifecycle and outbox intent are already durable in the
+        # local store, while a cold service preflight can consume the host's entire hard window.
+        # Leave the row pending for the next SessionStart or the service sweeper rather than
+        # risking host cancellation after local capture has committed.
+        if (
+            not skip_service
+            and resolved_event not in {"SessionStart", "SessionEnd"}
+            and not defer_contentless_native_drain
+        ):
             # Every later mapped hook drains the complete session outbox, so the
             # current envelope plus any stream-recovered or previously-pending
             # entries all reconcile. Retryable rejections stay pending and
@@ -3168,7 +3178,9 @@ def handle_observe(
             stages=stages,
             monotonic=_monotonic,
             _state=_state,
-            native_content=(native_profile_drain and resolved_event != "SessionEnd"),
+            native_content=(
+                native_profile_drain and content_map is not None and resolved_event != "SessionEnd"
+            ),
         )
         return 0
     except BaseException:
@@ -3224,6 +3236,27 @@ _NATIVE_OUTCOME_JSON_BYTES: Final = 65_536
 _NATIVE_SUCCESS_STATUSES: Final = frozenset(
     {"complete", "completed", "ok", "passed", "success", "succeeded"}
 )
+_CLAUDE_TOOL_RESPONSE_FACT_KEYS: Final = frozenset(
+    {
+        # Claude's built-in Bash result and documented MCP result boundary.
+        "interrupted",
+        "is_interrupted",
+        "is_interrupt",
+        "isInterrupted",
+        "cancelled",
+        "canceled",
+        "is_cancelled",
+        "isCanceled",
+        "is_error",
+        "isError",
+        "success",
+        "exit_code",
+        "exitCode",
+        "exit_status",
+        "exitStatus",
+    }
+)
+_MCP_RESULT_FACT_KEYS: Final = frozenset({"is_error", "isError"})
 _NATIVE_FAILURE_STATUS_MAP: Final = MappingProxyType(
     {
         "aborted": "aborted",
@@ -3282,13 +3315,34 @@ def _bounded_outcome_mapping(value: object) -> Mapping[str, JsonValue] | None:
 
 def _native_outcome_mappings(
     payload: Mapping[str, JsonValue],
+    *,
+    claude_tool_response_boundary: bool = False,
+    claude_mcp_tool_response_boundary: bool = False,
+    cursor_mcp_result_boundary: bool = False,
 ) -> tuple[Mapping[str, JsonValue], ...]:
-    """Collect top-level and one bounded layer of documented result wrappers."""
+    """Collect bounded host-result mappings without descending into domain output."""
 
     mappings: list[Mapping[str, JsonValue]] = [payload]
     for key in ("tool_response", "tool_output", "result", "result_json"):
         mapping = _bounded_outcome_mapping(payload.get(key))
         if mapping is None:
+            continue
+        if (
+            claude_tool_response_boundary
+            and key == "tool_response"
+            or cursor_mcp_result_boundary
+            and key in {"tool_output", "result_json"}
+        ):
+            # Claude and Cursor pass MCP structured content and arbitrary tool output through
+            # their result carriers. Only the protocol-level ``isError`` bit is a host fact for
+            # MCP; fields such as ``success``, ``exitCode``, ``outcome``, or ``status`` belong
+            # to the tool's domain and must not turn a successful delivery into a host failure.
+            fact_keys = (
+                _MCP_RESULT_FACT_KEYS
+                if claude_mcp_tool_response_boundary or cursor_mcp_result_boundary
+                else _CLAUDE_TOOL_RESPONSE_FACT_KEYS
+            )
+            mappings.append({field: mapping[field] for field in fact_keys if field in mapping})
             continue
         mappings.append(mapping)
         for nested_key in ("structuredContent", "structured_content", "data", "result"):
@@ -3306,6 +3360,9 @@ def _native_outcome_facts(
     require_process_exit: bool = False,
     host_event_success: bool = False,
     background_launch: bool = False,
+    claude_tool_response_boundary: bool = False,
+    claude_mcp_tool_response_boundary: bool = False,
+    cursor_mcp_result_boundary: bool = False,
 ) -> _NativeOutcomeFacts:
     """Extract closed native outcome facts without retaining host prose.
 
@@ -3329,7 +3386,12 @@ def _native_outcome_facts(
     failure_status: str | None = "failure" if force_failure else None
     success_status = False
 
-    for mapping in _native_outcome_mappings(payload):
+    for mapping in _native_outcome_mappings(
+        payload,
+        claude_tool_response_boundary=claude_tool_response_boundary,
+        claude_mcp_tool_response_boundary=claude_mcp_tool_response_boundary,
+        cursor_mcp_result_boundary=cursor_mcp_result_boundary,
+    ):
         for key in ("denied", "is_denied", "permission_denied"):
             value = mapping.get(key)
             if type(value) is bool and value:
@@ -3657,6 +3719,8 @@ def handle_claude_observe(
                     require_process_exit=(tool_token.lower() in _SHELL_TOOLS),
                     host_event_success=raw_event == "PostToolUse",
                     background_launch=background_launch,
+                    claude_tool_response_boundary=True,
+                    claude_mcp_tool_response_boundary=tool_token.lower().startswith("mcp__"),
                 )
                 structural["action"] = (
                     "claude_tool_success"
@@ -3920,12 +3984,12 @@ def handle_cursor_observe(
         if duration is not None:
             structural["duration_ms"] = duration
         if ordinary_profile and raw_event in {"postToolUse", "postToolUseFailure"}:
+            cursor_tool_name = (_token_or_none(payload.get("tool_name")) or "").lower()
             outcome = _native_outcome_facts(
                 payload,
                 force_failure=raw_event == "postToolUseFailure",
-                require_process_exit=(
-                    (_token_or_none(payload.get("tool_name")) or "").lower() in _SHELL_TOOLS
-                ),
+                require_process_exit=(cursor_tool_name in _SHELL_TOOLS),
+                cursor_mcp_result_boundary=cursor_tool_name.startswith(("mcp:", "mcp__")),
             )
             structural["action"] = (
                 "cursor_tool_denied"

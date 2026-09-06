@@ -371,23 +371,41 @@ async def _capture_claude_post_requests(
     tool_use_id: str,
     marker: bytes,
 ) -> tuple[ObservationIngestRequest, ...]:
+    """Capture the current PostToolUse handoff after a queued structural pre-event.
+
+    The hook stages the PostToolUse bytes first, then drains the queued
+    PreToolUse row and the PostToolUse structural row in FIFO order.  Callers
+    that exercise the content protocol need the capture and current structural
+    requests; the queued pre-event is validated here so those callers cannot
+    accidentally operate on the wrong envelope.
+    """
+
     captured: list[ObservationIngestRequest] = []
+    original_observation_ingest = client.observation_ingest
 
     async def capture_service_request(
         body: DomainJsonValue,
         *,
         deadline_ms: int | None = None,
     ) -> DomainJsonValue:
-        del deadline_ms
         request = observation_ingest_request_from_json(body)
         captured.append(request)
+        if not request.capture_only and request.envelope.event_kind == "PreToolUse":
+            # The deferred pre-event is a real FIFO row.  Let the fixture's
+            # production coordinator acknowledge it so the current Post row
+            # can be observed at the next structural slot.
+            return await original_observation_ingest(body, deadline_ms=deadline_ms)
         reason = (
             OBSERVATION_CONTENT_CAPTURE_PENDING_REASON
             if request.capture_only
             else ObservationGapCode.SERVICE_UNAVAILABLE.value
         )
         return observation_ingest_result_to_json(
-            ObservationIngestResult(ObservationIngestDisposition.REJECTED, reason, None)
+            ObservationIngestResult(
+                ObservationIngestDisposition.REJECTED,
+                reason,
+                None,
+            )
         )
 
     monkeypatch.setattr(client, "observation_ingest", capture_service_request)
@@ -406,7 +424,46 @@ async def _capture_claude_post_requests(
         )
         == 0
     )
-    return tuple(captured)
+    assert len(captured) in {2, 3}
+    capture_request = captured[0]
+    assert capture_request.capture_only
+    assert capture_request.envelope.event_kind == "PostToolUse"
+    queued_pre_requests = tuple(
+        request for request in captured[1:] if request.envelope.event_kind == "PreToolUse"
+    )
+    if queued_pre_requests:
+        assert len(queued_pre_requests) == 1
+        queued_pre_request = queued_pre_requests[0]
+        assert not queued_pre_request.capture_only
+        assert captured.index(queued_pre_request) > captured.index(capture_request)
+    post_structural_requests = tuple(
+        request
+        for request in captured[1:]
+        if request.envelope.event_kind == "PostToolUse" and not request.capture_only
+    )
+    assert post_structural_requests, [
+        (request.envelope.event_kind, request.capture_only) for request in captured
+    ]
+    structural_request = post_structural_requests[0]
+    assert structural_request.envelope.event_kind == "PostToolUse"
+    assert not structural_request.capture_only
+    if queued_pre_requests:
+        assert captured.index(queued_pre_requests[0]) < captured.index(structural_request)
+    return capture_request, structural_request
+
+
+def _pending_structural_request(  # pyright: ignore[reportUnusedFunction]
+    local: LocalObservationStore,
+    workspace: str,
+    *,
+    codex_session_id: str,
+    event_kind: str,
+) -> ObservationIngestRequest:
+    """Build a service-shaped request from the locally durable deferred row."""
+
+    rows = local.list_pending_outbox_rows(workspace, codex_session_id=codex_session_id)
+    row = next(row for row in rows if row.envelope.event_kind == event_kind)
+    return ObservationIngestRequest(codex_session_id=row.codex_session_id, envelope=row.envelope)
 
 
 def _assert_native_handoff_requests(
@@ -421,10 +478,28 @@ def _assert_native_handoff_requests(
     ObservationIngestRequest,
     ObservationIngestRequest,
 ]:
-    """Assert the durable native protocol's structural/capture/structural sequence."""
+    """Assert capture-first staging followed by the FIFO structural prefix.
+
+    Contentless ordinary-native rows remain in the local outbox until a later
+    content-bearing hook.  The later hook stages its transient bytes before
+    draining that queued prefix, so the wire order is capture-only PostToolUse,
+    structural PreToolUse, structural PostToolUse.  Return the requests by
+    their protocol role so callers do not accidentally couple themselves to
+    the transport order.
+    """
 
     assert len(requests) == 3
-    pre_request, capture_request, structural_request = requests
+    capture_request = next(request for request in requests if request.capture_only)
+    structural_requests = tuple(request for request in requests if not request.capture_only)
+    assert len(structural_requests) == 2
+    pre_request = next(
+        request for request in structural_requests if request.envelope.event_kind == "PreToolUse"
+    )
+    structural_request = next(
+        request for request in structural_requests if request.envelope.event_kind == "PostToolUse"
+    )
+    assert requests.index(capture_request) < requests.index(pre_request)
+    assert requests.index(pre_request) < requests.index(structural_request)
     assert pre_request.codex_session_id == codex_session_id
     assert not pre_request.capture_only
     assert pre_request.content_capture_profile == profile
@@ -848,17 +923,13 @@ async def test_ordinary_native_hook_content_reaches_prepared_semantic_packet(
     assert content_digest is not None
     assert manifest.content_bytes == len(captured_bytes)
 
-    # The service's routed-session table is the resolver's exact host/session fence.  Production
-    # verification workers record it when a workspace locator is available; this small in-process
-    # harness records the same service-owned route explicitly because it does not run verification.
-    task_observation.record_workspace_session_route(
+    # The service's routed-session table is the resolver's exact host/session fence.  This
+    # fixture has no approved-check policy, so verification setup returns early; the route must
+    # still have been recorded by the coordinator before that optional policy path.
+    assert task_observation.observation_route_for_session(
         workspace=workspace,
         yoetz_session_id=runtime.session_id,
-        yoetz_task_id=runtime.task_id,
-        yoetz_writer_id=cast(str, runtime.writer_id),
-        codex_session_commitment=session_commitment,
-        bound_at=Timestamp("2026-09-05T17:00:00.000Z"),
-    )
+    ) == (session_commitment, runtime.task_id, True)
     frontier = await ledger.load_frontier()
     frozen = await ledger.freeze_case(
         runtime.session_id,
@@ -1612,6 +1683,8 @@ async def test_native_finalize_without_manifest_stays_orphan_on_structural_retry
 
     def object_files() -> set[Path]:
         objects_root = tmp_path / "bundle" / "objects"
+        if not objects_root.is_dir():
+            return set()
         return {
             path
             for shard in objects_root.iterdir()
@@ -1981,6 +2054,14 @@ async def test_disabled_native_content_never_enters_service_request(tmp_path: Pa
         )
 
     assert await asyncio.to_thread(run_hook) == 0
-    assert len(client.requests) == 1, f"connector calls={client.connect_calls}"
-    assert client.requests[0].content_capture_profile is None
-    assert client.requests[0].content_chunks == ()
+    # With content capture disabled this ordinary-native row is structural-only;
+    # the hook keeps it locally durable and does not open a foreground service
+    # connection.
+    assert client.requests == [], f"connector calls={client.connect_calls}"
+    pending = local.list_pending_outbox_rows(
+        workspace,
+        codex_session_id="claude:disabled-content-session",
+    )
+    assert len(pending) == 1
+    assert pending[0].envelope.event_kind == "PostToolUse"
+    assert pending[0].envelope.content_object_refs == ()
