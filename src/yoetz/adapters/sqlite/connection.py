@@ -77,6 +77,10 @@ _WRITER_SAFE_CONFIGURATION_PRAGMAS: Final = {
     "foreign_keys": frozenset({None, "ON", "1"}),
     "trusted_schema": frozenset({None, "OFF", "0"}),
 }
+# Observation consent supports both structural-only and native-content bundle
+# schemas. Permit only its read-only column probe, including on inspection
+# connections; this is not permission to run arbitrary PRAGMAs (#616).
+_READ_ONLY_SCHEMA_PRAGMAS: Final = {"table_info": frozenset({"observation_consent"})}
 _STORAGE_UNSAFE_REASONS: Final = frozenset(
     {
         "application_id_mismatch",
@@ -381,8 +385,11 @@ def _read_only_authorizer(
         apsw.SQLITE_RECURSIVE,
     }:
         return apsw.SQLITE_OK
-    if action == apsw.SQLITE_PRAGMA and second is None and first in _READ_ONLY_ALLOWED_PRAGMAS:
-        return apsw.SQLITE_OK
+    if action == apsw.SQLITE_PRAGMA:
+        if second is None and first in _READ_ONLY_ALLOWED_PRAGMAS:
+            return apsw.SQLITE_OK
+        if first in _READ_ONLY_SCHEMA_PRAGMAS and second in _READ_ONLY_SCHEMA_PRAGMAS[first]:
+            return apsw.SQLITE_OK
     return apsw.SQLITE_DENY
 
 
@@ -405,6 +412,8 @@ def _writer_authorizer(
         return apsw.SQLITE_DENY
     if action == apsw.SQLITE_PRAGMA:
         if first in _WRITER_ALLOWED_PRAGMAS:
+            return apsw.SQLITE_OK
+        if first in _READ_ONLY_SCHEMA_PRAGMAS and second in _READ_ONLY_SCHEMA_PRAGMAS[first]:
             return apsw.SQLITE_OK
         if (
             first in _WRITER_SAFE_CONFIGURATION_PRAGMAS

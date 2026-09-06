@@ -166,6 +166,11 @@ class ObservationOutboxSweeper:
     # yields on time. Checked between rows, so one slow ingest can still overrun
     # it: the caller's deadline remains the hard bound.
     budget_seconds: float | None = None
+    # Production ready composition supplies the installation maintenance gate here. It is held
+    # only across one coordinator ingest, so a long backlog cannot keep ordinary workflow control
+    # behind the entire 20-second sweep. Local outbox bookkeeping stays outside the gate and is
+    # already fenced by the per-workspace lease.
+    ingest_gate: asyncio.Lock | None = None
     _executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -210,6 +215,13 @@ class ObservationOutboxSweeper:
         executor, self._executor = self._executor, None
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
+
+    async def _ingest(self, request: ObservationIngestRequest) -> ObservationIngestResult:
+        gate = self.ingest_gate
+        if gate is None:
+            return await self.coordinator.ingest_request(request)
+        async with gate:
+            return await self.coordinator.ingest_request(request)
 
     async def sweep(self) -> ObservationDrainSummary:
         loop = asyncio.get_running_loop()
@@ -309,7 +321,7 @@ class ObservationOutboxSweeper:
                         envelope=row.envelope,
                     )
                     try:
-                        result = await self.coordinator.ingest_request(request)
+                        result = await self._ingest(request)
                     except Exception:
                         result = ObservationIngestResult(
                             ObservationIngestDisposition.REJECTED,

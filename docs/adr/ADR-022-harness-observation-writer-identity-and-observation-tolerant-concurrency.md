@@ -15,6 +15,9 @@ maintainer-directed issue #346 incident repairs #350, #351, and
 for moderator-approved issue #244 and the reopened issue #216 recurrence; 2026-09-05 for issue #605
 (workspace recovery revalidation and durable lifecycle repair, decision 20); 2026-09-05 for issue
 #607 (host/profile pairing contracts, scoped orphan diagnostics, and identity fencing, decision 21).
+**Amended (continued):** 2026-09-06 for issue #616 (bounded host-hook maintenance: lightweight
+ordinary-profile ingress and bounded native-content draining, with cancellation limits kept
+explicit).
 **Implemented by:** `src/yoetz/application/observation_materialize.py`,
 `src/yoetz/application/observation_coordinator.py`, `src/yoetz/cli/observe_hooks.py`,
 `src/yoetz/adapters/memory/ledger.py`,
@@ -285,7 +288,14 @@ unsupported claims and unbounded duplicate findings.
     spelling; a name that merely resembles a Yoetz tool is ordinary. Like decision 10 this is a
     delivery-volume policy, not a coverage limitation, so it records no gap. On the consumer side,
     the service sweeper yields with its partial summary on a budget under the daemon's sweep
-    deadline, so progress made under a backlog is never discarded as a timeout, and the manual
+    deadline, so progress made under a backlog is never discarded as a timeout. Its maintenance
+    gate covers one coordinator ingest at a time rather than the complete pass, so ordinary
+    workflow control remains responsive while the per-workspace lease and routed task fence retain
+    recovery and bundle-rotation exclusion for each row. Legacy hook-spool normalization has one
+    generation-owned worker, advances a durable byte cursor in bounded batches, and retains its
+    claim future across cancellation before another pass may start; generation close stops between
+    batches. Route inspection and fence checks use short-lived read-only snapshots outside the
+    service event loop. The manual
     `observe drain` repeats bounded passes while a pass resolves rows and reports a terminal
     condition (`drained`, `retry_pending`, `service_unavailable`, `pass_limit`) instead of stopping
     at the first retryable lane head. `observe status` reports the receipt time of the oldest

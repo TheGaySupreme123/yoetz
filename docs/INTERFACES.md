@@ -1156,7 +1156,14 @@ single predicate deciding between the two, shared by the receipt and by compact 
 
 ### Ledger, projection, and durable check orchestration
 
-`LedgerPort` is the shared memory/SQLite contract. Its methods are:
+`LedgerPort` is the shared memory/SQLite contract.
+
+`AppendCommand.artifact_object_refs` is an internal application-to-ledger port field. It carries
+the exact authenticated object descriptors for artifact ids already present in the draft so the
+ledger can inventory them atomically with the event; it is not part of the public append request,
+accepted-event wire record, or any schema digest.
+
+Its methods are:
 
 - `append_batch(command: AppendCommand) -> AppendResult`;
 - `load_frontier() -> Frontier` (task-ledger truth without requiring a pre-existing session;
@@ -3297,6 +3304,14 @@ but only after atomically acquiring its lifecycle lock so an attach already in f
 The service sweeper yields with its partial summary once a pass has run for its 20-second budget,
 under the daemon's 30-second sweep deadline, so rows it resolved license the immediate re-sweep
 instead of being discarded as a deadline timeout. The
+installation maintenance gate covers one coordinator ingest at a time rather than the whole
+pass, so a backlog cannot hold ordinary workflow control behind local outbox bookkeeping; the
+workspace lease and the routed task fence still serialize each row against recovery and bundle
+rotation. Legacy hook-spool normalization uses one generation-owned worker, advances a durable
+byte cursor in bounded batches, and retains its claim future across cancellation, so a later pass
+cannot overlap the same rename-and-replay operation; generation close stops between batches. The
+route inspection and fence verification callbacks keep their synchronous SQLite snapshots off the
+control event loop. The
 manual `yoetz observe drain` repeats full FIFO passes while the previous pass resolved at least one
 row, bounded by the backlog size at entry, and reports `passes`, `pending_after`, and a closed
 `terminal`: `drained` (nothing pending), `retry_pending` (a pass resolved nothing; `reasons`

@@ -312,6 +312,11 @@ class AppendCommand:
     expected_frontier: int | None
     entries: tuple[AppendEntry, ...]
     result_object_ref: ObjectRef | None = None
+    # Object descriptors for non-payload artifacts that are already
+    # authenticated by the owning object store.  Native observation content
+    # is staged before the ledger append, so the ledger must receive the exact
+    # descriptor in order to retain it across a restart/replay.
+    artifact_object_refs: tuple[ObjectRef, ...] = ()
 
     def __post_init__(self) -> None:
         _id(IdKind.TASK, self.task_id)
@@ -342,6 +347,23 @@ class AppendCommand:
             ):
                 raise _invalid()
         elif self.result_object_ref is not None:
+            raise _invalid()
+        if type(self.artifact_object_refs) is not tuple:
+            raise _invalid()
+        artifact_ids = {
+            artifact_ref for entry in self.entries for artifact_ref in entry.draft.artifact_refs
+        }
+        refs = self.artifact_object_refs
+        if (
+            len(refs) > MAX_EVENTS_PER_BATCH * 64
+            or any(type(ref) is not ObjectRef for ref in refs)
+            or tuple(ref.object_id for ref in refs)
+            != tuple(sorted({ref.object_id for ref in refs}, key=str.encode))
+            or any(
+                ref.metadata.task_id != self.task_id or ref.object_id not in artifact_ids
+                for ref in refs
+            )
+        ):
             raise _invalid()
 
 

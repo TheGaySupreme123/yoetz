@@ -1637,8 +1637,16 @@ class ServiceDaemon:
     async def _bounded_observation_sweep(
         self, observation_sweep: Callable[[], Awaitable[ObservationDrainSummary]]
     ) -> ObservationDrainSummary | None:
-        """Run one deadline-bounded sweep, naming why it produced no summary."""
+        """Run one deadline-bounded sweep, naming why it produced no summary.
 
+        The production sweep owns the same maintenance gate around each coordinator ingest. Keep
+        the daemon from taking that gate around the whole pass, otherwise a backlog turns one
+        bounded row loop into a workflow-wide critical section. Small test compositions that do
+        not provide the row guard retain the historical whole-pass exclusion.
+        """
+
+        if getattr(observation_sweep, "row_gate_bound", False) is True:
+            return await self._bounded_observation_sweep_under_gate(observation_sweep)
         async with self._composition.maintenance_gate:
             return await self._bounded_observation_sweep_under_gate(observation_sweep)
 
@@ -3810,6 +3818,7 @@ async def _production_composition(
         relay = _ReadyActivationRelay()
         secret_ingress = SecretIngressService(clock, secret_memory, listener=listeners.secret)
         diagnostics = _NullDiagnostics()
+        maintenance_gate = asyncio.Lock()
         ready_application_factory = (
             _ready_application_factory
             if _ready_application_factory is not None
@@ -3823,6 +3832,7 @@ async def _production_composition(
                     clock=clock,
                     secret_memory=secret_memory,
                     diagnostics=diagnostics,
+                    observation_gate=maintenance_gate,
                 ),
             )
         )
@@ -3834,7 +3844,6 @@ async def _production_composition(
             activate_ready=relay,
         )
         privacy_relay = _PrivacyPolicyAppRelay()
-        maintenance_gate = asyncio.Lock()
         human = HumanControlService(
             clock=clock,
             lifecycle=lifecycle,

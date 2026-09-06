@@ -175,6 +175,7 @@ _ADVICE_FINDING_KIND_BY_RULE: Final = MappingProxyType(
 )
 
 _LEGACY_UNPAIRED_REPLAY_PROFILE: Final = "legacy-paired-replay"
+_CAPTURED_CONTENT_MEDIA_TYPE: Final = "application/vnd.yoetz.observation-content+json"
 
 
 def _legacy_unpaired_replay_envelope(
@@ -1009,23 +1010,37 @@ class ObservationCoordinator:
                                 if claim is not None:
                                     replay_claims.append((claim, candidate_roles))
                     stage = "ledger_append"
-                    claim = await self._append_materialized(
-                        runtime,
-                        envelope,
-                        batch,
-                        legacy_session_id=predecessor_session_id,
-                        legacy_writer_id=predecessor_writer_id,
-                        legacy_writer_routes=legacy_writer_routes,
-                        replay_required=(
-                            route_history_truncated
-                            and (
-                                result.disposition is ObservationIngestDisposition.DUPLICATE
-                                or bool(replay_claims)
-                            )
-                        ),
-                        replay_claims=tuple(replay_claims),
-                        replay_draft_role_sets=tuple(replay_role_sets),
+                    replay_required = route_history_truncated and (
+                        result.disposition is ObservationIngestDisposition.DUPLICATE
+                        or bool(replay_claims)
                     )
+                    if captured_content:
+                        claim = await self._append_materialized(
+                            runtime,
+                            envelope,
+                            batch,
+                            captured_content=captured_content,
+                            legacy_session_id=predecessor_session_id,
+                            legacy_writer_id=predecessor_writer_id,
+                            legacy_writer_routes=legacy_writer_routes,
+                            replay_required=replay_required,
+                            replay_claims=tuple(replay_claims),
+                            replay_draft_role_sets=tuple(replay_role_sets),
+                        )
+                    else:
+                        # Keep the structural-only override seam compatible with
+                        # older in-process coordinators and test doubles.
+                        claim = await self._append_materialized(
+                            runtime,
+                            envelope,
+                            batch,
+                            legacy_session_id=predecessor_session_id,
+                            legacy_writer_id=predecessor_writer_id,
+                            legacy_writer_routes=legacy_writer_routes,
+                            replay_required=replay_required,
+                            replay_claims=tuple(replay_claims),
+                            replay_draft_role_sets=tuple(replay_role_sets),
+                        )
                     if claim is not None:
                         (
                             operation_id,
@@ -1533,6 +1548,7 @@ class ObservationCoordinator:
         envelope: ObservationEnvelope,
         batch: MaterializedObservationBatch,
         *,
+        captured_content: tuple[ObservationContentManifest, ...] = (),
         legacy_session_id: str | None = None,
         legacy_writer_id: str | None = None,
         legacy_writer_routes: tuple[tuple[str, str], ...] = (),
@@ -1697,6 +1713,29 @@ class ObservationCoordinator:
         )
         operation_id = self._stable_operation_id(digest)
 
+        artifact_ids = {str(ref) for item in batch.drafts for ref in item.draft.artifact_refs}
+        artifact_object_refs: list[ObjectRef] = []
+        for manifest in captured_content:
+            if manifest.object_id not in artifact_ids:
+                continue
+            if manifest.envelope_digest is None:
+                raise ValueError("captured_object_unavailable")
+            ref = await runtime.objects.resolve_verified(
+                manifest.object_id, manifest.envelope_digest
+            )
+            if (
+                ref.metadata.task_id != runtime.task_id
+                or ref.metadata.kind is not ObjectKind.CAPTURED_CONTENT
+                or ref.metadata.media_type != _CAPTURED_CONTENT_MEDIA_TYPE
+            ):
+                raise ValueError("captured_object_invalid")
+            artifact_object_refs.append(ref)
+        if {ref.object_id for ref in artifact_object_refs} != artifact_ids:
+            raise ValueError("captured_object_unavailable")
+        artifact_object_refs_tuple = tuple(
+            sorted(artifact_object_refs, key=lambda ref: ref.object_id.encode("ascii"))
+        )
+
         author = observation_author()
         refs: list[ObjectRef] = []
         entries: list[AppendEntry] = []
@@ -1747,6 +1786,7 @@ class ObservationCoordinator:
                 digest,
                 None,
                 tuple(entries),
+                artifact_object_refs=artifact_object_refs_tuple,
             )
             mutation = PreparedMutation(
                 command.writer_id,
@@ -2152,6 +2192,7 @@ class ObservationCoordinator:
                 operation_digest,
                 None,
                 tuple(entries),
+                artifact_object_refs=(receipt_ref,),
             )
             mutation = PreparedMutation(
                 command.writer_id,

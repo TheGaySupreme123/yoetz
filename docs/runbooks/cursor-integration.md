@@ -311,9 +311,13 @@ The ordinary `postToolUse` path emits queued advice through the documented
 [`additional_context` output](https://cursor.com/docs/hooks#posttooluse), including when a
 command's exit is unknown or nonzero. Advice is marked delivered only after successful stdout
 emission. `postToolUseFailure` has no consumable output, so its advice remains pending for a later
-supported event. Legacy edit/MCP hooks keep their existing output behavior, and automatic Stop
-follow-up messages remain disabled. Hook success never substitutes for an explicit command/test
-exit fact.
+supported event. The rendered ordinary hooks use a lightweight entrypoint that avoids loading the
+full CLI application graph. Ordinary events have a five-second budget, `sessionStart` and `stop`
+ten seconds, and `sessionEnd` three seconds. Local structural capture, pairing, and the outbox
+intent close before the bounded service drain; advice-bearing events remain synchronous so
+`additional_context` stays on the current hook response. Legacy edit/MCP hooks keep their existing
+output behavior, and automatic Stop follow-up messages remain disabled. Hook success never
+substitutes for an explicit command/test exit fact.
 
 Select these hooks with `--observation-profile ordinary` on the existing native Cursor plugin
 preview/install/status commands. Repeat the same profile when applying an exact preview. To
@@ -337,7 +341,15 @@ yoetz observe content-disable --workspace /exact/project \
 
 The service accepts Cursor chunks only when that exact profile is active in local consent and in
 the mapped task grant. A missing or mismatched profile drops plaintext chunks and records
-`content_capture_unavailable`; chunks are not written to the structural outbox. The installed
+`content_capture_unavailable`; chunks are not written to the structural outbox. Authorized native
+hooks reserve the workspace drain before enqueueing the structural row, keeping a background sweep
+from consuming it before the foreground content attempt. The nonblocking reservation is released
+on cancellation or after the bounded drain; contention can still leave a content gap. A content-bearing
+pass prioritizes the current event after its same-session FIFO prefix, within a one-second drain and
+sixteen-row bound; a stale or blocked backlog produces the explicit gap when the hook completes.
+A hard process kill before that diagnostic path completes may lose transient content without a
+durable gap marker; making native plaintext survive that boundary requires a separate service-owned
+staging protocol. The installed
 Cursor IDE `3.19.7` fact is a candidate local host observation while this runbook's pinned
 compatibility cells remain unchanged; it cannot certify the ordinary profile without an exact
 isolated fixture and receipt evidence for native hook delivery, accepted content, semantic

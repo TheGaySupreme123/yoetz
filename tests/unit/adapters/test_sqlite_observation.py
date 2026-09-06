@@ -7,6 +7,8 @@ import asyncio
 import apsw
 import pytest
 
+from yoetz.adapters.sqlite import connection as connection_module
+from yoetz.adapters.sqlite import migrations as migrations_module
 from yoetz.adapters.sqlite.migrations import initialize_bundle
 from yoetz.adapters.sqlite.observation import SqliteObservationStore
 from yoetz.domain.observation import (
@@ -36,7 +38,27 @@ _TIME = Timestamp("2026-07-22T21:10:00.000Z")
 def _store() -> SqliteObservationStore:
     db = apsw.Connection(":memory:")
     initialize_bundle(db, {"task_id": "task_obs", "owner_generation": "1"})
+    # Exercise the production SQL guard: plain APSW missed the #616 consent
+    # schema-probe failure across structural and both native content profiles.
+    db.set_authorizer(connection_module._writer_authorizer)  # pyright: ignore[reportPrivateUsage]
     return SqliteObservationStore(db)
+
+
+def test_guarded_legacy_bundle_keeps_structural_consent_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        migrations_module, "BUNDLE_MIGRATIONS", migrations_module.BUNDLE_MIGRATIONS[:-1]
+    )
+    store = _store()
+    store.grant_consent(_WORKSPACE, _TIME)
+    store.bind_session(_WORKSPACE, _SESSION)
+    assert store.content_capture_profiles(_WORKSPACE) == ()
+    with pytest.raises(PublicOperationError) as rejected:
+        store.enable_content_capture(_WORKSPACE, CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID)
+    assert rejected.value.code is PublicErrorCode.INVALID_REQUEST
+    assert rejected.value.retryable is False
+    assert store.content_capture_profiles(_WORKSPACE) == ()
 
 
 def _cursor(*, generation: int = 1, byte_pos: int = 10, event_pos: int = 1) -> ObservationCursor:

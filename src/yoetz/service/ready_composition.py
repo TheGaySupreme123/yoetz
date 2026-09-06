@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import io
 import os
+import threading
 from collections.abc import Awaitable, Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast
 
@@ -17,7 +21,10 @@ import apsw
 import yoetz.adapters.sqlite.connection as connection_module
 import yoetz.adapters.sqlite.recovery as recovery_module
 from yoetz.adapters.importers.codex_plan import CodexImportPlans
-from yoetz.adapters.integrations.hook_spool import HookSpool
+from yoetz.adapters.integrations.hook_spool import (
+    DEFAULT_HOOK_SPOOL_CLAIM_LIMIT,
+    HookSpool,
+)
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.adapters.objects.encrypted_files import EncryptedFilesObjectStore
 from yoetz.adapters.privacy.catalog import CatalogPrivacyAudit, CatalogPrivacyPolicyStore
@@ -219,6 +226,7 @@ __all__ = [
 _CATALOG_NAME = "catalog.sqlite3"
 _LEDGER_NAME = "ledger.sqlite3"
 _ZERO_DIGEST = "sha256:" + "0" * 64
+_LEGACY_HOOK_SPOOL_BATCH_LIMIT: Final = DEFAULT_HOOK_SPOOL_CLAIM_LIMIT
 
 
 class _Lifecycle(Protocol):
@@ -347,6 +355,156 @@ class _BundleInspection:
     fresh_allocation: bool
     recovery_state: object
     recovery_verdict: object
+
+
+@dataclass(frozen=True, slots=True)
+class _ReadyObservationSweep:
+    """Callable sweep with an explicit per-row maintenance-gate contract."""
+
+    callback: Callable[[], Awaitable[ObservationDrainSummary]]
+    row_gate_bound: bool
+
+    async def __call__(self) -> ObservationDrainSummary:
+        return await self.callback()
+
+
+def _replay_legacy_hook_spool(state: Path, *, stop: threading.Event | None = None) -> None:
+    """Normalize one bounded crash-safe legacy-hook spool pass off the service loop."""
+
+    spool = HookSpool(_state=state)
+    from yoetz.cli.observe_hooks import handle_observe
+
+    remaining = _LEGACY_HOOK_SPOOL_BATCH_LIMIT
+    for workspace_commitment in spool.pending_workspaces():
+        if remaining <= 0 or (stop is not None and stop.is_set()):
+            return
+        with spool.claim(workspace_commitment, limit=remaining) as records:
+            for record in records:
+                handle_observe(
+                    event_name=record.event_name,
+                    stdin_bytes=canonical_encode(cast(DomainJsonValue, record.payload)),
+                    stdout=io.BytesIO(),
+                    _state=state,
+                    skip_service=True,
+                    _workspace_commitment=workspace_commitment,
+                )
+        # Invalid structural lines are consumed too, even though they produce no record. Count
+        # an empty batch as one unit so malformed workspaces cannot make this pass unbounded.
+        remaining -= max(1, len(records))
+        # A claim commits its cursor for the complete bounded batch only after this context exits.
+        # Stop between claims so generation close cannot leave a partially committed batch.
+        if stop is not None and stop.is_set():
+            return
+
+
+class _LegacyHookSpoolForwarder:
+    """Own one serialized spool worker for the lifetime of a READY generation.
+
+    The spool claim renames a file and the local hook adapter opens its own short-lived state
+    handles. One replay pass claims at most one bounded batch. A cancelled await therefore cannot
+    safely start a second claim until the first worker has finished; retaining the future also lets
+    the next maintenance pass join that worker. ``close`` asks the worker to stop between claims
+    during generation teardown but lets its active batch finish its owned local writes.
+    """
+
+    def __init__(self, state: Path) -> None:
+        self._state = state
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yoetz-hook-spool")
+        self._stop = threading.Event()
+        self._future: asyncio.Future[None] | None = None
+        self._closed = False
+
+    async def replay(self) -> None:
+        if self._closed:
+            return
+        future = self._future
+        if future is None:
+            future = asyncio.get_running_loop().run_in_executor(
+                self._executor,
+                partial(_replay_legacy_hook_spool, self._state, stop=self._stop),
+            )
+            self._future = future
+        elif future.done():
+            # Propagate the prior worker's failure before allowing another pass to begin.  A
+            # persistent spool error must remain observable and must not be converted into a
+            # false successful drain merely because a fresh worker was started.
+            self._future = None
+            future.result()
+            future = asyncio.get_running_loop().run_in_executor(
+                self._executor,
+                partial(_replay_legacy_hook_spool, self._state, stop=self._stop),
+            )
+            self._future = future
+        try:
+            # wait() leaves its input future running when this caller is cancelled. Unlike
+            # shield(), it does not report a retained worker's late exception as unhandled
+            # before the next pass can observe that exception (Python 3.14).
+            await asyncio.wait((future,))
+            future.result()
+        except asyncio.CancelledError:
+            # The worker still owns its claim. Keep it joinable by the next pass.
+            raise
+        except BaseException:
+            if self._future is future:
+                self._future = None
+            raise
+        else:
+            if self._future is future:
+                self._future = None
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._stop.set()
+        future = self._future
+        if future is not None:
+
+            def observe_closed_worker(done: asyncio.Future[None]) -> None:
+                if done.cancelled():
+                    return
+                error = done.exception()
+                if isinstance(error, Exception):
+                    record_unexpected_exception_without_raising(
+                        error,
+                        component="service.ready_composition",
+                        operation="legacy_hook_spool_replay_failed",
+                    )
+
+            future.add_done_callback(observe_closed_worker)
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+
+async def _run_blocking_joined[ResultT](call: Callable[[], ResultT], *, operation: str) -> ResultT:
+    """Run a side-effecting local operation off-loop and join it before cancellation returns."""
+
+    worker = asyncio.create_task(asyncio.to_thread(call))
+    try:
+        await asyncio.wait((worker,))
+        return worker.result()
+    except asyncio.CancelledError:
+        # ``asyncio.wait`` does not cancel its input.  Provisioning may have created a bundle or
+        # opened a writer before the caller's deadline, so do not release the route/gate while
+        # that worker can still mutate the same path.  Preserve the caller's cancellation after
+        # the worker has been joined, recording a bounded identity if the worker failed late.
+        while not worker.done():
+            try:
+                await asyncio.wait((worker,))
+            except asyncio.CancelledError:
+                # A second deadline/caller cancellation must not release the route while the
+                # side-effecting worker is still active. Keep joining until it reaches a terminal
+                # state, then propagate the original cancellation below.
+                continue
+        try:
+            worker.result()
+        except BaseException as worker_error:
+            if not isinstance(worker_error, asyncio.CancelledError):
+                record_unexpected_exception_without_raising(
+                    worker_error,
+                    component="service.ready_composition",
+                    operation=operation,
+                )
+        raise
 
 
 def _install_sqlite_support_policy() -> None:
@@ -775,6 +933,18 @@ def _admitted_writers_for_session(
     return writers
 
 
+def _admitted_writers_for_session_from_path(
+    catalog_path: Path, task_id: str, session_id: str
+) -> frozenset[str]:
+    """Read session writer admission through a short-lived private inspection connection."""
+
+    catalog_db = open_read_only(catalog_path)
+    try:
+        return _admitted_writers_for_session(catalog_db, task_id, session_id)
+    finally:
+        _close_db(catalog_db)
+
+
 def _inspect_common(
     *,
     catalog_path: Path,
@@ -819,7 +989,6 @@ def build_runtime_adapter_factories(
     clock: ClockPort,
     ids: IdPort,
     secret_memory: object,
-    catalog_db: apsw.Connection,
 ) -> RuntimeAdapterFactories:
     """Build durable local runtime adapter callbacks for one ready generation."""
 
@@ -833,44 +1002,54 @@ def build_runtime_adapter_factories(
     async def inspect_route(route: object, access: RouteAccess) -> object:
         del access
         session_id = cast(str, getattr(route, "session_id"))
-        return _inspect_common(
-            catalog_path=catalog_path,
-            bundle_base=paths.bundle,
-            route=route,
-            admitted_writer_ids=_admitted_writers_for_session(
-                catalog_db, cast(str, getattr(route, "task_id")), session_id
-            ),
-            fresh_allocation=False,
-        )
+
+        def inspect() -> object:
+            # Catalog and recovery inspection are synchronous APSW/file operations. Keep the
+            # entire route snapshot off the control event loop; runtime.route() already exposes
+            # this seam as async, so callers retain their normal deadline/cancellation contract.
+            return _inspect_common(
+                catalog_path=catalog_path,
+                bundle_base=paths.bundle,
+                route=route,
+                admitted_writer_ids=_admitted_writers_for_session_from_path(
+                    catalog_path, cast(str, getattr(route, "task_id")), session_id
+                ),
+                fresh_allocation=False,
+            )
+
+        return await asyncio.to_thread(inspect)
 
     async def inspect_provision(command: object) -> object:
-        route = TaskRoute(
-            task_id=cast(str, getattr(command, "task_id")),
-            session_id=cast(str, getattr(command, "session_id")),
-            bundle_relpath=cast(str, getattr(command, "bundle_relpath")),
-            route_generation=cast(int, getattr(command, "route_generation")),
-            route_identity_digest=cast(str, getattr(command, "route_identity_digest")),
-            state=TaskRouteState.ACTIVE,
-        )
-        bundle_root = _safe_bundle_root(
-            paths.bundle,
-            cast(str, getattr(command, "bundle_relpath")),
-            cast(str, getattr(command, "task_id")),
-        )
-        ledger_path = bundle_root / _LEDGER_NAME
-        fresh = not ledger_path.exists()
-        if fresh:
-            bundle_root.mkdir(mode=0o700, parents=True, exist_ok=False)
-            bundle_root.chmod(0o700)
-            _initialize_fresh_bundle(ledger_path, command=command, clock=clock)
-        writer_id = cast(str, getattr(command, "writer_id"))
-        return _inspect_common(
-            catalog_path=catalog_path,
-            bundle_base=paths.bundle,
-            route=route,
-            admitted_writer_ids=frozenset({writer_id}),
-            fresh_allocation=fresh,
-        )
+        def inspect() -> object:
+            route = TaskRoute(
+                task_id=cast(str, getattr(command, "task_id")),
+                session_id=cast(str, getattr(command, "session_id")),
+                bundle_relpath=cast(str, getattr(command, "bundle_relpath")),
+                route_generation=cast(int, getattr(command, "route_generation")),
+                route_identity_digest=cast(str, getattr(command, "route_identity_digest")),
+                state=TaskRouteState.ACTIVE,
+            )
+            bundle_root = _safe_bundle_root(
+                paths.bundle,
+                cast(str, getattr(command, "bundle_relpath")),
+                cast(str, getattr(command, "task_id")),
+            )
+            ledger_path = bundle_root / _LEDGER_NAME
+            fresh = not ledger_path.exists()
+            if fresh:
+                bundle_root.mkdir(mode=0o700, parents=True, exist_ok=False)
+                bundle_root.chmod(0o700)
+                _initialize_fresh_bundle(ledger_path, command=command, clock=clock)
+            writer_id = cast(str, getattr(command, "writer_id"))
+            return _inspect_common(
+                catalog_path=catalog_path,
+                bundle_base=paths.bundle,
+                route=route,
+                admitted_writer_ids=frozenset({writer_id}),
+                fresh_allocation=fresh,
+            )
+
+        return await _run_blocking_joined(inspect, operation="runtime_inspect_provision_failed")
 
     async def acquire_fence(inspection: object, write: bool) -> OwnershipFence:
         if type(inspection) is not _BundleInspection:
@@ -887,10 +1066,11 @@ def build_runtime_adapter_factories(
                 Callable[[Path, OwnershipFence], None],
                 getattr(connection_module, "_register_active_fence"),
             )
-            registrar(inspection.ledger_path, fence)
+            await asyncio.to_thread(registrar, inspection.ledger_path, fence)
             return fence
         try:
-            return recovery_module.acquire_bundle_ownership(
+            return await asyncio.to_thread(
+                recovery_module.acquire_bundle_ownership,
                 cast(recovery_module.RecoveryState, inspection.recovery_state),
                 cast(recovery_module.RecoveryTailVerdict, inspection.recovery_verdict),
                 service_instance_id=service_instance_id,
@@ -911,10 +1091,11 @@ def build_runtime_adapter_factories(
     async def validate_fence(inspection: object, fence: OwnershipFence) -> None:
         if type(inspection) is not _BundleInspection:
             raise ValueError("runtime_inspection_invalid")
-        cast(_RecoveryPersistence, recovery_module._backend()).verify_fence(  # pyright: ignore[reportPrivateUsage]
-            inspection.recovery_state,
-            fence,
+        backend = cast(
+            _RecoveryPersistence,
+            recovery_module._backend(),  # pyright: ignore[reportPrivateUsage]
         )
+        await asyncio.to_thread(backend.verify_fence, inspection.recovery_state, fence)
 
     async def open_objects(
         inspection: object,
@@ -925,7 +1106,10 @@ def build_runtime_adapter_factories(
         del fence, access
         if type(inspection) is not _BundleInspection or keys is None:
             raise ValueError("runtime_object_store_invalid")
-        db = open_read_only(inspection.ledger_path)
+        # ``LocalBundleRuntime._open_entry`` shields this opening task and waits for it during
+        # generation teardown, so the returned connection remains owned even if the requesting
+        # control call is cancelled while the worker performs schema verification.
+        db = await asyncio.to_thread(open_read_only, inspection.ledger_path)
         try:
             store = EncryptedFilesObjectStore(
                 bundle_root=inspection.bundle_root,
@@ -949,7 +1133,9 @@ def build_runtime_adapter_factories(
         del access
         if type(inspection) is not _BundleInspection:
             raise ValueError("runtime_ledger_invalid")
-        db = open_writer(inspection.ledger_path)
+        # The opening task is shielded by LocalBundleRuntime and joined by close(); this keeps the
+        # writer and its fence lifetime paired when the caller's deadline expires.
+        db = await asyncio.to_thread(open_writer, inspection.ledger_path)
         try:
             ledger = SqliteLedger(
                 db=db,
@@ -982,7 +1168,9 @@ def build_runtime_adapter_factories(
             clock=clock,
             ids=ids,
         )
-        writer = SqliteWriterThread(inspection.ledger_path)
+        # SqliteWriterThread is likewise created inside the shielded opening task; teardown waits
+        # for that task before closing the returned entry.
+        writer = await asyncio.to_thread(SqliteWriterThread, inspection.ledger_path)
         try:
             importer = SqliteImporter(
                 task_id=cast(str, getattr(route, "task_id")),
@@ -2879,6 +3067,7 @@ async def provide_service_ready_context(
     clock: ClockPort,
     secret_memory: object,
     diagnostics: DiagnosticsPort | None = None,
+    observation_gate: asyncio.Lock | None = None,
 ) -> ServiceReadyContext:
     """Compose one generation-bound ready application context."""
 
@@ -3047,7 +3236,6 @@ async def provide_service_ready_context(
         clock=clock,
         ids=ids,
         secret_memory=secret_memory,
-        catalog_db=cast(apsw.Connection, getattr(catalog, "_db")),
     )
     runtime = await open_local_bundle_runtime(
         runtime_context,
@@ -3250,7 +3438,9 @@ async def provide_service_ready_context(
         local_observation,
         observation_coordinator,
         budget_seconds=DEFAULT_OBSERVATION_SWEEP_BUDGET_SECONDS,
+        ingest_gate=observation_gate,
     )
+    legacy_spool_forwarder = _LegacyHookSpoolForwarder(paths.state)
 
     async def sweep_observation() -> ObservationDrainSummary:
         """Move fenced legacy-hook spool records into the normal durable outbox.
@@ -3260,23 +3450,11 @@ async def provide_service_ready_context(
         the ordinary service-owned outbox sweep forwards it.
         """
 
-        spool = HookSpool(_state=paths.state)
-        from yoetz.cli.observe_hooks import handle_observe
-
-        for workspace_commitment in spool.pending_workspaces():
-            with spool.claim(workspace_commitment) as records:
-                for record in records:
-                    handle_observe(
-                        event_name=record.event_name,
-                        stdin_bytes=canonical_encode(cast(DomainJsonValue, record.payload)),
-                        stdout=io.BytesIO(),
-                        _state=paths.state,
-                        skip_service=True,
-                        _workspace_commitment=workspace_commitment,
-                    )
+        await legacy_spool_forwarder.replay()
         return await observation_sweeper.sweep()
 
     def close_observation_maintenance() -> None:
+        legacy_spool_forwarder.close()
         observation_sweeper.close()
         observation_coordinator.close()
 
@@ -3331,7 +3509,10 @@ async def provide_service_ready_context(
         provider_credential_connected=provider_credential_connected,
         fallback_credential_connected=fallback_credential_connected,
         semantic_ready=semantic_ready,
-        observation_sweep=sweep_observation,
+        observation_sweep=_ReadyObservationSweep(
+            sweep_observation,
+            row_gate_bound=observation_gate is not None,
+        ),
         observation_sweep_close=close_observation_maintenance,
         ready_recommendation_refresh=refresh_ready_recommendations,
     )
@@ -3346,6 +3527,7 @@ def build_ready_application_factory(
     clock: ClockPort,
     secret_memory: object,
     diagnostics: DiagnosticsPort | None = None,
+    observation_gate: asyncio.Lock | None = None,
 ) -> ReadyApplicationFactory:
     # Publish the loaded config gate before unlock/READY construction begins;
     # hooks then stop capture during a disabled service generation as well as
@@ -3362,5 +3544,6 @@ def build_ready_application_factory(
             clock=clock,
             secret_memory=secret_memory,
             diagnostics=diagnostics,
+            observation_gate=observation_gate,
         )
     )

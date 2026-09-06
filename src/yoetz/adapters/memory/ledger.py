@@ -1521,6 +1521,10 @@ class MemoryLedgerAdapter:
                     entry.payload_object.object_id: entry.payload_object
                     for entry in command.entries
                 },
+                **{
+                    artifact_ref.object_id: artifact_ref
+                    for artifact_ref in command.artifact_object_refs
+                },
                 **(
                     {}
                     if command.result_object_ref is None

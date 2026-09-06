@@ -242,7 +242,19 @@ yoetz observe content-disable --workspace /exact/project \
 The service accepts Claude chunks only when that exact profile is active in local consent and in
 the mapped task grant. A missing or mismatched profile drops plaintext chunks and records
 `content_capture_unavailable`; chunks are never retained in the structural outbox for later
-replay. The current installed Claude `2.1.261` probe is a candidate host fact only; it does not
+replay. An authorized native hook reserves the workspace drain before enqueueing its structural
+row, keeping a background sweep from consuming that row before the foreground content attempt.
+The reservation is nonblocking and is released on cancellation or after the bounded drain; a busy
+owner can still leave an explicit content gap. The hook commits its structural envelope, pairing,
+mapping, and outbox intent locally
+before attempting the bounded service drain. A content-bearing pass prioritizes the current row
+after its same-session FIFO prefix, within a one-second drain and sixteen-row bound. A healthy
+accepted drain forwards the transient chunks and exact profile to the service; a bounded service
+failure or completed cancellation path leaves the structural record plus an explicit content gap.
+A hard process kill before that diagnostic path completes may lose transient content without a
+durable gap marker; making native plaintext survive that boundary requires a separate service-owned
+staging protocol. The current
+installed Claude `2.1.261` probe is a candidate host fact only; it does not
 certify this ordinary profile without an exact isolated fixture and a receipt that separately
 proves native hook delivery, accepted content, semantic selection, and any resulting influence.
 
@@ -252,7 +264,11 @@ the native hook/observation paths below.
 
 The native hook profile emits only `SessionStart`, scoped-Yoetz `PostToolUse`, scoped-Yoetz
 `PostToolUseFailure`, `Stop`, and `SessionEnd`. A bare MCP matcher is a negative control. Hooks call
-`yoetz hooks claude-observe` and are best-effort; timeouts/nonzero exits never authorize or block
+`yoetz hooks claude-observe` through a lightweight entrypoint that avoids loading the full CLI
+application graph. The renderer gives ordinary events a five-second budget, `SessionStart` and
+`Stop` ten seconds, and teardown `SessionEnd` three seconds. Structural capture and pairing close
+before service drain; advice-bearing events remain synchronous so Claude receives
+`additionalContext` in the same hook response. Timeouts/nonzero exits never authorize or block
 Claude work. The renderer knows Claude's documented `SubagentStart` / `SubagentStop` stdout shapes,
 but this profile does not advertise those events; adding them is a separate profile expansion.
 
@@ -298,8 +314,9 @@ payload-free `hook_diagnostics` reason
 (`auto_attach_workspace_unbound`, `auto_attach_request_invalid`, `auto_attach_conflict`,
 `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
 `privacy_authority_required`, `service_unavailable`, `vault_locked`, `timeout`, `storage_unsafe`,
-or `storage_corrupt`) and the session keeps an observation-only binding; turn-boundary events retry
-under the bounded budget. An explicit cooperative MCP `start` bound from its exact `PostToolUse`
+or `storage_corrupt`) and the session keeps an observation-only binding; `UserPromptSubmit` and
+`Stop` retry under the bounded budget, while teardown `SessionEnd` records its lifecycle intent and
+drains without spending an auto-attach retry. An explicit cooperative MCP `start` bound from its exact `PostToolUse`
 result remains the recovery path, not a substitute proof that natural auto-attach works. For
 `vault_locked` on a never-initialized install, that explicit `start` returns the typed
 `vault_initialization_required` continuation (see the proof checklist) rather than a dead end.

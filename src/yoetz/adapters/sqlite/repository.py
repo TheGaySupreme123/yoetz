@@ -355,6 +355,51 @@ class SqliteLedger:
         except (TypeError, ValueError) as exc:
             raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
 
+    async def _hydrate_artifact_ref(self, object_id: str, task: str) -> None:
+        """Restore one optional artifact from its authenticated object envelope.
+
+        The durable object inventory deliberately stores structural fields only; in particular it
+        does not store the media type.  Replaying an artifact therefore cannot reconstruct an
+        ``ObjectRef`` by guessing a media type from ``ObjectKind``.  Ask the object store to
+        authenticate the inventory-pinned envelope instead, then retain it only when the returned
+        header agrees with the task and every structural inventory column.  A missing, corrupt, or
+        mismatched optional artifact is left out of ``_state.object_refs`` so case-availability
+        reports the normal captured-content gap without treating the event ledger as corrupt.
+        """
+
+        if self._objects is None:
+            return
+        row = self._db.execute(
+            "SELECT kind,plaintext_size,commitment,envelope_digest,encryption_format,key_slot,state "
+            "FROM objects WHERE object_id=?",
+            (object_id,),
+        ).fetchone()
+        if row is None or len(row) != 7 or row[6] != "present":
+            return
+        try:
+            kind = ObjectKind(row[0])
+            expected_size = cast(int, row[1])
+            expected_commitment = cast(str, row[2])
+            expected_envelope_digest = cast(str, row[3])
+            expected_encryption_format = cast(Literal["yoetz-object/1"], row[4])
+            expected_key_slot = cast(str, row[5])
+            resolved = await self._objects.resolve_verified(object_id, expected_envelope_digest)
+            if (
+                type(resolved) is not ObjectRef
+                or resolved.object_id != object_id
+                or resolved.metadata.task_id != task
+                or resolved.metadata.kind is not kind
+                or resolved.plaintext_size != expected_size
+                or resolved.commitment != expected_commitment
+                or resolved.envelope_digest != expected_envelope_digest
+                or resolved.encryption_format != expected_encryption_format
+                or resolved.key_slot != expected_key_slot
+            ):
+                return
+        except KeyError, OSError, TypeError, ValueError:
+            return
+        self._state.object_refs[resolved.object_id] = resolved
+
     def _terminal_at(self) -> datetime:
         return self._clock.now_utc() if self._clock is not None else datetime.now(UTC)
 
@@ -504,6 +549,15 @@ class SqliteLedger:
                 payload_ref.object_id, cast(str, source["task_id"]), payload_ref.media_type
             )
             self._state.object_refs[ref.object_id] = ref
+            # Artifact objects are not event payloads.  Their durable inventory row is written
+            # before the event is published, so hydrate the exact authenticated descriptor on
+            # replay when the object is still present.  This includes captured observation and
+            # approved-check artifacts, whose media types are distinct despite sharing a captured
+            # object kind.
+            for artifact_value in cast(list[str] | tuple[str, ...], source["artifact_refs"]):
+                if artifact_value in self._state.object_refs:
+                    continue
+                await self._hydrate_artifact_ref(artifact_value, cast(str, source["task_id"]))
             payload = None
             if source["redaction"] == "present" and self._objects is not None:
                 try:
@@ -1387,6 +1441,8 @@ class SqliteLedger:
         current = _head(self._db)
         if current != result.subject_frontier:
             raise _frontier_conflict(current)
+        for artifact_ref in command.artifact_object_refs:
+            self._inventory_object(artifact_ref)
         for record, entry in zip(records, command.entries, strict=True):
             ref = entry.payload_object
             existing = self._db.execute(

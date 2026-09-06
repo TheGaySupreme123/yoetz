@@ -20,6 +20,11 @@ fault/contention matrix on both advertised platforms.
    `busy_timeout=5000`, `wal_autocheckpoint=0` (owner-run bounded PASSIVE checkpoints),
    `mmap_size=0`, extension loading disabled. `PRAGMA application_id = 0x594F4554` ("YOET"),
    current `user_version` from the ordered catalog and bundle migration registries.
+   Runtime authorizers permit the read-only `table_info(observation_consent)` schema probe on
+   writer and inspection connections so structural-only and native-content consent remain
+   distinguishable. Other table arguments and configuration-changing PRAGMAs remain denied
+   unless independently listed in the connection policy. Observation tests must exercise the
+   production authorizer, including supported older consent schemas (issue #616).
 3. **Transactions:** `BEGIN IMMEDIATE` for every write path; the append transaction contains only
    bounded indexed reads/writes. All hashing, validation, encryption, object
    fsync, and network work happens outside. Acknowledge only after COMMIT returns.

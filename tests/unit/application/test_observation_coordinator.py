@@ -8,16 +8,19 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
+import apsw
 import pytest
 
 from yoetz.adapters.integrations.codex_lifecycle import LifecycleMapping
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
-from yoetz.adapters.sqlite.migrations import initialize_bundle
+from yoetz.adapters.sqlite import connection as connection_module
+from yoetz.adapters.sqlite.migrations import initialize_bundle as initialize_schema
 from yoetz.adapters.sqlite.observation import SqliteObservationStore
 from yoetz.application.observation_control import build_observation_support_handlers
 from yoetz.application.observation_coordinator import ObservationCoordinator
@@ -58,6 +61,13 @@ from yoetz.ports.runtime import TaskRuntime
 from yoetz.protocol.canonical import canonical_digest, canonical_encode
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
+
+
+def initialize_bundle(db: apsw.Connection, seed: Mapping[str, str]) -> None:
+    """Stage a fixture schema, then enforce the production writer SQL policy (#616)."""
+
+    initialize_schema(db, seed)
+    db.set_authorizer(connection_module._writer_authorizer)  # pyright: ignore[reportPrivateUsage]
 
 
 def _task_id() -> str:
@@ -4780,8 +4790,6 @@ async def test_host_hook_row_refused_by_ledger_schema_quarantines_then_delivers_
     projected as retryable service_unavailable, so the FIFO head was retried forever while
     the service reported ready. After the bundle migrates, the identical envelope delivers.
     """
-
-    import apsw
 
     from yoetz.adapters.sqlite.migrations import BUNDLE_MIGRATIONS, run_migrations
 

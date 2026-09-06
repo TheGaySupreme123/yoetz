@@ -149,6 +149,12 @@ _MAX_CONTENT_CHUNK: Final = 256 * 1024
 # is never silently dropped as if committed.
 _HOOK_DRAIN_BUDGET_SECONDS: Final = 0.20
 _HOOK_DRAIN_ROW_LIMIT: Final = 4
+# Native Claude/Cursor content is transient by design: it cannot be copied to
+# the structural outbox. Give a content-bearing pass a bounded chance to drain
+# the current event after its same-session structural prefix, while keeping the
+# host hook finite and leaving the service sweeper responsible for bulk work.
+_NATIVE_CONTENT_DRAIN_BUDGET_SECONDS: Final = 1.0
+_NATIVE_CONTENT_ROW_LIMIT: Final = 16
 # Codex hard-clamps SessionEnd hooks to 3 seconds. The default drain budget
 # plus ingest/encode overhead measured within ~0.5s of that ceiling on a
 # realistic store, so SessionEnd drains under a tighter budget: an undrained
@@ -168,9 +174,10 @@ _HOOK_CONNECT_PREFLIGHT_SECONDS: Final = 1.0
 # demand and may miss a session's opening moments; without a later re-attempt an
 # unmapped session stayed unmapped for its whole life and its outbox retried as
 # mapping_missing forever (#275). Low-frequency, once-per-turn events only --
-# never the PreToolUse/PostToolUse storm -- under a budget that keeps even the
-# Codex 3s SessionEnd clamp honest (attach 1.0 + connect preflight 1.0 + drain).
-_AUTO_ATTACH_RETRY_EVENTS: Final = frozenset({"UserPromptSubmit", "Stop", "SessionEnd"})
+# never the PreToolUse/PostToolUse storm. SessionEnd is teardown-only and has a
+# three-second host clamp, so it records the lifecycle intent and drains pending
+# rows but never spends the extra attach retry budget.
+_AUTO_ATTACH_RETRY_EVENTS: Final = frozenset({"UserPromptSubmit", "Stop"})
 _AUTO_ATTACH_RETRY_BUDGET_SECONDS: Final = 1.0
 _AUTO_ATTACH_START_DEADLINE_MS: Final = 5_000
 # End-to-end observability contract for one hook pass, process start included.
@@ -186,10 +193,10 @@ _HOOK_TOTAL_BUDGET_SECONDS: Final = (
     + _HOOK_LOCAL_STAGE_ALLOWANCE_SECONDS
 )
 _TIMING_REPORT_EVENTS: Final = frozenset({"SessionStart", "Stop", "SessionEnd"})
-# The stages that partition one pass end to end, in order. 'advice' is nested
-# inside 'store' and every 'store_*' accumulator spans the whole pass, so
-# neither belongs in a sum against the total.
-_PASS_PARTITION_STAGES: Final = ("import", "resolve", "store", "drain", "deliver")
+# The stages that partition one pass end to end, in order. Advice refresh is
+# deliberately outside the local capture batch, so it is accounted for as its
+# own stage rather than being hidden in the store duration.
+_PASS_PARTITION_STAGES: Final = ("import", "resolve", "store", "advice", "drain", "deliver")
 _ROUTINE_READ_TOOLS: Final = frozenset(
     {
         "glob",
@@ -940,18 +947,21 @@ def _elapsed_ms(started: float, finished: float) -> int:
     return max(0, int((finished - started) * 1000))
 
 
-def _hook_total_budget_seconds(event: str) -> float:
+def _hook_total_budget_seconds(event: str, *, native_content: bool = False) -> float:
     """Return the end-to-end budget for one pass of *event*.
 
     Events that may legitimately retry auto-attach (and SessionStart, the
     primary attach point) carry that enforced budget on top of the base sum;
-    the high-frequency PreToolUse/PostToolUse storm never attaches and keeps
-    the tighter contract (#288).
+    the high-frequency PreToolUse/PostToolUse storm and teardown SessionEnd
+    keep the tighter contract (#288, #616).
     """
 
+    total = _HOOK_TOTAL_BUDGET_SECONDS
+    if native_content:
+        total += _NATIVE_CONTENT_DRAIN_BUDGET_SECONDS - _HOOK_DRAIN_BUDGET_SECONDS
     if event == "SessionStart" or event in _AUTO_ATTACH_RETRY_EVENTS:
-        return _HOOK_TOTAL_BUDGET_SECONDS + _AUTO_ATTACH_RETRY_BUDGET_SECONDS
-    return _HOOK_TOTAL_BUDGET_SECONDS
+        total += _AUTO_ATTACH_RETRY_BUDGET_SECONDS
+    return total
 
 
 def _record_pass_timing(
@@ -961,6 +971,7 @@ def _record_pass_timing(
     stages: Mapping[str, int],
     monotonic: Callable[[], float],
     _state: Path | None,
+    native_content: bool = False,
 ) -> None:
     """Record the end-to-end hook budget.
 
@@ -972,7 +983,9 @@ def _record_pass_timing(
 
     with contextlib.suppress(BaseException):
         total_ms = _elapsed_ms(entry_started, monotonic())
-        over = total_ms > int(_hook_total_budget_seconds(event) * 1000)
+        over = total_ms > int(
+            _hook_total_budget_seconds(event, native_content=native_content) * 1000
+        )
         if not over and event not in _TIMING_REPORT_EVENTS:
             return
         if over:
@@ -1079,8 +1092,10 @@ async def _drain_outbox(
     event_name: str = "drain",
     _state: Path | None = None,
     budget_seconds: float = _HOOK_DRAIN_BUDGET_SECONDS,
+    priority_source_identity: str | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     session_lock_owned: bool = False,
+    drain_lease_owned: bool = False,
 ) -> None:
     """Drain the workspace outbox under a nonblocking per-workspace lease.
 
@@ -1092,6 +1107,23 @@ async def _drain_outbox(
     exactly the diagnostic noise that buried genuine preflight/service faults.
     A crashed holder cannot wedge the lease; flock releases with its process.
     """
+
+    if drain_lease_owned:
+        await _drain_outbox_leased(
+            store,
+            workspace_commitment=workspace_commitment,
+            codex_session_id=codex_session_id,
+            content_by_source_identity=content_by_source_identity,
+            content_capture_profile=content_capture_profile,
+            connect=connect,
+            event_name=event_name,
+            _state=_state,
+            budget_seconds=budget_seconds,
+            priority_source_identity=priority_source_identity,
+            monotonic=monotonic,
+            session_lock_owned=session_lock_owned,
+        )
+        return
 
     with store.drain_lease(workspace_commitment) as owned:
         if not owned:
@@ -1115,6 +1147,7 @@ async def _drain_outbox(
             event_name=event_name,
             _state=_state,
             budget_seconds=budget_seconds,
+            priority_source_identity=priority_source_identity,
             monotonic=monotonic,
             session_lock_owned=session_lock_owned,
         )
@@ -1131,6 +1164,7 @@ async def _drain_outbox_leased(
     event_name: str = "drain",
     _state: Path | None = None,
     budget_seconds: float = _HOOK_DRAIN_BUDGET_SECONDS,
+    priority_source_identity: str | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     session_lock_owned: bool = False,
 ) -> None:
@@ -1189,7 +1223,46 @@ async def _drain_outbox_leased(
         session_order.remove(codex_session_id)
         session_order.insert(0, codex_session_id)
     pending: list[ObservationOutboxRow] = []
-    while grouped and len(pending) < _HOOK_DRAIN_ROW_LIMIT:
+    pending_limit = _HOOK_DRAIN_ROW_LIMIT
+    if priority_source_identity is not None:
+        # Native content is not replayable, so make the current content row's
+        # same-session prefix the first bounded work package. The prefix keeps
+        # cursor order intact; it never jumps over an older row to deliver
+        # plaintext out of order. A large or permanently blocked backlog is
+        # still reported as a content gap rather than extending the hook
+        # without bound.
+        priority_row = next(
+            (
+                row
+                for row in all_pending
+                if row.envelope.source_identity == priority_source_identity
+            ),
+            None,
+        )
+        if priority_row is not None:
+            priority_queue = grouped.get(priority_row.codex_session_id, [])
+            priority_index = next(
+                (
+                    index
+                    for index, row in enumerate(priority_queue)
+                    if row.envelope.source_identity == priority_source_identity
+                ),
+                None,
+            )
+            if priority_index is not None:
+                prefix_count = min(priority_index + 1, _NATIVE_CONTENT_ROW_LIMIT)
+                pending.extend(priority_queue[:prefix_count])
+                remaining_priority = priority_queue[prefix_count:]
+                if remaining_priority:
+                    grouped[priority_row.codex_session_id] = remaining_priority
+                else:
+                    grouped.pop(priority_row.codex_session_id, None)
+                if priority_row.codex_session_id in session_order:
+                    session_order.remove(priority_row.codex_session_id)
+                if remaining_priority:
+                    session_order.insert(0, priority_row.codex_session_id)
+                pending_limit = _NATIVE_CONTENT_ROW_LIMIT
+    while grouped and len(pending) < pending_limit:
         for session_id in tuple(session_order):
             queue = grouped.get(session_id)
             if not queue:
@@ -1198,7 +1271,7 @@ async def _drain_outbox_leased(
             pending.append(queue.pop(0))
             if not queue:
                 grouped.pop(session_id, None)
-            if len(pending) >= _HOOK_DRAIN_ROW_LIMIT:
+            if len(pending) >= pending_limit:
                 break
     # Retryable rejections split three ways by scope (the reason vocabulary is
     # RETRYABLE_OBSERVATION_REJECTIONS in application/observation_drain.py):
@@ -1217,6 +1290,7 @@ async def _drain_outbox_leased(
     # Re-attempting every row of a permanently-undeliverable backlog burned
     # the whole drain budget per hook forever — the recurrence tax of #211.
     skipped_sessions: set[str] = set()
+    delivered_content: set[str] = set()
     bound_sessions, pending_lifecycle_sessions = store.lifecycle_reconciliation_snapshot(
         workspace_commitment
     )
@@ -1301,6 +1375,8 @@ async def _drain_outbox_leased(
                         progressed += 1
                     elif decision.action is ObservationDrainAction.ACKNOWLEDGE:
                         store.acknowledge_outbox_row(workspace_commitment, attempted)
+                        if chunks:
+                            delivered_content.add(row.envelope.source_identity)
                         progressed += 1
             if attempted is None:
                 if chunks:
@@ -1351,6 +1427,14 @@ async def _drain_outbox_leased(
                 continue
             consecutive_unavailable = 0
     finally:
+        if content_by_source_identity:
+            for source_identity in content_by_source_identity:
+                if source_identity not in delivered_content:
+                    with contextlib.suppress(Exception):
+                        store.note_coverage_gap(
+                            workspace_commitment,
+                            ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                        )
         with contextlib.suppress(Exception):
             await client.close()
 
@@ -2116,6 +2200,29 @@ def handle_observe(
 
     entry_started = _monotonic() if _entry_monotonic is None else _entry_monotonic
     stages: dict[str, int] = {}
+
+    # Native content is carried only in this process. Reserve the workspace
+    # drain before entering the local store batch so a background sweeper cannot
+    # consume the newly enqueued structural row while the foreground hook is
+    # still preparing its transient chunks. The lease is deliberately entered
+    # manually: the batch and the later service pass live in separate scopes,
+    # while the outer finally must still release it on every early return or
+    # cancellation.
+    native_drain_lease: contextlib.AbstractContextManager[bool] | None = None
+    native_drain_lease_entered = False
+    native_drain_lease_owned = False
+
+    def _release_native_drain_lease() -> None:
+        nonlocal native_drain_lease, native_drain_lease_entered, native_drain_lease_owned
+        if not native_drain_lease_entered or native_drain_lease is None:
+            return
+        lease = native_drain_lease
+        native_drain_lease = None
+        native_drain_lease_entered = False
+        native_drain_lease_owned = False
+        with contextlib.suppress(BaseException):
+            lease.__exit__(None, None, None)
+
     try:
         store = LocalObservationStore(_state=_state)
         resolve_started = _monotonic()
@@ -2295,6 +2402,33 @@ def handle_observe(
             return 0
 
         assert workspace_commitment is not None
+        native_content_reservation = (
+            not skip_service
+            and source
+            in {
+                ObservationSource.CLAUDE_HOOK,
+                ObservationSource.CURSOR_HOOK,
+            }
+            and capture_authority_known
+            and _content_capture_profile is not None
+            and content_capture_profile_matches_source(source.value, _content_capture_profile)
+            and _content_capture_profile in consent.content_capture_profiles
+        )
+        if native_content_reservation:
+            try:
+                candidate_lease = store.drain_lease(workspace_commitment)
+                candidate_owned = candidate_lease.__enter__()
+            except Exception:
+                # The reservation is an optimization for transient content;
+                # if its lock file cannot be opened, retain the structural
+                # event and let the normal drain path report any content gap.
+                native_drain_lease = None
+                native_drain_lease_entered = False
+                native_drain_lease_owned = False
+            else:
+                native_drain_lease = candidate_lease
+                native_drain_lease_entered = True
+                native_drain_lease_owned = candidate_owned
         store_started = _monotonic()
         # Payload parse, runtime gate, workspace resolution and the consent
         # probe ran between 'import' and here, unwindowed. Three of those calls
@@ -2481,6 +2615,17 @@ def handle_observe(
                 )
             content_map = {envelope.source_identity: content_chunks} if content_chunks else None
             service_content_profile = _content_capture_profile if content_authorized else None
+            native_content_priority = (
+                next(iter(content_map))
+                if content_map
+                and source in {ObservationSource.CLAUDE_HOOK, ObservationSource.CURSOR_HOOK}
+                else None
+            )
+            native_content_drain_budget = (
+                _NATIVE_CONTENT_DRAIN_BUDGET_SECONDS
+                if native_content_priority is not None
+                else _HOOK_DRAIN_BUDGET_SECONDS
+            )
 
             # Local durable ingest and pairing admission share one store lock.
             # The returned envelope is authoritative: a paired orphan's gap is
@@ -2559,13 +2704,19 @@ def handle_observe(
                             hook_provided_path=hook_path_token,
                         )
 
-            # Deterministic advice from retained envelopes (works with zero MCP publications).
-            advice_started = _monotonic()
-            with contextlib.suppress(Exception):
-                store.refresh_advice(workspace_commitment)
-            stages["advice"] = _elapsed_ms(advice_started, _monotonic())
-
         stages["store"] = _elapsed_ms(store_started, _monotonic())
+
+        # Refresh deterministic advice only after the capture batch has
+        # closed.  The refresh can build and persist a comparatively large
+        # snapshot; keeping it outside the batch means a host cancellation
+        # cannot roll back the already-durable envelope, pairing, mapping, or
+        # outbox intent (#616).  Advice selection and its delivery lease remain
+        # below the service drain and stdout write, preserving commit-after-
+        # output semantics.
+        advice_started = _monotonic()
+        with contextlib.suppress(Exception):
+            store.refresh_advice(workspace_commitment)
+        stages["advice"] = _elapsed_ms(advice_started, _monotonic())
 
         # SessionStart: auto-start/attach first, persist mapping, then drain outbox.
         # Every branch below that opens a service connection is gated on
@@ -2720,12 +2871,20 @@ def handle_observe(
                                     connect=cast(HookDrainConnector | None, connect),
                                     event_name=resolved_event,
                                     _state=_state,
+                                    budget_seconds=native_content_drain_budget,
+                                    priority_source_identity=native_content_priority,
                                     monotonic=_monotonic,
                                     session_lock_owned=_session_lock_owned,
+                                    drain_lease_owned=native_drain_lease_owned,
                                 )
 
                             with contextlib.suppress(Exception):
                                 _resolve_runner()(_drain)
+                            _release_native_drain_lease()
+
+            # A clear SessionStart has no service drain; the regular SessionStart
+            # path released its reservation immediately after the drain above.
+            _release_native_drain_lease()
 
         # Issue #537: no applied-vs-serving drift probe runs on this path. A hook process
         # has no serving route of its own, so the only comparison available here is a
@@ -2805,14 +2964,17 @@ def handle_observe(
                     budget_seconds=(
                         _SESSION_END_DRAIN_BUDGET_SECONDS
                         if resolved_event == "SessionEnd"
-                        else _HOOK_DRAIN_BUDGET_SECONDS
+                        else native_content_drain_budget
                     ),
+                    priority_source_identity=native_content_priority,
                     monotonic=_monotonic,
                     session_lock_owned=_session_lock_owned,
+                    drain_lease_owned=native_drain_lease_owned,
                 )
 
             with contextlib.suppress(Exception):
                 _resolve_runner()(_drain_all)
+            _release_native_drain_lease()
 
         if content_chunks and skip_service:
             # Content is intentionally ephemeral. Without a ready mapped
@@ -2944,6 +3106,7 @@ def handle_observe(
             stages=stages,
             monotonic=_monotonic,
             _state=_state,
+            native_content=(native_content_priority is not None and resolved_event != "SessionEnd"),
         )
         return 0
     except BaseException:
@@ -2960,6 +3123,8 @@ def handle_observe(
                     "stdout_write_failed", event_name or "observe", _state=_state
                 )
         return 0
+    finally:
+        _release_native_drain_lease()
 
 
 _CLAUDE_SESSION_PREFIX: Final = "claude:"
@@ -3243,6 +3408,7 @@ def handle_claude_observe(
     run_async: AsyncRunner | None = None,
     skip_service: bool = False,
     observation_profile: str | None = None,
+    _entry_monotonic: float | None = None,
 ) -> int:
     """Normalize one Claude hook into bounded Yoetz observation.
 
@@ -3492,6 +3658,7 @@ def handle_claude_observe(
             connect=connect,
             run_async=run_async,
             skip_service=skip_service,
+            _entry_monotonic=_entry_monotonic,
             source=ObservationSource.CLAUDE_HOOK,
             _output_event_name=raw_event,
             _content_capture_profile=(
@@ -3516,6 +3683,7 @@ def handle_cursor_observe(
     run_async: AsyncRunner | None = None,
     skip_service: bool = False,
     observation_profile: str | None = None,
+    _entry_monotonic: float | None = None,
 ) -> int:
     """Normalize one Cursor hook into bounded Yoetz observation.
 
@@ -3728,6 +3896,7 @@ def handle_cursor_observe(
             connect=connect,
             run_async=run_async,
             skip_service=skip_service,
+            _entry_monotonic=_entry_monotonic,
             source=ObservationSource.CURSOR_HOOK,
             _output_event_name=raw_event,
             _content_capture_profile=(

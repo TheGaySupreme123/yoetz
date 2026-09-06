@@ -1009,6 +1009,134 @@ async def test_sweep_yields_its_partial_summary_when_the_budget_is_spent(tmp_pat
     assert store.pending_outbox_count(workspace) == 0
 
 
+@pytest.mark.anyio
+async def test_cancelled_row_ingest_releases_the_maintenance_gate(tmp_path: Path) -> None:
+    """A hook/service cancellation cannot strand the row-level workflow gate."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.bind_codex_session(workspace, "cancelled-gate")
+    envelope = _envelope(session, "hook:cancelled-gate", 1)
+    store.enqueue_outbox(workspace, "cancelled-gate", envelope)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _BlockingCoordinator:
+        async def ingest_request(
+            self, request: ObservationIngestRequest
+        ) -> ObservationIngestResult:
+            del request
+            started.set()
+            await release.wait()
+            return ObservationIngestResult(
+                ObservationIngestDisposition.ACCEPTED,
+                None,
+                envelope.cursor,
+            )
+
+    gate = asyncio.Lock()
+    task = asyncio.create_task(
+        ObservationOutboxSweeper(
+            store,
+            _BlockingCoordinator(),
+            ingest_gate=gate,
+        ).sweep()
+    )
+    await started.wait()
+    assert gate.locked()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not gate.locked()
+
+    # The row remains retryable after cancellation and can be delivered by a later pass.
+    result = await ObservationOutboxSweeper(
+        store,
+        _Coordinator(
+            {
+                envelope.source_identity: ObservationIngestResult(
+                    ObservationIngestDisposition.ACCEPTED,
+                    None,
+                    envelope.cursor,
+                )
+            }
+        ),
+        ingest_gate=gate,
+    ).sweep()
+    assert result.acknowledged == 1
+    assert not gate.locked()
+
+
+@pytest.mark.anyio
+async def test_workflow_waiter_gets_the_gate_before_the_next_sweep_row(tmp_path: Path) -> None:
+    """A queued workflow control turn wins before the sweeper takes its next row."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    first_session = store.bind_codex_session(workspace, "fair-first")
+    second_session = store.bind_codex_session(workspace, "fair-second")
+    first = _envelope(first_session, "hook:fair-first", 1)
+    second = _envelope(second_session, "hook:fair-second", 1)
+    store.enqueue_outbox(workspace, "fair-first", first)
+    store.enqueue_outbox(workspace, "fair-second", second)
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    workflow_queued = asyncio.Event()
+    workflow_entered = asyncio.Event()
+    second_started = asyncio.Event()
+    events: list[str] = []
+
+    class _FairCoordinator:
+        async def ingest_request(
+            self, request: ObservationIngestRequest
+        ) -> ObservationIngestResult:
+            if request.envelope.source_identity == first.source_identity:
+                events.append("first_started")
+                first_started.set()
+                await release_first.wait()
+                events.append("first_finished")
+                envelope = first
+            else:
+                events.append("second_started")
+                second_started.set()
+                envelope = second
+            return ObservationIngestResult(
+                ObservationIngestDisposition.ACCEPTED,
+                None,
+                envelope.cursor,
+            )
+
+    gate = asyncio.Lock()
+    sweep_task = asyncio.create_task(
+        ObservationOutboxSweeper(
+            store,
+            _FairCoordinator(),
+            limit=2,
+            ingest_gate=gate,
+        ).sweep()
+    )
+    await first_started.wait()
+
+    async def workflow_turn() -> None:
+        workflow_queued.set()
+        async with gate:
+            events.append("workflow_entered")
+            workflow_entered.set()
+
+    workflow_task = asyncio.create_task(workflow_turn())
+    await workflow_queued.wait()
+    release_first.set()
+    await workflow_entered.wait()
+    await second_started.wait()
+    await workflow_task
+    await sweep_task
+
+    assert events.index("workflow_entered") < events.index("second_started")
+    assert store.pending_outbox_count(workspace) == 0
+
+
 def test_sweep_budget_must_be_a_positive_float_or_absent(tmp_path: Path) -> None:
     store = LocalObservationStore(_state=tmp_path)
     coordinator = _Coordinator({})

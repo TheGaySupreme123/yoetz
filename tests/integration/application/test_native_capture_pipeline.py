@@ -29,6 +29,7 @@ from tests.integration.objects.test_envelope_and_encrypted_files import (
 from yoetz.adapters.integrations.codex_lifecycle import LifecycleMapping, store_mapping
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.adapters.objects.encrypted_files import EncryptedFilesObjectStore
+from yoetz.adapters.sqlite import connection as sqlite_connection
 from yoetz.adapters.sqlite.migrations import initialize_bundle
 from yoetz.adapters.sqlite.observation import SqliteObservationStore
 from yoetz.adapters.sqlite.repository import SqliteLedger
@@ -51,7 +52,7 @@ from yoetz.domain.observation_profiles import (
 )
 from yoetz.domain.privacy import ReviewContextProfile, ReviewSelectionPolicy
 from yoetz.domain.values import JsonValue as DomainJsonValue
-from yoetz.domain.values import Timestamp
+from yoetz.domain.values import Timestamp, evidence_id
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.importer import ImporterPort
@@ -68,6 +69,12 @@ from yoetz.ports.runtime import (
 )
 from yoetz.protocol.canonical import JsonValue as CanonicalJsonValue
 from yoetz.protocol.canonical import canonical_encode
+from yoetz.protocol.coverage import (
+    ArtifactObservation,
+    AuthorshipAssurance,
+    EvidenceImmutability,
+    PublicationChannel,
+)
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 
 _NOW = datetime(2026, 9, 5, 17, 0, tzinfo=UTC)
@@ -85,8 +92,8 @@ class _Clock(ClockPort):
 
 
 class _Ids(IdPort):
-    def __init__(self) -> None:
-        self._object_counter = 16
+    def __init__(self, *, object_counter: int = 16) -> None:
+        self._object_counter = object_counter
 
     def new(self, kind: IdKind) -> str:
         if kind is IdKind.OBJECT:
@@ -221,6 +228,11 @@ async def _pipeline(
             "owner_nonce": _OWNER_NONCE,
         },
     )
+    # Keep this end-to-end native-content path on the same guarded writer
+    # capability as the production task-bundle composition.  A raw APSW
+    # connection would let the coordinator test pass while bypassing the
+    # authorizer that exposed #616.
+    database.set_authorizer(sqlite_connection._writer_authorizer)  # pyright: ignore[reportPrivateUsage]
     ids = _Ids()
     roots = _Roots(task_id)
     objects = EncryptedFilesObjectStore(
@@ -292,6 +304,54 @@ async def _pipeline(
         client,
         connect,
     )
+
+
+def _reopen_runtime(
+    tmp_path: Path,
+    runtime: TaskRuntime,
+) -> tuple[apsw.Connection, SqliteLedger, TaskRuntime]:
+    """Reopen the guarded bundle and rebuild the routed runtime for replay checks."""
+
+    database = apsw.Connection(str(tmp_path / "bundle" / "bundle.sqlite3"))
+    database.set_authorizer(sqlite_connection._writer_authorizer)  # pyright: ignore[reportPrivateUsage]
+    # The original process has already allocated payload/content objects. Keep
+    # replay-created check-resume objects outside that deterministic range.
+    ids = _Ids(object_counter=64)
+    objects = EncryptedFilesObjectStore(
+        bundle_root=tmp_path / "bundle",
+        bundle_keys=BundleKeys(
+            "native-capture-slot",
+            WrapKeyForObjectTest(b"w" * 32),
+            MacKeyForObjectTest(b"m" * 32),
+        ),
+        secret_memory=SecretMemoryForObjectTest(),
+        id_port=ids,
+        current_root_snapshot=_Roots(runtime.task_id).current,
+    )
+    ledger = SqliteLedger(
+        db=database,
+        task_id=runtime.task_id,
+        ownership_fence=runtime.fence,
+        clock=_Clock(),
+        ids=ids,
+        objects=objects,
+    )
+    reopened = TaskRuntime(
+        task_id=runtime.task_id,
+        session_id=runtime.session_id,
+        writer_id=runtime.writer_id,
+        capabilities=runtime.capabilities,
+        ledger=ledger,
+        objects=cast(ObjectStorePort, objects),
+        importer=cast(ImporterPort, object()),
+        projection_version=runtime.projection_version,
+        engine_version=runtime.engine_version,
+        protocol_version=runtime.protocol_version,
+        bundle_schema_version=runtime.bundle_schema_version,
+        fence=runtime.fence,
+        observation=ledger.open_observation_store(),
+    )
+    return database, ledger, reopened
 
 
 @pytest.mark.anyio
@@ -511,6 +571,16 @@ async def test_ordinary_native_hook_content_reaches_prepared_semantic_packet(
         captured_content_scope=resolved.scope,
         captured_content_gaps=resolved.gaps,
     )
+    assert resolved.scope is not None
+    captured_evidence_refs = tuple(resolved.scope.phase_bindings)
+    assert len(captured_evidence_refs) == 1
+    captured_coverage = frozen.case.coverage_by_ref[evidence_id(captured_evidence_refs[0][0])]
+    assert captured_coverage.artifact_observation is ArtifactObservation.CONTENT_CAPTURED
+    assert captured_coverage.authorship_assurance is AuthorshipAssurance.SERVICE_AUTHENTICATED
+    assert captured_coverage.evidence_immutability is EvidenceImmutability.IMMUTABLE_SNAPSHOT
+    assert PublicationChannel.HOOK_OBSERVED in captured_coverage.publication_channels
+    assert semantic.packet.coverage.known_gaps == ()
+    assert semantic.packet.coverage.check_types
     excerpt = next(
         item
         for item in semantic.packet.targeted_excerpts
@@ -524,6 +594,126 @@ async def test_ordinary_native_hook_content_reaches_prepared_semantic_packet(
     )
     assert marker.decode("utf-8") in prepared.decode("utf-8")
     assert content_digest.encode("ascii") in prepared
+
+    reopened_db, reopened_ledger, reopened_runtime = _reopen_runtime(tmp_path, runtime)
+    try:
+        reopened_frontier = await reopened_ledger.load_frontier()
+        reopened_frozen = await reopened_ledger.freeze_case(
+            reopened_runtime.session_id,
+            cast(str, reopened_runtime.writer_id),
+            reopened_frontier.sequence,
+            _ids(IdKind.REQUEST, 5),
+            _ZERO_DIGEST,
+        )
+        assert isinstance(reopened_frozen, FrozenCase)
+        reopened_resolved = await resolve_captured_semantic_content(
+            runtime=reopened_runtime,
+            frozen=reopened_frozen,
+            workspace_commitment=workspace,
+            local_observation=local,
+        )
+        assert reopened_resolved.gaps == ()
+        assert len(reopened_resolved.content) == 1
+        assert reopened_resolved.content[0].content == captured_bytes
+        assert reopened_resolved.scope is not None
+        reopened_ref = evidence_id(reopened_resolved.scope.phase_bindings[0][0])
+        assert (
+            reopened_frozen.case.coverage_by_ref[reopened_ref].artifact_observation
+            is ArtifactObservation.CONTENT_CAPTURED
+        )
+    finally:
+        reopened_db.close(force=True)
+
+
+@pytest.mark.anyio
+async def test_unreadable_native_capture_degrades_without_semantic_content(tmp_path: Path) -> None:
+    """A deleted captured object must become an explicit content gap after replay."""
+
+    (
+        project,
+        workspace,
+        _session_commitment,
+        local,
+        observation,
+        _ledger,
+        runtime,
+        _coordinator,
+        client,
+        connect,
+    ) = await _pipeline(
+        tmp_path,
+        codex_session_id="claude:unreadable-content-session",
+        profile=CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+    )
+
+    def run_async(factory: Callable[[], Awaitable[object]]) -> object:
+        return asyncio.run(factory())
+
+    def run_hook(event_name: str, payload: Mapping[str, object]) -> int:
+        return handle_claude_observe(
+            event_name=event_name,
+            stdin_bytes=canonical_encode(cast(CanonicalJsonValue, payload)),
+            workspace=str(project),
+            _state=tmp_path / "state",
+            stdout=io.BytesIO(),
+            connect=cast(object, connect),  # type: ignore[arg-type]
+            run_async=run_async,
+            observation_profile=CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+        )
+
+    await asyncio.to_thread(
+        run_hook,
+        "PreToolUse",
+        {
+            "hook_event_name": "PreToolUse",
+            "session_id": "unreadable-content-session",
+            "tool_name": "Bash",
+            "tool_use_id": "unreadable-tool-1",
+        },
+    )
+    await asyncio.to_thread(
+        run_hook,
+        "PostToolUse",
+        {
+            "hook_event_name": "PostToolUse",
+            "session_id": "unreadable-content-session",
+            "tool_name": "Bash",
+            "tool_use_id": "unreadable-tool-1",
+            "tool_response": "unreadable-native-capture-marker",
+            "exit_status": 0,
+        },
+    )
+    assert len(client.requests) == 2
+    envelopes = observation.list_envelopes(workspace)
+    post = next(item for item in envelopes if item.event_kind == "PostToolUse")
+    assert post.content_object_refs
+    object_id_value = post.content_object_refs[0]
+    object_path = tmp_path / "bundle" / "objects" / object_id_value[4:6] / object_id_value
+    assert object_path.is_file()
+    object_path.unlink()
+
+    reopened_db, reopened_ledger, reopened_runtime = _reopen_runtime(tmp_path, runtime)
+    try:
+        frontier = await reopened_ledger.load_frontier()
+        frozen = await reopened_ledger.freeze_case(
+            reopened_runtime.session_id,
+            cast(str, reopened_runtime.writer_id),
+            frontier.sequence,
+            _ids(IdKind.REQUEST, 7),
+            _ZERO_DIGEST,
+        )
+        assert isinstance(frozen, FrozenCase)
+        resolved = await resolve_captured_semantic_content(
+            runtime=reopened_runtime,
+            frozen=frozen,
+            workspace_commitment=workspace,
+            local_observation=local,
+        )
+        assert resolved.content == ()
+        assert "content_capture_unavailable" in resolved.gaps
+        assert any(gap.code == "captured_object_unavailable" for gap in frozen.case.gaps)
+    finally:
+        reopened_db.close(force=True)
 
 
 @pytest.mark.anyio
