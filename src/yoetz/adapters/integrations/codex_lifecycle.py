@@ -13,7 +13,12 @@ from pathlib import Path
 from typing import Final, cast
 
 from yoetz.config.paths import PathSafetyError, ensure_owner_only_dir, state_dir
-from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
+from yoetz.protocol.canonical import (
+    JsonValue,
+    canonical_digest,
+    canonical_encode,
+    strict_json_parse,
+)
 from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.ids import IdKind, is_valid_id, validate_id
 
@@ -38,6 +43,8 @@ __all__ = [
     "parse_frontier_token",
     "queue_mapping_clear",
     "queue_mapping_store",
+    "is_scoped_child_session_id",
+    "scoped_child_session_id",
     "store_mapping",
     "validate_codex_session_id",
 ]
@@ -61,6 +68,12 @@ _LOCK_STALE_SECONDS: Final = 30.0
 _MAX_LOCK_TOKEN_BYTES: Final = 128
 _MAX_LOCK_PID_DIGITS: Final = 10
 _CODEX_SESSION_ID_RE: Final = re.compile(r"^[!-~]+$", re.ASCII)
+_SCOPED_CHILD_SESSION_PREFIX: Final = "yoetz-child-lane-"
+_SCOPED_CHILD_SESSION_RE: Final = re.compile(
+    rf"^{re.escape(_SCOPED_CHILD_SESSION_PREFIX)}[0-9a-f]{{64}}$", re.ASCII
+)
+_CHILD_LANE_HOSTS: Final = frozenset({"claude", "codex", "cursor"})
+_CHILD_LANE_IDENTITY_KINDS: Final = frozenset({"host", "task"})
 _WORKSPACE_COMMITMENT_RE: Final = re.compile(r"^hmac-sha256:[0-9a-f]{64}$", re.ASCII)
 _FRONTIER_DIGEST_RE: Final = re.compile(
     r"^(?:genesis|sha256:[0-9a-f]{64})$",
@@ -102,6 +115,45 @@ def validate_codex_session_id(value: object) -> str:
     if _CODEX_SESSION_ID_RE.fullmatch(value) is None:
         raise ProtocolValueError("id_not_ascii")
     return value
+
+
+def scoped_child_session_id(
+    parent_codex_session_id: object,
+    *,
+    host: object,
+    identity: object,
+    identity_kind: object,
+) -> str:
+    """Derive a bounded opaque lane for one validated native child identity.
+
+    A child lane is deliberately a digest rather than a concatenation of host supplied
+    identifiers.  The parent session, host adapter, and identity namespace are all part of
+    the preimage, so an arbitrary native identifier cannot collide with a different lane or
+    with an ordinary host-session mapping.  The returned value is safe for the lifecycle
+    mapping filename and for all public request validation paths.
+    """
+
+    parent = validate_codex_session_id(parent_codex_session_id)
+    if type(host) is not str or host not in _CHILD_LANE_HOSTS:
+        raise ProtocolValueError("id_malformed_uuid")
+    if type(identity_kind) is not str or identity_kind not in _CHILD_LANE_IDENTITY_KINDS:
+        raise ProtocolValueError("id_malformed_uuid")
+    child_identity = validate_codex_session_id(identity)
+    material: dict[str, JsonValue] = {
+        "domain": "yoetz/codex-child-lane/v1",
+        "parent_session_id": parent,
+        "host": host,
+        "identity_kind": identity_kind,
+        "identity": child_identity,
+    }
+    digest = canonical_digest(material).removeprefix("sha256:")
+    return _SCOPED_CHILD_SESSION_PREFIX + digest
+
+
+def is_scoped_child_session_id(value: object) -> bool:
+    """Return whether *value* is an opaque child-lane identifier we derived."""
+
+    return type(value) is str and _SCOPED_CHILD_SESSION_RE.fullmatch(value) is not None
 
 
 def encode_frontier_token(*, sequence: str, head_digest: str) -> str:
@@ -419,6 +471,18 @@ def apply_pending_mapping(codex_session_id: str, *, _state: Path | None = None) 
     if kind == "clear":
         clear_mapping(codex_session_id, _state=_state)
     elif mapping is not None:
+        # Derived child lanes are identity reservations.  A stale pending write must
+        # never retarget an alias that has since been claimed by another task.  The
+        # check lives in the replay primitive as well as the producer preflight so a
+        # producer that queued while the lock was held cannot bypass the ownership
+        # fence.  An existing but malformed lane is unknown ownership and therefore
+        # remains pending for an explicit attribution gap rather than being replaced.
+        if is_scoped_child_session_id(codex_session_id):
+            existing_path = mapping_path(codex_session_id, _state=_state)
+            if existing_path.exists() or existing_path.is_symlink():
+                existing = load_mapping(codex_session_id, _state=_state)
+                if existing is None or existing.yoetz_task_id != mapping.yoetz_task_id:
+                    return False
         store_mapping(mapping, _state=_state)
     else:
         return False

@@ -238,11 +238,40 @@ PostToolUse row fired inside a child without a validated child identity, is an a
 never parent work. The parent's advice and frontier lane remains independent. Transcript paths,
 prompts, agent types, and summaries are never correlation proof.
 
+Shared-session callbacks preserve the parent mapping when the child attaches. A successful child
+start can establish a separate local route when Claude supplies a validated child agent ID. If the
+callback omits that identity, names a foreign task or service session without a matching child
+route, or supplies conflicting aliases, it remains an explicit attribution gap. Such a callback
+cannot enqueue parent work or consume parent advice and frontier notices. A local delivery route
+does not create or accept a cooperative child. Ordinary child callbacks with no safe identity
+remain outside the attributed delivery contract.
+
 This decision is based on installed native execution and the pinned profile boundary; a current
 online Claude reference or a renderer fixture does not upgrade the pinned cell. The #509 host
 matrix records the `2.1.261` child-hook fixture and the later installed `2.1.263` bounded
 parent/delegate publication, check, and receipt run as separate evidence cells. Cooperative MCP
 self-registration remains a separate, explicitly bounded path.
+
+An intermediate diagnostic wheel cell used source commit `952bec0efdfd9b2ed05f64e4a35a6f35b70ebd09`
+and `yoetz-0.1.0-py3-none-any.whl` SHA256
+`30fed12caad1176229bb55ee09b5c7fcb585f9a5cf314a582ecd8d236fb48fde`, with 216 packaged resources
+(`sha256:9df067b42abbba673362c5574832d83b960dab1e4ef0a551a12cc76d24343c7c`). Claude Code `2.1.263`
+ran from a fresh mode-0700 isolated root with a passphrase-only synthetic vault, active consent for
+that synthetic project, and the development `--plugin-dir` carrier (`plugin_managed`, strict route);
+this remains development loading, not marketplace activation. The native host completed parent
+`start`, `mode=delegate`, native `Agent`, child `mode=attach`, `publish_work`, deterministic `check`,
+and JSON `receipt`. Installed public models validated the child attach, a check with `ok:true` and
+`state:complete` containing deterministic coverage, and an `ok:true` receipt whose child identity
+and subject frontier matched the issued check and receipt request; the receipt document had no
+`check_not_recorded` gap and reported `semantic_review_not_requested`. All recorded native
+`SessionStart`, `SubagentStart`, `SubagentStop`, and `Stop` hook responses succeeded. Post-run
+observation reported `mapping_present:true`, `source_coverage.claude_hook:true`, and no
+`unpaired_event` or `mapping_missing`; ten hook observations remained quarantined as
+`ledger_rejected`/`outbox_quarantined`, and the bounded drain ended with no pending rows, so the
+workspace projection does not establish separate parent-versus-child host mappings. The advice
+lane remained independent and emitted no final advice. The provider was a loopback synthetic
+Messages server, so this cell proves native plumbing and the bounded structural workflow only; it
+does not claim production model use, semantic review, or support for the pinned `2.1.241` cell.
 
 Advice uses Claude Code's documented output contract. `SessionStart`, `PostToolUse`,
 `PostToolUseFailure`, and `Stop` may emit `hookSpecificOutput.additionalContext`. The failure event
@@ -305,6 +334,10 @@ quarantined. A pending row from an ended host session whose task was recovered b
 session is delivered on the successor route (`session_superseded` is followed). A successor
 binding that cannot be followed quarantines that row as `session_superseded`, not
 `ledger_rejected` or `mapping_missing`.
+A `SESSION_CONFLICT` while acquiring the task runtime reports `mapping_missing`, keeping the
+envelope pending for a later drain after its lifecycle mapping is repaired. The route must still
+pass its ownership checks. Non-retryable conflicts after runtime acquisition remain
+`ledger_rejected` and enter quarantine.
 A row
 also enters quarantine after 128 consecutive rejections with the same retryable reason, except for
 designed back-pressure and workspace-global pause/vault/disabled gates. Both cases remain visible

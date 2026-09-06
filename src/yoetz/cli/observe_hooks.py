@@ -19,11 +19,13 @@ from yoetz.adapters.integrations.codex_lifecycle import (
     LifecycleMapping,
     acquire_session_lock,
     acquire_workspace_recovery_lock,
+    is_scoped_child_session_id,
     load_mapping,
     mapping_from_start_ids,
     mapping_path,
     queue_mapping_clear,
     queue_mapping_store,
+    scoped_child_session_id,
     store_mapping,
     validate_codex_session_id,
 )
@@ -85,6 +87,7 @@ from yoetz.ports.integrations import (
 )
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode
+from yoetz.protocol.ids import IdKind, is_valid_id
 
 if TYPE_CHECKING:
     from yoetz.cli import hooks as hooks_cli
@@ -387,17 +390,22 @@ def _consistent_alias_token(
 
     values: list[str] = []
     supplied = False
-    for name in names:
-        if name not in payload:
+    nested = payload.get("tool_input")
+    nested_payload = nested if isinstance(nested, Mapping) else None
+    for aliases in (payload, nested_payload):
+        if aliases is None:
             continue
-        supplied = True
-        raw = payload.get(name)
-        if raw is None:
-            continue
-        token = _token_or_none(raw)
-        if token is None:
-            return None, False
-        values.append(token)
+        for name in names:
+            if name not in aliases:
+                continue
+            supplied = True
+            raw = aliases.get(name)
+            if raw is None:
+                continue
+            token = _token_or_none(raw)
+            if token is None:
+                return None, False
+            values.append(token)
     if any(value != values[0] for value in values[1:]):
         return None, False
     return (values[0] if values else None), supplied
@@ -738,6 +746,288 @@ def _is_pre_event(event_name: str) -> bool:
 
 def _is_post_event(event_name: str) -> bool:
     return event_name in {"PostToolUse", "PostCompact", "SubagentStop"}
+
+
+@dataclass(frozen=True, slots=True)
+class _ObservationLane:
+    """The host lane and the effective service lane for one hook event."""
+
+    host_session_id: str
+    effective_session_id: str
+    is_child: bool = False
+    attribution_gap: bool = False
+
+
+def _narrow_tool_result(payload: Mapping[str, JsonValue]) -> Mapping[str, JsonValue] | None:
+    """Parse only a scoped Yoetz result for child-route reconciliation."""
+
+    tool_name = _token_or_none(payload.get("tool_name"))
+    if tool_name not in YOETZ_OWNED_TOOL_NAMES:
+        return None
+    from yoetz.cli.hooks import _extract_start_result  # pyright: ignore[reportPrivateUsage]
+
+    return _extract_start_result(payload.get("tool_response"))
+
+
+def _validated_result_task_id(result: Mapping[str, JsonValue] | None) -> str | None:
+    """Return a service result task id only when the narrow result shape validates it."""
+
+    if result is None:
+        return None
+    task_id = result.get("task_id")
+    return task_id if type(task_id) is str and is_valid_id(IdKind.TASK, task_id) else None
+
+
+def _result_task_id_is_malformed(result: Mapping[str, JsonValue] | None) -> bool:
+    """Return whether a narrow result supplied a task field that failed validation."""
+
+    return result is not None and "task_id" in result and _validated_result_task_id(result) is None
+
+
+def _nested_service_session_fact(
+    payload: Mapping[str, JsonValue],
+) -> tuple[str | None, bool, bool]:
+    """Read a nested Yoetz request session without confusing it with the host session."""
+
+    nested = payload.get("tool_input")
+    if not isinstance(nested, Mapping) or "session_id" not in nested:
+        return None, False, True
+    raw = nested.get("session_id")
+    if raw is None:
+        return None, True, True
+    if type(raw) is not str or not is_valid_id(IdKind.SESSION, raw):
+        return None, True, False
+    return raw, True, True
+
+
+def _task_lane_for_result(
+    payload: Mapping[str, JsonValue],
+    *,
+    host_session_id: str,
+    harness_id: Literal["claude", "codex", "cursor"],
+    _state: Path | None,
+) -> _ObservationLane | None:
+    """Resolve a child lane from a service-authored result, if one is already bound."""
+
+    result = _narrow_tool_result(payload)
+    if result is None:
+        return None
+    if _result_task_id_is_malformed(result):
+        return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+    task_id = _validated_result_task_id(result)
+    if task_id is None:
+        return None
+    nested_session_id, nested_session_supplied, nested_session_valid = _nested_service_session_fact(
+        payload
+    )
+    if nested_session_supplied and not nested_session_valid:
+        return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+    parent_task_id = result.get("parent_task_id")
+    if parent_task_id is not None and (
+        type(parent_task_id) is not str or not is_valid_id(IdKind.TASK, parent_task_id)
+    ):
+        return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+    parent_mapping = load_mapping(host_session_id, _state=_state)
+    if parent_mapping is not None and task_id == parent_mapping.yoetz_task_id:
+        if nested_session_id is not None and nested_session_id != parent_mapping.yoetz_session_id:
+            return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+        return _ObservationLane(host_session_id, host_session_id)
+    if (
+        result.get("outcome") == "delegated"
+        and parent_mapping is not None
+        and type(parent_task_id) is str
+        and parent_task_id == parent_mapping.yoetz_task_id
+    ):
+        # A delegation result reserves a child but is still authored by the current owner.
+        if nested_session_id is not None and nested_session_id != parent_mapping.yoetz_session_id:
+            return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+        return _ObservationLane(host_session_id, host_session_id)
+    try:
+        task_lane = scoped_child_session_id(
+            host_session_id,
+            host=harness_id,
+            identity=task_id,
+            identity_kind="task",
+        )
+    except ProtocolValueError, TypeError, ValueError:
+        return None
+    child_mapping = load_mapping(task_lane, _state=_state)
+    if child_mapping is not None and child_mapping.yoetz_task_id == task_id:
+        if nested_session_id is not None and nested_session_id != child_mapping.yoetz_session_id:
+            return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+        return _ObservationLane(host_session_id, task_lane, is_child=True)
+    # An explicit lineage result with no matching task lane is known child work, but it cannot be
+    # safely leased to the parent. Keep the structural event on the host lane and let the caller
+    # record a mapping gap without sending it to the parent's service route.
+    if parent_mapping is not None and task_id != parent_mapping.yoetz_task_id:
+        return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+    if type(parent_task_id) is str and task_id != parent_task_id:
+        # The result explicitly names a parent lineage even when the raw host
+        # mapping is still queued or has been removed. It cannot be leased to
+        # the raw session without a validated child alias.
+        return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+    if parent_mapping is None:
+        # A valid service result without any held parent route is still foreign
+        # to this host lane. Keep it out of a future parent auto-attach path.
+        return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+    return None
+
+
+def _resolve_observation_lane(
+    payload: Mapping[str, JsonValue],
+    *,
+    event_name: str,
+    source: ObservationSource,
+    _state: Path | None,
+    explicit_session_id: str | None = None,
+    explicit_attribution_gap: bool = False,
+) -> _ObservationLane:
+    """Select a validated child lane while preserving ordinary parent callbacks."""
+
+    try:
+        host_session_id = validate_codex_session_id(payload.get("session_id"))
+    except ProtocolValueError:
+        # The caller performs the public invalid-session diagnostic. This fallback only keeps
+        # this helper total for tests and degraded ingress.
+        return _ObservationLane("invalid-session", "invalid-session")
+
+    # A derived child lane is an internal namespace.  It must never be accepted
+    # as a new parent host session when its mapping has been removed or its
+    # service result names a different task.  The normal parent session is
+    # handled below, where optional host aliases remain ordinary unless they
+    # establish a validated child route.
+    reserved_mapping = None
+    if is_scoped_child_session_id(host_session_id):
+        reserved_mapping = load_mapping(host_session_id, _state=_state)
+        if reserved_mapping is None:
+            return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+        if event_name in {"SubagentStart", "SubagentStop"}:
+            return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+        nested_session_id, nested_session_supplied, nested_session_valid = _nested_service_session_fact(
+            payload
+        )
+        if nested_session_supplied and not nested_session_valid:
+            return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+        if (
+            nested_session_id is not None
+            and nested_session_id != reserved_mapping.yoetz_session_id
+        ):
+            return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+        reserved_result = _narrow_tool_result(payload)
+        if _result_task_id_is_malformed(reserved_result):
+            return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+        result_task_id = _validated_result_task_id(reserved_result)
+        if result_task_id is not None and result_task_id != reserved_mapping.yoetz_task_id:
+            return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+        return _ObservationLane(host_session_id, host_session_id, is_child=True)
+    if event_name in {"SubagentStart", "SubagentStop"}:
+        # Native lifecycle hooks describe the parent lineage commitment. They never lease the
+        # child work lane, even when a child identity is present on the event.
+        return _ObservationLane(host_session_id, host_session_id)
+
+    harness_id = _pairing_harness(source)
+    if explicit_session_id is not None:
+        try:
+            candidate = validate_codex_session_id(explicit_session_id)
+        except ProtocolValueError:
+            candidate = host_session_id
+        if candidate != host_session_id and load_mapping(candidate, _state=_state) is not None:
+            return _ObservationLane(
+                host_session_id,
+                candidate,
+                is_child=True,
+                attribution_gap=explicit_attribution_gap,
+            )
+        if explicit_attribution_gap:
+            return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+
+    from yoetz.cli.hooks import _child_identity_from_payload  # pyright: ignore[reportPrivateUsage]
+
+    child_id, aliases_supplied, aliases_valid = _child_identity_from_payload(payload)
+    result = _narrow_tool_result(payload)
+    nested_session_id, nested_session_supplied, nested_session_valid = _nested_service_session_fact(
+        payload
+    )
+    if nested_session_supplied and not nested_session_valid:
+        return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+    if _result_task_id_is_malformed(result):
+        return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+    result_task_id = _validated_result_task_id(result)
+    if aliases_supplied and not aliases_valid:
+        return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+    if child_id is not None:
+        try:
+            child_lane = scoped_child_session_id(
+                host_session_id,
+                host=harness_id,
+                identity=child_id,
+                identity_kind="host",
+            )
+        except ProtocolValueError, TypeError, ValueError:
+            child_lane = None
+        if child_lane is not None:
+            child_mapping = load_mapping(child_lane, _state=_state)
+            if child_mapping is not None:
+                if (
+                    (result_task_id is None or result_task_id == child_mapping.yoetz_task_id)
+                    and (
+                        nested_session_id is None
+                        or nested_session_id == child_mapping.yoetz_session_id
+                    )
+                ):
+                    return _ObservationLane(host_session_id, child_lane, is_child=True)
+                # A stale host alias must not win over a service result naming
+                # another child.  A separately validated task alias may still
+                # route that result; otherwise keep it as an explicit gap.
+                result_lane = _task_lane_for_result(
+                    payload,
+                    host_session_id=host_session_id,
+                    harness_id=harness_id,
+                    _state=_state,
+                )
+                if result_lane is not None and result_lane.is_child:
+                    return result_lane
+                return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+
+        # A valid host child id without a matching lane is known child-shaped
+        # input.  It cannot safely inherit the parent route.  A narrow service
+        # result can rescue it only through an already-owned task lane.
+        result_lane = _task_lane_for_result(
+            payload,
+            host_session_id=host_session_id,
+            harness_id=harness_id,
+            _state=_state,
+        )
+        if result_lane is not None and result_lane.is_child:
+            return result_lane
+        return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+
+    result_lane = _task_lane_for_result(
+        payload,
+        host_session_id=host_session_id,
+        harness_id=harness_id,
+        _state=_state,
+    )
+    if result_lane is not None:
+        return result_lane
+
+    parent_mapping = load_mapping(host_session_id, _state=_state)
+    if (
+        nested_session_id is not None
+        and (parent_mapping is None or nested_session_id != parent_mapping.yoetz_session_id)
+    ):
+        # A nested Yoetz request names a service session different from the
+        # held parent binding. Without a validated child lane this is foreign
+        # work and cannot inherit the parent's route.
+        return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+
+    # With no child alias and no service-authored child result, retain the ordinary
+    # parent route. A present-but-null alias is treated as absent; malformed or
+    # contradictory aliases returned early above as an explicit gap.
+    if explicit_attribution_gap:
+        return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+    del aliases_supplied
+    return _ObservationLane(host_session_id, host_session_id)
 
 
 def _pairing_harness(source: ObservationSource) -> Literal["claude", "codex", "cursor"]:
@@ -1661,6 +1951,14 @@ def _scan_ended_workspace_recovery(
 
     if lifecycles is None:
         lifecycles = store.codex_session_lifecycles_for_workspace(workspace_commitment)
+    # Scoped child lanes have no native SessionEnd in the shared-session host contract. They
+    # must not keep the parent workspace ineligible for recovery or be selected as a parent
+    # predecessor. Their own mapping remains available for direct child callbacks.
+    lifecycles = tuple(
+        (session_id, ended)
+        for session_id, ended in lifecycles
+        if not is_scoped_child_session_id(session_id)
+    )
     if any(session_id != codex_session_id and not ended for session_id, ended in lifecycles):
         return _RecoveryScan(None, lifecycles)
     eligible = tuple(
@@ -1766,7 +2064,12 @@ def _recovery_scan_still_valid(
 
     if scan.mapping is None:
         return False
-    if store.codex_session_lifecycles_for_workspace(workspace_commitment) != scan.lifecycles:
+    current_lifecycles = tuple(
+        (session_id, ended)
+        for session_id, ended in store.codex_session_lifecycles_for_workspace(workspace_commitment)
+        if not is_scoped_child_session_id(session_id)
+    )
+    if current_lifecycles != scan.lifecycles:
         return False
     unambiguous = frozenset(store.unambiguous_codex_sessions_for_workspace(workspace_commitment))
     current = tuple(
@@ -2166,6 +2469,8 @@ def handle_observe(
     source: ObservationSource = ObservationSource.CODEX_HOOK,
     _output_event_name: str | None = None,
     _session_lock_owned: bool = False,
+    _routing_session_id: str | None = None,
+    _child_attribution_gap: bool = False,
 ) -> int:
     """Bounded observation ingress for Codex lifecycle hooks. Always exits 0.
 
@@ -2316,6 +2621,17 @@ def handle_observe(
             record_hook_diagnostic("invalid_session", resolved_event, _state=_state)
             _stdout_json({}, stdout)
             return 0
+        host_session_id = codex_session_id
+        lane = _resolve_observation_lane(
+            payload,
+            event_name=resolved_event,
+            source=source,
+            _state=_state,
+            explicit_session_id=_routing_session_id,
+            explicit_attribution_gap=_child_attribution_gap,
+        )
+        codex_session_id = lane.effective_session_id
+        child_attribution_gap = lane.attribution_gap
 
         workspace_commitment: str | None = None
         workspace_locator: str | None = None
@@ -2359,7 +2675,7 @@ def handle_observe(
             # A hook without an explicit locator may retain the legacy bound-session/single-active
             # lane. An explicit locator that failed canonical consent never falls back to a
             # different commitment, including a legacy exact-subdirectory grant.
-            workspace_commitment = store.find_workspace_for_codex_session(codex_session_id)
+            workspace_commitment = store.find_workspace_for_codex_session(host_session_id)
             workspace_locator = None
         consent = None if workspace_commitment is None else store.consent_for(workspace_commitment)
         if consent is None or not consent.active:
@@ -2486,6 +2802,17 @@ def handle_observe(
                     ObservationGapCode.OUTBOX_OVERFLOW.value,
                 )
 
+            if child_attribution_gap:
+                # The host supplied child lineage, but no validated child lane was available.
+                # Retain the structural fact on the parent commitment while fencing it away from
+                # the parent's service route, advice, and frontier delivery.
+                gap_codes.append(ObservationGapCode.MAPPING_MISSING.value)
+                store.note_session_coverage_gap(
+                    workspace_commitment,
+                    session_commitment,
+                    ObservationGapCode.MAPPING_MISSING.value,
+                )
+
             if resolved_event not in SUPPORTED_HOOK_EVENTS:
                 gap_codes.append(ObservationGapCode.UNSUPPORTED_EVENT.value)
 
@@ -2552,8 +2879,10 @@ def handle_observe(
             # A Yoetz-owned tool call is delivered only when it carries evidence
             # the service does not already hold from serving it (#564); the
             # envelope itself is always retained locally above.
-            if local_result.disposition.value == "accepted" and self_observation_deliverable(
-                resolved_event, envelope.structural_payload
+            if (
+                not child_attribution_gap
+                and local_result.disposition.value == "accepted"
+                and self_observation_deliverable(resolved_event, envelope.structural_payload)
             ):
                 overflow = store.enqueue_outbox(workspace_commitment, codex_session_id, envelope)
                 if overflow is not None:
@@ -2577,7 +2906,7 @@ def handle_observe(
 
             # Cursor transcripts are outside its structural observation contract.
             # Only the Codex hook source may reconcile the secondary JSONL stream.
-            if source is ObservationSource.CODEX_HOOK:
+            if source is ObservationSource.CODEX_HOOK and not lane.is_child:
                 with contextlib.suppress(Exception):
                     from yoetz.adapters.integrations.codex_session_stream import (
                         CodexSessionStreamLocator,
@@ -2792,7 +3121,8 @@ def handle_observe(
                             else:
                                 additional = _UNAVAILABLE_CONTEXT
             if (
-                not skip_service
+                not child_attribution_gap
+                and not skip_service
                 and not pending_mapping_deferred
                 and session_source_value != "clear"
             ):
@@ -2877,7 +3207,12 @@ def handle_observe(
         # A pending lifecycle operation is a local fence, not a service
         # mapping_missing result. Leave the captured rows pending until the
         # next hook can acquire this exact session lock.
-        if not skip_service and resolved_event != "SessionStart" and not pending_mapping_deferred:
+        if (
+            not child_attribution_gap
+            and not skip_service
+            and resolved_event != "SessionStart"
+            and not pending_mapping_deferred
+        ):
             # Every later mapped hook drains the complete session outbox, so the
             # current envelope plus any stream-recovered or previously-pending
             # entries all reconcile. Retryable rejections stay pending and
@@ -2932,7 +3267,8 @@ def handle_observe(
         # (the delivery text is appended below) instead of being silently starved at the very
         # SessionStart that bootstraps an unmapped session (issues #241, #280).
         delivery_eligible = (
-            (not additional or attach_advisory_only)
+            not child_attribution_gap
+            and (not additional or attach_advisory_only)
             and resolved_event in ADVICE_SAFE_EVENTS
             and not skip_advice_loop
             and not stop_already_active
@@ -3162,6 +3498,8 @@ def handle_claude_observe(
             "hook_event_name": event_map[raw_event],
             "session_id": f"{_CLAUDE_SESSION_PREFIX}{session}",
         }
+        routing_session_id: str | None = None
+        child_attribution_gap = False
         if raw_event == "Stop" and payload.get("stop_hook_active") is True:
             structural["stop_hook_active"] = True
         if raw_event == "SessionStart":
@@ -3199,6 +3537,15 @@ def handle_claude_observe(
             correlation = _token_or_none(payload.get("tool_use_id"))
             if correlation is not None:
                 structural["tool_use_id"] = correlation
+            # Keep a validated child identity when Claude supplies one on a tool callback. The
+            # identity is structural only; route selection still requires a child mapping that a
+            # successful service start established. A parent callback carrying an optional
+            # agent_id therefore remains on the parent lane.
+            callback_subagent_id, _callback_aliases_supplied = _consistent_alias_token(
+                payload, ("subagent_id", "agent_id", "agent_thread_id")
+            )
+            if callback_subagent_id is not None:
+                structural["subagent_id"] = callback_subagent_id
             if raw_event == "PostToolUse" and tool_name == "mcp__plugin_yoetz_yoetz__start":
                 # Claude's observation envelope stays structural-only, but the
                 # successful start result is the sole authority that can bind
@@ -3214,21 +3561,59 @@ def handle_claude_observe(
                 # (issue #581): `observe status` can then say why observation
                 # kept routing to the previous task.
                 with contextlib.suppress(Exception):
+                    binding_payload: dict[str, JsonValue] = {
+                        "session_id": f"{_CLAUDE_SESSION_PREFIX}{session}",
+                        "tool_name": tool_name,
+                        "tool_response": payload.get("tool_response"),
+                    }
+                    for alias in ("subagent_id", "agent_id", "agent_thread_id"):
+                        value = payload.get(alias)
+                        if alias in payload:
+                            binding_payload[alias] = value
+                    tool_input = payload.get("tool_input")
+                    if isinstance(tool_input, Mapping):
+                        nested_aliases: dict[str, JsonValue] = {}
+                        for alias in ("subagent_id", "agent_id", "agent_thread_id"):
+                            if alias in tool_input:
+                                nested_aliases[alias] = cast(JsonValue, tool_input.get(alias))
+                        if nested_aliases:
+                            # Preserve the direct and nested namespaces independently.  A
+                            # contradictory pair must be rejected by the binder before it can
+                            # publish an alias; flattening nested values into the direct field
+                            # made ``agent_id=A`` plus ``tool_input.agent_id=B`` look consistent.
+                            binding_payload["tool_input"] = cast(JsonValue, nested_aliases)
                     record_start_bind_diagnostic(
                         bind_start_mapping_outcome(
-                            cast(
-                                Mapping[str, JsonValue],
-                                {
-                                    "session_id": f"{_CLAUDE_SESSION_PREFIX}{session}",
-                                    "tool_name": tool_name,
-                                    "tool_response": payload.get("tool_response"),
-                                },
-                            ),
+                            binding_payload,
                             _state=_state,
+                            host="claude",
                         ),
                         "PostToolUse",
                         _state=_state,
                     )
+
+            routing_payload = dict(payload)
+            routing_payload["session_id"] = f"{_CLAUDE_SESSION_PREFIX}{session}"
+            resolved_lane = _resolve_observation_lane(
+                cast(Mapping[str, JsonValue], routing_payload),
+                event_name="PostToolUse",
+                source=ObservationSource.CLAUDE_HOOK,
+                _state=_state,
+            )
+            if resolved_lane.is_child:
+                routing_session_id = resolved_lane.effective_session_id
+            elif resolved_lane.attribution_gap:
+                child_attribution_gap = True
+            elif any(
+                key in payload
+                for key in ("agent_transcript_path", "agent_type", "subagent_id", "agent_id")
+            ):
+                # Claude's child callback can omit every child identity and result body. Preserve
+                # the parent mapping but fence this observation from parent delivery; a later
+                # validated child result can drain it through the child alias. The same fence
+                # applies to a successful callback carrying child-only transcript metadata: a
+                # success bit does not authorize parent attribution.
+                child_attribution_gap = True
         return handle_observe(
             event_name=event_map[raw_event],
             stdin_bytes=canonical_encode(structural),
@@ -3240,6 +3625,8 @@ def handle_claude_observe(
             skip_service=skip_service,
             source=ObservationSource.CLAUDE_HOOK,
             _output_event_name=raw_event,
+            _routing_session_id=routing_session_id,
+            _child_attribution_gap=child_attribution_gap,
         )
     except BaseException:
         with contextlib.suppress(BaseException):

@@ -105,6 +105,7 @@ _REASONS: Final = frozenset(
         # bind failed silently and observation kept routing to the old task.
         "start_bind_unparsed",
         "start_bind_invalid_ids",
+        "start_bind_child_lane_unbound",
         "start_bind_deferred",
         "start_bind_write_failed",
         # Observability only: the end-to-end hook budget is a contract, not an

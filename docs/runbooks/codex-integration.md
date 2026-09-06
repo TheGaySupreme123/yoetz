@@ -350,57 +350,77 @@ resolve through the same child/parent-tool aliases; an event with no usable chil
 the permanent `missing_subagent_identity` gap and does not also produce an annotation. Parent
 advice and frontier delivery are never redirected to the child.
 
+Native child tool callbacks can carry the parent's host session ID together with a child
+`agent_id`. A successful delegated `start` preserves the parent mapping: its task result names the
+reserved child, but its session and writer still belong to `parent_task_id`. A successful child
+attach establishes a separate local route scoped to the host session and child identity. A shared
+session without a validated child identity remains an attribution gap. Conflicting aliases or a
+callback naming an unbound child also produce a gap; they cannot enqueue parent work or consume
+parent advice and frontier notices. Pending lifecycle writes and existing alias ownership are
+checked before publishing a child route. A contended write leaves a durable retry for that single
+route; replay cannot change its task owner. `SubagentStart` and
+`SubagentStop` remain parent lineage signals. These local routes neither mint cooperative children
+nor supply missing registry correlation, and they are excluded from parent session recovery and
+parent stream reconciliation.
+
 The installed `codex-cli 0.150.1` matches the current rollout parser cell, but this read-only version
 probe and the native renderer do not prove live subagent delivery, acceptance, or receipt behavior.
 The #509 matrix keeps the native subagent row evidence-gated until an isolated `YOETZ_ISOLATED_ROOT`
 cell exercises hook, stream, replay, and cooperative binding behavior. Parent-minted delegation is
 the supported design path once that cell is proven; host hooks alone never mint a child.
 
-The bounded legacy native cell has now exercised that parent-minted path with the reviewed final
-wheel `yoetz-0.1.0-py3-none-any.whl` (SHA-256
-`8d54a73c87e5e49b0b6179ad58f673d2b2f40b1a93c80c4393ce56ae36e82988`). In a fresh
-`YOETZ_ISOLATED_ROOT`, Codex-testing `0.150.1` ran with `multi_agent_v2=false` against a local
-loopback Responses provider and no subscription credential: one parent `start`, one `delegate`, one
-legacy `multi_agent_v1` native child, `wait_agent`, then the child's `start mode=attach`, one
-`publish_work`, deterministic `check`, and JSON `receipt` all completed. This proves the bounded
-source/wheel mechanics and native child execution in that synthetic cell; it does not prove real
-provider semantics, authentication, or production model use.
+An intermediate diagnostic legacy native cell used source commit `952bec0e` and the exact
+`yoetz-0.1.0-py3-none-any.whl` (SHA-256
+`30fed12caad1176229bb55ee09b5c7fcb585f9a5cf314a582ecd8d236fb48fde`) in a fresh
+`YOETZ_ISOLATED_ROOT`. Its runtime import and `direct_url.json` matched that wheel. Codex-testing
+`0.150.1` ran with `multi_agent_v2=false` against a loopback Responses provider with no provider
+credential. The supported project-marketplace carrier was active, `features.hooks=true`, and a
+fresh synthetic project completed the host TUI's **Trust all and continue** ceremony; app-server
+`hooks/list` then reported all 13 enabled Yoetz hooks trusted with zero warnings or errors.
 
-The same non-ephemeral run's two persisted Codex streams were reconciled by the source-owned
-`codex-rollout-jsonl/0.150.1/v1` adapter: the cursors reached event positions 34 and 28 with no
-rotation or truncation, and 62 structural envelopes were materialized. They contained
-`CollabAgentToolCall` records but no `SubAgentActivity`,
-`SubagentStart`, `SubagentStop`, or usable child identity. Isolated public status therefore reports
-`codex_session_stream=true`, `mapping_present=false`, and the permanent `unsupported_event` gap.
-This cell loaded direct MCP and set `features.hooks=true`, but it did not install a rendered Yoetz
-Codex hook carrier: no Yoetz plugin directory, `.agents` carrier, or hook manifest was present in
-the isolated project or Codex home. The absent subagent activity is therefore permanent for the
-records emitted by this stream; it does not establish that Codex `0.150.1` native hook delivery
-is unsupported. Keep that native hook capability evidence-gated until a carrier-enabled cell
-delivers and reconciles the hook events.
-The bounded drain retained `mapping_missing` delivery rows because no host session mapping was
-delivered. It must not mint `host_observed` or reinterpret this absence as
-`missing_subagent_identity`; the latter applies only when a subagent activity event exists without
-an identity. Keep these observation and delivery gaps separate from the successful source-artifact
-and native-ceremony proof. Repeat the cell only with a fresh isolated root and replace this digest
-when a later final artifact is reviewed.
+The native stream completed one parent `start`, one parent-minted `delegate`, exactly one legacy
+`multi_agent_v1` child, `wait_agent`, child `start mode=attach`, one `publish_work`, one deterministic
+`check`, one JSON `receipt`, and child terminal completion. Every required Yoetz response was
+structured and successful: the check reached `state=complete` with `verdict=insufficient_coverage`,
+and the receipt reached `ok=true` with the matching `insufficient_coverage` conclusion. Its document
+contains `semantic_review_not_requested` as the coverage limitation and no `check_not_recorded` gap;
+the public operation history finds both the check and receipt as complete. Parent lineage exposes
+one accepted `parent_minted` child and no duplicate child. This is a bounded source/wheel ceremony
+against a synthetic loopback provider; it does not prove real provider semantics, authentication,
+or production model use. The harness preserved the native `turn.completed` stream but lost the
+numeric process exit code while recording it, so this cell does not claim exit status 0.
 
-A separate carrier-only preparation cell then used the same reviewed wheel in a fresh owner-private
-project and Codex home. The supported sequence was `yoetz setup run --accept`, followed by the
-exact `codex-plugin-activation` recommendation preview and acceptance. It rendered the managed
-`.agents/plugins/yoetz` source, wrote the repository-local marketplace and enabled
-`[plugins."yoetz@yoetz"]`, and seeded the host-specific versioned cache with the rendered hook
-manifest. Codex `0.150.1`'s `plugin list --marketplace yoetz --json` reported one installed and
-enabled `yoetz@yoetz` plugin with a local repository source, and Yoetz plugin status reported
-`active` (activation preview digest `sha256:537587407abd0634d84c7f12a299eedca9256296559dbcb4868ad6af54bfee82`,
-plugin source/install digest `sha256:dbefae99b081dfa24a6844c7a8e6fa74b891b79eb13fd2b0d00dabb8c6d6d7fa`).
-The same selected home reported one enabled `yoetz` stdio MCP entry using the strict
-`mcp serve --semantic off` route, so the carrier and the owned MCP route were present together.
-The truthful carrier label for this cell is **native project marketplace**; it is not a Claude
-development directory. This proves configured activation and host inventory only: no new Codex
-agent session was started, and the read-only observation status remained `codex_hook=false` with
-no hook events. A fresh final-wheel native session must still prove that the active host process
-loads these hooks and delivers reconcilable activity.
+The source-owned `codex-rollout-jsonl/0.150.1/v1` adapter reconciled three persisted streams and 74
+structural records. The streams contain native `spawn_agent`/`wait_agent` tool records but no
+`SubAgentActivity` or usable subagent activity identity. The trusted hook carrier did execute:
+public observation reports `codex_hook=true`, `codex_session_stream=true`, and 20 hook diagnostics,
+including one structural `SubagentStart` and one structural `SubagentStop` with the same child
+identity. The registry retained both phases as one provisional Codex annotation, but the row was
+recorded under the attached child task and carried no parent-tool alias, so it was not safely
+bindable to the parent; the parent annotation page remains empty. Public status therefore keeps
+`unsupported_event` and `unpaired_event` as explicit observation gaps; it must not infer that
+native hooks are unsupported from the missing stream activity item, and it must not mint
+`host_observed` parent attribution from the absence of a safe parent correlation.
+
+The three `unpaired_event` rows have structural tool-call IDs: each is a repeated `PostToolUse`
+for a call whose earlier post already consumed its pre-event. The IDs are present; the gap is the
+source-ordinal duplicate/orphan condition, not missing identity. Parent lineage currently leaves
+the child `rollup_state=unavailable`, `session_health=contact_lost`, and annotations empty. The
+child check and receipt remain recorded history, while later hook-observed ledger events advanced
+the child frontier and made that checked snapshot `stale_after_material_change`; the parent
+manifest guard therefore reports `lineage_manifest_state_changed` until a new qualifying check.
+
+That cell's observation status also reports `content_capture_unavailable`, `ledger_rejected`, and
+`outbox_quarantined`; 68 delivery rows remain pending with `mapping_missing` after the bounded drain.
+Those pending rows belong to three separate stream session commitments with no task-route mapping;
+none belongs to the child ledger session that contains the accepted check/receipt and 58 accepted
+observation rows. `mapping_present=true` is a workspace-level fact and does not make each stream
+alias deliverable. Service diagnostics correlate the two current `ledger_rejected` rows with
+non-retryable session-conflict route failures; that routing/lifecycle defect is separate from the
+profile's explicit unsupported-event coverage. These stream, hook, lineage, and
+delivery-recovery gaps remain separate from the successful native parent/child/check/receipt
+ceremony. Late or replayed activity was not observed in this bounded cell; repeat it with a fresh
+isolated root when those paths are under test.
 
 The rendered `SessionStart`, `UserPromptSubmit`, tool, and turn-boundary commands bind
 `--workspace .`. Codex's hooks contract (re-read 2026-09-03) gives every hook the session `cwd` and
@@ -620,6 +640,7 @@ reviewer egress.
 | `observe status` shows `mapping_present: false` after a consented `SessionStart` | The hook sends `start mode=create_or_attach` with the canonical `--workspace` root as `workspace_ref` and `codex-session:<session_id>` as `external_ref`. Before admitting a new pair, it checks private persisted bindings from eligible ended Codex sessions. A unique task selected by those held mappings is resumed with `mode=attach` under the shared workspace and lifecycle locks; the repository fence and active selector are revalidated. Ambiguous bindings or a contended recovery lock refuse or retry without creating a replacement task. With no stored selector, a new pair creates new work, including beside a dormant task. Recovery rewrites eligible predecessor mappings and drains their pending rows on the successor route. A hard crash is never inferred to be an end from age alone. Otherwise read `hook_diagnostics.reasons` for the typed cause: `auto_attach_workspace_unbound` (no paired request was legal), `auto_attach_request_invalid` (an authoring defect — file it), `auto_attach_conflict` / `auto_attach_refused` (the service answered and declined), `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`, `vault_locked`, `timeout`, `storage_unsafe` / `storage_corrupt`, or `service_unavailable` (the daemon was still starting; `UserPromptSubmit`, `Stop`, and `SessionEnd` retry under the bounded budget and add `auto_attach_retry_failed` beside the cause). An explicit MCP `start` remains the recovery path; for `vault_locked` on a never-initialized install, that `start` returns the typed `vault_initialization_required` continuation below rather than a dead end. |
 | `observe status` shows `mapping_stale` after every resume or compaction | Before issue #578 the `yoetz hooks session-start` status read connected without a workspace locator, so the daemon's repository fence refused every probe as `SESSION_CONFLICT` and a live mapping was reported stale. The command now derives its locator from `--workspace` or, absent that (the rendered command passes none), the hook's working directory; `yoetz hooks observe --event SessionStart --workspace .` does the same. A fence refusal is now `status_workspace_unbound` / `status_workspace_mismatch` with a keep-the-mapping advisory; `mapping_stale` means the daemon actually reported the session replaced, and the advisory names the replacement ids. |
 | The agent created a sibling task instead of continuing the auto-attached one | The `SessionStart` context names the mapped `session_id` and `writer_id` and says to continue with `start mode=attach` by that session id; guidance and the `start` tool description name the canonical absolute repository root as `workspace_ref`, the value the hook commits (issue #580). The agent's successful scoped `start` re-binds the mapping through `yoetz hooks post-tool-use` from `structuredContent`; a scoped start that binds nothing records `start_bind_unparsed` / `start_bind_invalid_ids` / `start_bind_write_failed`. |
+| `observe status` shows pending `mapping_missing` after a runtime route conflict | A `SESSION_CONFLICT` while acquiring the task runtime keeps the envelope pending for a later drain after its lifecycle mapping is repaired. The route must still pass its ownership checks. Non-retryable conflicts after runtime acquisition remain `ledger_rejected` and enter quarantine. |
 | `observe status` shows `ledger_rejected` and `outbox_quarantined` | The service was reachable but rejected one envelope non-retryably. A repeated envelope after a lost acknowledgement, a service restart, or a workflow reattach (a second `start` in the same Codex session) is not such a rejection: its committed operation is resolved task-wide and the row is acknowledged idempotently with no quarantine row. A pending row from an ended host session whose task a successor recovered is delivered on the successor route (`session_superseded` is followed) and is also not `ledger_rejected`. A successor binding that cannot be followed quarantines that row as `session_superseded`, not `mapping_missing`. A `ledger_rejected` row is a genuine conflicting reuse of an event or operation identity. The row is retained under `quarantine_causes`, aggregate `delivery_causes`, and gaps; `pending_delivery_causes` names only rows still in the outbox. Later rows can drain; reclaim only after the underlying defect is understood. A hook-driven attempt also appears in the bounded `hook_diagnostics`, while manual and supervisor drains are represented by status rather than hook activity. Do not restart a ready service. A row is also quarantined after 128 consecutive rejections with the same retryable reason so a catch-all failure cannot block the lane forever; pause, vault, disabled, and designed back-pressure reasons keep their existing recovery behavior. |
 | `observe status` exits with `observation_status_failed:<reason>` | The reason names the layer: `workspace_unresolvable` (exit 2) is the locator; `storage_unsafe` (exit 20) is an unsafe state/lock path; `storage_unavailable` (exit 20) is a bounded open, permission, read-only, missing-parent, or lock-acquisition failure; `storage_corrupt` (exit 40) is invalid stored data. The fixed remediation never prints the absolute state path. A sandboxed Codex result proves only that sandbox cell; run and record an unrestricted-terminal comparison separately before making that claim. |
 

@@ -382,6 +382,10 @@ quarantined. A pending row from an ended host session whose task was recovered b
 session is delivered on the successor route (`session_superseded` is followed). A successor
 binding that cannot be followed quarantines that row as `session_superseded`, not
 `ledger_rejected` or `mapping_missing`.
+A `SESSION_CONFLICT` while acquiring the task runtime reports `mapping_missing`, keeping the
+envelope pending for a later drain after its lifecycle mapping is repaired. The route must still
+pass its ownership checks. Non-retryable conflicts after runtime acquisition remain
+`ledger_rejected` and enter quarantine.
 A row
 also enters quarantine after 128 consecutive rejections with the same retryable reason, except for
 designed back-pressure and workspace-global pause/vault/disabled gates. Both cases remain visible

@@ -17,6 +17,7 @@ from yoetz.adapters.integrations.codex_lifecycle import (
     mapping_from_start_ids,
     mapping_path,
     queue_mapping_store,
+    scoped_child_session_id,
     store_mapping,
 )
 from yoetz.cli import app as app_module
@@ -152,6 +153,267 @@ def test_post_tool_use_successful_start_creates_mapping(tmp_path: Path) -> None:
     assert mapping.yoetz_session_id == session_id
     assert mapping.yoetz_writer_id == writer_id
     assert mapping.last_frontier == "0:genesis"
+
+
+def test_post_tool_use_delegated_start_preserves_parent_mapping(tmp_path: Path) -> None:
+    """A delegated result names a child task but keeps the host session on its parent."""
+
+    parent_task, parent_session, parent_writer = _task_ids()
+    child_task, _child_session, _child_writer = _task_ids()
+    codex_session = "codex-delegate-parent"
+    parent_mapping = mapping_from_start_ids(
+        codex_session_id=codex_session,
+        yoetz_task_id=parent_task,
+        yoetz_session_id=parent_session,
+        yoetz_writer_id=parent_writer,
+        last_frontier="2:sha256:" + "b" * 64,
+    )
+    store_mapping(parent_mapping, _state=tmp_path)
+
+    payload = {
+        "session_id": codex_session,
+        "tool_name": "mcp__yoetz__start",
+        "tool_response": {
+            "structuredContent": {
+                "ok": True,
+                "outcome": "delegated",
+                "task_id": child_task,
+                "parent_task_id": parent_task,
+                "session_id": parent_session,
+                "writer_id": parent_writer,
+                "frontier": {"sequence": "3", "head_digest": "sha256:" + "c" * 64},
+            }
+        },
+    }
+
+    assert (
+        handle_post_tool_use(
+            stdin_bytes=json.dumps(payload).encode("utf-8"),
+            stdout=io.BytesIO(),
+            _state=tmp_path,
+        )
+        == 0
+    )
+    mapping = load_mapping(codex_session, _state=tmp_path)
+    assert mapping is not None
+    assert mapping.yoetz_task_id == parent_task
+    assert mapping.yoetz_session_id == parent_session
+    assert mapping.yoetz_writer_id == parent_writer
+    assert mapping.last_frontier == "3:sha256:" + "c" * 64
+
+
+def test_post_tool_use_delegated_start_without_parent_does_not_bind_child(
+    tmp_path: Path,
+) -> None:
+    """A malformed delegated success cannot turn its child id into a parent-session mapping."""
+
+    child_task, parent_session, parent_writer = _task_ids()
+    codex_session = "codex-delegate-invalid-parent"
+    payload = {
+        "session_id": codex_session,
+        "tool_name": "mcp__yoetz__start",
+        "tool_response": {
+            "structuredContent": {
+                "ok": True,
+                "outcome": "delegated",
+                "task_id": child_task,
+                "session_id": parent_session,
+                "writer_id": parent_writer,
+            }
+        },
+    }
+
+    assert (
+        handle_post_tool_use(
+            stdin_bytes=json.dumps(payload).encode("utf-8"),
+            stdout=io.BytesIO(),
+            _state=tmp_path,
+        )
+        == 0
+    )
+    assert load_mapping(codex_session, _state=tmp_path) is None
+    assert '"reason":"start_bind_invalid_ids"' in _diagnostics_text(tmp_path)
+
+
+def test_attached_child_shared_session_preserves_parent_and_binds_scoped_lanes(
+    tmp_path: Path,
+) -> None:
+    parent_task, parent_session, parent_writer = _task_ids()
+    child_task, child_session, child_writer = _task_ids()
+    host_session = "codex-shared-parent"
+    parent = mapping_from_start_ids(
+        codex_session_id=host_session,
+        yoetz_task_id=parent_task,
+        yoetz_session_id=parent_session,
+        yoetz_writer_id=parent_writer,
+        last_frontier="4:sha256:" + "a" * 64,
+    )
+    store_mapping(parent, _state=tmp_path)
+    payload = {
+        "session_id": host_session,
+        "subagent_id": "native-child-1",
+        "tool_name": "mcp__yoetz__start",
+        "tool_response": {
+            "structuredContent": {
+                "ok": True,
+                "outcome": "attached",
+                "task_id": child_task,
+                "parent_task_id": parent_task,
+                "session_id": child_session,
+                "writer_id": child_writer,
+                "frontier": {"sequence": "0", "head_digest": "genesis"},
+            }
+        },
+    }
+
+    assert hooks_module.bind_start_mapping_outcome(payload, _state=tmp_path) == "bound"
+    assert load_mapping(host_session, _state=tmp_path) == parent
+    host_lane = scoped_child_session_id(
+        host_session,
+        host="codex",
+        identity="native-child-1",
+        identity_kind="host",
+    )
+    child_mapping = load_mapping(host_lane, _state=tmp_path)
+    assert child_mapping is not None
+    assert child_mapping.yoetz_task_id == child_task
+    assert child_mapping.yoetz_session_id == child_session
+
+
+def test_child_start_reconciles_pending_parent_before_classification(tmp_path: Path) -> None:
+    parent_task, parent_session, parent_writer = _task_ids()
+    child_task, child_session, child_writer = _task_ids()
+    host_session = "codex-pending-parent"
+    parent = mapping_from_start_ids(
+        codex_session_id=host_session,
+        yoetz_task_id=parent_task,
+        yoetz_session_id=parent_session,
+        yoetz_writer_id=parent_writer,
+        last_frontier=None,
+    )
+    queue_mapping_store(parent, _state=tmp_path)
+    payload = {
+        "session_id": host_session,
+        "tool_name": "mcp__yoetz__start",
+        "tool_response": {
+            "structuredContent": {
+                "ok": True,
+                "outcome": "attached",
+                "task_id": child_task,
+                "parent_task_id": parent_task,
+                "session_id": child_session,
+                "writer_id": child_writer,
+            }
+        },
+    }
+
+    assert (
+        hooks_module.bind_start_mapping_outcome(payload, _state=tmp_path)
+        == "start_bind_child_lane_unbound"
+    )
+    assert load_mapping(host_session, _state=tmp_path) == parent
+    task_lane = scoped_child_session_id(
+        host_session,
+        host="codex",
+        identity=child_task,
+        identity_kind="task",
+    )
+    assert load_mapping(task_lane, _state=tmp_path) is None
+
+
+def test_child_alias_cannot_be_rebound_to_another_task(tmp_path: Path) -> None:
+    parent_task, parent_session, parent_writer = _task_ids()
+    old_child_task, old_child_session, old_child_writer = _task_ids()
+    new_child_task, new_child_session, new_child_writer = _task_ids()
+    host_session = "codex-alias-reuse"
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=host_session,
+            yoetz_task_id=parent_task,
+            yoetz_session_id=parent_session,
+            yoetz_writer_id=parent_writer,
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+    host_lane = scoped_child_session_id(
+        host_session,
+        host="codex",
+        identity="reused-child",
+        identity_kind="host",
+    )
+    old_mapping = mapping_from_start_ids(
+        codex_session_id=host_lane,
+        yoetz_task_id=old_child_task,
+        yoetz_session_id=old_child_session,
+        yoetz_writer_id=old_child_writer,
+        last_frontier=None,
+    )
+    store_mapping(old_mapping, _state=tmp_path)
+    payload = {
+        "session_id": host_session,
+        "subagent_id": "reused-child",
+        "tool_name": "mcp__yoetz__start",
+        "tool_response": {
+            "structuredContent": {
+                "ok": True,
+                "outcome": "attached",
+                "task_id": new_child_task,
+                "parent_task_id": parent_task,
+                "session_id": new_child_session,
+                "writer_id": new_child_writer,
+            }
+        },
+    }
+
+    assert (
+        hooks_module.bind_start_mapping_outcome(payload, _state=tmp_path)
+        == "start_bind_child_lane_unbound"
+    )
+    assert load_mapping(host_lane, _state=tmp_path) == old_mapping
+
+
+def test_conflicting_child_aliases_fail_closed_without_task_fallback(tmp_path: Path) -> None:
+    parent_task, parent_session, parent_writer = _task_ids()
+    child_task, child_session, child_writer = _task_ids()
+    host_session = "codex-conflicting-child"
+    parent = mapping_from_start_ids(
+        codex_session_id=host_session,
+        yoetz_task_id=parent_task,
+        yoetz_session_id=parent_session,
+        yoetz_writer_id=parent_writer,
+        last_frontier=None,
+    )
+    store_mapping(parent, _state=tmp_path)
+    payload = {
+        "session_id": host_session,
+        "subagent_id": "child-a",
+        "agent_id": "child-b",
+        "tool_name": "mcp__yoetz__start",
+        "tool_response": {
+            "structuredContent": {
+                "ok": True,
+                "outcome": "attached",
+                "task_id": child_task,
+                "parent_task_id": parent_task,
+                "session_id": child_session,
+                "writer_id": child_writer,
+            }
+        },
+    }
+
+    assert (
+        hooks_module.bind_start_mapping_outcome(payload, _state=tmp_path)
+        == "start_bind_child_lane_unbound"
+    )
+    assert load_mapping(host_session, _state=tmp_path) == parent
+    task_lane = scoped_child_session_id(
+        host_session,
+        host="codex",
+        identity=child_task,
+        identity_kind="task",
+    )
+    assert load_mapping(task_lane, _state=tmp_path) is None
 
 
 def test_post_tool_use_failed_start_creates_none(tmp_path: Path) -> None:

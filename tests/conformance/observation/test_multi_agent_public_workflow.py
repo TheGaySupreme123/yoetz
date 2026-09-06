@@ -7,6 +7,8 @@ not a public task check or a task receipt. Each row below invokes the actual pub
 from __future__ import annotations
 
 import asyncio
+import io
+import json
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
@@ -14,13 +16,33 @@ from pathlib import Path
 import pytest
 
 from builders.multi_agent import multi_agent_service
+from yoetz.adapters.integrations.codex_lifecycle import load_mapping, scoped_child_session_id
+from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.application.publish_work import PublishWorkInternalResult
 from yoetz.application.start import StartInternalResult
+from yoetz.cli.hooks import bind_start_mapping_outcome
+from yoetz.cli.observe_hooks import handle_observe
 from yoetz.config.models import LineageSettings, YoetzConfig
 from yoetz.domain.coordination import WorkState
+from yoetz.domain.observation import (
+    AdviceSnapshot,
+    ObservationIngestRequest,
+    observation_ingest_request_to_json,
+    observation_ingest_result_from_json,
+)
+from yoetz.domain.values import finding_id
 from yoetz.ports.control import RepositoryPrivacyContext
 from yoetz.ports.ledger import CheckCommitResult
 from yoetz.ports.start_catalog import TaskRouteState
+from yoetz.protocol.coverage import (
+    ArtifactObservation,
+    AuthorshipAssurance,
+    CheckType,
+    Coverage,
+    EvidenceImmutability,
+    LedgerFreshness,
+    PublicationChannel,
+)
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import (
@@ -219,6 +241,32 @@ async def test_real_delegation_attach_publication_and_child_receipt_preserve_par
             ),
             repository_privacy_context=_REPOSITORY,
         )
+        parent_host_session = "native-parent-session"
+        lifecycle_state = service.root / "state"
+        assert (
+            bind_start_mapping_outcome(
+                {
+                    "session_id": parent_host_session,
+                    "tool_name": "mcp__yoetz__start",
+                    "tool_response": {"structuredContent": parent.as_wire()},
+                },
+                _state=lifecycle_state,
+            )
+            == "bound"
+        )
+        parent_mapping = load_mapping(parent_host_session, _state=lifecycle_state)
+        assert parent_mapping is not None
+        assert (
+            parent_mapping.yoetz_task_id,
+            parent_mapping.yoetz_session_id,
+            parent_mapping.yoetz_writer_id,
+            parent_mapping.last_frontier,
+        ) == (
+            parent.task_id,
+            parent.session_id,
+            parent.writer_id,
+            f"{parent.frontier.sequence}:{parent.frontier.head_digest}",
+        )
         parent_binding = await app.start_catalog.session_binding(parent.session_id)
         delegate_request = StartRequest.model_validate(
             {
@@ -231,6 +279,30 @@ async def test_real_delegation_attach_publication_and_child_receipt_preserve_par
         )
         delegated = await app.start(delegate_request, repository_privacy_context=_REPOSITORY)
         assert delegated.attach_handle is not None
+        assert (
+            bind_start_mapping_outcome(
+                {
+                    "session_id": parent_host_session,
+                    "tool_name": "mcp__yoetz__start",
+                    "tool_response": {"structuredContent": delegated.as_wire()},
+                },
+                _state=lifecycle_state,
+            )
+            == "bound"
+        )
+        delegated_parent_mapping = load_mapping(parent_host_session, _state=lifecycle_state)
+        assert delegated_parent_mapping is not None
+        assert (
+            delegated_parent_mapping.yoetz_task_id,
+            delegated_parent_mapping.yoetz_session_id,
+            delegated_parent_mapping.yoetz_writer_id,
+            delegated_parent_mapping.last_frontier,
+        ) == (
+            parent.task_id,
+            parent.session_id,
+            parent.writer_id,
+            f"{delegated.frontier.sequence}:{delegated.frontier.head_digest}",
+        )
         child_route = await app.start_catalog.task_route(delegated.task_id)
         assert child_route is not None
         assert child_route.state is TaskRouteState.INITIALIZING
@@ -262,6 +334,33 @@ async def test_real_delegation_attach_publication_and_child_receipt_preserve_par
         )
         assert attached.task_id == delegated.task_id
         assert attached.task_id != parent.task_id
+        child_host_session = "native-child-session"
+        assert child_host_session != parent_host_session
+        assert (
+            bind_start_mapping_outcome(
+                {
+                    "session_id": child_host_session,
+                    "tool_name": "mcp__yoetz__start",
+                    "tool_response": {"structuredContent": attached.as_wire()},
+                },
+                _state=lifecycle_state,
+            )
+            == "bound"
+        )
+        child_mapping = load_mapping(child_host_session, _state=lifecycle_state)
+        assert child_mapping is not None
+        assert (
+            child_mapping.yoetz_task_id,
+            child_mapping.yoetz_session_id,
+            child_mapping.yoetz_writer_id,
+            child_mapping.last_frontier,
+        ) == (
+            attached.task_id,
+            attached.session_id,
+            attached.writer_id,
+            f"{attached.frontier.sequence}:{attached.frontier.head_digest}",
+        )
+        assert load_mapping(parent_host_session, _state=lifecycle_state) == delegated_parent_mapping
         publication = await app.publish_work(
             PublishWorkRequest.model_validate(
                 {
@@ -342,6 +441,234 @@ async def test_real_delegation_attach_publication_and_child_receipt_preserve_par
         assert child.acceptance == "accepted"
         assert child.work_state == "open"
         assert child.rollup_state != "clean"
+
+
+async def test_codex_shared_host_child_alias_routes_observation_to_attached_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Codex child callback keeps the parent lane and advice independent."""
+
+    workspace = _workspace(tmp_path / "workspace")
+    async with multi_agent_service(tmp_path / "state") as service:
+        app = service.app
+        # The builder keeps its service state in a private owner-only root.  Production
+        # observation ingest resolves lifecycle mappings through the isolated-root contract,
+        # so point that contract at this same test installation before exercising the public
+        # ingest path.
+        monkeypatch.setenv("YOETZ_ISOLATED_ROOT", str(service.root))
+        parent = await app.start(
+            StartRequest.model_validate(
+                {
+                    **_identity(),
+                    "mode": "create",
+                    "task_title": "Shared host parent",
+                    "workspace_ref": str(workspace),
+                    "external_ref": "shared-host-parent",
+                    "requested_view": "compact",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        parent_host_session = "codex-shared-parent-session"
+        lifecycle_state = service.root / "state"
+        assert (
+            bind_start_mapping_outcome(
+                {
+                    "session_id": parent_host_session,
+                    "tool_name": "mcp__yoetz__start",
+                    "tool_response": {"structuredContent": parent.as_wire()},
+                },
+                _state=lifecycle_state,
+            )
+            == "bound"
+        )
+
+        delegated = await app.start(
+            StartRequest.model_validate(
+                {
+                    **_identity(),
+                    "mode": "delegate",
+                    "task_title": "Shared host child",
+                    "session_id": parent.session_id,
+                    "requested_view": "compact",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        assert delegated.attach_handle is not None
+        assert (
+            bind_start_mapping_outcome(
+                {
+                    "session_id": parent_host_session,
+                    "tool_name": "mcp__yoetz__start",
+                    "tool_response": {"structuredContent": delegated.as_wire()},
+                },
+                _state=lifecycle_state,
+            )
+            == "bound"
+        )
+        parent_mapping = load_mapping(parent_host_session, _state=lifecycle_state)
+        assert parent_mapping is not None
+        assert parent_mapping.yoetz_task_id == parent.task_id
+
+        attached = await app.start(
+            StartRequest.model_validate(
+                {
+                    **_identity(),
+                    "mode": "attach",
+                    "task_title": "Shared host child",
+                    "attach_handle": delegated.as_wire()["attach_handle"],
+                    "requested_view": "compact",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        child_agent_id = "codex-native-child-agent"
+        assert (
+            bind_start_mapping_outcome(
+                {
+                    # Codex sends the child attach result through the parent's host session.
+                    "session_id": parent_host_session,
+                    "agent_id": child_agent_id,
+                    "tool_name": "mcp__yoetz__start",
+                    "tool_response": {"structuredContent": attached.as_wire()},
+                },
+                _state=lifecycle_state,
+            )
+            == "bound"
+        )
+        child_host_lane = scoped_child_session_id(
+            parent_host_session,
+            host="codex",
+            identity=child_agent_id,
+            identity_kind="host",
+        )
+        child_mapping = load_mapping(child_host_lane, _state=lifecycle_state)
+        assert child_mapping is not None
+        assert (
+            child_mapping.yoetz_task_id,
+            child_mapping.yoetz_session_id,
+            child_mapping.yoetz_writer_id,
+            child_mapping.last_frontier,
+        ) == (
+            attached.task_id,
+            attached.session_id,
+            attached.writer_id,
+            f"{attached.frontier.sequence}:{attached.frontier.head_digest}",
+        )
+        assert load_mapping(parent_host_session, _state=lifecycle_state) == parent_mapping
+
+        observation_store = LocalObservationStore(_state=lifecycle_state)
+        workspace_commitment = observation_store.workspace_commitment(str(workspace))
+        observation_store.grant_consent(workspace_commitment)
+        observation_store.set_session_advice_snapshot(
+            workspace_commitment,
+            yoetz_session_id=parent.session_id,
+            snapshot=AdviceSnapshot(
+                ranked_finding_ids=(
+                    finding_id("fnd_00000000-0000-4000-8000-000000000001"),
+                ),
+                evidence_basis_digest="sha256:" + "a" * 64,
+                confidence_coverage=Coverage(
+                    publication_channels=(PublicationChannel.HOOK_OBSERVED,),
+                    authorship_assurance=AuthorshipAssurance.HARNESS_OBSERVED,
+                    artifact_observation=ArtifactObservation.HOOK_OBSERVED,
+                    evidence_immutability=EvidenceImmutability.CONTENT_DIGEST,
+                    ledger_freshness=LedgerFreshness.CURRENT,
+                    check_types=(CheckType.DETERMINISTIC,),
+                    known_gaps=(),
+                ),
+                recommended_next_action="call_status",
+                freshness_frontier="frontier-1",
+                suppression_identity="suppress-shared-host-parent",
+            ),
+        )
+        parent_advice_before = observation_store.peek_advice_for_delivery(
+            workspace_commitment,
+            yoetz_session_id=parent.session_id,
+            allow_standing=False,
+            session_commitment=observation_store.session_commitment(parent_host_session),
+        )
+        assert parent_advice_before is not None
+
+        for event_name in ("PreToolUse", "PostToolUse"):
+            output = io.BytesIO()
+            payload: dict[str, object] = {
+                "hook_event_name": event_name,
+                "session_id": parent_host_session,
+                "agent_id": child_agent_id,
+                "tool_name": "shell",
+                "tool_call_id": "codex-child-call",
+                "exit_status": 0,
+            }
+            assert (
+                handle_observe(
+                    event_name=None,
+                    stdin_bytes=json.dumps(payload).encode(),
+                    stdout=output,
+                    workspace=str(workspace),
+                    _state=lifecycle_state,
+                    skip_service=True,
+                )
+                == 0
+            )
+            assert json.loads(output.getvalue().decode()) == {}
+
+        pending_rows = observation_store.list_pending_outbox_rows(workspace_commitment)
+        assert len(pending_rows) == 2
+        assert {row.codex_session_id for row in pending_rows} == {child_host_lane}
+        for row in pending_rows:
+            result = observation_ingest_result_from_json(
+                await app.observation_ingest(
+                    observation_ingest_request_to_json(
+                        ObservationIngestRequest(
+                            codex_session_id=row.codex_session_id,
+                            envelope=row.envelope,
+                        )
+                    )
+                )
+            )
+            assert result.disposition.value == "accepted"
+            assert observation_store.acknowledge_outbox_row(workspace_commitment, row)
+
+        child_status = await app.status(
+            StatusRequest.model_validate(
+                {
+                    **_identity(),
+                    "session_id": attached.session_id,
+                    "writer_id": attached.writer_id,
+                    "view": "compact",
+                    "limit": "10",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        assert child_status.task_id == attached.task_id
+        assert int(child_status.result_frontier.sequence) > int(attached.frontier.sequence)
+
+        parent_status = await app.status(
+            StatusRequest.model_validate(
+                {
+                    **_identity(),
+                    "session_id": parent.session_id,
+                    "writer_id": parent.writer_id,
+                    "view": "compact",
+                    "limit": "10",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        assert parent_status.task_id == parent.task_id
+        assert parent_status.result_frontier == parent_status.subject_frontier
+        parent_advice_after = observation_store.peek_advice_for_delivery(
+            workspace_commitment,
+            yoetz_session_id=parent.session_id,
+            allow_standing=False,
+            session_commitment=observation_store.session_commitment(parent_host_session),
+        )
+        assert parent_advice_after is not None
+        assert parent_advice_after.delivery_identity == parent_advice_before.delivery_identity
 
 
 async def test_delegated_child_does_not_consume_parent_selector(

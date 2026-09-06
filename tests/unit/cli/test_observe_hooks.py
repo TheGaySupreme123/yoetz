@@ -15,7 +15,14 @@ from typing import Literal, cast
 
 import pytest
 
-from yoetz.adapters.integrations.codex_lifecycle import LifecycleMapping, acquire_session_lock
+from yoetz.adapters.integrations.codex_lifecycle import (
+    LifecycleMapping,
+    acquire_session_lock,
+    is_scoped_child_session_id,
+    mapping_from_start_ids,
+    scoped_child_session_id,
+    store_mapping,
+)
 from yoetz.adapters.integrations.hook_spool import HookSpool
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.application.recommendations import RecommendationState, store_recommendation_state
@@ -157,6 +164,325 @@ def test_map_conflicting_native_child_aliases_leave_an_attribution_gap(tmp_path:
 
     assert "subagent_id" not in envelope.structural_payload
     assert "parent_tool_call_id" not in envelope.structural_payload
+
+
+def test_observation_lane_requires_a_validated_child_mapping(tmp_path: Path) -> None:
+    parent_task, parent_session, parent_writer = (
+        "tsk_11111111-1111-4111-8111-111111111111",
+        "ses_22222222-2222-4222-8222-222222222222",
+        "wri_33333333-3333-4333-8333-333333333333",
+    )
+    child_task, child_session, child_writer = (
+        "tsk_44444444-4444-4444-8444-444444444444",
+        "ses_55555555-5555-4555-8555-555555555555",
+        "wri_66666666-6666-4666-8666-666666666666",
+    )
+    host_session = "codex-lane-parent"
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=host_session,
+            yoetz_task_id=parent_task,
+            yoetz_session_id=parent_session,
+            yoetz_writer_id=parent_writer,
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+    task_lane = scoped_child_session_id(
+        host_session,
+        host="codex",
+        identity=child_task,
+        identity_kind="task",
+    )
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=task_lane,
+            yoetz_task_id=child_task,
+            yoetz_session_id=child_session,
+            yoetz_writer_id=child_writer,
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+
+    lane = observe_hooks_module._resolve_observation_lane(  # pyright: ignore[reportPrivateUsage]
+        {
+            "session_id": host_session,
+            "tool_name": "mcp__yoetz__publish_work",
+            "tool_response": {
+                "structuredContent": {
+                    "ok": True,
+                    "task_id": child_task,
+                    "parent_task_id": parent_task,
+                }
+            },
+        },
+        event_name="PostToolUse",
+        source=ObservationSource.CODEX_HOOK,
+        _state=tmp_path,
+    )
+    assert lane.host_session_id == host_session
+    assert lane.effective_session_id == task_lane
+    assert lane.is_child is True
+    assert lane.attribution_gap is False
+    assert is_scoped_child_session_id(task_lane)
+
+
+def test_observation_lane_keeps_parent_but_marks_known_child_gap(tmp_path: Path) -> None:
+    parent_task, parent_session, parent_writer = (
+        "tsk_77777777-7777-4777-8777-777777777777",
+        "ses_88888888-8888-4888-8888-888888888888",
+        "wri_99999999-9999-4999-8999-999999999999",
+    )
+    child_task = "tsk_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    host_session = "codex-lane-gap"
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=host_session,
+            yoetz_task_id=parent_task,
+            yoetz_session_id=parent_session,
+            yoetz_writer_id=parent_writer,
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+    lane = observe_hooks_module._resolve_observation_lane(  # pyright: ignore[reportPrivateUsage]
+        {
+            "session_id": host_session,
+            "tool_name": "mcp__yoetz__publish_work",
+            "tool_response": {
+                "structuredContent": {
+                    "ok": True,
+                    "task_id": child_task,
+                    "parent_task_id": parent_task,
+                }
+            },
+        },
+        event_name="PostToolUse",
+        source=ObservationSource.CODEX_HOOK,
+        _state=tmp_path,
+    )
+    assert lane.effective_session_id == host_session
+    assert lane.is_child is False
+    assert lane.attribution_gap is True
+
+
+def test_observation_lane_does_not_use_stale_host_alias_for_foreign_result(
+    tmp_path: Path,
+) -> None:
+    """A host alias owned by one child cannot route a result for another child."""
+
+    parent_task, parent_session, parent_writer = (
+        "tsk_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "ses_bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "wri_cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    )
+    old_child_task, old_child_session, old_child_writer = (
+        "tsk_dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "ses_eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "wri_ffffffff-ffff-4fff-8fff-ffffffffffff",
+    )
+    foreign_child_task = "tsk_11111111-2222-4333-8444-555555555555"
+    host_session = "codex-stale-host-alias"
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=host_session,
+            yoetz_task_id=parent_task,
+            yoetz_session_id=parent_session,
+            yoetz_writer_id=parent_writer,
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+    host_lane = scoped_child_session_id(
+        host_session,
+        host="codex",
+        identity="native-child-a",
+        identity_kind="host",
+    )
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=host_lane,
+            yoetz_task_id=old_child_task,
+            yoetz_session_id=old_child_session,
+            yoetz_writer_id=old_child_writer,
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+
+    lane = observe_hooks_module._resolve_observation_lane(  # pyright: ignore[reportPrivateUsage]
+        {
+            "session_id": host_session,
+            "agent_id": "native-child-a",
+            "tool_name": "mcp__yoetz__publish_work",
+            "tool_response": {
+                "structuredContent": {
+                    "ok": True,
+                    "task_id": foreign_child_task,
+                    "parent_task_id": parent_task,
+                }
+            },
+        },
+        event_name="PostToolUse",
+        source=ObservationSource.CODEX_HOOK,
+        _state=tmp_path,
+    )
+    assert lane.effective_session_id == host_session
+    assert lane.is_child is False
+    assert lane.attribution_gap is True
+
+
+def test_observation_lane_routes_matching_result_through_task_alias_when_host_alias_is_stale(
+    tmp_path: Path,
+) -> None:
+    """A validated task alias can recover a callback when its host alias is stale."""
+
+    parent_task, parent_session, parent_writer = (
+        "tsk_12121212-1212-4121-8121-121212121212",
+        "ses_34343434-3434-4434-8434-343434343434",
+        "wri_56565656-5656-4565-8565-565656565656",
+    )
+    old_child_task, old_child_session, old_child_writer = (
+        "tsk_78787878-7878-4787-8787-787878787878",
+        "ses_90909090-9090-4909-8909-909090909090",
+        "wri_abababab-abab-4aba-8aba-abababababab",
+    )
+    current_child_task, current_child_session, current_child_writer = (
+        "tsk_cdcdcdcd-cdcd-4cdc-8cdc-cdcdcdcdcdcd",
+        "ses_efefefef-efef-4efe-8efe-efefefefefef",
+        "wri_01010101-0101-4010-8010-010101010101",
+    )
+    host_session = "codex-stale-host-alias-task-route"
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=host_session,
+            yoetz_task_id=parent_task,
+            yoetz_session_id=parent_session,
+            yoetz_writer_id=parent_writer,
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+    host_lane = scoped_child_session_id(
+        host_session,
+        host="codex",
+        identity="native-child-b",
+        identity_kind="host",
+    )
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=host_lane,
+            yoetz_task_id=old_child_task,
+            yoetz_session_id=old_child_session,
+            yoetz_writer_id=old_child_writer,
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+    task_lane = scoped_child_session_id(
+        host_session,
+        host="codex",
+        identity=current_child_task,
+        identity_kind="task",
+    )
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=task_lane,
+            yoetz_task_id=current_child_task,
+            yoetz_session_id=current_child_session,
+            yoetz_writer_id=current_child_writer,
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+
+    lane = observe_hooks_module._resolve_observation_lane(  # pyright: ignore[reportPrivateUsage]
+        {
+            "session_id": host_session,
+            "agent_id": "native-child-b",
+            "tool_name": "mcp__yoetz__publish_work",
+            "tool_response": {
+                "structuredContent": {
+                    "ok": True,
+                    "task_id": current_child_task,
+                    "parent_task_id": parent_task,
+                }
+            },
+        },
+        event_name="PostToolUse",
+        source=ObservationSource.CODEX_HOOK,
+        _state=tmp_path,
+    )
+    assert lane.effective_session_id == task_lane
+    assert lane.is_child is True
+    assert lane.attribution_gap is False
+
+
+def test_valid_child_identity_without_lane_is_an_attribution_gap(tmp_path: Path) -> None:
+    """A child-shaped identity with no owned lane cannot inherit the parent route."""
+
+    parent_task, parent_session, parent_writer = (
+        "tsk_23232323-2323-4232-8232-232323232323",
+        "ses_45454545-4545-4454-8454-454545454545",
+        "wri_67676767-6767-4676-8676-676767676767",
+    )
+    host_session = "codex-unbound-child-identity"
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=host_session,
+            yoetz_task_id=parent_task,
+            yoetz_session_id=parent_session,
+            yoetz_writer_id=parent_writer,
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+
+    lane = observe_hooks_module._resolve_observation_lane(  # pyright: ignore[reportPrivateUsage]
+        {
+            "session_id": host_session,
+            "agent_id": "native-child-without-lane",
+            "tool_name": "shell",
+        },
+        event_name="PostToolUse",
+        source=ObservationSource.CODEX_HOOK,
+        _state=tmp_path,
+    )
+    assert lane.effective_session_id == host_session
+    assert lane.is_child is False
+    assert lane.attribution_gap is True
+
+
+def test_reserved_child_lane_without_mapping_is_an_attribution_gap(tmp_path: Path) -> None:
+    """An opaque derived lane cannot be promoted to a fresh parent session."""
+
+    reserved_lane = scoped_child_session_id(
+        "codex-reserved-parent",
+        host="codex",
+        identity="native-child-reserved",
+        identity_kind="host",
+    )
+    lane = observe_hooks_module._resolve_observation_lane(  # pyright: ignore[reportPrivateUsage]
+        {"session_id": reserved_lane, "tool_name": "shell"},
+        event_name="PostToolUse",
+        source=ObservationSource.CODEX_HOOK,
+        _state=tmp_path,
+    )
+    assert lane.effective_session_id == reserved_lane
+    assert lane.is_child is False
+    assert lane.attribution_gap is True
+
+
+def test_subagent_lifecycle_events_stay_on_parent_lane(tmp_path: Path) -> None:
+    lane = observe_hooks_module._resolve_observation_lane(  # pyright: ignore[reportPrivateUsage]
+        {"session_id": "codex-lineage-parent", "subagent_id": "child-1"},
+        event_name="SubagentStart",
+        source=ObservationSource.CODEX_HOOK,
+        _state=tmp_path,
+    )
+    assert lane.effective_session_id == "codex-lineage-parent"
+    assert lane.is_child is False
 
 
 def test_unknown_future_hook_becomes_opaque_gap(tmp_path: Path) -> None:

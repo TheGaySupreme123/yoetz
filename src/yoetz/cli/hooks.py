@@ -17,10 +17,12 @@ from yoetz.adapters.integrations.codex_lifecycle import (
     acquire_session_lock,
     apply_pending_mapping,
     encode_frontier_token,
+    is_scoped_child_session_id,
     load_mapping,
     mapping_from_start_ids,
     mapping_path,
     queue_mapping_store,
+    scoped_child_session_id,
     store_mapping,
     validate_codex_session_id,
 )
@@ -75,9 +77,11 @@ type StartBindOutcome = Literal[
     "skipped",
     "start_bind_unparsed",
     "start_bind_invalid_ids",
+    "start_bind_child_lane_unbound",
     "start_bind_deferred",
     "start_bind_write_failed",
 ]
+type HookHost = Literal["claude", "codex", "cursor"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +113,18 @@ class PendingMappingRecovery:
 
     applied: bool
     pending: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingMappingSnapshot:
+    """Validated pending operations for one lane before a producer replays them."""
+
+    present: bool
+    operation: tuple[str, LifecycleMapping | None] | None
+    # Both marker files can coexist after a crash: ``applying`` is older and
+    # ``pending`` is newer.  A different task in the newer marker is an alias
+    # reuse conflict and must be refused before either operation is replayed.
+    conflicting: bool = False
 
 
 _MAX_STDIN_BYTES: Final = 262_144
@@ -473,10 +489,280 @@ def _frontier_from_start(result: Mapping[str, JsonValue]) -> str | None:
         return None
 
 
+def _child_identity_from_payload(
+    payload: Mapping[str, JsonValue],
+) -> tuple[str | None, bool, bool]:
+    """Return one consistent native child identity without choosing through a conflict.
+
+    The host adapters have emitted three spellings for this identity.  A present ``null`` is
+    treated as an absent value, while a malformed value or contradictory non-null aliases is
+    invalid.  Callers may still use a service returned child task as a separate bounded route;
+    this helper only reports the host-supplied identity fact.
+    """
+
+    values: list[str] = []
+    supplied = False
+    nested = payload.get("tool_input")
+    nested_payload: Mapping[str, JsonValue] = (
+        cast(Mapping[str, JsonValue], nested) if isinstance(nested, Mapping) else {}
+    )
+    for name in ("subagent_id", "agent_id", "agent_thread_id"):
+        for aliases in (payload, nested_payload):
+            if name not in aliases:
+                continue
+            supplied = True
+            value = aliases.get(name)
+            if value is None:
+                continue
+            try:
+                token = validate_codex_session_id(value)
+            except ProtocolValueError:
+                return None, supplied, False
+            values.append(token)
+    if any(value != values[0] for value in values[1:]):
+        return None, supplied, False
+    return (values[0] if values else None), supplied, True
+
+
+def _mapping_for_lane(
+    lane_id: str,
+    *,
+    task_id: str,
+    session_id: str,
+    writer_id: str,
+    last_frontier: str | None,
+) -> LifecycleMapping:
+    return mapping_from_start_ids(
+        codex_session_id=lane_id,
+        yoetz_task_id=task_id,
+        yoetz_session_id=session_id,
+        yoetz_writer_id=writer_id,
+        last_frontier=last_frontier,
+    )
+
+
+def _pending_mapping_snapshot(
+    codex_session_id: str, *, _state: Path | None
+) -> _PendingMappingSnapshot:
+    """Inspect a queued lane operation without applying it.
+
+    Child start binding may publish more than one derived lane.  Applying a queued
+    operation while preflighting the first lane can make a later ownership conflict
+    observable as a partial child bind.  Read the adapter's validated pending record
+    first; the caller already holds the lane lock and decides whether replay is safe
+    only after every target has passed its ownership check.
+    """
+
+    try:
+        mapping = mapping_path(codex_session_id, _state=_state)
+        pending = mapping.parent / f".{codex_session_id}.pending.json"
+        applying = pending.with_name(pending.name + ".applying")
+        from yoetz.adapters.integrations.codex_lifecycle import (
+            _load_pending_mapping_operation,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        candidates = tuple(
+            candidate
+            for candidate in (applying, pending)
+            if candidate.exists() or candidate.is_symlink()
+        )
+        if not candidates:
+            return _PendingMappingSnapshot(False, None)
+        operations = tuple(
+            _load_pending_mapping_operation(
+                codex_session_id,
+                _state=_state,
+                claimed_path=candidate,
+            )
+            for candidate in candidates
+        )
+        # ``.applying`` is the older claimed operation and is the one the adapter
+        # will replay first when both files are present.  An unreadable marker is
+        # intentionally not interpreted as ownership; the caller defers it.
+        primary = operations[0]
+        if len(operations) == 1:
+            return _PendingMappingSnapshot(True, primary)
+        if primary is None or operations[1] is None:
+            return _PendingMappingSnapshot(True, None)
+        first_kind, first_mapping = primary
+        second_kind, second_mapping = operations[1]
+        conflicting = False
+        if first_kind != second_kind:
+            # A clear followed by a store can be a valid FIFO sequence, but a
+            # producer cannot safely decide which intent it is observing here;
+            # defer it and let the normal recovery owner drain the queue.
+            return _PendingMappingSnapshot(True, None)
+        elif first_kind == "store" and second_kind == "store":
+            if first_mapping is None or second_mapping is None:
+                return _PendingMappingSnapshot(True, None)
+            conflicting = first_mapping.yoetz_task_id != second_mapping.yoetz_task_id
+        return _PendingMappingSnapshot(True, primary, conflicting=conflicting)
+    except Exception:
+        # An unreadable marker is still a pending lifecycle fact.  Fail closed so
+        # the caller does not replace a lane whose ownership it could not inspect.
+        return _PendingMappingSnapshot(True, None)
+
+
+def _persist_start_mappings(
+    mappings: tuple[LifecycleMapping, ...], *, _state: Path | None
+) -> StartBindOutcome:
+    """Persist lane mappings after an all-lane ownership preflight."""
+
+    unique: dict[str, LifecycleMapping] = {}
+    for mapping in mappings:
+        prior = unique.get(mapping.codex_session_id)
+        if prior is not None and prior != mapping:
+            return "start_bind_child_lane_unbound"
+        unique[mapping.codex_session_id] = mapping
+    ordered = tuple(sorted(unique.values(), key=lambda candidate: candidate.codex_session_id))
+    if not ordered:
+        return "start_bind_child_lane_unbound"
+    try:
+        with contextlib.ExitStack() as locks:
+            owned: list[bool] = []
+            for mapping in ordered:
+                owned.append(
+                    locks.enter_context(
+                        acquire_session_lock(mapping.codex_session_id, _state=_state)
+                    )
+                )
+            if not all(owned):
+                # Every current child bind is one derived host lane.  Queueing that
+                # one lane preserves a retry intent when its lifecycle lock is held
+                # by another hook.  Multi-lane callers still defer as a unit because
+                # the pending-file protocol has no cross-file transaction marker.
+                if len(ordered) == 1:
+                    candidate = ordered[0]
+                    if is_scoped_child_session_id(candidate.codex_session_id):
+                        # We cannot take the lock to make a race-free ownership
+                        # decision, but we can reject an already visible conflicting
+                        # owner.  The replay primitive repeats this fence while the
+                        # eventual owner holds the lock.
+                        current_path = mapping_path(candidate.codex_session_id, _state=_state)
+                        current = load_mapping(candidate.codex_session_id, _state=_state)
+                        if (current_path.exists() or current_path.is_symlink()) and (
+                            current is None
+                        ):
+                            return "start_bind_deferred"
+                        snapshot = _pending_mapping_snapshot(
+                            candidate.codex_session_id, _state=_state
+                        )
+                        if snapshot.conflicting:
+                            return "start_bind_child_lane_unbound"
+                        if snapshot.present:
+                            if snapshot.operation is None:
+                                return "start_bind_deferred"
+                            operation, queued = snapshot.operation
+                            if operation != "store" or queued is None:
+                                return "start_bind_deferred"
+                            if queued.yoetz_task_id != candidate.yoetz_task_id:
+                                return "start_bind_child_lane_unbound"
+                        if current is not None and current.yoetz_task_id != candidate.yoetz_task_id:
+                            return "start_bind_child_lane_unbound"
+                    queue_mapping_store(candidate, _state=_state)
+                return "start_bind_deferred"
+
+            pending_states: list[_PendingMappingSnapshot] = []
+            existing: list[LifecycleMapping | None] = []
+            for mapping in ordered:
+                pending_states.append(
+                    _pending_mapping_snapshot(mapping.codex_session_id, _state=_state)
+                )
+                existing.append(load_mapping(mapping.codex_session_id, _state=_state))
+            # A queued operation is part of the ownership state even when its mapping
+            # file has not been applied yet.  Inspect every target before replaying or
+            # queueing any operation; otherwise a stale host alias can cause its task
+            # alias to become a partial, routable bind.
+            for mapping, snapshot, prior in zip(
+                ordered, pending_states, existing, strict=True
+            ):
+                if snapshot.present:
+                    if snapshot.conflicting:
+                        if is_scoped_child_session_id(mapping.codex_session_id):
+                            return "start_bind_child_lane_unbound"
+                        return "start_bind_deferred"
+                    if snapshot.operation is None:
+                        return "start_bind_deferred"
+                    operation, queued = snapshot.operation
+                    if operation != "store" or queued is None:
+                        return "start_bind_deferred"
+                    if is_scoped_child_session_id(mapping.codex_session_id) and (
+                        queued.yoetz_task_id != mapping.yoetz_task_id
+                    ):
+                        return "start_bind_child_lane_unbound"
+                if not is_scoped_child_session_id(mapping.codex_session_id):
+                    continue
+                if prior is not None and prior.yoetz_task_id != mapping.yoetz_task_id:
+                    return "start_bind_child_lane_unbound"
+
+            # Replay only after the complete ownership preflight.  Re-read the files
+            # after replay because a queued mapping may be the first materialized
+            # owner of a child alias.
+            for mapping, snapshot in zip(ordered, pending_states, strict=True):
+                if not snapshot.present:
+                    continue
+                if recover_pending_start_mapping(
+                    mapping.codex_session_id,
+                    _state=_state,
+                    _session_lock_owned=True,
+                ).pending:
+                    return "start_bind_deferred"
+            for mapping in ordered:
+                if not is_scoped_child_session_id(mapping.codex_session_id):
+                    continue
+                prior = load_mapping(mapping.codex_session_id, _state=_state)
+                if prior is not None and prior.yoetz_task_id != mapping.yoetz_task_id:
+                    return "start_bind_child_lane_unbound"
+
+            for mapping in ordered:
+                # Queue the owner result before replaying the lane. If another producer queued
+                # while this call was classifying, this durable write coalesces that intent.
+                queue_mapping_store(mapping, _state=_state)
+            for mapping in ordered:
+                recovery = recover_pending_start_mapping(
+                    mapping.codex_session_id,
+                    _state=_state,
+                    _session_lock_owned=True,
+                )
+                if recovery.pending:
+                    return "start_bind_deferred"
+    except Exception:
+        return "start_bind_write_failed"
+    return "bound"
+
+
+def _mapping_state_before_start(
+    codex_session_id: str, *, _state: Path | None
+) -> tuple[LifecycleMapping | None, bool]:
+    """Read a host lane after reconciling its pending start operation when possible."""
+
+    try:
+        with acquire_session_lock(codex_session_id, _state=_state) as owned:
+            if owned:
+                recover_pending_start_mapping(
+                    codex_session_id,
+                    _state=_state,
+                    _session_lock_owned=True,
+                )
+            mapping = load_mapping(codex_session_id, _state=_state)
+            path = mapping_path(codex_session_id, _state=_state)
+            pending = path.parent / f".{codex_session_id}.pending.json"
+            applying = pending.with_name(pending.name + ".applying")
+            return mapping, (not owned) or any(
+                item.exists() or item.is_symlink() for item in (pending, applying)
+            )
+    except Exception:
+        # An unreadable lock or pending marker cannot establish that the raw
+        # lane is free. Treat it as pending so a child result never replaces a
+        # parent mapping on an uncertain read.
+        return load_mapping(codex_session_id, _state=_state), True
+
+
 def bind_start_mapping_outcome(
     payload: Mapping[str, JsonValue],
     *,
     _state: Path | None = None,
+    host: HookHost = "codex",
 ) -> StartBindOutcome:
     """Persist a validated mapping from one exact successful start hook result.
 
@@ -490,6 +776,8 @@ def bind_start_mapping_outcome(
     tool_name = payload.get("tool_name")
     if type(tool_name) is not str or tool_name not in YOETZ_START_TOOL_NAMES:
         return "skipped"
+    if host not in {"claude", "codex", "cursor"}:
+        return "start_bind_invalid_ids"
     try:
         codex_session_id = validate_codex_session_id(payload.get("session_id"))
     except ProtocolValueError:
@@ -501,61 +789,188 @@ def bind_start_mapping_outcome(
         return "skipped"
     if result.get("ok") is not True:
         return "start_bind_unparsed"
+    outcome = result.get("outcome")
+    if outcome is not None and type(outcome) is not str:
+        return "start_bind_invalid_ids"
     task_id = result.get("task_id")
+    # A delegated start returns the newly reserved child task while its session and writer
+    # remain the parent's until the child consumes the attach handle.  Mapping that response as
+    # ``(child_task_id, parent_session_id, parent_writer_id)`` strands the parent's observation
+    # lane at the next hook.  The service-returned parent_task_id is the explicit ownership fact;
+    # use it for this host-session mapping and leave child attachment to its own start result.
+    delegated = outcome == "delegated"
+    parent_task_id = result.get("parent_task_id")
+    if parent_task_id is not None and (
+        type(parent_task_id) is not str or not is_valid_id(IdKind.TASK, parent_task_id)
+    ):
+        return "start_bind_invalid_ids"
+    if delegated:
+        delegated_parent_task_id = result.get("parent_task_id")
+        if type(delegated_parent_task_id) is not str:
+            return "start_bind_invalid_ids"
+        task_id = delegated_parent_task_id
     session_id = result.get("session_id")
     writer_id = result.get("writer_id")
     if type(task_id) is not str or type(session_id) is not str or type(writer_id) is not str:
         return "start_bind_invalid_ids"
     try:
-        mapping = mapping_from_start_ids(
-            codex_session_id=codex_session_id,
-            yoetz_task_id=task_id,
-            yoetz_session_id=session_id,
-            yoetz_writer_id=writer_id,
+        result_mapping = _mapping_for_lane(
+            codex_session_id,
+            task_id=task_id,
+            session_id=session_id,
+            writer_id=writer_id,
             last_frontier=_frontier_from_start(result),
         )
     except ProtocolValueError, TypeError, ValueError:
         return "start_bind_invalid_ids"
-    try:
-        # Mapping writes participate in the same per-host-session lifecycle
-        # lock as observation membership and recovery.  A recovery pass holding
-        # this lock must finish before a scoped Claude start result can replace
-        # the predecessor route.
-        with acquire_session_lock(codex_session_id, _state=_state) as owned:
-            if not owned:
-                try:
-                    queue_mapping_store(mapping, _state=_state)
-                except Exception:
-                    return "start_bind_write_failed"
-                return "start_bind_deferred"
-            try:
-                # Queue the owner result before replaying the lane. If another
-                # producer lost this lock and queued while the owner was
-                # recovering, this durable write coalesces that older pending
-                # intent before the bounded apply pass.
-                queue_mapping_store(mapping, _state=_state)
-            except Exception:
-                return "start_bind_write_failed"
-            recovery = recover_pending_start_mapping(
-                codex_session_id,
-                _state=_state,
-                _session_lock_owned=True,
+
+    existing, parent_pending = _mapping_state_before_start(codex_session_id, _state=_state)
+    child_identity, identity_supplied, identity_valid = _child_identity_from_payload(payload)
+    child_lineage = parent_task_id is not None and not delegated
+    targets: list[LifecycleMapping] = []
+
+    if delegated:
+        # Delegation reserves a child but keeps the returned session/writer on the owner that
+        # requested the reservation.  A shared host session therefore remains on its current
+        # mapping.  A nested child delegate can select its already validated child lane by the
+        # host identity; an ambiguous identity must never consume the parent's mapping.
+        assert parent_task_id is not None
+        if type(result.get("task_id")) is not str or not is_valid_id(
+            IdKind.TASK, result.get("task_id")
+        ):
+            return "start_bind_invalid_ids"
+        if parent_pending:
+            return "start_bind_deferred"
+        if identity_supplied and not identity_valid:
+            return "start_bind_child_lane_unbound"
+        if existing is None or existing.yoetz_task_id == parent_task_id:
+            targets.append(
+                _mapping_for_lane(
+                    codex_session_id,
+                    task_id=parent_task_id,
+                    session_id=session_id,
+                    writer_id=writer_id,
+                    last_frontier=result_mapping.last_frontier,
+                )
             )
-            if recovery.pending:
-                return "start_bind_deferred"
-    except Exception:
-        return "start_bind_write_failed"
-    return "bound"
+        elif identity_valid and child_identity is not None:
+            try:
+                child_lane = scoped_child_session_id(
+                    codex_session_id,
+                    host=host,
+                    identity=child_identity,
+                    identity_kind="host",
+                )
+                targets.append(
+                    _mapping_for_lane(
+                        child_lane,
+                        task_id=parent_task_id,
+                        session_id=session_id,
+                        writer_id=writer_id,
+                        last_frontier=result_mapping.last_frontier,
+                    )
+                )
+            except ProtocolValueError, TypeError, ValueError:
+                return "start_bind_child_lane_unbound"
+        else:
+            return "start_bind_child_lane_unbound"
+    elif child_lineage:
+        # An attached/replayed/created child result carries its parent task explicitly.  If the
+        # raw host session is already mapped to that parent, it is a shared parent lane and must
+        # remain untouched.  A separate host session is safe to bind directly, retaining the
+        # old one-session hook contract.  A shared session with no host child identity remains an
+        # explicit attribution gap; a task-derived fallback would be a second untrusted alias.
+        assert parent_task_id is not None
+        if type(task_id) is not str or not is_valid_id(IdKind.TASK, task_id):
+            return "start_bind_invalid_ids"
+        if task_id == parent_task_id:
+            return "start_bind_invalid_ids"
+        if identity_supplied and not identity_valid:
+            return "start_bind_child_lane_unbound"
+        if existing is None and not parent_pending:
+            targets.append(result_mapping)
+        elif existing is not None and existing.yoetz_task_id == task_id:
+            targets.append(result_mapping)
+        elif identity_valid and child_identity is not None:
+            try:
+                child_lane = scoped_child_session_id(
+                    codex_session_id,
+                    host=host,
+                    identity=child_identity,
+                    identity_kind="host",
+                )
+                targets.append(
+                    _mapping_for_lane(
+                        child_lane,
+                        task_id=task_id,
+                        session_id=session_id,
+                        writer_id=writer_id,
+                        last_frontier=result_mapping.last_frontier,
+                    )
+                )
+            except ProtocolValueError, TypeError, ValueError:
+                return "start_bind_child_lane_unbound"
+        else:
+            return "start_bind_child_lane_unbound"
+
+        # A missing host child identity remains an attribution gap.  Publishing a
+        # task-derived fallback lane would be a second, untrusted alias for the
+        # same child and would require an atomic multi-file transaction; the
+        # service-authored task id remains available to the caller's explicit
+        # cooperative route instead.
+    else:
+        # Root/ordinary starts keep the established raw host-session mapping.  A
+        # valid child identity plus a different task on an already mapped parent
+        # session is the one ambiguous native shape that must not overwrite the
+        # parent.  If that identity has no established host lane, leave the
+        # callback unbound; an ordinary parent sibling start remains allowed when
+        # the host supplies no child identity (the normal parent shape).
+        if (
+            (existing is not None or parent_pending)
+            and (existing is None or existing.yoetz_task_id != task_id)
+            and identity_valid
+            and child_identity is not None
+        ):
+            try:
+                child_lane = scoped_child_session_id(
+                    codex_session_id,
+                    host=host,
+                    identity=child_identity,
+                    identity_kind="host",
+                )
+            except ProtocolValueError, TypeError, ValueError:
+                return "start_bind_child_lane_unbound"
+            prior_child = load_mapping(child_lane, _state=_state)
+            if prior_child is not None and prior_child.yoetz_task_id != task_id:
+                return "start_bind_child_lane_unbound"
+            targets.append(
+                _mapping_for_lane(
+                    child_lane,
+                    task_id=task_id,
+                    session_id=session_id,
+                    writer_id=writer_id,
+                    last_frontier=result_mapping.last_frontier,
+                )
+            )
+        elif identity_supplied and not identity_valid:
+            return "start_bind_child_lane_unbound"
+        else:
+            targets.append(result_mapping)
+
+    if not targets:
+        return "start_bind_child_lane_unbound"
+    return _persist_start_mappings(tuple(targets), _state=_state)
 
 
 def bind_start_mapping_from_hook(
     payload: Mapping[str, JsonValue],
     *,
     _state: Path | None = None,
+    host: HookHost = "codex",
 ) -> bool:
     """Compatibility wrapper: ``True`` only when a mapping was persisted."""
 
-    return bind_start_mapping_outcome(payload, _state=_state) == "bound"
+    return bind_start_mapping_outcome(payload, _state=_state, host=host) == "bound"
 
 
 def recover_pending_start_mapping(

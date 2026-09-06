@@ -1041,6 +1041,13 @@ class ObservationCoordinator:
                     # opened is route retirement, not a missing mapping file
                     # and not a ledger content refusal (#577).
                     return _reject(ObservationGapCode.SESSION_SUPERSEDED.value)
+                if exc.code is PublicErrorCode.SESSION_CONFLICT and stage == "runtime_route":
+                    # A route conflict means the cached lifecycle mapping cannot
+                    # currently be used. Keep the observation pending so the next drain can
+                    # recover a successor mapping. A non-retryable conflict raised after routing
+                    # remains terminal below; that is a storage or ledger refusal, not route
+                    # recovery. Existing retryable conflicts retain their transient handling.
+                    return _reject(ObservationGapCode.MAPPING_MISSING.value)
                 if not exc.retryable:
                     # Validation and identity rejections are terminal by their
                     # public contract. Calling them service_unavailable made a

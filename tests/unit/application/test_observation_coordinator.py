@@ -1954,7 +1954,11 @@ async def test_coordinator_rejects_without_mapping(tmp_path: Path) -> None:
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "code",
-    [code for code in PublicErrorCode if code is not PublicErrorCode.STORAGE_CORRUPT],
+    [
+        code
+        for code in PublicErrorCode
+        if code not in {PublicErrorCode.STORAGE_CORRUPT, PublicErrorCode.SESSION_CONFLICT}
+    ],
 )
 async def test_nonretryable_public_ingest_errors_are_terminal(
     tmp_path: Path, code: PublicErrorCode
@@ -1980,6 +1984,146 @@ async def test_nonretryable_public_ingest_errors_are_terminal(
     )
 
     result = await coordinator.ingest_request(
+        ObservationIngestRequest(
+            codex_session_id=mapping.codex_session_id,
+            envelope=_envelope(session=session),
+        )
+    )
+
+    assert result.reason == ObservationGapCode.LEDGER_REJECTED.value
+    assert route_observation_ingest(result).action is ObservationDrainAction.QUARANTINE
+
+
+@pytest.mark.anyio
+async def test_nonretryable_route_session_conflict_is_mapping_missing(
+    tmp_path: Path,
+) -> None:
+    """A route conflict keeps the row recoverable while the lifecycle mapping is repaired."""
+
+    class _RejectedRuntime:
+        async def route(self, command: object) -> object:
+            del command
+            raise PublicOperationError(
+                PublicErrorCode.SESSION_CONFLICT,
+                "Observation route is already bound.",
+                retryable=False,
+            )
+
+        async def release(self, runtime: object) -> None:
+            raise AssertionError(f"unrouted runtime released: {runtime!r}")
+
+    local, _workspace, session, mapping = _mapped_local(tmp_path, "route-conflict-952")
+    coordinator = ObservationCoordinator(
+        runtime=_RejectedRuntime(),  # type: ignore[arg-type]
+        local=local,
+        clock=object(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
+
+    result = await coordinator.ingest_request(
+        ObservationIngestRequest(
+            codex_session_id=mapping.codex_session_id,
+            envelope=_envelope(session=session),
+        )
+    )
+
+    assert result.disposition is ObservationIngestDisposition.REJECTED
+    assert result.reason == ObservationGapCode.MAPPING_MISSING.value
+    assert route_observation_ingest(result).action is ObservationDrainAction.RETRY
+
+
+@pytest.mark.anyio
+async def test_route_session_conflict_retries_after_mapping_repair_and_delivers_once(
+    tmp_path: Path,
+) -> None:
+    """A repaired lifecycle mapping drains the same queued observation exactly once."""
+
+    cell = _reattach_fixture(tmp_path, "route-recovery-952")
+    envelope = _envelope(
+        session=cell.session,
+        kind="PostToolUse",
+        identity="hook:route-recovery-952",
+        exit_status=1,
+    )
+    cell.local.enqueue_outbox(cell.workspace, cell.codex_id, envelope)
+    route_available = False
+    inner_route = cell.runtime_port.route
+
+    async def route(command: object) -> TaskRuntime:
+        if not route_available:
+            raise PublicOperationError(
+                PublicErrorCode.SESSION_CONFLICT,
+                "Observation route is inactive.",
+                retryable=False,
+            )
+        return await inner_route(command)
+
+    cell.runtime_port.route = route  # type: ignore[method-assign]
+    sweeper = ObservationOutboxSweeper(cell.local, cell.coordinator, budget_seconds=None)
+    try:
+        first = await sweeper.sweep()
+        assert first.retry_pending == 1
+        assert first.quarantined == 0
+        assert cell.local.pending_outbox_count(cell.workspace) == 1
+
+        # A host reattach persists a successor lifecycle mapping before the next drain pass.
+        cell.reattach()
+        route_available = True
+        second = await sweeper.sweep()
+    finally:
+        sweeper.close()
+        cell.coordinator.close()
+
+    assert second.acknowledged == 1
+    assert second.quarantined == 0
+    assert cell.local.pending_outbox_count(cell.workspace) == 0
+    assert cell.operation_count() == 1
+
+
+@pytest.mark.anyio
+async def test_nonretryable_post_route_session_conflict_is_ledger_rejected(
+    tmp_path: Path,
+) -> None:
+    """A conflict after route acquisition remains terminal and is quarantined."""
+
+    from types import SimpleNamespace
+
+    local, _workspace, session, mapping = _mapped_local(tmp_path, "store-conflict-952")
+
+    class _Store:
+        def grant_consent(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+            raise PublicOperationError(
+                PublicErrorCode.SESSION_CONFLICT,
+                "Observation session is already bound.",
+                retryable=False,
+            )
+
+    runtime = SimpleNamespace(
+        task_id=mapping.yoetz_task_id,
+        session_id=mapping.yoetz_session_id,
+        writer_id=observation_writer_id(mapping.yoetz_task_id, mapping.yoetz_session_id),
+        observation=_Store(),
+    )
+
+    class _RuntimePort:
+        async def route(self, command: object) -> object:
+            del command
+            return runtime
+
+        async def release(self, released: object) -> None:
+            assert released is runtime
+
+    result = await ObservationCoordinator(
+        runtime=_RuntimePort(),  # type: ignore[arg-type]
+        local=local,
+        clock=object(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    ).ingest_request(
         ObservationIngestRequest(
             codex_session_id=mapping.codex_session_id,
             envelope=_envelope(session=session),
