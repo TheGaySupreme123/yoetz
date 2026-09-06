@@ -126,6 +126,8 @@ _CURSOR_HOOK_PROFILE: Final = HarnessHookProfile(
     trigger_payload_profile_id="cursor-hooks-common-3.17-v1",
     evidence_case_ids=("cursor-ide-native-3.17.8-macos-arm64",),
     observation_events=CURSOR_HOOK_EVENTS,
+    pairing_mode="post_only",
+    correlation_kind="generation_id",
 )
 CURSOR_HARNESS_PROFILE: Final = HarnessProfile(
     harness_id=HarnessId.CURSOR,

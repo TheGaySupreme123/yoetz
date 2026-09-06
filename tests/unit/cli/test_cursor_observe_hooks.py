@@ -326,7 +326,7 @@ def test_cursor_file_edit_uses_keyed_path_commitment_and_drops_outcomes(
     assert path not in canonical_encode(cast(JsonValue, sanitized)).decode("utf-8")
     assert "result_status" not in sanitized
     assert "success" not in sanitized
-    assert sanitized["capability_profile_id"] == "untested"
+    assert "capability_profile_id" not in sanitized
 
 
 def test_cursor_session_prefix_reserves_space_inside_token_bound(

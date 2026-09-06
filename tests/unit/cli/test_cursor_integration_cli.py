@@ -75,7 +75,14 @@ def _args(config: Path, project: Path, command: str, *extra: str) -> list[str]:
     ]
 
 
-def test_cursor_plugin_cli_binds_preview_install_status_and_remove(tmp_path: Path) -> None:
+def test_cursor_plugin_cli_binds_preview_install_status_and_remove(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # This scripted CLI lifecycle represents a legacy ambient install. Mock
+    # only the adapter lookup; the process still runs with its isolated root.
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.isolated_root", lambda: None
+    )
     runner = CliRunner()
     config = tmp_path / "cursor-testing-home" / ".cursor"
     project = tmp_path / "project"

@@ -553,13 +553,13 @@ reviewer egress.
 | `observe status` shows `ledger_rejected` and `outbox_quarantined` | The service was reachable but rejected one envelope non-retryably. A repeated envelope after a lost acknowledgement, a service restart, or a workflow reattach (a second `start` in the same Codex session) is not such a rejection: its committed operation is resolved task-wide and the row is acknowledged idempotently with no quarantine row. A pending row from an ended host session whose task a successor recovered is delivered on the successor route (`session_superseded` is followed) and is also not `ledger_rejected`. A successor binding that cannot be followed quarantines that row as `session_superseded`, not `mapping_missing`. A `ledger_rejected` row is a genuine conflicting reuse of an event or operation identity. The row is retained under `quarantine_causes`, aggregate `delivery_causes`, and gaps; `pending_delivery_causes` names only rows still in the outbox. Later rows can drain; reclaim only after the underlying defect is understood. A hook-driven attempt also appears in the bounded `hook_diagnostics`, while manual and supervisor drains are represented by status rather than hook activity. Do not restart a ready service. A row is also quarantined after 128 consecutive rejections with the same retryable reason so a catch-all failure cannot block the lane forever; pause, vault, disabled, and designed back-pressure reasons keep their existing recovery behavior. |
 | `observe status` exits with `observation_status_failed:<reason>` | The reason names the layer: `workspace_unresolvable` (exit 2) is the locator; `storage_unsafe` (exit 20) is an unsafe state/lock path; `storage_unavailable` (exit 20) is a bounded open, permission, read-only, missing-parent, or lock-acquisition failure; `storage_corrupt` (exit 40) is invalid stored data. The fixed remediation never prints the absolute state path. A sandboxed Codex result proves only that sandbox cell; run and record an unrestricted-terminal comparison separately before making that claim. |
 
-Busy host lifecycle changes are durable local work. State schema `/10` adds bounded pending
+Busy host lifecycle changes are durable local work. State schema `/11` adds bounded pending
 session-lifecycle intents, and a READY or hook drain reconciles them under the workspace and
 session reservations before routing their rows; busy mapping writes use an atomic per-session
 handoff. Upgrade this state quiescently: stop the older Yoetz service and Codex hooks, install
-the new runtime, then restart the service and all Codex integrations before writing `/10` state.
-Mixed old and new writers are unsupported because a `/9` writer ignores the new field and can
-erase a deferred intent when it saves.
+the new runtime, then restart the service and all Codex integrations before writing `/11` state.
+Mixed old and new writers are unsupported because a `/10` writer ignores the new pairing fields and
+can erase a deferred intent when it saves.
 
 ## 11. Security, privacy, and prohibited actions
 

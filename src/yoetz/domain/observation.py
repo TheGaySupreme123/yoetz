@@ -148,9 +148,21 @@ _STRUCTURAL_KEYS: Final = frozenset(
         "cursor_version",
         "model_id",
         "model_effort",
+        "pairing_mode",
+        "correlation_kind",
+        "generation_id",
     }
 )
-_STRUCTURAL_TOKEN_KEYS: Final = frozenset({"cursor_version", "model_id", "model_effort"})
+_STRUCTURAL_TOKEN_KEYS: Final = frozenset(
+    {
+        "cursor_version",
+        "model_id",
+        "model_effort",
+        "pairing_mode",
+        "correlation_kind",
+        "generation_id",
+    }
+)
 
 _PROSE_KEYS: Final = frozenset(
     {

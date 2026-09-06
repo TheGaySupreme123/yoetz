@@ -81,7 +81,10 @@ from yoetz.domain.values import (
 from yoetz.domain.values import (
     JsonValue as DomainJsonValue,
 )
-from yoetz.ports.integrations import YOETZ_WORKFLOW_TOOL_NAMES
+from yoetz.ports.integrations import (
+    YOETZ_WORKFLOW_TOOL_NAMES,
+    observation_pairing_contract,
+)
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode
 
@@ -216,6 +219,9 @@ _STRUCTURAL_ALLOW: Final = frozenset(
         "cursor_version",
         "model_id",
         "model_effort",
+        "pairing_mode",
+        "correlation_kind",
+        "generation_id",
     }
 )
 _TOKEN_CHARS: Final = frozenset(
@@ -462,12 +468,15 @@ def _bind_cursor_session_alias(conversation: str, session: str, *, _state: Path 
         return
 
 
-def _cursor_capability_profile_id(cursor_version: object) -> str:
-    """Map an exact Cursor version to its reviewed profile, else stay untested.
+def _cursor_capability_profile_id(cursor_version: object) -> str | None:
+    """Map an exact Cursor version to its reviewed profile.
 
     Hook payloads may report a version from any Cursor surface. Only the IDE
     profile owns the reviewed native hook set; the recognized CLI profile has
-    no hook cell and therefore remains ``untested`` at hook ingress. Importing
+    no hook cell and therefore remains ``untested`` at hook ingress. An omitted
+    version returns ``None`` so the closed pairing contract can apply the
+    installed legacy carrier fallback; a supplied but unknown version remains
+    explicitly untested and uses the conservative paired contract. Importing
     the adapter here would pull in the full plugin/rendering stack, so keep the
     fail-closed table local and never infer support for a neighboring surface
     or version.
@@ -475,7 +484,7 @@ def _cursor_capability_profile_id(cursor_version: object) -> str:
 
     version = _token_or_none(cursor_version)
     if version is None:
-        return _CURSOR_UNTESTED_PROFILE_ID
+        return None
     return _CURSOR_VERSION_TO_PROFILE.get(version, _CURSOR_UNTESTED_PROFILE_ID)
 
 
@@ -575,6 +584,9 @@ def _extract_structural(payload: Mapping[str, JsonValue], event_name: str) -> Js
         "cursor_version",
         "model_id",
         "model_effort",
+        "pairing_mode",
+        "correlation_kind",
+        "generation_id",
     ):
         token = _token_or_none(payload.get(key))
         if token is not None and key in _STRUCTURAL_ALLOW:
@@ -625,6 +637,49 @@ def _extract_structural(payload: Mapping[str, JsonValue], event_name: str) -> Js
     if decision is not None and "permission_decision" not in fields:
         fields["permission_decision"] = decision
     return JsonObject(fields)
+
+
+def _pairing_contract(
+    payload: Mapping[str, JsonValue], source: ObservationSource | None = None
+) -> tuple[str, str]:
+    """Resolve pairing from the closed host/profile contract.
+
+    The marker is an observation of the selected profile, not an authority that
+    raw hook input can rewrite.  In particular, Codex remains paired even if a
+    caller supplies a forged ``post_only`` marker.  A future paired Claude or
+    Cursor profile must be registered in the exact profile table.
+    """
+
+    if source is not None:
+        harness = (
+            "claude"
+            if source is ObservationSource.CLAUDE_HOOK
+            else "cursor"
+            if source is ObservationSource.CURSOR_HOOK
+            else "codex"
+        )
+        profile_id = payload.get("capability_profile_id")
+        return observation_pairing_contract(
+            harness, profile_id if isinstance(profile_id, str) else None
+        )
+    return "paired", "tool_call_id"
+
+
+def _pairing_correlation(payload: Mapping[str, JsonValue], correlation_kind: str) -> str | None:
+    """Return a real tool identity, never a host generation identity."""
+
+    if correlation_kind == "none":
+        return None
+    direct = _token_or_none(payload.get("tool_use_id")) or _token_or_none(
+        payload.get("tool_call_id")
+    )
+    if direct is not None:
+        return direct
+    if correlation_kind == "generation_id":
+        return None
+    return _token_or_none(payload.get("correlation_id")) or _token_or_none(
+        payload.get("parent_tool_call_id")
+    )
 
 
 def _source_identity(
@@ -2290,20 +2345,11 @@ def handle_observe(
                         )
             gap_codes: list[str] = []
 
-            # Prefer the host's canonical tool-use identity, while retaining
-            # compatibility with earlier tool-call and correlation aliases.
-            correlation = (
-                _token_or_none(payload.get("tool_use_id"))
-                or _token_or_none(payload.get("tool_call_id"))
-                or _token_or_none(payload.get("correlation_id"))
-            )
-            if correlation is not None and _is_pre_event(resolved_event):
-                store.note_open_pre(workspace_commitment, correlation, resolved_event)
-            elif correlation is not None and _is_post_event(resolved_event):
-                if not store.has_open_pre(workspace_commitment, correlation):
-                    gap_codes.append(ObservationGapCode.UNPAIRED_EVENT.value)
-                else:
-                    store.consume_open_pre(workspace_commitment, correlation)
+            # Pairing is selected by the host/profile contract.  Post-only
+            # profiles never consult the pre-event map; a generation id is a
+            # conversation/turn identity and is never accepted as a tool id.
+            pairing_mode, correlation_kind = _pairing_contract(payload, source)
+            correlation = _pairing_correlation(payload, correlation_kind)
 
             if resolved_event not in SUPPORTED_HOOK_EVENTS:
                 gap_codes.append(ObservationGapCode.UNSUPPORTED_EVENT.value)
@@ -2352,11 +2398,19 @@ def handle_observe(
                 )
             content_map = {envelope.source_identity: content_chunks} if content_chunks else None
 
-            # Local durable ingest first (never plaintext transcript spool).
-            local_result = (
-                store.ingest(envelope)
-                if binding_owned
-                else store.ingest(envelope, workspace_commitment=workspace_commitment)
+            # Local durable ingest and pairing admission share one store lock.
+            # The returned envelope is authoritative: a paired orphan's gap is
+            # present before any outbox row can be materialized.
+            local_result, envelope = store.ingest_with_pairing(
+                envelope,
+                workspace_commitment=workspace_commitment,
+                pairing_mode=pairing_mode,
+                correlation_id=correlation,
+                source=source,
+                session_commitment=session_commitment,
+                source_generation=source_generation,
+                is_pre_event=_is_pre_event(resolved_event),
+                is_post_event=_is_post_event(resolved_event),
             )
             # A Yoetz-owned tool call is delivered only when it carries evidence
             # the service does not already hold from serving it (#564); the
@@ -2821,18 +2875,19 @@ _CLAUDE_VERSION_TO_PROFILE: Final = {
 }
 
 
-def _claude_capability_profile_id(claude_version: object) -> str:
-    """Map an exact evidenced Claude version to its reviewed profile, else stay untested.
+def _claude_capability_profile_id(claude_version: object) -> str | None:
+    """Map an exact evidenced Claude version to its reviewed profile.
 
     The hook payload is the only version evidence this ingress has. A payload
-    that names no version, or a neighboring version whose native contract was
-    never proven, must not emit observations labeled with the evidenced
-    ``2.1.241`` profile; the fail-closed table never infers a range.
+    that names no version uses the omitted-profile compatibility path. A
+    neighboring version whose native contract was never proven stays
+    explicitly untested and uses the conservative paired contract; the
+    fail-closed table never infers a range.
     """
 
     token = _token_or_none(claude_version)
     if token is None:
-        return _CLAUDE_UNTESTED_PROFILE_ID
+        return None
     return _CLAUDE_VERSION_TO_PROFILE.get(token, _CLAUDE_UNTESTED_PROFILE_ID)
 
 
@@ -2910,14 +2965,19 @@ def handle_claude_observe(
         if session is None or len(session) > _MAX_TOKEN_CHARS - len(_CLAUDE_SESSION_PREFIX):
             hook_io.stdout_json({}, stdout)
             return 0
+        capability_profile_id = _claude_capability_profile_id(payload.get("claude_code_version"))
+        pairing_mode, correlation_kind = observation_pairing_contract(
+            "claude", capability_profile_id
+        )
         structural: dict[str, JsonValue] = {
             "action": "claude_lifecycle",
-            "capability_profile_id": _claude_capability_profile_id(
-                payload.get("claude_code_version")
-            ),
+            "pairing_mode": pairing_mode,
+            "correlation_kind": correlation_kind,
             "hook_event_name": event_map[raw_event],
             "session_id": f"{_CLAUDE_SESSION_PREFIX}{session}",
         }
+        if capability_profile_id is not None:
+            structural["capability_profile_id"] = capability_profile_id
         if raw_event == "Stop" and payload.get("stop_hook_active") is True:
             structural["stop_hook_active"] = True
         if raw_event == "SessionStart":
@@ -3073,6 +3133,10 @@ def handle_cursor_observe(
                 )
             return 0 if hook_io.stdout_json({}, stdout) else 0
         cursor_version = _token_or_none(payload.get("cursor_version"))
+        capability_profile_id = _cursor_capability_profile_id(cursor_version)
+        pairing_mode, correlation_kind = observation_pairing_contract(
+            "cursor", capability_profile_id
+        )
         structural: dict[str, JsonValue] = {
             "action": (
                 "cursor_file_edit"
@@ -3081,18 +3145,26 @@ def handle_cursor_observe(
                 if raw_event == "afterMCPExecution"
                 else "cursor_lifecycle"
             ),
-            "capability_profile_id": _cursor_capability_profile_id(cursor_version),
+            "pairing_mode": pairing_mode,
+            "correlation_kind": correlation_kind,
             "hook_event_name": event_map[raw_event],
             "session_id": f"{_CURSOR_SESSION_PREFIX}{session}",
         }
+        if capability_profile_id is not None:
+            structural["capability_profile_id"] = capability_profile_id
         for source_key, target_key in (
             ("cursor_version", "cursor_version"),
-            ("generation_id", "correlation_id"),
+            ("generation_id", "generation_id"),
             ("tool_name", "tool_name"),
         ):
             value = _token_or_none(payload.get(source_key))
             if value is not None:
                 structural[target_key] = value
+        tool_call_id = _token_or_none(payload.get("tool_call_id")) or _token_or_none(
+            payload.get("tool_use_id")
+        )
+        if tool_call_id is not None:
+            structural["tool_call_id"] = tool_call_id
         # Cursor's lifecycle payloads use ``model_id`` while execution and file
         # edit payloads use ``model``. Prefer the canonical lifecycle spelling
         # when both are present (they can intentionally differ: e.g. a provider

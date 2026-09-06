@@ -142,6 +142,10 @@ def test_record_logical_identity_claim_idempotence_union_and_conflict() -> None:
         (_WORKSPACE, logical_identity),
     ).fetchone()
     assert row == (3,)
+    assert store.load_logical_identity_claim(
+        workspace=_WORKSPACE,
+        logical_identity=logical_identity,
+    ) == (materialization_digest, operation_id, mapping_version)
 
     # A different materialization of the same claim key is corruption.
     with pytest.raises(PublicOperationError) as conflict:

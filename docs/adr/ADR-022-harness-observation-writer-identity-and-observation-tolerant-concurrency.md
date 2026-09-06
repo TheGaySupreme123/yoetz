@@ -13,7 +13,8 @@ maintainer-directed issue #346 incident repairs #350, #351, and
 #352 (decisions 12–14); 2026-08-18 for maintainer-authored issues #320 and #326 and issue #322
 (delivered frontier-motion high-water); 2026-08-16 for maintainer-approved issue #224; 2026-08-14
 for moderator-approved issue #244 and the reopened issue #216 recurrence; 2026-09-05 for issue #605
-(workspace recovery revalidation and durable lifecycle repair, decision 20).
+(workspace recovery revalidation and durable lifecycle repair, decision 20); 2026-09-05 for issue
+#607 (host/profile pairing contracts, scoped orphan diagnostics, and identity fencing, decision 21).
 **Implemented by:** `src/yoetz/application/observation_materialize.py`,
 `src/yoetz/application/observation_coordinator.py`, `src/yoetz/cli/observe_hooks.py`,
 `src/yoetz/adapters/memory/ledger.py`,
@@ -22,7 +23,7 @@ for moderator-approved issue #244 and the reopened issue #216 recurrence; 2026-0
 `src/yoetz/adapters/integrations/observation_local.py`.
 **Relates to:** ADR-009, ADR-010, ADR-020, and
 issues #214, #216, #217, #223, #224, #225, #226, #227, #244, #302, #320, #322, #326, #331,
-#445, #539, #540, #560, and #577.
+#445, #539, #540, #560, #577, and #607.
 
 **Proposed amendment for issue #231:** `provider_not_ready` remains bounded local advice, but the
 observation coordinator does not materialize it as an agent-facing finding. Provider readiness is a
@@ -305,11 +306,14 @@ unsupported claims and unbounded duplicate findings.
     conflicting reuse of the operation identity and fails closed as non-retryable
     `IDEMPOTENCY_CONFLICT` (`ledger_rejected`); a repeat that reuses committed event ids under a
     different logical identity still fails closed as `EVENT_INVALID`. Legacy versions keep their
-    session-bound digests as replay-only upgrade candidates probed under both admitted writers,
-    exactly as before: a pre-upgrade committed row is still replayable from the session that
-    committed it, and only from that session. Hook ordinals, session generations, and host session
-    commitments are keyed on the host session, not the mapping, so they stay monotonic across a
-    reattach.
+    session-bound digests as replay-only upgrade candidates. During route retirement, the lifecycle
+    adapter retains a bounded suffix of predecessor `(session, writer)` bindings in a private,
+    same-task sidecar before replacing the one-slot mapping. A fresh process can therefore probe
+    the retained predecessor routes after restart; a missing sidecar means there are no retained
+    predecessors, a malformed sidecar fails closed, and entries older than the bound are outside
+    the replay guarantee. Clearing a host mapping clears its route history as well. Hook ordinals,
+    session generations, and host session commitments are keyed on the host session, not the
+    mapping, so they stay monotonic across a reattach.
 19. An ended-host-session recovery attach that rotates the task route does not retire still-pending
     observation rows of the predecessor (issue #577). `SESSION_NOT_FOUND` with
     `reason_code: session_superseded` already carries the current task binding; ingest follows that
@@ -339,6 +343,20 @@ rewrites, and pruning; contention or changed state falls back to the ordinary re
     unsupported because the `/9` reader ignores the new field and can erase it on save. The
     retention bound protects pending and quarantined evidence, so protected rows may keep the
     total above the clean-binding cap without being deleted.
+21. Host hook pairing is selected by the closed source/profile contract, never by an arbitrary
+    payload marker. The installed Claude Code and Cursor hook profiles are post-only: Claude's
+    `tool_use_id` may identify a result when present, while Cursor's `generation_id` is metadata
+    only and can never become a tool identity. Codex remains paired, including when a raw payload
+    supplies a conflicting marker; a future paired Claude/Cursor profile must be an exact table
+    entry with a real tool-call identity. Local admission performs deduplication, pairing-state
+    lookup, envelope append, and pre/post consumption under one store lock. A duplicate therefore
+    cannot consume a pre-event, and a concurrent second post records a source/session/generation/
+    identity-scoped `unpaired_event` without resolving an unrelated orphan. Historical false
+    post-only diagnostics may clear their active projection only when retained envelope history is
+    complete; the immutable gap-history record remains. The local state extension is schema `/11`.
+    Materialization mapping `obs-ledger/1.6.0` includes source lane, host session commitment, and
+    source generation in canonical/action/result identities; legacy 1.5/1.4/1.3/1.2 identities
+    remain replayable under their historical semantics.
 
 ## Security and privacy consequences
 

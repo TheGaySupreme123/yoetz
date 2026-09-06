@@ -20,11 +20,13 @@ from yoetz.adapters.integrations.codex_lifecycle import (
     encode_frontier_token,
     load_latest_mapping,
     load_mapping,
+    load_route_history,
     mapping_from_start_ids,
     store_mapping,
     validate_codex_session_id,
 )
 from yoetz.config.paths import PathSafetyError
+from yoetz.protocol.canonical import canonical_encode
 from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.ids import IdKind, new_id
 
@@ -149,6 +151,178 @@ def test_clear_mapping(tmp_path: Path) -> None:
     )
     clear_mapping(codex_session_id, _state=tmp_path)
     assert load_mapping(codex_session_id, _state=tmp_path) is None
+
+
+def test_route_history_is_task_bound_and_malformed_history_fails_closed(
+    tmp_path: Path,
+) -> None:
+    codex_session_id, task_id, session_id, writer_id = _ids()
+    mapping = mapping_from_start_ids(
+        codex_session_id=codex_session_id,
+        yoetz_task_id=task_id,
+        yoetz_session_id=session_id,
+        yoetz_writer_id=writer_id,
+        last_frontier=None,
+    )
+    store_mapping(mapping, _state=tmp_path)
+    history_path = tmp_path / "codex-lifecycle" / "route-history" / f"{codex_session_id}.json"
+    history_path.parent.mkdir(mode=0o700, exist_ok=True)
+
+    history_path.write_bytes(
+        canonical_encode(
+            {
+                "schema": "yoetz.codex-route-history/1",
+                "task_id": new_id(IdKind.TASK),
+                "routes": ({"session_id": session_id, "writer_id": writer_id},),
+                "truncated": False,
+            }
+        )
+        + b"\n"
+    )
+    # A history file left by a previous task cannot authorize probes for the
+    # current task's legacy operation graph.
+    history = load_route_history(mapping, _state=tmp_path)
+    assert history is not None
+    assert history.routes == ()
+    assert history.truncated is False
+
+    history_path.write_bytes(b"not-json")
+    # A present but corrupt sidecar is different from a missing sidecar: the
+    # caller must fail closed instead of silently reminting an old operation.
+    assert load_route_history(mapping, _state=tmp_path) is None
+
+
+def test_route_history_is_bounded_to_the_newest_predecessors(tmp_path: Path) -> None:
+    max_route_history = 5
+    codex_session_id, task_id, session_id, writer_id = _ids()
+    current = mapping_from_start_ids(
+        codex_session_id=codex_session_id,
+        yoetz_task_id=task_id,
+        yoetz_session_id=session_id,
+        yoetz_writer_id=writer_id,
+        last_frontier=None,
+    )
+    store_mapping(current, _state=tmp_path)
+    predecessor_routes: list[tuple[str, str]] = []
+    for _ in range(max_route_history + 1):
+        predecessor_routes.append((current.yoetz_session_id, current.yoetz_writer_id))
+        current = mapping_from_start_ids(
+            codex_session_id=codex_session_id,
+            yoetz_task_id=task_id,
+            yoetz_session_id=new_id(IdKind.SESSION),
+            yoetz_writer_id=new_id(IdKind.WRITER),
+            last_frontier=None,
+        )
+        store_mapping(current, _state=tmp_path)
+
+    # The oldest route is deliberately evicted. The result is a truthful
+    # bounded suffix, never an unbounded reconstruction of the route graph.
+    history = load_route_history(current, _state=tmp_path)
+    assert history is not None
+    assert history.routes == tuple(predecessor_routes[-max_route_history:])
+    assert history.truncated is True
+
+
+def test_route_history_namespace_cannot_overwrite_a_mapping(tmp_path: Path) -> None:
+    codex_session_id, task_id, session_id, writer_id = _ids()
+    first = mapping_from_start_ids(
+        codex_session_id=codex_session_id,
+        yoetz_task_id=task_id,
+        yoetz_session_id=session_id,
+        yoetz_writer_id=writer_id,
+        last_frontier=None,
+    )
+    successor = mapping_from_start_ids(
+        codex_session_id=codex_session_id,
+        yoetz_task_id=task_id,
+        yoetz_session_id=new_id(IdKind.SESSION),
+        yoetz_writer_id=new_id(IdKind.WRITER),
+        last_frontier=None,
+    )
+    colliding_session = f"{codex_session_id}.history"
+    colliding = mapping_from_start_ids(
+        codex_session_id=colliding_session,
+        yoetz_task_id=new_id(IdKind.TASK),
+        yoetz_session_id=new_id(IdKind.SESSION),
+        yoetz_writer_id=new_id(IdKind.WRITER),
+        last_frontier=None,
+    )
+
+    store_mapping(first, _state=tmp_path)
+    store_mapping(successor, _state=tmp_path)
+    store_mapping(colliding, _state=tmp_path)
+
+    assert load_mapping(codex_session_id, _state=tmp_path) == successor
+    assert load_mapping(colliding_session, _state=tmp_path) == colliding
+    history = load_route_history(successor, _state=tmp_path)
+    assert history is not None
+    assert history.routes == ((first.yoetz_session_id, first.yoetz_writer_id),)
+    assert history.truncated is False
+
+
+def test_clear_mapping_removes_route_history_sidecar(tmp_path: Path) -> None:
+    codex_session_id, task_id, session_id, writer_id = _ids()
+    first = mapping_from_start_ids(
+        codex_session_id=codex_session_id,
+        yoetz_task_id=task_id,
+        yoetz_session_id=session_id,
+        yoetz_writer_id=writer_id,
+        last_frontier=None,
+    )
+    successor = mapping_from_start_ids(
+        codex_session_id=codex_session_id,
+        yoetz_task_id=task_id,
+        yoetz_session_id=new_id(IdKind.SESSION),
+        yoetz_writer_id=new_id(IdKind.WRITER),
+        last_frontier=None,
+    )
+    store_mapping(first, _state=tmp_path)
+    store_mapping(successor, _state=tmp_path)
+    history_path = tmp_path / "codex-lifecycle" / "route-history" / f"{codex_session_id}.json"
+    assert history_path.is_file()
+
+    clear_mapping(codex_session_id, _state=tmp_path)
+
+    assert load_mapping(codex_session_id, _state=tmp_path) is None
+    assert not history_path.exists()
+    history = load_route_history(successor, _state=tmp_path)
+    assert history is not None
+    assert history.routes == ()
+    assert history.truncated is False
+
+
+@pytest.mark.parametrize("failure_stage", ["write", "fsync"])
+def test_private_atomic_write_cleans_temporary_on_initial_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_stage: str
+) -> None:
+    codex_session_id, task_id, session_id, writer_id = _ids()
+    mapping = mapping_from_start_ids(
+        codex_session_id=codex_session_id,
+        yoetz_task_id=task_id,
+        yoetz_session_id=session_id,
+        yoetz_writer_id=writer_id,
+        last_frontier=None,
+    )
+
+    if failure_stage == "write":
+
+        def fail_write(_descriptor: int, _payload: memoryview) -> int:
+            raise OSError("simulated write failure")
+
+        monkeypatch.setattr(codex_lifecycle_module.os, "write", fail_write)
+    else:
+
+        def fail_fsync(_descriptor: int) -> None:
+            raise OSError("simulated fsync failure")
+
+        monkeypatch.setattr(codex_lifecycle_module.os, "fsync", fail_fsync)
+
+    with pytest.raises(OSError):
+        store_mapping(mapping, _state=tmp_path)
+
+    lifecycle = tmp_path / "codex-lifecycle"
+    assert not list(lifecycle.glob(f".{codex_session_id}.json.*.tmp"))
+    assert not (lifecycle / f"{codex_session_id}.json").exists()
 
 
 def test_load_latest_mapping_uses_valid_mapping_write_recency(tmp_path: Path) -> None:
@@ -353,3 +527,26 @@ def test_pending_mapping_preserves_update_queued_during_apply(
         assert codex_lifecycle_module.apply_pending_mapping(session, _state=tmp_path)
         assert load_mapping(session, _state=tmp_path) == second
         assert not codex_lifecycle_module.apply_pending_mapping(session, _state=tmp_path)
+
+
+def test_new_mapping_does_not_reuse_history_left_by_interrupted_clear(tmp_path: Path) -> None:
+    host, task, _, _ = _ids()
+    mappings = [
+        mapping_from_start_ids(
+            codex_session_id=host,
+            yoetz_task_id=task,
+            yoetz_session_id=new_id(IdKind.SESSION),
+            yoetz_writer_id=new_id(IdKind.WRITER),
+            last_frontier=None,
+        )
+        for _ in range(3)
+    ]
+    store_mapping(mappings[0], _state=tmp_path)
+    store_mapping(mappings[1], _state=tmp_path)
+    history = load_route_history(mappings[1], _state=tmp_path)
+    assert history is not None and len(history.routes) == 1
+    # Simulate a crash between clear_mapping's two unlinks.
+    codex_lifecycle_module.mapping_path(host, _state=tmp_path).unlink()
+    store_mapping(mappings[2], _state=tmp_path)
+    history = load_route_history(mappings[2], _state=tmp_path)
+    assert history is not None and history.routes == () and not history.truncated
