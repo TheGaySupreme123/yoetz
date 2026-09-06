@@ -68,6 +68,7 @@ from yoetz.observability.logging import (
     record_unexpected_exception_without_raising,
 )
 from yoetz.ports.clock import ClockPort
+from yoetz.ports.control import McpHostProfile
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
@@ -428,7 +429,9 @@ _SEMANTIC_ATTEMPT_GAPS: Final = frozenset(
 )
 
 
-def _strict_ceiling_route_drift(*, _state: Path | None) -> bool:
+def _strict_ceiling_route_drift(
+    *, host_profile: McpHostProfile = "generic", _state: Path | None
+) -> bool:
     """Fail-soft applied-policy probe for the strict route ceiling (issue #537).
 
     True only when the durable applied-route record says the last install applied the
@@ -438,6 +441,11 @@ def _strict_ceiling_route_drift(*, _state: Path | None) -> bool:
     status/reason/provenance — the caller only adds a structural coverage gap.
     """
 
+    # A bare or otherwise generic serving command does not prove that Codex owns the process.
+    # The applied-route record is Codex-specific, so comparing it against another host would
+    # manufacture a registration-drift claim (issue #548).
+    if host_profile != "codex":
+        return False
     try:
         from yoetz.application.applied_mcp_route import read_applied_route
 
@@ -1323,6 +1331,7 @@ async def execute_check_commit(
     request: CheckRequest,
     *,
     route_profile: Literal["policy", "strict"] = "policy",
+    host_profile: McpHostProfile = "generic",
     _state: Path | None = None,
 ) -> CheckCommitResult | CheckAwaitingHuman:
     """Freeze, evaluate, rank, and atomically commit one check operation.
@@ -1531,7 +1540,7 @@ async def execute_check_commit(
             route_profile == "strict"
             and semantic_result.status is SemanticStatus.BLOCKED_BY_POLICY
             and semantic_result.reason is SemanticReason.ROUTE_SEMANTIC_CEILING
-            and _strict_ceiling_route_drift(_state=_state)
+            and _strict_ceiling_route_drift(host_profile=host_profile, _state=_state)
         ):
             # The ceiling still blocks this process with the same status, reason, and null
             # provenance. The extra gap is the structural route_drift detail — applied policy
@@ -1664,6 +1673,7 @@ async def execute_check(
     request: CheckRequest,
     *,
     route_profile: Literal["policy", "strict"] = "policy",
+    host_profile: McpHostProfile = "generic",
     _state: Path | None = None,
 ) -> CheckCommitResult | CheckAwaitingHuman:
     """Return the closed sink-independent result for the facade's sole projection step."""
@@ -1671,4 +1681,10 @@ async def execute_check(
     # Omitted mode resolves via policy so recorded check events always carry a concrete mode.
     if request.mode is None:
         request = request.model_copy(update={"mode": app.verification_policy.default_check_mode})
-    return await execute_check_commit(app, request, route_profile=route_profile, _state=_state)
+    return await execute_check_commit(
+        app,
+        request,
+        route_profile=route_profile,
+        host_profile=host_profile,
+        _state=_state,
+    )

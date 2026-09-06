@@ -1,6 +1,6 @@
 # Yoetz v0.1 — decision ledger and release-gate dispositions
 
-**ADRs:** ADR-001 through ADR-023 | **Related:** [`docs/INTERFACES.md`](INTERFACES.md),
+**ADRs:** ADR-001 through ADR-026 | **Related:** [`docs/INTERFACES.md`](INTERFACES.md),
 [`docs/adr/`](adr/), release-evidence generation
 
 ## Purpose
@@ -118,7 +118,8 @@ that evidence.
 ### v0.1.0 public-alpha gate dispositions — 2026-08-20
 
 v0.1.0 may ship as a **public alpha** under a maintainer-accepted narrowed claim set. Each
-empirical gate below carries exactly one dated disposition:
+empirical gate below carries exactly one dated disposition; a later dated re-disposition in the
+0.2 section that follows supersedes it for that release while the original row stays as history:
 
 - **Closed by decision** — a dated product decision replaces the calibration or refresh for the
   alpha; the decision itself is the recorded answer and manufactures no support evidence.
@@ -148,17 +149,57 @@ affected claim, and for the first non-alpha release regardless.
 | E-014 | Closed by decision — publication-ceremony guidance remains qualitative, informed by bounded dogfood use; no numeric budget or grouping-threshold claim ships, and measurement is required before any later budget claim. |
 | E-015 | Narrowed — `yoetz state capture` ships fail-closed with no advertised capability cells; `support.structural_subject_state_capture` stays `not_yet_evidenced`. |
 | E-016 | Working (unchanged, ADR-014) — the optional live owner-declared host probe is not performed and verified interoperability beyond the protocol cell is not advertised. |
+| E-017 | Open, narrowed (row added 2026-09-05; the gate post-dates the 2026-08-20 alpha and was never a v0.1.0 tag gate). The Claude Code `claude-code-cli-local-project-2.1.241` cell ships as an implementation/fixture pin declaring a `SessionStart` trigger arm with `observation_events=()`: its fixture proves strict validation, source/render/cache identity, disabled default, discovery, fresh-session plugin/skill/tool registration, and connected plugin-owned MCP, while a correlated model call, accepted observation, semantic dispatch, privacy receipt, and workflow receipt remain unobserved for that version. The 2026-09-04 live capture on Claude Code `2.1.251` proves only the bare-JSON-string `PostToolUse` `tool_response` shape and adds no capability-profile entry (`docs/runbooks/claude-code-integration.md`). Cursor `cursor-ide-3.17.8` and `cursor-cli-2026.07.09-a3815c0` are implementation/fixture pins; the SDK rows are metadata-only. No host cell is `supported`, and `support/runtime-support.json` ships every cell array empty under `development_unverified`. |
+
+### 0.2 re-dispositions — 2026-09-05
+
+- **E-013 — Narrowed (was "not applicable" for v0.1.0; that row stays above as history).** What
+  ships in 0.2: hook observation ingress exists for all three first-party hosts. The Codex plugin
+  renders `PreToolUse`/`PostToolUse`/`PermissionRequest` hooks
+  (`src/yoetz/adapters/integrations/codex_plugin.py`), the Claude Code marketplace plugin renders
+  `SessionStart`, `PostToolUse`, `PostToolUseFailure`, `PermissionDenied`, `Stop`, and `SessionEnd`
+  (`claude_code_integration.py`), and the Cursor IDE plugin renders
+  `sessionStart|sessionEnd|afterMCPExecution|afterFileEdit|stop` (`cursor_integration.py`); every
+  install goes through the host's explicit preview→confirm plugin ceremony. Consented accepted
+  rows are stored in the task ledger under `ObservationSource`
+  `claude_hook|codex_hook|codex_session_stream|cursor_hook` (bundle migration `0009`, issues
+  #576/#586). `src/yoetz/application/observation_materialize.py` materializes the `hook_observed`
+  publication channel for every accepted hook envelope, and the `hook_observed` artifact-observation
+  class with `harness_observed` authorship only for a gap-free `codex_hook` envelope; `claude_hook`
+  and `cursor_hook` rows keep `published_only`/`service_authenticated` under that channel. So
+  `hook_observed` is earnable in 0.2, from real observation evidence only. Capability cells:
+  `CODEX_HARNESS_PROFILE` stays jointly empty (unprofiled/unadvertised);
+  `claude-code-cli-local-project-2.1.241` declares a `SessionStart` trigger arm with
+  `observation_events=()`; `cursor-ide-3.17.8` declares a `sessionStart` trigger arm plus those
+  five observation events, and `cursor-cli-2026.07.09-a3815c0` is `None`. Still not claimed: no
+  `supported` release cell exists — `support/runtime-support.json` ships every cell array empty
+  (`session_event_cells: []`) under `development_unverified`; no installed-artifact run has frozen
+  event, payload/privacy boundary, permitted action, coalescing/loop guard, gap codes, and failure
+  behavior per arm as this gate requires; the Claude `2.1.251` `PostToolUse` capture proves a
+  payload shape only; and unprofiled harnesses stay cooperative-only. Wider wording must first add
+  that evidence and update this ledger in the same review.
 
 ### Explicit v0.2 or later deferrals
 
-- Product-telemetry, crash-diagnostics-upload, update-check, and capability-testing transports.
-  v0.1 keeps all four channel rows explicit but unavailable/off, rejects enablement with
-  `channel_unavailable`, creates no dormant consent, and requires a fresh local-human transition if
-  a later exact transport capability is installed.
+- Product-telemetry, crash-diagnostics-upload, and capability-testing transports. Those three
+  channel rows stay explicit but unavailable/off: enablement is rejected with
+  `channel_unavailable`, no dormant consent is created, and a later exact transport capability
+  requires a fresh local-human transition. *(Amended 2026-09-05: `update_checks` left this list.
+  It is the one owned non-LLM transport — an independently policy-gated, allowlisted PyPI request
+  carrying only the package identity, never task or user content, and never auto-upgrading
+  (`src/yoetz/adapters/privacy/update_checks.py`, `src/yoetz/application/package_update.py`;
+  claim `privacy.v01_update_checks_only_non_llm_transport`).)*
 - Live Git/filesystem artifact inspection during import review; v0.1 compares recorded evidence
   only.
 - Chunked import/object formats above the exact 4 MiB source/object cap.
-- Codex app-server integration, additional first-party harnesses, and remote service exposure.
+- Remote service exposure. *(Narrowed 2026-09-05: this bullet formerly also deferred Codex
+  app-server integration and additional first-party harnesses. The exact digest-bound Codex
+  app-server subscription evaluator ships (`src/yoetz/adapters/providers/codex_app_server.py`,
+  issue #480, E-007 status 2026-09-04), and Claude Code and Cursor ship as first-party harness
+  adapters (`src/yoetz/adapters/integrations/claude_code_integration.py`,
+  `cursor_integration.py`; ADR-023, E-017) — none with a `supported` release cell. Only remote
+  service exposure remains deferred here, alongside the multi-user hosting and remote-control
+  bullet below.)*
   Additional harnesses are additive by construction under ADR-010: an adapter plus a
   `HarnessId` value, with no port, guidance, or registry change. Hooks land on
   `HarnessProfile.hooks_by_capability_profile`, whose exact values distinguish two arms.
@@ -170,13 +211,16 @@ affected claim, and for the first non-alpha release regardless.
   because the `status` result they cause discloses only what that call would already have returned
   under the ordinary provenance rules and the `agent_context` ceiling. An exact v0.1 capability
   cell may declare either or both arms after E-013 passes; unsupported cells remain `None`.
-  App-server integration, non-Codex first-party harnesses, and remote service exposure remain
-  deferred. No v0.1 adapter silently installs or configures hooks.
+  Remote service exposure remains deferred. No adapter silently installs or configures hooks;
+  every hook install goes through the host's explicit plugin ceremony.
 - MCP prompts. v0.1 ships tools, resources, and the `instructions` string only.
 - Launchd/systemd convenience installers, multi-user service hosting, remote control, and
   independent concurrent service writers; the single-user persistent local service and
   authenticated local IPC are v0.1 requirements.
-- Public `doctor`/support-bundle command and schema; v0.1 has `version --json` plus startup gates.
+- Standalone public `yoetz doctor` CLI command and support-bundle schema. *(2026-09-05: the
+  terminal interface's read-only `/doctor` report and `yoetz service diagnostics` (one durable
+  owner-only diagnostic record by correlation id) ship next to `version --json` and the startup
+  gates; the standalone CLI command and bundle schema remain deferred without a version promise.)*
 - Broad waiver scopes, noninteractive/model waivers, or waiver of deterministic policy classes.
 - Structural task/workflow status without keys; the locked service exposes only its bounded service
   lifecycle/reason status, while all six task operations fail closed when required keys are locked.

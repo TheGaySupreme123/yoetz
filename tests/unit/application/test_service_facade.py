@@ -600,9 +600,14 @@ async def test_omitted_check_mode_resolves_through_the_verification_policy(
     seen: list[object] = []
 
     async def _capture(
-        _app: object, request: object, *, route_profile: object = "policy"
+        _app: object,
+        request: object,
+        *,
+        route_profile: object = "policy",
+        host_profile: object = "generic",
     ) -> object:
         assert route_profile == "policy"
+        assert host_profile == "generic"
         seen.append(request)
         return object()
 
@@ -626,9 +631,14 @@ async def test_present_check_mode_is_never_overridden_by_policy(
     seen: list[object] = []
 
     async def _capture(
-        _app: object, request: object, *, route_profile: object = "policy"
+        _app: object,
+        request: object,
+        *,
+        route_profile: object = "policy",
+        host_profile: object = "generic",
     ) -> object:
         assert route_profile == "policy"
+        assert host_profile == "generic"
         seen.append(request)
         return object()
 

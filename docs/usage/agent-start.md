@@ -9,8 +9,9 @@ curl -fsSL https://raw.githubusercontent.com/TheGaySupreme123/yoetz/main/docs/us
 ```
 
 `https://yoetz.dev/agent-start` is the intended future home; this file is the authority today.
-Codex is the only first-party integration in v0.1; any agent can still use Yoetz over MCP with no
-integration.
+Codex, Claude Code, and Cursor have first-party integrations — the first-run wizard connects Codex,
+while Claude Code and Cursor are connected afterwards through `yoetz integrate claude ...` and
+`yoetz integrate cursor ...` — and any agent can still use Yoetz over MCP with no integration.
 
 ## 1. Install — you do this
 
@@ -19,8 +20,9 @@ uv tool install --managed-python --python 3.14.6 "yoetz==0.1.0"
 yoetz version
 ```
 
-`uvx yoetz` works for a one-off run. npm is not an install route yet, and the compatibility extras
-are aliases the standard install already contains — do not add them.
+`uvx yoetz` works for a one-off run. With `uv` already installed, `npx yoetz` launches the same
+exact-version PyPI package and installs nothing itself. The compatibility extras are aliases the
+standard install already contains — do not add them.
 
 ## 2. Setup — guide it in the conversation
 

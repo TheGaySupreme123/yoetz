@@ -720,6 +720,7 @@ class YoetzRuntime:
             "anthropic": "Anthropic",
             "google_gemini": "Google Gemini",
             "openrouter": "OpenRouter",
+            "grok": "Grok (xAI)",
             "vercel_ai_gateway": "Vercel AI Gateway",
         }
         options = [

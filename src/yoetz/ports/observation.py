@@ -42,6 +42,7 @@ __all__ = [
     "ObservationIngestDisposition",
     "ObservationIngestResult",
     "ObservationInspectionSnapshot",
+    "ObservationLogicalIdentityClaim",
     "ObservationLifecycle",
     "ObservationPort",
     "ObservationRevokeCommand",
@@ -52,6 +53,8 @@ __all__ = [
     "observation_earns_hook_observed",
     "workspace_commitment_from_path",
 ]
+
+type ObservationLogicalIdentityClaim = tuple[str, str, str]
 
 
 class ObservationPort(Protocol):
@@ -75,7 +78,21 @@ class TaskObservationPort(Protocol):
     read back coverage, and record advice snapshots for one mapped task bundle.
     """
 
-    def grant_consent(self, workspace_commitment: str, granted_at: Timestamp) -> None: ...
+    def grant_consent(
+        self,
+        workspace_commitment: str,
+        granted_at: Timestamp,
+        *,
+        content_capture_profiles: tuple[str, ...] = (),
+    ) -> None: ...
+
+    def content_capture_profiles(self, workspace_commitment: str) -> tuple[str, ...]: ...
+
+    def enable_content_capture(self, workspace_commitment: str, profile: str) -> None: ...
+
+    def disable_content_capture(
+        self, workspace_commitment: str, profile: str | None = None
+    ) -> None: ...
 
     def bind_session(self, workspace_commitment: str, session_commitment: str) -> None: ...
 
@@ -227,3 +244,7 @@ class TaskObservationPort(Protocol):
         mapping_version: str,
         materialized_at: Timestamp,
     ) -> None: ...
+
+    def load_logical_identity_claim(
+        self, *, workspace: str, logical_identity: str
+    ) -> ObservationLogicalIdentityClaim | None: ...

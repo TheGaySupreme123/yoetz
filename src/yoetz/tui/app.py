@@ -852,7 +852,7 @@ class YoetzTui(App[int]):
             await self._run_confidential(
                 "Choose a Yoetz passphrase",
                 self.runtime.initialize_passphrase_vault,
-                fallback_command="yoetz service unlock --initialize",
+                fallback_command="yoetz service initialize-passphrase",
             )
         else:
             await self._run_confidential(
@@ -1703,7 +1703,7 @@ class YoetzTui(App[int]):
             await self._run_confidential(
                 "Choose a Yoetz passphrase",
                 self.runtime.initialize_passphrase_vault,
-                fallback_command="yoetz service unlock --initialize",
+                fallback_command="yoetz service initialize-passphrase",
             )
         elif choice == "rotate":
             await self._run_confidential(

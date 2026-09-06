@@ -25,7 +25,12 @@ from yoetz.cli.app import app
 from yoetz.cli.privacy_setup import build_candidate_policy, recipe_answers
 from yoetz.cli.trusted_console import TrustedForegroundConsole
 from yoetz.config.models import ConfigError
-from yoetz.domain.privacy import AuthorizationScope, AuthorizationScopeKind, ProviderBinding
+from yoetz.domain.privacy import (
+    AuthorizationScope,
+    AuthorizationScopeKind,
+    PrivacyPolicy,
+    ProviderBinding,
+)
 from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.chat_user_authority import ChatUserAttestationModel
 from yoetz.protocol.consent import ConsentReviewResultModel
@@ -546,6 +551,20 @@ _GRANT_BINDING = repository_grant_binding(
     current_policy=_GRANT_CURRENT,
     candidate_policy=_GRANT_CANDIDATE,
 )
+# The reverse state (#552): the repository already holds the Expanded grant above and the user
+# asks for the strictly tighter Assisted recipe.
+_GRANT_TIGHTER_CANDIDATE = build_candidate_policy(
+    _GRANT_CANDIDATE,
+    recipe_answers("assisted_review", _GRANT_CANDIDATE, _GRANT_EXTERNAL),
+    now=datetime(2026, 9, 5, tzinfo=UTC),
+)
+_GRANT_TIGHTENING_BINDING = repository_grant_binding(
+    recipe="assisted_review",
+    repository_privacy_commitment=_GRANT_REPOSITORY_COMMITMENT,
+    authority_digest=_GRANT_AUTHORITY_DIGEST,
+    current_policy=_GRANT_CANDIDATE,
+    candidate_policy=_GRANT_TIGHTER_CANDIDATE,
+)
 
 
 @contextmanager
@@ -556,6 +575,7 @@ def _repository_grant_patches(
     external: ProviderBinding | None = _GRANT_EXTERNAL,
     authority_digest: str = _GRANT_AUTHORITY_DIGEST,
     repository_commitment: str = _GRANT_REPOSITORY_COMMITMENT,
+    composed_policy: PrivacyPolicy = _GRANT_CURRENT,
 ) -> Generator[Any]:
     """Patch everything around the decide ceremony so its outcome handling is under test."""
 
@@ -563,7 +583,7 @@ def _repository_grant_patches(
         return SimpleNamespace(
             bound_scope={"workspace_ref_commitment": repository_commitment},
             authority_digest=authority_digest,
-            composed_policy=_GRANT_CURRENT,
+            composed_policy=composed_policy,
         )
 
     async def default_propose(candidate: object, authority_digest: str) -> str:
@@ -630,6 +650,58 @@ def test_repository_grant_recovers_committed_result_when_close_confirmation_lost
     assert load_pending(_state=tmp_path) is None
     audit = _audit_lines(tmp_path)
     assert any('"outcome":"approved"' in line for line in audit)
+    assert not any('"outcome":"failed"' in line for line in audit)
+
+
+def test_repository_grant_tightening_reports_tightened_without_a_decision(
+    tmp_path: Path,
+) -> None:
+    """#552: a strictly tighter recipe over an existing grant needs no decision ceremony.
+
+    The service applies a tightening on propose (`tightening_applied`, no proposal id), so the
+    lane must report the wire outcome `tightened`, never reach for the auto-unlock passphrase
+    or the decide ceremony, and consume the pending review as approved exactly once.
+    """
+
+    async def decide(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a tightening must never reach the decide ceremony")
+
+    async def tightening_propose(candidate: object, authority_digest: str) -> None:
+        assert candidate == _GRANT_TIGHTER_CANDIDATE
+        assert authority_digest == _GRANT_AUTHORITY_DIGEST
+        return None
+
+    async def run() -> dict[str, Any]:
+        with _patch_state(tmp_path):
+            elevated.prepare_elevated(
+                "repository_privacy_grant", grant_binding=_GRANT_TIGHTENING_BINDING
+            )
+            pending = load_pending(_state=tmp_path)
+            assert pending is not None
+            with (
+                _repository_grant_patches(
+                    decide, propose=tightening_propose, composed_policy=_GRANT_CANDIDATE
+                ) as decide_mock,
+                patch(
+                    "yoetz.cli.elevated._load_auto_unlock_passphrase",
+                    side_effect=AssertionError("a tightening needs no reauthentication"),
+                ),
+            ):
+                result = cast(
+                    dict[str, Any],
+                    await elevated.authorize_elevated(_chat_attestation(pending)),
+                )
+            decide_mock.assert_not_awaited()
+            return result
+
+    result = anyio.run(run)
+    assert result["outcome"] == "completed"
+    assert result["authority_channel"] == "agent_attested_chat_instruction"
+    assert result["result"] == {"recipe": "assisted_review", "outcome": "tightened"}
+    validate_schema_instance("review-result", "6.0.0", result)
+    assert load_pending(_state=tmp_path) is None
+    audit = _audit_lines(tmp_path)
+    assert len([line for line in audit if '"outcome":"approved"' in line]) == 1
     assert not any('"outcome":"failed"' in line for line in audit)
 
 

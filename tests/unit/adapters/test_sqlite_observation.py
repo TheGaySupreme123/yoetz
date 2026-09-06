@@ -20,6 +20,10 @@ from yoetz.domain.observation import (
     ObservationSource,
     ObservationStatusQuery,
 )
+from yoetz.domain.observation_profiles import (
+    CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+    CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+)
 from yoetz.domain.values import JsonObject, Timestamp
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 
@@ -102,6 +106,39 @@ def test_sqlite_pause_resume() -> None:
     asyncio.run(run())
 
 
+def test_sqlite_content_profiles_survive_pause_and_clear_on_revoke() -> None:
+    async def run() -> None:
+        store = _store()
+        store.grant_consent(
+            _WORKSPACE,
+            _TIME,
+            content_capture_profiles=(CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,),
+        )
+        assert store.content_capture_profiles(_WORKSPACE) == (
+            CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+        )
+        store.enable_content_capture(_WORKSPACE, CURSOR_ORDINARY_OBSERVATION_PROFILE_ID)
+        store.enable_content_capture(_WORKSPACE, CURSOR_ORDINARY_OBSERVATION_PROFILE_ID)
+        assert store.content_capture_profiles(_WORKSPACE) == (
+            CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+            CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+        )
+        await store.pause(ObservationControlCommand(_WORKSPACE))
+        assert store.content_capture_profiles(_WORKSPACE) == (
+            CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+            CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+        )
+        await store.resume(ObservationControlCommand(_WORKSPACE))
+        store.disable_content_capture(_WORKSPACE, CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID)
+        assert store.content_capture_profiles(_WORKSPACE) == (
+            CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+        )
+        await store.revoke(ObservationRevokeCommand(_WORKSPACE))
+        assert store.content_capture_profiles(_WORKSPACE) == ()
+
+    asyncio.run(run())
+
+
 def test_sqlite_resume_without_consent_fails() -> None:
     async def run() -> None:
         store = _store()
@@ -142,6 +179,10 @@ def test_record_logical_identity_claim_idempotence_union_and_conflict() -> None:
         (_WORKSPACE, logical_identity),
     ).fetchone()
     assert row == (3,)
+    assert store.load_logical_identity_claim(
+        workspace=_WORKSPACE,
+        logical_identity=logical_identity,
+    ) == (materialization_digest, operation_id, mapping_version)
 
     # A different materialization of the same claim key is corruption.
     with pytest.raises(PublicOperationError) as conflict:

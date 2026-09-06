@@ -8,7 +8,7 @@ import re
 import shlex
 import sys
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Generator, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,9 +18,13 @@ from typing import TYPE_CHECKING, BinaryIO, Final, Literal, Protocol, cast
 from yoetz.adapters.integrations.codex_lifecycle import (
     LifecycleMapping,
     acquire_session_lock,
-    load_latest_mapping,
+    acquire_workspace_recovery_lock,
+    apply_pending_mapping,
+    clear_mapping,
     load_mapping,
     mapping_from_start_ids,
+    mapping_path,
+    queue_mapping_clear,
     store_mapping,
     validate_codex_session_id,
 )
@@ -69,6 +73,13 @@ from yoetz.domain.observation import (
     observation_ingest_request_to_json,
     observation_ingest_result_from_json,
 )
+from yoetz.domain.observation_profiles import (
+    CLAUDE_CODE_ORDINARY_HOOK_MAPPING_VERSION,
+    CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+    CURSOR_ORDINARY_HOOK_MAPPING_VERSION,
+    CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+    content_capture_profile_matches_source,
+)
 from yoetz.domain.values import (
     JsonObject,
     Timestamp,
@@ -77,8 +88,16 @@ from yoetz.domain.values import (
 from yoetz.domain.values import (
     JsonValue as DomainJsonValue,
 )
-from yoetz.ports.integrations import YOETZ_WORKFLOW_TOOL_NAMES
-from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
+from yoetz.ports.integrations import (
+    YOETZ_WORKFLOW_TOOL_NAMES,
+    observation_pairing_contract,
+)
+from yoetz.protocol.canonical import (
+    JsonValue,
+    canonical_digest,
+    canonical_encode,
+    strict_json_parse,
+)
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode
 
 if TYPE_CHECKING:
@@ -105,6 +124,7 @@ SUPPORTED_HOOK_EVENTS: Final = frozenset(
         "PreToolUse",
         "PostToolUse",
         "PermissionRequest",
+        "PermissionDecision",
         "PreCompact",
         "PostCompact",
         "SubagentStart",
@@ -212,6 +232,9 @@ _STRUCTURAL_ALLOW: Final = frozenset(
         "cursor_version",
         "model_id",
         "model_effort",
+        "pairing_mode",
+        "correlation_kind",
+        "generation_id",
     }
 )
 _TOKEN_CHARS: Final = frozenset(
@@ -458,12 +481,15 @@ def _bind_cursor_session_alias(conversation: str, session: str, *, _state: Path 
         return
 
 
-def _cursor_capability_profile_id(cursor_version: object) -> str:
-    """Map an exact Cursor version to its reviewed profile, else stay untested.
+def _cursor_capability_profile_id(cursor_version: object) -> str | None:
+    """Map an exact Cursor version to its reviewed profile.
 
     Hook payloads may report a version from any Cursor surface. Only the IDE
     profile owns the reviewed native hook set; the recognized CLI profile has
-    no hook cell and therefore remains ``untested`` at hook ingress. Importing
+    no hook cell and therefore remains ``untested`` at hook ingress. An omitted
+    version returns ``None`` so the closed pairing contract can apply the
+    installed legacy carrier fallback; a supplied but unknown version remains
+    explicitly untested and uses the conservative paired contract. Importing
     the adapter here would pull in the full plugin/rendering stack, so keep the
     fail-closed table local and never infer support for a neighboring surface
     or version.
@@ -471,7 +497,7 @@ def _cursor_capability_profile_id(cursor_version: object) -> str:
 
     version = _token_or_none(cursor_version)
     if version is None:
-        return _CURSOR_UNTESTED_PROFILE_ID
+        return None
     return _CURSOR_VERSION_TO_PROFILE.get(version, _CURSOR_UNTESTED_PROFILE_ID)
 
 
@@ -571,6 +597,9 @@ def _extract_structural(payload: Mapping[str, JsonValue], event_name: str) -> Js
         "cursor_version",
         "model_id",
         "model_effort",
+        "pairing_mode",
+        "correlation_kind",
+        "generation_id",
     ):
         token = _token_or_none(payload.get(key))
         if token is not None and key in _STRUCTURAL_ALLOW:
@@ -621,6 +650,49 @@ def _extract_structural(payload: Mapping[str, JsonValue], event_name: str) -> Js
     if decision is not None and "permission_decision" not in fields:
         fields["permission_decision"] = decision
     return JsonObject(fields)
+
+
+def _pairing_contract(
+    payload: Mapping[str, JsonValue], source: ObservationSource | None = None
+) -> tuple[str, str]:
+    """Resolve pairing from the closed host/profile contract.
+
+    The marker is an observation of the selected profile, not an authority that
+    raw hook input can rewrite.  In particular, Codex remains paired even if a
+    caller supplies a forged ``post_only`` marker.  A future paired Claude or
+    Cursor profile must be registered in the exact profile table.
+    """
+
+    if source is not None:
+        harness = (
+            "claude"
+            if source is ObservationSource.CLAUDE_HOOK
+            else "cursor"
+            if source is ObservationSource.CURSOR_HOOK
+            else "codex"
+        )
+        profile_id = payload.get("capability_profile_id")
+        return observation_pairing_contract(
+            harness, profile_id if isinstance(profile_id, str) else None
+        )
+    return "paired", "tool_call_id"
+
+
+def _pairing_correlation(payload: Mapping[str, JsonValue], correlation_kind: str) -> str | None:
+    """Return a real tool identity, never a host generation identity."""
+
+    if correlation_kind == "none":
+        return None
+    direct = _token_or_none(payload.get("tool_use_id")) or _token_or_none(
+        payload.get("tool_call_id")
+    )
+    if direct is not None:
+        return direct
+    if correlation_kind == "generation_id":
+        return None
+    return _token_or_none(payload.get("correlation_id")) or _token_or_none(
+        payload.get("parent_tool_call_id")
+    )
 
 
 def _source_identity(
@@ -792,7 +864,11 @@ def _visible_content_chunks(
         add(
             ObservationContentKind.TOOL_OUTPUT,
             "tool-output",
-            payload.get("tool_response") or payload.get("tool_output") or payload.get("output"),
+            payload.get("tool_response")
+            or payload.get("tool_output")
+            or payload.get("output")
+            or payload.get("result")
+            or payload.get("result_json"),
         )
     elif event_name not in SUPPORTED_HOOK_EVENTS:
         # Unknown host events are retained only when the host marks their
@@ -948,6 +1024,7 @@ async def _try_service_ingest(
     envelope: ObservationEnvelope,
     *,
     content_chunks: tuple[ObservationContentChunk, ...] = (),
+    content_capture_profile: str | None = None,
     deadline_ms: int,
 ) -> ObservationIngestResult:
     """Attempt one typed ingest through an already-open preflight client."""
@@ -960,6 +1037,7 @@ async def _try_service_ingest(
                 codex_session_id=codex_session_id,
                 envelope=envelope,
                 content_chunks=content_chunks,
+                content_capture_profile=content_capture_profile,
             )
         )
         raw = await client.observation_ingest(body, deadline_ms=deadline_ms)
@@ -996,11 +1074,13 @@ async def _drain_outbox(
     workspace_commitment: str,
     codex_session_id: str,
     content_by_source_identity: Mapping[str, tuple[ObservationContentChunk, ...]] | None = None,
+    content_capture_profile: str | None = None,
     connect: HookDrainConnector | None = None,
     event_name: str = "drain",
     _state: Path | None = None,
     budget_seconds: float = _HOOK_DRAIN_BUDGET_SECONDS,
     monotonic: Callable[[], float] = time.monotonic,
+    session_lock_owned: bool = False,
 ) -> None:
     """Drain the workspace outbox under a nonblocking per-workspace lease.
 
@@ -1015,17 +1095,28 @@ async def _drain_outbox(
 
     with store.drain_lease(workspace_commitment) as owned:
         if not owned:
+            if content_by_source_identity:
+                # Native content chunks are intentionally absent from the
+                # durable outbox. A concurrent drain therefore cannot replay
+                # this hook's bytes; make that loss visible even though the
+                # structural row continues through the other owner.
+                store.note_coverage_gap(
+                    workspace_commitment,
+                    ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                )
             return
         await _drain_outbox_leased(
             store,
             workspace_commitment=workspace_commitment,
             codex_session_id=codex_session_id,
             content_by_source_identity=content_by_source_identity,
+            content_capture_profile=content_capture_profile,
             connect=connect,
             event_name=event_name,
             _state=_state,
             budget_seconds=budget_seconds,
             monotonic=monotonic,
+            session_lock_owned=session_lock_owned,
         )
 
 
@@ -1035,11 +1126,13 @@ async def _drain_outbox_leased(
     workspace_commitment: str,
     codex_session_id: str,
     content_by_source_identity: Mapping[str, tuple[ObservationContentChunk, ...]] | None = None,
+    content_capture_profile: str | None = None,
     connect: HookDrainConnector | None = None,
     event_name: str = "drain",
     _state: Path | None = None,
     budget_seconds: float = _HOOK_DRAIN_BUDGET_SECONDS,
     monotonic: Callable[[], float] = time.monotonic,
+    session_lock_owned: bool = False,
 ) -> None:
     """Drain all mapped-session work fairly; ack only after service commit.
 
@@ -1061,6 +1154,11 @@ async def _drain_outbox_leased(
 
     all_pending = store.list_pending_outbox_rows(workspace_commitment)
     if not all_pending:
+        if content_by_source_identity:
+            store.note_coverage_gap(
+                workspace_commitment,
+                ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+            )
         return
 
     connector = cast(HookDrainConnector, _connect_service()) if connect is None else connect
@@ -1071,6 +1169,11 @@ async def _drain_outbox_leased(
         )
     except Exception:
         record_hook_diagnostic("drain_preflight_failed", event_name, _state=_state)
+        if content_by_source_identity:
+            store.note_coverage_gap(
+                workspace_commitment,
+                ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+            )
         return
     # The budget clock starts after the connect: the preflight bounds connect
     # time on its own, and charging a slow-but-successful connect against the
@@ -1114,6 +1217,9 @@ async def _drain_outbox_leased(
     # Re-attempting every row of a permanently-undeliverable backlog burned
     # the whole drain budget per hook forever — the recurrence tax of #211.
     skipped_sessions: set[str] = set()
+    bound_sessions, pending_lifecycle_sessions = store.lifecycle_reconciliation_snapshot(
+        workspace_commitment
+    )
     consecutive_unavailable = 0
     # The hook owns a bounded slice; the service sweeper owns bulk delivery.
     # Hitting the slice after moving backlog (acknowledged or quarantined rows)
@@ -1123,6 +1229,19 @@ async def _drain_outbox_leased(
     try:
         for row in pending:
             if row.codex_session_id in skipped_sessions:
+                continue
+            # A previous hook may have captured this row while its workspace
+            # membership reservation was busy. Converge the raw session route
+            # before any service delivery; contention leaves the row untouched.
+            if (
+                row.codex_session_id not in bound_sessions
+                or row.codex_session_id in pending_lifecycle_sessions
+            ) and not store.reconcile_outbox_session_lifecycle(
+                workspace_commitment,
+                row,
+                session_lock_owned=session_lock_owned and row.codex_session_id == codex_session_id,
+            ):
+                skipped_sessions.add(row.codex_session_id)
                 continue
             remaining = budget_seconds - (monotonic() - started)
             if remaining <= 0:
@@ -1141,11 +1260,17 @@ async def _drain_outbox_leased(
                         row.codex_session_id,
                         row.envelope,
                         content_chunks=chunks,
+                        content_capture_profile=content_capture_profile,
                         deadline_ms=max(1, int(remaining * 1_000)),
                     ),
                     timeout=remaining,
                 )
             except TimeoutError:
+                if chunks:
+                    store.note_coverage_gap(
+                        workspace_commitment,
+                        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                    )
                 if progressed == 0:
                     record_hook_diagnostic("drain_budget_exhausted", event_name, _state=_state)
                 break
@@ -1178,6 +1303,11 @@ async def _drain_outbox_leased(
                         store.acknowledge_outbox_row(workspace_commitment, attempted)
                         progressed += 1
             if attempted is None:
+                if chunks:
+                    store.note_coverage_gap(
+                        workspace_commitment,
+                        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                    )
                 continue
             if decision.reason is not None and not expected_backpressure:
                 record_hook_diagnostic(decision.reason, event_name, _state=_state)
@@ -1433,44 +1563,247 @@ def _host_session_matches(
     return not session_id.startswith((_CLAUDE_SESSION_PREFIX, _CURSOR_SESSION_PREFIX))
 
 
-def _ended_workspace_recovery_mapping(
+# Ended host-session bindings retained per workspace beyond the ones a recovery
+# attach consumed. Consumed bindings are pruned at consumption; this cap bounds
+# the never-consumed remainder (sessions that never mapped, sibling tasks in one
+# workspace) so neither the SessionStart scan nor the state file grows with the
+# workspace's whole history (#549). Ranked by mapping recency so the selectors
+# recovery would pick survive; ended sessions without a mapping go first.
+_MAX_ENDED_SESSION_BINDINGS: Final = 32
+
+
+@dataclass(frozen=True, slots=True)
+class _RecoveryCandidate:
+    """One eligible predecessor mapping plus the recency used to select it."""
+
+    mapping: LifecycleMapping
+    modified_ns: int
+
+
+@dataclass(frozen=True, slots=True)
+class _RecoveryScan:
+    """One pass's ended-session recovery scan, computed once and revalidated (#549)."""
+
+    # The selected predecessor mapping, or None when recovery is not admissible.
+    mapping: LifecycleMapping | None
+    # (host session id, ended) for every binding in the workspace at scan time.
+    lifecycles: tuple[tuple[str, bool], ...]
+    # Every ended same-host session considered by the scan, including one without
+    # a mapping yet.  Holding these session locks keeps a mapping from appearing
+    # or changing while the recovery request is in flight.
+    eligible_session_ids: tuple[str, ...] = ()
+    # Valid, unambiguous mappings among ``eligible_session_ids``.  Recency is
+    # part of the snapshot because a same-byte rewrite can change the selector.
+    candidates: tuple[_RecoveryCandidate, ...] = ()
+
+
+def _load_recovery_candidate(session_id: str, *, _state: Path | None) -> _RecoveryCandidate | None:
+    """Read one valid mapping and the file recency used for recovery ranking."""
+
+    mapping = load_mapping(session_id, _state=_state)
+    if mapping is None:
+        return None
+    try:
+        path = mapping_path(session_id, _state=_state)
+        if path.is_symlink():
+            return None
+        return _RecoveryCandidate(mapping, path.stat().st_mtime_ns)
+    except OSError, ProtocolValueError:
+        return None
+
+
+def _latest_mapping(
+    candidates: tuple[_RecoveryCandidate, ...],
+) -> LifecycleMapping | None:
+    """Rank already-loaded mappings by the file recency captured in one pass."""
+
+    latest: tuple[int, bytes, LifecycleMapping] | None = None
+    for candidate in candidates:
+        ranked = (
+            candidate.modified_ns,
+            candidate.mapping.codex_session_id.encode(),
+            candidate.mapping,
+        )
+        if latest is None or ranked[:2] > latest[:2]:
+            latest = ranked
+    return None if latest is None else latest[2]
+
+
+def _scan_ended_workspace_recovery(
     store: LocalObservationStore,
     workspace_commitment: str,
     codex_session_id: str,
     *,
     harness_id: Literal["claude", "codex", "cursor"],
     _state: Path | None,
-) -> LifecycleMapping | None:
-    """Return the latest same-host selector when every other bound session has ended."""
+    lifecycles: tuple[tuple[str, bool], ...] | None = None,
+) -> _RecoveryScan:
+    """Select the latest same-host predecessor when every other bound session has ended.
 
-    unambiguous = frozenset(store.unambiguous_codex_sessions_for_workspace(workspace_commitment))
-    bound_sessions = store.codex_sessions_for_workspace(workspace_commitment)
-    if any(
-        session_id != codex_session_id
-        and not store.codex_session_ended(workspace_commitment, session_id)
-        for session_id in bound_sessions
-    ):
-        return None
+    One state read yields every binding's ended flag, so the live-session early
+    return costs no per-binding store call; the cross-workspace ambiguity probe
+    and the mapping reads run only once some ended same-host candidate exists,
+    and each candidate's mapping file is read once per pass (#549).
+    """
 
-    ended = tuple(
+    if lifecycles is None:
+        lifecycles = store.codex_session_lifecycles_for_workspace(workspace_commitment)
+    if any(session_id != codex_session_id and not ended for session_id, ended in lifecycles):
+        return _RecoveryScan(None, lifecycles)
+    eligible = tuple(
         session_id
-        for session_id in bound_sessions
+        for session_id, is_ended in lifecycles
         if session_id != codex_session_id
-        and store.codex_session_ended(workspace_commitment, session_id)
-        and session_id in unambiguous
+        and is_ended
         and _host_session_matches(session_id, harness_id)
     )
-    valid = tuple(
-        mapping
-        for session_id in ended
-        if (mapping := load_mapping(session_id, _state=_state)) is not None
+    if not eligible:
+        return _RecoveryScan(None, lifecycles)
+    unambiguous = frozenset(store.unambiguous_codex_sessions_for_workspace(workspace_commitment))
+    candidates = tuple(
+        candidate
+        for session_id in eligible
+        if session_id in unambiguous
+        and (candidate := _load_recovery_candidate(session_id, _state=_state)) is not None
     )
-    if len({mapping.yoetz_task_id for mapping in valid}) != 1:
-        return None
-    return load_latest_mapping(
-        tuple(mapping.codex_session_id for mapping in valid),
-        _state=_state,
+    if len({candidate.mapping.yoetz_task_id for candidate in candidates}) != 1:
+        return _RecoveryScan(None, lifecycles, eligible, candidates)
+    return _RecoveryScan(_latest_mapping(candidates), lifecycles, eligible, candidates)
+
+
+@contextlib.contextmanager
+def _acquire_recovery_session_locks(
+    session_ids: tuple[str, ...],
+    *,
+    held_codex_session_id: str,
+    _state: Path | None,
+) -> Generator[bool]:
+    """Hold every scanned predecessor lock through validation and attach.
+
+    Session locks are nonblocking by contract.  If another host event owns one
+    of the candidate locks, recovery yields ``False`` and the caller performs
+    the ordinary service request.  Acquiring in sorted order avoids a lock
+    hierarchy cycle between concurrent recovery attempts.
+    """
+
+    with contextlib.ExitStack() as stack:
+        for session_id in sorted(set(session_ids), key=str.encode):
+            if session_id == held_codex_session_id:
+                continue
+            if not stack.enter_context(acquire_session_lock(session_id, _state=_state)):
+                yield False
+                return
+        yield True
+
+
+@contextlib.contextmanager
+def _acquire_observe_membership_lock(
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    codex_session_id: str,
+    *,
+    _state: Path | None,
+    force: bool = False,
+    session_lock_owned: bool = False,
+) -> Generator[bool]:
+    """Reserve a workspace before creating a new host-session membership.
+
+    Existing membership is idempotent and need not contend with recovery except
+    for a forced SessionStart. A new membership takes the workspace reservation
+    first, then its session lock, matching recovery's lock order. Both locks are
+    nonblocking so a busy hook can still retain an explicitly targeted
+    observation envelope. ``session_lock_owned`` is used only by the clear-route
+    caller, which already owns the session lock but must still reserve the
+    workspace before changing membership state.
+    """
+
+    existing = codex_session_id in store.codex_sessions_for_workspace(workspace_commitment)
+    if not force and existing:
+        yield True
+        return
+    with acquire_workspace_recovery_lock(workspace_commitment, _state=_state) as workspace_owned:
+        if not workspace_owned:
+            yield False
+            return
+        if session_lock_owned:
+            # The clear-route caller already owns the session lock. It still
+            # needs the workspace reservation so recovery cannot race the
+            # generation/membership mutation.
+            yield True
+            return
+        with acquire_session_lock(codex_session_id, _state=_state) as session_owned:
+            yield session_owned
+
+
+def _recovery_scan_still_valid(
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    scan: _RecoveryScan,
+    *,
+    _state: Path | None,
+) -> bool:
+    """Re-check all scan inputs while every eligible predecessor is locked (#605).
+
+    The caller holds the selected predecessor and every other eligible session
+    lock through this check and the recovery RPC.  Re-reading the complete
+    bounded candidate set catches cross-workspace ownership changes, newly
+    materialized mappings, changed task identities, and recency changes that
+    could otherwise leave a stale non-selected candidate outside validation.
+    """
+
+    if scan.mapping is None:
+        return False
+    if store.codex_session_lifecycles_for_workspace(workspace_commitment) != scan.lifecycles:
+        return False
+    unambiguous = frozenset(store.unambiguous_codex_sessions_for_workspace(workspace_commitment))
+    current = tuple(
+        candidate
+        for session_id in scan.eligible_session_ids
+        if session_id in unambiguous
+        and (candidate := _load_recovery_candidate(session_id, _state=_state)) is not None
     )
+    if current != scan.candidates:
+        return False
+    return _latest_mapping(current) == scan.mapping
+
+
+def _prune_surplus_ended_session_bindings(
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    lifecycles: tuple[tuple[str, bool], ...],
+    codex_session_id: str,
+    *,
+    _state: Path | None,
+) -> tuple[str, ...]:
+    """Keep the newest ended bindings up to the cap; ask the store to prune the rest.
+
+    Only the surplus is ranked, and ranking is one ``stat`` per ended binding:
+    sessions with no mapping file first (they cannot serve recovery), then by
+    mapping modification time, oldest first. The store enforces the
+    ended-and-drained rule, so a surplus binding with pending or quarantined rows
+    survives and is offered again on a later pass (#549).
+    """
+
+    ended = [
+        session_id
+        for session_id, is_ended in lifecycles
+        if is_ended and session_id != codex_session_id
+    ]
+    surplus = len(ended) - _MAX_ENDED_SESSION_BINDINGS
+    if surplus <= 0:
+        return ()
+
+    def _rank(session_id: str) -> tuple[int, int, bytes]:
+        try:
+            path = mapping_path(session_id, _state=_state)
+            if path.is_symlink():
+                return (0, 0, session_id.encode())
+            return (1, path.stat().st_mtime_ns, session_id.encode())
+        except OSError, ProtocolValueError:
+            return (0, 0, session_id.encode())
+
+    ended.sort(key=_rank)
+    return store.prune_codex_session_bindings(workspace_commitment, ended[:surplus])
 
 
 def _rewrite_one_ended_predecessor_mapping(
@@ -1480,19 +1813,24 @@ def _rewrite_one_ended_predecessor_mapping(
     successor: LifecycleMapping,
     *,
     _state: Path | None,
-) -> None:
-    """Rewrite one ended predecessor if it still maps the recovered task."""
+) -> bool:
+    """Rewrite one ended predecessor if it still maps the recovered task.
+
+    Returns True when the predecessor now carries the successor route, whether it
+    was rewritten here or was already aligned: those are the bindings the
+    recovery consumed (#549).
+    """
 
     if not store.codex_session_ended(workspace_commitment, session_id):
-        return
+        return False
     predecessor = load_mapping(session_id, _state=_state)
     if predecessor is None or predecessor.yoetz_task_id != successor.yoetz_task_id:
-        return
+        return False
     if (
         predecessor.yoetz_session_id == successor.yoetz_session_id
         and predecessor.yoetz_writer_id == successor.yoetz_writer_id
     ):
-        return
+        return True
     store_mapping(
         mapping_from_start_ids(
             codex_session_id=predecessor.codex_session_id,
@@ -1503,6 +1841,7 @@ def _rewrite_one_ended_predecessor_mapping(
         ),
         _state=_state,
     )
+    return True
 
 
 def _rewrite_ended_predecessor_mappings(
@@ -1513,30 +1852,61 @@ def _rewrite_ended_predecessor_mappings(
     harness_id: Literal["claude", "codex", "cursor"],
     _state: Path | None,
     held_codex_session_id: str | None = None,
-) -> None:
-    """Point ended same-host mappings at the rotated successor route (#577)."""
+    held_codex_session_ids: frozenset[str] = frozenset(),
+    authorized_codex_session_ids: frozenset[str] | None = None,
+    lifecycles: tuple[tuple[str, bool], ...] | None = None,
+) -> tuple[str, ...]:
+    """Point ended same-host mappings at the rotated successor route (#577).
 
-    for session_id in store.codex_sessions_for_workspace(workspace_commitment):
-        if session_id == successor.codex_session_id:
-            continue
-        if not store.codex_session_ended(workspace_commitment, session_id):
+    Returns the predecessors that now carry the successor route. ``lifecycles``
+    is the pass's scan snapshot when the caller has one; the ended flag is still
+    re-read under each predecessor's lock before its mapping is touched. When
+    the caller supplies ``authorized_codex_session_ids``, only that scan-proven
+    unambiguous set can be rewritten. Direct callers compute the same set here.
+    """
+
+    if lifecycles is None:
+        lifecycles = store.codex_session_lifecycles_for_workspace(workspace_commitment)
+    # A supplied set is a scan snapshot protected by the workspace reservation
+    # in the production recovery path. Direct callers have no such reservation,
+    # so they recheck each candidate while holding its per-session lock below.
+    authorized = authorized_codex_session_ids
+    held = set(held_codex_session_ids)
+    if held_codex_session_id is not None:
+        held.add(held_codex_session_id)
+    consumed: list[str] = []
+    for session_id, ended in lifecycles:
+        if session_id == successor.codex_session_id or not ended:
             continue
         if not _host_session_matches(session_id, harness_id):
             continue
+        if authorized is not None and session_id not in authorized:
+            continue
         try:
-            if session_id == held_codex_session_id:
-                _rewrite_one_ended_predecessor_mapping(
-                    store, workspace_commitment, session_id, successor, _state=_state
-                )
-                continue
-            with acquire_session_lock(session_id, _state=_state) as owned:
-                if not owned:
+            if session_id in held:
+                if authorized is None and session_id not in frozenset(
+                    store.unambiguous_codex_sessions_for_workspace(workspace_commitment)
+                ):
                     continue
-                _rewrite_one_ended_predecessor_mapping(
+                aligned = _rewrite_one_ended_predecessor_mapping(
                     store, workspace_commitment, session_id, successor, _state=_state
                 )
+            else:
+                with acquire_session_lock(session_id, _state=_state) as owned:
+                    if not owned:
+                        continue
+                    if authorized is None and session_id not in frozenset(
+                        store.unambiguous_codex_sessions_for_workspace(workspace_commitment)
+                    ):
+                        continue
+                    aligned = _rewrite_one_ended_predecessor_mapping(
+                        store, workspace_commitment, session_id, successor, _state=_state
+                    )
         except Exception:
             continue
+        if aligned:
+            consumed.append(session_id)
+    return tuple(consumed)
 
 
 async def _try_workspace_auto_start(
@@ -1548,54 +1918,93 @@ async def _try_workspace_auto_start(
     harness_id: Literal["claude", "codex", "cursor"],
     _state: Path | None,
     connect: HookStartConnector | None,
+    prune_surplus: bool = False,
 ) -> AutoAttachOutcome:
-    """Auto-start, holding an ended predecessor stable through any recovery attach."""
+    """Auto-start, holding every eligible predecessor stable through recovery.
 
-    recovery = _ended_workspace_recovery_mapping(
-        store,
-        workspace_commitment,
-        codex_session_id,
-        harness_id=harness_id,
-        _state=_state,
-    )
-    if recovery is None:
-        return await _try_auto_start(
-            codex_session_id,
-            _state=_state,
-            harness_id=harness_id,
-            workspace_locator=workspace_locator,
-            connect=connect,
-        )
+    The recovery scan runs once per call; the bounded re-check under the selected
+    and eligible-predecessor locks compares the complete candidate snapshot before
+    the RPC, so the retry events' one-second budget wraps a bounded amount of
+    synchronous local work (#549/#605). ``prune_surplus`` is the SessionStart
+    pass's retention step; retry events skip it.
+    """
 
-    with acquire_session_lock(recovery.codex_session_id, _state=_state) as predecessor_owned:
-        if predecessor_owned:
-            refreshed = _ended_workspace_recovery_mapping(
-                store,
-                workspace_commitment,
-                codex_session_id,
-                harness_id=harness_id,
-                _state=_state,
-            )
-            if refreshed is not None and refreshed == recovery:
-                outcome = await _try_auto_start(
-                    codex_session_id,
-                    _state=_state,
-                    harness_id=harness_id,
-                    workspace_locator=workspace_locator,
-                    recovery_mapping=refreshed,
-                    connect=connect,
+    with acquire_workspace_recovery_lock(workspace_commitment, _state=_state) as recovery_owned:
+        if not recovery_owned:
+            # Membership and recovery share this reservation. A contended
+            # SessionStart must wait for the owner; issuing an ordinary start
+            # here would attach a second task during recovery.
+            return AutoAttachOutcome(None, "auto_attach_recovery_busy")
+        lifecycles = store.codex_session_lifecycles_for_workspace(workspace_commitment)
+        if prune_surplus:
+            pruned: tuple[str, ...] = ()
+            with contextlib.suppress(Exception):
+                pruned = _prune_surplus_ended_session_bindings(
+                    store, workspace_commitment, lifecycles, codex_session_id, _state=_state
                 )
-                if outcome.mapping is not None and outcome.recovered:
-                    with contextlib.suppress(Exception):
-                        _rewrite_ended_predecessor_mappings(
-                            store,
-                            workspace_commitment,
-                            outcome.mapping,
-                            harness_id=harness_id,
-                            _state=_state,
-                            held_codex_session_id=refreshed.codex_session_id,
-                        )
-                return outcome
+            if pruned:
+                lifecycles = tuple(entry for entry in lifecycles if entry[0] not in pruned)
+        scan = _scan_ended_workspace_recovery(
+            store,
+            workspace_commitment,
+            codex_session_id,
+            harness_id=harness_id,
+            _state=_state,
+            lifecycles=lifecycles,
+        )
+        recovery = scan.mapping
+        if recovery is None:
+            # Release the workspace reservation before the ordinary RPC.
+            # A return expression containing ``await`` would evaluate while
+            # this context is still held.
+            pass
+        else:
+            # Recovery locks the selected predecessor first for compatibility
+            # with its existing lifecycle fence, then takes every other
+            # candidate in stable order.
+            with acquire_session_lock(
+                recovery.codex_session_id, _state=_state
+            ) as predecessor_owned:
+                if predecessor_owned:
+                    with _acquire_recovery_session_locks(
+                        scan.eligible_session_ids,
+                        held_codex_session_id=recovery.codex_session_id,
+                        _state=_state,
+                    ) as candidates_owned:
+                        if candidates_owned and _recovery_scan_still_valid(
+                            store, workspace_commitment, scan, _state=_state
+                        ):
+                            outcome = await _try_auto_start(
+                                codex_session_id,
+                                _state=_state,
+                                harness_id=harness_id,
+                                workspace_locator=workspace_locator,
+                                recovery_mapping=recovery,
+                                connect=connect,
+                            )
+                            if outcome.mapping is not None and outcome.recovered:
+                                with contextlib.suppress(Exception):
+                                    consumed = _rewrite_ended_predecessor_mappings(
+                                        store,
+                                        workspace_commitment,
+                                        outcome.mapping,
+                                        harness_id=harness_id,
+                                        _state=_state,
+                                        held_codex_session_ids=frozenset(scan.eligible_session_ids),
+                                        authorized_codex_session_ids=frozenset(
+                                            candidate.mapping.codex_session_id
+                                            for candidate in scan.candidates
+                                        ),
+                                        lifecycles=scan.lifecycles,
+                                    )
+                                    # Recovery consumed these predecessors: the live successor
+                                    # binding now carries their task, and their mapping files stay
+                                    # in the lifecycle store to route any rows still pending. The
+                                    # store keeps every binding whose rows are not yet drained.
+                                    store.prune_codex_session_bindings(
+                                        workspace_commitment, consumed
+                                    )
+                            return outcome
 
     # A resumed predecessor or changed local state invalidates the capability.
     # Still run the ordinary request so the hook records the service's typed
@@ -1690,6 +2099,8 @@ def handle_observe(
     source: ObservationSource = ObservationSource.CODEX_HOOK,
     _output_event_name: str | None = None,
     _session_lock_owned: bool = False,
+    _content_capture_profile: str | None = None,
+    _content_payload: Mapping[str, JsonValue] | None = None,
 ) -> int:
     """Bounded observation ingress for Codex lifecycle hooks. Always exits 0.
 
@@ -1770,12 +2181,34 @@ def handle_observe(
             _stdout_json({}, stdout)
             return 0
         resolved_event = raw_event
+        # ``clear`` is a host lifecycle command, not an observation consent
+        # decision. Apply or queue its mapping operation before the runtime
+        # gate and workspace consent checks so a busy/disabled hook cannot
+        # leave the integration route stale.
+        if resolved_event == "SessionStart" and payload.get("source") == "clear":
+            try:
+                clear_session_id = validate_codex_session_id(payload.get("session_id"))
+                clear_lock = (
+                    contextlib.nullcontext(True)
+                    if _session_lock_owned
+                    else acquire_session_lock(clear_session_id, _state=_state)
+                )
+                with clear_lock as clear_owned:
+                    if clear_owned:
+                        with contextlib.suppress(Exception):
+                            apply_pending_mapping(clear_session_id, _state=_state)
+                        clear_mapping(clear_session_id, _state=_state)
+                    else:
+                        queue_mapping_clear(clear_session_id, _state=_state)
+            except Exception:
+                pass
+        capture_authority_known = True
         try:
             capture_enabled = store.runtime_enabled()
         except TimeoutError:
-            # Store-lock contention says nothing about the gate itself.
-            # Fall back to the missing-marker default (enabled) instead of
-            # discarding the event; consent still gates every ingest below.
+            # Retain structural activity on contention, but unknown runtime
+            # authority must never permit extracting or forwarding plaintext.
+            capture_authority_known = False
             _stderr_line("hook_observe_degraded: runtime_gate_contended")
             record_hook_diagnostic("runtime_gate_contended", resolved_event, _state=_state)
             capture_enabled = True
@@ -1872,52 +2305,106 @@ def handle_observe(
         # service RPC so an outbox acknowledgement can never become durable
         # ahead of the ingest it acknowledges, and it never spans a network
         # wait: it holds the interprocess store lock for its duration.
-        with store.batched(workspace_commitment):
-            if resolved_event == "SessionStart":
-                # A recovery attach holds the predecessor's lifecycle lock. Gate
-                # generation restart on that same lock so a resumed predecessor
-                # cannot clear its ended marker between selection and attach.
-                if _session_lock_owned:
-                    session_commitment = store.bind_codex_session(
-                        workspace_commitment, codex_session_id
-                    )
-                    source_generation = store.begin_session_generation(
-                        workspace_commitment, session_commitment
-                    )
-                else:
-                    with acquire_session_lock(codex_session_id, _state=_state) as generation_owned:
-                        if not generation_owned:
-                            _stdout_json({}, stdout)
-                            return 0
-                        session_commitment = store.bind_codex_session(
-                            workspace_commitment, codex_session_id
-                        )
-                        source_generation = store.begin_session_generation(
-                            workspace_commitment, session_commitment
-                        )
-            else:
+        #
+        # Session membership creation shares the lifecycle lock with recovery.
+        # An already-known binding is idempotent and may continue while another
+        # pass owns that session's lock; if a new binding loses the nonblocking
+        # lock, keep the event as an observation envelope and defer membership
+        # creation rather than silently dropping a non-SessionStart hook.
+        known_session_binding = codex_session_id in store.codex_sessions_for_workspace(
+            workspace_commitment
+        )
+        binding_lock = _acquire_observe_membership_lock(
+            store,
+            workspace_commitment,
+            codex_session_id,
+            _state=_state,
+            force=resolved_event in {"SessionStart", "SessionEnd"},
+            session_lock_owned=_session_lock_owned,
+        )
+        with contextlib.ExitStack() as local_pass:
+            binding_owned = local_pass.enter_context(binding_lock)
+            local_pass.enter_context(store.batched(workspace_commitment))
+            if binding_owned:
                 session_commitment = store.bind_codex_session(
                     workspace_commitment, codex_session_id
                 )
-                source_generation = store.current_session_generation(
+            else:
+                # Another handler is changing membership.  Use the stable
+                # session commitment for local capture and let a later hook
+                # bind it once the lifecycle lock is available.
+                session_commitment = store.session_commitment(codex_session_id)
+            if resolved_event == "SessionStart" and binding_owned:
+                # A recovery attach holds the predecessor's lifecycle lock.
+                # Gate generation restart on that same lock so a resumed
+                # predecessor cannot clear its ended marker between
+                # selection and attach.
+                source_generation = store.begin_session_generation(
                     workspace_commitment, session_commitment
                 )
+            else:
+                source_generation = store.effective_session_generation(
+                    workspace_commitment, codex_session_id, session_commitment
+                )
+                lifecycle_start_applied = False
+                if resolved_event in {"SessionStart", "SessionEnd"} and not binding_owned:
+                    pending = store.list_pending_session_lifecycles(
+                        workspace_commitment, codex_session_id
+                    )
+                    latest = pending[-1] if pending else None
+                    clear_requested = payload.get("source") == "clear"
+                    if resolved_event == "SessionStart":
+                        target_generation = source_generation
+                        if latest is not None and latest.event_kind == "SessionEnd":
+                            target_generation += 1
+                        elif (
+                            latest is not None
+                            and latest.event_kind == "SessionStart"
+                            and latest.clear_mapping == clear_requested
+                        ):
+                            target_generation = latest.target_generation
+                        elif clear_requested and known_session_binding:
+                            target_generation += 1
+                        elif known_session_binding and store.codex_session_ended(
+                            workspace_commitment, codex_session_id
+                        ):
+                            # The public generation accessor presents legacy
+                            # pre-counter state as generation one. A deferred
+                            # first resume must use the persisted zero so its
+                            # eventual begin transition creates generation one
+                            # rather than manufacturing generation two.
+                            persisted_generation = store.persisted_session_generation(
+                                workspace_commitment, session_commitment
+                            )
+                            target_generation = (
+                                persisted_generation + 1 if persisted_generation > 0 else 1
+                            )
+
+                        if not lifecycle_start_applied:
+                            source_generation = target_generation
+                            store.record_pending_session_lifecycle(
+                                workspace_commitment,
+                                codex_session_id,
+                                session_commitment,
+                                "SessionStart",
+                                target_generation,
+                                clear_mapping=clear_requested,
+                            )
+                    else:
+                        store.record_pending_session_lifecycle(
+                            workspace_commitment,
+                            codex_session_id,
+                            session_commitment,
+                            "SessionEnd",
+                            source_generation,
+                        )
             gap_codes: list[str] = []
 
-            # Prefer the host's canonical tool-use identity, while retaining
-            # compatibility with earlier tool-call and correlation aliases.
-            correlation = (
-                _token_or_none(payload.get("tool_use_id"))
-                or _token_or_none(payload.get("tool_call_id"))
-                or _token_or_none(payload.get("correlation_id"))
-            )
-            if correlation is not None and _is_pre_event(resolved_event):
-                store.note_open_pre(workspace_commitment, correlation, resolved_event)
-            elif correlation is not None and _is_post_event(resolved_event):
-                if not store.has_open_pre(workspace_commitment, correlation):
-                    gap_codes.append(ObservationGapCode.UNPAIRED_EVENT.value)
-                else:
-                    store.consume_open_pre(workspace_commitment, correlation)
+            # Pairing is selected by the host/profile contract.  Post-only
+            # profiles never consult the pre-event map; a generation id is a
+            # conversation/turn identity and is never accepted as a tool id.
+            pairing_mode, correlation_kind = _pairing_contract(payload, source)
+            correlation = _pairing_correlation(payload, correlation_kind)
 
             if resolved_event not in SUPPORTED_HOOK_EVENTS:
                 gap_codes.append(ObservationGapCode.UNSUPPORTED_EVENT.value)
@@ -1942,15 +2429,43 @@ def handle_observe(
                 gap_codes=tuple(sorted(set(gap_codes), key=str.encode)),
                 source=source,
             )
-            # Cursor publishes structural observation only. Its hook payloads
-            # contain prompts, responses, transcript paths, file contents, and
-            # MCP arguments/results that must never enter Yoetz content capture.
-            if source in {ObservationSource.CLAUDE_HOOK, ObservationSource.CURSOR_HOOK}:
+            # Native host content requires both the explicit profile argument
+            # emitted by the rendered artifact and the matching user consent
+            # arm.  Old/native structural hooks therefore remain contentless;
+            # Codex's historical session-stream path keeps its prior behavior.
+            native_content_source = source in {
+                ObservationSource.CLAUDE_HOOK,
+                ObservationSource.CURSOR_HOOK,
+            }
+            content_authorized = capture_authority_known and not native_content_source
+            if native_content_source:
+                content_authorized = (
+                    capture_authority_known
+                    and _content_capture_profile is not None
+                    and content_capture_profile_matches_source(
+                        source.value, _content_capture_profile
+                    )
+                    and _content_capture_profile in consent.content_capture_profiles
+                )
+                if (
+                    capture_authority_known
+                    and _content_capture_profile is not None
+                    and not content_authorized
+                ):
+                    gap_codes.append(ObservationGapCode.CONTENT_UNSELECTED.value)
+            if not capture_authority_known:
+                gap_codes.append(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
+            if tuple(sorted(set(gap_codes), key=str.encode)) != envelope.gap_codes:
+                envelope = replace(
+                    envelope,
+                    gap_codes=tuple(sorted(set(gap_codes), key=str.encode)),
+                )
+            if not content_authorized:
                 content_chunks, content_truncated = (), False
             else:
                 content_chunks, content_truncated = _visible_content_chunks(
                     resolved_event,
-                    payload,
+                    payload if _content_payload is None else _content_payload,
                     envelope=envelope,
                     workspace_locator=workspace_locator,
                 )
@@ -1965,9 +2480,30 @@ def handle_observe(
                     ),
                 )
             content_map = {envelope.source_identity: content_chunks} if content_chunks else None
+            service_content_profile = _content_capture_profile if content_authorized else None
 
-            # Local durable ingest first (never plaintext transcript spool).
-            local_result = store.ingest(envelope)
+            # Local durable ingest and pairing admission share one store lock.
+            # The returned envelope is authoritative: a paired orphan's gap is
+            # present before any outbox row can be materialized.
+            local_result, envelope = store.ingest_with_pairing(
+                envelope,
+                workspace_commitment=workspace_commitment,
+                pairing_mode=pairing_mode,
+                correlation_id=correlation,
+                source=source,
+                session_commitment=session_commitment,
+                source_generation=source_generation,
+                is_pre_event=_is_pre_event(resolved_event),
+                is_post_event=_is_post_event(resolved_event),
+            )
+            if content_chunks and local_result.disposition.value != "accepted":
+                # The plaintext chunks have no durable retry carrier. A local
+                # cursor/consent rejection therefore needs the same explicit
+                # omission signal as a service delivery failure.
+                store.note_coverage_gap(
+                    workspace_commitment,
+                    ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                )
             # A Yoetz-owned tool call is delivered only when it carries evidence
             # the service does not already hold from serving it (#564); the
             # envelope itself is always retained locally above.
@@ -1986,7 +2522,7 @@ def handle_observe(
 
             # Persist session end so lifecycle can report STOPPED once every bound
             # session has ended.
-            if resolved_event == "SessionEnd":
+            if resolved_event == "SessionEnd" and binding_owned:
                 with contextlib.suppress(Exception):
                     store.note_session_end(
                         workspace_commitment,
@@ -2060,7 +2596,12 @@ def handle_observe(
                     bound_connector,
                 )
 
-                with acquire_session_lock(codex_session_id, _state=_state) as owned:
+                session_lifecycle_lock = (
+                    contextlib.nullcontext(True)
+                    if _session_lock_owned
+                    else acquire_session_lock(codex_session_id, _state=_state)
+                )
+                with session_lifecycle_lock as owned:
                     if owned:
                         mapping = load_mapping(codex_session_id, _state=_state)
                         if mapping is None and not skip_advice_loop:
@@ -2075,6 +2616,7 @@ def handle_observe(
                                         harness_id=harness_id,
                                         workspace_locator=workspace_locator,
                                         connect=cast(HookStartConnector | None, connect),
+                                        prune_surplus=True,
                                     )
 
                                 mapping = _record_auto_attach(
@@ -2174,10 +2716,12 @@ def handle_observe(
                                     workspace_commitment=workspace_commitment,
                                     codex_session_id=codex_session_id,
                                     content_by_source_identity=content_map,
+                                    content_capture_profile=service_content_profile,
                                     connect=cast(HookDrainConnector | None, connect),
                                     event_name=resolved_event,
                                     _state=_state,
                                     monotonic=_monotonic,
+                                    session_lock_owned=_session_lock_owned,
                                 )
 
                             with contextlib.suppress(Exception):
@@ -2201,7 +2745,12 @@ def handle_observe(
             # unreachable, so one missed SessionStart no longer costs the session's whole
             # record (#275). Bounded, and placed before the drain below so a fresh mapping
             # delivers this session's backlog in the same pass.
-            with acquire_session_lock(codex_session_id, _state=_state) as owned:
+            retry_session_lock = (
+                contextlib.nullcontext(True)
+                if _session_lock_owned
+                else acquire_session_lock(codex_session_id, _state=_state)
+            )
+            with retry_session_lock as owned:
                 if owned:
                     mapping = load_mapping(codex_session_id, _state=_state)
                     if mapping is None:
@@ -2249,6 +2798,7 @@ def handle_observe(
                     workspace_commitment=workspace_commitment,
                     codex_session_id=codex_session_id,
                     content_by_source_identity=content_map,
+                    content_capture_profile=service_content_profile,
                     connect=cast(HookDrainConnector | None, connect),
                     event_name=resolved_event,
                     _state=_state,
@@ -2258,6 +2808,7 @@ def handle_observe(
                         else _HOOK_DRAIN_BUDGET_SECONDS
                     ),
                     monotonic=_monotonic,
+                    session_lock_owned=_session_lock_owned,
                 )
 
             with contextlib.suppress(Exception):
@@ -2296,7 +2847,13 @@ def handle_observe(
             and not skip_advice_loop
             and not stop_already_active
             and (
-                source is not ObservationSource.CURSOR_HOOK or _output_event_name == "sessionStart"
+                source is not ObservationSource.CURSOR_HOOK
+                or _output_event_name == "sessionStart"
+                or (
+                    _output_event_name == "postToolUse"
+                    and payload.get("capability_profile_id")
+                    == CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
+                )
             )
         )
         delivery_gate = (
@@ -2418,22 +2975,239 @@ _CLAUDE_VERSION_TO_PROFILE: Final = {
 }
 
 
-def _claude_capability_profile_id(claude_version: object) -> str:
-    """Map an exact evidenced Claude version to its reviewed profile, else stay untested.
+def _claude_capability_profile_id(claude_version: object) -> str | None:
+    """Map an exact evidenced Claude version to its reviewed profile.
 
     The hook payload is the only version evidence this ingress has. A payload
-    that names no version, or a neighboring version whose native contract was
-    never proven, must not emit observations labeled with the evidenced
-    ``2.1.241`` profile; the fail-closed table never infers a range.
+    that names no version uses the omitted-profile compatibility path. A
+    neighboring version whose native contract was never proven stays
+    explicitly untested and uses the conservative paired contract; the
+    fail-closed table never infers a range.
     """
 
     token = _token_or_none(claude_version)
     if token is None:
-        return _CLAUDE_UNTESTED_PROFILE_ID
+        return None
     return _CLAUDE_VERSION_TO_PROFILE.get(token, _CLAUDE_UNTESTED_PROFILE_ID)
 
 
 _CLAUDE_CHECK_TOOL_NAMES: Final = frozenset({"mcp__yoetz__check", "mcp__plugin_yoetz_yoetz__check"})
+
+_NATIVE_OUTCOME_JSON_BYTES: Final = 65_536
+_NATIVE_SUCCESS_STATUSES: Final = frozenset(
+    {"complete", "completed", "ok", "passed", "success", "succeeded"}
+)
+_NATIVE_FAILURE_STATUS_MAP: Final = MappingProxyType(
+    {
+        "aborted": "aborted",
+        "canceled": "cancelled",
+        "cancelled": "cancelled",
+        "denied": "denied",
+        "error": "error",
+        "errored": "error",
+        "failed": "failure",
+        "failure": "failure",
+        "interrupted": "interrupted",
+        "nonzero": "nonzero_exit",
+        "nonzero_exit": "nonzero_exit",
+        "permission_denied": "denied",
+        "timed_out": "timeout",
+        "timeout": "timeout",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _NativeOutcomeFacts:
+    """Closed outcome facts extracted from a native host result.
+
+    Host result objects are untrusted and may contain arbitrary prose.  This
+    value retains only booleans, a bounded process exit code, and a closed
+    result token.  ``success=None`` deliberately means that the host did not
+    provide enough outcome evidence to call the operation successful.
+    """
+
+    success: bool | None
+    denied: bool
+    exit_status: int | None
+    result_status: str | None
+
+
+def _bounded_outcome_mapping(value: object) -> Mapping[str, JsonValue] | None:
+    """Return one bounded host result object, parsing JSON strings transiently."""
+
+    if isinstance(value, Mapping):
+        return cast(Mapping[str, JsonValue], value)
+    if type(value) is not str or not value:
+        return None
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    if len(encoded) > _NATIVE_OUTCOME_JSON_BYTES:
+        return None
+    try:
+        parsed = strict_json_parse(encoded)
+    except ProtocolValueError, TypeError, ValueError:
+        return None
+    return cast(Mapping[str, JsonValue], parsed) if isinstance(parsed, Mapping) else None
+
+
+def _native_outcome_mappings(
+    payload: Mapping[str, JsonValue],
+) -> tuple[Mapping[str, JsonValue], ...]:
+    """Collect top-level and one bounded layer of documented result wrappers."""
+
+    mappings: list[Mapping[str, JsonValue]] = [payload]
+    for key in ("tool_response", "tool_output", "result", "result_json"):
+        mapping = _bounded_outcome_mapping(payload.get(key))
+        if mapping is None:
+            continue
+        mappings.append(mapping)
+        for nested_key in ("structuredContent", "structured_content", "data", "result"):
+            nested = _bounded_outcome_mapping(mapping.get(nested_key))
+            if nested is not None:
+                mappings.append(nested)
+    return tuple(mappings)
+
+
+def _native_outcome_facts(
+    payload: Mapping[str, JsonValue],
+    *,
+    force_failure: bool = False,
+    force_denied: bool = False,
+    require_process_exit: bool = False,
+) -> _NativeOutcomeFacts:
+    """Extract closed native outcome facts without retaining host prose.
+
+    Command-like tools require an explicit process exit when
+    ``require_process_exit`` is true. A host-level success flag or an
+    ``isError=false`` wrapper then proves tool delivery only, so the command
+    result stays unknown until an exit/status fact is present.
+    """
+
+    success_true = False
+    success_false = False
+    denied = force_denied
+    interrupted = False
+    error = False
+    error_false = False
+    unknown = False
+    partial = False
+    valid_exits: list[int] = []
+    invalid_exit = False
+    failure_status: str | None = "failure" if force_failure else None
+    success_status = False
+
+    for mapping in _native_outcome_mappings(payload):
+        for key in ("denied", "is_denied", "permission_denied"):
+            value = mapping.get(key)
+            if type(value) is bool and value:
+                denied = True
+        for key in (
+            "interrupted",
+            "is_interrupted",
+            "is_interrupt",
+            "isInterrupted",
+            "cancelled",
+            "canceled",
+            "is_cancelled",
+            "isCanceled",
+        ):
+            value = mapping.get(key)
+            if type(value) is bool and value:
+                interrupted = True
+        for key in ("is_error", "isError", "failed"):
+            value = mapping.get(key)
+            if type(value) is bool and value:
+                error = True
+            elif key in {"is_error", "isError"} and type(value) is bool:
+                error_false = True
+        for key in ("success", "ok"):
+            value = mapping.get(key)
+            if type(value) is bool:
+                success_true = success_true or value
+                success_false = success_false or not value
+        for key in ("exit_code", "exitCode", "exit_status", "exitStatus"):
+            if key not in mapping:
+                continue
+            value = mapping.get(key)
+            if type(value) is int and not isinstance(value, bool) and -1 <= value <= 255:
+                valid_exits.append(value)
+            else:
+                invalid_exit = True
+        for key in ("result_status", "status", "outcome", "failure_type"):
+            if key not in mapping:
+                continue
+            value = mapping.get(key)
+            if type(value) is not str:
+                if value is not None:
+                    unknown = True
+                continue
+            lowered = value.lower()
+            if lowered in _NATIVE_FAILURE_STATUS_MAP:
+                failure_status = _NATIVE_FAILURE_STATUS_MAP[lowered]
+                if failure_status == "denied":
+                    denied = True
+            elif lowered in _NATIVE_SUCCESS_STATUSES:
+                success_status = True
+            elif lowered in {"partial", "partially_completed"}:
+                partial = True
+            else:
+                # Keep an explicit unknown marker useful for materialization,
+                # while never copying an arbitrary host token or prose.
+                unknown = True
+        if "error" in mapping:
+            value = mapping.get("error")
+            if value not in (None, False, ""):
+                error = True
+
+    if denied:
+        failure_status = "denied"
+    elif interrupted:
+        failure_status = "interrupted"
+    elif error:
+        failure_status = "error"
+    elif valid_exits and any(value != 0 for value in valid_exits):
+        failure_status = "nonzero_exit"
+
+    if failure_status is not None:
+        return _NativeOutcomeFacts(
+            False,
+            denied,
+            next((value for value in valid_exits if value != 0), None),
+            failure_status,
+        )
+    if success_false:
+        return _NativeOutcomeFacts(
+            False,
+            denied,
+            valid_exits[0] if valid_exits else None,
+            "failure",
+        )
+    if partial:
+        return _NativeOutcomeFacts(
+            None,
+            denied,
+            valid_exits[0] if valid_exits else None,
+            "partial",
+        )
+    if invalid_exit:
+        return _NativeOutcomeFacts(None, denied, None, "unknown")
+    if valid_exits:
+        return _NativeOutcomeFacts(
+            all(value == 0 for value in valid_exits),
+            denied,
+            valid_exits[0],
+            "success" if all(value == 0 for value in valid_exits) else "nonzero_exit",
+        )
+    if require_process_exit:
+        return _NativeOutcomeFacts(None, denied, None, "unknown")
+    if unknown:
+        return _NativeOutcomeFacts(None, denied, None, "unknown")
+    if success_true or success_status or error_false:
+        return _NativeOutcomeFacts(True, denied, None, "success")
+    return _NativeOutcomeFacts(None, denied, None, None)
 
 
 def _record_claude_permission_denied(
@@ -2468,13 +3242,15 @@ def handle_claude_observe(
     connect: ServiceConnector | None = None,
     run_async: AsyncRunner | None = None,
     skip_service: bool = False,
+    observation_profile: str | None = None,
 ) -> int:
-    """Normalize one Claude hook into structural-only Yoetz observation.
+    """Normalize one Claude hook into bounded Yoetz observation.
 
     The host payload can contain transcript/cwd paths, prompts, assistant text,
-    complete tool inputs/responses, and raw errors.  None crosses this boundary.
-    Only a closed lifecycle action, exact scoped Yoetz tool identity, bounded
-    correlation token, and host-derived success bit are retained.
+    complete tool inputs/responses, and raw errors.  Structural profiles retain
+    only the historical scoped Yoetz events.  The explicit ordinary profile
+    admits generic tool pre/post/failure events; content remains separately
+    gated by the matching user consent arm.
     """
 
     event_map = {
@@ -2484,6 +3260,31 @@ def handle_claude_observe(
         "SessionStart": "SessionStart",
         "Stop": "Stop",
     }
+    ordinary_profile = observation_profile == CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+    if observation_profile is not None and not ordinary_profile:
+        with contextlib.suppress(Exception):
+            record_hook_diagnostic(
+                "observation_profile_invalid", event_name or "unknown_event", _state=_state
+            )
+        with contextlib.suppress(BaseException):
+            hook_io.stdout_json({}, stdout)
+        return 0
+    if ordinary_profile:
+        # Generic tool hooks are authoritative.  Specialized filesystem and
+        # batch events stay out of this subscription until a common dedup
+        # contract proves that they add distinct work.
+        event_map.update(
+            {
+                "PermissionDenied": "PermissionDecision",
+                "PermissionRequest": "PermissionRequest",
+                "PreToolUse": "PreToolUse",
+                "PostToolUse": "PostToolUse",
+                "PostToolUseFailure": "PostToolUse",
+                # StopFailure is a per-turn API failure, not a lifecycle end.
+                # Keep the observation visible without fencing the session.
+                "StopFailure": "Stop",
+            }
+        )
     start_actions = {
         "startup": "claude_session_startup",
         "resume": "claude_session_resume",
@@ -2494,7 +3295,7 @@ def handle_claude_observe(
     try:
         payload = read_hook_payload(stdin_bytes)
         raw_event = event_name or payload.get("hook_event_name")
-        if raw_event == "PermissionDenied":
+        if raw_event == "PermissionDenied" and not ordinary_profile:
             # Not an observation of work: the host refused the call before Yoetz saw it. Retain
             # only a closed reason token; tool input, reason prose, cwd, and ids are discarded.
             _record_claude_permission_denied(payload, _state=_state)
@@ -2507,14 +3308,27 @@ def handle_claude_observe(
         if session is None or len(session) > _MAX_TOKEN_CHARS - len(_CLAUDE_SESSION_PREFIX):
             hook_io.stdout_json({}, stdout)
             return 0
+        capability_profile_id = (
+            CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+            if ordinary_profile
+            else _claude_capability_profile_id(payload.get("claude_code_version"))
+        )
+        pairing_mode, correlation_kind = observation_pairing_contract(
+            "claude", capability_profile_id
+        )
         structural: dict[str, JsonValue] = {
             "action": "claude_lifecycle",
-            "capability_profile_id": _claude_capability_profile_id(
-                payload.get("claude_code_version")
-            ),
+            "pairing_mode": pairing_mode,
+            "correlation_kind": correlation_kind,
             "hook_event_name": event_map[raw_event],
             "session_id": f"{_CLAUDE_SESSION_PREFIX}{session}",
         }
+        if capability_profile_id is not None:
+            structural["capability_profile_id"] = capability_profile_id
+        if ordinary_profile:
+            # Keep the materialization cursor vocabulary stable while recording
+            # the exact host mapping used by this opt-in profile separately.
+            structural["mapping_hint"] = CLAUDE_CODE_ORDINARY_HOOK_MAPPING_VERSION
         if raw_event == "Stop" and payload.get("stop_hook_active") is True:
             structural["stop_hook_active"] = True
         if raw_event == "SessionStart":
@@ -2524,20 +3338,122 @@ def handle_claude_observe(
                 if type(source) is str and source in start_actions
                 else "claude_session"
             )
-        if raw_event in {"PostToolUse", "PostToolUseFailure"}:
-            tool_name = payload.get("tool_name")
-            if type(tool_name) is not str or _CLAUDE_SCOPED_TOOL_RE.fullmatch(tool_name) is None:
+        if ordinary_profile and raw_event == "PermissionRequest":
+            # Claude's documented PermissionRequest payload has no tool_use_id.
+            # Retain the event and any bounded tool name without manufacturing
+            # a call identity or pairing operation. The closed permission
+            # classification describes the host event and mints no work row.
+            tool_token = _token_or_none(payload.get("tool_name"))
+            if tool_token is not None:
+                structural["tool_name"] = tool_token
+            structural["action"] = "claude_permission_request"
+            structural["permission_decision"] = "requested"
+        if ordinary_profile and raw_event == "PreToolUse":
+            tool_token = _token_or_none(payload.get("tool_name"))
+            correlation = _token_or_none(payload.get("tool_use_id")) or _token_or_none(
+                payload.get("tool_call_id")
+            )
+            if tool_token is None or correlation is None:
+                with contextlib.suppress(Exception):
+                    record_hook_diagnostic(
+                        "claude_tool_identity_missing", event_map[raw_event], _state=_state
+                    )
                 hook_io.stdout_json({}, stdout)
                 return 0
-            structural["action"] = (
-                "claude_mcp_success" if raw_event == "PostToolUse" else "claude_mcp_failure"
+            structural["tool_name"] = tool_token
+            structural["tool_use_id"] = correlation
+            structural["action"] = "claude_tool_pending"
+            if _routine_read_action(payload):
+                structural["action"] = "routine_read"
+        if ordinary_profile and raw_event == "PermissionDenied":
+            tool_token = _token_or_none(payload.get("tool_name"))
+            correlation = _token_or_none(payload.get("tool_use_id")) or _token_or_none(
+                payload.get("tool_call_id")
             )
-            structural["success"] = raw_event == "PostToolUse"
-            structural["tool_name"] = tool_name
-            correlation = _token_or_none(payload.get("tool_use_id"))
+            if tool_token is None or correlation is None:
+                with contextlib.suppress(Exception):
+                    record_hook_diagnostic(
+                        "claude_tool_identity_missing", event_map[raw_event], _state=_state
+                    )
+                hook_io.stdout_json({}, stdout)
+                return 0
+            structural.update(
+                {
+                    "action": "claude_permission_denied",
+                    "denied": True,
+                    "permission_decision": "denied",
+                    "tool_name": tool_token,
+                    "tool_use_id": correlation,
+                }
+            )
+        if ordinary_profile and raw_event == "StopFailure":
+            structural["action"] = "claude_api_failure"
+            outcome = _native_outcome_facts(
+                payload,
+                force_failure=True,
+            )
+            structural["result_status"] = outcome.result_status or "error"
+        if raw_event in {"PostToolUse", "PostToolUseFailure"} or (
+            raw_event == "PermissionDenied" and not ordinary_profile
+        ):
+            tool_name = payload.get("tool_name")
+            if not ordinary_profile and (
+                type(tool_name) is not str or _CLAUDE_SCOPED_TOOL_RE.fullmatch(tool_name) is None
+            ):
+                hook_io.stdout_json({}, stdout)
+                return 0
+            tool_token = _token_or_none(tool_name)
+            if tool_token is None:
+                hook_io.stdout_json({}, stdout)
+                return 0
+            if ordinary_profile:
+                outcome = _native_outcome_facts(
+                    payload,
+                    force_failure=raw_event == "PostToolUseFailure",
+                    require_process_exit=(tool_token.lower() in _SHELL_TOOLS),
+                )
+                structural["action"] = (
+                    "claude_tool_success"
+                    if outcome.success is True
+                    else "claude_tool_failure"
+                    if outcome.success is False
+                    else "claude_tool_outcome_unknown"
+                )
+                if outcome.success is not None:
+                    structural["success"] = outcome.success
+                if outcome.denied:
+                    structural["denied"] = True
+                if outcome.exit_status is not None:
+                    structural["exit_status"] = outcome.exit_status
+                if outcome.result_status is not None:
+                    structural["result_status"] = outcome.result_status
+                if (
+                    _routine_read_action(payload)
+                    and outcome.success is not False
+                    and not outcome.denied
+                ):
+                    structural["action"] = "routine_read"
+            else:
+                structural["action"] = (
+                    "claude_mcp_success" if raw_event == "PostToolUse" else "claude_mcp_failure"
+                )
+                structural["success"] = raw_event == "PostToolUse"
+            structural["tool_name"] = tool_token
+            correlation = _token_or_none(payload.get("tool_use_id")) or _token_or_none(
+                payload.get("tool_call_id")
+            )
             if correlation is not None:
                 structural["tool_use_id"] = correlation
-            if raw_event == "PostToolUse" and tool_name == "mcp__plugin_yoetz_yoetz__start":
+            if not ordinary_profile:
+                result_status = _token_or_none(
+                    payload.get("result_status") or payload.get("failure_type")
+                )
+                if result_status is not None:
+                    structural["result_status"] = result_status
+                duration = _int_or_none(payload.get("duration_ms"))
+                if duration is not None:
+                    structural["duration_ms"] = duration
+            if raw_event == "PostToolUse" and tool_token == "mcp__plugin_yoetz_yoetz__start":
                 # Claude's observation envelope stays structural-only, but the
                 # successful start result is the sole authority that can bind
                 # this host session to the cooperative Yoetz task. Inspect the
@@ -2578,6 +3494,10 @@ def handle_claude_observe(
             skip_service=skip_service,
             source=ObservationSource.CLAUDE_HOOK,
             _output_event_name=raw_event,
+            _content_capture_profile=(
+                CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID if ordinary_profile else None
+            ),
+            _content_payload=payload if ordinary_profile else None,
         )
     except BaseException:
         with contextlib.suppress(BaseException):
@@ -2595,13 +3515,15 @@ def handle_cursor_observe(
     connect: ServiceConnector | None = None,
     run_async: AsyncRunner | None = None,
     skip_service: bool = False,
+    observation_profile: str | None = None,
 ) -> int:
-    """Normalize one Cursor hook into structural-only Yoetz observation.
+    """Normalize one Cursor hook into bounded Yoetz observation.
 
     Cursor supplies prompts, transcript paths, file paths/edits, MCP inputs/results,
     response text, email, and other user-controlled content in the same envelope.
-    This boundary copies none of those values. Only bounded identifiers, exact host/
-    model tokens, durations, booleans, and a one-way changed-path digest survive.
+    Structural profiles copy none of those values. The explicit ordinary profile
+    admits Cursor's generic tool lifecycle and keeps content behind its separate
+    consent arm.
     """
 
     event_map = {
@@ -2611,6 +3533,28 @@ def handle_cursor_observe(
         "sessionStart": "SessionStart",
         "stop": "Stop",
     }
+    ordinary_profile = observation_profile == CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
+    if observation_profile is not None and not ordinary_profile:
+        with contextlib.suppress(Exception):
+            record_hook_diagnostic(
+                "observation_profile_invalid", event_name or "unknown_event", _state=_state
+            )
+        with contextlib.suppress(BaseException):
+            hook_io.stdout_json({}, stdout)
+        return 0
+    if ordinary_profile:
+        # Cursor's generic tool events are the authoritative stream.  Shell,
+        # read-file, MCP and edit-specific hooks are deliberately supplemental
+        # and remain unsupported here until their overlap is proven distinct.
+        event_map.pop("afterFileEdit")
+        event_map.pop("afterMCPExecution")
+        event_map.update(
+            {
+                "preToolUse": "PreToolUse",
+                "postToolUse": "PostToolUse",
+                "postToolUseFailure": "PostToolUse",
+            }
+        )
     try:
         try:
             payload = read_cursor_hook_payload(stdin_bytes)
@@ -2670,6 +3614,14 @@ def handle_cursor_observe(
                 )
             return 0 if hook_io.stdout_json({}, stdout) else 0
         cursor_version = _token_or_none(payload.get("cursor_version"))
+        capability_profile_id = (
+            CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
+            if ordinary_profile
+            else _cursor_capability_profile_id(cursor_version)
+        )
+        pairing_mode, correlation_kind = observation_pairing_contract(
+            "cursor", capability_profile_id
+        )
         structural: dict[str, JsonValue] = {
             "action": (
                 "cursor_file_edit"
@@ -2678,18 +3630,37 @@ def handle_cursor_observe(
                 if raw_event == "afterMCPExecution"
                 else "cursor_lifecycle"
             ),
-            "capability_profile_id": _cursor_capability_profile_id(cursor_version),
+            "pairing_mode": pairing_mode,
+            "correlation_kind": correlation_kind,
             "hook_event_name": event_map[raw_event],
             "session_id": f"{_CURSOR_SESSION_PREFIX}{session}",
         }
-        for source_key, target_key in (
-            ("cursor_version", "cursor_version"),
-            ("generation_id", "correlation_id"),
-            ("tool_name", "tool_name"),
-        ):
+        if capability_profile_id is not None:
+            structural["capability_profile_id"] = capability_profile_id
+        if ordinary_profile:
+            structural["mapping_hint"] = CURSOR_ORDINARY_HOOK_MAPPING_VERSION
+        identity_fields = (
+            (
+                ("cursor_version", "cursor_version"),
+                ("tool_use_id", "tool_call_id"),
+                ("tool_name", "tool_name"),
+            )
+            if ordinary_profile
+            else (
+                ("cursor_version", "cursor_version"),
+                ("generation_id", "correlation_id"),
+                ("tool_name", "tool_name"),
+            )
+        )
+        for source_key, target_key in identity_fields:
             value = _token_or_none(payload.get(source_key))
             if value is not None:
                 structural[target_key] = value
+        tool_call_id = _token_or_none(payload.get("tool_call_id")) or _token_or_none(
+            payload.get("tool_use_id")
+        )
+        if tool_call_id is not None:
+            structural["tool_call_id"] = tool_call_id
         # Cursor's lifecycle payloads use ``model_id`` while execution and file
         # edit payloads use ``model``. Prefer the canonical lifecycle spelling
         # when both are present (they can intentionally differ: e.g. a provider
@@ -2700,6 +3671,39 @@ def handle_cursor_observe(
         duration = _int_or_none(payload.get("duration"))
         if duration is not None:
             structural["duration_ms"] = duration
+        if ordinary_profile and raw_event in {"postToolUse", "postToolUseFailure"}:
+            outcome = _native_outcome_facts(
+                payload,
+                force_failure=raw_event == "postToolUseFailure",
+                require_process_exit=(
+                    (_token_or_none(payload.get("tool_name")) or "").lower() in _SHELL_TOOLS
+                ),
+            )
+            structural["action"] = (
+                "cursor_tool_denied"
+                if outcome.denied
+                else "cursor_tool_success"
+                if outcome.success is True
+                else "cursor_tool_failure"
+                if outcome.success is False
+                else "cursor_tool_outcome_unknown"
+            )
+            if outcome.success is not None:
+                structural["success"] = outcome.success
+            if outcome.denied:
+                structural["denied"] = True
+            if outcome.exit_status is not None:
+                structural["exit_status"] = outcome.exit_status
+            if outcome.result_status is not None:
+                structural["result_status"] = outcome.result_status
+            if (
+                _routine_read_action(payload)
+                and outcome.success is not False
+                and not outcome.denied
+            ):
+                structural["action"] = "routine_read"
+        elif ordinary_profile and raw_event == "preToolUse":
+            structural["action"] = "cursor_tool_pending"
         path_value = payload.get("file_path")
         if raw_event == "afterFileEdit" and type(path_value) is str and path_value:
             store = LocalObservationStore(_state=_state)
@@ -2726,6 +3730,10 @@ def handle_cursor_observe(
             skip_service=skip_service,
             source=ObservationSource.CURSOR_HOOK,
             _output_event_name=raw_event,
+            _content_capture_profile=(
+                CURSOR_ORDINARY_OBSERVATION_PROFILE_ID if ordinary_profile else None
+            ),
+            _content_payload=payload if ordinary_profile else None,
         )
     except BaseException:
         with contextlib.suppress(BaseException):

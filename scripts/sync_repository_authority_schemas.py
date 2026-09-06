@@ -21,6 +21,10 @@ _DIGEST: Final[dict[str, Any]] = {
     "pattern": "^sha256:[0-9a-f]{64}$",
     "type": "string",
 }
+_ORDINARY_CONTENT_CAPTURE_PROFILES: Final = (
+    "claude-code-ordinary-observation-v1",
+    "cursor-ordinary-observation-v1",
+)
 
 
 def _load(name: str) -> dict[str, Any]:
@@ -382,13 +386,14 @@ def _claude_result() -> dict[str, Any]:
 
 def _replace_schema_ref(value: Any, old: str, new: str) -> None:
     if isinstance(value, dict):
-        for key, member in value.items():
+        mapping = cast(dict[str, Any], value)
+        for key, member in mapping.items():
             if key == "$ref" and member == old:
-                value[key] = new
+                mapping[key] = new
             else:
                 _replace_schema_ref(member, old, new)
     elif isinstance(value, list):
-        for member in value:
+        for member in cast(list[Any], value):
             _replace_schema_ref(member, old, new)
 
 
@@ -414,6 +419,40 @@ def _status_v23_result() -> dict[str, Any]:
 
 def _claim_v24_request() -> dict[str, Any]:
     generated = _with_id("control-request", "2.4.0", _status_v23_request())
+    # Serving-host identity is new to the current, unreleased control schema.
+    # Keep released 1.0/2.0 bytes and earlier request versions unchanged.
+    for branch in generated["oneOf"]:
+        properties = branch.get("properties", {})
+        if properties.get("method", {}).get("const") == "check":
+            properties["host_profile"] = {
+                "enum": ["generic", "codex", "claude", "cursor"],
+                "type": "string",
+            }
+    # Host/profile pairing metadata is likewise new to the current schema.
+    # Keep the local observation envelope's structural keys closed for every
+    # released request version while allowing the issue #607 ingress contract
+    # through the active 2.4 control path.
+    structural_properties = generated["$defs"]["observation_envelope"]["properties"][
+        "structural_payload"
+    ]["properties"]
+    structural_properties.update(
+        {
+            "pairing_mode": {
+                "enum": ["paired", "post_only"],
+                "type": "string",
+            },
+            "correlation_kind": {
+                "enum": ["tool_call_id", "generation_id", "none"],
+                "type": "string",
+            },
+            "generation_id": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$",
+                "type": "string",
+            },
+        }
+    )
     _replace_schema_ref(
         generated,
         "https://schemas.yoetz.dev/0.1/operations/publish-work-request-1.0.0.schema.json",
@@ -422,22 +461,32 @@ def _claim_v24_request() -> dict[str, Any]:
 
     def admit_policy_versions(value: Any) -> None:
         if isinstance(value, dict):
-            if value.get("$ref") == _PRIVACY_POLICY:
-                value.pop("$ref")
-                value["anyOf"] = [
+            mapping = cast(dict[str, Any], value)
+            if mapping.get("$ref") == _PRIVACY_POLICY:
+                mapping.pop("$ref")
+                mapping["anyOf"] = [
                     {"$ref": _PRIVACY_POLICY},
                     {
                         "$ref": "https://schemas.yoetz.dev/0.1/privacy/privacy-policy-1.1.0.schema.json"
                     },
                 ]
             else:
-                for child in value.values():
+                for child in mapping.values():
                     admit_policy_versions(child)
         elif isinstance(value, list):
-            for child in value:
+            for child in cast(list[Any], value):
                 admit_policy_versions(child)
 
     admit_policy_versions(generated)
+    # The ordinary native-host content arm is a new optional request member.
+    # Keep the released and intermediate control schemas byte-identical: only
+    # the current unreleased 2.4 request may carry this authorization-bound
+    # profile selector.
+    ingest = generated["$defs"]["observation_ingest_body"]
+    ingest["properties"]["content_capture_profile"] = {
+        "enum": list(_ORDINARY_CONTENT_CAPTURE_PROFILES),
+        "type": "string",
+    }
     return generated
 
 

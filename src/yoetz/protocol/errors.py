@@ -279,7 +279,7 @@ _TOKEN_DETAIL_VALUES: Mapping[str, frozenset[str]] = MappingProxyType(
         "authorize_command": frozenset({"yoetz consent authorize"}),
         "availability": frozenset({"terminal_unavailable"}),
         "continuation": frozenset({"vault_initialization_required"}),
-        "host_profile": frozenset({"generic", "cursor"}),
+        "host_profile": frozenset({"generic", "codex", "claude", "cursor"}),
         "prepare_command": frozenset({"yoetz consent prepare vault_initialize"}),
         "review_command": frozenset({"yoetz consent review"}),
         "route_profile": frozenset({"policy", "strict"}),

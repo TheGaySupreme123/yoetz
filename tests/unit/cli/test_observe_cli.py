@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import io
 import json
 import os
@@ -701,6 +702,80 @@ async def test_manual_drain_quarantines_ended_unmapped_lane(tmp_path: Path) -> N
     assert code == 0
     assert summary["quarantined"] == 2
     assert store.list_pending_outbox_rows(workspace) == ()
+
+
+@pytest.mark.anyio
+async def test_manual_drain_lane_lock_failure_does_not_abort_other_lanes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#554: an OSError from one lane's ended-unmapped terminalization (the
+    lifecycle lock) stays inside that lane, as in the hook drain. The lane's rows
+    remain pending for the next run, the later lane is still quarantined, and the
+    command exits normally instead of escaping to the process catch-all."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    locked_session = "manual-lock-failed"
+    healthy_session = "manual-lock-healthy"
+    for session_id, ordinals in ((locked_session, (1, 2)), (healthy_session, (1,))):
+        for ordinal in ordinals:
+            handle_observe(
+                event_name="PostToolUse",
+                stdin_bytes=json.dumps(
+                    {"session_id": session_id, "tool_name": "shell", "event_ordinal": ordinal}
+                ).encode(),
+                stdout=io.BytesIO(),
+                workspace=str(tmp_path),
+                _state=tmp_path,
+                skip_service=True,
+            )
+        store.note_session_end(workspace, store.session_commitment(session_id))
+
+    original = LocalObservationStore.quarantine_ended_unmapped_session
+
+    def failing_for_locked_lane(
+        self: LocalObservationStore, workspace: str, codex_session_id: str, reason: str
+    ) -> int:
+        if codex_session_id == locked_session:
+            raise OSError(errno.EAGAIN, "lifecycle lock unavailable")
+        return original(self, workspace, codex_session_id, reason)
+
+    monkeypatch.setattr(
+        LocalObservationStore, "quarantine_ended_unmapped_session", failing_for_locked_lane
+    )
+
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del body, deadline_ms
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(
+                    ObservationIngestDisposition.REJECTED,
+                    ObservationGapCode.MAPPING_MISSING.value,
+                    None,
+                )
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return Client()
+
+    code, summary = await observe_cli._drain_observation_async(  # pyright: ignore[reportPrivateUsage]
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+    )
+
+    assert code == 0
+    assert summary["quarantined"] == 1
+    assert summary["pending_after"] == 2
+    assert summary["terminal"] == "retry_pending"
+    remaining = store.list_pending_outbox_rows(workspace)
+    assert {row.codex_session_id for row in remaining} == {locked_session}
+    assert len(remaining) == 2
+    assert {row.last_reason for row in remaining} == {ObservationGapCode.MAPPING_MISSING.value}
 
 
 @pytest.mark.anyio

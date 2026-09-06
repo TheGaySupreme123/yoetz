@@ -102,8 +102,8 @@ exactly those contracts and connects the steps without weakening any existing tr
    absence only when that successful structural listing contains no `yoetz` name. A failed or
    malformed listing fails closed; a single matching entry is classified normally; duplicate
    matching names are ambiguous and fail closed. In ambient mode it runs the exact `codex mcp add
-   yoetz -- yoetz mcp serve` command; under ADR-026 isolation it runs `codex mcp add yoetz --env
-   YOETZ_ISOLATED_ROOT=<validated-root> -- yoetz mcp serve`. It does so only after that positive
+   yoetz -- yoetz mcp serve --host codex` command; under ADR-026 isolation it runs `codex mcp add yoetz --env
+   YOETZ_ISOLATED_ROOT=<validated-root> -- yoetz mcp serve --host codex`. It does so only after that positive
    absence observation; a foreign same-name entry is
    preserved and refused with `foreign_entry_present` — there is no force path. The structural
    JSON parser rejects duplicate keys, nonstandard constants, and truncated output. Codex exposes

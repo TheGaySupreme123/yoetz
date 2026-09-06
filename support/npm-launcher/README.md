@@ -27,10 +27,10 @@ installs nothing itself — then exits 1 without running anything.
 
 ## Publication and provenance
 
-The v0.1.0 maintainer decision publishes this launcher as the public `yoetz` package. The tagged
-release workflow builds its tarball once, records its SHA-256, publishes the exact tarball through
-npm trusted publishing only after the matching `yoetz==0.1.0` Python distribution is live, and
-downloads it back for byte comparison. npm's package provenance binds the public tarball to that
+The standing maintainer decision publishes this launcher as the public `yoetz` npm package, one
+release per tagged Yoetz version. The tagged release workflow builds its tarball once, records its
+SHA-256, publishes the exact tarball through npm trusted publishing only after the Python
+distribution of the same version is live on PyPI, and downloads it back for byte comparison. npm's package provenance binds the public tarball to that
 GitHub Actions workflow.
 
 The launcher remains only a delegator. npm installation does not install Python, `uv`, Yoetz's

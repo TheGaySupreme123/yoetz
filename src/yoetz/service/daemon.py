@@ -1065,6 +1065,8 @@ class ServiceDaemon:
         if request.method in {ControlMethod.CHECK, ControlMethod.STATUS}:
             if request.route_profile is not None:
                 kwargs["route_profile"] = request.route_profile
+        if request.method is ControlMethod.CHECK and request.host_profile is not None:
+            kwargs["host_profile"] = request.host_profile
         if request.method in {
             ControlMethod.START,
             ControlMethod.PUBLISH_WORK,

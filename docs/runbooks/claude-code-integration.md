@@ -29,6 +29,10 @@ portable and Codex/Cursor projections. Yoetz writes no credentials, endpoints, u
 vault, receipt, or provider state into the plugin, `${CLAUDE_PLUGIN_ROOT}`, or
 `${CLAUDE_PLUGIN_DATA}`.
 
+The plugin-owned `.mcp.json` starts the bridge with the explicit `--host claude` identity (and
+`--semantic off` for the strict route). This identifies the serving carrier for diagnostics; it
+does not grant host admission or agent-chat attestation.
+
 ## Explicit roots
 
 Choose an exact trusted project, exact resolved Claude executable, isolated Claude config/cache,
@@ -150,12 +154,12 @@ The validator covers the default manifest/hooks/skill paths. Yoetz separately va
 
 ## Applied-route drift decision (issue #537)
 
-Decision for Claude Code: not supported here — no additional state-root applied-route record
-at this time. The plugin-managed `.mcp.json` already binds the route profile and the artifact
-digest in its in-tree marker, and the live file reads remain the authority for which route
-this host serves; a stale serving process is detected through the existing activation and
-ownership read-backs, not through a second record. If a ceiling check ever needs an
-applied-vs-serving distinction on this host, that is a separate design-gated change.
+Decision for Claude Code: no Codex applied-route record is used here. The explicit `--host claude`
+identity prevents the Codex-only drift comparison from being applied to this host. The
+plugin-managed `.mcp.json` still binds the route profile and artifact digest in its in-tree marker,
+and live file reads remain the authority for which route this host serves; activation and ownership
+read-backs cover stale plugin processes. A generic legacy `.mcp.json` remains readable during
+upgrade/remove but is unproven until the plugin is re-rendered.
 
 ## Enable, trust, reload, and activation
 
@@ -175,7 +179,7 @@ The skill name is `/yoetz:yoetz`. The MCP server is `plugin:yoetz:yoetz`, and ca
 `mcp__plugin_yoetz_yoetz__<operation>`. A live proof needs a fresh session and correlated
 `start`/`status` call through that scoped name; a list/details/MCP handshake alone is insufficient.
 
-Claude Code's generic MCP profile (`yoetz mcp serve` without `--host cursor`) delivers
+Claude Code's native MCP profile (`yoetz mcp serve --host claude`) delivers
 `structuredContent` for successful tools but only the bounded text `content` for `isError`
 results. Cooperative `EVENT_INVALID` therefore cannot rely on `safe_details` reaching the model.
 Decision for Claude Code (issue #579): supported here — the text summary names frozen
@@ -194,8 +198,53 @@ the new pair can fall through its legacy opaque branch.
 
 Claude Code remains structural-only for issue #302: the scoped hook path discards raw prompt,
 result, transcript, path, and error content before storage and therefore cannot mint
-`observation_captured` evidence. Any future content-bearing profile is a separate capability and
-privacy decision with its own fixture and consent proof.
+`observation_captured` evidence. Content-bearing profiles are separate capability and privacy
+decisions with their own fixture and consent proof; the explicitly opted-in profile below is the
+ordinary-work decision for this release.
+
+The default structural artifact keeps that boundary. An explicitly rendered ordinary-work
+artifact uses the neutral profile id `claude-code-ordinary-observation-v1` and subscribes to
+Claude's generic `PreToolUse`, `PostToolUse`, and `PostToolUseFailure` events plus lifecycle and
+permission/API-failure signals. It does not subscribe to `FileChanged` or `PostToolBatch` until a
+deduplication contract proves those signals add distinct work. The hook command carries the exact
+profile id with `--observation-profile`; the id is a mapping contract, not a claim about the
+installed Claude version.
+
+The [Claude hook contract](https://code.claude.com/docs/en/hooks) keeps permission
+requests separate from tool execution. `PermissionRequest` has no tool-call identifier, so Yoetz
+retains an uncorrelated permission event without inventing a tool action. `PermissionDenied`
+reports auto-mode refusals; it does not cover manual dialog denial, deny rules, or a pre-tool hook
+blocking execution. `StopFailure` records an API-failed turn without ending the observed session,
+and emits no advice output. Cancellation and process outcomes are retained only when explicit
+native fields supply them; a successful shell tool call without an exit fact leaves command/test
+outcome unknown. These decisions do not add filesystem or batch observation.
+
+Select these hooks with `--observation-profile ordinary` on the existing Claude plugin
+preview/install/update/status commands, or on `yoetz integrate claude plugin export` for a
+development directory. Repeat the same profile when applying an exact preview. To return to
+scoped structural hooks, preview and apply an update with `--observation-profile structural`.
+Artifact selection does not grant content capture.
+Preview names the selected profile. Status reports the requested profile and confirms an installed
+profile only when its verified marker and artifact digest match; otherwise that installed value is
+unknown rather than inferred from the request.
+
+Native content remains a second, per-host consent arm. After granting structural observation, an
+operator can enable and later revoke it with the user-facing commands below:
+
+```text
+yoetz observe content-enable --workspace /exact/project \
+  --profile claude-code-ordinary-observation-v1
+yoetz observe content-status --workspace /exact/project --json
+yoetz observe content-disable --workspace /exact/project \
+  --profile claude-code-ordinary-observation-v1
+```
+
+The service accepts Claude chunks only when that exact profile is active in local consent and in
+the mapped task grant. A missing or mismatched profile drops plaintext chunks and records
+`content_capture_unavailable`; chunks are never retained in the structural outbox for later
+replay. The current installed Claude `2.1.261` probe is a candidate host fact only; it does not
+certify this ordinary profile without an exact isolated fixture and a receipt that separately
+proves native hook delivery, accepted content, semantic selection, and any resulting influence.
 
 Claude Code has no `codex exec --json` import surface. Issue #301's bounded import authorization
 therefore makes no Claude adapter change; Claude evidence continues through cooperative MCP and
@@ -237,7 +286,12 @@ task, the selector still active, no sibling task, the matching repository-privac
 start already pending for that route. This reuses an already-known session selector; the public
 conflict still discloses no task or session ID, and a hard crash without `SessionEnd` remains
 fail-closed rather than being guessed from age. A successful recovery also rewrites every ended
-same-host predecessor mapping for that task to the rotated session and writer. Pending predecessor rows then
+same-host predecessor mapping for that task to the rotated session and writer. Recovery first takes a
+nonblocking workspace reservation, then holds ordered locks for every eligible ended same-host session
+through full candidate revalidation, the service RPC, authorized rewrites, and pruning. The revalidation
+covers unmapped sessions, cross-workspace ownership, mapping identity, and mapping recency; a busy workspace reservation defers with `auto_attach_recovery_busy`, while candidate-lock
+contention or changed state falls back to the ordinary request.
+Pending predecessor rows then
 drain on that successor route (`session_superseded` is followed, not quarantined as
 `ledger_rejected`). A failed attempt records its cause as a
 payload-free `hook_diagnostics` reason
@@ -249,6 +303,14 @@ under the bounded budget. An explicit cooperative MCP `start` bound from its exa
 result remains the recovery path, not a substitute proof that natural auto-attach works. For
 `vault_locked` on a never-initialized install, that explicit `start` returns the typed
 `vault_initialization_required` continuation (see the proof checklist) rather than a dead end.
+
+Busy host lifecycle changes are durable local work. State schema `/11` adds bounded pending
+session-lifecycle intents, and a READY or hook drain reconciles them under the workspace and
+session reservations before routing their rows; busy mapping writes use an atomic per-session
+handoff. Upgrade this state quiescently: stop the older Yoetz service and Claude Code hooks,
+install the new runtime, then restart the service and all Claude Code integrations before writing
+`/11` state. Mixed old and new writers are unsupported because a `/10` writer ignores the new
+pairing fields and can erase a deferred intent when it saves.
 
 The shared `observe status` CLI maps an unsafe state/lock path to `storage_unsafe`, bounded
 open/permission/read-only/missing-parent/lock-acquisition failures to `storage_unavailable`, and
@@ -284,7 +346,9 @@ observing itself (issue #564). The shared self-observation policy applies: a `Po
 `mcp__plugin_yoetz_yoetz__status`, `_receipt`, or `_read_guidance` is ingested into the bounded
 local store but not enqueued for delivery; a `PostToolUse` of `_start`, `_publish_work`, `_check`,
 or `_respond` enqueues one row; every `PostToolUseFailure` enqueues one row. Claude sends no
-`PreToolUse` on this profile, so there is no pre-event to hold back. The `PostToolUse` advice
+`PreToolUse` on this profile, so its reviewed pairing contract is post-only and there is no
+pre-event to hold back. Its `tool_use_id`, when present, identifies the observed result; no
+missing-pre gap is created for a legacy post-only hook. The `PostToolUse` advice
 channel is unchanged by this policy; only outbox delivery is governed. The manual
 `yoetz observe drain --json` reports `terminal: drained` once nothing is pending.
 

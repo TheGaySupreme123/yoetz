@@ -38,7 +38,7 @@ skill files under `skills/codex/`, and `tests/capability/`.
    full skill/MCP/hook matrix in `runtime-support.json` and issue #413 remain unfrozen until those
    facets have independent installed-artifact evidence.
 2. **Integration posture:** Codex is the MCP client; Yoetz is a local stdio server registered via
-   `codex mcp add yoetz -- yoetz mcp serve`, default `required = false`. Yoetz first runs `codex mcp
+   `codex mcp add yoetz -- yoetz mcp serve --host codex`, default `required = false`. Yoetz first runs `codex mcp
    get yoetz --json`; because a nonzero named lookup is ambiguous, only a successful strict parse
    of `codex mcp list --json` with no matching name confirms absence. Duplicate keys/names,
    nonstandard constants, truncation, malformed output, and failed listing all fail closed. A

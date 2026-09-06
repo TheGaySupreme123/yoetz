@@ -19,6 +19,32 @@ An MCP host can impose a stronger process-local ceiling with
 durable policy is widened later. It is separate from the policy profiles below; see
 [Auto-approving an MCP route](auto-approving-agents.md).
 
+## Native work evidence is a separate choice
+
+The default host integration records structural observation. When you explicitly select a host's
+versioned ordinary-work artifact, it can also prepare bounded native content for that host. Selecting
+the artifact does not enable content capture. Content capture is a second, reversible choice for the
+same repository:
+
+```text
+yoetz observe content-enable --workspace /exact/project \
+  --profile claude-code-ordinary-observation-v1
+yoetz observe content-status --workspace /exact/project --json
+yoetz observe content-disable --workspace /exact/project \
+  --profile claude-code-ordinary-observation-v1
+```
+
+Status keeps configured profiles separate from locally effective capture. A configured profile is the
+profile you selected; local status lists it as effective only while observation consent is active and
+the local runtime gate is enabled. Retaining plaintext additionally requires that exact profile in
+the mapped task's consent grant. Local status does not establish that task-level permission; without
+it, ingress drops content chunks. Pausing observation or disabling the runtime gate preserves the
+configured choice but empties locally effective capture. Disabling a profile removes that choice.
+
+Native content capture and semantic review have separate authority. Enabling a host profile does not
+authorize external review, choose a provider, or permit any content to leave the computer. Semantic
+review still requires its own provider readiness and repository privacy decision described below.
+
 ## The four LLM privacy profiles
 
 `local_only`, `confirm_every_request`, `minimal_external`, `trusted_provider`.
@@ -45,9 +71,12 @@ Some content classes can never become model input or reach another sink — see 
 [`PRIVACY.md`](../../PRIVACY.md). No profile overrides it. No approval unlocks it. Authorship does
 not unlock it: sensitive and confidential content stays sensitive no matter who wrote it.
 
-Only a reauthenticated local human can loosen effective policy, and loosening is never silent. The
-machine row is an installation ceiling; external LLM work also needs an exact granted row for the
-current repository beneath it.
+Effective policy loosens only through a reauthenticated decision you make: the trusted local
+ceremony, or your explicit current-chat approval of one exact prepared, previewed, expiring consent
+target that a capable agent relays for you. That relay is the agent's assertion, which Yoetz cannot
+independently authenticate, so the local ceremony remains the stronger path. Loosening is never
+silent: every path shows the complete change before you decide. The machine row is an installation
+ceiling; external LLM work also needs an exact granted row for the current repository beneath it.
 
 ## Commands
 
@@ -57,9 +86,11 @@ yoetz privacy setup             # equivalent guided policy review
 yoetz privacy show              # current effective policy
 yoetz privacy tighten           # tighten (proceeds through gates)
 yoetz privacy propose           # propose a change for decision
+yoetz privacy decide-policy     # approve or deny one exact pending policy proposal on the terminal
 yoetz privacy export-desired    # effective nonsecret policy as desired-state TOML (never secrets)
 yoetz privacy apply-desired     # apply desired-state TOML; tighten may proceed, widen never silent
 yoetz privacy pending           # list disclosure decisions waiting for you
+yoetz privacy decide-disclosure # decide one exact pending disclosure by id (see below)
 yoetz privacy receipts          # inspect bounded structural egress receipts
 ```
 

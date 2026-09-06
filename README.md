@@ -115,22 +115,27 @@ Full walkthrough: [Install and first run](docs/usage/install-and-first-run.md) a
 its user should follow [Agent start](docs/usage/agent-start.md): setup's questions appear only on
 the human's own terminal, and that page says what to run, what to ask, and what to recommend.
 
-For Codex observation, source files and configuration are not activation proof. Setup offers one
-standing-trust preview bound to the exact selected Codex executable and an explicitly selected,
-existing Codex home. Before consent, only that executable's `--version` runs, with both Codex home
-variables redirected to a fresh owner-private temporary home that is removed afterward; setup does
-not inspect the approved home's plugin inventory. Only explicit digest-bound approval permits the
-scoped inventory/add commands and disclosed marketplace, config, scratch, and versioned-cache
-effects in the selected home. Even an `active` result proves installed inventory and
-cache/config state for future sessions—not that a later session loaded a hook or delivered an
-observation.
+Harness observation is opt-in per project, and source files and configuration are never
+activation proof. For Codex, setup offers one standing-trust preview bound to the exact selected
+Codex executable and an explicitly selected, existing Codex home. Before consent, only that
+executable's `--version` runs, with both Codex home variables redirected to a fresh owner-private
+temporary home that is removed afterward; setup does not inspect the approved home's plugin
+inventory. Only explicit digest-bound approval permits the scoped inventory/add commands and
+disclosed marketplace, config, scratch, and versioned-cache effects in the selected home. Claude
+Code and Cursor hooks are installed through `yoetz integrate claude ...` and
+`yoetz integrate cursor ...` with the same preview-then-approve shape. What a hook keeps differs by
+host: consented Codex events may retain secret-scanned, encrypted tool output and changed-file
+bytes as captured evidence; Claude Code and Cursor hooks keep only structural facts — Yoetz tool
+names, lifecycle events, digests — and discard prompts, transcripts, paths, and results before
+storage. Under every host, even an `active` result proves installed inventory and cache/config
+state for future sessions—not that a later session loaded a hook or delivered an observation.
 
 ## What's in the box
 
 | | |
 | --- | --- |
 | **Six operations, two surfaces** | `start`, `publish_work`, `check`, `respond`, `status`, `receipt` — identical contracts on the CLI and over MCP. Everything else is a bounded support surface, not a seventh operation. |
-| **Works with any MCP agent** | No integration, no installed skill, no configuration. Codex has a first-party integration because its skill surface delivers the guidance natively — but integration buys ergonomics, never a stronger claim. |
+| **Works with any MCP agent** | No integration, no installed skill, no configuration. Codex, Claude Code, and Cursor have first-party integrations because each host's skill or plugin surface delivers the guidance natively — but integration buys ergonomics, never a stronger claim. |
 | **Honest receipts** | Coverage, provenance, freshness, findings, and limitations stay separate. A clean deterministic check is never presented as proof that work is correct. |
 | **Zero-egress by default** | A fresh installation is deterministic and fully useful offline; nothing leaves your machine before first-run setup commits a policy. |
 | **Privacy-gated semantic review** | An optional reviewer model reads a bounded, minimized packet built from the ledger — never your repository — behind explicit provider binding and reauthenticated policy authority. |
@@ -155,8 +160,11 @@ External semantic review is a separate explicit decision. When you choose it, th
 `assisted-review` recipe shows and confirms a standing policy that sends the reviewer a structured
 packet built from the ledger — goal, obligations, claims, timeline, deterministic findings and their
 bases, coverage gaps, and bounded problem-local excerpts already recorded in the case. Sensitive and
-confidential content is off, the never-send set is absolute, and only a reauthenticated local human
-can loosen policy.
+confidential content is off, and the never-send set is absolute. Policy loosens only through a
+reauthenticated decision you make: the trusted local ceremony, or your explicit current-chat
+approval of one exact prepared, previewed, expiring consent target that a capable agent relays for
+you. That relay is the agent's assertion, which Yoetz cannot independently authenticate, so the
+local ceremony remains the stronger path.
 
 Provider setup distinguishes **OpenAI API / compatible API** from **Codex with ChatGPT
 subscription**. The subscription route binds one exact Codex app-server and dedicated home; Codex

@@ -88,7 +88,11 @@ def _operation_exit_code(state: PluginOperationState) -> int:
 
 
 def plugin_artifact(
-    ownership_name: str, route_name: str | None, *, development_enabled: bool = False
+    ownership_name: str,
+    route_name: str | None,
+    *,
+    development_enabled: bool = False,
+    observation_profile: str = "structural",
 ) -> ClaudeCodePluginArtifact:
     ownerships = {
         "external-registration": McpOwnership.EXTERNAL_REGISTRATION,
@@ -105,11 +109,14 @@ def plugin_artifact(
         route = cast(Literal["strict", "policy"], route_name)
     else:
         raise ValueError("claude_code_mcp_route_invalid")
+    if observation_profile not in {"structural", "ordinary"}:
+        raise ValueError("claude_code_observation_profile_invalid")
     return render_claude_code_plugin(
         mcp_ownership=ownership,
         route_profile=route,
         yoetz_launcher=invoking_launcher(),
         development_enabled=development_enabled,
+        observation_profile=cast(Literal["structural", "ordinary"], observation_profile),
     )
 
 
@@ -120,6 +127,7 @@ def run_claude_code_plugin_export(
     route_profile: str | None,
     development_enabled: bool,
     json_output: bool,
+    observation_profile: str = "structural",
 ) -> int:
     """Write the exact Claude plugin root for a ``claude --plugin-dir`` session.
 
@@ -131,7 +139,10 @@ def run_claude_code_plugin_export(
 
     try:
         artifact = plugin_artifact(
-            ownership_name, route_profile, development_enabled=development_enabled
+            ownership_name,
+            route_profile,
+            development_enabled=development_enabled,
+            observation_profile=observation_profile,
         )
         written = export_claude_code_plugin(artifact, output_root)
         _emit(
@@ -140,6 +151,7 @@ def run_claude_code_plugin_export(
                 "default_enabled": development_enabled,
                 "development": artifact.development,
                 "files": list(written),
+                "observation_profile": artifact.plan.host_extension_profile,
                 "mcp_ownership": artifact.plan.mcp_ownership.value,
                 "mcp_route_profile": artifact.plan.mcp_route_profile,
                 "next_step": (
@@ -210,6 +222,7 @@ def run_claude_code_plugin_command(
     preview_digest: str | None,
     accept: bool,
     json_output: bool,
+    observation_profile: str = "structural",
     _state: Path | None = None,
     _presence: ArtifactUserPresencePort | None = None,
 ) -> int:
@@ -242,10 +255,24 @@ def run_claude_code_plugin_command(
             str(executable),
             identity,
         )
-        artifact = plugin_artifact(ownership_name, route_profile)
+        artifact = plugin_artifact(
+            ownership_name, route_profile, observation_profile=observation_profile
+        )
         status = status_claude_code_plugin(target, artifact)
         if command == "status":
-            _emit(_status_body(status), json_output=json_output)
+            _emit(
+                {
+                    **_status_body(status),
+                    "requested_observation_profile": artifact.plan.host_extension_profile,
+                    "installed_observation_profile": (
+                        artifact.plan.host_extension_profile
+                        if status.marker_valid
+                        and status.installed_digest == artifact.artifact_digest
+                        else None
+                    ),
+                },
+                json_output=json_output,
+            )
             return 0
         action_name = requested_action if command == "preview" else command
         if action_name is None:
@@ -274,6 +301,7 @@ def run_claude_code_plugin_command(
                         admission_cleanup_preview("claude", project) if reverse_admission else None
                     ),
                     "artifact_digest": preview.artifact_digest,
+                    "observation_profile": artifact.plan.host_extension_profile,
                     "authorization": {
                         "operation": "plugin_artifact_apply",
                         "prepare_command": [
@@ -332,6 +360,7 @@ def run_claude_code_plugin_command(
                     else None
                 ),
                 "artifact_digest": result.artifact_digest,
+                "requested_observation_profile": artifact.plan.host_extension_profile,
                 "changed_files": list(result.changed_files),
                 "enabled": result.enabled,
                 "installed_digest": result.installed_digest,
