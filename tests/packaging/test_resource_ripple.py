@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -102,6 +103,24 @@ def _run(*arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _run_resource_manifest(*arguments: str, repo_root: Path) -> subprocess.CompletedProcess[str]:
+    environment = dict(os.environ)
+    source_root = str(repo_root / "src")
+    existing = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = (
+        source_root if not existing else os.pathsep.join((source_root, existing))
+    )
+    return subprocess.run(
+        [sys.executable, str(_REPO_ROOT / "scripts/verify_resource_manifest.py"), *arguments],
+        cwd=repo_root,
+        env=environment,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=120,
+    )
+
+
 def test_real_checkout_passes_the_single_ci_entrypoint() -> None:
     completed = _run("--check")
 
@@ -138,6 +157,133 @@ def test_write_repeats_until_the_owned_bytes_are_stable(tmp_path: Path) -> None:
     assert completed.returncode == 0, completed.stderr
     assert "fixed point after 2 pass(es)" in completed.stdout
     assert (tmp_path / "schemas/state.txt").read_text(encoding="utf-8") == "stable\n"
+
+
+def test_sync_retires_prior_inventory_file_before_manifest_publish_and_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An interrupted retirement leaves an old manifest that a retry can converge."""
+
+    from scripts import verify_resource_manifest as resource_manifest
+
+    resource_root = tmp_path / "src/yoetz/resources"
+    stale_relative = "fixtures/replay/retired.case.json"
+    stale_path = resource_root / stale_relative
+    stale_path.parent.mkdir(parents=True)
+    stale_path.write_bytes(b"retired")
+    manifest_path = resource_root / "manifest.json"
+    old_manifest = canonical_encode({"entries": [{"package_path": stale_relative}]}) + b"\n"
+    manifest_path.write_bytes(old_manifest)
+
+    current_relative = "fixtures/canonical/current.case.json"
+    current_data = b"{}"
+    current = resource_manifest.CollectedResource(
+        resource_manifest.ResourceInventoryEntry(
+            logical_name=current_relative,
+            source_path=current_relative,
+            package_path=current_relative,
+            kind="canonical_vector",
+            media_type="application/json",
+            size_cap=100,
+            text=True,
+        ),
+        len(current_data),
+        f"sha256:{hashlib.sha256(current_data).hexdigest()}",
+        current_data,
+    )
+    new_manifest = canonical_encode({"entries": []}) + b"\n"
+    real_replace = resource_manifest.os.replace
+    interrupted = False
+
+    def interrupt_manifest_publish(source: Path, destination: Path) -> None:
+        nonlocal interrupted
+        if Path(destination) == manifest_path and not interrupted:
+            interrupted = True
+            raise OSError("simulated_manifest_publish_interruption")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(resource_manifest.os, "replace", interrupt_manifest_publish)
+    with pytest.raises(OSError, match="simulated_manifest_publish_interruption"):
+        resource_manifest.sync_resource_tree((current,), new_manifest, repo_root=tmp_path)
+
+    assert not stale_path.exists()
+    assert manifest_path.read_bytes() == old_manifest
+
+    monkeypatch.setattr(resource_manifest.os, "replace", real_replace)
+    resource_manifest.sync_resource_tree((current,), new_manifest, repo_root=tmp_path)
+    assert not stale_path.exists()
+    assert (resource_root / current_relative).read_bytes() == current_data
+    assert manifest_path.read_bytes() == new_manifest
+
+
+def test_real_sync_retires_stale_package_resource_and_keeps_source_fixture(
+    tmp_path: Path,
+) -> None:
+    """Inventory retirement removes only the generated mirror and keeps the source corpus."""
+
+    checkout = tmp_path / "checkout"
+    _copy_checkout(checkout)
+    relative = "fixtures/replay/lineage-event-families.case.json"
+    source = checkout / relative
+    package = checkout / "src/yoetz/resources" / relative
+    package.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, package)
+
+    manifest_path = checkout / "src/yoetz/resources/manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["entries"].append(
+        {
+            "kind": "canonical_vector",
+            "logical_name": relative,
+            "media_type": "application/vnd.yoetz.fixture-case+json",
+            "package_path": relative,
+            "sha256": f"sha256:{hashlib.sha256(source.read_bytes()).hexdigest()}",
+            "size": source.stat().st_size,
+            "source_path": relative,
+        }
+    )
+    manifest_path.write_bytes(canonical_encode(manifest) + b"\n")
+
+    completed = _run_resource_manifest("--sync", repo_root=checkout)
+
+    assert completed.returncode == 0, completed.stderr + completed.stdout
+    assert source.is_file()
+    assert not package.exists()
+
+
+@pytest.mark.parametrize(
+    "layout", ("package_root", "package_parent", "package_extra", "source_parent")
+)
+def test_resource_scans_reject_symlinked_roots_ancestors_and_extras(
+    tmp_path: Path, layout: str
+) -> None:
+    checkout = tmp_path / "checkout"
+    _copy_checkout(checkout)
+    resources = checkout / "src/yoetz/resources"
+
+    if layout == "package_root":
+        target = checkout / "package-resource-target"
+        shutil.move(str(resources), str(target))
+        resources.symlink_to(target, target_is_directory=True)
+    elif layout == "package_parent":
+        parent = resources / "fixtures"
+        target = checkout / "package-fixtures-target"
+        shutil.move(str(parent), str(target))
+        parent.symlink_to(target, target_is_directory=True)
+    elif layout == "package_extra":
+        target = checkout / "unowned-resource.json"
+        target.write_text("{}\n", encoding="utf-8")
+        (resources / "unowned-resource.json").symlink_to(target)
+    else:
+        parent = checkout / "fixtures/canonical"
+        target = checkout / "source-canonical-target"
+        shutil.move(str(parent), str(target))
+        parent.symlink_to(target, target_is_directory=True)
+
+    for mode in ("--check", "--sync"):
+        completed = _run_resource_manifest(mode, repo_root=checkout)
+        assert completed.returncode == 1
+        assert "symlink_forbidden" in completed.stderr
 
 
 @pytest.mark.slow
