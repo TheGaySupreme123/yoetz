@@ -32,6 +32,7 @@ from yoetz.adapters.integrations.observation_local import (
     session_commitment_from_codex_id,
 )
 from yoetz.adapters.workspace_inspect import LocalWorkspaceInspectAdapter
+from yoetz.application.lineage_coordinator import LineageManifestCoordinator
 from yoetz.application.observation_advice import (
     ObservationAdviceContextBuilder,
     scoped_session_envelopes,
@@ -64,6 +65,7 @@ from yoetz.application.observation_verification import (
     VerificationDrainHandle,
     orchestrate_changed_path_inspection,
 )
+from yoetz.application.projects import SourceConsentRevocationPlan
 from yoetz.application.unit_of_work import (
     PreparedMutation,
     PreSubmissionCancelled,
@@ -94,6 +96,7 @@ from yoetz.domain.findings import (
     FindingKind,
     FindingOrigin,
 )
+from yoetz.domain.host_lineage import host_lineage_from_envelope
 from yoetz.domain.observation import (
     OBSERVATION_BACKPRESSURE_REASON,
     AdviceItem,
@@ -130,6 +133,11 @@ from yoetz.kernel.projections import ProjectionRecord, ProjectionState
 from yoetz.observability.logging import record_unexpected_exception_without_raising
 from yoetz.observability.privacy import prepare_persisted_plaintext
 from yoetz.ports.clock import ClockPort
+from yoetz.ports.host_lineage import (
+    HostLineageRegistryError,
+    HostLineageRegistryPort,
+    HostLineageRegistryReason,
+)
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
     AcceptedEventSummary,
@@ -327,6 +335,16 @@ class ObservationMappingStorer(Protocol):
     def __call__(self, mapping: LifecycleMapping, *, _state: Path | None = None) -> None: ...
 
 
+class ObservationConsentInvalidationPlanner(Protocol):
+    def __call__(
+        self, task_ids: tuple[str, ...], workspace_commitment: str, revocation_token: str
+    ) -> Awaitable[SourceConsentRevocationPlan]: ...
+
+
+class ObservationConsentInvalidationApplier(Protocol):
+    def __call__(self, plan: SourceConsentRevocationPlan) -> Awaitable[object]: ...
+
+
 def _session_superseded_binding(
     error: PublicOperationError, *, expected_task_id: str
 ) -> tuple[str, str] | None:
@@ -395,11 +413,19 @@ class ObservationCoordinator:
     mapping_storer: ObservationMappingStorer = store_mapping
     state_root: Path | None = None
     advice_hook: ObservationAdviceHook | None = None
+    # READY binds these to ProjectApplication.  The planner snapshots current project
+    # generations; the applier performs the CAS-style fence and is replay-safe across restart.
+    consent_invalidation_planner: ObservationConsentInvalidationPlanner | None = None
+    consent_invalidation_applier: ObservationConsentInvalidationApplier | None = None
     advice_context_builder: ObservationAdviceContextBuilder = field(
         default_factory=ObservationAdviceContextBuilder
     )
     verification_supervisor: ObservationVerificationSupervisor | None = None
     observation_enabled: bool = True
+    lineage_coordinator: LineageManifestCoordinator | None = None
+    # Host observations are recorded in the service-owned catalog after local ingest accepts the
+    # envelope.  The registry is optional for pre-migration/test compositions.
+    host_lineage_registry: HostLineageRegistryPort | None = None
     _advice_event_ref_cache: dict[tuple[str, str], tuple[str, ...]] = field(
         default_factory=_empty_advice_event_ref_cache, init=False, repr=False
     )
@@ -461,10 +487,16 @@ class ObservationCoordinator:
         *,
         sessions: tuple[str, ...] | None = None,
         start_index: int = 0,
+        task_id: str | None = None,
     ) -> None:
-        """Register the next pending session repository for one workspace."""
+        """Register pending session repositories for one workspace and task lane.
 
-        if supervisor.closed or supervisor.has_handle(workspace):
+        Initial discovery may register sibling tasks together.  An idle callback belongs to one
+        task runtime, however, so its successor scan must not route or release a sibling runtime
+        that another concurrent drain is already retiring.
+        """
+
+        if supervisor.closed:
             return
         consent = await self._local(partial(self.local.consent_for, workspace))
         if consent is None or not consent.active:
@@ -474,14 +506,20 @@ class ObservationCoordinator:
                 partial(self.local.codex_sessions_for_workspace, workspace)
             )
         for session_index, codex_session_id in enumerate(sessions[start_index:], start=start_index):
-            if supervisor.closed or supervisor.has_handle(workspace):
+            if supervisor.closed:
                 return
             mapping = self.mapping_loader(codex_session_id, _state=self.state_root)
             if mapping is None:
                 continue
+            if task_id is not None and mapping.yoetz_task_id != task_id:
+                continue
             runtime: TaskRuntime | None = None
             try:
                 runtime, mapping = await self._route_observation_mapping(mapping)
+                # The verification repository is task-bundle local.  A sibling task may use the
+                # same source workspace, so only suppress a duplicate handle for this task lane.
+                if supervisor.has_handle(workspace, runtime.task_id):
+                    continue
                 store = self._observation_store(runtime)
                 repository = getattr(store, "verification_repository", None)
                 if not callable(repository):
@@ -524,6 +562,23 @@ class ObservationCoordinator:
                         bound_workspace,
                         sessions=bound_sessions,
                         start_index=next_session_index,
+                        task_id=bound_runtime.task_id,
+                    )
+
+                async def _failed(
+                    bound_workspace: str = workspace,
+                    bound_session_id: str = codex_session_id,
+                ) -> None:
+                    session_commitment = await self._local(
+                        partial(self.local.session_commitment, bound_session_id)
+                    )
+                    await self._local(
+                        partial(
+                            self.local.note_session_coverage_gap,
+                            bound_workspace,
+                            session_commitment,
+                            ObservationGapCode.VERIFICATION_STALE.value,
+                        )
                     )
 
                 registered = supervisor.register(
@@ -532,17 +587,25 @@ class ObservationCoordinator:
                         worker=worker,
                         after_complete=_after,
                         on_idle=_release_and_continue,
+                        task_id=runtime.task_id,
+                        on_failure=_failed,
                     )
                 )
                 if registered:
                     runtime = None
-                return
+                # Continue discovery so sibling task lanes sharing the same repository can run
+                # concurrently.  A same-task second session is suppressed by the lane key above.
+                continue
             except Exception:
+                session_commitment = await self._local(
+                    partial(self.local.session_commitment, codex_session_id)
+                )
                 await self._local(
                     partial(
-                        self.local.note_coverage_gap,
+                        self.local.note_session_coverage_gap,
                         workspace,
-                        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                        session_commitment,
+                        ObservationGapCode.VERIFICATION_STALE.value,
                     )
                 )
             finally:
@@ -637,6 +700,12 @@ class ObservationCoordinator:
                 result = await store.ingest(envelope)
                 if result.disposition is ObservationIngestDisposition.REJECTED:
                     return result
+
+                # Keep host attribution in the service-owned catalog alongside the local envelope.
+                # ACCEPTED and DUPLICATE both pass through this idempotent path so a restart or a
+                # prior partial failure can repair a missing annotation before reporting success.
+                stage = "host_lineage"
+                await self._record_host_lineage(runtime, workspace, envelope)
 
                 # ACCEPTED and DUPLICATE both reconcile the durable ledger before
                 # reporting success. A DUPLICATE is never an early return: the
@@ -930,6 +999,8 @@ class ObservationCoordinator:
                     legacy_writer_id=mapping.yoetz_writer_id,
                     session_commitment=envelope.session_commitment,
                 )
+                stage = "lineage"
+                await self._sweep_lineage(runtime)
                 return result
             except PublicOperationError as exc:
                 if exc.retryable and exc.code in {
@@ -1015,38 +1086,96 @@ class ObservationCoordinator:
         return await self._local(partial(self.local.resume, command))
 
     async def revoke(self, command: ObservationRevokeCommand) -> ObservationStatus:
-        status = await self._local(partial(self.local.revoke, command))
-        # The local fence is authoritative for immediately stopping new capture.
-        # Best-effort bundle propagation additionally deactivates the encrypted
-        # locator and exact-digest trust rows while retaining encrypted evidence.
-        seen_tasks: set[str] = set()
-        revoked_sessions = await self._local(
-            partial(self.local.codex_sessions_for_workspace, command.workspace_commitment)
-        )
-        for codex_session_id in revoked_sessions:
-            mapping = self.mapping_loader(codex_session_id, _state=self.state_root)
-            if mapping is None or mapping.yoetz_task_id in seen_tasks:
-                continue
-            runtime: TaskRuntime | None = None
-            try:
-                runtime, mapping = await self._route_observation_mapping(
-                    mapping,
-                    required_capabilities=frozenset({RuntimeCapability.WRITE}),
-                )
-                await self._observation_store(runtime).revoke(command)
+        async with self._lock:
+            # The local fence is authoritative for immediately stopping new capture.  The
+            # pending token is durable before any project/catalog await, so a crash here cannot
+            # be mistaken for a completed revocation after a later re-consent.
+            status = await self._local(partial(self.local.revoke, command))
+            pending = await self._local(
+                partial(self.local.pending_consent_revocation, command.workspace_commitment)
+            )
+
+            seen_tasks: set[str] = set()
+            mappings_by_task: dict[str, LifecycleMapping] = {}
+            revoked_sessions = await self._local(
+                partial(self.local.codex_sessions_for_workspace, command.workspace_commitment)
+            )
+            task_ids: list[str] = []
+            for codex_session_id in revoked_sessions:
+                mapping = self.mapping_loader(codex_session_id, _state=self.state_root)
+                if mapping is None or mapping.yoetz_task_id in seen_tasks:
+                    continue
                 seen_tasks.add(mapping.yoetz_task_id)
-            except Exception:
-                await self._local(
-                    partial(
-                        self.local.note_coverage_gap,
-                        command.workspace_commitment,
-                        ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                task_ids.append(mapping.yoetz_task_id)
+                mappings_by_task[mapping.yoetz_task_id] = mapping
+
+            planner = self.consent_invalidation_planner
+            applier = self.consent_invalidation_applier
+            if pending is not None:
+                token, recorded_generations = pending
+                if planner is None or applier is None:
+                    # A local-only composition has no project catalog to fence.  READY always
+                    # binds both callbacks; keeping this fallback preserves the standalone hook
+                    # store's existing revoke semantics without exposing a false project claim.
+                    await self._local(
+                        partial(
+                            self.local.mark_consent_revocation_fenced,
+                            command.workspace_commitment,
+                            token,
+                        )
                     )
-                )
-            finally:
-                if runtime is not None:
-                    await self.runtime.release(runtime)
-        return status
+                else:
+                    if recorded_generations is not None:
+                        plan = SourceConsentRevocationPlan(token, recorded_generations)
+                    else:
+                        plan = await planner(
+                            tuple(sorted(task_ids, key=str.encode)),
+                            command.workspace_commitment,
+                            token,
+                        )
+                        await self._local(
+                            partial(
+                                self.local.record_consent_revocation_plan,
+                                command.workspace_commitment,
+                                token,
+                                dict(plan.project_generations),
+                            )
+                        )
+                    await applier(plan)
+                    await self._local(
+                        partial(
+                            self.local.mark_consent_revocation_fenced,
+                            command.workspace_commitment,
+                            token,
+                        )
+                    )
+
+            # Bundle propagation additionally deactivates the encrypted locator and exact-digest
+            # trust rows while retaining encrypted evidence.  It runs only after the project
+            # fence, so no queued old-generation advice can win a delivery race.
+            for task_id in sorted(task_ids, key=str.encode):
+                mapping = mappings_by_task.get(task_id)
+                if mapping is None:
+                    continue
+                runtime: TaskRuntime | None = None
+                try:
+                    runtime, mapping = await self._route_observation_mapping(
+                        mapping,
+                        required_capabilities=frozenset({RuntimeCapability.WRITE}),
+                    )
+                    await self._observation_store(runtime).revoke(command)
+                except Exception:
+                    await self._local(
+                        partial(
+                            self.local.note_coverage_gap,
+                            command.workspace_commitment,
+                            ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                        )
+                    )
+                finally:
+                    if runtime is not None:
+                        await self.runtime.release(runtime)
+            return status
 
     def _observation_store(self, runtime: TaskRuntime) -> TaskObservationPort:
         store = runtime.observation
@@ -1057,6 +1186,80 @@ class ObservationCoordinator:
                 retryable=True,
             )
         return store
+
+    async def _sweep_lineage(self, runtime: TaskRuntime) -> None:
+        """Refresh this task's manifest and its parent after one observed commit.
+
+        Lineage failures are represented by the next successful service sweep.  They must not
+        turn an otherwise durable host observation into a rejected observation, and this helper
+        never opens a child directly: the injected manifest coordinator owns the route and source
+        gate.
+        """
+
+        coordinator = self.lineage_coordinator
+        if coordinator is None:
+            return
+        try:
+            await coordinator.sweep(runtime)
+            await coordinator.sweep_parent_of(runtime.task_id)
+        except Exception as exc:
+            # The child observation is already durable. Keep this derived maintenance failure
+            # bounded and retryable through the next observation/outbox sweep rather than
+            # replacing the observation result with a broad internal error.
+            record_unexpected_exception_without_raising(
+                exc,
+                component="application.observation_coordinator",
+                operation="lineage_manifest_sweep_failed",
+            )
+
+    async def _record_host_lineage(
+        self,
+        runtime: TaskRuntime,
+        workspace: str,
+        envelope: ObservationEnvelope,
+    ) -> None:
+        """Persist one normalized host signal without promoting host claims to authorship.
+
+        Host adapters can emit partial or conflicting identities.  Those signals remain in the
+        observation ledger and receive a bounded local coverage gap; storage/key failures remain
+        retryable so the durable outbox can repair them on a later pass.
+        """
+
+        registry = self.host_lineage_registry
+        if registry is None:
+            return
+        observation = host_lineage_from_envelope(envelope)
+        if observation is None:
+            return
+        try:
+            await registry.record_host_lineage_observation(
+                runtime.task_id,
+                observation,
+                observed_session_commitment=envelope.session_commitment,
+                source=envelope.source,
+            )
+        except HostLineageRegistryError as exc:
+            if exc.reason in {
+                HostLineageRegistryReason.ANNOTATION_AMBIGUOUS,
+                HostLineageRegistryReason.IDENTITY_CONFLICT,
+            }:
+                # The event itself remains durable, but its host attribution is explicitly
+                # incomplete until a stronger alias can disambiguate it.
+                await self._local(
+                    partial(self.local.note_coverage_gap, workspace, exc.reason.value)
+                )
+                return
+            if exc.reason is HostLineageRegistryReason.STORAGE_CORRUPT:
+                raise PublicOperationError(
+                    PublicErrorCode.STORAGE_CORRUPT,
+                    "Host lineage storage is inconsistent.",
+                    retryable=False,
+                ) from exc
+            raise PublicOperationError(
+                PublicErrorCode.SERVICE_UNAVAILABLE,
+                "Host lineage storage is temporarily unavailable.",
+                retryable=True,
+            ) from exc
 
     async def _route_observation_runtime(
         self,
@@ -2136,7 +2339,7 @@ class ObservationCoordinator:
             return
         if self.verification_supervisor is not None:
             supervisor = self.verification_supervisor
-            if supervisor.has_handle(workspace):
+            if supervisor.has_handle(workspace, runtime.task_id):
                 supervisor.notify(workspace)
                 return
 
@@ -2167,12 +2370,24 @@ class ObservationCoordinator:
                 async def _release() -> None:
                     await self.runtime.release(deferred_runtime)
 
+                async def _failed() -> None:
+                    await self._local(
+                        partial(
+                            self.local.note_session_coverage_gap,
+                            workspace,
+                            envelope.session_commitment,
+                            ObservationGapCode.VERIFICATION_STALE.value,
+                        )
+                    )
+
                 registered = supervisor.register(
                     VerificationDrainHandle(
                         workspace_commitment=workspace,
                         worker=deferred_worker,
                         after_complete=_after,
                         on_idle=_release,
+                        task_id=runtime.task_id,
+                        on_failure=_failed,
                     )
                 )
                 if not registered:

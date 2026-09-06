@@ -346,6 +346,8 @@ class YoetzTui(App[int]):
         handlers: dict[str, Callable[[], Awaitable[None]]] = {
             "status": self.command_status,
             "work": self.command_work,
+            "lineage": self.command_lineage,
+            "project": self.command_project,
             "check": self.command_check,
             "receipt": self.command_receipt,
             "connect": self.command_connect,
@@ -1737,7 +1739,7 @@ class YoetzTui(App[int]):
     async def command_work(self) -> None:
         recent = self.runtime.opened_titles
         rows = [Option(f"task:{title}", title, "opened in this session") for title in recent]
-        rows.append(Option("open", "Open a task by name"))
+        rows.append(Option("open", "Open a task by session ID"))
         chosen = await self.ask(
             SelectionView(
                 name="work",
@@ -1745,9 +1747,8 @@ class YoetzTui(App[int]):
                 body=()
                 if recent
                 else (
-                    "Yoetz records work per task. The local service does not keep",
-                    "a browsable index of every task, so open one by the title the",
-                    "agent used for it.",
+                    "Open a task using the session ID returned by Yoetz start.",
+                    "Its title or workspace alone cannot select work to resume.",
                 ),
                 options=rows,
                 searchable=bool(recent),
@@ -1761,8 +1762,8 @@ class YoetzTui(App[int]):
             entry = TextEntryView(
                 name="work-open",
                 title="Open a task",
-                label="Task title",
-                placeholder="the title the agent used",
+                label="Session ID",
+                placeholder="ses_…",
             )
             if await self.ask(entry) is None:
                 return
@@ -1771,6 +1772,37 @@ class YoetzTui(App[int]):
         detail = await self.runtime.open_task(title)
         self._active_task_title = title
         self.settle(Level.ACTIVE, title, render_work_detail(detail, self.body_width))
+
+    async def command_lineage(self) -> None:
+        await self._command_task_view("lineage")
+
+    async def command_project(self) -> None:
+        await self._command_task_view("project")
+
+    async def _command_task_view(self, view: Literal["lineage", "project"]) -> None:
+        title = await self._require_task()
+        if title is None:
+            return
+        cursor: str | None = None
+        while True:
+            page = await self.runtime.task_status(title, view, cursor=cursor)
+            self.settle(Level.ACTIVE, "Child tasks" if view == "lineage" else "Project", page.lines)
+            if page.next_cursor is None:
+                return
+            chosen = await self.ask(
+                SelectionView(
+                    name="task-view-page",
+                    title="More results are available",
+                    options=[
+                        Option("next", "Next page", "Continue this task view."),
+                        Option("done", "Done", "Return to the conversation."),
+                    ],
+                    hint="enter to choose · esc to finish",
+                )
+            )
+            if chosen != "next":
+                return
+            cursor = page.next_cursor
 
     async def command_check(self) -> None:
         title = await self._require_task()
@@ -1789,6 +1821,9 @@ class YoetzTui(App[int]):
         mode = CheckMode(chosen)
         self.say(Level.ACTIVE, f"Checking {title} ({mode.label.lower()})")
         verdict, lines = await self.runtime.run_check(title, mode)
+        if verdict == "awaiting_human":
+            self.settle(Level.ACTIVE, "Check awaiting your decision", lines)
+            return
         level = Level.VERIFIED if verdict == "pass" else Level.UNPROVEN
         self.settle(level, f"Check complete: {verdict}", lines)
 

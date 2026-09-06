@@ -333,6 +333,16 @@ class MemoryImporter:
         self._policy = policy
         self._fault_hook = fault_hook
 
+    def rebind_session(self, admitted_session_id: str) -> None:
+        """Move this task-owned importer to the currently attached session.
+
+        A task bundle can be re-attached without reopening its durable ports.  The runtime
+        therefore has to refresh the session fence held by the importer before a new capture;
+        the route itself remains the authority for which session may call it.
+        """
+
+        self._session_id = session_id(admitted_session_id)
+
     async def _fault(self, point: MemoryImportFaultPoint) -> None:
         if self._fault_hook is None:
             return

@@ -48,7 +48,9 @@ from yoetz.adapters.keys.vault_passphrase import (
 )
 from yoetz.domain.values import validate_sha256_digest
 from yoetz.ports.clock import ClockPort
+from yoetz.ports.host_lineage import HOST_LINEAGE_MAC_DOMAIN
 from yoetz.ports.keys import (
+    LINEAGE_ATTACH_MAC_DOMAIN,
     REPOSITORY_PRIVACY_MAC_DOMAIN,
     BundleKeys,
     KeyStoreError,
@@ -94,6 +96,7 @@ _INSTALLATION_SALT: Final = b"yoetz/installation-mac-root/v1"
 _BUNDLE_SALT: Final = b"yoetz/bundle-key-root/v1"
 _INSTALLATION_INFO: Final[Mapping[MacKeyPurpose, bytes]] = {
     MacKeyPurpose.CATALOG_LOOKUP: b"yoetz/catalog-lookup/v1",
+    MacKeyPurpose.LINEAGE_ATTACH: b"yoetz/lineage-attach/v1",
     MacKeyPurpose.LOG_CORRELATION: b"yoetz/log-correlation/v1",
     MacKeyPurpose.PRIVACY_AUDIT: b"yoetz/privacy-audit/v1",
 }
@@ -104,6 +107,13 @@ _INSTALLATION_DOMAINS: Final[Mapping[MacKeyPurpose, frozenset[bytes]]] = {
             b"yoetz/workspace-ref/v1\x00",
             b"yoetz/external-task-ref/v1\x00",
             REPOSITORY_PRIVACY_MAC_DOMAIN,
+            HOST_LINEAGE_MAC_DOMAIN,
+        }
+    ),
+    MacKeyPurpose.LINEAGE_ATTACH: frozenset(
+        {
+            LINEAGE_ATTACH_MAC_DOMAIN,
+            b"yoetz/lineage-child-route/v1\x00",
         }
     ),
     MacKeyPurpose.LOG_CORRELATION: frozenset({b"yoetz/session-log-id/v1\x00"}),

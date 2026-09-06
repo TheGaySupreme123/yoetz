@@ -24,6 +24,15 @@ from pydantic import (
     model_validator,
 )
 
+from yoetz.domain.coordination import (
+    GrantState,
+    LineageAcceptance,
+    LineageOrigin,
+    MemberKind,
+    ProjectKind,
+    SessionHealth,
+    WorkState,
+)
 from yoetz.protocol.canonical import JsonValue, parse_canonical_integer_string
 from yoetz.protocol.coverage import (
     ArtifactObservation,
@@ -94,6 +103,34 @@ __all__ = [
     "ReceiptRequestModel",
     "ReceiptResult",
     "ReceiptResultModel",
+    "WorkState",
+    "SessionHealth",
+    "LineageOrigin",
+    "LineageAcceptance",
+    "ProjectKind",
+    "MembershipKind",
+    "GrantState",
+    "LineageRollupState",
+    "LineageReadGapReason",
+    "LineageProvenanceRestriction",
+    "AttachHandleModel",
+    "ChildFindingSnapshotModel",
+    "ChildDependencySnapshotModel",
+    "ChildDependenciesModel",
+    "CheckChildPreviewItemModel",
+    "CheckChildrenPreviewModel",
+    "CheckAdvisoryNoteModel",
+    "StatusLineageChildModel",
+    "StatusLineageAnnotationModel",
+    "StatusLineagePageModel",
+    "ProjectTextRefModel",
+    "StatusProjectMemberModel",
+    "StatusProjectCoverageModel",
+    "StatusProjectDetectionModel",
+    "StatusProjectReceiptModel",
+    "StatusProjectPageModel",
+    "ReceiptChildOutcomeModel",
+    "ReceiptChildrenModel",
     "REGISTERED_GUIDANCE_URIS",
     "ReadGuidanceRequest",
     "ReadGuidanceRequestModel",
@@ -193,6 +230,35 @@ class IntegrationKind(str, Enum):  # noqa: UP042 - exact public wire enum base
     COOPERATIVE_MCP = "cooperative_mcp"
     LOCAL_CLI = "local_cli"
     CODEX_JSONL_IMPORT = "codex_jsonl_import"
+
+
+MembershipKind = MemberKind
+
+
+class LineageRollupState(str, Enum):  # noqa: UP042 - exact wire enum base
+    CLEAN = "clean"
+    ANNOTATION = "annotation"
+    BLOCKED = "blocked"
+    OPEN_GAP = "open_gap"
+    INCOMPLETE = "incomplete"
+    UNAVAILABLE = "unavailable"
+
+
+class LineageReadGapReason(str, Enum):  # noqa: UP042 - exact wire enum base
+    MISSING = "missing"
+    UNREADABLE = "unreadable"
+    QUARANTINED = "quarantined"
+    REVOKED = "revoked"
+    NOT_AUTHORIZED = "not_authorized"
+    UNKNOWN = "unknown"
+
+
+class LineageProvenanceRestriction(str, Enum):  # noqa: UP042 - exact wire enum base
+    CATEGORY_RESTRICTED = "category_restricted"
+    NEVER_SEND = "never_send"
+    TASK_SCOPE = "task_scope"
+    MINIMIZATION = "minimization"
+    AUTHORIZATION_MISSING = "authorization_missing"
 
 
 class ReceiptFormat(str, Enum):  # noqa: UP042 - exact public wire enum base
@@ -495,6 +561,46 @@ def _data_category_from_wire(value: object) -> DataCategory:
     return _enum_from_wire(value, DataCategory)
 
 
+def _work_state_from_wire(value: object) -> WorkState:
+    return _enum_from_wire(value, WorkState)
+
+
+def _session_health_from_wire(value: object) -> SessionHealth:
+    return _enum_from_wire(value, SessionHealth)
+
+
+def _lineage_origin_from_wire(value: object) -> LineageOrigin:
+    return _enum_from_wire(value, LineageOrigin)
+
+
+def _lineage_acceptance_from_wire(value: object) -> LineageAcceptance:
+    return _enum_from_wire(value, LineageAcceptance)
+
+
+def _project_kind_from_wire(value: object) -> ProjectKind:
+    return _enum_from_wire(value, ProjectKind)
+
+
+def _membership_kind_from_wire(value: object) -> MembershipKind:
+    return _enum_from_wire(value, MembershipKind)
+
+
+def _grant_state_from_wire(value: object) -> GrantState:
+    return _enum_from_wire(value, GrantState)
+
+
+def _lineage_rollup_state_from_wire(value: object) -> LineageRollupState:
+    return _enum_from_wire(value, LineageRollupState)
+
+
+def _lineage_read_gap_reason_from_wire(value: object) -> LineageReadGapReason:
+    return _enum_from_wire(value, LineageReadGapReason)
+
+
+def _lineage_provenance_restriction_from_wire(value: object) -> LineageProvenanceRestriction:
+    return _enum_from_wire(value, LineageProvenanceRestriction)
+
+
 def _receipt_format_from_wire(value: object) -> ReceiptFormat:
     return _enum_from_wire(value, ReceiptFormat)
 
@@ -541,6 +647,10 @@ def _obligation_id_wire(value: object) -> str:
 
 def _task_id_wire(value: object) -> str:
     return _validate_id_wire(IdKind.TASK, value)
+
+
+def _project_id_wire(value: object) -> str:
+    return _validate_id_wire(IdKind.PROJECT, value)
 
 
 def _finding_id_wire(value: object) -> str:
@@ -677,6 +787,24 @@ EvidenceImmutabilityWire = Annotated[
 LedgerFreshnessWire = Annotated[LedgerFreshness, BeforeValidator(_ledger_freshness_from_wire)]
 CheckTypeWire = Annotated[CheckType, BeforeValidator(_check_type_from_wire)]
 DataCategoryWire = Annotated[DataCategory, BeforeValidator(_data_category_from_wire)]
+WorkStateWire = Annotated[WorkState, BeforeValidator(_work_state_from_wire)]
+SessionHealthWire = Annotated[SessionHealth, BeforeValidator(_session_health_from_wire)]
+LineageOriginWire = Annotated[LineageOrigin, BeforeValidator(_lineage_origin_from_wire)]
+LineageAcceptanceWire = Annotated[LineageAcceptance, BeforeValidator(_lineage_acceptance_from_wire)]
+ProjectKindWire = Annotated[ProjectKind, BeforeValidator(_project_kind_from_wire)]
+MembershipKindWire = Annotated[MembershipKind, BeforeValidator(_membership_kind_from_wire)]
+GrantStateWire = Annotated[GrantState, BeforeValidator(_grant_state_from_wire)]
+LineageRollupStateWire = Annotated[
+    LineageRollupState, BeforeValidator(_lineage_rollup_state_from_wire)
+]
+LineageReadGapReasonWire = Annotated[
+    LineageReadGapReason,
+    BeforeValidator(_lineage_read_gap_reason_from_wire),
+]
+LineageProvenanceRestrictionWire = Annotated[
+    LineageProvenanceRestriction,
+    BeforeValidator(_lineage_provenance_restriction_from_wire),
+]
 ReceiptFormatWire = Annotated[ReceiptFormat, BeforeValidator(_receipt_format_from_wire)]
 ReceiptIncludeWire = Annotated[ReceiptInclude, BeforeValidator(_receipt_include_from_wire)]
 ReceiptRedactionProfileWire = Annotated[
@@ -692,6 +820,7 @@ WriterIdWire = Annotated[str, BeforeValidator(_writer_id_wire)]
 ClaimIdWire = Annotated[str, BeforeValidator(_claim_id_wire)]
 ObligationIdWire = Annotated[str, BeforeValidator(_obligation_id_wire)]
 TaskIdWire = Annotated[str, BeforeValidator(_task_id_wire)]
+ProjectIdWire = Annotated[str, BeforeValidator(_project_id_wire)]
 FindingIdWire = Annotated[str, BeforeValidator(_finding_id_wire)]
 EvidenceIdWire = Annotated[str, BeforeValidator(_evidence_id_wire)]
 ResultIdWire = Annotated[str, BeforeValidator(_result_id_wire)]
@@ -729,6 +858,14 @@ SubjectIdWire = Annotated[
     ),
 ]
 CodeWire = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,127}$", max_length=128)]
+HostCorrelationWire = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=256,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/+\-]*$",
+    ),
+]
 VersionWire = Annotated[
     str, Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._+/-]{0,63}$")
 ]
@@ -774,6 +911,7 @@ type FreshnessWire = Literal[
 type FindingKindWire = Literal[
     "action_without_result",
     "claim_without_admissible_evidence",
+    "coordination_overlap",
     "completion_with_open_obligations",
     "contradictory_claims_unresolved",
     "diff_does_not_match_account",
@@ -890,7 +1028,7 @@ def _strip_optional_non_null_fields(
             result[key] = _strip_optional_non_null_fields(attribute, value)
         elif (
             isinstance(attribute, Sequence)
-            and not isinstance(attribute, (str, bytes))
+            and not isinstance(attribute, str | bytes)
             and isinstance(value, list)
         ):
             children: list[JsonValue] = []
@@ -976,6 +1114,149 @@ class CoverageModel(_ClosedModel):
             check_types=self.check_types,
             known_gaps=self.known_gaps,
         )
+        return self
+
+
+class AttachHandleModel(_ClosedModel):
+    """A service-minted, single-use child attachment capability.
+
+    The opaque handle is deliberately bounded and structurally opaque.  Its meaning is held by
+    the service; callers receive the child identity and expiry so they can route a subagent, but
+    no secret or transcript content is exposed in this contract.
+    """
+
+    handle: Annotated[
+        str, Field(min_length=32, max_length=256, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/+\-]*$")
+    ]
+    child_task_id: TaskIdWire
+    expires_at: TimestampWire
+
+    @property
+    def token(self) -> str:
+        """Compatibility spelling used by host adapters when forwarding the capability."""
+
+        return self.handle
+
+
+_CHILD_FINDING_TRAITS: Final[Mapping[str, tuple[int, bool]]] = MappingProxyType(
+    {
+        "completion_with_open_obligations": (1, True),
+        "requested_item_never_attempted": (2, True),
+        "failed_work_omitted": (1, True),
+        "claim_without_admissible_evidence": (1, True),
+        "result_without_action": (2, True),
+        "action_without_result": (3, True),
+        "stale_evidence_for_changed_state": (2, True),
+        "contradictory_claims_unresolved": (1, True),
+        "ledger_stale_or_incomplete": (3, False),
+        "weak_or_stale_response": (2, True),
+        "evidence_does_not_support_claim": (1, True),
+        "diff_does_not_match_account": (1, True),
+        "material_limitation_omitted": (1, True),
+        "questionable_finding_rejection": (2, True),
+        "coordination_overlap": (2, True),
+    }
+)
+
+
+class ChildFindingSnapshotModel(_ClosedModel):
+    optional_non_null_fields = frozenset({"resolution_event_id"})
+
+    finding_id: FindingIdWire
+    kind: Literal[
+        "action_without_result",
+        "claim_without_admissible_evidence",
+        "coordination_overlap",
+        "completion_with_open_obligations",
+        "contradictory_claims_unresolved",
+        "diff_does_not_match_account",
+        "evidence_does_not_support_claim",
+        "failed_work_omitted",
+        "ledger_stale_or_incomplete",
+        "material_limitation_omitted",
+        "questionable_finding_rejection",
+        "requested_item_never_attempted",
+        "result_without_action",
+        "stale_evidence_for_changed_state",
+        "weak_or_stale_response",
+    ]
+    origin: Literal["deterministic", "semantic_model_derived"]
+    priority: Annotated[int, Field(ge=1, le=3)]
+    actionable: bool
+    resolved: bool
+    resolution_event_id: EventIdWire | None = None
+
+    @model_validator(mode="after")
+    def _validate_child_finding_snapshot(self) -> ChildFindingSnapshotModel:
+        expected_priority, expected_actionable = _CHILD_FINDING_TRAITS[self.kind]
+        if self.priority != expected_priority:
+            raise ValueError("child_finding_priority_mismatch")
+        if self.actionable != expected_actionable:
+            raise ValueError("child_finding_actionable_mismatch")
+        if self.resolved != (self.resolution_event_id is not None):
+            raise ValueError("child_finding_resolution_mismatch")
+        return self
+
+
+class ChildDependencySnapshotModel(_ClosedModel):
+    optional_non_null_fields = frozenset(
+        {
+            "child_frontier",
+            "child_check_id",
+            "child_receipt_id",
+            "membership_generation",
+        }
+    )
+
+    child_task_id: TaskIdWire
+    origin: LineageOriginWire
+    acceptance: LineageAcceptanceWire
+    work_state: WorkStateWire
+    session_health: SessionHealthWire
+    child_frontier: FrontierModel | None = None
+    child_check_id: EventIdWire | None = None
+    child_check_subject_frontier: FrontierModel | None = None
+    child_receipt_id: ReceiptIdWire | None = None
+    coverage: CoverageModel
+    findings: tuple[ChildFindingSnapshotModel, ...]
+    lineage_authority_revision: CanonicalPositiveUInt64Wire
+    membership_generation: CanonicalPositiveUInt64Wire | None = None
+    read_gap_reasons: tuple[LineageReadGapReasonWire, ...] = ()
+    provenance_restrictions: tuple[LineageProvenanceRestrictionWire, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_child_dependency_snapshot(self) -> ChildDependencySnapshotModel:
+        if len(self.findings) > 100:
+            raise ValueError("child_finding_count_invalid")
+        _require_unique(tuple(item.finding_id for item in self.findings), limit=100)
+        _require_unique(self.read_gap_reasons, limit=len(LineageReadGapReason))
+        _require_unique(self.provenance_restrictions, limit=len(LineageProvenanceRestriction))
+        if self.read_gap_reasons and self.child_frontier is not None:
+            raise ValueError("child_gap_frontier_mismatch")
+        if not self.read_gap_reasons and self.child_frontier is None:
+            raise ValueError("child_frontier_missing")
+        if self.child_check_id is None and self.child_check_subject_frontier is not None:
+            raise ValueError("child_check_frontier_without_check")
+        if self.child_check_id is not None and self.child_check_subject_frontier is None:
+            raise ValueError("child_check_frontier_missing")
+        return self
+
+    @property
+    def tested_frontier(self) -> FrontierModel | None:
+        """The frontier actually covered by the child's check, when one was recorded."""
+
+        return self.child_check_subject_frontier
+
+
+class ChildDependenciesModel(_ClosedModel):
+    children: tuple[ChildDependencySnapshotModel, ...]
+
+    @model_validator(mode="after")
+    def _validate_child_dependencies(self) -> ChildDependenciesModel:
+        ids = tuple(item.child_task_id for item in self.children)
+        _require_unique(ids, limit=100)
+        if ids != tuple(sorted(ids, key=str.encode)):
+            raise ValueError("child_dependencies_not_canonical")
         return self
 
 
@@ -1131,17 +1412,42 @@ def _validate_model_against_schema(model: BaseModel, schema_name: str) -> None:
 
 
 class StartRequestModel(PublicRequestModel):
-    optional_non_null_fields = frozenset({"session_id", "external_ref", "workspace_ref"})
+    optional_non_null_fields = frozenset(
+        {
+            "session_id",
+            "external_ref",
+            "workspace_ref",
+            "parent_session_id",
+            "attach_handle",
+            "subagent_id",
+            "parent_tool_call_id",
+            "correlation_id",
+        }
+    )
 
-    mode: Literal["attach", "create", "create_or_attach"]
+    mode: Literal["attach", "create", "create_or_attach", "delegate"]
     task_title: String1To8192
     requested_view: Literal["compact"]
     session_id: SessionIdWire | None = None
     external_ref: String1To8192 | None = None
     workspace_ref: String1To8192 | None = None
+    parent_session_id: SessionIdWire | None = None
+    attach_handle: AttachHandleModel | None = None
+    subagent_id: HostCorrelationWire | None = None
+    parent_tool_call_id: HostCorrelationWire | None = None
+    correlation_id: HostCorrelationWire | None = None
 
     @model_validator(mode="after")
     def _validate_start_request(self) -> StartRequestModel:
+        if self.mode == "delegate":
+            if self.session_id is None:
+                raise ValueError("delegate_parent_session_required")
+            if self.parent_session_id is not None or self.attach_handle is not None:
+                raise ValueError("selector_conflict")
+        if self.attach_handle is not None and self.mode != "attach":
+            raise ValueError("selector_conflict")
+        if self.parent_session_id is not None and self.mode not in {"create", "create_or_attach"}:
+            raise ValueError("selector_conflict")
         _validate_model_against_schema(self, "start-request")
         return self
 
@@ -1172,9 +1478,10 @@ class CheckRequestModel(PublicRequestModel):
     mode: Literal["deterministic_only", "semantic_if_configured", "semantic_required"] | None = None
     scope: CheckScopeModel | None = None
     max_findings: Literal["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"] | None = None
-    policy_packs: tuple[Literal["research-evidence/0.1.0", "work-integrity/0.1.0"], ...] | None = (
-        None
-    )
+    policy_packs: (
+        tuple[Literal["coordination/0.1.0", "research-evidence/0.1.0", "work-integrity/0.1.0"], ...]
+        | None
+    ) = None
 
     @model_validator(mode="after")
     def _validate_check_request(self) -> CheckRequestModel:
@@ -1294,7 +1601,7 @@ _STATUS_FILTER_BY_VIEW: Final[Mapping[str, type[_ClosedModel]]] = MappingProxyTy
 
 
 class StatusRequestModel(PublicRequestModel):
-    optional_non_null_fields = frozenset({"filter"})
+    optional_non_null_fields = frozenset({"filter", "project_id", "task_id", "correlation_id"})
 
     session_id: SessionIdWire
     writer_id: WriterIdWire
@@ -1308,11 +1615,16 @@ class StatusRequestModel(PublicRequestModel):
         "history",
         "obligations",
         "operation",
+        "lineage",
+        "project",
         "results",
         "versions",
     ]
     limit: CanonicalPageLimitWire
     filter: StatusFilter | None = None
+    project_id: ProjectIdWire | None = None
+    task_id: TaskIdWire | None = None
+    correlation_id: HostCorrelationWire | None = None
     at_frontier: CanonicalUInt64Wire | None = None
     cursor: CursorWire | None = None
 
@@ -1335,6 +1647,19 @@ class StatusRequestModel(PublicRequestModel):
 
     @model_validator(mode="after")
     def _validate_status_request(self) -> StatusRequestModel:
+        selectors = tuple(
+            value
+            for value in (self.project_id, self.task_id, self.correlation_id)
+            if value is not None
+        )
+        if len(selectors) > 1:
+            raise ValueError("selector_conflict")
+        if self.view in {"lineage", "project"} and self.filter is not None:
+            raise ValueError("status_filter_not_supported_for_view")
+        if self.project_id is not None and self.view != "project":
+            raise ValueError("selector_conflict")
+        if self.correlation_id is not None and self.view != "lineage":
+            raise ValueError("selector_conflict")
         _validate_model_against_schema(self, "status-request")
         return self
 
@@ -1642,11 +1967,15 @@ class StartNextRequestTemplateModel(_ClosedModel):
 
 
 class StartSuccessModel(_ClosedModel):
+    optional_non_null_fields = frozenset(
+        {"attach_handle", "parent_task_id", "depth", "origin", "acceptance"}
+    )
+
     protocol_version: Literal["0.1"]
     schema_version: Literal["1.0.0"]
     request_id: RequestIdWire
     ok: Literal[True]
-    outcome: Literal["attached", "created", "replayed"]
+    outcome: Literal["attached", "created", "replayed", "delegated"]
     task_id: TaskIdWire
     session_id: SessionIdWire
     writer_id: WriterIdWire
@@ -1655,9 +1984,32 @@ class StartSuccessModel(_ClosedModel):
     versions: StartVersionSliceModel
     next_request_template: StartNextRequestTemplateModel
     privacy_projection: PrivacyProjectionModel
+    attach_handle: AttachHandleModel | None = None
+    parent_task_id: TaskIdWire | None = None
+    depth: CanonicalPositiveUInt64Wire | None = None
+    origin: LineageOriginWire | None = None
+    acceptance: LineageAcceptanceWire | None = None
 
     @model_validator(mode="after")
     def _validate_start_success(self) -> StartSuccessModel:
+        lineage_values = (self.parent_task_id, self.depth, self.origin, self.acceptance)
+        if any(value is not None for value in lineage_values) and not all(
+            value is not None for value in lineage_values
+        ):
+            raise ValueError("start_lineage_fields_incomplete")
+        if self.attach_handle is not None:
+            if self.outcome != "delegated" or self.attach_handle.child_task_id != self.task_id:
+                raise ValueError("start_attach_handle_mismatch")
+        if self.outcome == "delegated":
+            if self.attach_handle is None or self.parent_task_id is None or self.depth is None:
+                raise ValueError("start_delegation_fields_missing")
+            if (
+                self.origin is not LineageOrigin.PARENT_MINTED
+                or self.acceptance is not LineageAcceptance.ACCEPTED
+            ):
+                raise ValueError("start_delegation_identity_invalid")
+        elif self.attach_handle is not None:
+            raise ValueError("start_attach_handle_mismatch")
         request = self.next_request_template.arguments
         if (
             request.protocol_version != self.protocol_version
@@ -1693,6 +2045,7 @@ _PUBLISH_SUMMARY_CATEGORY: Final[Mapping[tuple[str, str], DataCategory]] = Mappi
         ("response_recorded", "1.0.0"): DataCategory.FINDING_SUMMARY,
         ("finding_recorded", "1.0.0"): DataCategory.FINDING_SUMMARY,
         ("finding_recorded", "1.1.0"): DataCategory.FINDING_SUMMARY,
+        ("finding_recorded", "1.2.0"): DataCategory.FINDING_SUMMARY,
     }
 )
 _PUBLISH_FIXED_SUMMARY: Final[Mapping[tuple[str, str], str]] = MappingProxyType(
@@ -1704,6 +2057,9 @@ _PUBLISH_FIXED_SUMMARY: Final[Mapping[tuple[str, str], str]] = MappingProxyType(
         ("check_recorded", "1.0.0"): "check_recorded",
         ("check_recorded", "1.1.0"): "check_recorded",
         ("receipt_recorded", "1.0.0"): "receipt_recorded",
+        ("coordination_context_recorded", "1.0.0"): "coordination_context_recorded",
+        ("coordination_obligation_declared", "1.0.0"): "coordination_obligation_declared",
+        ("coordination_disposition_recorded", "1.0.0"): "coordination_disposition_recorded",
     }
 )
 
@@ -1971,7 +2327,7 @@ class PublishWorkResultModel(PublicResultModel[PublishWorkResultBranch]):
 
 
 class CheckPolicyExecutionModel(_ClosedModel):
-    policy_id: Literal["research-evidence", "work-integrity"]
+    policy_id: Literal["coordination", "research-evidence", "work-integrity"]
     policy_version: Literal["0.1.0"]
     outcome: Literal["failed", "run", "skipped"]
     reason: Literal[
@@ -1999,6 +2355,7 @@ class CheckProjectedFindingModel(_ClosedModel):
     kind: Literal[
         "action_without_result",
         "claim_without_admissible_evidence",
+        "coordination_overlap",
         "completion_with_open_obligations",
         "contradictory_claims_unresolved",
         "diff_does_not_match_account",
@@ -2017,7 +2374,7 @@ class CheckProjectedFindingModel(_ClosedModel):
     summary: String1To8192 | OmittedContentModel
     detail: String1To8192 | OmittedContentModel
     subject_refs: tuple[SubjectIdWire, ...]
-    policy_id: Literal["research-evidence", "work-integrity"]
+    policy_id: Literal["coordination", "research-evidence", "work-integrity"]
     policy_version: Literal["0.1.0"]
     subject_frontier: FrontierModel
     coverage: CoverageModel
@@ -2042,17 +2399,63 @@ class CheckProjectedFindingModel(_ClosedModel):
         return self
 
 
+class CheckChildPreviewItemModel(_ClosedModel):
+    child_task_id: TaskIdWire
+    origin: LineageOriginWire
+    acceptance: LineageAcceptanceWire
+    work_state: WorkStateWire
+    session_health: SessionHealthWire
+    rollup_state: LineageRollupStateWire
+    blocking_conditions: tuple[CodeWire, ...]
+
+    @model_validator(mode="after")
+    def _validate_child_preview_item(self) -> CheckChildPreviewItemModel:
+        _require_unique(self.blocking_conditions, limit=64)
+        return self
+
+
+class CheckChildrenPreviewModel(_ClosedModel):
+    label: Literal["recorded", "preview"]
+    items: tuple[CheckChildPreviewItemModel, ...]
+    tested_manifest_frontier: FrontierModel | None = None
+
+    @model_validator(mode="after")
+    def _validate_child_preview(self) -> CheckChildrenPreviewModel:
+        _require_unique(tuple(item.child_task_id for item in self.items), limit=64)
+        if len(self.items) > 64:
+            raise ValueError("child_preview_count_invalid")
+        return self
+
+
+class CheckAdvisoryNoteModel(_ClosedModel):
+    """A coordination hint, deliberately disjoint from CheckProjectedFindingModel."""
+
+    kind: Literal["live_member_present", "duplicate_finding"]
+    project_id: ProjectIdWire
+    task_ids: tuple[TaskIdWire, ...]
+    count: CanonicalPositiveUInt64Wire
+
+    @model_validator(mode="after")
+    def _validate_advisory_note(self) -> CheckAdvisoryNoteModel:
+        _require_unique(self.task_ids, limit=64)
+        if self.kind == "duplicate_finding" and len(self.task_ids) < 2:
+            raise ValueError("advisory_note_task_count_invalid")
+        return self
+
+
 class CheckVersionSliceModel(_ClosedModel):
     protocol_version: Literal["0.1"]
     engine_version: VersionWire
     projection_version: VersionWire
-    policy_packs: tuple[Literal["research-evidence/0.1.0", "work-integrity/0.1.0"], ...]
+    policy_packs: tuple[
+        Literal["coordination/0.1.0", "research-evidence/0.1.0", "work-integrity/0.1.0"], ...
+    ]
 
     @model_validator(mode="after")
     def _validate_check_version_packs(self) -> CheckVersionSliceModel:
-        if not 1 <= len(self.policy_packs) <= 2:
+        if not 1 <= len(self.policy_packs) <= 3:
             raise ValueError("policy_pack_count_invalid")
-        _require_unique(self.policy_packs, limit=2)
+        _require_unique(self.policy_packs, limit=3)
         return self
 
 
@@ -2154,6 +2557,8 @@ class CheckAwaitingHumanModel(_ClosedModel):
 
 
 class CheckSuccessModel(_ClosedModel):
+    optional_non_null_fields = frozenset({"children", "advisory_notes"})
+
     protocol_version: Literal["0.1"]
     schema_version: Literal["1.0.0"]
     request_id: RequestIdWire
@@ -2172,7 +2577,9 @@ class CheckSuccessModel(_ClosedModel):
     policy_executions: tuple[CheckPolicyExecutionModel, ...]
     semantic_status: SemanticStatusWire
     semantic_reason: SemanticReasonWire
-    semantic_provenance: JsonValue | None
+    semantic_provenance: JsonValue | None = None
+    children: CheckChildrenPreviewModel | None = None
+    advisory_notes: tuple[CheckAdvisoryNoteModel, ...] = ()
     coverage: CoverageModel
     versions: CheckVersionSliceModel
     privacy_projection: PrivacyProjectionModel
@@ -2188,7 +2595,13 @@ class CheckSuccessModel(_ClosedModel):
     def _validate_check_success(self) -> CheckSuccessModel:
         if len(self.findings) > MAX_FINDINGS_LIMIT:
             raise ValueError("finding_count_invalid")
-        if not 1 <= len(self.policy_executions) <= 2 or len(set(self.policy_executions)) != len(
+        if len(self.advisory_notes) > 64:
+            raise ValueError("advisory_note_count_invalid")
+        _require_unique(
+            tuple((note.kind, note.project_id, note.task_ids) for note in self.advisory_notes),
+            limit=64,
+        )
+        if not 1 <= len(self.policy_executions) <= 3 or len(set(self.policy_executions)) != len(
             self.policy_executions
         ):
             raise ValueError("policy_execution_count_invalid")
@@ -2381,7 +2794,7 @@ class StatusCandidateFindingItemModel(_ClosedModel):
     summary: String1To8192 | OmittedContentModel
     detail: String1To8192 | OmittedContentModel
     subject_refs: tuple[SubjectIdWire, ...]
-    policy_id: Literal["research-evidence", "work-integrity"]
+    policy_id: Literal["coordination", "research-evidence", "work-integrity"]
     policy_version: Literal["0.1.0"]
     subject_frontier: FrontierModel
     coverage: CoverageModel
@@ -2582,7 +2995,7 @@ class StatusFindingItemModel(_ClosedModel):
     summary: String1To8192 | OmittedContentModel
     detail: String1To8192 | OmittedContentModel
     subject_refs: tuple[SubjectIdWire, ...]
-    policy_id: Literal["research-evidence", "work-integrity"]
+    policy_id: Literal["coordination", "research-evidence", "work-integrity"]
     policy_version: Literal["0.1.0"]
     subject_frontier: FrontierModel
     coverage: CoverageModel
@@ -2664,8 +3077,17 @@ class StatusHistoryItemModel(_ClosedModel):
         "action_recorded",
         "assignment_recorded",
         "check_recorded",
+        "child_accepted",
+        "child_dependencies_recorded",
+        "child_rejected",
+        "child_written_off",
         "claim_recorded",
+        "coordination_context_recorded",
+        "coordination_disposition_recorded",
+        "coordination_obligation_declared",
         "decision_recorded",
+        "delegation_cancelled",
+        "delegation_declared",
         "evidence_recorded",
         "finding_recorded",
         "obligation_published",
@@ -2678,6 +3100,10 @@ class StatusHistoryItemModel(_ClosedModel):
         "result_recorded",
         "session_opened",
         "session_resumed",
+        "work_abandoned",
+        "work_cancelled",
+        "work_closed",
+        "work_written_off",
     ]
 
 
@@ -2885,6 +3311,16 @@ class StatusObligationsPageModel(_ClosedModel):
 
 
 class StatusAdviceItemModel(_ClosedModel):
+    optional_non_null_fields = frozenset(
+        {
+            "coordination_counterpart_task_id",
+            "coordination_detection_id",
+            "coordination_membership_generation",
+            "coordination_project_id",
+            "coordination_resource_paths",
+        }
+    )
+
     finding_id: FindingIdWire
     rule_code: CodeWire
     priority: Annotated[int, Field(ge=1, le=100)]
@@ -2894,10 +3330,37 @@ class StatusAdviceItemModel(_ClosedModel):
     verification_state: Literal["current", "stale", "unavailable", "not_required"]
     semantic_state: Literal["ready", "disabled", "unavailable", "failed"]
     recommended_next_action: CodeWire
+    coordination_project_id: ProjectIdWire | None = None
+    coordination_detection_id: EventIdWire | None = None
+    coordination_membership_generation: CanonicalPositiveUInt64Wire | None = None
+    coordination_counterpart_task_id: TaskIdWire | None = None
+    coordination_resource_paths: tuple[String1To4096, ...] | OmittedContentModel | None = None
 
     @model_validator(mode="after")
     def _validate_advice_item(self) -> StatusAdviceItemModel:
         _require_unique(self.evidence_commitments, limit=16)
+        selector_values = (
+            self.coordination_project_id,
+            self.coordination_detection_id,
+            self.coordination_membership_generation,
+            self.coordination_counterpart_task_id,
+        )
+        if any(value is not None for value in selector_values):
+            if not all(value is not None for value in selector_values):
+                raise ValueError("coordination_advice_selector_incomplete")
+            if self.coordination_resource_paths is None:
+                raise ValueError("coordination_advice_resources_missing")
+        if isinstance(self.coordination_resource_paths, OmittedContentModel):
+            if self.coordination_resource_paths.category is not DataCategory.REPOSITORY_EXCERPT:
+                raise ValueError("coordination_advice_omission_category_invalid")
+        elif self.coordination_resource_paths is not None:
+            if len(self.coordination_resource_paths) > 256:
+                raise ValueError("coordination_advice_resource_path_limit")
+            _require_unique(self.coordination_resource_paths, limit=256)
+            if self.coordination_resource_paths != tuple(
+                sorted(self.coordination_resource_paths, key=str.encode)
+            ):
+                raise ValueError("coordination_advice_resource_paths_not_canonical")
         return self
 
 
@@ -2909,6 +3372,171 @@ class StatusAdvicePageModel(_ClosedModel):
     @model_validator(mode="after")
     def _validate_advice_page(self) -> StatusAdvicePageModel:
         if len(self.items) > 64:
+            raise ValueError("status_page_limit")
+        return self
+
+
+class StatusLineageChildModel(_ClosedModel):
+    """One direct child in the bounded lineage projection."""
+
+    task_id: TaskIdWire
+    parent_task_id: TaskIdWire
+    origin: LineageOriginWire
+    acceptance: LineageAcceptanceWire
+    work_state: WorkStateWire
+    session_health: SessionHealthWire
+    depth: CanonicalPositiveUInt64Wire
+    rollup_state: LineageRollupStateWire
+    blocking_conditions: tuple[CodeWire, ...]
+
+    @model_validator(mode="after")
+    def _validate_lineage_child(self) -> StatusLineageChildModel:
+        _require_unique(self.blocking_conditions, limit=64)
+        return self
+
+
+class StatusLineageAnnotationModel(_ClosedModel):
+    """A host-observed child signal before a real child task is bound.
+
+    An annotation intentionally carries no task or bundle identity.  Binding it to a task is a
+    service-side operation and must never be inferred by a status renderer.
+    """
+
+    correlation_id: HostCorrelationWire
+    subagent_id: HostCorrelationWire | None = None
+    parent_tool_call_id: HostCorrelationWire | None = None
+    origin: Literal["host_observed"]
+    acceptance: Literal["pending"]
+
+    @model_validator(mode="after")
+    def _validate_annotation_identity(self) -> StatusLineageAnnotationModel:
+        if self.subagent_id is None and self.parent_tool_call_id is None:
+            raise ValueError("lineage_annotation_identity_missing")
+        return self
+
+
+class StatusLineagePageModel(_ClosedModel):
+    """Direct-child lineage view, with provisional host annotations kept separate."""
+
+    parent_task_id: TaskIdWire | None = None
+    children: tuple[StatusLineageChildModel, ...]
+    annotations: tuple[StatusLineageAnnotationModel, ...]
+    next_cursor: CursorWire | None
+
+    @model_validator(mode="after")
+    def _validate_lineage_page(self) -> StatusLineagePageModel:
+        _require_unique(tuple(item.task_id for item in self.children), limit=100)
+        _require_unique(tuple(item.correlation_id for item in self.annotations), limit=100)
+        if len(self.children) > 100 or len(self.annotations) > 100:
+            raise ValueError("status_page_limit")
+        return self
+
+
+class StatusProjectMemberModel(_ClosedModel):
+    task_id: TaskIdWire
+    actor_id: ActorAssertionIdWire | None
+    work_state: WorkStateWire
+    session_health: SessionHealthWire
+    parent_task_id: TaskIdWire | None = None
+
+
+class ProjectTextRefModel(_ClosedModel):
+    """Reference to encrypted project text; plaintext is never a structural field."""
+
+    optional_non_null_fields = frozenset({"envelope_digest"})
+
+    object_id: ObjectIdWire
+    content_digest: Sha256Digest
+    plaintext_size: Annotated[int, Field(ge=0, le=MAX_OBJECT_PLAINTEXT_BYTES)]
+    owner_task_id: TaskIdWire
+    route_generation: CanonicalPositiveUInt64Wire
+    envelope_digest: Sha256Digest | None = None
+
+
+class StatusProjectDetectionModel(_ClosedModel):
+    optional_non_null_fields = frozenset({"resource_paths"})
+
+    detection_id: EventIdWire
+    task_ids: tuple[TaskIdWire, ...]
+    resource_count: CanonicalUInt64Wire
+    open: bool
+    resource_paths: tuple[String1To4096, ...] | OmittedContentModel | None = None
+
+    @model_validator(mode="after")
+    def _validate_project_detection(self) -> StatusProjectDetectionModel:
+        if len(self.task_ids) < 2:
+            raise ValueError("project_detection_task_count_invalid")
+        _require_unique(self.task_ids, limit=64)
+        if self.task_ids != tuple(sorted(self.task_ids, key=str.encode)):
+            raise ValueError("project_detection_tasks_not_canonical")
+        if isinstance(self.resource_paths, OmittedContentModel):
+            if self.resource_paths.category is not DataCategory.REPOSITORY_EXCERPT:
+                raise ValueError("project_resource_omission_category_invalid")
+        elif self.resource_paths is not None:
+            if len(self.resource_paths) > 256:
+                raise ValueError("project_resource_path_limit")
+            _require_unique(self.resource_paths, limit=256)
+            if self.resource_paths != tuple(sorted(self.resource_paths, key=str.encode)):
+                raise ValueError("project_resource_paths_not_canonical")
+        return self
+
+
+class StatusProjectCoverageModel(_ClosedModel):
+    coverage_id: EventIdWire
+    project_id: ProjectIdWire
+    task_id: TaskIdWire
+    membership_generation: CanonicalPositiveUInt64Wire
+    coverage: Literal["unobservable"]
+    gap_code: Literal["not_observable"]
+
+
+class StatusProjectReceiptModel(_ClosedModel):
+    task_id: TaskIdWire
+    receipt_id: ReceiptIdWire
+    frontier: FrontierModel
+    conclusion: Literal[
+        "insufficient_coverage",
+        "no_unresolved_deterministic_findings",
+        "unresolved_findings_remain",
+    ]
+
+
+class StatusProjectPageModel(_ClosedModel):
+    optional_non_null_fields = frozenset({"title", "description", "title_ref", "description_ref"})
+
+    project_id: ProjectIdWire
+    kind: ProjectKindWire
+    membership_generation: CanonicalPositiveUInt64Wire
+    grant_state: GrantStateWire | None
+    title: String1To8192 | OmittedContentModel | None = None
+    description: String1To8192 | OmittedContentModel | None = None
+    title_ref: ProjectTextRefModel | None = None
+    description_ref: ProjectTextRefModel | None = None
+    members: tuple[StatusProjectMemberModel, ...]
+    lineage: StatusLineagePageModel
+    detections: tuple[StatusProjectDetectionModel, ...]
+    receipts: tuple[StatusProjectReceiptModel, ...]
+    coverage: tuple[StatusProjectCoverageModel, ...] = ()
+    next_cursor: CursorWire | None
+
+    @model_validator(mode="after")
+    def _validate_project_page(self) -> StatusProjectPageModel:
+        for value in (self.title, self.description):
+            if (
+                isinstance(value, OmittedContentModel)
+                and value.category is not DataCategory.TASK_DESCRIPTION
+            ):
+                raise ValueError("project_text_omission_category_invalid")
+        _require_unique(tuple(item.task_id for item in self.members), limit=100)
+        _require_unique(tuple(item.detection_id for item in self.detections), limit=100)
+        _require_unique(tuple(item.receipt_id for item in self.receipts), limit=100)
+        _require_unique(tuple(item.coverage_id for item in self.coverage), limit=100)
+        if (
+            len(self.members) > 100
+            or len(self.detections) > 100
+            or len(self.receipts) > 100
+            or len(self.coverage) > 100
+        ):
             raise ValueError("status_page_limit")
         return self
 
@@ -3038,6 +3666,8 @@ type StatusPage = (
     | StatusObligationsPageModel
     | StatusOperationPageModel
     | StatusResultsPageModel
+    | StatusLineagePageModel
+    | StatusProjectPageModel
     | StatusVersionsPageModel
 )
 
@@ -3052,6 +3682,8 @@ _STATUS_PAGE_BY_VIEW: Final[Mapping[str, type[_ClosedModel]]] = MappingProxyType
         "history": StatusHistoryPageModel,
         "obligations": StatusObligationsPageModel,
         "operation": StatusOperationPageModel,
+        "lineage": StatusLineagePageModel,
+        "project": StatusProjectPageModel,
         "results": StatusResultsPageModel,
         "versions": StatusVersionsPageModel,
     }
@@ -3076,6 +3708,8 @@ class StatusSuccessModel(_ClosedModel):
         "history",
         "obligations",
         "operation",
+        "lineage",
+        "project",
         "results",
         "versions",
     ]
@@ -3170,6 +3804,36 @@ class ReceiptVersionSliceModel(_ClosedModel):
             raise ValueError("receipt_policy_versions_not_canonical")
         if schema_keys != tuple(sorted(set(schema_keys))):
             raise ValueError("receipt_schema_versions_not_canonical")
+        return self
+
+
+class ReceiptChildOutcomeModel(_ClosedModel):
+    """One direct child contribution in a receipt document."""
+
+    child_task_id: TaskIdWire
+    outcome: Literal["clean", "annotated", "open_gap", "incomplete", "unavailable"]
+    tested_manifest_ref: EventIdWire | None
+    later_manifest_ref: EventIdWire | None = None
+    freshness: Literal["known", "unknown"]
+    findings: tuple[ChildFindingSnapshotModel, ...]
+
+    @model_validator(mode="after")
+    def _validate_receipt_child(self) -> ReceiptChildOutcomeModel:
+        _require_unique(tuple(item.finding_id for item in self.findings), limit=64)
+        if self.outcome == "unavailable" and self.tested_manifest_ref is not None:
+            raise ValueError("receipt_child_manifest_mismatch")
+        return self
+
+
+class ReceiptChildrenModel(_ClosedModel):
+    children: tuple[ReceiptChildOutcomeModel, ...]
+
+    @model_validator(mode="after")
+    def _validate_receipt_children(self) -> ReceiptChildrenModel:
+        ids = tuple(item.child_task_id for item in self.children)
+        _require_unique(ids, limit=64)
+        if ids != tuple(sorted(ids, key=str.encode)):
+            raise ValueError("receipt_children_not_canonical")
         return self
 
 
@@ -3447,6 +4111,15 @@ _RECEIPT_DOCUMENT_VERSION_LEAVES: Final = (
 _START_STRUCTURAL_POINTERS: Final = (
     _COMMON_SUCCESS_LEAVES
     + ("/outcome", "/writer_id")
+    + (
+        "/acceptance",
+        "/attach_handle/child_task_id",
+        "/attach_handle/expires_at",
+        "/attach_handle/handle",
+        "/depth",
+        "/origin",
+        "/parent_task_id",
+    )
     + _prefix_leaf_patterns("/frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/compact/coverage", _COVERAGE_LEAVES)
     + (
@@ -3566,6 +4239,29 @@ _CHECK_STRUCTURAL_POINTERS: Final = (
     + _prefix_leaf_patterns("/privacy_projection", _PRIVACY_PROJECTION_LEAVES)
     + _prefix_leaf_patterns("/versions", _BASIC_VERSION_LEAVES)
     + _prefix_leaf_patterns("/semantic_provenance", _SEMANTIC_PROVENANCE_LEAVES)
+    + (
+        "/children",
+        "/children/label",
+        "/children/tested_manifest_frontier",
+        "/children/tested_manifest_frontier/head_digest",
+        "/children/tested_manifest_frontier/sequence",
+    )
+    + _prefix_leaf_patterns(
+        "/children/items/*",
+        (
+            "acceptance",
+            "blocking_conditions/*",
+            "child_task_id",
+            "origin",
+            "rollup_state",
+            "session_health",
+            "work_state",
+        ),
+    )
+    + _prefix_leaf_patterns(
+        "/advisory_notes/*",
+        ("count", "kind", "project_id", "task_ids/*"),
+    )
     + _prefix_leaf_patterns(
         "/policy_executions/*",
         ("outcome", "policy_id", "policy_version", "reason"),
@@ -3665,12 +4361,21 @@ _STATUS_ADVICE_STRUCTURAL_POINTERS: Final = (
             "evidence_commitments/*",
             "finding_id",
             "freshness_frontier",
+            "coordination_counterpart_task_id",
+            "coordination_detection_id",
+            "coordination_membership_generation",
+            "coordination_project_id",
             "priority",
             "recommended_next_action",
             "rule_code",
             "semantic_state",
             "verification_state",
         ),
+    )
+    + (
+        "/page/items/*/coordination_resource_paths/category",
+        "/page/items/*/coordination_resource_paths/omitted",
+        "/page/items/*/coordination_resource_paths/reason",
     )
     + _prefix_leaf_patterns("/page/items/*/coverage", _COVERAGE_LEAVES)
 )
@@ -3900,6 +4605,92 @@ _STATUS_VERSIONS_STRUCTURAL_POINTERS: Final = ("/page/next_cursor",) + _prefix_l
     ),
 )
 
+_STATUS_LINEAGE_STRUCTURAL_POINTERS: Final = (
+    "/page/next_cursor",
+    "/page/parent_task_id",
+    "/page/children/*/acceptance",
+    "/page/children/*/blocking_conditions/*",
+    "/page/children/*/depth",
+    "/page/children/*/origin",
+    "/page/children/*/parent_task_id",
+    "/page/children/*/rollup_state",
+    "/page/children/*/session_health",
+    "/page/children/*/task_id",
+    "/page/children/*/work_state",
+    "/page/annotations/*/acceptance",
+    "/page/annotations/*/correlation_id",
+    "/page/annotations/*/origin",
+    "/page/annotations/*/parent_tool_call_id",
+    "/page/annotations/*/subagent_id",
+)
+
+_STATUS_PROJECT_STRUCTURAL_POINTERS: Final = (
+    "/page/next_cursor",
+    "/page/project_id",
+    "/page/kind",
+    "/page/membership_generation",
+    "/page/grant_state",
+    "/page/title/category",
+    "/page/title/omitted",
+    "/page/title/reason",
+    "/page/title_ref/object_id",
+    "/page/title_ref/content_digest",
+    "/page/title_ref/plaintext_size",
+    "/page/title_ref/owner_task_id",
+    "/page/title_ref/route_generation",
+    "/page/title_ref/envelope_digest",
+    "/page/title_ref",
+    "/page/description_ref/object_id",
+    "/page/description_ref/content_digest",
+    "/page/description_ref/plaintext_size",
+    "/page/description_ref/owner_task_id",
+    "/page/description_ref/route_generation",
+    "/page/description_ref/envelope_digest",
+    "/page/description_ref",
+    "/page/description/category",
+    "/page/description/omitted",
+    "/page/description/reason",
+    "/page/members/*/task_id",
+    "/page/members/*/actor_id",
+    "/page/members/*/work_state",
+    "/page/members/*/session_health",
+    "/page/members/*/parent_task_id",
+    "/page/detections/*/detection_id",
+    "/page/detections/*/task_ids/*",
+    "/page/detections/*/resource_count",
+    "/page/detections/*/open",
+    "/page/detections/*/resource_paths/category",
+    "/page/detections/*/resource_paths/omitted",
+    "/page/detections/*/resource_paths/reason",
+    "/page/coverage/*/coverage_id",
+    "/page/coverage/*/project_id",
+    "/page/coverage/*/task_id",
+    "/page/coverage/*/membership_generation",
+    "/page/coverage/*/coverage",
+    "/page/coverage/*/gap_code",
+    "/page/receipts/*/task_id",
+    "/page/receipts/*/receipt_id",
+    "/page/receipts/*/frontier/head_digest",
+    "/page/receipts/*/frontier/sequence",
+    "/page/receipts/*/conclusion",
+    "/page/lineage/next_cursor",
+    "/page/lineage/parent_task_id",
+    "/page/lineage/children/*/acceptance",
+    "/page/lineage/children/*/blocking_conditions/*",
+    "/page/lineage/children/*/depth",
+    "/page/lineage/children/*/origin",
+    "/page/lineage/children/*/parent_task_id",
+    "/page/lineage/children/*/rollup_state",
+    "/page/lineage/children/*/session_health",
+    "/page/lineage/children/*/task_id",
+    "/page/lineage/children/*/work_state",
+    "/page/lineage/annotations/*/acceptance",
+    "/page/lineage/annotations/*/correlation_id",
+    "/page/lineage/annotations/*/origin",
+    "/page/lineage/annotations/*/parent_tool_call_id",
+    "/page/lineage/annotations/*/subagent_id",
+)
+
 _RECEIPT_STRUCTURAL_POINTERS: Final = (
     _COMMON_SUCCESS_LEAVES
     + (
@@ -3966,6 +4757,25 @@ _RECEIPT_STRUCTURAL_POINTERS: Final = (
     + _prefix_leaf_patterns("/document/gaps/*", ("code", "subject_refs/*"))
     + _prefix_leaf_patterns("/document/redactions/*", ("category", "count", "reason"))
     + _prefix_leaf_patterns("/document/sections/*", ("key",))
+    + (
+        "/document/children/children/*/child_task_id",
+        "/document/children/children/*/outcome",
+        "/document/children/children/*/tested_manifest_ref",
+        "/document/children/children/*/later_manifest_ref",
+        "/document/children/children/*/freshness",
+    )
+    + _prefix_leaf_patterns(
+        "/document/children/children/*/findings/*",
+        (
+            "finding_id",
+            "kind",
+            "origin",
+            "priority",
+            "actionable",
+            "resolved",
+            "resolution_event_id",
+        ),
+    )
 )
 
 _CHECK_CONTENT_RULES: Final[tuple[tuple[str, DataCategory], ...]] = (
@@ -4015,6 +4825,18 @@ _STATUS_CONTENT_RULES: Final[tuple[tuple[str, str, DataCategory], ...]] = (
     ("obligations", "/page/items/*/evidence_expectation", DataCategory.OBLIGATION_TEXT),
     ("obligations", "/page/items/*/requested_items/*/value", DataCategory.OBLIGATION_TEXT),
     ("obligations", "/page/items/*/unattempted_items/*/value", DataCategory.OBLIGATION_TEXT),
+    ("project", "/page/title", DataCategory.TASK_DESCRIPTION),
+    ("project", "/page/description", DataCategory.TASK_DESCRIPTION),
+    (
+        "project",
+        "/page/detections/*/resource_paths/*",
+        DataCategory.REPOSITORY_EXCERPT,
+    ),
+    (
+        "advice",
+        "/page/items/*/coordination_resource_paths/*",
+        DataCategory.REPOSITORY_EXCERPT,
+    ),
 )
 _RECEIPT_CONTENT_RULES: Final[tuple[tuple[str, DataCategory], ...]] = (
     ("/document/gaps/*/detail", DataCategory.FINDING_SUMMARY),
@@ -4092,6 +4914,8 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
         status_view="operation",
     )
     add_structural("status", _STATUS_RESULTS_STRUCTURAL_POINTERS, status_view="results")
+    add_structural("status", _STATUS_LINEAGE_STRUCTURAL_POINTERS, status_view="lineage")
+    add_structural("status", _STATUS_PROJECT_STRUCTURAL_POINTERS, status_view="project")
     add_structural("status", _STATUS_VERSIONS_STRUCTURAL_POINTERS, status_view="versions")
     add_structural("receipt", _RECEIPT_STRUCTURAL_POINTERS)
 
@@ -4172,7 +4996,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 923:
+    if len(result) != 1053:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

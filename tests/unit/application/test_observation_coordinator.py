@@ -1461,7 +1461,7 @@ def test_local_outbox_v1_compatibility_and_v2_attempt_round_trip(tmp_path: Path)
     assert durable.last_attempt_at == attempted_at
     assert durable.consecutive_reason_attempts == 1
     assert json.loads(state_path.read_text(encoding="utf-8"))["schema"] == (
-        "yoetz.observation-local/9"
+        "yoetz.observation-local/10"
     )
 
     raw = json.loads(state_path.read_text(encoding="utf-8"))
@@ -2749,8 +2749,10 @@ async def test_deferred_verification_uses_a_dedicated_runtime_lease(tmp_path: Pa
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("failed_lane", (False, True))
 async def test_rediscovery_drains_pending_repositories_for_every_bound_session(
     tmp_path: Path,
+    failed_lane: bool,
 ) -> None:
     from types import SimpleNamespace
 
@@ -2818,6 +2820,8 @@ async def test_rediscovery_drains_pending_repositories_for_every_bound_session(
 
     class _RuntimePort:
         async def route(self, command: object) -> object:
+            if failed_lane and command.session_id == session_ids[0]:  # type: ignore[attr-defined]
+                raise ValueError("isolated lane failure")
             return runtimes[command.session_id]  # type: ignore[attr-defined]
 
         async def release(self, runtime: object) -> None:
@@ -2846,16 +2850,20 @@ async def test_rediscovery_drains_pending_repositories_for_every_bound_session(
     )
 
     await coordinator.rediscover_pending_verification()
-    first = supervisor._handles[workspace]  # pyright: ignore[reportPrivateUsage]
-    await supervisor._drain_once()  # pyright: ignore[reportPrivateUsage]
-    second = supervisor._handles[workspace]  # pyright: ignore[reportPrivateUsage]
+    assert supervisor.has_handle(workspace, task_ids[0]) is (not failed_lane)
+    assert supervisor.has_handle(workspace, task_ids[1])
+    assert len(supervisor._handles) == (1 if failed_lane else 2)  # pyright: ignore[reportPrivateUsage]
+    assert local.session_gap_codes(workspace, local.session_commitment(codex_ids[1])) == ()
+    if failed_lane:
+        assert local.session_gap_codes(workspace, local.session_commitment(codex_ids[0])) == (
+            ObservationGapCode.VERIFICATION_STALE.value,
+        )
 
-    assert second is not first
-    assert len(released) == 1
-
-    await supervisor._drain_once()  # pyright: ignore[reportPrivateUsage]
+    # Each task owns a separate verification repository even though both observe the same source
+    # workspace.  A fair round drains both lanes and releases both dedicated runtimes.
+    assert await supervisor._drain_once() is False  # pyright: ignore[reportPrivateUsage]
     assert supervisor.has_handle(workspace) is False
-    assert sorted(released) == sorted(session_ids)
+    assert sorted(released) == sorted(session_ids[1:] if failed_lane else session_ids)
 
 
 @pytest.mark.anyio

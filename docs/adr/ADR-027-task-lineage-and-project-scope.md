@@ -59,7 +59,7 @@ tool, or populate a host capability cell.
 3. **Identities stay separate (C3/D6).** The workspace/start identity owns `workspace_ref`, the
    canonical working-tree identity; a linked worktree is its own workspace. The Git/common-root
    and installation-keyed privacy adapters own repository identity, which is the key for an
-   implicit repository project. The future project registry owns a general project's `prj_`
+   implicit repository project. The project registry owns a general project's `prj_`
    identity and its amendable grouping over repositories, workspaces, and tasks. None of these
    identities selects a task for resume, and none collapses into another.
 
@@ -120,7 +120,7 @@ than implementation notes.
 | D6 | When `projects.auto_grouping` is enabled, birth an implicit project at the second **live** task in the same repository; repository membership is the grouping key and never a resume selector. | Worktrees are the modal multi-agent setup, while sequential sessions must not create a project or select a task by possession. |
 | D7 | Project coordination is local disclosure authorized by each source workspace's consent and, for general or cross-repository projects, an explicit generation-bound coordination grant. The privacy egress lattice is unchanged. | Membership is a mutable graph; cross-repository semantic dispatch is outside this series, so a new egress scope kind would add authority without a new permitted channel. |
 | D8 | Retire `workspace_task_exists` only from automatic admission after the #497 decision table is implemented; explicit `mode=create` sibling admission remains. | The existing conflict is part of the ended-session recovery path; removing it before replacement would strand predecessor work and pending observations. |
-| D9 | Coordination detectors are advice-first. A finding requires a declared, unaddressed coordination obligation; a disposition addresses it and a later qualifying check resolves it. | Intentional collaborative edits should not create an unconditional finding storm. |
+| D9 | Coordination detectors are advice-first. A finding requires a declared, unaddressed coordination obligation; a disposition addresses it and a later qualifying check resolves it. The ordinary agent-published declaration binds the exact detection, project, membership generation, recipient task, and existing open obligation; ordinary file/source obligations and acknowledgements never infer that binding. A live admitted task with no revealable attributable paths receives only a per-task `unobservable` coverage row; that row is not a pair detection, finding, counterpart disclosure, or path claim. | Intentional collaborative edits should not create an unconditional finding storm, and a frozen check must be able to prove which obligation authorized the finding. Coverage gaps must remain durable without inventing overlap evidence. |
 | D11 | Add no MCP tool and pay every later schema or descriptor increase from the reviewed advertised-surface budget after #504 step 0. | The 2026-09-05 pre-trim measurement left 596 policy bytes and 342 strict bytes of headroom in that reviewed snapshot. |
 | D12 | Record child facts in a frozen parent dependency manifest before a parent result uses them. | Parent results must be reproducible from the parent ledger and cannot depend on mutable child state. |
 | D13 | Keep grouping, work lifecycle, session health, and receipt history as independent facts with separate owners and transitions. | Conflating them turns a missing host event, an open task, and an incomplete receipt into the wrong claim. |
@@ -162,7 +162,7 @@ than implementation notes.
 
 5. **A project is a grouping object, not an egress scope.** `IdKind.project` uses server-generated
    `prj_` identifiers under the same lowercase UUIDv4 rule as the other server kinds. The project
-   registry is future work in #495/#496. Its initial kinds are `repository` (implicit) and
+   registry is implemented by #495/#496. Its initial kinds are `repository` (implicit) and
    `general` (explicit and amendable); membership kinds are `repository`, `workspace`, and `task`.
    Membership rows are append-only and carry a monotonic `membership_generation`. A repository
    commitment or workspace commitment is a membership fact, never the project's identity.

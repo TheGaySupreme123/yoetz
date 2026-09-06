@@ -11,6 +11,8 @@ the decisions behind it see [`docs/adr/`](../adr/).
   vocabulary, keys, and slash commands.
 - [The six operations](six-operations.md) — `start`, `publish_work`, `check`, `respond`, `status`,
   `receipt`, end to end.
+- [Working with several agents](multi-agent-work.md) — child tasks, dependency receipts, projects,
+  and consented coordination.
 - [Importing bounded Codex JSONL](importing-codex-jsonl.md) — stage, review, authorize, and resume
   one exact local `codex exec --json` import.
 - [Privacy and semantic review](privacy-and-semantic-review.md) — the zero-egress default, the

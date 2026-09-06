@@ -264,6 +264,25 @@ def test_native_projection_uses_shared_bytes_and_only_admitted_claude_components
     )
 
 
+def test_installed_neighbor_fixture_keeps_native_child_proof_bounded() -> None:
+    from fixture_loader import build_fixture_loader
+
+    fixture = cast(
+        dict[str, object],
+        build_fixture_loader().load_json(
+            "agent-plugins/claude-code-cli-native-project-2.1.261.case.json"
+        ),
+    )
+    assert fixture["capability_status"] == "native_child_hooks_bounded_proven"
+    assert fixture["model_use"] == "loopback_synthetic_only"
+    assert fixture["observation_evidence"] == "native_hook_payload_only"
+    limits = cast(list[object], fixture["proof_limits"])
+    assert "production_auth_unavailable_in_isolated_home" in limits
+    child = cast(dict[str, object], fixture["native_child_probe"])
+    assert child["child_lifecycle"] == "started_completed"
+    assert child["parent_tool_identifier"] == "absent_from_native_payload"
+
+
 def test_launcher_binding_uses_the_invoking_installation_and_marks_the_marker(
     tmp_path: Path,
 ) -> None:

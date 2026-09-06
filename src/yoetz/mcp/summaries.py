@@ -308,6 +308,16 @@ def summary_for_check(envelope: object) -> str:
         prefix = (
             f"Check verdict: {verdict}; findings returned: {findings}; suppressed: {suppressed}; "
         )
+    children = source.get("children")
+    if (
+        isinstance(children, Mapping)
+        and type(children.get("label")) is str
+        and children.get("label") in {"recorded", "preview"}
+    ):
+        prefix += f"children ({children['label']}): {_item_count(children.get('items'))}; "
+    notes = source.get("advisory_notes")
+    if isinstance(notes, (list, tuple)) and notes:
+        prefix += f"project advice (non-verdict): {len(notes)}; "
     suffix = f"semantic status/reason: {status}/{reason}; {_frontier_clause(source)}."
     clause = _finding_identity_clause(
         source,
@@ -376,6 +386,15 @@ def _compact_status_fields(source: Mapping[str, JsonValue], view: str) -> tuple[
 def summary_for_status(envelope: object) -> str:
     source = _mapping(envelope)
     view = _safe_token(source.get("view"))
+    if view in {"lineage", "project"}:
+        return _summary_for_multi_agent_status(source, view)
+    if view == "advice":
+        page = source.get("page")
+        count = _item_count(page.get("items")) if isinstance(page, Mapping) else "unavailable"
+        return _bounded(
+            f"Status view: advice; {_frontier_clause(source)}; advice items: {count}; "
+            "Read the structured page for coordination selectors and bounded resource details."
+        )
     freshness, obligations, unanswered, receipt_blocking = _compact_status_fields(source, view)
     gaps = _item_count(source.get("gaps"))
     prefix = (
@@ -393,6 +412,52 @@ def summary_for_status(envelope: object) -> str:
         byte_budget=_MAX_SUMMARY_BYTES - len((prefix + suffix).encode("ascii")),
     )
     return _bounded(prefix + clause + suffix)
+
+
+def _summary_for_multi_agent_status(source: Mapping[str, JsonValue], view: str) -> str:
+    page = source.get("page")
+    prefix = f"Status view: {view}; {_frontier_clause(source)}; "
+    if not isinstance(page, Mapping):
+        return _bounded(prefix + "page unavailable.")
+    lineage = page if view == "lineage" else page.get("lineage")
+    if view == "project":
+        project = page.get("project_id")
+        project_id = project if is_valid_id(IdKind.PROJECT, project) else "unavailable"
+        grant = page.get("grant_state")
+        grant_state = (
+            grant
+            if type(grant) is str and grant in {"active", "revoked"}
+            else "none"
+            if grant is None
+            else "unavailable"
+        )
+        prefix += (
+            f"project: {project_id}; generation: {_safe_count(page.get('membership_generation'))}; "
+            f"grant: {grant_state or 'none'}; members: {_item_count(page.get('members'))}; "
+            f"detections: {_item_count(page.get('detections'))}; "
+            f"receipts: {_item_count(page.get('receipts'))}; "
+        )
+    if isinstance(lineage, Mapping):
+        parent = lineage.get("parent_task_id")
+        if view == "lineage":
+            parent_id = (
+                parent
+                if is_valid_id(IdKind.TASK, parent)
+                else "none"
+                if parent is None
+                else "unavailable"
+            )
+            prefix += f"parent: {parent_id}; "
+        prefix += (
+            f"children: {_item_count(lineage.get('children'))}; "
+            f"host annotations: {_item_count(lineage.get('annotations'))}; "
+        )
+    if view == "project":
+        prefix += f"coverage: {_item_count(page.get('coverage'))}; "
+    suffix = "Read the structured page for child states and row identities."
+    if page.get("next_cursor") is not None:
+        suffix = "More pages available. " + suffix
+    return _bounded(prefix + suffix)
 
 
 def summary_for_receipt(envelope: object) -> str:

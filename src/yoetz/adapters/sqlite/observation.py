@@ -412,12 +412,11 @@ class SqliteObservationStore:
     ) -> None:
         try:
             with self._db:
-                self._db.execute(
-                    "UPDATE observation_workspace_session_routes "
-                    "SET active=0, unbound_at=? "
-                    "WHERE workspace_commitment=? AND yoetz_session_id<>? AND active=1",
-                    (bound_at.wire, workspace, yoetz_session_id),
-                )
+                # Routes are keyed by Yoetz session, not by workspace.  Deactivating every other
+                # row here encoded the old one-session-per-workspace assumption and made a second
+                # explicit sibling appear to retire the first one's route.  A replacement of the
+                # *same* Yoetz session is still an upsert below; unrelated sessions remain active
+                # and can drain their task-local verification repositories concurrently.
                 self._db.execute(
                     "INSERT INTO observation_workspace_session_routes("
                     "workspace_commitment, yoetz_session_id, yoetz_task_id, yoetz_writer_id, "

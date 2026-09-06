@@ -10,6 +10,12 @@ from datetime import datetime
 from enum import Enum
 from typing import Final, Literal, Protocol, cast
 
+from yoetz.domain.coordination import (
+    LineageAcceptance,
+    LineageOrigin,
+    SessionHealth,
+    WorkState,
+)
 from yoetz.domain.events import EventDraft, LedgerRecord
 from yoetz.domain.findings import (
     CheckVerdict,
@@ -26,6 +32,7 @@ from yoetz.domain.values import (
     validate_sha256_digest,
 )
 from yoetz.kernel.deterministic_checks import CaseAvailabilityFacts, DeterministicCase
+from yoetz.kernel.lineage import LineageRollupState
 from yoetz.kernel.projections import ProjectionState
 from yoetz.ports.objects import ObjectKind, ObjectRef
 from yoetz.protocol.coverage import Coverage, PublicationChannel
@@ -57,6 +64,9 @@ __all__ = [
     "AssignmentProjectionFilter",
     "AttemptOutcome",
     "CheckAwaitingHuman",
+    "CheckAdvisoryNote",
+    "CheckChildPreviewItem",
+    "CheckChildrenPreview",
     "CheckCommitResult",
     "CheckPhase",
     "CheckPolicyExecution",
@@ -174,7 +184,11 @@ type QueryableProjectionView = Literal[
 _MAX_SAFE_INTEGER: Final = 2**53 - 1
 _MAX_SQLITE_SIGNED_INTEGER: Final = 2**63 - 1
 _IDENTITY_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$", re.ASCII)
-_POLICY_IDS: Final = ("research-evidence/0.1.0", "work-integrity/0.1.0")
+_POLICY_IDS: Final = (
+    "coordination/0.1.0",
+    "research-evidence/0.1.0",
+    "work-integrity/0.1.0",
+)
 
 
 def _invalid() -> ValueError:
@@ -488,9 +502,91 @@ class CheckVersionSlice:
             raise _invalid()
         _identity(self.engine_version)
         _identity(self.projection_version)
-        packs = _sorted_unique_strings(self.policy_packs, maximum=2)
+        packs = _sorted_unique_strings(self.policy_packs, maximum=3)
         if not packs or any(pack not in _POLICY_IDS for pack in packs):
             raise _invalid()
+
+
+@dataclass(frozen=True, slots=True)
+class CheckChildPreviewItem:
+    """One bounded child projection attached to a completed check result.
+
+    The preview is derived from the parent ledger's recorded manifest by the application layer;
+    it never holds live child state.  ``blocking_conditions`` contains evaluator tokens only and
+    is deliberately separate from the check's finding list.
+    """
+
+    child_task_id: str
+    origin: LineageOrigin
+    acceptance: LineageAcceptance
+    work_state: WorkState
+    session_health: SessionHealth
+    rollup_state: LineageRollupState
+    blocking_conditions: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _id(IdKind.TASK, self.child_task_id)
+        if (
+            type(self.origin) is not LineageOrigin
+            or type(self.acceptance) is not LineageAcceptance
+            or type(self.work_state) is not WorkState
+            or type(self.session_health) is not SessionHealth
+            or type(self.rollup_state) is not LineageRollupState
+        ):
+            raise _invalid()
+        _sorted_unique_strings(self.blocking_conditions)
+
+
+@dataclass(frozen=True, slots=True)
+class CheckChildrenPreview:
+    """The check-result child section, with a recorded/preview freshness label."""
+
+    label: Literal["recorded", "preview"]
+    items: tuple[CheckChildPreviewItem, ...]
+    tested_manifest_frontier: Frontier | None = None
+
+    def __post_init__(self) -> None:
+        if self.label not in {"recorded", "preview"} or type(self.items) is not tuple:
+            raise _invalid()
+        if len(self.items) > 64 or any(
+            type(item) is not CheckChildPreviewItem for item in self.items
+        ):
+            raise _invalid()
+        ids = tuple(item.child_task_id for item in self.items)
+        if ids != tuple(sorted(set(ids), key=str.encode)):
+            raise _invalid()
+        if (
+            self.tested_manifest_frontier is not None
+            and type(self.tested_manifest_frontier) is not Frontier
+        ):
+            raise _invalid()
+
+
+@dataclass(frozen=True, slots=True)
+class CheckAdvisoryNote:
+    """A bounded project coordination hint carried beside, never inside, findings."""
+
+    kind: Literal["live_member_present", "duplicate_finding"]
+    project_id: str
+    task_ids: tuple[str, ...]
+    count: int
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"live_member_present", "duplicate_finding"}:
+            raise _invalid()
+        _id(IdKind.PROJECT, self.project_id)
+        if type(self.task_ids) is not tuple or not 1 <= len(self.task_ids) <= 64:
+            raise _invalid()
+        tasks = tuple(_id(IdKind.TASK, value) for value in self.task_ids)
+        if tasks != tuple(sorted(set(tasks), key=str.encode)):
+            raise _invalid()
+        if self.kind == "duplicate_finding" and len(tasks) < 2:
+            raise _invalid()
+        if type(self.count) is not int or not 1 <= self.count <= _MAX_SAFE_INTEGER:
+            raise _invalid()
+        if self.count < len(tasks):
+            raise _invalid()
+        object.__setattr__(self, "task_ids", tasks)
 
 
 @dataclass(frozen=True, slots=True)
@@ -511,6 +607,8 @@ class CheckCommitResult:
     semantic_provenance: SemanticProvenance | None
     coverage: Coverage
     versions: CheckVersionSlice
+    children: CheckChildrenPreview | None = None
+    advisory_notes: tuple[CheckAdvisoryNote, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.outcome) is not str or self.outcome not in {"committed", "replayed"}:
@@ -550,6 +648,17 @@ class CheckCommitResult:
         ):
             raise _invalid()
         if type(self.coverage) is not Coverage or type(self.versions) is not CheckVersionSlice:
+            raise _invalid()
+        if self.children is not None and type(self.children) is not CheckChildrenPreview:
+            raise _invalid()
+        if type(self.advisory_notes) is not tuple or len(self.advisory_notes) > 64:
+            raise _invalid()
+        if any(type(item) is not CheckAdvisoryNote for item in self.advisory_notes):
+            raise _invalid()
+        note_keys = tuple(
+            (item.kind, item.project_id, item.task_ids) for item in self.advisory_notes
+        )
+        if len(note_keys) != len(set(note_keys)):
             raise _invalid()
 
 

@@ -649,7 +649,7 @@ def test_server_answers_hello_result_then_refuses_a_foreign_manifest() -> None:
             await server_handshake(server, client_peer, _status())
         _assert_reason(refused, "manifest_mismatch")
         result = await read_control_frame(client)
-        validate_schema_instance("control-hello-result", "2.1.0", result)
+        validate_schema_instance("control-hello-result", "2.5.0", result)
         assert result["schema_manifest_digest"] == load_schema_catalog().manifest_digest
         assert result["service_instance_id"] == _SERVICE_ID
 

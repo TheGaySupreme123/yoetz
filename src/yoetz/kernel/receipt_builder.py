@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from typing import Final, cast
+from typing import Final, Literal, cast
 
 from yoetz.domain.events import (
     CheckRecordedPayload,
@@ -31,6 +31,9 @@ from yoetz.domain.receipts import (
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
     SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
+    ReceiptChildFinding,
+    ReceiptChildOutcome,
+    ReceiptChildren,
     ReceiptConclusion,
     ReceiptDocument,
     ReceiptGap,
@@ -60,6 +63,7 @@ from yoetz.domain.values import (
 )
 from yoetz.kernel.claims import effective_claim_items
 from yoetz.kernel.deterministic_checks import CaseAvailabilityFacts, CaseGap
+from yoetz.kernel.lineage import LineageEvaluation, LineageRollupState
 from yoetz.kernel.plan_scope import CurrentPlanScope, current_plan_scope
 from yoetz.kernel.projections import ObligationProjectionRecord, ProjectionRecord, ProjectionState
 from yoetz.protocol.coverage import LEDGER_FRESHNESS_ORDER, Coverage, weakest
@@ -264,6 +268,7 @@ class ReceiptBuildContext:
     gaps: tuple[CaseGap, ...]
     finding_states: tuple[ReceiptFindingState, ...]
     applicable_check: CheckRecordedPayload | None
+    lineage: LineageEvaluation | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -279,6 +284,7 @@ class ReceiptBuildContext:
                 self.applicable_check is not None
                 and type(self.applicable_check) is not CheckRecordedPayload
             )
+            or (self.lineage is not None and type(self.lineage) is not LineageEvaluation)
         ):
             raise ValueError(_CONTEXT_INVALID)
         expected_frontier = Frontier(self.projection.frontier, self.projection.head_digest)
@@ -311,6 +317,11 @@ class ReceiptBuildContext:
         if self.applicable_check is not None:
             if weakest(self.coverage, self.applicable_check.coverage) != self.coverage:
                 raise ValueError(_CONTEXT_INVALID)
+        if (
+            self.lineage is not None
+            and weakest(self.coverage, self.lineage.coverage) != self.coverage
+        ):
+            raise ValueError(_CONTEXT_INVALID)
         _validate_availability(self)
         _validate_finding_states(self)
         _validate_applicable_check(self)
@@ -683,6 +694,63 @@ def _apply_profile(
     )
 
 
+def _receipt_children(evaluation: LineageEvaluation | None) -> ReceiptChildren:
+    """Project the pure lineage evaluation into the receipt's bounded child section."""
+
+    if evaluation is None:
+        return ReceiptChildren()
+    snapshots = {snapshot.child_task_id: snapshot for snapshot in evaluation.snapshots}
+    children: list[ReceiptChildOutcome] = []
+    for rollup in evaluation.children:
+        snapshot = snapshots.get(rollup.child_task_id)
+        if snapshot is None:
+            # A synthetic rollup without its source snapshot cannot be rendered as a truthful
+            # child finding row.  Keep the child identity and outcome while naming the missing
+            # source through the evaluator's coverage gap.
+            findings: tuple[ReceiptChildFinding, ...] = ()
+        else:
+            findings = tuple(
+                ReceiptChildFinding(
+                    finding_id=finding.finding_id,
+                    kind=finding.kind,
+                    origin=finding.origin,
+                    priority=finding.priority,
+                    actionable=bool(finding.actionable),
+                    resolved=finding.resolved,
+                    resolution_event_id=finding.resolution_event_id,
+                )
+                for finding in snapshot.findings
+            )
+        # ``blocked`` is the evaluator's internal state for unresolved actionable child findings;
+        # receipts expose the bounded child outcome vocabulary, where that state is an open gap
+        # accompanied by the actionable finding rows.
+        outcome = (
+            "annotated"
+            if rollup.state is LineageRollupState.ANNOTATION
+            else "open_gap"
+            if rollup.state is LineageRollupState.BLOCKED
+            else rollup.outcome
+        )
+        children.append(
+            ReceiptChildOutcome(
+                child_task_id=rollup.child_task_id,
+                outcome=cast(
+                    Literal["clean", "annotated", "open_gap", "incomplete", "unavailable"],
+                    outcome,
+                ),
+                tested_manifest_ref=(
+                    None
+                    if rollup.state is LineageRollupState.UNAVAILABLE
+                    else rollup.tested_manifest_ref
+                ),
+                later_manifest_ref=rollup.later_manifest_ref,
+                freshness=cast(Literal["known", "unknown"], rollup.freshness),
+                findings=findings,
+            )
+        )
+    return ReceiptChildren(tuple(children))
+
+
 def _conclusion(
     context: ReceiptBuildContext,
     unresolved_actionable: tuple[Finding, ...],
@@ -691,8 +759,12 @@ def _conclusion(
         # These two closed gaps bound completion itself. Findings remain visible and actionable,
         # but they cannot make an empty completion scope read as sufficiently covered.
         return ReceiptConclusion.INSUFFICIENT_COVERAGE
-    if unresolved_actionable:
+    if unresolved_actionable or (
+        context.lineage is not None and context.lineage.actionable_finding_ids
+    ):
         return ReceiptConclusion.UNRESOLVED_FINDINGS_REMAIN
+    if context.lineage is not None and context.lineage.blocks_clean_completion:
+        return ReceiptConclusion.INSUFFICIENT_COVERAGE
     check = context.applicable_check
     if check is None:
         return ReceiptConclusion.INSUFFICIENT_COVERAGE
@@ -1054,6 +1126,7 @@ def build_receipt(
     claim_refs = _select_claim_refs(context, findings)
     evidence_refs = _select_evidence_refs(context, claim_refs, obligations, responses)
     gaps = _select_gaps(context)
+    children = _receipt_children(context.lineage)
     (
         retained_findings,
         retained_obligations,
@@ -1127,4 +1200,5 @@ def build_receipt(
         gaps=retained_gaps,
         redactions=redactions,
         sections=sections,
+        children=children,
     )

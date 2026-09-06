@@ -5,17 +5,21 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final, Literal, Protocol, cast
 
 from pydantic import BaseModel
 
 from yoetz.application.check import CheckScope, run_deterministic_policies
+from yoetz.application.coordination import CoordinationAdvice
+from yoetz.application.projects import ProjectApplication, ProjectCommandError
+from yoetz.application.task_views import LineageStatusSnapshot, ProjectStatusSnapshot
 from yoetz.domain.findings import FINDING_KIND_TRAITS, FindingOrigin
 from yoetz.domain.observation import AdviceSnapshot
 from yoetz.domain.values import (
     Frontier,
+    JsonObject,
     SemanticContinuation,
     disclosure_continuation,
     repository_grant_continuation,
@@ -27,6 +31,7 @@ from yoetz.kernel.deterministic_checks import (
 )
 from yoetz.observability.logging import record_unexpected_exception_without_raising
 from yoetz.ports.diagnostics import RuntimeCapability
+from yoetz.ports.host_lineage import HostLineageRegistryPort
 from yoetz.ports.ledger import (
     AssignmentProjectionFilter,
     CheckSuspensionKind,
@@ -47,6 +52,7 @@ from yoetz.ports.ledger import (
     ProjectionView,
 )
 from yoetz.ports.runtime import BundleRuntimePort, RouteAccess, RouteCommand, TaskRuntime
+from yoetz.ports.start_catalog import StartCatalogPort
 from yoetz.protocol.canonical import (
     JsonValue,
     canonical_digest,
@@ -86,11 +92,13 @@ from yoetz.protocol.models import (
     StatusHistoryFilterModel,
     StatusHistoryPageModel,
     StatusImportStatusModel,
+    StatusLineagePageModel,
     StatusObligationsFilterModel,
     StatusObligationsPageModel,
     StatusOperationFilterModel,
     StatusOperationPageModel,
     StatusPage,
+    StatusProjectPageModel,
     StatusRequest,
     StatusResultsPageModel,
     StatusVersionSliceModel,
@@ -163,6 +171,9 @@ def _strip_optional_non_null_nulls(
 class Application(Protocol):
     runtime: BundleRuntimePort
     status_cursor_key: bytes
+    start_catalog: StartCatalogPort
+    project_application: ProjectApplication | None
+    host_lineage_registry: HostLineageRegistryPort | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,6 +238,150 @@ def _error(code: PublicErrorCode, message: str) -> PublicOperationError:
     return PublicOperationError(code, message, False)
 
 
+async def _coordination_advice_status_items(
+    app: Application,
+    runtime: TaskRuntime,
+    coverage: Coverage,
+    *,
+    limit: int,
+) -> tuple[dict[str, JsonValue], ...]:
+    """Project currently delivered coordination advice into the ordinary advice page.
+
+    The project application performs the source-consent, recipient-consent, delivery-pair, and
+    membership-generation checks.  Status only retains rows addressed to this task and exposes
+    structural commitments; counterpart paths and text stay behind the existing project detail
+    and disclosure gates.
+    """
+
+    project_application = getattr(app, "project_application", None)
+    if not isinstance(project_application, ProjectApplication):
+        return ()
+    list_projects = getattr(project_application.catalog, "list_task_project_ids", None)
+    advice_for = getattr(project_application, "coordination_advice_for", None)
+    if not callable(list_projects) or not callable(advice_for):
+        return ()
+    try:
+        project_ids = await cast(Callable[[str], Awaitable[tuple[str, ...]]], list_projects)(
+            runtime.task_id
+        )
+    except ProjectCommandError, PublicOperationError:
+        return ()
+    items: list[dict[str, JsonValue]] = []
+    for project_id in sorted(set(project_ids), key=str.encode):
+        try:
+            rows = await cast(Callable[..., Awaitable[tuple[CoordinationAdvice, ...]]], advice_for)(
+                runtime.task_id, project=project_id
+            )
+        except ProjectCommandError, PublicOperationError:
+            continue
+        for advice in rows:
+            target = getattr(advice, "target_task_id", None)
+            if target != runtime.task_id:
+                continue
+            detection_id = getattr(advice, "detection_id", None)
+            project_value = getattr(advice, "project_id", None)
+            generation = getattr(advice, "membership_generation", None)
+            counterpart = getattr(advice, "counterpart_task_id", None)
+            if (
+                type(detection_id) is not str
+                or type(project_value) is not str
+                or type(generation) is not int
+                or type(counterpart) is not str
+            ):
+                continue
+            evidence = canonical_digest(cast(JsonValue, advice.as_wire()))
+            items.append(
+                {
+                    # The advice page predates the coordination-specific item shape and uses a
+                    # finding-shaped stable identity.  Preserve the detection UUID while changing
+                    # only its typed prefix; this is an advice identity, not a recorded finding.
+                    "finding_id": "fnd_" + detection_id.removeprefix("evt_"),
+                    "rule_code": "coordination_overlap",
+                    "priority": 50,
+                    "evidence_commitments": (evidence,),
+                    "coverage": coverage_to_json(coverage),
+                    "freshness_frontier": f"membership_generation:{generation}",
+                    "verification_state": "not_required",
+                    "semantic_state": "disabled",
+                    "recommended_next_action": "review_coordination_advice",
+                    "coordination_project_id": project_value,
+                    "coordination_detection_id": detection_id,
+                    "coordination_membership_generation": str(generation),
+                    "coordination_counterpart_task_id": counterpart,
+                    "coordination_resource_paths": JsonObject(
+                        {
+                            "omitted": True,
+                            "category": "repository_excerpt",
+                            "reason": "local_disclosure_not_authorized",
+                        }
+                    ),
+                }
+            )
+    return tuple(items[:limit])
+
+
+def _task_snapshot_size(snapshot: LineageStatusSnapshot | ProjectStatusSnapshot) -> int:
+    if isinstance(snapshot, LineageStatusSnapshot):
+        return len(snapshot.children) + len(snapshot.annotations)
+    return (
+        len(snapshot.members)
+        + _task_snapshot_size(snapshot.lineage)
+        + len(snapshot.detections)
+        + len(snapshot.coverage)
+        + len(snapshot.receipts)
+    )
+
+
+def _task_snapshot_page(
+    snapshot: LineageStatusSnapshot | ProjectStatusSnapshot,
+    offset: int,
+    limit: int,
+    next_cursor: str | None,
+) -> StatusLineagePageModel | StatusProjectPageModel:
+    """One shared item budget covers every collection in a task/project response."""
+
+    end = offset + limit
+    if isinstance(snapshot, LineageStatusSnapshot):
+        count = len(snapshot.children)
+        return StatusLineagePageModel(
+            parent_task_id=snapshot.parent_task_id,
+            children=snapshot.children[offset:end],
+            annotations=snapshot.annotations[max(0, offset - count) : max(0, end - count)],
+            next_cursor=next_cursor,
+        )
+    members_end = len(snapshot.members)
+    children_end = members_end + len(snapshot.lineage.children)
+    annotations_end = children_end + len(snapshot.lineage.annotations)
+    detections_end = annotations_end + len(snapshot.detections)
+    coverage_end = detections_end + len(snapshot.coverage)
+    return StatusProjectPageModel.model_validate(
+        {
+            **snapshot.metadata,
+            "members": snapshot.members[offset:end],
+            "lineage": {
+                "parent_task_id": snapshot.lineage.parent_task_id,
+                "children": snapshot.lineage.children[
+                    max(0, offset - members_end) : max(0, end - members_end)
+                ],
+                "annotations": snapshot.lineage.annotations[
+                    max(0, offset - children_end) : max(0, end - children_end)
+                ],
+                "next_cursor": None,
+            },
+            "detections": snapshot.detections[
+                max(0, offset - annotations_end) : max(0, end - annotations_end)
+            ],
+            "coverage": snapshot.coverage[
+                max(0, offset - detections_end) : max(0, end - detections_end)
+            ],
+            "receipts": snapshot.receipts[
+                max(0, offset - coverage_end) : max(0, end - coverage_end)
+            ],
+            "next_cursor": next_cursor,
+        }
+    )
+
+
 def _filter_json(value: StatusFilter | None) -> JsonValue:
     if value is None:
         return None
@@ -234,7 +389,14 @@ def _filter_json(value: StatusFilter | None) -> JsonValue:
 
 
 def _filter_digest(request: StatusRequest) -> str:
-    return canonical_digest(_filter_json(request.filter))
+    selectors = {
+        name: getattr(request, name, None)
+        for name in ("task_id", "project_id", "correlation_id")
+        if getattr(request, name, None) is not None
+    }
+    if not selectors:
+        return canonical_digest(_filter_json(request.filter))
+    return canonical_digest({"filter": _filter_json(request.filter), **selectors})
 
 
 # A SHA-256 HMAC digest is always exactly 32 bytes, so its unpadded base64url encoding is
@@ -929,6 +1091,7 @@ async def execute_status(
             if request.at_frontier is not None and int(request.at_frontier) != frontier.sequence:
                 raise _error(PublicErrorCode.INVALID_REQUEST, "The status cursor is invalid.")
 
+        result_view = request.view
         import_status = await _import_status(runtime)
         compact_page: ProjectionPage | None = None
         if request.view == "operation":
@@ -1097,6 +1260,13 @@ async def execute_status(
                     }
                     for item in advice.ranked_items[: int(request.limit)]
                 )
+            coordination_items = await _coordination_advice_status_items(
+                app,
+                runtime,
+                raw_page.coverage,
+                limit=max(0, min(int(request.limit), 64 - len(items))),
+            )
+            items = (*items, *coordination_items)
             page = StatusAdvicePageModel.model_validate(
                 {
                     "projection_format": "yoetz.advice-snapshot/1",
@@ -1113,6 +1283,72 @@ async def execute_status(
             lag = raw_page.lag
             projection_version = raw_page.projection_version
             rebuild_state = raw_page.rebuild_state
+        elif request.view == "lineage" or request.view == "project":
+            from yoetz.application.task_views import lineage_status_page, project_status_snapshot
+
+            if frontier != head:
+                raise _error(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "Current task views require the current task frontier.",
+                )
+            if position is not None and type(position) is not int:
+                raise _error(PublicErrorCode.INVALID_REQUEST, "The status cursor is invalid.")
+            if request.view == "lineage":
+                if request.task_id is not None and request.task_id != runtime.task_id:
+                    raise _error(
+                        PublicErrorCode.SESSION_CONFLICT, "The task selector is inconsistent."
+                    )
+                full_page = await lineage_status_page(
+                    app.start_catalog,
+                    runtime,
+                    frontier,
+                    host_lineage_registry=app.host_lineage_registry,
+                    correlation_id=request.correlation_id,
+                )
+            else:
+                if app.project_application is None:
+                    raise _error(
+                        PublicErrorCode.SERVICE_UNAVAILABLE, "Project status is unavailable."
+                    )
+                full_page = await project_status_snapshot(
+                    app.project_application,
+                    app.start_catalog,
+                    app.runtime,
+                    runtime,
+                    frontier,
+                    selected_task_id=request.task_id,
+                    project_id=request.project_id,
+                    host_lineage_registry=app.host_lineage_registry,
+                    correlation_id=request.correlation_id,
+                )
+            if isinstance(full_page, LineageStatusSnapshot):
+                result_view = "lineage"
+            snapshot_identity = canonical_digest(cast(JsonValue, full_page.as_wire()))
+            if expected_version is not None and expected_version != snapshot_identity:
+                raise _error(PublicErrorCode.INVALID_REQUEST, "The task view cursor is stale.")
+            offset = position or 0
+            limit = int(request.limit)
+            next_offset = offset + limit
+            next_cursor = (
+                _encode_cursor(app, request, frontier, snapshot_identity, next_offset)
+                if next_offset < _task_snapshot_size(full_page)
+                else None
+            )
+            page = _task_snapshot_page(full_page, offset, limit, next_cursor)
+            effective = frontier
+            lag = 0
+            projection_version = runtime.projection_version
+            rebuild_state = "current"
+            compact_page = await runtime.ledger.query_projection(
+                ProjectionQuery(runtime.session_id, "compact", None, frontier, 1, None, None)
+            )
+            coverage = compact_page.coverage
+            view_gaps = (
+                full_page.known_gaps
+                if isinstance(full_page, LineageStatusSnapshot)
+                else full_page.gaps
+            )
+            gaps = tuple(sorted(set(compact_page.gaps) | set(view_gaps)))
         elif request.view == "candidate_findings":
             if position is not None and type(position) is not int:
                 raise _error(PublicErrorCode.INVALID_REQUEST, "The status cursor is invalid.")
@@ -1181,7 +1417,7 @@ async def execute_status(
             runtime.task_id,
             runtime.session_id,
             cast(str, runtime.writer_id),
-            request.view,
+            result_view,
             frontier,
             head,
             effective,

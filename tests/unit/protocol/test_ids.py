@@ -55,6 +55,7 @@ _EXPECTED_KINDS: tuple[tuple[str, str, str], ...] = (
     ("EGRESS_DISPATCH", "egress_dispatch", "dsp_"),
     ("EGRESS_RECEIPT", "egress_receipt", "egr_"),
     ("ACTOR", "actor", "agt_"),
+    ("PROJECT", "project", "prj_"),
 )
 
 _OWNED_REASONS = frozenset(
@@ -167,7 +168,7 @@ def test_new_id_kind_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
     assert (
         tuple((kind.name, kind.value, PREFIX_BY_KIND[kind]) for kind in IdKind) == _EXPECTED_KINDS
     )
-    assert len(IdKind) == 28
+    assert len(IdKind) == 29
     assert ID_TOTAL_LENGTH == 40
     assert ACTOR_ID_PATTERN == r"^[A-Za-z0-9._:-]{1,128}$"
     assert isinstance(PREFIX_BY_KIND, MappingProxyType)
@@ -194,7 +195,7 @@ def test_new_id_kind_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
         assert generated[18] == "4"
         assert generated[23] in "89ab"
         assert validate_id(kind, generated) == generated
-    assert calls == [16] * 27
+    assert calls == [16] * 28
 
 
 def test_generation_forces_version_and_variant_distribution() -> None:
@@ -212,6 +213,8 @@ def test_validate_id_rejects_bad_shapes_from_frozen_vectors() -> None:
     fixture = _as_mapping(load_fixture_json("canonical/identifiers.case.json"))
     input_value = _as_mapping(fixture["input"])
     valid_vectors = _as_list(input_value["valid_vectors"])
+    # The original identifier vectors remain frozen; the project kind is covered by the
+    # additive assertion below so the historical fixture does not need to be rewritten.
     assert len(valid_vectors) == 28
     for raw_vector in valid_vectors:
         vector = _as_mapping(raw_vector)
@@ -219,6 +222,9 @@ def test_validate_id_rejects_bad_shapes_from_frozen_vectors() -> None:
         value = cast(str, vector["value"])
         assert validate_id(kind, value) is value
         assert is_valid_id(kind, value)
+    project_value = "prj_00000000-0000-4000-8000-000000000001"
+    assert validate_id(IdKind.PROJECT, project_value) is project_value
+    assert is_valid_id(IdKind.PROJECT, project_value)
 
     negative_vectors = _as_list(input_value["negative_vectors"])
     seen_reasons: set[str] = set()

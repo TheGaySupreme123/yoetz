@@ -454,3 +454,112 @@ def test_invalid_persisted_profile_is_dropped_on_load(tmp_path: Path) -> None:
     assert reloaded.stream_profile_for_session(workspace, "other") == (
         "codex-rollout-jsonl/0.150.1/v1"
     )
+
+
+def test_codex_session_lifecycles_report_every_binding_with_its_ended_flag(
+    tmp_path: Path,
+) -> None:
+    """#549: one state read answers the ended question for every bound session."""
+
+    store, workspace, _ = _consented_store(tmp_path)
+    live = store.bind_codex_session(workspace, "sess-live")
+    ended = store.bind_codex_session(workspace, "sess-ended")
+    store.note_session_end(workspace, ended)
+    del live
+
+    assert store.codex_session_lifecycles_for_workspace(workspace) == (
+        ("sess-ended", True),
+        ("sess-live", False),
+        ("sess-partials", False),
+    )
+    assert store.codex_session_lifecycles_for_workspace("hmac-sha256:" + "0" * 64) == ()
+
+
+def test_prune_codex_session_bindings_removes_only_ended_and_drained_sessions(
+    tmp_path: Path,
+) -> None:
+    """#549: live, pending, quarantined, and corrupt sessions keep their binding."""
+
+    store, workspace, _ = _consented_store(tmp_path)
+    kinds = ("live", "clean", "pending", "quarantined", "corrupt")
+    commitments = {kind: store.bind_codex_session(workspace, f"sess-{kind}") for kind in kinds}
+    for kind in kinds[1:]:
+        store.note_session_end(workspace, commitments[kind])
+    for kind in ("pending", "quarantined", "corrupt"):
+        assert (
+            store.enqueue_outbox(
+                workspace,
+                f"sess-{kind}",
+                _envelope(session=commitments[kind], identity=f"hook:{kind}"),
+            )
+            is None
+        )
+    assert (
+        store.quarantine_outbox_session(
+            workspace, "sess-quarantined", ObservationGapCode.MAPPING_MISSING.value
+        )
+        == 1
+    )
+    assert (
+        store.quarantine_outbox_session(
+            workspace, "sess-corrupt", ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value
+        )
+        == 1
+    )
+    store.note_frontier_motion(
+        workspace,
+        "sess-clean",
+        from_sequence=1,
+        to_sequence=2,
+        head_digest="sha256:" + "1" * 64,
+        observation_record_count=1,
+        task_id="tsk-prune-test",
+    )
+    everything = tuple(f"sess-{kind}" for kind in kinds) + ("sess-unknown", "")
+
+    assert store.prune_codex_session_bindings(workspace, everything) == ("sess-clean",)
+
+    expected = (
+        ("sess-corrupt", True),
+        ("sess-live", False),
+        ("sess-partials", False),
+        ("sess-pending", True),
+        ("sess-quarantined", True),
+    )
+    assert store.codex_session_lifecycles_for_workspace(workspace) == expected
+    assert store.peek_frontier_motion(workspace, "sess-clean") is None
+    # The ended-unmapped quarantine path still resolves every retained session.
+    assert store.codex_session_ended(workspace, "sess-pending") is True
+    assert store.codex_session_ended(workspace, "sess-quarantined") is True
+    assert store.codex_session_ended(workspace, "sess-clean") is False
+    # Pruning is a persisted change to the existing binding map, not a new shape.
+    raw = _state_json(tmp_path)
+    bindings = cast(dict[str, str], raw["codex_session_bindings"])
+    assert sorted(bindings) == [session_id for session_id, _ in expected]
+    reloaded = LocalObservationStore(_state=tmp_path)
+    assert reloaded.codex_session_lifecycles_for_workspace(workspace) == expected
+    # A second prune with nothing eligible is a no-op.
+    assert store.prune_codex_session_bindings(workspace, everything) == ()
+
+    # Once the pending lane drains, the same request prunes that session too.
+    (row,) = store.list_pending_outbox_rows(workspace, codex_session_id="sess-pending")
+    assert store.acknowledge_outbox_row(workspace, row) is True
+    assert store.prune_codex_session_bindings(workspace, everything) == ("sess-pending",)
+
+
+def test_pruned_binding_resumes_with_generation_continuity(tmp_path: Path) -> None:
+    """#549: a resumed session re-binds on its next hook and keeps its generation counter."""
+
+    store, workspace, _ = _consented_store(tmp_path)
+    commitment = store.bind_codex_session(workspace, "sess-resumed")
+    assert store.begin_session_generation(workspace, commitment) == 1
+    store.note_session_end(workspace, commitment)
+    assert store.prune_codex_session_bindings(workspace, ("sess-resumed",)) == ("sess-resumed",)
+    assert store.codex_session_ended(workspace, "sess-resumed") is False
+
+    assert store.bind_codex_session(workspace, "sess-resumed") == commitment
+    # Bound again but not yet restarted: still the ended generation, exactly as
+    # before pruning, until SessionStart advances it under the lifecycle lock.
+    assert store.codex_session_ended(workspace, "sess-resumed") is True
+    assert store.begin_session_generation(workspace, commitment) == 2
+    assert store.codex_session_ended(workspace, "sess-resumed") is False

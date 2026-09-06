@@ -363,6 +363,9 @@ FINDING_KIND_GLOSSARY: Final[dict[str, str]] = {
     "claim_without_admissible_evidence": (
         "a claim of fact or completion rests on no evidence the packet actually contains"
     ),
+    "coordination_overlap": (
+        "two live task lanes appear to require an explicit coordination obligation before completion"
+    ),
     "completion_with_open_obligations": (
         "work is presented as finished while obligations it was meant to satisfy remain open"
     ),

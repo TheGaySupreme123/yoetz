@@ -19,6 +19,7 @@ from yoetz.adapters.memory.start_catalog import (
     MemoryStartCatalogAdapter,
     MemoryStartCatalogState,
 )
+from yoetz.application.lineage import LineageCoordinator
 from yoetz.domain.events import RuntimeProfile
 from yoetz.domain.values import Frontier
 from yoetz.ports.clock import ClockPort
@@ -191,6 +192,7 @@ class FailOnceStartCatalog:
 
 
 class StartTestApplication:
+    lineage: LineageCoordinator | None = None
     profile: RuntimeProfile = RuntimeProfile.TEST_FAKE
     policy_packs: tuple[str, ...] = (
         "research-evidence/0.1.0",
@@ -212,6 +214,7 @@ class StartTestApplication:
         self.start_catalog = catalog
         self.runtime = runtime
         self.clock = clock
+        self.ids = FixedIds()
 
 
 def start_request(

@@ -11,9 +11,23 @@ from typing import Annotated, Final, Literal, cast
 
 from pydantic import Field, ValidationError
 
+from yoetz.domain.coordination import (
+    CoordinationDisposition,
+    CoordinationGapCode,
+    LineageAcceptance,
+    LineageOrigin,
+    OverlapKind,
+    ProjectTextRef,
+    SessionHealth,
+    WorkState,
+    project_id,
+)
 from yoetz.domain.findings import (
+    FINDING_KIND_TRAITS,
     CheckVerdict,
     Finding,
+    FindingKind,
+    FindingOrigin,
     ResponseDisposition,
     SemanticDispatchKind,
     SemanticProvenance,
@@ -56,7 +70,9 @@ from yoetz.domain.values import (
     frontier_from_json,
     object_id,
     obligation_id,
+    parse_wire_sequence,
     receipt_id,
+    render_wire_sequence,
     request_id,
     result_id,
     session_id,
@@ -84,6 +100,8 @@ from yoetz.protocol.models import (
     CheckScopeModel,
     ClientKind,
     IntegrationKind,
+    LineageProvenanceRestriction,
+    LineageReadGapReason,
     ReceiptRedactionProfile,
     SemanticReason,
     SemanticStatus,
@@ -102,10 +120,14 @@ __all__ = [
     "OBSERVATION_COORDINATOR_ACTOR_ID",
     "PAYLOAD_TYPES",
     "CLAIM_SCHEMA_VERSION",
+    "COORDINATION_EVENT_SCHEMA_VERSION",
     "SCHEMA_VERSION",
     "EVIDENCE_SCHEMA_VERSION",
     "EVIDENCE_SCHEMA_VERSIONS",
     "EVIDENCE_TYPED_SCHEMA_VERSION",
+    "LINEAGE_EVENT_SCHEMA_VERSION",
+    "LINEAGE_SESSION_EVENT_SCHEMA_VERSION",
+    "LINEAGE_SERVICE_STAMPED_FAMILIES",
     "AcceptedEvent",
     "ActionKind",
     "ActionRecordedPayload",
@@ -115,9 +137,19 @@ __all__ = [
     "ClaimKind",
     "ClaimRecordedPayload",
     "ClaimRecordedPayloadV1_1",
+    "ChildDependenciesRecordedPayload",
+    "ChildDependencySnapshot",
+    "ChildFindingSnapshot",
+    "CoordinationContextRecordedPayload",
+    "CoordinationObligationDeclaredPayload",
+    "CoordinationDisposition",
+    "CoordinationDispositionRecordedPayload",
+    "CoordinationGapCode",
     "ClaimRevisionMismatch",
     "ClientKind",
     "DecisionRecordedPayload",
+    "DelegationCancelledPayload",
+    "DelegationDeclaredPayload",
     "EventDraft",
     "EventPayload",
     "EventSchema",
@@ -134,6 +166,7 @@ __all__ = [
     "LedgerRecord",
     "is_observation_authored",
     "is_observation_authorship",
+    "is_lineage_service_stamped",
     "ObligationChange",
     "ObligationChangeKind",
     "NoObligationsReason",
@@ -164,6 +197,13 @@ __all__ = [
     "SESSION_EVENT_SCHEMA_VERSION",
     "SessionOpenedPayload",
     "SessionResumedPayload",
+    "ChildAcceptedPayload",
+    "ChildRejectedPayload",
+    "ChildWrittenOffPayload",
+    "WorkAbandonedPayload",
+    "WorkCancelledPayload",
+    "WorkClosedPayload",
+    "WorkWrittenOffPayload",
     "UnknownEvent",
     "WritePolicy",
     "WriterChain",
@@ -187,7 +227,21 @@ EVIDENCE_SCHEMA_VERSIONS: Final = (
 )
 CLAIM_SCHEMA_VERSION: Final = "1.1.0"
 SEMANTIC_EVENT_SCHEMA_VERSION: Final = "1.1.0"
+COORDINATION_EVENT_SCHEMA_VERSION: Final = "1.0.0"
 SESSION_EVENT_SCHEMA_VERSION: Final = "1.1.0"
+# Lineage fields are additive to the original event families.  The old session-opened schema
+# remains frozen at 1.1.0; the 1.2.0 payload is selected only when a caller supplies the lineage
+# metadata.  The lifecycle and manifest families are new 1.0.0 contracts.
+LINEAGE_SESSION_EVENT_SCHEMA_VERSION: Final = "1.2.0"
+LINEAGE_EVENT_SCHEMA_VERSION: Final = "1.0.0"
+LINEAGE_SERVICE_STAMPED_FAMILIES: Final = frozenset(
+    {
+        "coordination_context_recorded",
+        "delegation_declared",
+        "child_dependencies_recorded",
+        "work_abandoned",
+    }
+)
 MAX_TEXT_BYTES: Final = 8_192
 MAX_REASON_BYTES: Final = 4_096
 MAX_LABEL_BYTES: Final = 256
@@ -227,6 +281,19 @@ EVENT_FAMILIES: Final = (
     "redaction_recorded",
     "check_recorded",
     "receipt_recorded",
+    "delegation_declared",
+    "delegation_cancelled",
+    "child_accepted",
+    "child_rejected",
+    "child_written_off",
+    "child_dependencies_recorded",
+    "coordination_context_recorded",
+    "coordination_obligation_declared",
+    "coordination_disposition_recorded",
+    "work_closed",
+    "work_abandoned",
+    "work_cancelled",
+    "work_written_off",
 )
 
 
@@ -498,6 +565,65 @@ def _timestamp(value: object) -> Timestamp:
     return value
 
 
+_LINEAGE_REVISION_MAX: Final = _MAX_SAFE_INTEGER
+_LINEAGE_TOKEN_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+\-]{0,255}$", re.ASCII)
+
+
+def _lineage_revision(value: object) -> int:
+    """Validate the service-owned lineage revision as a bounded monotonic counter."""
+
+    if type(value) is int:
+        return _bounded_integer(value, 1, _LINEAGE_REVISION_MAX)
+    # Wire events use the repository's canonical integer spelling.  Decoding accepts only that
+    # spelling and immediately restores the domain integer, so an integer and its wire spelling
+    # cannot produce two different manifest identities.
+    if type(value) is str:
+        try:
+            parsed = parse_wire_sequence(value)
+        except (TypeError, ValueError, ProtocolValueError) as exc:
+            raise ProtocolValueError("invalid_event_value_type") from exc
+        return _bounded_integer(parsed, 1, _LINEAGE_REVISION_MAX)
+    raise ProtocolValueError("invalid_event_value_type")
+
+
+def _canonical_uint(value: object) -> int:
+    """Decode one canonical nonnegative integer used by current coordination wire fields."""
+
+    if type(value) is int:
+        return _bounded_integer(value, 0, _LINEAGE_REVISION_MAX)
+    if type(value) is str:
+        try:
+            parsed = parse_wire_sequence(value)
+        except (TypeError, ValueError, ProtocolValueError) as exc:
+            raise ProtocolValueError("invalid_event_value_type") from exc
+        if str(parsed) != value:
+            raise ProtocolValueError("invalid_event_value_type")
+        return _bounded_integer(parsed, 0, _LINEAGE_REVISION_MAX)
+    raise ProtocolValueError("invalid_event_value_type")
+
+
+def _lineage_token(value: object) -> str:
+    if type(value) is not str or _LINEAGE_TOKEN_RE.fullmatch(value) is None:
+        raise ProtocolValueError("invalid_event_value_type")
+    return value
+
+
+def _lineage_enum_tuple[T: Enum](
+    value: object,
+    enum_type: type[T],
+    *,
+    maximum: int,
+    field: str,
+) -> tuple[T, ...]:
+    raw = _tuple(value, 0, maximum)
+    result = tuple(_exact_enum(item, enum_type) for item in raw)
+    _validate_ascii_sorted_unique(
+        tuple(cast(str, member.value) for member in result),
+        field=field,
+    )
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class RequestedItem:
     item_kind: RequestedItemKind
@@ -544,7 +670,7 @@ class PolicyVersion:
 
     def __post_init__(self) -> None:
         policy_id_value = _bounded_text(self.policy_id, 128, minimum=1)
-        if policy_id_value not in {"research-evidence", "work-integrity"}:
+        if policy_id_value not in {"coordination", "research-evidence", "work-integrity"}:
             raise ProtocolValueError("invalid_event_value_type")
         if type(self.policy_version) is not str or self.policy_version != "0.1.0":
             raise ProtocolValueError("invalid_event_value_type")
@@ -641,7 +767,7 @@ def _locator_key_kind(schema: EventSchema) -> str:
         or (schema.name == "evidence_recorded" and schema.version in EVIDENCE_SCHEMA_VERSIONS)
         or (
             schema.name in {"check_recorded", "finding_recorded"}
-            and schema.version == SEMANTIC_EVENT_SCHEMA_VERSION
+            and schema.version in {SEMANTIC_EVENT_SCHEMA_VERSION, "1.2.0"}
         )
     )
     if schema.version != SCHEMA_VERSION and not additive:
@@ -733,6 +859,11 @@ class SessionOpenedPayload:
     profile: RuntimeProfile
     external_ref: str | None = None
     workspace_ref: str | None = None
+    parent_task_id: TaskId | None = None
+    depth: int | None = None
+    origin: LineageOrigin | None = None
+    project_id: str | None = None
+    membership_generation: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -758,6 +889,30 @@ class SessionOpenedPayload:
                 "workspace_ref",
                 _bounded_text(self.workspace_ref, MAX_TEXT_BYTES, minimum=1),
             )
+        parent_task = None if self.parent_task_id is None else task_id(self.parent_task_id)
+        object.__setattr__(self, "parent_task_id", parent_task)
+        if self.depth is not None:
+            object.__setattr__(self, "depth", _bounded_integer(self.depth, 1, 64))
+        if self.origin is not None:
+            object.__setattr__(self, "origin", _exact_enum(self.origin, LineageOrigin))
+        lineage_values_present = (
+            parent_task is not None or self.depth is not None or self.origin is not None
+        )
+        if lineage_values_present and (
+            parent_task is None or self.depth is None or self.origin is None
+        ):
+            raise ProtocolValueError("session_lineage_fields_incomplete")
+        project_value = None if self.project_id is None else project_id(self.project_id)
+        object.__setattr__(self, "project_id", project_value)
+        if self.membership_generation is not None:
+            object.__setattr__(
+                self,
+                "membership_generation",
+                _lineage_revision(self.membership_generation),
+            )
+        project_values_present = project_value is not None or self.membership_generation is not None
+        if project_values_present and (project_value is None or self.membership_generation is None):
+            raise ProtocolValueError("session_lineage_fields_incomplete")
 
 
 @dataclass(frozen=True, slots=True)
@@ -778,6 +933,444 @@ class SessionResumedPayload:
         object.__setattr__(self, "integration", _exact_enum(self.integration, IntegrationKind))
         object.__setattr__(self, "profile", _exact_enum(self.profile, RuntimeProfile))
         object.__setattr__(self, "resumed_frontier", _frontier(self.resumed_frontier))
+
+
+@dataclass(frozen=True, slots=True)
+class ChildFindingSnapshot:
+    """Frozen, structural finding facts copied into a parent dependency manifest.
+
+    The finding kind and origin remain in the manifest so a later evaluator can distinguish
+    deterministic and semantic findings.  ``actionable`` is service-stamped when present and is
+    checked against the canonical kind traits; callers that replay an older producer may omit it,
+    in which case the same trait is derived locally.
+    """
+
+    finding_id: FindingId
+    kind: FindingKind
+    origin: FindingOrigin
+    priority: int
+    resolved: bool
+    resolution_event_id: EventId | None = None
+    actionable: bool | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "finding_id", finding_id(self.finding_id))
+        kind = _exact_enum(self.kind, FindingKind)
+        origin = _exact_enum(self.origin, FindingOrigin)
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "origin", origin)
+        expected_priority, expected_actionable = FINDING_KIND_TRAITS[kind]
+        if self.priority != expected_priority:
+            raise ProtocolValueError("finding_priority_mismatch")
+        if type(self.resolved) is not bool:
+            raise ProtocolValueError("invalid_event_value_type")
+        resolution = (
+            None if self.resolution_event_id is None else event_id(self.resolution_event_id)
+        )
+        if self.resolved is not (resolution is not None):
+            raise ProtocolValueError("finding_resolution_mismatch")
+        object.__setattr__(self, "resolution_event_id", resolution)
+        actionable = expected_actionable if self.actionable is None else self.actionable
+        if type(actionable) is not bool or actionable is not expected_actionable:
+            raise ProtocolValueError("finding_actionable_mismatch")
+        object.__setattr__(self, "actionable", actionable)
+
+
+@dataclass(frozen=True, slots=True)
+class ChildDependencySnapshot:
+    """One complete child snapshot recorded in a parent ledger.
+
+    ``child_frontier`` is the child's observed current frontier.  It is deliberately separate from
+    ``child_check_subject_frontier``: a check may have tested an earlier frontier, and its identity
+    must not be promoted to the current child state.  A missing current frontier therefore requires
+    at least one closed read-gap reason; the service cannot manufacture a frontier.
+    """
+
+    child_task_id: TaskId
+    origin: LineageOrigin
+    acceptance: LineageAcceptance
+    work_state: WorkState
+    session_health: SessionHealth
+    child_frontier: Frontier | None
+    child_check_id: EventId | None
+    child_check_subject_frontier: Frontier | None
+    child_receipt_id: ReceiptId | None
+    coverage: Coverage
+    findings: tuple[ChildFindingSnapshot, ...]
+    lineage_authority_revision: int
+    membership_generation: int | None = None
+    read_gap_reasons: tuple[LineageReadGapReason, ...] = ()
+    provenance_restrictions: tuple[LineageProvenanceRestriction, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "child_task_id", task_id(self.child_task_id))
+        object.__setattr__(self, "origin", _exact_enum(self.origin, LineageOrigin))
+        object.__setattr__(self, "acceptance", _exact_enum(self.acceptance, LineageAcceptance))
+        object.__setattr__(self, "work_state", _exact_enum(self.work_state, WorkState))
+        object.__setattr__(self, "session_health", _exact_enum(self.session_health, SessionHealth))
+        current = None if self.child_frontier is None else _frontier(self.child_frontier)
+        checked = (
+            None
+            if self.child_check_subject_frontier is None
+            else _frontier(self.child_check_subject_frontier)
+        )
+        object.__setattr__(self, "child_frontier", current)
+        object.__setattr__(self, "child_check_subject_frontier", checked)
+        check_id = None if self.child_check_id is None else event_id(self.child_check_id)
+        receipt_id_value = (
+            None if self.child_receipt_id is None else receipt_id(self.child_receipt_id)
+        )
+        object.__setattr__(self, "child_check_id", check_id)
+        object.__setattr__(self, "child_receipt_id", receipt_id_value)
+        if check_id is None and checked is not None:
+            raise ProtocolValueError("child_check_frontier_without_check")
+        if check_id is not None and checked is None:
+            raise ProtocolValueError("child_check_frontier_missing")
+        if current is not None and checked is not None and checked > current:
+            raise ProtocolValueError("child_check_frontier_ahead_of_child")
+        coverage = self.coverage
+        if type(coverage) is not Coverage:
+            raise ProtocolValueError("invalid_coverage_value")
+        object.__setattr__(self, "coverage", coverage)
+        if type(self.findings) is not tuple or len(self.findings) > 100:
+            raise ProtocolValueError("child_finding_count_invalid")
+        if any(type(item) is not ChildFindingSnapshot for item in self.findings):
+            raise ProtocolValueError("invalid_event_value_type")
+        findings = self.findings
+        if findings != tuple(
+            sorted(findings, key=lambda item: str(item.finding_id).encode("ascii"))
+        ):
+            raise ProtocolValueError("child_findings_not_canonical")
+        if len({item.finding_id for item in findings}) != len(findings):
+            raise ProtocolValueError("duplicate_set_member")
+        object.__setattr__(self, "findings", findings)
+        object.__setattr__(
+            self, "lineage_authority_revision", _lineage_revision(self.lineage_authority_revision)
+        )
+        if self.membership_generation is not None:
+            object.__setattr__(
+                self,
+                "membership_generation",
+                _lineage_revision(self.membership_generation),
+            )
+        object.__setattr__(
+            self,
+            "read_gap_reasons",
+            _lineage_enum_tuple(
+                self.read_gap_reasons,
+                LineageReadGapReason,
+                maximum=len(LineageReadGapReason),
+                field="read_gap_reasons",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "provenance_restrictions",
+            _lineage_enum_tuple(
+                self.provenance_restrictions,
+                LineageProvenanceRestriction,
+                maximum=len(LineageProvenanceRestriction),
+                field="provenance_restrictions",
+            ),
+        )
+        if self.child_frontier is None and not self.read_gap_reasons:
+            raise ProtocolValueError("child_frontier_missing")
+        if self.read_gap_reasons and self.child_frontier is not None:
+            raise ProtocolValueError("child_gap_frontier_mismatch")
+
+    @property
+    def tested_frontier(self) -> Frontier | None:
+        """The frontier actually tested by the child's qualifying check, if any."""
+
+        return self.child_check_subject_frontier
+
+
+@dataclass(frozen=True, slots=True)
+class ChildDependenciesRecordedPayload:
+    """Service-stamped aggregate of direct child snapshots.
+
+    The aggregate is intentionally closed and canonical.  An empty aggregate is valid when the
+    service records that a parent no longer has direct children; each child id may occur once.
+    """
+
+    children: tuple[ChildDependencySnapshot, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.children) is not tuple or len(self.children) > 64:
+            raise ProtocolValueError("child_dependency_count_invalid")
+        if any(type(item) is not ChildDependencySnapshot for item in self.children):
+            raise ProtocolValueError("invalid_event_value_type")
+        if self.children != tuple(
+            sorted(self.children, key=lambda item: str(item.child_task_id).encode("ascii"))
+        ):
+            raise ProtocolValueError("child_dependencies_not_canonical")
+        if len({item.child_task_id for item in self.children}) != len(self.children):
+            raise ProtocolValueError("duplicate_set_member")
+
+
+@dataclass(frozen=True, slots=True)
+class CoordinationContextRecordedPayload:
+    """Service-stamped, structural context for one project-overlap detection.
+
+    Resource identities are commitments; repository-relative path text can only travel through
+    the encrypted ``detail_ref`` boundary.  The wire representation renders all counters as
+    canonical decimal strings so the same context has one digest identity.
+    """
+
+    detection_id: EventId
+    project_id: str
+    membership_generation: int
+    left_task_id: TaskId
+    right_task_id: TaskId
+    recipient_task_id: TaskId
+    counterpart_task_id: TaskId
+    source_task_id: TaskId
+    overlap_kind: OverlapKind
+    resource_identities: tuple[str, ...]
+    resource_count: int
+    source_repository_commitment: str
+    source_workspace_commitment: str
+    source_route_generation: int
+    source_attributable_paths: bool
+    context_digest: str
+    detail_ref: ProjectTextRef | None = None
+    gap_codes: tuple[CoordinationGapCode, ...] = ()
+    recorded_authority_revision: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "detection_id", event_id(self.detection_id))
+        object.__setattr__(self, "project_id", project_id(self.project_id))
+        object.__setattr__(
+            self,
+            "membership_generation",
+            _lineage_revision(self.membership_generation),
+        )
+        left = task_id(self.left_task_id)
+        right = task_id(self.right_task_id)
+        if left >= right:
+            raise ProtocolValueError("coordination_tasks_not_canonical")
+        object.__setattr__(self, "left_task_id", left)
+        object.__setattr__(self, "right_task_id", right)
+        recipient = task_id(self.recipient_task_id)
+        counterpart = task_id(self.counterpart_task_id)
+        source = task_id(self.source_task_id)
+        if recipient not in {left, right} or counterpart not in {left, right}:
+            raise ProtocolValueError("coordination_task_pair_invalid")
+        if source != counterpart or recipient == counterpart:
+            raise ProtocolValueError("coordination_task_pair_invalid")
+        object.__setattr__(self, "recipient_task_id", recipient)
+        object.__setattr__(self, "counterpart_task_id", counterpart)
+        object.__setattr__(self, "source_task_id", source)
+        object.__setattr__(self, "overlap_kind", _exact_enum(self.overlap_kind, OverlapKind))
+
+        resources = _tuple(self.resource_identities, 0, 64)
+        identities = tuple(validate_sha256_digest(cast(str, value)) for value in resources)
+        _validate_ascii_sorted_unique(identities, field="resource_identities")
+        object.__setattr__(self, "resource_identities", identities)
+        resource_count = _canonical_uint(self.resource_count)
+        if resource_count < len(identities):
+            raise ProtocolValueError("coordination_resource_count_invalid")
+        object.__setattr__(self, "resource_count", resource_count)
+
+        object.__setattr__(
+            self,
+            "source_repository_commitment",
+            validate_commitment(self.source_repository_commitment),
+        )
+        object.__setattr__(
+            self,
+            "source_workspace_commitment",
+            validate_commitment(self.source_workspace_commitment),
+        )
+        object.__setattr__(
+            self,
+            "source_route_generation",
+            _lineage_revision(self.source_route_generation),
+        )
+        if type(self.source_attributable_paths) is not bool:
+            raise ProtocolValueError("invalid_event_value_type")
+        validate_sha256_digest(self.context_digest)
+        if self.detail_ref is not None and type(self.detail_ref) is not ProjectTextRef:
+            raise ProtocolValueError("invalid_event_value_type")
+        object.__setattr__(
+            self,
+            "gap_codes",
+            _lineage_enum_tuple(
+                self.gap_codes,
+                CoordinationGapCode,
+                maximum=len(CoordinationGapCode),
+                field="gap_codes",
+            ),
+        )
+        if self.recorded_authority_revision is not None:
+            validate_sha256_digest(self.recorded_authority_revision)
+
+
+@dataclass(frozen=True, slots=True)
+class CoordinationObligationDeclaredPayload:
+    """Service-stamped binding of one existing obligation to one overlap detection."""
+
+    detection_id: EventId
+    project_id: str
+    membership_generation: int
+    recipient_task_id: TaskId
+    obligation_id: ObligationId
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "detection_id", event_id(self.detection_id))
+        object.__setattr__(self, "project_id", project_id(self.project_id))
+        object.__setattr__(
+            self,
+            "membership_generation",
+            _lineage_revision(self.membership_generation),
+        )
+        object.__setattr__(self, "recipient_task_id", task_id(self.recipient_task_id))
+        object.__setattr__(self, "obligation_id", obligation_id(self.obligation_id))
+
+
+@dataclass(frozen=True, slots=True)
+class CoordinationDispositionRecordedPayload:
+    """Typed evidence that addresses one declared coordination obligation."""
+
+    detection_id: EventId
+    project_id: str
+    membership_generation: int
+    recipient_task_id: TaskId
+    obligation_id: ObligationId
+    disposition: CoordinationDisposition
+    evidence_refs: tuple[EvidenceId | ResultId, ...]
+    finding_id: FindingId | None = None
+    context_digest: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "detection_id", event_id(self.detection_id))
+        object.__setattr__(self, "project_id", project_id(self.project_id))
+        object.__setattr__(
+            self,
+            "membership_generation",
+            _lineage_revision(self.membership_generation),
+        )
+        object.__setattr__(self, "recipient_task_id", task_id(self.recipient_task_id))
+        object.__setattr__(self, "obligation_id", obligation_id(self.obligation_id))
+        object.__setattr__(
+            self,
+            "disposition",
+            _exact_enum(self.disposition, CoordinationDisposition),
+        )
+        object.__setattr__(
+            self,
+            "evidence_refs",
+            _evidence_result_tuple(self.evidence_refs, minimum=1, field="evidence_refs"),
+        )
+        if self.finding_id is not None:
+            object.__setattr__(self, "finding_id", finding_id(self.finding_id))
+        if self.context_digest is not None:
+            validate_sha256_digest(self.context_digest)
+
+
+@dataclass(frozen=True, slots=True)
+class DelegationDeclaredPayload:
+    child_task_id: TaskId
+    handle_digest: str
+    depth: int
+    project_id: str | None = None
+    membership_generation: int | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "child_task_id", task_id(self.child_task_id))
+        validate_sha256_digest(self.handle_digest)
+        object.__setattr__(self, "depth", _bounded_integer(self.depth, 1, 64))
+        project_value = None if self.project_id is None else project_id(self.project_id)
+        object.__setattr__(self, "project_id", project_value)
+        if self.membership_generation is not None:
+            object.__setattr__(
+                self,
+                "membership_generation",
+                _lineage_revision(self.membership_generation),
+            )
+        project_values_present = project_value is not None or self.membership_generation is not None
+        if project_values_present and (project_value is None or self.membership_generation is None):
+            raise ProtocolValueError("invalid_event_value_type")
+
+
+@dataclass(frozen=True, slots=True)
+class DelegationCancelledPayload:
+    child_task_id: TaskId
+    reason_code: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "child_task_id", task_id(self.child_task_id))
+        if self.reason_code is not None:
+            object.__setattr__(self, "reason_code", _lineage_token(self.reason_code))
+
+
+@dataclass(frozen=True, slots=True)
+class ChildAcceptedPayload:
+    child_task_id: TaskId
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "child_task_id", task_id(self.child_task_id))
+
+
+@dataclass(frozen=True, slots=True)
+class ChildRejectedPayload:
+    child_task_id: TaskId
+    reason_code: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "child_task_id", task_id(self.child_task_id))
+        if self.reason_code is not None:
+            object.__setattr__(self, "reason_code", _lineage_token(self.reason_code))
+
+
+@dataclass(frozen=True, slots=True)
+class ChildWrittenOffPayload:
+    child_task_id: TaskId
+    reason_code: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "child_task_id", task_id(self.child_task_id))
+        if self.reason_code is not None:
+            object.__setattr__(self, "reason_code", _lineage_token(self.reason_code))
+
+
+@dataclass(frozen=True, slots=True)
+class WorkClosedPayload:
+    reason_code: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.reason_code is not None:
+            object.__setattr__(self, "reason_code", _lineage_token(self.reason_code))
+
+
+@dataclass(frozen=True, slots=True)
+class WorkAbandonedPayload:
+    service_stamped: Literal[True] = True
+    reason_code: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.service_stamped is not True:
+            raise ProtocolValueError("service_stamp_required")
+        if self.reason_code is not None:
+            object.__setattr__(self, "reason_code", _lineage_token(self.reason_code))
+
+
+@dataclass(frozen=True, slots=True)
+class WorkCancelledPayload:
+    reason_code: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.reason_code is not None:
+            object.__setattr__(self, "reason_code", _lineage_token(self.reason_code))
+
+
+@dataclass(frozen=True, slots=True)
+class WorkWrittenOffPayload:
+    reason_code: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.reason_code is not None:
+            object.__setattr__(self, "reason_code", _lineage_token(self.reason_code))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1572,11 +2165,16 @@ class RedactionRecordedPayload:
 
 _RESEARCH_POLICY: Final = PolicyVersion("research-evidence", "0.1.0")
 _WORK_POLICY: Final = PolicyVersion("work-integrity", "0.1.0")
+_COORDINATION_POLICY: Final = PolicyVersion("coordination", "0.1.0")
 _VALID_POLICY_SELECTIONS: Final = frozenset(
     {
         (_RESEARCH_POLICY,),
         (_WORK_POLICY,),
         (_RESEARCH_POLICY, _WORK_POLICY),
+        (_COORDINATION_POLICY,),
+        (_COORDINATION_POLICY, _RESEARCH_POLICY),
+        (_COORDINATION_POLICY, _WORK_POLICY),
+        (_COORDINATION_POLICY, _RESEARCH_POLICY, _WORK_POLICY),
     }
 )
 
@@ -1600,7 +2198,7 @@ class CheckRecordedPayload:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", _exact_enum(self.mode, CheckMode))
-        policies_raw = _tuple(self.policies, 1, 2)
+        policies_raw = _tuple(self.policies, 1, 3)
         if any(type(policy) is not PolicyVersion for policy in policies_raw):
             raise ProtocolValueError("invalid_event_value_type")
         policies = cast(tuple[PolicyVersion, ...], policies_raw)
@@ -1611,7 +2209,7 @@ class CheckRecordedPayload:
             raise ProtocolValueError("invalid_event_value_type")
         _id_tuple(self.scope.claim_ids, claim_id, field="scope")
         _id_tuple(self.scope.obligation_ids, obligation_id, field="scope")
-        executions_raw = _tuple(self.policy_executions, 1, 2)
+        executions_raw = _tuple(self.policy_executions, 1, 3)
         if any(type(execution) is not CheckPolicyExecutionModel for execution in executions_raw):
             raise ProtocolValueError("invalid_event_value_type")
         executions = cast(tuple[CheckPolicyExecutionModel, ...], executions_raw)
@@ -1695,6 +2293,19 @@ class ReceiptRecordedPayload:
 type EventPayload = (
     SessionOpenedPayload
     | SessionResumedPayload
+    | ChildDependenciesRecordedPayload
+    | CoordinationContextRecordedPayload
+    | CoordinationObligationDeclaredPayload
+    | CoordinationDispositionRecordedPayload
+    | DelegationDeclaredPayload
+    | DelegationCancelledPayload
+    | ChildAcceptedPayload
+    | ChildRejectedPayload
+    | ChildWrittenOffPayload
+    | WorkClosedPayload
+    | WorkAbandonedPayload
+    | WorkCancelledPayload
+    | WorkWrittenOffPayload
     | PlanPublishedPayload
     | ObligationPublishedPayload
     | AssignmentRecordedPayload
@@ -1717,6 +2328,7 @@ PAYLOAD_TYPES: Final[Mapping[EventSchema, type[EventPayload]]] = MappingProxyTyp
     {
         EventSchema("session_opened", SCHEMA_VERSION): SessionOpenedPayload,
         EventSchema("session_opened", SESSION_EVENT_SCHEMA_VERSION): SessionOpenedPayload,
+        EventSchema("session_opened", LINEAGE_SESSION_EVENT_SCHEMA_VERSION): SessionOpenedPayload,
         EventSchema("session_resumed", SCHEMA_VERSION): SessionResumedPayload,
         EventSchema("session_resumed", SESSION_EVENT_SCHEMA_VERSION): SessionResumedPayload,
         EventSchema("plan_published", SCHEMA_VERSION): PlanPublishedPayload,
@@ -1734,11 +2346,35 @@ PAYLOAD_TYPES: Final[Mapping[EventSchema, type[EventPayload]]] = MappingProxyTyp
         EventSchema("plan_revised", SCHEMA_VERSION): PlanRevisedPayload,
         EventSchema("finding_recorded", SCHEMA_VERSION): Finding,
         EventSchema("finding_recorded", SEMANTIC_EVENT_SCHEMA_VERSION): Finding,
+        EventSchema("finding_recorded", "1.2.0"): Finding,
         EventSchema("response_recorded", SCHEMA_VERSION): ResponseRecordedPayload,
         EventSchema("redaction_recorded", SCHEMA_VERSION): RedactionRecordedPayload,
         EventSchema("check_recorded", SCHEMA_VERSION): CheckRecordedPayload,
         EventSchema("check_recorded", SEMANTIC_EVENT_SCHEMA_VERSION): CheckRecordedPayload,
         EventSchema("receipt_recorded", SCHEMA_VERSION): ReceiptRecordedPayload,
+        EventSchema("delegation_declared", LINEAGE_EVENT_SCHEMA_VERSION): DelegationDeclaredPayload,
+        EventSchema(
+            "delegation_cancelled", LINEAGE_EVENT_SCHEMA_VERSION
+        ): DelegationCancelledPayload,
+        EventSchema("child_accepted", LINEAGE_EVENT_SCHEMA_VERSION): ChildAcceptedPayload,
+        EventSchema("child_rejected", LINEAGE_EVENT_SCHEMA_VERSION): ChildRejectedPayload,
+        EventSchema("child_written_off", LINEAGE_EVENT_SCHEMA_VERSION): ChildWrittenOffPayload,
+        EventSchema(
+            "child_dependencies_recorded", LINEAGE_EVENT_SCHEMA_VERSION
+        ): ChildDependenciesRecordedPayload,
+        EventSchema(
+            "coordination_context_recorded", COORDINATION_EVENT_SCHEMA_VERSION
+        ): CoordinationContextRecordedPayload,
+        EventSchema(
+            "coordination_obligation_declared", COORDINATION_EVENT_SCHEMA_VERSION
+        ): CoordinationObligationDeclaredPayload,
+        EventSchema(
+            "coordination_disposition_recorded", COORDINATION_EVENT_SCHEMA_VERSION
+        ): CoordinationDispositionRecordedPayload,
+        EventSchema("work_closed", LINEAGE_EVENT_SCHEMA_VERSION): WorkClosedPayload,
+        EventSchema("work_abandoned", LINEAGE_EVENT_SCHEMA_VERSION): WorkAbandonedPayload,
+        EventSchema("work_cancelled", LINEAGE_EVENT_SCHEMA_VERSION): WorkCancelledPayload,
+        EventSchema("work_written_off", LINEAGE_EVENT_SCHEMA_VERSION): WorkWrittenOffPayload,
     }
 )
 
@@ -1942,6 +2578,248 @@ def _decode_policy_execution(value: object) -> CheckPolicyExecutionModel:
         raise ProtocolValueError("invalid_event_enum") from exc
 
 
+def _nullable(source: Mapping[str, JsonValue], key: str) -> JsonValue | None:
+    """Read a nullable lineage field without treating explicit null as an error."""
+
+    if key not in source:
+        return None
+    return _field(source, key)
+
+
+def _decode_child_finding(value: object) -> ChildFindingSnapshot:
+    source = _closed_object(
+        value,
+        required=frozenset({"finding_id", "kind", "origin", "priority", "resolved"}),
+        optional=frozenset({"resolution_event_id", "actionable"}),
+    )
+    actionable = _nullable(source, "actionable")
+    return ChildFindingSnapshot(
+        finding_id=finding_id(_field(source, "finding_id")),
+        kind=_enum_from_json(_field(source, "kind"), FindingKind),
+        origin=_enum_from_json(_field(source, "origin"), FindingOrigin),
+        priority=cast(int, _field(source, "priority")),
+        resolved=cast(bool, _field(source, "resolved")),
+        resolution_event_id=(
+            None
+            if _nullable(source, "resolution_event_id") is None
+            else event_id(_field(source, "resolution_event_id"))
+        ),
+        actionable=(None if actionable is None else cast(bool, actionable)),
+    )
+
+
+def _decode_child_dependency(value: object) -> ChildDependencySnapshot:
+    source = _closed_object(
+        value,
+        required=frozenset(
+            {
+                "child_task_id",
+                "origin",
+                "acceptance",
+                "work_state",
+                "session_health",
+                "coverage",
+                "findings",
+                "lineage_authority_revision",
+            }
+        ),
+        optional=frozenset(
+            {
+                "child_frontier",
+                "child_check_id",
+                "child_check_subject_frontier",
+                "child_receipt_id",
+                "membership_generation",
+                "read_gap_reasons",
+                "provenance_restrictions",
+            }
+        ),
+    )
+    child_frontier_value = _nullable(source, "child_frontier")
+    check_frontier_value = _nullable(source, "child_check_subject_frontier")
+    check_id_value = _nullable(source, "child_check_id")
+    child_receipt_value = _nullable(source, "child_receipt_id")
+    generation_value = _nullable(source, "membership_generation")
+    generation = None if generation_value is None else _lineage_revision(generation_value)
+    gap_value = _nullable(source, "read_gap_reasons")
+    restriction_value = _nullable(source, "provenance_restrictions")
+    return ChildDependencySnapshot(
+        child_task_id=task_id(_field(source, "child_task_id")),
+        origin=_enum_from_json(_field(source, "origin"), LineageOrigin),
+        acceptance=_enum_from_json(_field(source, "acceptance"), LineageAcceptance),
+        work_state=_enum_from_json(_field(source, "work_state"), WorkState),
+        session_health=_enum_from_json(_field(source, "session_health"), SessionHealth),
+        child_frontier=(
+            None if child_frontier_value is None else frontier_from_json(child_frontier_value)
+        ),
+        child_check_id=(None if check_id_value is None else event_id(check_id_value)),
+        child_check_subject_frontier=(
+            None if check_frontier_value is None else frontier_from_json(check_frontier_value)
+        ),
+        child_receipt_id=(None if child_receipt_value is None else receipt_id(child_receipt_value)),
+        coverage=coverage_from_json(cast(CanonicalJsonValue, _field(source, "coverage"))),
+        findings=tuple(_decode_child_finding(item) for item in _array(_field(source, "findings"))),
+        lineage_authority_revision=_lineage_revision(_field(source, "lineage_authority_revision")),
+        membership_generation=generation,
+        read_gap_reasons=tuple(
+            _enum_from_json(item, LineageReadGapReason)
+            for item in (() if gap_value is None else _array(gap_value))
+        ),
+        provenance_restrictions=tuple(
+            _enum_from_json(item, LineageProvenanceRestriction)
+            for item in (() if restriction_value is None else _array(restriction_value))
+        ),
+    )
+
+
+def _decode_child_dependencies(value: object) -> ChildDependenciesRecordedPayload:
+    source = _closed_object(value, required=frozenset({"children"}))
+    return ChildDependenciesRecordedPayload(
+        children=tuple(
+            _decode_child_dependency(item) for item in _array(_field(source, "children"))
+        )
+    )
+
+
+def _decode_project_text_ref(value: object) -> ProjectTextRef:
+    source = _closed_object(
+        value,
+        required=frozenset(
+            {"object_id", "content_digest", "plaintext_size", "owner_task_id", "route_generation"}
+        ),
+        optional=frozenset({"envelope_digest"}),
+    )
+    return ProjectTextRef(
+        object_id=cast(str, _field(source, "object_id")),
+        content_digest=cast(str, _field(source, "content_digest")),
+        plaintext_size=cast(int, _field(source, "plaintext_size")),
+        owner_task_id=cast(str, _field(source, "owner_task_id")),
+        route_generation=_canonical_uint(_field(source, "route_generation")),
+        envelope_digest=cast(str | None, _optional(source, "envelope_digest")),
+    )
+
+
+def _decode_coordination_context(value: object) -> CoordinationContextRecordedPayload:
+    source = _closed_object(
+        value,
+        required=frozenset(
+            {
+                "detection_id",
+                "project_id",
+                "membership_generation",
+                "left_task_id",
+                "right_task_id",
+                "recipient_task_id",
+                "counterpart_task_id",
+                "source_task_id",
+                "overlap_kind",
+                "resource_identities",
+                "resource_count",
+                "source_repository_commitment",
+                "source_workspace_commitment",
+                "source_route_generation",
+                "source_attributable_paths",
+                "context_digest",
+            }
+        ),
+        optional=frozenset({"detail_ref", "gap_codes", "recorded_authority_revision"}),
+    )
+    gap_codes = _optional(source, "gap_codes")
+    return CoordinationContextRecordedPayload(
+        detection_id=event_id(_field(source, "detection_id")),
+        project_id=cast(str, _field(source, "project_id")),
+        membership_generation=_canonical_uint(_field(source, "membership_generation")),
+        left_task_id=task_id(_field(source, "left_task_id")),
+        right_task_id=task_id(_field(source, "right_task_id")),
+        recipient_task_id=task_id(_field(source, "recipient_task_id")),
+        counterpart_task_id=task_id(_field(source, "counterpart_task_id")),
+        source_task_id=task_id(_field(source, "source_task_id")),
+        overlap_kind=_enum_from_json(_field(source, "overlap_kind"), OverlapKind),
+        resource_identities=cast(
+            tuple[str, ...], tuple(_array(_field(source, "resource_identities")))
+        ),
+        resource_count=_canonical_uint(_field(source, "resource_count")),
+        source_repository_commitment=cast(str, _field(source, "source_repository_commitment")),
+        source_workspace_commitment=cast(str, _field(source, "source_workspace_commitment")),
+        source_route_generation=_canonical_uint(_field(source, "source_route_generation")),
+        source_attributable_paths=cast(bool, _field(source, "source_attributable_paths")),
+        context_digest=cast(str, _field(source, "context_digest")),
+        detail_ref=(
+            None
+            if "detail_ref" not in source
+            else _decode_project_text_ref(_field(source, "detail_ref"))
+        ),
+        gap_codes=(
+            ()
+            if gap_codes is None
+            else tuple(_enum_from_json(item, CoordinationGapCode) for item in _array(gap_codes))
+        ),
+        recorded_authority_revision=cast(
+            str | None,
+            _optional(source, "recorded_authority_revision"),
+        ),
+    )
+
+
+def _decode_coordination_obligation_declared(
+    value: object,
+) -> CoordinationObligationDeclaredPayload:
+    source = _closed_object(
+        value,
+        required=frozenset(
+            {
+                "detection_id",
+                "project_id",
+                "membership_generation",
+                "recipient_task_id",
+                "obligation_id",
+            }
+        ),
+    )
+    return CoordinationObligationDeclaredPayload(
+        detection_id=event_id(_field(source, "detection_id")),
+        project_id=cast(str, _field(source, "project_id")),
+        membership_generation=_canonical_uint(_field(source, "membership_generation")),
+        recipient_task_id=task_id(_field(source, "recipient_task_id")),
+        obligation_id=obligation_id(_field(source, "obligation_id")),
+    )
+
+
+def _decode_coordination_disposition(
+    value: object,
+) -> CoordinationDispositionRecordedPayload:
+    source = _closed_object(
+        value,
+        required=frozenset(
+            {
+                "detection_id",
+                "project_id",
+                "membership_generation",
+                "recipient_task_id",
+                "obligation_id",
+                "disposition",
+                "evidence_refs",
+            }
+        ),
+        optional=frozenset({"finding_id", "context_digest"}),
+    )
+    return CoordinationDispositionRecordedPayload(
+        detection_id=event_id(_field(source, "detection_id")),
+        project_id=cast(str, _field(source, "project_id")),
+        membership_generation=_canonical_uint(_field(source, "membership_generation")),
+        recipient_task_id=task_id(_field(source, "recipient_task_id")),
+        obligation_id=obligation_id(_field(source, "obligation_id")),
+        disposition=_enum_from_json(_field(source, "disposition"), CoordinationDisposition),
+        evidence_refs=cast(
+            tuple[EvidenceId | ResultId, ...], tuple(_array(_field(source, "evidence_refs")))
+        ),
+        finding_id=(
+            None if "finding_id" not in source else finding_id(_field(source, "finding_id"))
+        ),
+        context_digest=cast(str | None, _optional(source, "context_digest")),
+    )
+
+
 def _decode_session_opened(source: Mapping[str, JsonValue]) -> SessionOpenedPayload:
     return SessionOpenedPayload(
         task_title=cast(str, _field(source, "task_title")),
@@ -1951,6 +2829,19 @@ def _decode_session_opened(source: Mapping[str, JsonValue]) -> SessionOpenedPayl
         profile=_enum_from_json(_field(source, "profile"), RuntimeProfile),
         external_ref=cast(str | None, _optional(source, "external_ref")),
         workspace_ref=cast(str | None, _optional(source, "workspace_ref")),
+        parent_task_id=cast(TaskId | None, _optional(source, "parent_task_id")),
+        depth=cast(int | None, _optional(source, "depth")),
+        origin=(
+            None
+            if _optional(source, "origin") is None
+            else _enum_from_json(_field(source, "origin"), LineageOrigin)
+        ),
+        project_id=cast(str | None, _optional(source, "project_id")),
+        membership_generation=(
+            None
+            if _optional(source, "membership_generation") is None
+            else _lineage_revision(_field(source, "membership_generation"))
+        ),
     )
 
 
@@ -1968,7 +2859,17 @@ _PAYLOAD_SHAPES: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = Ma
     {
         "session_opened": (
             frozenset({"task_title", "client_kind", "client_version", "integration", "profile"}),
-            frozenset({"external_ref", "workspace_ref"}),
+            frozenset(
+                {
+                    "external_ref",
+                    "workspace_ref",
+                    "parent_task_id",
+                    "depth",
+                    "origin",
+                    "project_id",
+                    "membership_generation",
+                }
+            ),
         ),
         "session_resumed": (
             frozenset(
@@ -2085,6 +2986,95 @@ _PAYLOAD_SHAPES: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = Ma
             ),
             frozenset(),
         ),
+        "child_dependencies_recorded": (
+            frozenset({"children"}),
+            frozenset(),
+        ),
+        "coordination_context_recorded": (
+            frozenset(
+                {
+                    "detection_id",
+                    "project_id",
+                    "membership_generation",
+                    "left_task_id",
+                    "right_task_id",
+                    "recipient_task_id",
+                    "counterpart_task_id",
+                    "source_task_id",
+                    "overlap_kind",
+                    "resource_identities",
+                    "resource_count",
+                    "source_repository_commitment",
+                    "source_workspace_commitment",
+                    "source_route_generation",
+                    "source_attributable_paths",
+                    "context_digest",
+                }
+            ),
+            frozenset({"detail_ref", "gap_codes", "recorded_authority_revision"}),
+        ),
+        "coordination_obligation_declared": (
+            frozenset(
+                {
+                    "detection_id",
+                    "project_id",
+                    "membership_generation",
+                    "recipient_task_id",
+                    "obligation_id",
+                }
+            ),
+            frozenset(),
+        ),
+        "coordination_disposition_recorded": (
+            frozenset(
+                {
+                    "detection_id",
+                    "project_id",
+                    "membership_generation",
+                    "recipient_task_id",
+                    "obligation_id",
+                    "disposition",
+                    "evidence_refs",
+                }
+            ),
+            frozenset({"finding_id", "context_digest"}),
+        ),
+        "delegation_declared": (
+            frozenset({"child_task_id", "handle_digest", "depth"}),
+            frozenset({"project_id", "membership_generation"}),
+        ),
+        "delegation_cancelled": (
+            frozenset({"child_task_id"}),
+            frozenset({"reason_code"}),
+        ),
+        "child_accepted": (
+            frozenset({"child_task_id"}),
+            frozenset(),
+        ),
+        "child_rejected": (
+            frozenset({"child_task_id"}),
+            frozenset({"reason_code"}),
+        ),
+        "child_written_off": (
+            frozenset({"child_task_id"}),
+            frozenset({"reason_code"}),
+        ),
+        "work_closed": (
+            frozenset(),
+            frozenset({"reason_code"}),
+        ),
+        "work_abandoned": (
+            frozenset({"service_stamped"}),
+            frozenset({"reason_code"}),
+        ),
+        "work_cancelled": (
+            frozenset(),
+            frozenset({"reason_code"}),
+        ),
+        "work_written_off": (
+            frozenset(),
+            frozenset({"reason_code"}),
+        ),
     }
 )
 
@@ -2108,6 +3098,54 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
         required = frozenset({*required, "limitation_refs", "supersedes_claim_refs"})
     source = _closed_object(frozen, required=required, optional=optional)
 
+    if schema.name == "child_dependencies_recorded":
+        return _decode_child_dependencies(source)
+    if schema.name == "coordination_context_recorded":
+        return _decode_coordination_context(source)
+    if schema.name == "coordination_obligation_declared":
+        return _decode_coordination_obligation_declared(source)
+    if schema.name == "coordination_disposition_recorded":
+        return _decode_coordination_disposition(source)
+    if schema.name == "delegation_declared":
+        return DelegationDeclaredPayload(
+            child_task_id=task_id(_field(source, "child_task_id")),
+            handle_digest=cast(str, _field(source, "handle_digest")),
+            depth=cast(int, _field(source, "depth")),
+            project_id=cast(str | None, _optional(source, "project_id")),
+            membership_generation=(
+                None
+                if _optional(source, "membership_generation") is None
+                else _lineage_revision(_field(source, "membership_generation"))
+            ),
+        )
+    if schema.name == "delegation_cancelled":
+        return DelegationCancelledPayload(
+            child_task_id=task_id(_field(source, "child_task_id")),
+            reason_code=cast(str | None, _optional(source, "reason_code")),
+        )
+    if schema.name == "child_accepted":
+        return ChildAcceptedPayload(child_task_id=task_id(_field(source, "child_task_id")))
+    if schema.name == "child_rejected":
+        return ChildRejectedPayload(
+            child_task_id=task_id(_field(source, "child_task_id")),
+            reason_code=cast(str | None, _optional(source, "reason_code")),
+        )
+    if schema.name == "child_written_off":
+        return ChildWrittenOffPayload(
+            child_task_id=task_id(_field(source, "child_task_id")),
+            reason_code=cast(str | None, _optional(source, "reason_code")),
+        )
+    if schema.name == "work_closed":
+        return WorkClosedPayload(reason_code=cast(str | None, _optional(source, "reason_code")))
+    if schema.name == "work_abandoned":
+        return WorkAbandonedPayload(
+            service_stamped=cast(Literal[True], _field(source, "service_stamped")),
+            reason_code=cast(str | None, _optional(source, "reason_code")),
+        )
+    if schema.name == "work_cancelled":
+        return WorkCancelledPayload(reason_code=cast(str | None, _optional(source, "reason_code")))
+    if schema.name == "work_written_off":
+        return WorkWrittenOffPayload(reason_code=cast(str | None, _optional(source, "reason_code")))
     if schema.name == "session_opened":
         opened = _decode_session_opened(source)
         _validate_event_schema_payload(schema, opened)
@@ -2427,12 +3465,190 @@ def _optional_tuple(result: dict[str, object], key: str, value: tuple[object, ..
         result[key] = value
 
 
+def _encode_child_finding(value: ChildFindingSnapshot) -> JsonObject:
+    if type(value) is not ChildFindingSnapshot:
+        raise ProtocolValueError("invalid_event_value_type")
+    result: dict[str, object] = {
+        "finding_id": value.finding_id,
+        "kind": value.kind.value,
+        "origin": value.origin.value,
+        "priority": value.priority,
+        "actionable": value.actionable,
+        "resolved": value.resolved,
+    }
+    _optional_value(result, "resolution_event_id", value.resolution_event_id)
+    return _json_object(result)
+
+
+def _encode_child_dependency(value: ChildDependencySnapshot) -> JsonObject:
+    if type(value) is not ChildDependencySnapshot:
+        raise ProtocolValueError("invalid_event_value_type")
+    result: dict[str, object] = {
+        "child_task_id": value.child_task_id,
+        "origin": value.origin.value,
+        "acceptance": value.acceptance.value,
+        "work_state": value.work_state.value,
+        "session_health": value.session_health.value,
+        "coverage": coverage_to_json(value.coverage),
+        "findings": tuple(_encode_child_finding(item) for item in value.findings),
+        "lineage_authority_revision": render_wire_sequence(value.lineage_authority_revision),
+    }
+    _optional_value(
+        result,
+        "child_frontier",
+        None if value.child_frontier is None else value.child_frontier.as_wire(),
+    )
+    _optional_value(result, "child_check_id", value.child_check_id)
+    _optional_value(
+        result,
+        "child_check_subject_frontier",
+        None
+        if value.child_check_subject_frontier is None
+        else value.child_check_subject_frontier.as_wire(),
+    )
+    _optional_value(result, "child_receipt_id", value.child_receipt_id)
+    if value.membership_generation is not None:
+        result["membership_generation"] = render_wire_sequence(value.membership_generation)
+    _optional_tuple(
+        result,
+        "read_gap_reasons",
+        tuple(item.value for item in value.read_gap_reasons),
+    )
+    _optional_tuple(
+        result,
+        "provenance_restrictions",
+        tuple(item.value for item in value.provenance_restrictions),
+    )
+    return _json_object(result)
+
+
+def _encode_project_text_ref(value: ProjectTextRef) -> JsonObject:
+    if type(value) is not ProjectTextRef:
+        raise ProtocolValueError("invalid_event_value_type")
+    result: dict[str, object] = {
+        "object_id": value.object_id,
+        "content_digest": value.content_digest,
+        "plaintext_size": value.plaintext_size,
+        "owner_task_id": value.owner_task_id,
+        "route_generation": render_wire_sequence(value.route_generation),
+    }
+    _optional_value(result, "envelope_digest", value.envelope_digest)
+    return _json_object(result)
+
+
 def encode_payload(payload: EventPayload) -> JsonValue:
     """Encode one exact payload type into its normalized closed frozen JSON object."""
 
     payload_type = type(payload)
     if payload_type is Finding:
         return finding_to_json(cast(Finding, payload))
+    if payload_type is ChildDependenciesRecordedPayload:
+        value = cast(ChildDependenciesRecordedPayload, payload)
+        return _json_object(
+            {"children": tuple(_encode_child_dependency(item) for item in value.children)}
+        )
+    if payload_type is CoordinationContextRecordedPayload:
+        value = cast(CoordinationContextRecordedPayload, payload)
+        result: dict[str, object] = {
+            "detection_id": value.detection_id,
+            "project_id": value.project_id,
+            "membership_generation": render_wire_sequence(value.membership_generation),
+            "left_task_id": value.left_task_id,
+            "right_task_id": value.right_task_id,
+            "recipient_task_id": value.recipient_task_id,
+            "counterpart_task_id": value.counterpart_task_id,
+            "source_task_id": value.source_task_id,
+            "overlap_kind": value.overlap_kind.value,
+            "resource_identities": value.resource_identities,
+            "resource_count": render_wire_sequence(value.resource_count),
+            "source_repository_commitment": value.source_repository_commitment,
+            "source_workspace_commitment": value.source_workspace_commitment,
+            "source_route_generation": render_wire_sequence(value.source_route_generation),
+            "source_attributable_paths": value.source_attributable_paths,
+            "context_digest": value.context_digest,
+        }
+        _optional_value(
+            result,
+            "detail_ref",
+            None if value.detail_ref is None else _encode_project_text_ref(value.detail_ref),
+        )
+        _optional_tuple(result, "gap_codes", tuple(item.value for item in value.gap_codes))
+        _optional_value(result, "recorded_authority_revision", value.recorded_authority_revision)
+        return _json_object(result)
+    if payload_type is CoordinationObligationDeclaredPayload:
+        value = cast(CoordinationObligationDeclaredPayload, payload)
+        return _json_object(
+            {
+                "detection_id": value.detection_id,
+                "project_id": value.project_id,
+                "membership_generation": render_wire_sequence(value.membership_generation),
+                "recipient_task_id": value.recipient_task_id,
+                "obligation_id": value.obligation_id,
+            }
+        )
+    if payload_type is CoordinationDispositionRecordedPayload:
+        value = cast(CoordinationDispositionRecordedPayload, payload)
+        result = {
+            "detection_id": value.detection_id,
+            "project_id": value.project_id,
+            "membership_generation": render_wire_sequence(value.membership_generation),
+            "recipient_task_id": value.recipient_task_id,
+            "obligation_id": value.obligation_id,
+            "disposition": value.disposition.value,
+            "evidence_refs": value.evidence_refs,
+        }
+        _optional_value(result, "finding_id", value.finding_id)
+        _optional_value(result, "context_digest", value.context_digest)
+        return _json_object(result)
+    if payload_type is DelegationDeclaredPayload:
+        value = cast(DelegationDeclaredPayload, payload)
+        result = {
+            "child_task_id": value.child_task_id,
+            "handle_digest": value.handle_digest,
+            "depth": value.depth,
+        }
+        _optional_value(result, "project_id", value.project_id)
+        if value.membership_generation is not None:
+            result["membership_generation"] = render_wire_sequence(value.membership_generation)
+        return _json_object(result)
+    if payload_type is DelegationCancelledPayload:
+        value = cast(DelegationCancelledPayload, payload)
+        result = {"child_task_id": value.child_task_id}
+        _optional_value(result, "reason_code", value.reason_code)
+        return _json_object(result)
+    if payload_type is ChildAcceptedPayload:
+        value = cast(ChildAcceptedPayload, payload)
+        return _json_object({"child_task_id": value.child_task_id})
+    if payload_type is ChildRejectedPayload:
+        value = cast(ChildRejectedPayload, payload)
+        result = {"child_task_id": value.child_task_id}
+        _optional_value(result, "reason_code", value.reason_code)
+        return _json_object(result)
+    if payload_type is ChildWrittenOffPayload:
+        value = cast(ChildWrittenOffPayload, payload)
+        result = {"child_task_id": value.child_task_id}
+        _optional_value(result, "reason_code", value.reason_code)
+        return _json_object(result)
+    if payload_type is WorkClosedPayload:
+        value = cast(WorkClosedPayload, payload)
+        result: dict[str, object] = {}
+        _optional_value(result, "reason_code", value.reason_code)
+        return _json_object(result)
+    if payload_type is WorkAbandonedPayload:
+        value = cast(WorkAbandonedPayload, payload)
+        result = {"service_stamped": value.service_stamped}
+        _optional_value(result, "reason_code", value.reason_code)
+        return _json_object(result)
+    if payload_type is WorkCancelledPayload:
+        value = cast(WorkCancelledPayload, payload)
+        result = {}
+        _optional_value(result, "reason_code", value.reason_code)
+        return _json_object(result)
+    if payload_type is WorkWrittenOffPayload:
+        value = cast(WorkWrittenOffPayload, payload)
+        result = {}
+        _optional_value(result, "reason_code", value.reason_code)
+        return _json_object(result)
     result: dict[str, object]
     if payload_type is SessionOpenedPayload:
         value = cast(SessionOpenedPayload, payload)
@@ -2445,6 +3661,16 @@ def encode_payload(payload: EventPayload) -> JsonValue:
         }
         _optional_value(result, "external_ref", value.external_ref)
         _optional_value(result, "workspace_ref", value.workspace_ref)
+        _optional_value(result, "parent_task_id", value.parent_task_id)
+        _optional_value(result, "depth", value.depth)
+        _optional_value(
+            result,
+            "origin",
+            None if value.origin is None else value.origin.value,
+        )
+        _optional_value(result, "project_id", value.project_id)
+        if value.membership_generation is not None:
+            result["membership_generation"] = render_wire_sequence(value.membership_generation)
         return _json_object(result)
     if payload_type is SessionResumedPayload:
         value = cast(SessionResumedPayload, payload)
@@ -2720,6 +3946,21 @@ def _validate_event_schema_payload(
     schema: EventSchema,
     payload: EventPayload | None,
 ) -> None:
+    if type(payload) is SessionOpenedPayload:
+        has_lineage = any(
+            value is not None for value in (payload.parent_task_id, payload.depth, payload.origin)
+        )
+        has_project_lineage = any(
+            value is not None for value in (payload.project_id, payload.membership_generation)
+        )
+        if has_lineage and schema != EventSchema(
+            "session_opened", LINEAGE_SESSION_EVENT_SCHEMA_VERSION
+        ):
+            raise ProtocolValueError("invalid_event_schema")
+        if has_project_lineage and schema != EventSchema(
+            "session_opened", LINEAGE_SESSION_EVENT_SCHEMA_VERSION
+        ):
+            raise ProtocolValueError("invalid_event_schema")
     if schema.version == SCHEMA_VERSION:
         profile: RuntimeProfile | None = None
         if type(payload) is SessionOpenedPayload:
@@ -3136,6 +4377,19 @@ def is_observation_authored(record: LedgerRecord) -> bool:
     """Recognize only service-stamped observation coordinator records."""
 
     return is_observation_authorship(record.author, record.publication_channel)
+
+
+def is_lineage_service_stamped(record: LedgerRecord) -> bool:
+    """Return whether a service-only lineage event has the observation stamp.
+
+    The event payload itself is closed and cannot prove who authored it.  Publication admission
+    must combine this family allowlist with the existing coordinator author/channel predicate;
+    keeping the composition here gives every caller one guard instead of a family-specific guess.
+    """
+
+    return record.schema.name in LINEAGE_SERVICE_STAMPED_FAMILIES and is_observation_authored(
+        record
+    )
 
 
 def accepted_record_to_json(record: LedgerRecord) -> JsonObject:

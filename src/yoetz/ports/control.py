@@ -10,6 +10,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Literal, Protocol, cast
 
+from yoetz.domain.coordination import CoordinationErrorCode
 from yoetz.domain.values import JsonObject, validate_commitment
 from yoetz.protocol.canonical import parse_canonical_integer_string
 from yoetz.protocol.errors import SafeDetailValue, normalize_safe_details
@@ -116,6 +117,7 @@ class ControlMethod(str, Enum):  # noqa: UP042 - exact wire enum base
     STATUS = "status"
     RECEIPT = "receipt"
     IMPORT_CODEX_JSONL = "import_codex_jsonl"
+    PROJECT = "project"
     REVIEW = "review"
     BACKUP_PREVIEW = "backup_preview"
     BACKUP_EXECUTE = "backup_execute"
@@ -285,7 +287,7 @@ class ControlCancelRequest:
 type ControlRequest = ControlCallRequest | ControlCancelRequest
 
 
-_CONTROL_ERROR_REASONS = frozenset(
+_TRANSPORT_CONTROL_ERROR_REASONS: Final[frozenset[str]] = frozenset(
     {
         "service_unavailable",
         "service_incompatible",
@@ -307,6 +309,10 @@ _CONTROL_ERROR_REASONS = frozenset(
         "endpoint_unsafe",
     }
 )
+_COORDINATION_CONTROL_ERROR_REASONS: Final[frozenset[str]] = frozenset(
+    code.value for code in CoordinationErrorCode
+)
+_CONTROL_ERROR_REASONS = _TRANSPORT_CONTROL_ERROR_REASONS | _COORDINATION_CONTROL_ERROR_REASONS
 _EMPTY_ACCEPTED_STATE: Final[Mapping[str, SafeDetailValue]] = MappingProxyType({})
 # The exact structural facts a caller needs to continue after a post-commit projection failure:
 # where the ledger landed, and how many events it accepted.
@@ -322,6 +328,11 @@ class ControlError(Exception):
     landed and must spend a second `status` call to learn *where*. Values pass through the same
     ``SAFE_DETAIL_KEYS`` allowlist as public errors, so this stays structural — no user content,
     no free text — and it is admitted only for ``response_projection_failed``.
+
+    Coordination application refusals use the finite ``CoordinationErrorCode`` vocabulary as their
+    control reason. They remain non-retryable: the caller must change the command or refresh its
+    authorization before trying again. No project title, description, path, or other caller text
+    is carried by this exception.
 
     ``correlation_id`` is the optional service-minted diagnostic identity for an unexpected failure
     the daemon already recorded. It is a structural ``err_…`` token with no caller content; when
@@ -350,6 +361,8 @@ class ControlError(Exception):
             raise TypeError("control_error_reason_invalid")
         if type(retryable) is not bool:
             raise TypeError("control_error_retryable_invalid")
+        if reason in _COORDINATION_CONTROL_ERROR_REASONS and retryable:
+            raise ValueError("coordination_control_error_must_not_be_retryable")
         if reason == "privacy_projection_unavailable" and not retryable:
             raise ValueError("privacy_projection_error_must_be_retryable")
         if reason == "privacy_projection_blocked" and retryable:

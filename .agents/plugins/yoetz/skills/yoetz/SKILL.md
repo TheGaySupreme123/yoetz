@@ -31,7 +31,7 @@ read Yoetz product source.
 - Before the first `start`: `yoetz://guidance/workflow.md` (the ten steps, cadence, resume behavior) and `yoetz://guidance/coverage-and-receipts.md` (coverage, findings, receipt wording). Neither is in initialize `instructions`; read both before the first `start`, and call `read_guidance` with the same URI if the `resources/read` body is empty.
 - Before the first `publish_work`: `yoetz://guidance/publication-policy.md` (what is material and safe to publish).
 - When schema metadata is missing or a request is rejected:
-  `yoetz://guidance/request-templates.md` (complete bodies for all six operations and all nine
+  `yoetz://guidance/request-templates.md` (complete bodies for all six operations and
   ordinary publish families; replace every illustrative value before use).
 - `yoetz://guidance/agent-instructions.md` is the non-negotiable safety floor. It is already delivered as the server's initialize instructions; re-read it if that text is not in context.
 
@@ -40,7 +40,39 @@ source. If the host drops schema metadata, use the request templates resource ra
 product source. This holds when something goes wrong too: Yoetz's own SQLite databases, catalog
 files, and source tree are never the way to work out what a result meant. Every recoverable fact is
 reachable through `status`. The schema is authority for field shapes; the guidance is authority for which call
-to make and when. `start` takes `mode` as exactly one of `create`, `attach`, or `create_or_attach`.
+to make and when. `start` takes `mode` as exactly one of `create`, `attach`, `create_or_attach`,
+or `delegate`.
+
+## Delegation and project work
+
+Before delegating, read the multi-agent section of `yoetz://guidance/workflow.md`. The parent
+calls `start mode=delegate` with its current session and passes the complete returned expiring
+`attach_handle` to the intended child in its bounded assignment. The child calls `start
+mode=attach` with that handle and uses its own returned session and writer; the parent keeps
+its existing binding. Reuse the exact request and request ID after a timeout. Do not publish
+the handle or share it with another child.
+
+Self-registration with `parent_session_id` starts `self_registered` and `pending`. The parent
+can publish `child_accepted` or `child_rejected`; acceptance preserves origin, and accepted
+children cannot later be rejected. Read `status view=lineage` after handoff. A provisional host
+annotation is not a cooperative child ledger or evidence that it published or checked work.
+
+Work state, session health, and receipts are independent. Publish `work_closed` to close work;
+a receipt never closes it. Cancellation revokes a Yoetz capability without stopping a host
+process. Write-off and cancellation retain an accepted dependency and its incomplete outcome.
+Parent checks and receipts use recorded child manifests; receipt generation never refreshes
+children. A later recorded manifest needs a qualifying recheck for an updated conclusion.
+Keep parent obligations for incorporating child work and verifying the combined result.
+
+Project membership is grouping, never an attach selector or permission to read arbitrary
+sibling content. Read `status view=project` for admitted coordination facts. Source workspace
+consent and exact membership generation bound each delivery; revocation suppresses stale advice.
+Presence/duplicate notes cannot affect a verdict. Ordinary file obligations do not declare
+coordination work. Bind an existing obligation explicitly with `coordination_obligation_declared`
+to the admitted detection, project, recipient task, and generation. That coordination obligation
+may require `coordination_disposition_recorded` with evidence for shared work, sequencing, or
+scope revision; a bare `respond` acknowledgement does not address it. A later qualifying local
+coordination check resolves the finding. See the request templates for complete bodies.
 
 ## When to activate
 

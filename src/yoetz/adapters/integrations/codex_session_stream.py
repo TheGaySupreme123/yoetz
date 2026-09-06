@@ -69,9 +69,15 @@ _MATERIAL_HOOK_EVENTS: Final = frozenset(
         "Stop",
         "SessionEnd",
         "SessionStart",
+        "SubagentStart",
         "SubagentStop",
     }
 )
+_SUBAGENT_ACTIVITY_START_KINDS: Final = frozenset({"start", "started"})
+_SUBAGENT_ACTIVITY_STOP_KINDS: Final = frozenset(
+    {"cancelled", "completed", "failed", "interrupted", "stop", "stopped"}
+)
+_SUBAGENT_ACTIVITY_KINDS: Final = _SUBAGENT_ACTIVITY_START_KINDS | _SUBAGENT_ACTIVITY_STOP_KINDS
 
 
 _JSONL_SUFFIXES: Final = (".jsonl", ".jsonl.zst")
@@ -247,6 +253,29 @@ def _token(value: object) -> str | None:
     if any(ch not in allowed for ch in value) or value[0] in "._:/+-":
         return None
     return value
+
+
+def _consistent_alias_token(
+    body: Mapping[str, JsonValue], names: tuple[str, ...]
+) -> tuple[str | None, bool]:
+    """Return one bounded alias value only when every supplied spelling agrees."""
+
+    values: list[str] = []
+    supplied = False
+    for name in names:
+        if name not in body:
+            continue
+        supplied = True
+        raw = body.get(name)
+        if raw is None:
+            continue
+        token = _token(raw)
+        if token is None:
+            return None, supplied
+        values.append(token)
+    if any(value != values[0] for value in values[1:]):
+        return None, supplied
+    return (values[0] if values else None), supplied
 
 
 def resolve_codex_home(
@@ -478,9 +507,37 @@ def structural_from_stream_record(
                 fields["exit_status"] = exit_code
             else:
                 gaps.add(ObservationGapCode.UNSUPPORTED_EVENT.value)
-        call_id = _token(body.get("id")) or _token(body.get("call_id"))
-        if call_id is not None:
-            fields["tool_call_id"] = call_id
+        # ``SubAgentActivity.id`` identifies the rollout item itself, not the
+        # parent tool call.  Keep it out of the parent correlation family; only
+        # an explicit call alias may identify that parent.
+        if item_type != "SubAgentActivity":
+            call_id = _token(body.get("id")) or _token(body.get("call_id"))
+            if call_id is not None:
+                fields["tool_call_id"] = call_id
+        # Codex rollout records use the same child identifiers as its native
+        # hook profile.  Preserve only the bounded structural pair; task
+        # creation and acceptance stay service-owned.  Some historical stream
+        # records use ``agent_id`` for the child, so normalize that alias to
+        # the canonical ``subagent_id`` field.
+        subagent_id, _subagent_aliases_supplied = _consistent_alias_token(
+            body, ("subagent_id", "agent_id", "agent_thread_id")
+        )
+        if subagent_id is not None:
+            fields["subagent_id"] = subagent_id
+        if item_type == "SubAgentActivity":
+            parent_tool_call_id, _parent_aliases_supplied = _consistent_alias_token(
+                body, ("parent_tool_call_id", "tool_call_id", "tool_use_id")
+            )
+            if parent_tool_call_id is not None:
+                fields["parent_tool_call_id"] = parent_tool_call_id
+            # The generic ``tool_call_id`` spelling is accepted above only as
+            # an explicit parent alias for this item family.  Never leave a
+            # conflicting/invalid value in the generic field where the domain
+            # normalizer could reinterpret it as a parent call.
+            fields.pop("tool_call_id", None)
+            activity_kind = _token(body.get("kind"))
+            if activity_kind not in _SUBAGENT_ACTIVITY_KINDS:
+                gaps.add(ObservationGapCode.UNSUPPORTED_EVENT.value)
     if record.wrapper_type not in known_wrappers:
         gaps.add(ObservationGapCode.UNSUPPORTED_EVENT.value)
     return JsonObject(fields), tuple(sorted(gaps, key=str.encode))
@@ -497,10 +554,20 @@ def envelope_from_stream_record(
     host_ids: dict[str, JsonValue] = {}
     body = _structural_body(record)
     if body is not None:
-        for key in ("id", "call_id", "tool_call_id", "event_id"):
+        for key in (
+            "id",
+            "call_id",
+            "tool_call_id",
+            "event_id",
+            "subagent_id",
+            "agent_id",
+            "agent_thread_id",
+            "parent_tool_call_id",
+            "tool_use_id",
+        ):
             token = _token(body.get(key))
             if token is not None:
-                host_ids[key] = token
+                host_ids["subagent_id" if key in {"agent_id", "agent_thread_id"} else key] = token
     event_id = _token(record.value.get("event_id")) or _token(record.value.get("id"))
     if event_id is not None:
         host_ids.setdefault("event_id", event_id)
@@ -520,6 +587,12 @@ def envelope_from_stream_record(
         ).removeprefix("sha256:")[:48]
     )
     event_kind = _token(record.wrapper_type) or "unsupported_event"
+    if record.item_type == "SubAgentActivity" and body is not None:
+        activity_kind = _token(body.get("kind"))
+        if activity_kind in _SUBAGENT_ACTIVITY_START_KINDS:
+            event_kind = "SubagentStart"
+        elif activity_kind in _SUBAGENT_ACTIVITY_STOP_KINDS:
+            event_kind = "SubagentStop"
     return ObservationEnvelope(
         session_commitment=session_commitment,
         event_kind=event_kind,

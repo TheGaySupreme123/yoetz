@@ -265,6 +265,30 @@ the portable CLI artifact therefore advertises no hooks. SDK fixture metadata ad
 capability; the SDKs' file-based hook contract is not execution evidence. Hooks call
 `yoetz hooks cursor-observe`, are fail-open, and never enforce Cursor work.
 
+### Delegate identity and file overlap (#508, #509)
+
+The current exact local capability cell is IDE `3.17.8` and Agent CLI
+`2026.07.09-a3815c0`. A read-only inspection of the installed app found Cursor `3.19.7`; its
+resolver contains `SubagentStartRequestQuery` / `SubagentStopRequestQuery` fields such as
+`subagent_id`, `parent_conversation_id`, and `tool_call_id`. Those shipped type definitions are
+artifact evidence only and do not prove that the pinned 3.17.8 IDE or CLI emits, forwards, or
+binds them at runtime.
+
+The decision is **not supported here** for native subagent observation on both surfaces. The IDE
+profile advertises only the five hooks above, and the CLI profile has no admitted hook or SDK child
+signal. An inherited MCP session may carry an attach handle only through cooperative prompt
+delivery; no separate child session identity is currently proven. A child `afterFileEdit` has only
+the one-way changed-path digest, so #503 file-overlap attribution is `not observable for a
+delegate` unless the child explicitly registers and supplies its own task/session. Such activity
+is recorded as an attribution gap and never silently assigned to the parent.
+
+If a future exact cell proves a child signal, the service may stamp one `host_observed` pending
+annotation from `subagent_id` plus parent conversation/tool correlation. An accepted parent-minted
+delegate or cooperative self-registration then binds that annotation; host metadata alone never
+creates a child task. The #509 row stays evidence-gated until an isolated cell reports child start,
+publication, observation, advice isolation, and receipt separately. Cursor Cloud/Cloud Agents and
+the portable CLI artifact remain separate unsupported surfaces.
+
 Native hook artifacts and the plugin-owned `mcp.json` resolve the invoking `yoetz` launcher to
 one exact command at render time. A
 console-script invocation resolves to that absolute executable; the documented `python -m yoetz`
@@ -303,15 +327,14 @@ symlinked ancestors, root/home locators, unsafe markers, or unbounded/control-be
 (with `paused` for a paused grant), recorded by the shared ingress for every host. A consented
 `sessionStart` auto-attaches through the shared `start mode=create_or_attach` request, pairing the
 resolved workspace root as `workspace_ref` with `cursor-session:<session_id>` as `external_ref`;
-an exact `workspace_task_exists` conflict gets one `mode=attach` recovery only when the private
-local store already holds a valid mapping from an earlier Cursor session whose `sessionEnd` was
-received, every other bound session is ended, and the candidate is bound only to this consented
-workspace. The catalog also requires one mapped task, the selector still active, no sibling task,
-the matching repository-privacy binding, and no start already pending for that route. The conflict
-reveals no selector, and a hard crash without `sessionEnd` remains fail-closed rather than being
-guessed from age. A successful recovery also rewrites every ended same-host predecessor mapping for that task to
-the rotated session and writer so pending predecessor rows drain on the successor route
-(`session_superseded` is followed, not quarantined as `ledger_rejected`). A failed attempt records its typed cause (`auto_attach_workspace_unbound`,
+before a new admission, it checks private persisted mappings from eligible ended Cursor sessions.
+A unique mapped task resumes with `mode=attach` while the workspace and lifecycle locks keep the
+candidate set stable. The trusted repository binding and active selector are revalidated.
+Ambiguous bindings or a contended recovery lock refuse or retry without creating replacement work.
+With no stored selector, a new pair creates new work, including beside a dormant task. Recovery
+rewrites eligible ended predecessor mappings and drains pending rows on the successor route
+(`session_superseded` is followed, not quarantined as `ledger_rejected`). Age alone never proves a
+host session ended. A failed attempt records its typed cause (`auto_attach_workspace_unbound`,
 `auto_attach_request_invalid`, `auto_attach_conflict`, `auto_attach_refused`,
 `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`,
 `service_unavailable`, `vault_locked`, `timeout`, `storage_unsafe`, or `storage_corrupt`) in the

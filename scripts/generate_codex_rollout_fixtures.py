@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import sys
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,7 @@ from yoetz.adapters.importers.codex_rollout_jsonl import (  # noqa: E402
 from yoetz.adapters.integrations.codex_capability_cells import (  # noqa: E402
     skill_manifest_capability_fields,
 )
-from yoetz.protocol.canonical import canonical_digest, canonical_encode  # noqa: E402
+from yoetz.protocol.canonical import canonical_digest, canonical_encode, entry_digest  # noqa: E402
 
 _CANARY = "sk-proj-CANARYLEGACYTOKEN0001"
 _DIR = _ROOT / "fixtures" / "imports" / "codex"
@@ -514,8 +515,97 @@ def _unsupported_0_152_1() -> bytes:
 
 def _write_case(name: str, document: dict[str, Any]) -> None:
     path = _DIR / name
-    encoded = json.dumps(document, separators=(",", ":"), sort_keys=True).encode("ascii") + b"\n"
-    path.write_bytes(encoded)
+    path.write_bytes(canonical_encode(document) + b"\n")
+
+
+def _refresh_lineage_fixture_service_provenance() -> None:
+    """Bind the service-only lineage positive vector to the observation coordinator stamp."""
+
+    path = _ROOT / "fixtures" / "replay" / "lineage-event-families.case.json"
+    document = json.loads(path.read_bytes())
+    rows = document["input"]["accepted_entries"]
+    if not any(
+        row["envelope"]["schema"]["name"] == "coordination_obligation_declared" for row in rows
+    ):
+        template = next(
+            row for row in rows if row["envelope"]["schema"]["name"] == "delegation_declared"
+        )
+        declaration = deepcopy(template)
+        envelope = declaration["envelope"]
+        payload = declaration["payload"]
+        payload.clear()
+        payload.update(
+            {
+                "detection_id": "evt_30000003-0000-4000-8000-000000000011",
+                "project_id": "prj_30000003-0000-4000-8000-000000000012",
+                "membership_generation": "1",
+                "recipient_task_id": "tsk_30000003-0000-4000-8000-000000000013",
+                "obligation_id": "obl_30000003-0000-4000-8000-000000000014",
+            }
+        )
+        envelope["event_id"] = "evt_30000003-0000-4000-8000-00000000000b"
+        envelope["operation_id"] = "req_30000003-0000-4000-8000-00000000000b"
+        envelope["occurred_at"] = "2026-09-05T00:00:11.000Z"
+        envelope["ledger"]["accepted_at"] = "2026-09-05T00:01:11.000Z"
+        envelope["schema"] = {
+            "name": "coordination_obligation_declared",
+            "version": "1.0.0",
+        }
+        payload_ref = envelope["payload_ref"]
+        payload_ref["object_id"] = "obj_30000003-0000-4000-8000-00000000006f"
+        payload_ref["media_type"] = "application/vnd.yoetz.coordination_obligation_declared+json"
+        payload_ref["plaintext_size"] = len(canonical_encode(payload))
+        payload_ref["commitment"] = "hmac-sha256:" + "b" * 64
+        declaration["canonical_payload_digest"] = canonical_digest(payload)
+        envelope["entry_digest"] = entry_digest(
+            {key: value for key, value in envelope.items() if key != "entry_digest"}
+        )
+        rows.append(declaration)
+    expected_families = document["input"]["expected_event_families"]
+    if "coordination_obligation_declared" not in expected_families:
+        expected_families.insert(6, "coordination_obligation_declared")
+    for row in rows:
+        envelope = row["envelope"]
+        if envelope["schema"]["name"] == "delegation_declared":
+            payload = row["payload"]
+            payload.update(
+                {
+                    "membership_generation": "7",
+                    "project_id": "prj_30000003-0000-4000-8000-000000000012",
+                }
+            )
+            row["canonical_payload_digest"] = canonical_digest(payload)
+            envelope["payload_ref"]["plaintext_size"] = len(canonical_encode(payload))
+        if envelope["schema"]["name"] == "coordination_obligation_declared":
+            envelope["author"] = {
+                "actor_id": "agent.fixture.primary",
+                "actor_type": "logical_agent",
+                "assurance": "self_asserted",
+            }
+            envelope["publication_channel"] = "cooperative_mcp"
+            envelope["coverage"]["authorship_assurance"] = "self_asserted"
+            envelope["coverage"]["publication_channels"] = ["cooperative_mcp"]
+            envelope["entry_digest"] = entry_digest(
+                {key: value for key, value in envelope.items() if key != "entry_digest"}
+            )
+            continue
+        if envelope["schema"]["name"] not in {
+            "delegation_declared",
+            "child_dependencies_recorded",
+            "work_abandoned",
+        }:
+            continue
+        envelope["author"] = {
+            "actor_id": "yoetz:observation-coordinator",
+            "actor_type": "harness",
+            "assurance": "harness_observed",
+        }
+        envelope["publication_channel"] = "hook_observed"
+        envelope["coverage"]["authorship_assurance"] = "harness_observed"
+        envelope["coverage"]["publication_channels"] = ["hook_observed"]
+        preimage = {key: value for key, value in envelope.items() if key != "entry_digest"}
+        envelope["entry_digest"] = entry_digest(preimage)
+    path.write_bytes(canonical_encode(document))
 
 
 def _refresh_manifest() -> None:
@@ -533,6 +623,7 @@ def _refresh_manifest() -> None:
         ("IMP-011", "imports/codex/rollout-paginated-0.150.1.case.json"),
         ("IMP-012", "imports/codex/rollout-truncated-0.150.1.case.json"),
         ("IMP-013", "imports/codex/rollout-unsupported-0.152.1.case.json"),
+        ("LINEAGE-001", "replay/lineage-event-families.case.json"),
     ]
     by_path = {item["path"]: item for item in members}
     for fixture_id, rel in extra:
@@ -684,6 +775,7 @@ def main() -> None:
             ),
         ),
     )
+    _refresh_lineage_fixture_service_provenance()
     _refresh_manifest()
     _refresh_skill_manifest()
 

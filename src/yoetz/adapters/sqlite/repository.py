@@ -1492,12 +1492,14 @@ class SqliteLedger:
         locator = operation.result_locator
         assert operation.result_canonical is not None and operation.result_digest is not None
         assert operation.terminal_at is not None and locator is not None
+        if locator.result_object_ref is not None:
+            self._inventory_object(locator.result_object_ref)
         self._db.execute(
             "INSERT INTO operations(writer_id,operation_id,operation_kind,request_digest,"
             "resume_object_id,state,phase,owner_generation,lease_owner_id,lease_generation,"
             "lease_expires_at,first_ingestion_seq,last_ingestion_seq,result_canonical,"
             "result_digest,result_object_id,quarantine_code,terminal_at,created_at,updated_at) "
-            "VALUES(?,?,?,?,NULL,'complete','terminal',NULL,NULL,NULL,NULL,?,?,?,?,NULL,NULL,?,?,?)",
+            "VALUES(?,?,?,?,NULL,'complete','terminal',NULL,NULL,NULL,NULL,?,?,?,?,?,NULL,?,?,?)",
             (
                 command.writer_id,
                 command.operation_id,
@@ -1507,6 +1509,7 @@ class SqliteLedger:
                 locator.last_ingestion_sequence,
                 operation.result_canonical,
                 operation.result_digest,
+                None if locator.result_object_ref is None else locator.result_object_ref.object_id,
                 format_rfc3339_millis(operation.terminal_at),
                 now,
                 now,

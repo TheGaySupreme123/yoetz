@@ -939,6 +939,11 @@ class ServiceClient(ControlClientPort):
             ControlMethod.IMPORT_CODEX_JSONL, request, deadline_ms=deadline_ms
         )
 
+    async def project(self, request: JsonObject, *, deadline_ms: int | None = None) -> JsonObject:
+        """Send one CLI-only project lifecycle request to the ready service."""
+
+        return await self._support(ControlMethod.PROJECT, request, deadline_ms=deadline_ms)
+
     async def review(self, request: JsonObject, *, deadline_ms: int | None = None) -> JsonObject:
         return await self._support(ControlMethod.REVIEW, request, deadline_ms=deadline_ms)
 

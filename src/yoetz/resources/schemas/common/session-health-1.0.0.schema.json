@@ -1,0 +1,1 @@
+{"$id":"https://schemas.yoetz.dev/0.1/common/session-health-1.0.0.schema.json","$schema":"https://json-schema.org/draft/2020-12/schema","enum":["active","contact_lost","ended"],"title":"session-health","type":"string"}

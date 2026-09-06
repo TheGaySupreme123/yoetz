@@ -330,6 +330,53 @@ only from real observation evidence. `AdviceSnapshot` surfaces via nonblocking h
 path fails, use the ordinary manual resume/compaction procedure and cooperative publication; do not
 infer support from a different Codex version.
 
+### Subagent correlation (#507)
+
+The Codex native hook artifact includes `SubagentStart` and `SubagentStop`. Their structural
+identifiers are normalized as `subagent_id` plus the optional `parent_tool_call_id`; the 0.150.1
+rollout grammar also exposes a `SubAgentActivity` record whose bounded `agent_thread_id` maps to
+the child identity and whose closed `kind` (`started` or a terminal state) selects the phase. Raw
+agent paths, prompts, and summaries are discarded. These mappings are service inputs, not caller
+authorship.
+
+The service records one provisional annotation per observed child correlation, keyed by one
+correlation identity, with `origin=host_observed`, `acceptance=pending`, and no child bundle. The
+materializer retains the host observation as evidence, and the durable registry exposes its
+bounded annotation through lineage status. A
+parent may mint an accepted child with `mode=delegate` before spawning; a cooperative child may
+self-register with the parent session. Either accepted path binds the
+existing annotation and never creates a second record. A stop replay after session rotation must
+resolve through the same child/parent-tool aliases; an event with no usable child identity remains
+the permanent `missing_subagent_identity` gap and does not also produce an annotation. Parent
+advice and frontier delivery are never redirected to the child.
+
+The installed `codex-cli 0.150.1` matches the current rollout parser cell, but this read-only version
+probe and the native renderer do not prove live subagent delivery, acceptance, or receipt behavior.
+The #509 matrix keeps the native subagent row evidence-gated until an isolated `YOETZ_ISOLATED_ROOT`
+cell exercises hook, stream, replay, and cooperative binding behavior. Parent-minted delegation is
+the supported design path once that cell is proven; host hooks alone never mint a child.
+
+The bounded legacy native cell has now exercised that parent-minted path with the reviewed candidate
+wheel `yoetz-0.1.0-py3-none-any.whl` (SHA-256
+`670c4244f06532f728e9d0f697be3554d9cd028f66afc800f303e789a072a9e1`). In a fresh
+`YOETZ_ISOLATED_ROOT`, Codex-testing `0.150.1` ran with `multi_agent_v2=false` against a local
+loopback Responses provider and no subscription credential: one parent `start`, one `delegate`, one
+legacy `multi_agent_v1` native child, `wait_agent`, then the child's `start mode=attach`, one
+`publish_work`, deterministic `check`, and JSON `receipt` all completed. This proves the bounded
+source/wheel mechanics and native child execution in that synthetic cell; it does not prove real
+provider semantics, authentication, or production model use.
+
+The same non-ephemeral run's two persisted Codex streams were reconciled by the source-owned
+`codex-rollout-jsonl/0.150.1/v1` adapter: 34 and 28 records accepted, zero duplicates, both
+resolved. They contained `CollabAgentToolCall` records but no `SubAgentActivity`,
+`SubagentStart`, `SubagentStop`, or usable child identity. Isolated public status therefore reports
+`codex_session_stream=true`, `mapping_present=false`, and the permanent `unsupported_event` gap.
+It must not mint `host_observed` or reinterpret this absence as `missing_subagent_identity`;
+the latter applies only when a subagent activity event exists without an identity. Keep this
+observation gap separate from the successful source-artifact and native-ceremony proof. Repeat the
+cell only with a fresh isolated root and replace this candidate digest with the exact final wheel
+digest after the final build.
+
 The rendered `SessionStart`, `UserPromptSubmit`, tool, and turn-boundary commands bind
 `--workspace .`. Codex's hooks contract (re-read 2026-09-03) gives every hook the session `cwd` and
 runs command hooks from that directory, so `.` is the current project/subdirectory and the shared
@@ -545,7 +592,7 @@ reviewer egress.
 | MCP unavailable | Diagnose through separate MCP configuration/startup steps. |
 | Trigger absent or failed | Use the manual re-grounding procedure; never edit hook configuration through this integration. |
 | `observe status` shows no envelopes for a session | Read `hook_diagnostics.reasons`: `workspace_unresolvable` means the hook's `--workspace` locator could not be canonicalized; `workspace_unconsented` means the session's Git root carries no active consent (a session started in a subdirectory canonicalizes to the same root as the consent, so grant consent at the repository root); `paused` means consent is paused. A successful ingest records no diagnostic, so read `recent_count` together with the envelopes: no new envelopes and a zero `recent_count` means the hooks never reached the ingress or the runtime gate is disabled, not that a binding drop occurred. |
-| `observe status` shows `mapping_present: false` after a consented `SessionStart` | The hook sends `start mode=create_or_attach` with the canonical `--workspace` root as `workspace_ref` and `codex-session:<session_id>` as `external_ref`. On the exact `workspace_task_exists` conflict it retries once with `mode=attach` only if the private local lifecycle store already holds a valid mapping from an earlier Codex session whose `SessionEnd` was received, every other bound session is ended, and the candidate is bound only to this consented workspace. The catalog then requires one mapped task, the selector still active, no sibling task, the matching repository-privacy binding, and no start already pending for that route. A successful recovery rewrites every ended same-host predecessor mapping for that task to the rotated session and writer so pending predecessor rows drain on the successor route rather than being quarantined. The public error reveals no selector; a hard crash without `SessionEnd` remains fail-closed rather than being guessed from age. Otherwise read `hook_diagnostics.reasons` for the typed cause: `auto_attach_workspace_unbound` (no paired request was legal), `auto_attach_request_invalid` (an authoring defect — file it), `auto_attach_conflict` / `auto_attach_refused` (the service answered and declined), `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`, `vault_locked`, `timeout`, `storage_unsafe` / `storage_corrupt`, or `service_unavailable` (the daemon was still starting; `UserPromptSubmit`, `Stop`, and `SessionEnd` retry under the bounded budget and add `auto_attach_retry_failed` beside the cause). An explicit MCP `start` remains the recovery path; for `vault_locked` on a never-initialized install, that `start` returns the typed `vault_initialization_required` continuation below rather than a dead end. |
+| `observe status` shows `mapping_present: false` after a consented `SessionStart` | The hook sends `start mode=create_or_attach` with the canonical `--workspace` root as `workspace_ref` and `codex-session:<session_id>` as `external_ref`. Before admitting a new pair, it checks private persisted bindings from eligible ended Codex sessions. A unique task selected by those held mappings is resumed with `mode=attach` under the shared workspace and lifecycle locks; the repository fence and active selector are revalidated. Ambiguous bindings or a contended recovery lock refuse or retry without creating a replacement task. With no stored selector, a new pair creates new work, including beside a dormant task. Recovery rewrites eligible predecessor mappings and drains their pending rows on the successor route. A hard crash is never inferred to be an end from age alone. Otherwise read `hook_diagnostics.reasons` for the typed cause: `auto_attach_workspace_unbound` (no paired request was legal), `auto_attach_request_invalid` (an authoring defect — file it), `auto_attach_conflict` / `auto_attach_refused` (the service answered and declined), `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`, `vault_locked`, `timeout`, `storage_unsafe` / `storage_corrupt`, or `service_unavailable` (the daemon was still starting; `UserPromptSubmit`, `Stop`, and `SessionEnd` retry under the bounded budget and add `auto_attach_retry_failed` beside the cause). An explicit MCP `start` remains the recovery path; for `vault_locked` on a never-initialized install, that `start` returns the typed `vault_initialization_required` continuation below rather than a dead end. |
 | `observe status` shows `mapping_stale` after every resume or compaction | Before issue #578 the `yoetz hooks session-start` status read connected without a workspace locator, so the daemon's repository fence refused every probe as `SESSION_CONFLICT` and a live mapping was reported stale. The command now derives its locator from `--workspace` or, absent that (the rendered command passes none), the hook's working directory; `yoetz hooks observe --event SessionStart --workspace .` does the same. A fence refusal is now `status_workspace_unbound` / `status_workspace_mismatch` with a keep-the-mapping advisory; `mapping_stale` means the daemon actually reported the session replaced, and the advisory names the replacement ids. |
 | The agent created a sibling task instead of continuing the auto-attached one | The `SessionStart` context names the mapped `session_id` and `writer_id` and says to continue with `start mode=attach` by that session id; guidance and the `start` tool description name the canonical absolute repository root as `workspace_ref`, the value the hook commits (issue #580). The agent's successful scoped `start` re-binds the mapping through `yoetz hooks post-tool-use` from `structuredContent`; a scoped start that binds nothing records `start_bind_unparsed` / `start_bind_invalid_ids` / `start_bind_write_failed`. |
 | `observe status` shows `ledger_rejected` and `outbox_quarantined` | The service was reachable but rejected one envelope non-retryably. A repeated envelope after a lost acknowledgement, a service restart, or a workflow reattach (a second `start` in the same Codex session) is not such a rejection: its committed operation is resolved task-wide and the row is acknowledged idempotently with no quarantine row. A pending row from an ended host session whose task a successor recovered is delivered on the successor route (`session_superseded` is followed) and is also not `ledger_rejected`. A successor binding that cannot be followed quarantines that row as `session_superseded`, not `mapping_missing`. A `ledger_rejected` row is a genuine conflicting reuse of an event or operation identity. The row is retained under `quarantine_causes`, aggregate `delivery_causes`, and gaps; `pending_delivery_causes` names only rows still in the outbox. Later rows can drain; reclaim only after the underlying defect is understood. A hook-driven attempt also appears in the bounded `hook_diagnostics`, while manual and supervisor drains are represented by status rather than hook activity. Do not restart a ready service. A row is also quarantined after 128 consecutive rejections with the same retryable reason so a catch-all failure cannot block the lane forever; pause, vault, disabled, and designed back-pressure reasons keep their existing recovery behavior. |

@@ -69,6 +69,11 @@ class _Catalog:
         return self.route if session_id == _SESSION else None
 
     async def session_binding(self, session_id: str) -> SessionBinding | None:
+        if session_id == _SESSION:
+            route = self.route
+            if route is None:
+                return None
+            return SessionBinding(route.task_id, route.session_id, _WRITER)
         assert session_id == _RETIRED_SESSION
         return self.binding
 
@@ -502,6 +507,35 @@ async def test_projection_binding_facts_resolve_exact_active_catalog_route() -> 
                 "request_id": _REQUEST,
                 "task_id": _TASK,
                 "session_id": _SESSION,
+            }
+        ),
+    )
+
+    assert facts.original_request_id == _REQUEST
+    assert facts.route_identity_digest == route.route_identity_digest
+    assert catalog.calls == 1
+
+
+@pytest.mark.anyio
+async def test_projection_binding_facts_keep_parent_route_for_delegated_start() -> None:
+    """A delegated result maps through its parent host session until child attach."""
+
+    route = _route()
+    catalog = _Catalog(route)
+    child = "tsk_00000000-0000-4000-8000-000000000006"
+    facts = await _application(catalog).projection_binding_facts(
+        ControlMethod.START,
+        {"request_id": _REQUEST},
+        JsonObject(
+            {
+                "schema_version": "1.0.0",
+                "request_id": _REQUEST,
+                "ok": True,
+                "outcome": "delegated",
+                "task_id": child,
+                "parent_task_id": _TASK,
+                "session_id": _SESSION,
+                "writer_id": _WRITER,
             }
         ),
     )

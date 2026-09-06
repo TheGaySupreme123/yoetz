@@ -103,6 +103,7 @@ _SEMANTIC_VERSION_PATTERN: Final = re.compile(
 class FindingKind(str, Enum):  # noqa: UP042 - exact wire enum base
     ACTION_WITHOUT_RESULT = "action_without_result"
     CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE = "claim_without_admissible_evidence"
+    COORDINATION_OVERLAP = "coordination_overlap"
     COMPLETION_WITH_OPEN_OBLIGATIONS = "completion_with_open_obligations"
     CONTRADICTORY_CLAIMS_UNRESOLVED = "contradictory_claims_unresolved"
     DIFF_DOES_NOT_MATCH_ACCOUNT = "diff_does_not_match_account"
@@ -305,6 +306,7 @@ FINDING_KIND_TRAITS: Final[MappingProxyType[FindingKind, tuple[int, bool]]] = Ma
         FindingKind.DIFF_DOES_NOT_MATCH_ACCOUNT: (1, True),
         FindingKind.MATERIAL_LIMITATION_OMITTED: (1, True),
         FindingKind.QUESTIONABLE_FINDING_REJECTION: (2, True),
+        FindingKind.COORDINATION_OVERLAP: (2, True),
     }
 )
 
@@ -328,6 +330,8 @@ _POLICY_IDENTITY_BY_KIND: Final[MappingProxyType[FindingKind, tuple[str, str]]] 
             ("work-integrity", "0.1.0")
             if kind in _WORK_INTEGRITY_KINDS
             else ("research-evidence", "0.1.0")
+            if kind is not FindingKind.COORDINATION_OVERLAP
+            else ("coordination", "0.1.0")
         )
         for kind in FindingKind
     }

@@ -363,6 +363,15 @@ jobs:
             tests/integration/application tests/integration/privacy \
             -m "not fault and not kill_matrix and not soak and not live" -q --timeout=180
 
+      - name: Multi-agent READY service and project authority workflows
+        run: |
+          uv run --locked pytest \
+            tests/integration/service/test_cross_repository_lineage_grant.py \
+            tests/integration/service/test_project_client_lifecycle.py \
+            tests/integration/service/test_project_ready_consent.py \
+            tests/integration/service/test_project_text_roots.py \
+            -m "not fault and not kill_matrix and not soak and not live" -q --timeout=180
+
       - name: Sanitize and scan structural test report before any upload
         if: failure()
         run: |

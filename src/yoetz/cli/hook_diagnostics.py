@@ -74,6 +74,8 @@ _REASONS: Final = frozenset(
         "auto_attach_refused",
         "auto_attach_result_invalid",
         "auto_attach_mapping_write_failed",
+        "auto_attach_recovery_busy",
+        "auto_attach_binding_ambiguous",
         "privacy_authority_required",
         "runtime_gate_contended",
         "runtime_gate_unsafe",
@@ -103,6 +105,7 @@ _REASONS: Final = frozenset(
         # bind failed silently and observation kept routing to the old task.
         "start_bind_unparsed",
         "start_bind_invalid_ids",
+        "start_bind_deferred",
         "start_bind_write_failed",
         # Observability only: the end-to-end hook budget is a contract, not an
         # enforcement point. Aborting mid-hook would drop ingest.
@@ -191,18 +194,23 @@ def record_hook_diagnostic(
     reason: str,
     event: str,
     *,
+    candidate_count: int | None = None,
     _state: Path | None = None,
 ) -> None:
     """Append one bounded structural hook failure record, rotating one prior file."""
 
-    _append_row(
-        {
-            "event": _closed(event, _EVENTS, "unknown_event"),
-            "reason": _closed(reason, _REASONS, "unknown_reason"),
-            "ts": _timestamp(),
-        },
-        _state=_state,
-    )
+    row: dict[str, object] = {
+        "event": _closed(event, _EVENTS, "unknown_event"),
+        "reason": _closed(reason, _REASONS, "unknown_reason"),
+        "ts": _timestamp(),
+    }
+    if (
+        reason == "auto_attach_binding_ambiguous"
+        and type(candidate_count) is int
+        and 2 <= candidate_count <= 1_000_000
+    ):
+        row["candidate_count"] = candidate_count
+    _append_row(row, _state=_state)
 
 
 def _append_row(row: dict[str, object], *, _state: Path | None) -> None:

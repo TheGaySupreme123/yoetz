@@ -21,6 +21,7 @@ _RIPPLE_SCRIPT = _REPO_ROOT / "scripts" / "sync_resource_ripple.py"
 _CHECKOUT_TREES: Final = (
     "fixtures/agent-plugins",
     "fixtures/canonical",
+    "fixtures/replay",
     "guidance",
     "migrations",
     "schemas",
@@ -47,6 +48,8 @@ def _copy_checkout(destination: Path) -> None:
 
 def _synthetic_checkout(root: Path, *, inventory_count: int, reviewed_count: int) -> None:
     _write(root, "src/yoetz/__init__.py", "")
+    _write(root, "src/yoetz/protocol/__init__.py", "")
+    _write(root, "src/yoetz/protocol/schemas.py", "def load_schema_catalog():\n    return None\n")
     _write(
         root,
         "src/yoetz/version.py",
@@ -106,6 +109,27 @@ def test_real_checkout_passes_the_single_ci_entrypoint() -> None:
     assert "generated artifacts are at a fixed point" in completed.stdout
 
 
+@pytest.mark.slow
+def test_shared_stale_schema_member_identity_cannot_pass_the_ripple(tmp_path: Path) -> None:
+    """Source/mirror parity cannot conceal an invalid hand-maintained schema inventory."""
+
+    checkout = tmp_path / "checkout"
+    _copy_checkout(checkout)
+    manifest_path = checkout / "schemas/manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    member = next(
+        item for item in manifest["members"] if item["path"] == "consent/status-7.0.0.schema.json"
+    )
+    member["byte_length"] += 1
+    manifest_path.write_bytes(canonical_encode(manifest))
+
+    # The command owns all mirror and runtime digest changes, so the final failure can only be
+    # seen by loading the schema catalog, not by comparing a stale package mirror with a source.
+    completed = _run("--write", "--repo-root", str(checkout))
+    assert completed.returncode != 0
+    assert "schema_manifest_member_mismatch" in completed.stderr
+
+
 def test_write_repeats_until_the_owned_bytes_are_stable(tmp_path: Path) -> None:
     _synthetic_checkout(tmp_path, inventory_count=1, reviewed_count=1)
 
@@ -135,6 +159,34 @@ def test_write_converges_a_reviewed_source_byte_change_in_a_real_checkout(tmp_pa
     package_manifest = json.loads((checkout / "src/yoetz/resources/manifest.json").read_bytes())
     assert support["resource_set_digest"] == package_manifest["resource_set_digest"]
 
+    checked = _run("--check", "--repo-root", str(checkout))
+    assert checked.returncode == 0, checked.stderr + checked.stdout
+
+
+@pytest.mark.slow
+def test_write_regenerates_current_builder_owned_schema_without_changing_frozen_history(
+    tmp_path: Path,
+) -> None:
+    """One owning command repairs a stale current schema and all of its dependent bytes."""
+
+    checkout = tmp_path / "checkout"
+    _copy_checkout(checkout)
+    frozen_path = checkout / "schemas/operations/status-result-1.2.0.schema.json"
+    frozen = frozen_path.read_bytes()
+    current_path = checkout / "schemas/operations/status-result-1.3.0.schema.json"
+    expected = current_path.read_bytes()
+    current = json.loads(expected)
+    current["$defs"]["history_item"]["properties"]["summary_code"]["enum"].remove("child_accepted")
+    current_path.write_bytes(canonical_encode(current))
+
+    written = _run("--write", "--repo-root", str(checkout))
+
+    assert written.returncode == 0, written.stderr + written.stdout
+    assert current_path.read_bytes() == expected
+    assert frozen_path.read_bytes() == frozen
+    assert (
+        checkout / "src/yoetz/resources/schemas/operations/status-result-1.3.0.schema.json"
+    ).read_bytes() == expected
     checked = _run("--check", "--repo-root", str(checkout))
     assert checked.returncode == 0, checked.stderr + checked.stdout
 

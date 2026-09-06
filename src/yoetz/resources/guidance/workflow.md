@@ -59,7 +59,7 @@ body. Never inspect product source to reconstruct a request.
 1. Decide whether the task is material enough for Yoetz.
 2. Start or attach with stable request identity and the intended create or attach semantics.
 3. Publish a bounded plan, requested outcomes, acceptance evidence, and assignments. Declare completion scope with obligation refs, or — only when the effective ref set is empty — one typed `no_obligations_reason`: `no_material_change`, `single_atomic_change`, or `exploratory_scope_unknown`. Group large inventories into independently reviewable work packages; files are leaf evidence, not automatic obligations.
-4. Delegate with the session, task, distinct logical writer, and bounded assignment context. Do not send or publish full transcripts.
+4. Delegate with `start mode=delegate` using the parent's current session. Give the intended child the complete returned `attach_handle` and bounded assignment context. The child attaches with that handle and uses its own returned session and writer. Do not send or publish full transcripts.
 5. Publish material work-package transitions: assignment, decision, blocked attempt, independently useful result, completion, or revision. Omit routine reads, searches, formatting, and per-file mechanics.
 6. Stay next to the record. After resume, compaction, handoff, or uncertainty about what is already done or committed, call `status`. `view=candidate_findings` is an advisory read: it creates no verdict, IDs, receipt, or event. For claim correction, read `candidate_findings`, `history`, and `results`, then dry-run one `claim_recorded/1.1.0` replacement: admissible support belongs in `supporting_refs`, partial/failed results in `limitation_refs`, and prior effective claim ids in `supersedes_claim_refs`.
 7. Before completion, publish the intended material completion claim and current evidence, then call `check`. Read `declared_obligation_count`, `no_obligations_reason`, and `closure_readiness` on `status` first. A readable plan with zero declared obligations and no reason is blocked by `no_obligations_declared`; add effective obligations or revise the plan with a typed reason. The reason clears readiness but a completion claim over zero obligations still yields an insufficient-coverage gap. Resolve remediable blockers before spending a check or receipt. `receipt_findings_unresolved` is different: it says an actionable finding is still current. Only a later qualifying check of the repaired record resolves it, never a response; if you can repair the record, do so and recheck. Then read the finding's `resolved` state. If the issue re-fires, or it does not re-fire but remains `resolved=false` because the check did not qualify, proceed to the receipt rather than rechecking unchanged state. A deterministic check with otherwise readable proof may still qualify when its only case-wide host-observation limits are `captured_object_unavailable`, `content_unselected`, `host_outcome_unavailable`, or `unpaired_event`; those codes remain receipt limitations, require the original finding coverage to have been readable, and never relax semantic-finding proof. Choose mode deliberately: `semantic_if_configured` for most material implementation/review claims; `semantic_required` when completion depends on qualitative correctness, design conformance, security/privacy reasoning, interoperability, or whether the code satisfies the ask; `deterministic_only` only for explicitly local/structural checks, semantic-disabled policy, or a deliberate no-egress choice — and disclose that limitation. Publish the smallest state-bound diff/symbol and the directly relevant test or failure excerpt; never rely on self-asserted completion prose alone.
@@ -79,7 +79,57 @@ Reuse the original request and operation IDs after timeout or reconnect. A timeo
 
 ## Multi-agent attribution and handoff
 
-The parent publishes assignments and gives each delegate a distinct logical writer identity. A delegate publishes its own bounded claims; the parent neither impersonates it nor upgrades self-asserted authorship. Before integration, read current assignments, decisions, contradictions, and obligations. A delegate summary is a claim, not proof, and contradictions remain visible until a recorded decision resolves them.
+Each participating child has its own task ledger, session, and writer. The parent calls `start`
+with `mode=delegate` and its current `session_id`; the returned child is `parent_minted` and
+`accepted`. Pass the complete expiring, single-use `attach_handle` only to the intended child in
+its assignment. The child calls `start mode=attach` with that handle and publishes with its own
+returned session and writer. The parent keeps its original binding. A timeout requires the exact
+same request and `request_id`; never create another child to recover a pending delegation.
+
+A child without a handle may create a separate task with `parent_session_id`. This is
+`self_registered` and `pending`: knowing a parent session is not authority to add blocking work.
+The parent may publish `child_accepted` or `child_rejected`. Acceptance never changes origin;
+an accepted relationship cannot later be rejected. Conflicting selectors, invalid parent refs,
+expired handles, cycles, and configured depth or fan-out limits produce typed refusals. Recover
+through the returned operation/status information, not by guessing identities.
+
+Use `status view=lineage` after a handoff to inspect recorded relationships. Host observations
+can be provisional annotations without a child ledger; never claim those children published or
+checked work. A delegate summary is a claim, not proof. The parent's own obligations must cover
+incorporating each child's work and verifying the combined result; a clean child receipt does
+not establish integration. Preserve contradictory claims until a recorded decision resolves them.
+
+Work state, session health, and receipt history are separate. A receipt never closes work:
+publish `work_closed` when the work is complete. Lost contact leaves work open during the
+documented recovery window; the service records abandonment only after it expires. Late evidence
+remains visible with a gap. `delegation_cancelled` revokes the Yoetz capability, not the host
+process. `child_written_off` and cancellation preserve an accepted dependency and its incomplete
+outcome. Publish these lifecycle transitions through `publish_work`, using the request templates.
+
+Parent checks use the latest dependency manifest recorded in the parent's ledger. Receipt creation
+does not refresh it. If a newer manifest was recorded after the check, recheck for an updated
+conclusion; an honest incomplete receipt remains available while children are active. Read
+[coverage and receipts](coverage-and-receipts.md) for severity and freshness limits.
+
+### Project coordination
+
+Projects group work without granting attach authority. Automatic repository grouping begins with
+a second live task when enabled. Use `status view=project`, `yoetz project status`, or `/project`
+to inspect the admitted scope; membership and a dormant sibling never select a task to resume.
+Each source workspace must consent. General and cross-repository projects additionally need
+approval for the exact current membership generation. Revocation, unlink, dissolve, or opt-out
+invalidates old deliveries; project membership does not authorize cross-repository semantic input.
+
+Presence and duplicate-finding notes are advisory, separate from findings, and cannot change the
+verdict. Overlap advice concerns declared structured resources, not inferred intent or ownership.
+A `coordination_overlap` finding requires an explicitly declared coordination obligation and a
+recorded context. Publish the obligation first, then `coordination_obligation_declared` with its
+ID and the admitted detection, project, recipient task, and membership generation. Ordinary file
+or source requested items identify potential overlap; they do not declare coordination work.
+Publish a `coordination_disposition_recorded` event linking that same obligation and
+evidence for `shared_work`, `sequencing`, or `scope_revision`. That addresses the obligation;
+a later qualifying `coordination/0.1.0` check resolves a finding. A bare `respond` acknowledgement
+does neither. An agreed shared-work disposition may leave the resource overlap in place.
 
 ## Resume and compaction
 
@@ -87,17 +137,18 @@ On resume, attach to the existing task and read status before reconstructing wor
 
 ### Workspace grouping and attach selectors
 
-`start` resumes by one of two selectors (never by bare `task_id`):
+`start` resumes by a held session or exact identity pair; an intended new child may instead use
+its complete attach handle. Never attach by bare `task_id`:
 
 1. `session_id` — continue the exact session you already hold.
-2. `workspace_ref` + `external_ref` as a pair — resolve the durable task for that project work item without a `session_id`. Under `mode=create_or_attach`, the same pair creates on first use and attaches on every later conversation. Attach mints a fresh session and writer; use the returned ids. The previously held session is retired for routing, but `status view=operation` from the successor session recovers that task's request ids, and `start mode=attach` with the retired `session_id` re-binds the same task. A different `external_ref` in a workspace that already has a task is `SESSION_CONFLICT` (`workspace_task_exists`) without task selectors — attach with the previously held session id, or retry with `mode=create` for an explicit sibling.
+2. `workspace_ref` + `external_ref` as a pair — resolve the durable task for that work item without a `session_id`. Under `mode=create_or_attach`, the same pair creates on first use and attaches on later conversations; a different complete pair creates an independent sibling. Attach mints a fresh session and writer; use the returned ids. The previously held session is retired for routing, but `status view=operation` from the successor session recovers that task's request ids, and `start mode=attach` with the retired `session_id` re-binds the same task. Incomplete or conflicting selectors refuse without guessing among siblings.
 
 Convention:
 
-- `workspace_ref` = the canonical absolute repository root of the working tree you are in (a linked Git worktree is its own root). Never a remote URL: the workspace commitment is keyed on the exact value, so hook observation on Claude Code, Codex, and Cursor auto-attaches with this root and `workspace_task_exists` protects you from a sibling only under the same value. A remote URL or any other spelling is a different workspace and silently creates a sibling task.
+- `workspace_ref` = the canonical absolute repository root of the working tree you are in (a linked Git worktree is its own root). Never a remote URL: selector commitments use the exact value. Repository grouping uses trusted repository identity separately and never substitutes for a workspace selector.
 - `external_ref` = stable task identity within that project (branch name, issue reference, or plan slug). A hook-mapped task carries `<host>-session:<host session id>`; do not reproduce that pair. Attach to a host-mapped task with `mode=attach` and the `session_id` the session-start context names.
 
-Same conversation resuming, or a fresh conversation continuing the same work → `mode=create_or_attach` with the same pair and no `session_id`. Sibling work in the same project → `mode=create` with the same `workspace_ref` and a different `external_ref` (do not use `create_or_attach` for a new sibling). Both refs are one-shot redacted values: only installation-keyed HMAC commitments are persisted, so a repository path or remote URL never lands in durable state — do not self-censor into unstable refs.
+Same conversation resuming, or a fresh conversation continuing the same work → `mode=create_or_attach` with the same pair and no `session_id`. Sibling work → a different complete pair, or explicit `mode=create`. Selector refs are committed with installation-keyed HMACs rather than stored as structural plaintext. Keep them stable; do not self-censor into a different identity.
 
 ## Findings and recheck
 

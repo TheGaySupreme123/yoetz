@@ -26,6 +26,7 @@ from yoetz.cli.exits import (
     lifecycle_public_code,
     remediation_message,
 )
+from yoetz.cli.project import project_app
 from yoetz.cli.render import (
     render_human_awaiting_human,
     render_human_check,
@@ -33,6 +34,7 @@ from yoetz.cli.render import (
     render_human_receipt,
     render_human_status,
 )
+from yoetz.domain.coordination import CoordinationErrorCode
 from yoetz.domain.values import JsonObject
 from yoetz.ports.control import (
     ControlClientKind,
@@ -77,11 +79,46 @@ if TYPE_CHECKING:
 __all__ = [
     "app",
     "build_service_client",
+    "control_failure",
     "main",
     "run_async",
     "support_methods_carrying_schema_version",
+    "usage_failure",
     "with_body_schema_version",
 ]
+
+_COORDINATION_CONTROL_ERROR_REASONS: Final[frozenset[str]] = frozenset(
+    code.value for code in CoordinationErrorCode
+)
+_COORDINATION_CONTROL_GUIDANCE: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "coordination_invalid": "correct the project command fields and retry",
+        "project_not_found": "choose an existing project and retry",
+        "project_dissolved": "choose an active project and retry",
+        "implicit_project_requires_opt_out": (
+            "run `yoetz project opt-out` for the repository before retrying"
+        ),
+        "general_project_membership_conflict": (
+            "unlink the task from its current general project before linking another"
+        ),
+        "project_member_not_found": "refresh project status and choose an active member",
+        "selector_conflict": "provide selectors that identify the same task",
+        "coordination_consent_required": (
+            "obtain current source-workspace consent before retrying"
+        ),
+        "coordination_grant_required": "obtain the current project grant before retrying",
+        "coordination_generation_revoked": (
+            "refresh project status and grant, then retry with the current generation"
+        ),
+        "coordination_generation_mismatch": (
+            "refresh project status and retry with the current generation"
+        ),
+        "cross_repository_lineage_requires_grant": (
+            "obtain a cross-repository project grant before retrying"
+        ),
+        "project_member_already_unbound": "refresh project status; the member is already unlinked",
+    }
+)
 
 _MAX_INPUT_BYTES: Final = 1_048_576
 _INPUT = Annotated[
@@ -213,6 +250,7 @@ app.add_typer(elevated_app, name="consent")
 app.add_typer(hooks_app, name="hooks")
 app.add_typer(observe_app, name="observe")
 observe_app.add_typer(observe_checks_app, name="checks")
+app.add_typer(project_app, name="project")
 
 
 def _recommend_operation(name: str) -> Callable[..., None]:
@@ -419,6 +457,12 @@ def _usage_failure() -> int:
     return 2
 
 
+def usage_failure() -> int:
+    """Return the standard CLI exit code for invalid command usage."""
+
+    return _usage_failure()
+
+
 def _machine_scope_request_or_none() -> JsonObject | None:
     """Build the machine-scope privacy body locally, or emit one bounded diagnostic.
 
@@ -590,6 +634,20 @@ def _lifecycle_failure(error: LifecycleError) -> int:
 def _control_failure(error: ControlError, *, json_output: bool = False) -> int:
     error = _bind_handshake_correlation(error)
     code = public_error_code_for_control_reason(error.reason)
+    if error.reason in _COORDINATION_CONTROL_ERROR_REASONS:
+        remedy = _COORDINATION_CONTROL_GUIDANCE[error.reason]
+        _stderr(f"{error.reason}: {remedy}")
+        if json_output:
+            payload: dict[str, JsonValue] = {
+                "ok": False,
+                "public_code": code.value,
+                "reason": error.reason,
+                "retryable": error.retryable,
+            }
+            if error.correlation_id is not None:
+                payload["correlation_id"] = error.correlation_id
+            _stdout_json(payload)
+        return exit_code_for(code)
     if error.reason in {"service_incompatible", "protocol_mismatch"}:
         # The endpoint answered, but with a service of another installation or protocol
         # generation. Neither 'service run' (refused while the holder lives) nor a plain retry
@@ -647,6 +705,12 @@ def _control_failure(error: ControlError, *, json_output: bool = False) -> int:
     }.get(code, f"{code.value.lower()}: the local request could not be completed")
     _stderr(guidance)
     return exit_code_for(code)
+
+
+def control_failure(error: ControlError, *, json_output: bool = False) -> int:
+    """Render a control-channel failure using the shared CLI taxonomy."""
+
+    return _control_failure(error, json_output=json_output)
 
 
 type WorkflowRequest = (
@@ -3646,6 +3710,18 @@ def elevated_prepare(
             help="Exact repository privacy recipe for repository_privacy_grant.",
         ),
     ] = None,
+    project_id: Annotated[
+        str | None,
+        typer.Option("--project-id", help="Exact project id for project coordination grant."),
+    ] = None,
+    membership_generation: Annotated[
+        int | None,
+        typer.Option("--membership-generation", min=1),
+    ] = None,
+    audit_record_id: Annotated[
+        str | None,
+        typer.Option("--audit-record-id", help="Exact project grant audit event id."),
+    ] = None,
     target_digest: Annotated[
         str | None,
         typer.Option("--target-digest", help="Exact plan/preview digest when required."),
@@ -3660,6 +3736,7 @@ def elevated_prepare(
     prepare = cast(Callable[..., object], getattr(module, "prepare_elevated"))
     binding: dict[str, str] | None = None
     grant: dict[str, JsonValue] | None = None
+    coordination: dict[str, JsonValue] | None = None
     if operation in {"provider_credential_set", "provider_credential_rotate"}:
         required = {
             "provider_id": provider_id,
@@ -3777,11 +3854,28 @@ def elevated_prepare(
             raise SystemExit(2) from None
         if code != 0 or grant is None:
             raise SystemExit(2)
+    if operation == "project_coordination_grant":
+        if project_id is None or membership_generation is None or audit_record_id is None:
+            _finish(_usage_failure())
+        try:
+            coordination_builder = cast(
+                Callable[..., dict[str, JsonValue]],
+                getattr(errors, "project_coordination_grant_binding"),
+            )
+            coordination = coordination_builder(
+                project_id=project_id,
+                membership_generation=membership_generation,
+                audit_record_id=audit_record_id,
+            )
+        except elevated_error as exc:
+            _elevated_failure(exc)
+            raise SystemExit(2) from None
     try:
         payload = prepare(
             operation,
             provider_binding=binding,
             grant_binding=grant,
+            coordination_binding=coordination,
             target_digest=target_digest,
         )
     except elevated_error as exc:

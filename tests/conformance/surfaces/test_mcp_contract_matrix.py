@@ -280,8 +280,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:f33f5ff45ccd9797daa0996b724e05fa7a0904c4223b062fb3c9bea83b0fccc4",
-        "strict": "sha256:e9633bcb7d0919405f64cd268c6a1c33e8707938a00d0545d967f7be17ac1016",
+        "policy": "sha256:a2d74a0e9f1604c60dc707996e0035711df07e8c27d448a7f911cc59f15fafb5",
+        "strict": "sha256:0c52e7d6c2c53c6b49d2bcf78eaecd1ee36bfc4f8e2fbd6e6786ed1efee703e9",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -318,11 +318,11 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert isinstance(description, str)
     assert "unsorted_set_field" in description
     publish_descriptor = descriptor_for("publish_work")
-    assert publish_descriptor.input_schema_ref.endswith("publish-work-request-1.1.0.schema.json")
+    assert publish_descriptor.input_schema_ref.endswith("publish-work-request-1.2.0.schema.json")
     assert publish_descriptor.output_schema_ref.endswith("publish-work-result-1.0.0.schema.json")
     status_descriptor = descriptor_for("status")
-    assert status_descriptor.input_schema_ref.endswith("status-request-1.1.0.schema.json")
-    assert status_descriptor.output_schema_ref.endswith("status-result-1.1.0.schema.json")
+    assert status_descriptor.input_schema_ref.endswith("status-request-1.2.0.schema.json")
+    assert status_descriptor.output_schema_ref.endswith("status-result-1.3.0.schema.json")
     for descriptors in TOOL_DESCRIPTORS.values():
         assert {item.name for item in descriptors if item.annotations.read_only} == {
             "status",
@@ -510,7 +510,7 @@ def test_presentation_examples_admit_under_catalog_models() -> None:
     start_examples = descriptor_for("start").input_schema["examples"]
     status_examples = descriptor_for("status").input_schema["examples"]
     publish_examples = descriptor_for("publish_work").input_schema["examples"]
-    assert isinstance(start_examples, list) and len(start_examples) == 1
+    assert isinstance(start_examples, list) and len(start_examples) == 4
     assert isinstance(status_examples, list) and len(status_examples) == 1
     assert isinstance(publish_examples, list) and publish_examples
     start_example = start_examples[0]
@@ -519,7 +519,8 @@ def test_presentation_examples_admit_under_catalog_models() -> None:
     assert isinstance(start_example, dict)
     assert isinstance(status_example, dict)
     assert isinstance(publish_example, dict)
-    StartRequest.model_validate(start_example)
+    for example in start_examples:
+        StartRequest.model_validate(example)
     StatusRequest.model_validate(status_example)
     event_drafts = publish_example["event_drafts"]
     assert isinstance(event_drafts, list) and event_drafts

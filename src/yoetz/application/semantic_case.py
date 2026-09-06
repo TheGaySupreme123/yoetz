@@ -50,6 +50,7 @@ from yoetz.kernel.deterministic_checks import (
     DeterministicCase,
     FrozenHistoryEvent,
 )
+from yoetz.kernel.lineage import LineageEvaluation
 from yoetz.ports.semantic import (
     ChangeObservation,
     ExcerptDigestProvenance,
@@ -256,6 +257,86 @@ def _bounded_json(value: Mapping[str, JsonValue]) -> tuple[str, bool]:
     return _structural_json(marker), True
 
 
+def _lineage_semantic_item(evaluation: LineageEvaluation) -> SemanticCaseItem:
+    """Encode the recorded lineage evaluation as bounded structural provider input.
+
+    This is deliberately derived from the parent-prefix evaluation handed to the check.  It
+    carries identities, lifecycle state, freshness, coverage tokens, and finding identities only;
+    child prose and live child state never enter a semantic case.  The application admission path
+    re-authorizes the same recorded source before dispatching this item.
+    """
+
+    snapshots = {item.child_task_id: item for item in evaluation.snapshots}
+    children: list[dict[str, JsonValue]] = []
+    for rollup in evaluation.children:
+        snapshot = snapshots.get(rollup.child_task_id)
+        if snapshot is None:
+            # This should be impossible for evaluator-produced values, but omitting a child would
+            # make the semantic case claim less source than the check evaluated.  Fail closed at
+            # case construction instead.
+            raise ValueError("lineage_semantic_input_invalid")
+        findings = tuple(str(value) for value in rollup.finding_ids)
+        row: dict[str, JsonValue] = {
+            "acceptance": snapshot.acceptance.value,
+            "blocking_conditions": list(rollup.blockers),
+            "child_check_id": snapshot.child_check_id,
+            "child_check_subject_frontier": (
+                None
+                if snapshot.child_check_subject_frontier is None
+                else dict(snapshot.child_check_subject_frontier.as_wire())
+            ),
+            "child_frontier": (
+                None if snapshot.child_frontier is None else dict(snapshot.child_frontier.as_wire())
+            ),
+            "child_receipt_id": snapshot.child_receipt_id,
+            "child_task_id": str(rollup.child_task_id),
+            "coverage_gaps": list(snapshot.coverage.known_gaps),
+            "finding_ids": list(findings),
+            "freshness": rollup.freshness,
+            "lineage_authority_revision": snapshot.lineage_authority_revision,
+            "origin": snapshot.origin.value,
+            "provenance_restrictions": list(snapshot.provenance_restrictions),
+            "read_gap_reasons": list(snapshot.read_gap_reasons),
+            "rollup_state": rollup.state.value,
+            "session_health": snapshot.session_health.value,
+            "work_state": snapshot.work_state.value,
+        }
+        children.append(row)
+    body = cast(
+        dict[str, JsonValue],
+        {
+            "children": children,
+            "gaps": [
+                {
+                    "code": gap.code,
+                    "child_task_id": gap.child_task_id,
+                    "finding_ids": [str(value) for value in gap.finding_ids],
+                    "manifest_event_id": gap.manifest_event_id,
+                }
+                for gap in evaluation.gaps
+            ],
+            "manifest_digest": evaluation.manifest_digest,
+            "schema": "yoetz.lineage-semantic-input/1",
+        },
+    )
+    encoded = canonical_encode(cast(JsonValue, body))
+    # CandidateContextItem permits a 16 KiB item.  Sending a partial JSON document would be an
+    # authority violation, so reject an over-sized structural input and let the semantic
+    # coordinator report a failed/coverage-bounded review rather than silently truncating it.
+    if len(encoded) > MAX_SEMANTIC_ITEM_BYTES:
+        raise ValueError("lineage_semantic_input_too_large")
+    return _content_item(
+        item_id="lineage",
+        section="timeline",
+        category=DataCategory.BOUNDED_STRUCTURAL_METADATA,
+        source_kind="task",
+        source_ref="lineage",
+        linked_subject_refs=(),
+        occurred_order=0,
+        text=encoded.decode("utf-8"),
+    )
+
+
 def _history_json(
     item: FrozenHistoryEvent,
     *,
@@ -332,6 +413,7 @@ def build_semantic_case(
     review_selection: ReviewSelectionPolicy,
     policy_id: str,
     policy_version: str,
+    lineage_evaluation: LineageEvaluation | None = None,
 ) -> SemanticCase:
     """Build one pre-egress semantic case from frozen authority only."""
 
@@ -1156,12 +1238,25 @@ def build_semantic_case(
                 )
                 excerpt_bytes_used += item.content_bytes
 
-    # Cap lists per selection.
+    lineage_item: SemanticCaseItem | None = None
+    if lineage_evaluation is not None:
+        # Lineage is an independent C9 channel.  Keep it in the provider packet even when the
+        # review selection caps ordinary timeline rows; it is structural authority for this
+        # parent check, not child prose selected by the review profile.
+        lineage_item = _lineage_semantic_item(lineage_evaluation)
+        items.append(lineage_item)
+
+    # Cap lists per selection.  Reserve one timeline slot for the lineage authority item when it
+    # is present.  Dropped ordinary timeline items are removed below with the rest of the
+    # post-cap catalog so SemanticCase's referenced-item invariant remains exact.
     goal_ids = goal_ids[:4]
     obligation_ids = obligation_ids[:32]
     claim_ids = claim_ids[:32]
     decision_ids = decision_ids[:16]
     timeline_ids = timeline_ids[: selection.max_timeline_items]
+    if lineage_item is not None:
+        timeline_ids = timeline_ids[: max(0, selection.max_timeline_items - 1)]
+        timeline_ids.append(lineage_item.item_id)
     review_assessments = review_assessments[: selection.max_assessments]
     changes = changes[: selection.max_change_observations]
     targeted = targeted[: selection.max_excerpts]
@@ -1189,7 +1284,10 @@ def build_semantic_case(
     }
     review_assessments.sort(
         key=lambda item: (
-            kind_order[item.finding_kind],
+            # The finding registry is extensible by coordination lanes.  Keep the historical
+            # review order for the core kinds, while placing a newly registered kind after that
+            # stable prefix instead of raising a KeyError during semantic case construction.
+            kind_order.get(item.finding_kind, len(kind_order)),
             tuple(ref.encode("ascii") for ref in item.subject_refs),
         )
     )

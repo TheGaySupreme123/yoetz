@@ -186,12 +186,22 @@ from yoetz.protocol.models import (
 __all__ = ["MemoryLedgerAdapter", "MemoryLedgerState", "compact_status_coverage"]
 
 _GENESIS: Final = Frontier.genesis()
+_REPLAY_SAFE_IMMATERIAL_FAMILIES: Final = frozenset({"receipt_recorded"})
 type _SummaryCode = Literal[
     "action_recorded",
     "assignment_recorded",
     "check_recorded",
+    "child_accepted",
+    "child_dependencies_recorded",
+    "child_rejected",
+    "child_written_off",
     "claim_recorded",
+    "coordination_context_recorded",
+    "coordination_disposition_recorded",
+    "coordination_obligation_declared",
     "decision_recorded",
+    "delegation_cancelled",
+    "delegation_declared",
     "evidence_recorded",
     "finding_recorded",
     "obligation_published",
@@ -204,6 +214,10 @@ type _SummaryCode = Literal[
     "result_recorded",
     "session_opened",
     "session_resumed",
+    "work_abandoned",
+    "work_cancelled",
+    "work_closed",
+    "work_written_off",
 ]
 
 
@@ -1323,6 +1337,28 @@ class MemoryLedgerAdapter:
             if record.ledger.ingestion_sequence > sequence
         )
 
+    def _receipt_prefix_suffix_safe_unlocked(
+        self, sequence: int, *, finding_free: bool = False
+    ) -> bool:
+        """True when a pinned receipt prefix only gained immaterial records.
+
+        A second rendering of one checked receipt may follow an engine-derived
+        ``receipt_recorded`` event. That suffix changes the ledger frontier and receipt history,
+        but it does not change the deterministic case. Observation records remain allowed under
+        the existing observation rule; all other event families, including child manifests, are
+        treated as material so a stale prefix cannot launder newer work.
+        """
+
+        return all(
+            (
+                is_observation_authored(record)
+                or record.schema.name in _REPLAY_SAFE_IMMATERIAL_FAMILIES
+            )
+            and not (finding_free and record.schema.name == "finding_recorded")
+            for record in self._state.records
+            if record.ledger.ingestion_sequence > sequence
+        )
+
     def _projection_anchored_unlocked(self, projection: ProjectionState) -> bool:
         """True when ``projection`` is the exact replay of this chain through its frontier."""
 
@@ -1401,7 +1437,7 @@ class MemoryLedgerAdapter:
                 and command.expected_frontier != subject.sequence
                 and not (
                     command.expected_frontier < subject.sequence
-                    and self._observation_only_since_unlocked(
+                    and self._receipt_prefix_suffix_safe_unlocked(
                         command.expected_frontier,
                         finding_free=command.operation_kind is OperationKind.RECEIPT,
                     )
@@ -1609,14 +1645,17 @@ class MemoryLedgerAdapter:
             if not any(row.session_id == session_id for row in self._state.records):
                 raise _frontier_conflict(live)
             # A case pinned to a past frontier stays valid while the live chain only extends it
-            # with observation-authored, finding-free records. Replaying and comparing the exact
-            # prefix is required: its head digest authenticates the ledger prefix, not an arbitrary
-            # caller-supplied ProjectionState that happens to repeat that frontier. Anything else
-            # is a real conflict.
+            # with observation-authored or receipt-only, finding-free records. Replaying and
+            # comparing the exact prefix is required: its head digest authenticates the ledger
+            # prefix, not an arbitrary caller-supplied ProjectionState that happens to repeat that
+            # frontier. Anything else is a real conflict.
             if projection != self._state.projection and not (
                 projection.frontier < live.sequence
                 and self._projection_anchored_unlocked(projection)
-                and self._observation_only_since_unlocked(projection.frontier, finding_free=True)
+                and self._receipt_prefix_suffix_safe_unlocked(
+                    projection.frontier,
+                    finding_free=True,
+                )
             ):
                 raise _frontier_conflict(live)
             by_event = {row.event_id: row for row in self._state.records}

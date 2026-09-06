@@ -12,6 +12,7 @@ from pathlib import Path
 import apsw
 import pytest
 
+from yoetz.adapters.sqlite.migrations import initialize_catalog
 from yoetz.adapters.sqlite.start_catalog import SqliteStartCatalog
 from yoetz.domain.values import Frontier
 from yoetz.ports.runtime import StartCompletionEvidence, StartMilestone
@@ -255,7 +256,7 @@ async def test_attachment_conflict_and_quarantine_paths() -> None:
 
 @pytest.mark.anyio
 async def test_workspace_ref_groups_sibling_tasks_and_pair_attaches() -> None:
-    """create_or_attach on a drifted pair conflicts; mode=create still makes a sibling."""
+    """A drifted pair creates an authorized sibling and later resumes that exact pair."""
 
     harness = _Harness.create(840)
     first_request = await harness.command(841, mode=StartMode.CREATE_OR_ATTACH, refs="A")
@@ -280,45 +281,100 @@ async def test_workspace_ref_groups_sibling_tasks_and_pair_attaches() -> None:
         commitments_b,
         None,
     )
-    with pytest.raises(PublicOperationError) as drifted:
-        await harness.catalog.reserve_or_resume(drifted_request)
-    assert drifted.value.code is PublicErrorCode.SESSION_CONFLICT
-    assert drifted.value.safe_details == {"reason_code": "workspace_task_exists"}
-    assert first.task_id not in drifted.value.message
-    assert first.session_id not in drifted.value.message
-    assert first.writer_id not in drifted.value.message
+    second = await harness.catalog.reserve_or_resume(drifted_request)
+    assert second.route_action == "created"
+    assert second.task_id != first.task_id
+    await _complete(harness.catalog, second, 844)
 
-    create_request = StartCommand(
-        _id(IdKind.REQUEST, 844),
-        canonical_digest(
-            {
-                "external": commitments_b.external_ref_commitment,
-                "mode": StartMode.CREATE.value,
-                "session_id": None,
-                "title": commitments_b.title_commitment,
-                "workspace": commitments_b.workspace_ref_commitment,
-            }
-        ),
-        StartMode.CREATE,
+    drifted_attach = StartCommand(
+        _id(IdKind.REQUEST, 845),
+        drifted_request.request_digest,
+        StartMode.CREATE_OR_ATTACH,
         identity_b,
         commitments_b,
         None,
     )
-    second = await harness.catalog.reserve_or_resume(create_request)
-    await _complete(harness.catalog, second, 845)
+    drifted_attach_result = await harness.catalog.reserve_or_resume(drifted_attach)
+    assert drifted_attach_result.route_action == "attached"
+    assert drifted_attach_result.task_id == second.task_id
+    await _complete(harness.catalog, drifted_attach_result, 846)
 
-    assert second.task_id != first.task_id
+    identity_c = StartIdentityInput("Task title", "workspace-A", "external-C")
+    commitments_c = await harness.catalog.commit_identity(identity_c)
+    create_request = StartCommand(
+        _id(IdKind.REQUEST, 847),
+        canonical_digest(
+            {
+                "external": commitments_c.external_ref_commitment,
+                "mode": StartMode.CREATE.value,
+                "session_id": None,
+                "title": commitments_c.title_commitment,
+                "workspace": commitments_c.workspace_ref_commitment,
+            }
+        ),
+        StartMode.CREATE,
+        identity_c,
+        commitments_c,
+        None,
+    )
+    third = await harness.catalog.reserve_or_resume(create_request)
+    await _complete(harness.catalog, third, 848)
+
+    assert third.task_id not in {first.task_id, second.task_id}
     workspace = first_request.identity_commitments.workspace_ref_commitment
     assert workspace is not None
     grouped = await harness.catalog.list_workspace_task_ids(workspace)
-    assert grouped == tuple(sorted((first.task_id, second.task_id)))
+    assert grouped == tuple(sorted((first.task_id, second.task_id, third.task_id)))
 
-    attach_request = await harness.command(846, mode=StartMode.CREATE_OR_ATTACH, refs="A")
+    attach_request = await harness.command(849, mode=StartMode.CREATE_OR_ATTACH, refs="A")
     attached = await harness.catalog.reserve_or_resume(attach_request)
     assert attached.route_action == "attached"
     assert attached.task_id == first.task_id
     grouped_after = await harness.catalog.list_workspace_task_ids(workspace)
     assert grouped_after == grouped
+
+
+@pytest.mark.anyio
+async def test_prebirth_auto_grouping_preference_is_durable_without_project_birth() -> None:
+    installation_id = _id(IdKind.INSTALLATION, 850)
+    database = apsw.Connection(":memory:")
+    initialize_catalog(database)
+    database.executemany(
+        "INSERT INTO catalog_meta(key, value) VALUES(?, ?)",
+        (("installation_id", installation_id), ("owner_generation", "1")),
+    )
+    clock = _Clock(datetime(2026, 7, 19, 12, 0, tzinfo=UTC))
+    catalog = SqliteStartCatalog(
+        database,
+        installation_id=installation_id,
+        lookup=_Lookup(),
+        clock=clock,
+        ids=_Ids(),
+    )
+    repository = "hmac-sha256:" + "a" * 64
+
+    assert await catalog.repository_auto_grouping_enabled(repository) is True
+    assert await catalog.set_project_auto_grouping(repository, enabled=False) is None
+    assert await catalog.repository_auto_grouping_enabled(repository) is False
+    assert database.execute("SELECT COUNT(*) FROM projects").fetchone() == (0,)
+    assert database.execute(
+        "SELECT auto_grouping FROM repository_grouping_preferences WHERE repository_commitment = ?",
+        (repository,),
+    ).fetchone() == (0,)
+
+    assert await catalog.ensure_repository_project_if_auto_grouping_enabled(repository) is None
+    assert database.execute("SELECT COUNT(*) FROM projects").fetchone() == (0,)
+    project = await catalog.ensure_repository_project(repository)
+    assert project.auto_grouping is False
+    assert database.execute("SELECT COUNT(*) FROM projects").fetchone() == (1,)
+
+    updated = await catalog.set_project_auto_grouping(repository, enabled=True)
+    assert updated is not None and updated.auto_grouping is True
+    assert await catalog.repository_auto_grouping_enabled(repository) is True
+    assert database.execute(
+        "SELECT auto_grouping FROM repository_grouping_preferences WHERE repository_commitment = ?",
+        (repository,),
+    ).fetchone() == (1,)
 
 
 @pytest.mark.anyio

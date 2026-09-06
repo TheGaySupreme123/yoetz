@@ -11,6 +11,7 @@ from typing import Final, Literal, cast
 from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
     Finding,
+    FindingKind,
     FindingOrigin,
     ResponseDisposition,
     WaiverScope,
@@ -67,6 +68,9 @@ __all__ = [
     "PolicyVersionEntry",
     "ReceiptConclusion",
     "ReceiptDocument",
+    "ReceiptChildFinding",
+    "ReceiptChildOutcome",
+    "ReceiptChildren",
     "ReceiptGap",
     "ReceiptObligation",
     "ReceiptObligationStatus",
@@ -468,6 +472,27 @@ class ReceiptVersionSlice:
         )
 
 
+def _receipt_document_artifact_version(versions: ReceiptVersionSlice) -> str | None:
+    """Return the selected receipt-document artifact version from a receipt version slice.
+
+    The document's ``schema_version`` field predates versioned artifact selection and therefore
+    remains ``1.0.0``.  Artifact evolution is recorded in the version slice, where 1.0.0 and
+    1.1.0 are the child-free readers and 1.2.0 is the additive child-bearing writer.
+    """
+
+    return next(
+        (
+            entry.schema_version
+            for entry in versions.schema_versions
+            # Stored version slices historically used the resource path while the
+            # version manifest uses the request/result schema id.  Both identify the
+            # same receipt-document artifact and must select the same reader/writer.
+            if entry.schema_id in {"receipts/receipt-document", "receipt-document"}
+        ),
+        None,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ReceiptObligation:
     obligation_id: ObligationId
@@ -554,6 +579,96 @@ class ReceiptGap:
 
 
 @dataclass(frozen=True, slots=True)
+class ReceiptChildFinding:
+    """The bounded finding identity copied into a direct-child receipt row."""
+
+    finding_id: FindingId
+    kind: FindingKind
+    origin: FindingOrigin
+    priority: int
+    actionable: bool
+    resolved: bool
+    resolution_event_id: EventId | None = None
+
+    def __post_init__(self) -> None:
+        invalid = "invalid_receipt_child_finding"
+        object.__setattr__(self, "finding_id", finding_id(self.finding_id))
+        if type(self.kind) is not FindingKind or type(self.origin) is not FindingOrigin:
+            raise ProtocolValueError(invalid)
+        if type(self.priority) is not int or not 1 <= self.priority <= 3:
+            raise ProtocolValueError(invalid)
+        expected_priority, expected_actionable = FINDING_KIND_TRAITS[self.kind]
+        if self.priority != expected_priority or type(self.actionable) is not bool:
+            raise ProtocolValueError(invalid)
+        if self.actionable is not expected_actionable or type(self.resolved) is not bool:
+            raise ProtocolValueError(invalid)
+        resolution = (
+            None if self.resolution_event_id is None else event_id(self.resolution_event_id)
+        )
+        if self.resolved is not (resolution is not None):
+            raise ProtocolValueError(invalid)
+        object.__setattr__(self, "resolution_event_id", resolution)
+
+
+@dataclass(frozen=True, slots=True)
+class ReceiptChildOutcome:
+    """One direct child's frozen contribution to a parent receipt."""
+
+    child_task_id: TaskId
+    outcome: Literal["clean", "annotated", "open_gap", "incomplete", "unavailable"]
+    tested_manifest_ref: EventId | None
+    later_manifest_ref: EventId | None
+    freshness: Literal["known", "unknown"]
+    findings: tuple[ReceiptChildFinding, ...]
+
+    def __post_init__(self) -> None:
+        invalid = "invalid_receipt_child_outcome"
+        object.__setattr__(self, "child_task_id", task_id(self.child_task_id))
+        if self.outcome not in {"clean", "annotated", "open_gap", "incomplete", "unavailable"}:
+            raise ProtocolValueError(invalid)
+        tested = None if self.tested_manifest_ref is None else event_id(self.tested_manifest_ref)
+        later = None if self.later_manifest_ref is None else event_id(self.later_manifest_ref)
+        object.__setattr__(self, "tested_manifest_ref", tested)
+        object.__setattr__(self, "later_manifest_ref", later)
+        if self.freshness not in {"known", "unknown"}:
+            raise ProtocolValueError(invalid)
+        values = _validate_tuple(self.findings, 0, 64, invalid)
+        if any(type(value) is not ReceiptChildFinding for value in values):
+            raise ProtocolValueError(invalid)
+        typed_values = cast(tuple[ReceiptChildFinding, ...], values)
+        ordered = tuple(
+            sorted(typed_values, key=lambda value: str(value.finding_id).encode("ascii"))
+        )
+        if typed_values != ordered or len({value.finding_id for value in typed_values}) != len(
+            typed_values
+        ):
+            raise ProtocolValueError(invalid)
+        if self.outcome == "unavailable" and tested is not None:
+            raise ProtocolValueError("receipt_child_manifest_mismatch")
+
+
+@dataclass(frozen=True, slots=True)
+class ReceiptChildren:
+    """Canonical wrapper for the receipt document's direct-child section."""
+
+    children: tuple[ReceiptChildOutcome, ...] = ()
+
+    def __post_init__(self) -> None:
+        invalid = "invalid_receipt_children"
+        values = _validate_tuple(self.children, 0, 64, invalid)
+        if any(type(value) is not ReceiptChildOutcome for value in values):
+            raise ProtocolValueError(invalid)
+        typed_values = cast(tuple[ReceiptChildOutcome, ...], values)
+        ordered = tuple(
+            sorted(typed_values, key=lambda value: str(value.child_task_id).encode("ascii"))
+        )
+        if typed_values != ordered or len({value.child_task_id for value in typed_values}) != len(
+            typed_values
+        ):
+            raise ProtocolValueError("receipt_children_not_canonical")
+
+
+@dataclass(frozen=True, slots=True)
 class ReceiptRedaction:
     category: ReceiptRedactionCategory
     reason: ReceiptRedactionReason
@@ -596,6 +711,10 @@ class ReceiptSection:
 
 @dataclass(frozen=True, slots=True)
 class ReceiptDocument:
+    # ``schema_version`` is the version carried inside the receipt document.  The receipt
+    # document artifact itself is selected by ``versions.schema_versions`` and is currently
+    # 1.2.0 when the additive ``children`` member is present.  The inner field intentionally
+    # remains 1.0.0 for compatibility with the 1.0.0 and 1.1.0 artifact readers.
     schema_version: Literal["1.0.0"] = field(default="1.0.0", init=False)
     receipt_id: ReceiptId
     task_id: TaskId
@@ -614,9 +733,12 @@ class ReceiptDocument:
     gaps: tuple[ReceiptGap, ...]
     redactions: tuple[ReceiptRedaction, ...]
     sections: tuple[ReceiptSection, ...]
+    children: ReceiptChildren = field(default_factory=ReceiptChildren)
 
     def __post_init__(self) -> None:
         invalid = "invalid_receipt_document"
+        if self.schema_version != "1.0.0":
+            raise ProtocolValueError(invalid)
         object.__setattr__(self, "receipt_id", receipt_id(self.receipt_id))
         object.__setattr__(self, "task_id", task_id(self.task_id))
         object.__setattr__(self, "session_id", session_id(self.session_id))
@@ -657,6 +779,11 @@ class ReceiptDocument:
         sections = _validate_tuple(self.sections, 3, 6, invalid)
         if any(type(value) is not ReceiptSection for value in sections):
             raise ProtocolValueError(invalid)
+        if type(self.children) is not ReceiptChildren:
+            raise ProtocolValueError(invalid)
+        receipt_schema_version = _receipt_document_artifact_version(self.versions)
+        if self.children.children and receipt_schema_version != "1.2.0":
+            raise ProtocolValueError("receipt_children_schema_version")
         section_keys = tuple(cast(ReceiptSection, section).key for section in sections)
         if section_keys not in _VALID_SECTION_KEY_SEQUENCES:
             raise ProtocolValueError("invalid_receipt_section_order")
@@ -825,6 +952,78 @@ def _gap_from_json(value: object) -> ReceiptGap:
     )
 
 
+def _child_finding_from_json(value: object) -> ReceiptChildFinding:
+    invalid = "invalid_receipt_child_finding"
+    source = _closed_object(
+        value,
+        frozenset({"finding_id", "kind", "origin", "priority", "actionable", "resolved"}),
+        frozenset({"resolution_event_id"}),
+        invalid,
+    )
+    keys = frozenset(cast(tuple[str, ...], tuple(source)))
+    return ReceiptChildFinding(
+        finding_id=finding_id(_field(source, "finding_id", invalid)),
+        kind=_enum_value(_field(source, "kind", invalid), FindingKind, invalid),
+        origin=_enum_value(_field(source, "origin", invalid), FindingOrigin, invalid),
+        priority=cast(int, _field(source, "priority", invalid)),
+        actionable=cast(bool, _field(source, "actionable", invalid)),
+        resolved=cast(bool, _field(source, "resolved", invalid)),
+        resolution_event_id=(
+            event_id(_field(source, "resolution_event_id", invalid))
+            if "resolution_event_id" in keys
+            else None
+        ),
+    )
+
+
+def _child_outcome_from_json(value: object) -> ReceiptChildOutcome:
+    invalid = "invalid_receipt_child_outcome"
+    source = _closed_object(
+        value,
+        frozenset(
+            {
+                "child_task_id",
+                "outcome",
+                "tested_manifest_ref",
+                "freshness",
+                "findings",
+            }
+        ),
+        frozenset({"later_manifest_ref"}),
+        invalid,
+    )
+    keys = frozenset(cast(tuple[str, ...], tuple(source)))
+    tested_raw = _field(source, "tested_manifest_ref", invalid)
+    later_raw = (
+        _field(source, "later_manifest_ref", invalid) if "later_manifest_ref" in keys else None
+    )
+    return ReceiptChildOutcome(
+        child_task_id=task_id(_field(source, "child_task_id", invalid)),
+        outcome=cast(
+            Literal["clean", "annotated", "open_gap", "incomplete", "unavailable"],
+            _field(source, "outcome", invalid),
+        ),
+        tested_manifest_ref=None if tested_raw is None else event_id(tested_raw),
+        later_manifest_ref=None if later_raw is None else event_id(later_raw),
+        freshness=cast(Literal["known", "unknown"], _field(source, "freshness", invalid)),
+        findings=tuple(
+            _child_finding_from_json(item)
+            for item in _array(_field(source, "findings", invalid), invalid)
+        ),
+    )
+
+
+def _children_from_json(value: object) -> ReceiptChildren:
+    invalid = "invalid_receipt_children"
+    source = _closed_object(value, frozenset({"children"}), frozenset(), invalid)
+    return ReceiptChildren(
+        tuple(
+            _child_outcome_from_json(item)
+            for item in _array(_field(source, "children", invalid), invalid)
+        )
+    )
+
+
 def _redaction_from_json(value: object) -> ReceiptRedaction:
     invalid = "invalid_receipt_redaction"
     source = _closed_object(
@@ -902,9 +1101,14 @@ def receipt_document_from_json(value: object) -> ReceiptDocument:
             "sections",
         }
     )
-    source = _closed_object(value, keys, frozenset(), invalid)
-    if _field(source, "schema_version", invalid) != "1.0.0":
+    if not _is_actual_mapping(value):
         raise ProtocolValueError(invalid)
+    raw_schema_version = _field(cast(Mapping[object, object], value), "schema_version", invalid)
+    if raw_schema_version != "1.0.0":
+        raise ProtocolValueError(invalid)
+    # The artifact version is selected by the version slice.  Its 1.2.0 successor adds the
+    # required ``children`` member while retaining the document's historical inner version.
+    source = _closed_object(value, keys, frozenset({"children"}), invalid)
     raw_suppressed = _field(source, "suppressed_finding_count", invalid)
     if type(raw_suppressed) is not int:
         raise ProtocolValueError("invalid_receipt_document")
@@ -933,7 +1137,14 @@ def receipt_document_from_json(value: object) -> ReceiptDocument:
     sections = tuple(
         _section_from_json(item) for item in _array(_field(source, "sections", invalid), invalid)
     )
-    return ReceiptDocument(
+    versions = _version_slice_from_json(_field(source, "versions", invalid))
+    artifact_version = _receipt_document_artifact_version(versions)
+    has_children = "children" in source
+    if has_children and artifact_version != "1.2.0":
+        raise ProtocolValueError("invalid_receipt_document")
+    if not has_children and artifact_version == "1.2.0":
+        raise ProtocolValueError("invalid_receipt_document")
+    document = ReceiptDocument(
         receipt_id=receipt_id(_field(source, "receipt_id", invalid)),
         task_id=task_id(_field(source, "task_id", invalid)),
         session_id=session_id(_field(source, "session_id", invalid)),
@@ -945,7 +1156,7 @@ def receipt_document_from_json(value: object) -> ReceiptDocument:
             "invalid_receipt_conclusion",
         ),
         suppressed_finding_count=raw_suppressed,
-        versions=_version_slice_from_json(_field(source, "versions", invalid)),
+        versions=versions,
         coverage=coverage_from_json(cast(CanonicalJsonValue, _field(source, "coverage", invalid))),
         findings=findings,
         obligations=obligations,
@@ -955,7 +1166,13 @@ def receipt_document_from_json(value: object) -> ReceiptDocument:
         gaps=gaps,
         redactions=redactions,
         sections=sections,
+        children=(
+            _children_from_json(_field(source, "children", invalid))
+            if has_children
+            else ReceiptChildren()
+        ),
     )
+    return document
 
 
 def _frontier_to_json(frontier: Frontier) -> dict[str, object]:
@@ -1038,12 +1255,46 @@ def _section_to_json(value: ReceiptSection) -> dict[str, object]:
     return result
 
 
+def _child_finding_to_json(value: ReceiptChildFinding) -> dict[str, object]:
+    result: dict[str, object] = {
+        "finding_id": value.finding_id,
+        "kind": value.kind.value,
+        "origin": value.origin.value,
+        "priority": value.priority,
+        "actionable": value.actionable,
+        "resolved": value.resolved,
+    }
+    if value.resolution_event_id is not None:
+        result["resolution_event_id"] = value.resolution_event_id
+    return result
+
+
+def _children_to_json(value: ReceiptChildren) -> dict[str, object]:
+    return {
+        "children": [
+            {
+                "child_task_id": child.child_task_id,
+                "outcome": child.outcome,
+                "tested_manifest_ref": child.tested_manifest_ref,
+                **(
+                    {}
+                    if child.later_manifest_ref is None
+                    else {"later_manifest_ref": child.later_manifest_ref}
+                ),
+                "freshness": child.freshness,
+                "findings": [_child_finding_to_json(finding) for finding in child.findings],
+            }
+            for child in value.children
+        ]
+    }
+
+
 def receipt_document_to_json(document: ReceiptDocument) -> dict[str, object]:
     """Encode a receipt document as the exact closed schema object."""
 
     if type(document) is not ReceiptDocument:
         raise ProtocolValueError("invalid_receipt_document")
-    return {
+    result: dict[str, object] = {
         "schema_version": document.schema_version,
         "receipt_id": document.receipt_id,
         "task_id": document.task_id,
@@ -1063,6 +1314,9 @@ def receipt_document_to_json(document: ReceiptDocument) -> dict[str, object]:
         "redactions": [_redaction_to_json(value) for value in document.redactions],
         "sections": [_section_to_json(value) for value in document.sections],
     }
+    if _receipt_document_artifact_version(document.versions) == "1.2.0":
+        result["children"] = _children_to_json(document.children)
+    return result
 
 
 def receipt_weakest_coverage(document: ReceiptDocument) -> Coverage:
@@ -1144,6 +1398,28 @@ def render_receipt_human(document: ReceiptDocument, *, markdown: bool) -> str:
         if section.coverage_note is not None:
             section_parts.append(section.coverage_note)
         parts.append("\n".join(section_parts))
+    if _receipt_document_artifact_version(document.versions) == "1.2.0":
+        heading = "## Children" if markdown else "Children"
+        child_parts = [heading]
+        if not document.children.children:
+            child_parts.append("No direct child dependencies were recorded.")
+        else:
+            child_parts.append("Direct child dependency outcomes:")
+            for child in document.children.children:
+                finding_ids = tuple(str(item.finding_id) for item in child.findings)
+                findings = ", ".join(finding_ids) if finding_ids else "none"
+                tested = (
+                    "none" if child.tested_manifest_ref is None else str(child.tested_manifest_ref)
+                )
+                later = (
+                    "none" if child.later_manifest_ref is None else str(child.later_manifest_ref)
+                )
+                child_parts.append(
+                    f"- {child.child_task_id}: outcome={child.outcome}; "
+                    f"freshness={child.freshness}; tested_manifest={tested}; "
+                    f"later_manifest={later}; findings={findings}"
+                )
+        parts.append("\n".join(child_parts))
     advisory_count = sum(
         1 for finding in document.findings if not FINDING_KIND_TRAITS[finding.kind][1]
     )

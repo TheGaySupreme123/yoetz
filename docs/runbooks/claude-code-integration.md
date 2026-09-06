@@ -190,11 +190,47 @@ Claude Code has no `codex exec --json` import surface. Issue #301's bounded impo
 therefore makes no Claude adapter change; Claude evidence continues through cooperative MCP and
 the native hook/observation paths below.
 
-The native hook profile emits only `SessionStart`, scoped-Yoetz `PostToolUse`, scoped-Yoetz
-`PostToolUseFailure`, `Stop`, and `SessionEnd`. A bare MCP matcher is a negative control. Hooks call
-`yoetz hooks claude-observe` and are best-effort; timeouts/nonzero exits never authorize or block
-Claude work. The renderer knows Claude's documented `SubagentStart` / `SubagentStop` stdout shapes,
-but this profile does not advertise those events; adding them is a separate profile expansion.
+The native hook profile emits `SessionStart`, scoped-Yoetz `PostToolUse`, scoped-Yoetz
+`PostToolUseFailure`, `Stop`, `SessionEnd`, `SubagentStart`, and `SubagentStop`. A bare MCP matcher is
+a negative control. Hooks call `yoetz hooks claude-observe` and are best-effort; timeouts/nonzero
+exits never authorize or block Claude work. The child hooks retain only the bounded child identity;
+transcript, prompt, agent type, and path data stay outside the Yoetz envelope.
+
+### Task-tool subagents and attribution (#506)
+
+The exact pinned capability cell remains `claude-code-cli-local-project-2.1.241`. The earlier
+installed Claude Code `2.1.261` fixture proves native child-hook delivery in an evidence-only
+plugin. The latest installed binary reported `2.1.263`; it was exercised in a fresh isolated
+strict-plugin export with a bounded loopback Messages provider. Claude's real native `Agent` path
+started and completed one child at `spawn_depth=1`; both `SubagentStart` and `SubagentStop` hooks
+ran successfully. The observed start shape carried `agent_id`, `agent_type`, `session_id`, `cwd`,
+and `transcript_path`; stop additionally carried `agent_transcript_path` and `permission_mode`.
+Neither event carried a parent tool-call id, so child-only correlation is a required supported input
+shape.
+
+The same isolated exact-wheel run completed a Yoetz parent `start`, `mode=delegate`, native child
+`Agent`, child `mode=attach`, one `publish_work`, deterministic `check`, and JSON `receipt`. The
+parent and child ledgers durably recorded delegation, the child action, check, and receipt. The
+provider remained a loopback synthetic Messages server, Claude auth status was
+`loggedIn=false`/`authMethod=none`, and no normal credentials or vault material entered the root.
+The first `SessionStart` hook was cancelled during this run; the child and operation hooks returned
+success. This proves the bounded host and Yoetz workflow under the recorded limits; it does not
+promote either installed version to the pinned `2.1.241` capability cell or prove production model
+use.
+
+When a future exact cell proves a child signal, the service may normalize `agent_id` to a bounded
+subagent identity and retain only structural correlation. `origin=host_observed` and
+`acceptance=pending` stay service-stamped until an accepted `mode=delegate` handle or cooperative
+self-registration binds the same correlation. A hook carrying only the parent's `session_id`, or a
+PostToolUse row fired inside a child without a validated child identity, is an attribution gap and
+never parent work. The parent's advice and frontier lane remains independent. Transcript paths,
+prompts, agent types, and summaries are never correlation proof.
+
+This decision is based on installed native execution and the pinned profile boundary; a current
+online Claude reference or a renderer fixture does not upgrade the pinned cell. The #509 host
+matrix records the `2.1.261` child-hook fixture and the later installed `2.1.263` bounded
+parent/delegate publication, check, and receipt run as separate evidence cells. Cooperative MCP
+self-registration remains a separate, explicitly bounded path.
 
 Advice uses Claude Code's documented output contract. `SessionStart`, `PostToolUse`,
 `PostToolUseFailure`, and `Stop` may emit `hookSpecificOutput.additionalContext`. The failure event
@@ -218,17 +254,14 @@ A consented `SessionStart` auto-attaches a ledger task without an explicit MCP `
 sends `start mode=create_or_attach` with the canonical project root as `workspace_ref` and
 `claude-session:<session_id>` as `external_ref` (both persisted only as HMAC commitments). Success
 shows as `mapping_present: true` in `observe status` and the session's queued rows drain in the
-same pass. If that new pair conflicts because the workspace already has a task, the shared hook
-path retries once with `mode=attach` only when it already holds a valid private mapping from an
-earlier Claude session whose `SessionEnd` was received, every other bound session is ended, and the
-candidate is bound only to this consented workspace. The catalog additionally requires one mapped
-task, the selector still active, no sibling task, the matching repository-privacy binding, and no
-start already pending for that route. This reuses an already-known session selector; the public
-conflict still discloses no task or session ID, and a hard crash without `SessionEnd` remains
-fail-closed rather than being guessed from age. A successful recovery also rewrites every ended
-same-host predecessor mapping for that task to the rotated session and writer. Pending predecessor rows then
-drain on that successor route (`session_superseded` is followed, not quarantined as
-`ledger_rejected`). A failed attempt records its cause as a
+same pass. Before admitting a new pair, the shared hook path checks private persisted mappings
+from eligible ended Claude sessions. A unique mapped task resumes with `mode=attach` under the
+workspace and lifecycle locks, with the trusted repository binding and active selector revalidated.
+Ambiguous bindings or a contended recovery lock refuse or retry without creating replacement work.
+With no stored selector, a new pair creates new work, including beside a dormant task. Recovery
+rewrites eligible ended predecessor mappings and drains pending rows on the successor route
+(`session_superseded` is followed, not quarantined as `ledger_rejected`). Age alone never proves a
+host session ended. A failed attempt records its cause as a
 payload-free `hook_diagnostics` reason
 (`auto_attach_workspace_unbound`, `auto_attach_request_invalid`, `auto_attach_conflict`,
 `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,

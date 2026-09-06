@@ -23,7 +23,12 @@ from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_pa
 
 def test_claude_hook_ingress_retains_only_closed_structural_mcp_fields(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
+    inherited = tmp_path / "inherited"
+    inherited.mkdir(mode=0o700)
+    monkeypatch.setenv("YOETZ_ISOLATED_ROOT", str(inherited))
+    local_state = tmp_path / "local-state"
     captured: dict[str, object] = {}
 
     def fake_handle_observe(**kwargs: object) -> int:
@@ -49,6 +54,7 @@ def test_claude_hook_ingress_retains_only_closed_structural_mcp_fields(
             stdin_bytes=canonical_encode(payload),
             stdout=io.BytesIO(),
             workspace=".",
+            _state=local_state,
         )
         == 0
     )
@@ -62,6 +68,51 @@ def test_claude_hook_ingress_retains_only_closed_structural_mcp_fields(
         "success": True,
         "tool_name": "mcp__plugin_yoetz_yoetz__start",
         "tool_use_id": "tool-1",
+    }
+    assert captured["source"] is ObservationSource.CLAUDE_HOOK
+    assert _recorded_diagnostics(local_state) == [("start_bind_unparsed", "PostToolUse")]
+    assert list(inherited.iterdir()) == []
+
+
+@pytest.mark.parametrize("event_name", ["SubagentStart", "SubagentStop"])
+def test_claude_native_child_ingress_keeps_child_identity_without_parent_tool(
+    monkeypatch: pytest.MonkeyPatch,
+    event_name: str,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_handle_observe(**kwargs: object) -> int:
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(observe_hooks, "handle_observe", fake_handle_observe)
+    payload: dict[str, JsonValue] = {
+        "agent_id": "claude-agent-1",
+        "agent_type": "general-purpose",
+        "agent_transcript_path": "/private/agent-transcript.jsonl",
+        "cwd": "/private/project",
+        "hook_event_name": event_name,
+        "permission_mode": "dontAsk",
+        "session_id": "claude-parent-session",
+        "transcript_path": "/private/transcript.jsonl",
+    }
+
+    assert (
+        observe_hooks.handle_claude_observe(
+            event_name=event_name,
+            stdin_bytes=canonical_encode(payload),
+            stdout=io.BytesIO(),
+        )
+        == 0
+    )
+    sanitized = strict_json_parse(cast(bytes, captured["stdin_bytes"]))
+    assert isinstance(sanitized, Mapping)
+    assert sanitized == {
+        "action": "claude_subagent",
+        "capability_profile_id": "untested",
+        "hook_event_name": event_name,
+        "session_id": "claude:claude-parent-session",
+        "subagent_id": "claude-agent-1",
     }
     assert captured["source"] is ObservationSource.CLAUDE_HOOK
 

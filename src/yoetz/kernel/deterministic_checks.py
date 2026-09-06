@@ -438,6 +438,10 @@ DETERMINISTIC_FINDING_TEMPLATES: Final[
             "A deterministic finding was rejected without admissible support.",
             "Provide current evidence for the rejection.",
         ),
+        FindingKind.COORDINATION_OVERLAP: DeterministicFindingTemplate(
+            "Accepted work overlaps another live task in the coordination scope.",
+            "Record a coordination disposition, then run a qualifying check to resolve the overlap.",
+        ),
     }
 )
 if frozenset(DETERMINISTIC_FINDING_TEMPLATES) != frozenset(FindingKind):
@@ -1187,6 +1191,9 @@ def _projection_records(
         projection.claims,
         projection.findings,
         projection.responses,
+        projection.coordination_contexts,
+        projection.coordination_declarations,
+        projection.coordination_dispositions,
     ):
         records.extend(cast(Iterable[ProjectionRecord[object]], collection.values()))
     return tuple(records)
@@ -1205,6 +1212,12 @@ def _logical_sources(projection: ProjectionState) -> dict[FindingBasisRef, Event
     for logical, record in projection.claims.items():
         sources[logical] = record.source_event_id
     for logical, record in projection.findings.items():
+        sources[logical] = record.source_event_id
+    for logical, record in projection.coordination_contexts.items():
+        sources[logical] = record.source_event_id
+    for logical, record in projection.coordination_declarations.items():
+        sources[logical] = record.source_event_id
+    for logical, record in projection.coordination_dispositions.items():
         sources[logical] = record.source_event_id
     return sources
 

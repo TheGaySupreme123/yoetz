@@ -228,10 +228,10 @@ async def test_open_ready_catalog_transactionally_migrates_v2_before_runtime_use
         ids=IdPort(),
     )
     try:
-        assert catalog._db.execute("PRAGMA user_version").fetchone() == (3,)  # pyright: ignore[reportPrivateUsage]
+        assert catalog._db.execute("PRAGMA user_version").fetchone() == (4,)  # pyright: ignore[reportPrivateUsage]
         assert catalog._db.execute(  # pyright: ignore[reportPrivateUsage]
             "SELECT value FROM catalog_meta WHERE key = 'storage_schema_version'"
-        ).fetchone() == ("3",)
+        ).fetchone() == ("4",)
         assert (
             catalog._db.execute(  # pyright: ignore[reportPrivateUsage]
                 "SELECT repository_privacy_commitment FROM task_routes LIMIT 1"
@@ -492,7 +492,10 @@ async def test_ready_factory_starts_and_reads_repository_bound_setup(tmp_path: P
                 "requested_view": "compact",
             }
         )
-        result = await app.start(request)
+        result = await app.start(
+            request,
+            repository_privacy_context=repository_context,
+        )
         rpc_id = new_id(IdKind.CONTROL_RPC)
         facts = await app.projection_binding_facts(ControlMethod.START, request, result)
         binding = ControlProjectionBinding(
@@ -523,6 +526,19 @@ async def test_ready_factory_starts_and_reads_repository_bound_setup(tmp_path: P
         assert result.ok is True
         assert result.outcome == "created"
         assert result.frontier.sequence == "1"
+        route = await app.start_catalog.task_route(result.task_id)
+        assert route is not None
+        assert route.repository_privacy_commitment == repository_context.commitment
+        # The runtime cache retains the inspected route after START releases its lease.  This
+        # checks the production provision callback carried the catalog authority through the
+        # command instead of rebuilding a route with default metadata.
+        entries = cast(dict[str, object], getattr(app.runtime, "_entries"))
+        entry = entries[result.task_id]
+        inspection = cast(object, getattr(entry, "inspection"))
+        inspected_route = cast(object, getattr(inspection, "route"))
+        assert getattr(inspected_route, "repository_privacy_commitment") == (
+            repository_context.commitment
+        )
         verified_routes, replayed_events, verified_objects = await app.verify_recovery_candidate()
         assert verified_routes == 1
         assert replayed_events >= 1

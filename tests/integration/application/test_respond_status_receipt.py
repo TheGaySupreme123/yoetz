@@ -372,19 +372,29 @@ def _scope(_binding: object, source: Mapping[str, JsonValue]) -> AuthorizationSc
     )
 
 
-async def _semantic_disabled(frozen: object, findings: object) -> object:
-    del frozen, findings
+async def _semantic_disabled(
+    frozen: object,
+    findings: object,
+    runtime: object | None = None,
+    lineage_evaluation: object | None = None,
+) -> object:
+    del frozen, findings, runtime, lineage_evaluation
     raise AssertionError("semantic_evaluator_called_in_deterministic_mode")
 
 
-async def _semantic_succeeds(frozen: object, findings: object) -> object:
+async def _semantic_succeeds(
+    frozen: object,
+    findings: object,
+    runtime: object | None = None,
+    lineage_evaluation: object | None = None,
+) -> object:
     """Reach ``succeeded`` without raising a semantic challenge of its own.
 
     Semantic delivery is exercised elsewhere; here the only thing that matters is that the check
     earns ``semantic_model_derived`` coverage, so the receipt has something to lose.
     """
 
-    del frozen, findings
+    del frozen, findings, runtime, lineage_evaluation
     return FinalSemanticEvaluation(
         SemanticStatus.SUCCEEDED,
         SemanticReason.SEMANTIC_COMPLETED,

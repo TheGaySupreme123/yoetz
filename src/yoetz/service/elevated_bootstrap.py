@@ -39,7 +39,12 @@ from yoetz.domain.privacy import (
     ReviewContextProfile,
 )
 from yoetz.domain.values import ProtocolValueError, validate_commitment, validate_sha256_digest
-from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
+from yoetz.protocol.canonical import (
+    JsonValue,
+    canonical_digest,
+    canonical_encode,
+    parse_canonical_integer_string,
+)
 from yoetz.protocol.consent import (
     CONSENT_PENDING_TTL_SECONDS,
     AgentSafePendingModel,
@@ -51,6 +56,7 @@ from yoetz.protocol.consent import (
     RepositoryPrivacyProviderBindingModel,
     RepositoryPrivacyRecipe,
 )
+from yoetz.protocol.ids import IdKind, validate_id
 from yoetz.service.confidential_protocol import ProviderCredentialTarget
 
 __all__ = [
@@ -60,6 +66,7 @@ __all__ = [
     "ElevatedOperation",
     "PendingElevatedConsent",
     "ImportPublicationAuthorization",
+    "ProjectCoordinationAuthorization",
     "RiskClass",
     "catalog_payload",
     "claim_pending_for_review",
@@ -69,11 +76,17 @@ __all__ = [
     "repository_grant_binding",
     "consume_import_publication_authorization",
     "load_import_publication_authorization",
+    "load_project_coordination_audit_record_id",
     "load_pending",
     "operation_spec",
     "prepare_pending",
     "projection_for_status",
     "record_import_publication_authorization",
+    "record_project_coordination_authorization",
+    "load_project_coordination_authorization",
+    "consume_project_coordination_authorization",
+    "project_coordination_grant_binding",
+    "project_coordination_target_digest",
     "status_payload",
 ]
 
@@ -100,6 +113,7 @@ ElevatedOperation = Literal[
     "skill_install",
     "plugin_artifact_apply",
     "harness_mcp_register",
+    "project_coordination_grant",
 ]
 
 _SCHEMA: Final = "yoetz.elevated-bootstrap.pending/4"
@@ -116,6 +130,7 @@ _REVIEW_NAME: Final = "elevated-bootstrap-reviewing.json"
 _REVIEW_LOCK_NAME: Final = ".elevated-bootstrap.lock"
 _AUDIT_NAME: Final = "elevated-bootstrap-audit.jsonl"
 _IMPORT_AUTHORIZATION_NAME: Final = "import-publication-authorization.json"
+_PROJECT_COORDINATION_AUTHORIZATION_NAME: Final = "project-coordination-authorization.json"
 _FORBIDDEN: Final = ("mcp", "argv", "env", "stdin", "config", "transcript")
 _PROVIDER_BINDING_KEYS: Final = (
     "provider_id",
@@ -131,6 +146,14 @@ _PROVIDER_BINDING_OPTIONAL_KEYS: Final = frozenset({_PROVIDER_REPOSITORY_KEY})
 _GRANT_BINDING_KEYS: Final = ("schema", "preview", "current_policy", "candidate_policy")
 _GRANT_RECIPES: Final[frozenset[RepositoryPrivacyRecipe]] = frozenset(
     {"assisted_review", "expanded_review", "private", "metadata_only"}
+)
+_COORDINATION_BINDING_SCHEMA: Final = "yoetz.project-coordination-grant-binding/1"
+_COORDINATION_BINDING_KEYS: Final = (
+    "schema",
+    "project_id",
+    "membership_generation",
+    "action",
+    "audit_record_id",
 )
 
 
@@ -234,6 +257,22 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         ),
         requires_provider_binding=False,
         requires_grant_binding=True,
+        requires_target_digest_arg=False,
+        implemented=True,
+        agent_chat_authorize_allowed=True,
+    ),
+    ConsentOperationSpec(
+        operation="project_coordination_grant",
+        risk_class="privacy_widen",
+        summary="Grant bounded local coordination for one project generation.",
+        danger_text=(
+            "DANGER — project coordination grant. Allows bounded local disclosure for the exact "
+            "project membership generation and audit record shown in this request. It does not "
+            "authorize external semantic dispatch, attach, resume, or task selection. The grant "
+            "expires if it is not consumed by that exact project operation."
+        ),
+        requires_provider_binding=False,
+        requires_grant_binding=False,
         requires_target_digest_arg=False,
         implemented=True,
         agent_chat_authorize_allowed=True,
@@ -399,6 +438,7 @@ class PendingElevatedConsent:
     provider_binding: Mapping[str, str] | None
     grant_binding: Mapping[str, JsonValue] | None = None
     import_publication_preview: Mapping[str, JsonValue] | None = None
+    coordination_binding: Mapping[str, JsonValue] | None = None
 
     def as_json(self) -> dict[str, JsonValue]:
         payload: dict[str, JsonValue] = {
@@ -419,6 +459,8 @@ class PendingElevatedConsent:
             payload["grant_binding"] = dict(self.grant_binding)
         if self.import_publication_preview is not None:
             payload["import_publication_preview"] = dict(self.import_publication_preview)
+        if self.coordination_binding is not None:
+            payload["coordination_binding"] = dict(self.coordination_binding)
         return payload
 
 
@@ -437,6 +479,60 @@ class ImportPublicationAuthorization:
             "pending_id": self.pending_id,
             "danger_digest": self.danger_digest,
             "target_digest": self.target_digest,
+            "expires_at_unix": self.expires_at_unix,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectCoordinationAuthorization:
+    """One-use owner-only proof for one exact project-generation grant.
+
+    This is deliberately a narrow handoff from the existing elevated consent ceremony to the
+    project application.  It is not a bearer token: the application recomputes the binding from
+    its live project generation and audit record, then consumes this record under the same lock.
+    """
+
+    pending_id: str
+    danger_digest: str
+    target_digest: str
+    project_id: str
+    membership_generation: int
+    action: Literal["grant"]
+    audit_record_id: str
+    expires_at_unix: int
+
+    def __post_init__(self) -> None:
+        try:
+            if type(self.pending_id) is not str or len(self.pending_id) != 64:
+                raise ValueError("project_coordination_authorization_invalid")
+            if any(character not in "0123456789abcdef" for character in self.pending_id):
+                raise ValueError("project_coordination_authorization_invalid")
+            validate_sha256_digest(self.danger_digest)
+            validate_sha256_digest(self.target_digest)
+            validate_id(IdKind.PROJECT, self.project_id)
+            if (
+                type(self.membership_generation) is not int
+                or not 1 <= self.membership_generation <= 2**53 - 1
+            ):
+                raise ValueError("project_coordination_authorization_invalid")
+            if self.action != "grant":
+                raise ValueError("project_coordination_authorization_invalid")
+            validate_id(IdKind.EVENT, self.audit_record_id)
+            if type(self.expires_at_unix) is not int or self.expires_at_unix <= 0:
+                raise ValueError("project_coordination_authorization_invalid")
+        except (TypeError, ValueError, ProtocolValueError) as exc:
+            raise ValueError("project_coordination_authorization_invalid") from exc
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            "schema": "yoetz.project-coordination-authorization/1",
+            "pending_id": self.pending_id,
+            "danger_digest": self.danger_digest,
+            "target_digest": self.target_digest,
+            "project_id": self.project_id,
+            "membership_generation": str(self.membership_generation),
+            "action": self.action,
+            "audit_record_id": self.audit_record_id,
             "expires_at_unix": self.expires_at_unix,
         }
 
@@ -465,6 +561,10 @@ def review_path(*, _state: Path | None = None) -> Path:
 
 def _import_authorization_path(*, _state: Path | None = None) -> Path:
     return elevated_dir(_state=_state) / _IMPORT_AUTHORIZATION_NAME
+
+
+def _project_coordination_authorization_path(*, _state: Path | None = None) -> Path:
+    return elevated_dir(_state=_state) / _PROJECT_COORDINATION_AUTHORIZATION_NAME
 
 
 class _PendingStateLock:
@@ -560,6 +660,7 @@ def _danger_digest(
     provider_binding: Mapping[str, str] | None,
     grant_binding: Mapping[str, JsonValue] | None = None,
     import_publication_preview: Mapping[str, JsonValue] | None = None,
+    coordination_binding: Mapping[str, JsonValue] | None = None,
 ) -> str:
     body: dict[str, JsonValue] = {
         "danger_text": danger_text,
@@ -576,6 +677,8 @@ def _danger_digest(
         body["grant_binding"] = dict(grant_binding)
     if import_publication_preview is not None:
         body["import_publication_preview"] = dict(import_publication_preview)
+    if coordination_binding is not None:
+        body["coordination_binding"] = dict(coordination_binding)
     return canonical_digest(body)
 
 
@@ -586,6 +689,7 @@ def prepare_pending(
     provider_binding: Mapping[str, str] | None = None,
     grant_binding: Mapping[str, JsonValue] | None = None,
     import_publication_preview: Mapping[str, JsonValue] | None = None,
+    coordination_binding: Mapping[str, JsonValue] | None = None,
     _state: Path | None = None,
 ) -> PendingElevatedConsent:
     spec = operation_spec(operation)
@@ -618,6 +722,14 @@ def prepare_pending(
         raise ElevatedBootstrapError("import_publication_preview_forbidden")
     else:
         preview = None
+    if operation == "project_coordination_grant":
+        if coordination_binding is None:
+            raise ElevatedBootstrapError("coordination_binding_required")
+        coordination = _validated_coordination_binding(coordination_binding)
+    elif coordination_binding is not None:
+        raise ElevatedBootstrapError("coordination_binding_forbidden")
+    else:
+        coordination = None
     binding = (
         _validated_provider_binding(provider_binding) if provider_binding is not None else None
     )
@@ -626,12 +738,23 @@ def prepare_pending(
         validated_digest = validate_sha256_digest(target_digest)
     except ProtocolValueError as exc:
         raise ElevatedBootstrapError("target_digest_invalid") from exc
+    if operation == "project_coordination_grant":
+        if not _exact_match(
+            validated_digest,
+            project_coordination_target_digest(cast(Mapping[str, JsonValue], coordination)),
+        ):
+            raise ElevatedBootstrapError("coordination_binding_invalid")
     with _PendingStateLock(_state):
         if (
             operation == "import_publication"
             and _load_import_authorization_unlocked(_state=_state) is not None
         ):
             raise ElevatedBootstrapError("import_publication_authorization_active")
+        if (
+            operation == "project_coordination_grant"
+            and _load_project_coordination_authorization_unlocked(_state=_state) is not None
+        ):
+            raise ElevatedBootstrapError("project_coordination_authorization_active")
         if review_path(_state=_state).is_file():
             raise ElevatedBootstrapError("review_in_progress")
         existing = _load_pending_unlocked(_state=_state)
@@ -651,6 +774,7 @@ def prepare_pending(
             provider_binding=binding,
             grant_binding=grant,
             import_publication_preview=preview,
+            coordination_binding=coordination,
         )
         pending = PendingElevatedConsent(
             pending_id=pending_id,
@@ -664,6 +788,7 @@ def prepare_pending(
             provider_binding=binding,
             grant_binding=grant,
             import_publication_preview=preview,
+            coordination_binding=coordination,
         )
         _write_pending(pending, _state=_state)
         _audit(
@@ -678,6 +803,78 @@ def prepare_pending(
             _state=_state,
         )
     return pending
+
+
+def _validated_coordination_binding(
+    binding: Mapping[str, JsonValue],
+) -> dict[str, JsonValue]:
+    """Validate the exact project-generation grant binding used by consent.
+
+    The binding contains identities and a generation only.  It deliberately contains no project
+    title, description, path, task content, or caller supplied authority label.
+    """
+
+    if set(binding) != set(_COORDINATION_BINDING_KEYS):
+        raise ElevatedBootstrapError("coordination_binding_invalid")
+    if binding.get("schema") != _COORDINATION_BINDING_SCHEMA:
+        raise ElevatedBootstrapError("coordination_binding_invalid")
+    project_value = binding.get("project_id")
+    audit_value = binding.get("audit_record_id")
+    generation_value = binding.get("membership_generation")
+    if type(project_value) is not str or type(audit_value) is not str:
+        raise ElevatedBootstrapError("coordination_binding_invalid")
+    try:
+        project = validate_id(IdKind.PROJECT, project_value)
+        audit_record_id = validate_id(IdKind.EVENT, audit_value)
+    except (ProtocolValueError, TypeError, ValueError) as exc:
+        raise ElevatedBootstrapError("coordination_binding_invalid") from exc
+    if type(generation_value) is not str:
+        raise ElevatedBootstrapError("coordination_binding_invalid")
+    try:
+        generation = parse_canonical_integer_string(generation_value)
+    except (TypeError, ValueError) as exc:
+        raise ElevatedBootstrapError("coordination_binding_invalid") from exc
+    if generation <= 0 or generation > 2**53 - 1:
+        raise ElevatedBootstrapError("coordination_binding_invalid")
+    if binding.get("action") != "grant":
+        raise ElevatedBootstrapError("coordination_binding_invalid")
+    return {
+        "schema": _COORDINATION_BINDING_SCHEMA,
+        "project_id": project,
+        "membership_generation": str(generation),
+        "action": "grant",
+        "audit_record_id": audit_record_id,
+    }
+
+
+def project_coordination_grant_binding(
+    *,
+    project_id: str,
+    membership_generation: int,
+    audit_record_id: str,
+) -> dict[str, JsonValue]:
+    """Build one exact, canonical binding for a local project coordination grant."""
+
+    if type(membership_generation) is not int:
+        raise ElevatedBootstrapError("coordination_binding_invalid")
+    return _validated_coordination_binding(
+        {
+            "schema": _COORDINATION_BINDING_SCHEMA,
+            "project_id": project_id,
+            "membership_generation": str(membership_generation),
+            "action": "grant",
+            "audit_record_id": audit_record_id,
+        }
+    )
+
+
+def project_coordination_target_digest(
+    binding: Mapping[str, JsonValue],
+) -> str:
+    """Return the target digest bound to one project coordination grant."""
+
+    normalized = _validated_coordination_binding(binding)
+    return canonical_digest({"kind": "project_coordination_grant", "binding": normalized})
 
 
 def _validated_provider_binding(binding: Mapping[str, str]) -> dict[str, str]:
@@ -949,6 +1146,8 @@ def _load_pending_path(
             expected_keys.add("grant_binding")
         if "import_publication_preview" in source:
             expected_keys.add("import_publication_preview")
+        if "coordination_binding" in source:
+            expected_keys.add("coordination_binding")
         if set(source) != expected_keys or source.get("state") != "pending":
             raise ElevatedBootstrapError("pending_corrupt")
         operation = _require_str(source["operation"])
@@ -1011,12 +1210,34 @@ def _load_pending_path(
                 raise ElevatedBootstrapError("pending_corrupt")
         elif preview is not None:
             raise ElevatedBootstrapError("pending_corrupt")
+        coordination_raw = source.get("coordination_binding")
+        coordination: dict[str, JsonValue] | None
+        if coordination_raw is None:
+            coordination = None
+        elif isinstance(coordination_raw, dict) and all(
+            isinstance(key, str) for key in cast(dict[object, object], coordination_raw)
+        ):
+            try:
+                coordination = _validated_coordination_binding(
+                    cast(dict[str, JsonValue], coordination_raw)
+                )
+            except ElevatedBootstrapError as exc:
+                raise ElevatedBootstrapError("pending_corrupt") from exc
+        else:
+            raise ElevatedBootstrapError("pending_corrupt")
+        if (operation == "project_coordination_grant") != (coordination is not None):
+            raise ElevatedBootstrapError("pending_corrupt")
         risk = _require_str(source["risk_class"])
         danger_text = _require_str(source["danger_text"])
         if risk != spec.risk_class or danger_text != spec.danger_text:
             raise ElevatedBootstrapError("pending_tampered")
         target_digest = validate_sha256_digest(_require_str(source["target_digest"]))
         danger_digest = validate_sha256_digest(_require_str(source["danger_digest"]))
+        if operation == "project_coordination_grant":
+            if coordination is None or not _exact_match(
+                target_digest, project_coordination_target_digest(coordination)
+            ):
+                raise ElevatedBootstrapError("pending_tampered")
         created_at = _require_int(source["created_at_unix"])
         expires_at = _require_int(source["expires_at_unix"])
         if created_at <= 0 or expires_at - created_at != _TTL_SECONDS:
@@ -1033,6 +1254,7 @@ def _load_pending_path(
             provider_binding=binding,
             grant_binding=grant,
             import_publication_preview=preview,
+            coordination_binding=coordination,
         )
     except ElevatedBootstrapError:
         raise
@@ -1048,6 +1270,7 @@ def _load_pending_path(
         provider_binding=pending.provider_binding,
         grant_binding=pending.grant_binding,
         import_publication_preview=pending.import_publication_preview,
+        coordination_binding=pending.coordination_binding,
     )
     if not _exact_match(expected, pending.danger_digest):
         raise ElevatedBootstrapError("pending_tampered")
@@ -1224,6 +1447,253 @@ def consume_import_publication_authorization(
         )
 
 
+def _load_project_coordination_authorization_unlocked(
+    *, _state: Path | None = None, expire: bool = True
+) -> ProjectCoordinationAuthorization | None:
+    path = _project_coordination_authorization_path(_state=_state)
+    if not path.is_file():
+        return None
+    try:
+        decoded = json.loads(path.read_bytes().decode("utf-8"))
+        if not isinstance(decoded, dict):
+            raise ElevatedBootstrapError("project_coordination_authorization_corrupt")
+        raw = cast(dict[str, object], decoded)
+        expected_keys = {
+            "schema",
+            "pending_id",
+            "danger_digest",
+            "target_digest",
+            "project_id",
+            "membership_generation",
+            "action",
+            "audit_record_id",
+            "expires_at_unix",
+        }
+        if (
+            set(raw) != expected_keys
+            or raw.get("schema") != "yoetz.project-coordination-authorization/1"
+        ):
+            raise ElevatedBootstrapError("project_coordination_authorization_corrupt")
+        binding = _validated_coordination_binding(
+            cast(
+                dict[str, JsonValue],
+                {
+                    "schema": _COORDINATION_BINDING_SCHEMA,
+                    "project_id": raw["project_id"],
+                    "membership_generation": raw["membership_generation"],
+                    "action": raw["action"],
+                    "audit_record_id": raw["audit_record_id"],
+                },
+            )
+        )
+        authorization = ProjectCoordinationAuthorization(
+            pending_id=_validated_pending_id(raw["pending_id"]),
+            danger_digest=validate_sha256_digest(_require_str(raw["danger_digest"])),
+            target_digest=validate_sha256_digest(_require_str(raw["target_digest"])),
+            project_id=cast(str, binding["project_id"]),
+            membership_generation=parse_canonical_integer_string(
+                cast(str, binding["membership_generation"])
+            ),
+            action="grant",
+            audit_record_id=cast(str, binding["audit_record_id"]),
+            expires_at_unix=_require_int(raw["expires_at_unix"]),
+        )
+        expected_target = project_coordination_target_digest(binding)
+        if not _exact_match(authorization.target_digest, expected_target):
+            raise ElevatedBootstrapError("project_coordination_authorization_corrupt")
+    except ElevatedBootstrapError:
+        raise
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+        ProtocolValueError,
+    ) as exc:
+        raise ElevatedBootstrapError("project_coordination_authorization_corrupt") from exc
+    if authorization.expires_at_unix <= int(time.time()):
+        if expire:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                raise ElevatedBootstrapError(
+                    "project_coordination_authorization_clear_failed"
+                ) from exc
+            _audit(
+                {
+                    "event": "project_coordination_authorization_expired",
+                    "target_digest": authorization.target_digest,
+                },
+                _state=_state,
+            )
+        return None
+    return authorization
+
+
+def load_project_coordination_authorization(
+    *,
+    project_id: str,
+    membership_generation: int,
+    audit_record_id: str,
+    _state: Path | None = None,
+) -> ProjectCoordinationAuthorization | None:
+    """Load a project grant only when every live binding field matches exactly."""
+
+    try:
+        binding = project_coordination_grant_binding(
+            project_id=project_id,
+            membership_generation=membership_generation,
+            audit_record_id=audit_record_id,
+        )
+    except ElevatedBootstrapError:
+        raise
+    expected = project_coordination_target_digest(binding)
+    with _PendingStateLock(_state):
+        authorization = _load_project_coordination_authorization_unlocked(_state=_state)
+        if authorization is None or not _exact_match(authorization.target_digest, expected):
+            return None
+        return authorization
+
+
+def load_project_coordination_audit_record_id(
+    *,
+    project_id: str,
+    membership_generation: int,
+    _state: Path | None = None,
+) -> str | None:
+    """Recover the stable audit identity for a pending or approved project grant.
+
+    A grant command may omit ``audit_record_id`` on its first attempt.  The authority mints that
+    identity into the owner-only pending binding, so a retry can recover the same challenge after
+    the command response was lost.  This returns only the validated event identity and never
+    returns consent material.
+    """
+
+    if type(membership_generation) is not int:
+        raise ElevatedBootstrapError("coordination_binding_invalid")
+    try:
+        validated_project = validate_id(IdKind.PROJECT, project_id)
+    except (ProtocolValueError, TypeError, ValueError) as exc:
+        raise ElevatedBootstrapError("coordination_binding_invalid") from exc
+    if not 1 <= membership_generation <= 2**53 - 1:
+        raise ElevatedBootstrapError("coordination_binding_invalid")
+    with _PendingStateLock(_state):
+        authorization = _load_project_coordination_authorization_unlocked(_state=_state)
+        if (
+            authorization is not None
+            and authorization.project_id == validated_project
+            and authorization.membership_generation == membership_generation
+        ):
+            return authorization.audit_record_id
+        # A review claim deliberately blocks ordinary reads.  The approved artifact above is the
+        # only retry identity that is safe to expose while a human review owns the claim.
+        if review_path(_state=_state).is_file():
+            return None
+        pending = _load_pending_unlocked(_state=_state)
+        if pending is None or pending.operation != "project_coordination_grant":
+            return None
+        binding = pending.coordination_binding
+        if binding is None:
+            return None
+        if (
+            binding.get("project_id") == validated_project
+            and binding.get("membership_generation") == str(membership_generation)
+            and binding.get("action") == "grant"
+        ):
+            audit_record_id = binding.get("audit_record_id")
+            return audit_record_id if type(audit_record_id) is str else None
+        return None
+
+
+def record_project_coordination_authorization(
+    pending: PendingElevatedConsent, *, _state: Path | None = None
+) -> ProjectCoordinationAuthorization:
+    """Persist the one exact project-generation handoff after consent approval."""
+
+    if (
+        type(pending) is not PendingElevatedConsent
+        or pending.operation != "project_coordination_grant"
+        or pending.coordination_binding is None
+    ):
+        raise ElevatedBootstrapError("coordination_binding_required")
+    binding = _validated_coordination_binding(pending.coordination_binding)
+    expected_target = project_coordination_target_digest(binding)
+    if not _exact_match(pending.target_digest, expected_target):
+        raise ElevatedBootstrapError("coordination_binding_invalid")
+    authorization = ProjectCoordinationAuthorization(
+        pending_id=pending.pending_id,
+        danger_digest=pending.danger_digest,
+        target_digest=pending.target_digest,
+        project_id=cast(str, binding["project_id"]),
+        membership_generation=parse_canonical_integer_string(
+            cast(str, binding["membership_generation"])
+        ),
+        action="grant",
+        audit_record_id=cast(str, binding["audit_record_id"]),
+        expires_at_unix=pending.expires_at_unix,
+    )
+    with _PendingStateLock(_state):
+        existing = _load_project_coordination_authorization_unlocked(_state=_state)
+        if existing is not None and existing != authorization:
+            raise ElevatedBootstrapError("project_coordination_authorization_active")
+        path = _project_coordination_authorization_path(_state=_state)
+        ensure_owner_only_dir(path.parent)
+        payload = canonical_encode(authorization.as_json())
+        # A unique sibling avoids treating a crash-left temporary file as a live
+        # authorization and keeps retries safe after an interrupted write.
+        tmp = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+        try:
+            descriptor = os.open(tmp, flags, 0o600)
+            try:
+                os.write(descriptor, payload)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        os.chmod(path, 0o600)
+        _audit(
+            {
+                "event": "project_coordination_authorized",
+                "pending_id": pending.pending_id,
+                "target_digest": pending.target_digest,
+            },
+            _state=_state,
+        )
+    return authorization
+
+
+def consume_project_coordination_authorization(
+    authorization: ProjectCoordinationAuthorization, *, _state: Path | None = None
+) -> None:
+    """Consume an exact project grant handoff under the owner-only consent lock."""
+
+    if type(authorization) is not ProjectCoordinationAuthorization:
+        raise TypeError("project_coordination_authorization_invalid")
+    with _PendingStateLock(_state):
+        observed = _load_project_coordination_authorization_unlocked(_state=_state, expire=False)
+        if observed is None or observed != authorization:
+            raise ElevatedBootstrapError("project_coordination_authorization_mismatch")
+        try:
+            _project_coordination_authorization_path(_state=_state).unlink()
+        except OSError as exc:
+            raise ElevatedBootstrapError("project_coordination_authorization_clear_failed") from exc
+        _audit(
+            {
+                "event": "project_coordination_authorization_consumed",
+                "target_digest": authorization.target_digest,
+            },
+            _state=_state,
+        )
+
+
 def _exact_match(left: str, right: str) -> bool:
     if type(left) is not str or type(right) is not str or len(left) != len(right):
         return False
@@ -1365,31 +1835,38 @@ def projection_for_status(
             cast(Mapping[str, JsonValue], pending.grant_binding["preview"])
         )
     )
-    model = AgentSafePendingModel(
-        schema="yoetz.consent.pending-agent/6",
-        operation=pending.operation,
-        risk_class=pending.risk_class,
-        pending_id=pending.pending_id,
-        danger_digest=pending.danger_digest,
-        danger_text=pending.danger_text,
-        expires_at_unix=pending.expires_at_unix,
-        target_digest=pending.target_digest,
-        repository_privacy_recipe=None if grant_preview is None else grant_preview.recipe,
-        repository_privacy_preview=grant_preview,
-        import_publication_preview=(
+    model_values: dict[str, object] = {
+        "schema": (
+            "yoetz.consent.pending-agent/7"
+            if pending.coordination_binding is not None
+            else "yoetz.consent.pending-agent/6"
+        ),
+        "operation": pending.operation,
+        "risk_class": pending.risk_class,
+        "pending_id": pending.pending_id,
+        "danger_digest": pending.danger_digest,
+        "danger_text": pending.danger_text,
+        "expires_at_unix": pending.expires_at_unix,
+        "target_digest": pending.target_digest,
+        "repository_privacy_recipe": None if grant_preview is None else grant_preview.recipe,
+        "repository_privacy_preview": grant_preview,
+        "import_publication_preview": (
             None
             if pending.import_publication_preview is None
             else ImportPublicationPreviewModel.model_validate(
                 dict(pending.import_publication_preview)
             )
         ),
-        review_command=("yoetz", "consent", "review"),
-        authorize_command=(
+        "review_command": ("yoetz", "consent", "review"),
+        "authorize_command": (
             ("yoetz", "consent", "authorize")
             if operation_spec(pending.operation).agent_chat_authorize_allowed
             else None
         ),
-    )
+    }
+    if pending.coordination_binding is not None:
+        model_values["coordination_binding"] = dict(pending.coordination_binding)
+    model = AgentSafePendingModel.model_validate(model_values)
     return cast(dict[str, JsonValue], model.model_dump(mode="json", by_alias=True))
 
 
@@ -1407,6 +1884,11 @@ def catalog_payload() -> dict[str, JsonValue]:
             hint += " --target-digest <sha256:...>"
         if spec.requires_grant_binding:
             hint += " --recipe <expanded_review|assisted_review|private|metadata_only>"
+        if spec.operation == "project_coordination_grant":
+            hint += (
+                " --project-id <prj_...> --membership-generation <positive-integer>"
+                " --audit-record-id <evt_...>"
+            )
         # Only the profile identity is caller input; the purpose, its digests, and the repository
         # privacy commitment are derived by prepare. Naming them here sent agents hunting for
         # internals they cannot know.
@@ -1430,7 +1912,7 @@ def catalog_payload() -> dict[str, JsonValue]:
         )
     model = ConsentCatalogModel.model_validate(
         {
-            "schema": "yoetz.consent.catalog/6",
+            "schema": "yoetz.consent.catalog/7",
             "default_safe": [
                 "mcp.start",
                 "mcp.publish_work",
@@ -1468,7 +1950,7 @@ def catalog_payload() -> dict[str, JsonValue]:
 def status_payload(*, _state: Path | None = None) -> dict[str, JsonValue]:
     model = ConsentStatusModel.model_validate(
         {
-            "schema": "yoetz.elevated-bootstrap.status/6",
+            "schema": "yoetz.elevated-bootstrap.status/7",
             "pending": projection_for_status(load_pending(_state=_state)),
             "consent_catalog": catalog_payload(),
         }

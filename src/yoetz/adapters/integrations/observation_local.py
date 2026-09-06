@@ -16,11 +16,11 @@ import re
 import stat
 import threading
 import time
-from collections.abc import Callable, Generator, Mapping, MutableMapping
+from collections.abc import Callable, Generator, Iterable, Mapping, MutableMapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Final, cast
+from typing import Final, TypeVar, cast
 
 from yoetz.config.paths import PathSafetyError, ensure_owner_only_dir, state_dir
 from yoetz.domain.observation import (
@@ -52,11 +52,13 @@ from yoetz.domain.values import (
     JsonValue,
     Timestamp,
     timestamp_from_datetime,
+    validate_commitment,
     validate_sha256_digest,
 )
 from yoetz.ports.integrations import YOETZ_WORKFLOW_TOOL_NAMES
 from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
+from yoetz.protocol.ids import IdKind, validate_id
 
 try:
     import fcntl
@@ -70,6 +72,7 @@ __all__ = [
     "LocalObservationConsent",
     "LocalObservationStore",
     "ObservationOutboxRow",
+    "PendingSessionLifecycle",
     "STREAM_MAPPING_VERSION",
     "YOETZ_OWNED_TOOL_NAMES",
     "YOETZ_READ_TOOL_NAMES",
@@ -91,6 +94,8 @@ _MAX_ENVELOPES: Final = 256
 _MAX_DEDUP: Final = 4_096
 _MAX_OPEN_PRE: Final = 256
 _MAX_OUTBOX: Final = 512
+_MAX_PENDING_LIFECYCLES: Final = 256
+_MAX_PENDING_CONSENT_PROJECTS: Final = 256
 _MAX_QUARANTINE: Final = 512
 # Quarantined detail is a diagnostic aid, not the durable record; entries this
 # stale are pure per-hook parse/encode tax (#211). Age-expired detail folds
@@ -120,7 +125,14 @@ _MAX_STREAM_CALL_TOOLS: Final = 256
 _MAX_STATE_CACHE_ENTRIES: Final = 8
 _MAX_HOOK_SEQUENCES: Final = 256
 _MAX_FRONTIER_MOTION_NOTICES: Final = 256
+# Session keyed replay/tombstone indexes have to be bounded independently of
+# the envelope and outbox ceilings.  A host can create ended sessions without
+# retaining any envelopes, so the byte cap alone does not bound these maps.
+_MAX_SESSION_REPLAY_KEYS: Final = 256
+_MAX_SESSION_GAP_CODES: Final = 8
 _MAX_SAFE_INTEGER: Final = 9_007_199_254_740_991
+
+_SessionMapValue = TypeVar("_SessionMapValue")
 # Wall/monotonic drift tolerated before persisted monotonic samples are treated
 # as belonging to a different boot epoch (and therefore fenced off).
 _EPOCH_TOLERANCE_SECONDS: Final = 2.0
@@ -135,6 +147,8 @@ _MAX_RUNTIME_GATE_BYTES: Final = 256
 _OPEN_PRE_SEPARATOR: Final = "|"
 _LOCAL_OUTBOX_OVERFLOW_GAP: Final = "_local_outbox_overflow"
 _LOCAL_STREAM_PARTIAL_DROPPED_GAP: Final = "_local_stream_partial_dropped"
+_LOCAL_DEDUP_EVICTED_GAP: Final = "_local_dedup_evicted"
+_LOCAL_ENVELOPE_RETENTION_GAP: Final = "_local_envelope_retention"
 _LEGACY_STREAM_PARTIAL_DROPPED_SESSION: Final = "_legacy_unknown"
 _STORE_LOCK_TIMEOUT_SECONDS: Final = 2.0
 _STORE_LOCK_POLL_SECONDS: Final = 0.01
@@ -561,6 +575,66 @@ class ObservationOutboxRow:
             raise ProtocolValueError("invalid_event_value_type")
 
 
+@dataclass(frozen=True, slots=True)
+class PendingSessionLifecycle:
+    """One durable host-session lifecycle operation waiting for its lock.
+
+    The target generation is frozen when the hook captures the event.  That
+    makes retries idempotent: a later worker can distinguish an already
+    applied operation from a still-pending one without inferring intent from
+    the current ended flag alone.
+    """
+
+    codex_session_id: str
+    session_commitment: str
+    event_kind: str
+    target_generation: int
+    clear_mapping: bool = False
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.codex_session_id) is not str
+            or not 1 <= len(self.codex_session_id) <= 128
+            or "/" in self.codex_session_id
+            or "\\" in self.codex_session_id
+            or "\0" in self.codex_session_id
+            or not self.codex_session_id.isascii()
+            or not all(0x21 <= ord(char) <= 0x7E for char in self.codex_session_id)
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        if type(self.session_commitment) is not str or not re.fullmatch(
+            r"hmac-sha256:[0-9a-f]{64}", self.session_commitment
+        ):
+            raise ProtocolValueError("invalid_commitment")
+        if self.event_kind not in {"SessionStart", "SessionEnd"}:
+            raise ProtocolValueError("invalid_event_value_type")
+        if (
+            type(self.target_generation) is not int
+            or isinstance(self.target_generation, bool)
+            or not 1 <= self.target_generation <= _MAX_SAFE_INTEGER
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        if type(self.clear_mapping) is not bool:
+            raise ProtocolValueError("invalid_event_value_type")
+        if self.clear_mapping and self.event_kind != "SessionStart":
+            raise ProtocolValueError("invalid_event_value_type")
+
+    @property
+    def operation_id(self) -> str:
+        """Stable identity for retries, independent of the target generation."""
+
+        return canonical_digest(
+            JsonObject(
+                {
+                    "codex_session_id": self.codex_session_id,
+                    "session_commitment": self.session_commitment,
+                    "event_kind": self.event_kind,
+                    "clear_mapping": self.clear_mapping,
+                }
+            )
+        )
+
+
 @dataclass
 class _GapState:
     first_seen: Timestamp
@@ -574,8 +648,19 @@ class _WorkspaceState:
     session_workspaces: dict[str, str] | None = None
     cursors: dict[str, ObservationCursor] | None = None
     dedup: set[str] | None = None
+    # ``dedup`` remains a set for compatibility with older state and callers,
+    # while this insertion order plus lane map makes bounded eviction
+    # deterministic and session-aware.  The metadata is additive and can be
+    # reconstructed from retained envelopes for legacy state.
+    dedup_order: list[str] | None = None
+    dedup_lanes: dict[str, str] | None = None
     envelopes: list[ObservationEnvelope] | None = None
     gaps: dict[str, _GapState] | None = None
+    # Active retention gaps keyed by the affected session commitment.  The
+    # ordinary workspace gap history remains the aggregate compatibility view;
+    # this map prevents a busy session's bounded loss from being attributed to
+    # every sibling.
+    session_gaps: dict[str, set[str]] | None = None
     unsupported_events: set[str] | None = None
     last_receipt: Timestamp | None = None
     advice_frontier: str | None = None
@@ -600,6 +685,10 @@ class _WorkspaceState:
     stream_profiles: dict[str, str] | None = None
     stream_partial_dropped_sessions: set[str] | None = None
     hook_sequences: dict[str, int] | None = None
+    # Workspace high-water mark for locally allocated hook ordinals.  The
+    # per-session map is intentionally bounded, but an evicted active session
+    # must never restart at one when it returns.
+    hook_sequence_clock: int = 0
     last_stream_reconcile_mono_ms: int | None = None
     last_hook_receipt_mono_ms: int | None = None
     last_successful_drain_mono_ms: int | None = None
@@ -617,6 +706,12 @@ class _WorkspaceState:
     ended_sessions: set[str] | None = None
     session_generations: dict[str, int] | None = None
     ended_session_generations: dict[str, int] | None = None
+    pending_lifecycles: list[PendingSessionLifecycle] | None = None
+    # A consent revoke is a two-store operation: the local fence is durable before the
+    # service-owned project generations advance.  Keep the bounded token and generation plan
+    # here so a daemon crash between those stores is retried before re-consent can clear it.
+    pending_consent_revocation: str | None = None
+    pending_consent_projects: dict[str, int] | None = None
     quarantine_evicted_count: int = 0
     quarantine_reclaimed_count: int = 0
     quarantine_evicted_commitment: str | None = None
@@ -632,10 +727,16 @@ class _WorkspaceState:
             self.cursors = {}
         if self.dedup is None:
             self.dedup = set()
+        if self.dedup_order is None:
+            self.dedup_order = []
+        if self.dedup_lanes is None:
+            self.dedup_lanes = {}
         if self.envelopes is None:
             self.envelopes = []
         if self.gaps is None:
             self.gaps = {}
+        if self.session_gaps is None:
+            self.session_gaps = {}
         if self.unsupported_events is None:
             self.unsupported_events = set()
         if self.open_pre is None:
@@ -670,6 +771,8 @@ class _WorkspaceState:
             self.session_generations = {}
         if self.ended_session_generations is None:
             self.ended_session_generations = {}
+        if self.pending_lifecycles is None:
+            self.pending_lifecycles = []
         if self.session_advice is None:
             self.session_advice = {}
         if self.session_advice_suppression is None:
@@ -885,8 +988,11 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         session_workspaces=dict(state.session_workspaces or {}),
         cursors=dict(state.cursors or {}),
         dedup=set(state.dedup or ()),
+        dedup_order=list(state.dedup_order or ()),
+        dedup_lanes=dict(state.dedup_lanes or {}),
         envelopes=list(state.envelopes or ()),
         gaps=dict(state.gaps or {}),
+        session_gaps={session: set(gaps) for session, gaps in (state.session_gaps or {}).items()},
         unsupported_events=set(state.unsupported_events or ()),
         session_advice=dict(state.session_advice or {}),
         session_advice_suppression=dict(state.session_advice_suppression or {}),
@@ -903,6 +1009,7 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         stream_profiles=dict(state.stream_profiles or {}),
         stream_partial_dropped_sessions=set(state.stream_partial_dropped_sessions or ()),
         hook_sequences=dict(state.hook_sequences or {}),
+        hook_sequence_clock=state.hook_sequence_clock,
         pending_outbox=list(state.pending_outbox or ()),
         quarantine=list(state.quarantine or ()),
         codex_session_bindings=dict(state.codex_session_bindings or {}),
@@ -910,6 +1017,11 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         ended_sessions=set(state.ended_sessions or ()),
         session_generations=dict(state.session_generations or {}),
         ended_session_generations=dict(state.ended_session_generations or {}),
+        pending_lifecycles=list(state.pending_lifecycles or ()),
+        pending_consent_revocation=state.pending_consent_revocation,
+        pending_consent_projects=(
+            None if state.pending_consent_projects is None else dict(state.pending_consent_projects)
+        ),
     )
 
 
@@ -1140,6 +1252,15 @@ class LocalObservationStore:
     def grant_consent(self, workspace_commitment: str, granted_at: Timestamp | None = None) -> None:
         with self._lock:
             state = self._load(workspace_commitment)
+            if state.pending_consent_revocation is not None:
+                # A project-generation fence is still pending in the service-owned catalog.
+                # Re-consent must wait for that fence; otherwise the old detection generation
+                # could become eligible again after a process crash (#502).
+                raise _error(
+                    PublicErrorCode.SESSION_CONFLICT,
+                    "Observation consent revocation is still being fenced.",
+                    retryable=True,
+                )
             stamp = granted_at if granted_at is not None else _now()
             state.consent = LocalObservationConsent(
                 workspace_commitment=workspace_commitment,
@@ -1147,7 +1268,111 @@ class LocalObservationStore:
                 revoked_at=None,
                 paused=False,
             )
+            state.pending_consent_revocation = None
+            state.pending_consent_projects = None
             self._save(workspace_commitment, state)
+
+    def pending_consent_revocation(
+        self, workspace_commitment: str
+    ) -> tuple[str, tuple[tuple[str, int], ...] | None] | None:
+        """Return the durable source-consent fence awaiting project invalidation.
+
+        The token and generation plan contain only structural commitments.  They are kept out of
+        ordinary status output, but survive a daemon restart so a revoked source cannot be
+        re-consented while its old project generation is still queued for delivery.
+        """
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            token = state.pending_consent_revocation
+            if token is None:
+                return None
+            if state.pending_consent_projects is None:
+                return token, None
+            return token, tuple(
+                sorted(state.pending_consent_projects.items(), key=lambda item: item[0].encode())
+            )
+
+    def record_consent_revocation_plan(
+        self,
+        workspace_commitment: str,
+        token: str,
+        project_generations: Mapping[str, int],
+    ) -> None:
+        """Durably bind one revoke token to the project generations it must fence."""
+
+        validate_sha256_digest(token)
+        normalized: dict[str, int] = {}
+        if len(project_generations) > _MAX_PENDING_CONSENT_PROJECTS:
+            raise ProtocolValueError("invalid_event_value_type")
+        for project_id, generation in project_generations.items():
+            validate_id(IdKind.PROJECT, project_id)
+            if type(generation) is not int or isinstance(generation, bool) or generation < 1:
+                raise ProtocolValueError("invalid_event_value_type")
+            normalized[project_id] = generation
+        with self._lock:
+            state = self._load(workspace_commitment)
+            if state.pending_consent_revocation != token:
+                raise _error(
+                    PublicErrorCode.SESSION_CONFLICT,
+                    "Observation consent revocation is no longer current.",
+                    retryable=False,
+                )
+            if (
+                state.pending_consent_projects is not None
+                and state.pending_consent_projects != normalized
+            ):
+                raise _error(
+                    PublicErrorCode.SESSION_CONFLICT,
+                    "Observation consent revocation plan changed.",
+                    retryable=False,
+                )
+            state.pending_consent_projects = normalized
+            self._save(workspace_commitment, state)
+
+    def mark_consent_revocation_fenced(self, workspace_commitment: str, token: str) -> None:
+        """Clear a completed project-generation fence, idempotently."""
+
+        validate_sha256_digest(token)
+        with self._lock:
+            state = self._load(workspace_commitment)
+            if state.pending_consent_revocation != token:
+                return
+            state.pending_consent_revocation = None
+            state.pending_consent_projects = None
+            self._save(workspace_commitment, state)
+
+    def _session_workspace_owners_unlocked(self, session_commitment: str) -> frozenset[str]:
+        """Return every local workspace that records one session commitment.
+
+        ``session_workspaces`` is the envelope routing index while
+        ``codex_session_bindings`` is the raw host-session index.  They are
+        written by separate compatibility paths, so ownership checks must
+        consult both maps while the interprocess store lock is held.  A
+        disagreement between the containing workspace and a stored route is
+        treated as two owners and therefore fails closed.
+        """
+
+        owners: set[str] = set()
+        for workspace, state in self._iter_workspaces():
+            assert state.session_workspaces is not None
+            bound_workspace = state.session_workspaces.get(session_commitment)
+            if bound_workspace is not None:
+                owners.add(workspace)
+                if type(bound_workspace) is str and bound_workspace:
+                    owners.add(bound_workspace)
+            assert state.codex_session_bindings is not None
+            if session_commitment in state.codex_session_bindings.values():
+                owners.add(workspace)
+            # A pruned ended binding retains its generation tombstone so late
+            # replay and a same-workspace reattach keep their identity. Treat
+            # that tombstone as ownership evidence too; otherwise the same raw
+            # host session could be rebound to a different workspace after GC.
+            if session_commitment in (state.session_generations or {}):
+                owners.add(workspace)
+            if session_commitment in (state.ended_session_generations or {}):
+                owners.add(workspace)
+        return frozenset(owners)
 
     def bind_session(self, workspace_commitment: str, session_commitment: str) -> None:
         with self._lock:
@@ -1156,6 +1381,13 @@ class LocalObservationStore:
                 raise _error(
                     PublicErrorCode.INVALID_REQUEST,
                     "Observation consent is missing.",
+                    retryable=False,
+                )
+            owners = self._session_workspace_owners_unlocked(session_commitment)
+            if owners - {workspace_commitment}:
+                raise _error(
+                    PublicErrorCode.SESSION_CONFLICT,
+                    "Observation session is already bound.",
                     retryable=False,
                 )
             assert state.session_workspaces is not None
@@ -1174,26 +1406,50 @@ class LocalObservationStore:
 
         with self._lock:
             state = self._load(workspace_commitment)
-            assert state.session_generations is not None
-            assert state.ended_session_generations is not None
-            assert state.ended_sessions is not None
-            generation = state.session_generations.get(session_commitment, 0) + 1
-            state.session_generations[session_commitment] = generation
-            state.ended_session_generations.pop(session_commitment, None)
-            state.ended_sessions.discard(session_commitment)
-            assert state.stream_partial_dropped_sessions is not None
-            state.stream_partial_dropped_sessions.discard(session_commitment)
-            state.stream_partial_dropped_sessions.discard(_LEGACY_STREAM_PARTIAL_DROPPED_SESSION)
-            if not state.stream_partial_dropped_sessions:
-                self._resolve_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
+            generation = self._begin_session_generation_state(state, session_commitment)
             self._save(workspace_commitment, state)
             return generation
+
+    @staticmethod
+    def _begin_session_generation_state(state: _WorkspaceState, session_commitment: str) -> int:
+        """Advance one generation in an already-held workspace state."""
+
+        assert state.session_generations is not None
+        assert state.ended_session_generations is not None
+        assert state.ended_sessions is not None
+        generation = state.session_generations.get(session_commitment, 0) + 1
+        state.session_generations[session_commitment] = generation
+        state.ended_session_generations.pop(session_commitment, None)
+        state.ended_sessions.discard(session_commitment)
+        assert state.stream_partial_dropped_sessions is not None
+        state.stream_partial_dropped_sessions.discard(session_commitment)
+        state.stream_partial_dropped_sessions.discard(_LEGACY_STREAM_PARTIAL_DROPPED_SESSION)
+        if not state.stream_partial_dropped_sessions:
+            LocalObservationStore._resolve_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
+        return generation
 
     def current_session_generation(self, workspace_commitment: str, session_commitment: str) -> int:
         with self._lock:
             state = self._load(workspace_commitment)
             assert state.session_generations is not None
-            return state.session_generations.get(session_commitment, 1)
+            return state.session_generations.get(session_commitment, 0) or 1
+
+    def persisted_session_generation(
+        self, workspace_commitment: str, session_commitment: str
+    ) -> int:
+        """Return the stored counter, preserving zero for legacy state.
+
+        ``current_session_generation`` is the public event-stamping view and
+        therefore presents a pre-counter binding as generation one. Lifecycle
+        reconciliation needs the persisted counter itself so a deferred first
+        start can materialize generation one exactly once instead of advancing
+        a legacy ended binding to generation two.
+        """
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.session_generations is not None
+            return state.session_generations.get(session_commitment, 0)
 
     def note_session_end(
         self,
@@ -1210,35 +1466,145 @@ class LocalObservationStore:
 
         with self._lock:
             state = self._load(workspace_commitment)
-            assert state.ended_sessions is not None
-            assert state.session_generations is not None
-            assert state.ended_session_generations is not None
-            assert state.session_workspaces is not None
-            current = state.session_generations.get(session_commitment, 1)
-            observed = current if generation is None else generation
-            if observed != current:
-                return
-            # Retain the binding so "all bound sessions ended" is computable.
-            state.session_workspaces.setdefault(session_commitment, workspace_commitment)
-            state.ended_sessions.add(session_commitment)
-            state.ended_session_generations[session_commitment] = observed
-            assert state.stream_partial_dropped_sessions is not None
-            state.stream_partial_dropped_sessions.discard(session_commitment)
-            if not state.stream_partial_dropped_sessions:
-                self._resolve_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
-            self._save(workspace_commitment, state)
+            if self._note_session_end_state(
+                state, workspace_commitment, session_commitment, generation
+            ):
+                self._save(workspace_commitment, state)
+
+    @staticmethod
+    def _note_session_end_state(
+        state: _WorkspaceState,
+        workspace_commitment: str,
+        session_commitment: str,
+        generation: int | None,
+    ) -> bool:
+        """Apply one generation-fenced end to an already-held workspace state."""
+
+        assert state.ended_sessions is not None
+        assert state.session_generations is not None
+        assert state.ended_session_generations is not None
+        assert state.session_workspaces is not None
+        current = state.session_generations.get(session_commitment, 1)
+        observed = current if generation is None else generation
+        if observed != current:
+            return False
+        # Retain the binding so "all bound sessions ended" is computable.
+        state.session_workspaces.setdefault(session_commitment, workspace_commitment)
+        state.ended_sessions.add(session_commitment)
+        state.ended_session_generations[session_commitment] = observed
+        assert state.stream_partial_dropped_sessions is not None
+        state.stream_partial_dropped_sessions.discard(session_commitment)
+        if not state.stream_partial_dropped_sessions:
+            LocalObservationStore._resolve_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
+        return True
 
     def bind_codex_session(self, workspace_commitment: str, codex_session_id: str) -> str:
         """Bind a Codex session id to a consented workspace; return session commitment."""
 
         session = self.session_commitment(codex_session_id)
-        self.bind_session(workspace_commitment, session)
         with self._lock:
             state = self._load(workspace_commitment)
+            if state.consent is None:
+                raise _error(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "Observation consent is missing.",
+                    retryable=False,
+                )
+            owners = self._session_workspace_owners_unlocked(session)
+            if owners - {workspace_commitment}:
+                raise _error(
+                    PublicErrorCode.SESSION_CONFLICT,
+                    "Observation session is already bound.",
+                    retryable=False,
+                )
+            assert state.session_workspaces is not None
+            state.session_workspaces[session] = workspace_commitment
             assert state.codex_session_bindings is not None
             state.codex_session_bindings[codex_session_id] = session
             self._save(workspace_commitment, state)
         return session
+
+    def reconcile_outbox_session_lifecycle(
+        self,
+        workspace_commitment: str,
+        row: ObservationOutboxRow,
+        *,
+        session_lock_owned: bool = False,
+    ) -> bool:
+        """Converge raw session membership before one outbox row is delivered.
+
+        A hook can capture an envelope while the workspace reservation is held by
+        recovery. The row is the durable handoff containing both the raw host
+        session id and its target workspace. A later hook drain or READY sweep
+        binds that id under the same workspace-then-session locks before sending
+        the row. Contended locks and foreign ownership return ``False`` so the
+        caller leaves the row untouched for a later pass.
+        """
+
+        if type(row) is not ObservationOutboxRow:
+            return False
+        pending = self.list_pending_session_lifecycles(workspace_commitment, row.codex_session_id)
+        if not pending and row.codex_session_id in self.codex_sessions_for_workspace(
+            workspace_commitment
+        ):
+            # The normal mapped-session path already serialized its lifecycle
+            # mutation before enqueueing. Avoid taking a second pair of locks
+            # for every ordinary delivery row.
+            return True
+        if not self.reconcile_pending_session_lifecycles(
+            workspace_commitment,
+            row.codex_session_id,
+            session_lock_owned=session_lock_owned,
+        ):
+            return False
+        if self.list_pending_session_lifecycles(workspace_commitment, row.codex_session_id):
+            # A foreign owner or stale target remains unresolved. Do not route
+            # the row before its explicit lifecycle intent converges.
+            return False
+        from yoetz.adapters.integrations.codex_lifecycle import (
+            acquire_session_lock,
+            acquire_workspace_recovery_lock,
+        )
+
+        try:
+            with acquire_workspace_recovery_lock(
+                workspace_commitment, _state=self._state_root
+            ) as workspace_owned:
+                if not workspace_owned:
+                    return False
+                session_lock = (
+                    contextlib.nullcontext(True)
+                    if session_lock_owned
+                    else acquire_session_lock(row.codex_session_id, _state=self._state_root)
+                )
+                with session_lock as session_owned:
+                    if not session_owned:
+                        return False
+                    session_commitment = self.session_commitment(row.codex_session_id)
+                    known = row.codex_session_id in self.codex_sessions_for_workspace(
+                        workspace_commitment
+                    )
+                    if not known:
+                        self.bind_codex_session(workspace_commitment, row.codex_session_id)
+                    current_generation = self.current_session_generation(
+                        workspace_commitment, session_commitment
+                    )
+                    event_kind = row.envelope.event_kind
+                    source_generation = row.envelope.cursor.source_generation
+                    if event_kind == "SessionEnd" and (current_generation == source_generation):
+                        self.note_session_end(
+                            workspace_commitment,
+                            session_commitment,
+                            generation=source_generation,
+                        )
+                    elif event_kind == "SessionStart":
+                        # A historical outbox Start does not prove that its
+                        # lifecycle was deferred. Only explicit pending
+                        # intents may advance a generation.
+                        return True
+                    return True
+        except Exception:
+            return False
 
     def codex_session_ended(self, workspace_commitment: str, codex_session_id: str) -> bool:
         """Whether the bound Codex session is marked ended for its current generation.
@@ -1282,12 +1648,19 @@ class LocalObservationStore:
 
     def find_workspace_for_codex_session(self, codex_session_id: str) -> str | None:
         with self._lock:
-            for workspace, state in self._iter_workspaces():
-                assert state.codex_session_bindings is not None
-                if codex_session_id in state.codex_session_bindings:
-                    consent = state.consent
-                    if consent is not None and consent.active:
-                        return workspace
+            owners = self._session_workspace_owners_unlocked(
+                self.session_commitment(codex_session_id)
+            )
+            if len(owners) == 1:
+                workspace = next(iter(owners))
+                consent = self._load(workspace).consent
+                if consent is not None and consent.active:
+                    return workspace
+                return None
+            if owners:
+                # A duplicated raw binding is a local ownership conflict. Never
+                # choose the first filesystem entry as an implicit selector.
+                return None
             # Single active consent may auto-bind later at ingest.
             active = [
                 workspace
@@ -1314,23 +1687,104 @@ class LocalObservationStore:
         with self._lock:
             target = self._load(workspace_commitment)
             assert target.codex_session_bindings is not None
-            owners: dict[str, set[str]] = {
-                session_id: set() for session_id in target.codex_session_bindings
-            }
-            for workspace, state in self._iter_workspaces():
-                assert state.codex_session_bindings is not None
-                for session_id in owners.keys() & state.codex_session_bindings.keys():
-                    owners[session_id].add(workspace)
             return tuple(
                 sorted(
                     (
                         session_id
-                        for session_id, bound in owners.items()
-                        if bound == {workspace_commitment}
+                        for session_id, session in target.codex_session_bindings.items()
+                        if self._session_workspace_owners_unlocked(session)
+                        == frozenset((workspace_commitment,))
                     ),
                     key=str.encode,
                 )
             )
+
+    def codex_session_lifecycles_for_workspace(
+        self, workspace_commitment: str
+    ) -> tuple[tuple[str, bool], ...]:
+        """Return every bound host session id with its ended flag from one state read.
+
+        The SessionStart recovery scan needs the ended flag of every binding in the
+        workspace. Asking ``codex_session_ended`` per binding copies the whole state once
+        per call outside a batch, so the scan cost grew with the binding count (#549).
+        """
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.codex_session_bindings is not None
+            assert state.ended_sessions is not None
+            bindings = state.codex_session_bindings
+            ended = state.ended_sessions
+            return tuple(
+                (session_id, bindings[session_id] in ended)
+                for session_id in sorted(bindings, key=str.encode)
+            )
+
+    def prune_codex_session_bindings(
+        self, workspace_commitment: str, codex_session_ids: Iterable[str]
+    ) -> tuple[str, ...]:
+        """Drop the requested bindings whose sessions are ended and fully drained (#549).
+
+        Rule: a binding is removed only when its session is marked ended for its current
+        generation, no pending outbox row and no quarantine row still names the session,
+        and the session is not held as storage-corrupt. Anything else is kept whatever
+        the caller asked for. The ended-unmapped quarantine path resolves a host session
+        id through this map to decide that its rows are terminal, and the corruption
+        repair path clears a session through it, so a binding with undrained work must
+        outlive that work. A pruned session that resumes re-binds on its next hook event;
+        its generation counter is keyed by commitment and retained, so the resumed
+        generation continues rather than restarting. Returns the ids removed, sorted.
+        """
+
+        requested = {
+            session_id for session_id in codex_session_ids if type(session_id) is str and session_id
+        }
+        if not requested:
+            return ()
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.codex_session_bindings is not None
+            assert state.ended_sessions is not None
+            assert state.pending_outbox is not None
+            assert state.quarantine is not None
+            assert state.storage_corrupt_sessions is not None
+            assert state.pending_lifecycles is not None
+            bindings = state.codex_session_bindings
+            busy = {row.codex_session_id for row in state.pending_outbox}
+            busy.update(entry[0] for entry in state.quarantine)
+            busy.update(state.storage_corrupt_sessions)
+            busy.update(intent.codex_session_id for intent in state.pending_lifecycles)
+            removed: list[str] = []
+            for session_id in sorted(requested & bindings.keys(), key=str.encode):
+                if bindings[session_id] not in state.ended_sessions or session_id in busy:
+                    continue
+                session_commitment = bindings[session_id]
+                del bindings[session_id]
+                # One-shot frontier notices are keyed by host session id and are
+                # only ever dropped through the binding's ended flag.
+                if state.frontier_motion_notices:
+                    state.frontier_motion_notices.pop(session_id, None)
+                if state.frontier_motion_delivered:
+                    state.frontier_motion_delivered.pop(session_id, None)
+                # The workspace route has no work left to resolve once the raw
+                # binding is removed. Keep the ended generation fence and all
+                # replay state (cursors, stream identity/profile, dedup, and
+                # hook high-water) so a later reattach resumes monotonically;
+                # ``ended_sessions`` remains the stopped-state fence that is
+                # cleared only by the next SessionStart generation.
+                if not any(bound == session_commitment for bound in bindings.values()):
+                    assert state.session_generations is not None
+                    assert state.session_workspaces is not None
+                    state.session_generations.setdefault(session_commitment, 0)
+                    state.session_workspaces.pop(session_commitment, None)
+                    if state.stream_partial_dropped_sessions is not None:
+                        state.stream_partial_dropped_sessions.discard(session_commitment)
+                        if not state.stream_partial_dropped_sessions:
+                            self._resolve_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
+                removed.append(session_id)
+            if removed:
+                self._save(workspace_commitment, state)
+            return tuple(removed)
 
     def consent_for(self, workspace_commitment: str) -> LocalObservationConsent | None:
         with self._lock:
@@ -1754,6 +2208,20 @@ class LocalObservationStore:
             assert state.envelopes is not None
             return tuple(state.envelopes)
 
+    def session_gap_codes(self, workspace: str, session_commitment: str) -> tuple[str, ...]:
+        """Return active bounded-loss codes for one session lane.
+
+        Workspace status keeps its historical aggregate gap vocabulary for
+        compatibility. This scoped view lets a caller explain which sibling
+        lane encountered retention pressure without attributing that loss to
+        every session sharing the workspace.
+        """
+
+        with self._lock:
+            state = self._load(workspace)
+            assert state.session_gaps is not None
+            return tuple(sorted(state.session_gaps.get(session_commitment, ()), key=str.encode))
+
     def refresh_advice(
         self,
         workspace: str,
@@ -2095,12 +2563,51 @@ class LocalObservationStore:
         with self._lock:
             state = self._load(workspace)
             assert state.hook_sequences is not None
-            next_value = state.hook_sequences.get(session_commitment, 0) + 1
-            state.hook_sequences[session_commitment] = next_value
+            hook_sequences = state.hook_sequences
+            previous = hook_sequences.get(session_commitment, 0)
+            state.hook_sequence_clock = max(
+                state.hook_sequence_clock,
+                previous,
+                max(hook_sequences.values(), default=0),
+            )
+            next_value = min(_MAX_SAFE_INTEGER, state.hook_sequence_clock + 1)
+            state.hook_sequence_clock = next_value
+            # Re-touch the session so the bounded map evicts by recency rather
+            # than by first-ever admission. The workspace clock preserves
+            # monotonicity even when an active session is eventually evicted.
+            hook_sequences.pop(session_commitment, None)
+            hook_sequences[session_commitment] = next_value
             # Bound retained sequence keys.
-            if len(state.hook_sequences) > _MAX_HOOK_SEQUENCES:
-                oldest = next(iter(state.hook_sequences))
-                del state.hook_sequences[oldest]
+            if len(hook_sequences) > _MAX_HOOK_SEQUENCES:
+                active = set(state.session_workspaces or ()) - set(state.ended_sessions or ())
+                active.update(
+                    session
+                    for session in (state.codex_session_bindings or {}).values()
+                    if session not in (state.ended_sessions or set())
+                )
+                candidates = [
+                    session
+                    for session in hook_sequences
+                    if session != session_commitment and session not in active
+                ]
+                if not candidates:
+                    candidates = [
+                        session for session in hook_sequences if session != session_commitment
+                    ]
+                if candidates:
+                    # Dict insertion order is not a durable recency signal:
+                    # state serialization canonicalizes map keys, so a
+                    # restart would otherwise evict by lexical key order.
+                    # Locally allocated ordinals are monotonic and therefore
+                    # provide a stable recency fence across reloads.
+                    oldest = min(
+                        candidates,
+                        key=lambda session: (
+                            hook_sequences.get(session, 0),
+                            session.encode(),
+                        ),
+                    )
+                    del hook_sequences[oldest]
             self._save(workspace, state)
             return next_value
 
@@ -2113,20 +2620,46 @@ class LocalObservationStore:
             state = self._load(workspace)
             assert state.pending_outbox is not None
             assert state.gaps is not None
-            if len(state.pending_outbox) >= _MAX_OUTBOX:
-                self._note_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
-                self._save(workspace, state)
-                return ObservationGapCode.OUTBOX_OVERFLOW.value
-            # Dedup identical source identities already pending for this session.
+            assert state.session_gaps is not None
+            # A retry of an already-persisted row is idempotent even when the
+            # aggregate queue is full. Capacity arbitration must never mutate
+            # or report a gap for a duplicate replay.
+            incoming_key = _dedup_key(workspace, envelope)
             for row in state.pending_outbox:
                 if (
                     row.codex_session_id == codex_session_id
-                    and row.envelope.source_identity == envelope.source_identity
-                    and row.envelope.event_kind == envelope.event_kind
-                    and row.envelope.cursor.source_generation == envelope.cursor.source_generation
-                    and row.envelope.cursor.event_position == envelope.cursor.event_position
+                    and _dedup_key(workspace, row.envelope) == incoming_key
                 ):
                     return None
+            if len(state.pending_outbox) >= _MAX_OUTBOX:
+                # Preserve strict FIFO for an existing lane. If a new session
+                # arrives while one sibling has consumed the whole aggregate
+                # bound, reclaim one overrepresented row into quarantine so
+                # the new lane gets a durable slot. The quarantine and scoped
+                # gap make the reclaimed row explicit rather than silently
+                # dropping it.
+                evicted_index = self._fair_new_lane_outbox_index(
+                    state.pending_outbox, codex_session_id
+                )
+                if evicted_index is None:
+                    self._note_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
+                    self._note_session_gap_state(
+                        state, envelope.session_commitment, ObservationGapCode.OUTBOX_OVERFLOW.value
+                    )
+                    self._save(workspace, state)
+                    return ObservationGapCode.OUTBOX_OVERFLOW.value
+                evicted_row = state.pending_outbox.pop(evicted_index)
+                self._quarantine_row_state(
+                    state,
+                    evicted_row,
+                    ObservationGapCode.OUTBOX_OVERFLOW.value,
+                )
+                self._note_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
+                self._note_session_gap_state(
+                    state,
+                    evicted_row.envelope.session_commitment,
+                    ObservationGapCode.OUTBOX_OVERFLOW.value,
+                )
             state.pending_outbox.append(
                 ObservationOutboxRow(codex_session_id=codex_session_id, envelope=envelope)
             )
@@ -2137,6 +2670,9 @@ class LocalObservationStore:
             if len(projected) > _MAX_STATE_BYTES:
                 state.pending_outbox.pop()
                 self._note_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
+                self._note_session_gap_state(
+                    state, envelope.session_commitment, ObservationGapCode.OUTBOX_OVERFLOW.value
+                )
                 self._save(workspace, state)
                 return ObservationGapCode.OUTBOX_OVERFLOW.value
             self._save(workspace, state, projected=projected)
@@ -2165,15 +2701,289 @@ class LocalObservationStore:
             )
 
     def pending_workspaces(self) -> tuple[str, ...]:
-        """Return only opaque commitments for workspaces with undelivered rows."""
+        """Return opaque commitments with undelivered rows or lifecycle work."""
 
         with self._lock:
             pending: list[str] = []
             for workspace, state in self._iter_workspaces():
                 assert state.pending_outbox is not None
-                if state.pending_outbox:
+                assert state.pending_lifecycles is not None
+                if state.pending_outbox or state.pending_lifecycles:
                     pending.append(workspace)
             return tuple(sorted(pending, key=str.encode))
+
+    def list_pending_session_lifecycles(
+        self, workspace_commitment: str, codex_session_id: str | None = None
+    ) -> tuple[PendingSessionLifecycle, ...]:
+        """Return immutable deferred lifecycle intents in capture order."""
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.pending_lifecycles is not None
+            if codex_session_id is None:
+                return tuple(state.pending_lifecycles)
+            return tuple(
+                intent
+                for intent in state.pending_lifecycles
+                if intent.codex_session_id == codex_session_id
+            )
+
+    def lifecycle_reconciliation_snapshot(
+        self, workspace_commitment: str
+    ) -> tuple[frozenset[str], frozenset[str]]:
+        """Return bound and deferred raw session ids from one state read."""
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.codex_session_bindings is not None
+            assert state.pending_lifecycles is not None
+            return (
+                frozenset(state.codex_session_bindings),
+                frozenset(intent.codex_session_id for intent in state.pending_lifecycles),
+            )
+
+    def effective_session_generation(
+        self,
+        workspace_commitment: str,
+        codex_session_id: str,
+        session_commitment: str,
+    ) -> int:
+        """Return the generation future envelopes must use while intents are queued."""
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.session_generations is not None
+            generation = state.session_generations.get(session_commitment, 0) or 1
+            assert state.pending_lifecycles is not None
+            for intent in state.pending_lifecycles:
+                if (
+                    intent.codex_session_id != codex_session_id
+                    or intent.session_commitment != session_commitment
+                ):
+                    continue
+                if intent.event_kind == "SessionStart":
+                    generation = intent.target_generation
+                elif intent.target_generation == generation:
+                    # A queued end makes the next start a new generation.  The
+                    # current generation remains the one stamped on events
+                    # captured before that start is observed.
+                    continue
+            return generation
+
+    def record_pending_session_lifecycle(
+        self,
+        workspace_commitment: str,
+        codex_session_id: str,
+        session_commitment: str,
+        event_kind: str,
+        target_generation: int,
+        *,
+        clear_mapping: bool = False,
+    ) -> bool:
+        """Persist one lifecycle intent when a nonblocking membership lock is busy.
+
+        The intent and the envelope that caused it are committed by the same
+        workspace batch in the hook. Consecutive duplicate intents collapse;
+        distinct start/end transitions retain their order up to a bounded
+        per-workspace queue.
+        """
+
+        intent = PendingSessionLifecycle(
+            codex_session_id=codex_session_id,
+            session_commitment=session_commitment,
+            event_kind=event_kind,
+            target_generation=target_generation,
+            clear_mapping=clear_mapping,
+        )
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.pending_lifecycles is not None
+            for prior in reversed(state.pending_lifecycles):
+                if prior.codex_session_id != codex_session_id:
+                    continue
+                if (
+                    prior.event_kind == intent.event_kind
+                    and prior.target_generation == intent.target_generation
+                    and prior.clear_mapping == intent.clear_mapping
+                    and prior.session_commitment == intent.session_commitment
+                ):
+                    return True
+                break
+            if len(state.pending_lifecycles) >= _MAX_PENDING_LIFECYCLES:
+                return False
+            state.pending_lifecycles.append(intent)
+            self._save(workspace_commitment, state)
+            return True
+
+    def _pending_session_workspace_owners(self, codex_session_id: str) -> frozenset[str]:
+        """Return every raw binding owner while the store lock is held."""
+
+        return self._session_workspace_owners_unlocked(self.session_commitment(codex_session_id))
+
+    def _reconcile_pending_session_lifecycle_lanes(
+        self,
+        workspace_commitment: str,
+        session_ids: tuple[str, ...],
+        *,
+        session_lock_owned: bool,
+        owned_session_id: str | None,
+    ) -> bool:
+        """Reconcile each pending raw-session lane independently.
+
+        A workspace reservation protects the shared state batch, while each
+        session lock fences only that session's lifecycle.  One contended
+        session therefore remains durable without preventing an unrelated
+        session from converging in the same pass.
+        """
+
+        from yoetz.adapters.integrations.codex_lifecycle import (
+            acquire_session_lock,
+            acquire_workspace_recovery_lock,
+            clear_mapping,
+        )
+
+        with acquire_workspace_recovery_lock(
+            workspace_commitment, _state=self._state_root
+        ) as workspace_owned:
+            if not workspace_owned:
+                return False
+            acquired_any = False
+            for session_id in session_ids:
+                session_lock = (
+                    contextlib.nullcontext(True)
+                    if session_lock_owned and session_id == owned_session_id
+                    else acquire_session_lock(session_id, _state=self._state_root)
+                )
+                with session_lock as session_owned:
+                    if not session_owned:
+                        continue
+                    acquired_any = True
+                    with self.batched(workspace_commitment):
+                        state = self._load(workspace_commitment)
+                        assert state.pending_lifecycles is not None
+                        current = list(state.pending_lifecycles)
+                        remaining: list[PendingSessionLifecycle] = []
+                        changed = False
+                        blocked = False
+                        for intent in current:
+                            if intent.codex_session_id != session_id:
+                                remaining.append(intent)
+                                continue
+                            # Preserve FIFO for one raw session. If an older
+                            # intent is still fenced, a later transition cannot
+                            # be applied independently of it.
+                            if blocked:
+                                remaining.append(intent)
+                                continue
+                            owners = self._pending_session_workspace_owners(session_id)
+                            if owners - {workspace_commitment}:
+                                remaining.append(intent)
+                                blocked = True
+                                continue
+                            if state.consent is None or not state.consent.active:
+                                remaining.append(intent)
+                                blocked = True
+                                continue
+                            assert state.codex_session_bindings is not None
+                            assert state.session_workspaces is not None
+                            assert state.session_generations is not None
+                            assert state.ended_sessions is not None
+                            session = self.session_commitment(intent.codex_session_id)
+                            if session != intent.session_commitment:
+                                remaining.append(intent)
+                                blocked = True
+                                continue
+                            if intent.codex_session_id not in state.codex_session_bindings:
+                                state.session_workspaces.setdefault(session, workspace_commitment)
+                                state.codex_session_bindings[intent.codex_session_id] = session
+                                changed = True
+                            stored_generation = state.session_generations.get(session, 0)
+                            # A legacy end may have been persisted before the
+                            # generation counter existed; its public generation
+                            # is still the initial value one. Starts keep the
+                            # stored-zero distinction so a deferred first Start
+                            # materializes generation one.
+                            generation = (
+                                stored_generation
+                                if stored_generation > 0 or intent.event_kind == "SessionStart"
+                                else 1
+                            )
+                            ended = session in state.ended_sessions
+                            if intent.event_kind == "SessionStart":
+                                if generation > intent.target_generation:
+                                    # A stale clear has no authority over a later route.
+                                    changed = True
+                                    continue
+                                if intent.clear_mapping:
+                                    clear_mapping(intent.codex_session_id, _state=self._state_root)
+                                if generation == intent.target_generation and not ended:
+                                    # The operation reached its frozen target before
+                                    # the worker got here. Do not increment again.
+                                    pass
+                                elif generation + 1 == intent.target_generation and (
+                                    ended or intent.clear_mapping
+                                ):
+                                    self._begin_session_generation_state(state, session)
+                                    changed = True
+                                elif generation == 0 and intent.target_generation == 1:
+                                    self._begin_session_generation_state(state, session)
+                                    changed = True
+                                elif generation > intent.target_generation:
+                                    # A later generation already superseded this
+                                    # stale intent; dropping it is idempotent.
+                                    changed = True
+                                else:
+                                    remaining.append(intent)
+                                    blocked = True
+                                    continue
+                            elif generation == intent.target_generation:
+                                if not ended:
+                                    self._note_session_end_state(
+                                        state,
+                                        workspace_commitment,
+                                        session,
+                                        intent.target_generation,
+                                    )
+                                    changed = True
+                            elif generation < intent.target_generation:
+                                remaining.append(intent)
+                                blocked = True
+                                continue
+                            else:
+                                # An older end is already superseded by a later
+                                # generation and can be retired idempotently.
+                                changed = True
+                        if remaining != current:
+                            state.pending_lifecycles[:] = remaining
+                            changed = True
+                        if changed:
+                            self._save(workspace_commitment, state)
+            return acquired_any
+
+    def reconcile_pending_session_lifecycles(
+        self,
+        workspace_commitment: str,
+        codex_session_id: str | None = None,
+        *,
+        session_lock_owned: bool = False,
+    ) -> bool:
+        """Apply queued lifecycle operations under the shared workspace reservation.
+
+        ``False`` means a reservation or session lock was busy and the intents
+        remain durable.  A successful pass removes only operations that were
+        applied or proven already applied at their frozen target generation.
+        """
+
+        pending = self.list_pending_session_lifecycles(workspace_commitment, codex_session_id)
+        if not pending:
+            return True
+        session_ids = tuple(sorted({intent.codex_session_id for intent in pending}, key=str.encode))
+        return self._reconcile_pending_session_lifecycle_lanes(
+            workspace_commitment,
+            session_ids,
+            session_lock_owned=session_lock_owned,
+            owned_session_id=codex_session_id,
+        )
 
     def bump_outbox_row_attempt(
         self,
@@ -2403,7 +3213,11 @@ class LocalObservationStore:
                     self._record_quarantine_eviction(state, evicted[0], evicted[1], evicted[2])
             if reason in _OBSERVATION_GAP_CODES:
                 self._note_gap_state(state, reason)
+                self._note_session_gap_state(state, moved.session_commitment, reason)
             self._note_gap_state(state, ObservationGapCode.OUTBOX_QUARANTINED.value)
+            self._note_session_gap_state(
+                state, moved.session_commitment, ObservationGapCode.OUTBOX_QUARANTINED.value
+            )
             self._save(workspace, state)
             return True
 
@@ -2440,7 +3254,11 @@ class LocalObservationStore:
                     self._record_quarantine_eviction(state, evicted[0], evicted[1], evicted[2])
             if reason in _OBSERVATION_GAP_CODES:
                 self._note_gap_state(state, reason)
+                self._note_session_gap_state(state, moved.session_commitment, reason)
             self._note_gap_state(state, ObservationGapCode.OUTBOX_QUARANTINED.value)
+            self._note_session_gap_state(
+                state, moved.session_commitment, ObservationGapCode.OUTBOX_QUARANTINED.value
+            )
             self._save(workspace, state)
             return True
 
@@ -2488,9 +3306,17 @@ class LocalObservationStore:
                 self._record_quarantine_eviction(state, evicted[0], evicted[1], evicted[2])
             if reason in _OBSERVATION_GAP_CODES:
                 self._note_gap_state(state, reason)
+                for row in moved:
+                    self._note_session_gap_state(state, row.envelope.session_commitment, reason)
             if reason == ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value:
                 state.storage_corrupt_sessions.add(codex_session_id)
             self._note_gap_state(state, ObservationGapCode.OUTBOX_QUARANTINED.value)
+            for row in moved:
+                self._note_session_gap_state(
+                    state,
+                    row.envelope.session_commitment,
+                    ObservationGapCode.OUTBOX_QUARANTINED.value,
+                )
             self._save(workspace, state)
             return len(moved)
 
@@ -2560,6 +3386,22 @@ class LocalObservationStore:
                 self._note_gap_state(state, gap_code)
             self._save(workspace, state)
 
+    def note_session_coverage_gap(
+        self, workspace: str, session_commitment: str, gap_code: str
+    ) -> None:
+        """Record a safe coverage gap for one session lane."""
+
+        with self._lock:
+            state = self._load(workspace)
+            if (
+                type(gap_code) is str
+                and gap_code
+                and type(session_commitment) is str
+                and session_commitment
+            ):
+                self._note_session_gap_state(state, session_commitment, gap_code)
+            self._save(workspace, state)
+
     def _note_gap_state(self, state: _WorkspaceState, gap_code: str) -> None:
         assert state.gaps is not None
         observed_at = self._wall_timestamp()
@@ -2569,6 +3411,183 @@ class LocalObservationStore:
             observed_at,
             True,
         )
+
+    @staticmethod
+    def _note_session_gap_state(
+        state: _WorkspaceState, session_commitment: str, gap_code: str
+    ) -> None:
+        """Retain an active bounded-loss marker for one observation lane."""
+
+        assert state.session_gaps is not None
+        if not session_commitment or not gap_code:
+            return
+        gaps: set[str] | None = state.session_gaps.get(session_commitment)
+        if gaps is None:
+            # Session commitments are already bounded by the envelope/session
+            # admission paths. Keep this diagnostic map bounded independently
+            # so malformed or legacy state cannot turn it into an unbounded
+            # retention root.
+            if len(state.session_gaps) >= _MAX_ENVELOPES:
+                oldest = min(state.session_gaps, key=str.encode)
+                del state.session_gaps[oldest]
+            new_gaps: set[str] = set()
+            state.session_gaps[session_commitment] = new_gaps
+            gaps = new_gaps
+        if gap_code not in gaps and len(gaps) >= _MAX_SESSION_GAP_CODES:
+            return
+        gaps.add(gap_code)
+
+    @staticmethod
+    def _resolve_session_gap_state(
+        state: _WorkspaceState, gap_code: str, session_commitment: str | None = None
+    ) -> None:
+        assert state.session_gaps is not None
+        targets = (
+            (session_commitment,) if session_commitment is not None else tuple(state.session_gaps)
+        )
+        for session in targets:
+            gaps = state.session_gaps.get(session)
+            if gaps is None:
+                continue
+            gaps.discard(gap_code)
+            if not gaps:
+                del state.session_gaps[session]
+
+    @staticmethod
+    def _ordered_dedup_keys(state: _WorkspaceState) -> list[str]:
+        """Return dedup keys in durable insertion order, repairing legacy state."""
+
+        assert state.dedup is not None
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for key in state.dedup_order or ():
+            if key in state.dedup and key not in seen:
+                ordered.append(key)
+                seen.add(key)
+        # Older state only has the set. Appending its members in byte order is
+        # deterministic and keeps the compatibility path from reintroducing
+        # ``set.pop`` behaviour.
+        ordered.extend(sorted((state.dedup - seen), key=str.encode))
+        return ordered
+
+    def _hydrate_dedup_metadata(self, workspace: str, state: _WorkspaceState) -> None:
+        """Backfill lane metadata from retained envelopes when loading old state."""
+
+        assert state.dedup_order is not None
+        assert state.dedup_lanes is not None
+        assert state.dedup is not None
+        state.dedup_order[:] = self._ordered_dedup_keys(state)
+        for key in tuple(state.dedup_lanes):
+            if key not in state.dedup:
+                del state.dedup_lanes[key]
+        for envelope in state.envelopes or ():
+            key = _dedup_key(workspace, envelope)
+            if key in state.dedup and key not in state.dedup_lanes:
+                state.dedup_lanes[key] = envelope.session_commitment
+
+    @staticmethod
+    def _select_dedup_eviction_key(state: _WorkspaceState) -> str | None:
+        """Choose the oldest key from an overrepresented session lane."""
+
+        assert state.dedup_lanes is not None
+        ordered = LocalObservationStore._ordered_dedup_keys(state)
+        if not ordered:
+            return None
+        counts: dict[str, int] = {}
+        for key in ordered:
+            # Unknown keys in pre-metadata state are treated as independent
+            # lanes. That is conservative: it avoids evicting a known quiet
+            # session merely because old keys have no recoverable attribution.
+            lane = state.dedup_lanes.get(key, f"_unknown:{key}")
+            counts[lane] = counts.get(lane, 0) + 1
+        for key in ordered:
+            lane = state.dedup_lanes.get(key, f"_unknown:{key}")
+            if counts[lane] > 1:
+                return key
+        return ordered[0]
+
+    @staticmethod
+    def _fair_envelope_index(envelopes: list[ObservationEnvelope]) -> int | None:
+        """Choose the oldest envelope from an overrepresented lane first."""
+
+        if not envelopes:
+            return None
+        counts: dict[str, int] = {}
+        for envelope in envelopes:
+            counts[envelope.session_commitment] = counts.get(envelope.session_commitment, 0) + 1
+        for index, envelope in enumerate(envelopes):
+            if counts[envelope.session_commitment] > 1:
+                return index
+        # More sessions than the aggregate bound cannot all retain one row;
+        # the oldest row is the deterministic, explicitly gap-marked fallback.
+        return 0
+
+    @staticmethod
+    def _fair_outbox_index(rows: list[ObservationOutboxRow]) -> int | None:
+        """Choose the oldest row from an overrepresented delivery lane."""
+
+        if not rows:
+            return None
+        counts: dict[str, int] = {}
+        for row in rows:
+            counts[row.codex_session_id] = counts.get(row.codex_session_id, 0) + 1
+        for index, row in enumerate(rows):
+            if counts[row.codex_session_id] > 1:
+                return index
+        return 0
+
+    @staticmethod
+    def _fair_new_lane_outbox_index(
+        rows: list[ObservationOutboxRow], incoming_session: str
+    ) -> int | None:
+        """Return a safe eviction candidate only when a new lane needs a slot.
+
+        Existing rows retain strict FIFO within their session. A full queue may
+        therefore make an existing lane wait, while a new session can reclaim
+        one row from an overrepresented sibling and preserve progress for both.
+        """
+
+        if any(row.codex_session_id == incoming_session for row in rows):
+            return None
+        counts: dict[str, int] = {}
+        for row in rows:
+            counts[row.codex_session_id] = counts.get(row.codex_session_id, 0) + 1
+        for index, row in enumerate(rows):
+            if counts[row.codex_session_id] > 1:
+                return index
+        return None
+
+    def _quarantine_row_state(
+        self,
+        state: _WorkspaceState,
+        row: ObservationOutboxRow,
+        reason: str,
+        *,
+        quarantined_at: Timestamp | None = None,
+    ) -> bool:
+        """Move one row into bounded quarantine while a state lock is held."""
+
+        assert state.quarantine is not None
+        already = any(
+            entry[0] == row.codex_session_id
+            and entry[1].source_identity == row.envelope.source_identity
+            and observation_envelope_to_json(entry[1]) == observation_envelope_to_json(row.envelope)
+            for entry in state.quarantine
+        )
+        if already:
+            return False
+        state.quarantine.append(
+            (
+                row.codex_session_id,
+                row.envelope,
+                reason,
+                self._wall_timestamp() if quarantined_at is None else quarantined_at,
+            )
+        )
+        while len(state.quarantine) > _MAX_QUARANTINE:
+            evicted = state.quarantine.pop(0)
+            self._record_quarantine_eviction(state, evicted[0], evicted[1], evicted[2])
+        return True
 
     @classmethod
     def _resolve_delivered(cls, state: _WorkspaceState) -> None:
@@ -2649,7 +3668,21 @@ class LocalObservationStore:
             state.trusted_policy_mac = None
             self._save(workspace, state)
 
-    def ingest(self, envelope: ObservationEnvelope) -> ObservationIngestResult:
+    def ingest(
+        self,
+        envelope: ObservationEnvelope,
+        *,
+        workspace_commitment: str | None = None,
+    ) -> ObservationIngestResult:
+        """Durably ingest one envelope, optionally at an explicit local workspace.
+
+        The explicit workspace is a hook-only fallback for an observation whose
+        session membership could not be created because its nonblocking
+        lifecycle reservation was busy. It selects the already-consented target
+        state without mutating session ownership; ordinary callers continue to
+        resolve the workspace from the envelope's bound session commitment.
+        """
+
         if type(envelope) is not ObservationEnvelope:
             raise _error(
                 PublicErrorCode.INVALID_REQUEST,
@@ -2657,14 +3690,32 @@ class LocalObservationStore:
                 retryable=False,
             )
         with self._lock:
-            try:
-                workspace = self._workspace_for_envelope(envelope)
-            except PublicOperationError:
-                return ObservationIngestResult(
-                    ObservationIngestDisposition.REJECTED,
-                    ObservationGapCode.CONSENT_MISSING.value,
-                    None,
-                )
+            if workspace_commitment is None:
+                try:
+                    workspace = self._workspace_for_envelope(envelope)
+                except PublicOperationError:
+                    return ObservationIngestResult(
+                        ObservationIngestDisposition.REJECTED,
+                        ObservationGapCode.CONSENT_MISSING.value,
+                        None,
+                    )
+            else:
+                try:
+                    workspace = validate_commitment(workspace_commitment)
+                except ProtocolValueError:
+                    return ObservationIngestResult(
+                        ObservationIngestDisposition.REJECTED,
+                        ObservationGapCode.CONSENT_MISSING.value,
+                        None,
+                    )
+                if self._session_workspace_owners_unlocked(envelope.session_commitment) - {
+                    workspace
+                }:
+                    return ObservationIngestResult(
+                        ObservationIngestDisposition.REJECTED,
+                        ObservationGapCode.CONSENT_MISSING.value,
+                        None,
+                    )
             state = self._load(workspace)
             consent = state.consent
             if consent is None:
@@ -2685,11 +3736,17 @@ class LocalObservationStore:
                     "paused",
                     None,
                 )
+            if workspace_commitment is not None:
+                assert state.session_workspaces is not None
+                state.session_workspaces.setdefault(envelope.session_commitment, workspace)
             assert state.dedup is not None
+            assert state.dedup_order is not None
+            assert state.dedup_lanes is not None
             assert state.cursors is not None
             assert state.envelopes is not None
             assert state.gaps is not None
             assert state.unsupported_events is not None
+            self._hydrate_dedup_metadata(workspace, state)
             key = _dedup_key(workspace, envelope)
             if key in state.dedup:
                 cursor = state.cursors.get(
@@ -2711,13 +3768,41 @@ class LocalObservationStore:
                     existing,
                 )
             state.dedup.add(key)
-            if len(state.dedup) > _MAX_DEDUP:
-                # Bounded retention: drop an arbitrary oldest-looking member.
-                state.dedup.pop()
+            state.dedup_order.append(key)
+            state.dedup_lanes[key] = envelope.session_commitment
+            while len(state.dedup_order) > _MAX_DEDUP:
+                evicted_key = self._select_dedup_eviction_key(state)
+                if evicted_key is None:
+                    break
+                state.dedup.discard(evicted_key)
+                state.dedup_order.remove(evicted_key)
+                evicted_session = state.dedup_lanes.pop(evicted_key, None)
+                self._note_gap_state(state, _LOCAL_DEDUP_EVICTED_GAP)
+                self._note_gap_state(state, ObservationGapCode.TRUNCATED_PAYLOAD.value)
+                if evicted_session is not None:
+                    self._note_session_gap_state(state, evicted_session, _LOCAL_DEDUP_EVICTED_GAP)
+                    self._note_session_gap_state(
+                        state, evicted_session, ObservationGapCode.TRUNCATED_PAYLOAD.value
+                    )
             state.cursors[cursor_key] = envelope.cursor
             state.envelopes.append(envelope)
-            if len(state.envelopes) > _MAX_ENVELOPES:
-                del state.envelopes[: len(state.envelopes) - _MAX_ENVELOPES]
+            while len(state.envelopes) > _MAX_ENVELOPES:
+                evicted_index = self._fair_envelope_index(state.envelopes)
+                if evicted_index is None:
+                    break
+                evicted = state.envelopes.pop(evicted_index)
+                self._note_gap_state(state, ObservationGapCode.TRUNCATED_PAYLOAD.value)
+                self._note_gap_state(state, _LOCAL_ENVELOPE_RETENTION_GAP)
+                self._note_session_gap_state(
+                    state,
+                    evicted.session_commitment,
+                    _LOCAL_ENVELOPE_RETENTION_GAP,
+                )
+                self._note_session_gap_state(
+                    state,
+                    evicted.session_commitment,
+                    ObservationGapCode.TRUNCATED_PAYLOAD.value,
+                )
             state.last_receipt = envelope.receipt_time
             mono_ms = int(self._now_mono() * 1000)
             state.monotonic_epoch = self._boot_epoch()
@@ -2823,10 +3908,22 @@ class LocalObservationStore:
             revoked_at = (
                 state.last_receipt if state.last_receipt is not None else consent.granted_at
             )
+            if consent.revoked_at is None:
+                token = canonical_digest(
+                    JsonObject(
+                        {
+                            "workspace_commitment": consent.workspace_commitment,
+                            "granted_at": consent.granted_at.wire,
+                            "revoked_at": revoked_at.wire,
+                        }
+                    )
+                )
+                state.pending_consent_revocation = token
+                state.pending_consent_projects = None
             state.consent = LocalObservationConsent(
                 workspace_commitment=consent.workspace_commitment,
                 granted_at=consent.granted_at,
-                revoked_at=revoked_at,
+                revoked_at=consent.revoked_at or revoked_at,
                 paused=True,
             )
             self._save(command.workspace_commitment, state)
@@ -2994,12 +4091,166 @@ class LocalObservationStore:
                 )
                 del delivered[oldest]
 
-    def _encode_state(self, workspace_commitment: str, state: _WorkspaceState) -> bytes:
+    @staticmethod
+    def _session_commitment_for_key(key: str) -> str | None:
+        """Return a session commitment encoded as a direct or cursor-map key."""
+
+        candidate = key
+        if not candidate.startswith("hmac-sha256:"):
+            _prefix, separator, suffix = candidate.partition(":")
+            if not separator:
+                return None
+            candidate = suffix
+        try:
+            return validate_commitment(candidate)
+        except ProtocolValueError:
+            return None
+
+    @staticmethod
+    def _session_replay_protected(state: _WorkspaceState) -> set[str]:
+        """Find sessions whose replay state is still needed by live work."""
+
+        ended = state.ended_sessions or set()
+        protected = {
+            session for session in (state.session_workspaces or {}) if session not in ended
+        }
+        protected.update((state.codex_session_bindings or {}).values())
+        protected.update(state.storage_corrupt_sessions or ())
+        protected.update(row.envelope.session_commitment for row in (state.pending_outbox or ()))
+        protected.update(
+            envelope.session_commitment
+            for _codex_session_id, envelope, _reason, _quarantined_at in (state.quarantine or ())
+        )
+        protected.update(intent.session_commitment for intent in (state.pending_lifecycles or ()))
+        return protected
+
+    @classmethod
+    def _trim_session_mapping(
+        cls,
+        mapping: MutableMapping[str, _SessionMapValue] | None,
+        protected: set[str],
+    ) -> bool:
+        """Trim one session keyed map, preserving keys needed by live work."""
+
+        if mapping is None or len(mapping) <= _MAX_SESSION_REPLAY_KEYS:
+            return False
+        candidates = sorted(
+            (key for key in mapping if cls._session_commitment_for_key(key) not in protected),
+            key=str.encode,
+        )
+        changed = False
+        while len(mapping) > _MAX_SESSION_REPLAY_KEYS and candidates:
+            mapping.pop(candidates.pop(0), None)
+            changed = True
+        return changed
+
+    @classmethod
+    def _prune_session_replay_maps(cls, state: _WorkspaceState) -> bool:
+        """Bound ended-session replay indexes while preserving live lanes.
+
+        ``codex_session_bindings`` is pruned by the recovery scan because it
+        needs host mapping recency.  The associated generation, cursor, stream,
+        and gap maps used to outlive that operation indefinitely, however.  A
+        compact replay fence is retained for the oldest bounded window; entries
+        still referenced by a live binding, pending row, quarantine, lifecycle
+        intent, or corruption repair are never evicted.
+        """
+
+        protected = cls._session_replay_protected(state)
+        changed = False
+
+        # Keep the three lifecycle tombstone containers in lockstep.  The
+        # generation counter remains the replay fence for a pruned session;
+        # once the bounded history is exhausted a later reattach is treated as
+        # a new local generation, which is the same bounded-retention contract
+        # as the host mapping cap.
+        generation_keys = set(state.session_generations or ())
+        generation_keys.update(state.ended_session_generations or ())
+        generation_keys.update(state.ended_sessions or ())
+        tombstone_candidates = sorted(
+            generation_keys - protected,
+            key=str.encode,
+        )
+        while len(generation_keys) > _MAX_SESSION_REPLAY_KEYS and tombstone_candidates:
+            session = tombstone_candidates.pop(0)
+            generation_keys.discard(session)
+            if state.session_generations is not None:
+                changed = state.session_generations.pop(session, None) is not None or changed
+            if state.ended_session_generations is not None:
+                changed = state.ended_session_generations.pop(session, None) is not None or changed
+            if state.ended_sessions is not None and session in state.ended_sessions:
+                state.ended_sessions.discard(session)
+                changed = True
+
+        direct_maps = (
+            cast(MutableMapping[str, object] | None, state.session_workspaces),
+            cast(MutableMapping[str, object] | None, state.cursors),
+            cast(MutableMapping[str, object] | None, state.stream_cursors),
+            cast(MutableMapping[str, object] | None, state.stream_partials),
+            cast(MutableMapping[str, object] | None, state.stream_call_tools),
+            cast(MutableMapping[str, object] | None, state.stream_call_tool_generations),
+            cast(MutableMapping[str, object] | None, state.stream_source_identities),
+            cast(MutableMapping[str, object] | None, state.stream_profiles),
+            cast(MutableMapping[str, object] | None, state.hook_sequences),
+            cast(MutableMapping[str, object] | None, state.session_advice_suppression),
+        )
+        for mapping in direct_maps:
+            changed = cls._trim_session_mapping(mapping, protected) or changed
+
+        if state.stream_partial_dropped_sessions is not None:
+            candidates = sorted(
+                session
+                for session in state.stream_partial_dropped_sessions
+                if session not in protected
+            )
+            while (
+                len(state.stream_partial_dropped_sessions) > _MAX_SESSION_REPLAY_KEYS and candidates
+            ):
+                state.stream_partial_dropped_sessions.discard(candidates.pop(0))
+                changed = True
+
+        if state.session_gaps is not None and len(state.session_gaps) > _MAX_SESSION_REPLAY_KEYS:
+            candidates = sorted(
+                (session for session in state.session_gaps if session not in protected),
+                key=str.encode,
+            )
+            while len(state.session_gaps) > _MAX_SESSION_REPLAY_KEYS and candidates:
+                del state.session_gaps[candidates.pop(0)]
+                changed = True
+
+        # ``dedup_lanes`` is already bounded by ``dedup_order`` during normal
+        # ingest.  Trim malformed/legacy excess here as well, keeping the set,
+        # order list, and lane attribution synchronized.
+        if (
+            state.dedup is not None
+            and state.dedup_order is not None
+            and state.dedup_lanes is not None
+        ):
+            for key in tuple(state.dedup_lanes):
+                if key not in state.dedup:
+                    del state.dedup_lanes[key]
+                    changed = True
+            while len(state.dedup_order) > _MAX_DEDUP:
+                key = cls._select_dedup_eviction_key(state)
+                if key is None:
+                    break
+                state.dedup_order.remove(key)
+                state.dedup.discard(key)
+                state.dedup_lanes.pop(key, None)
+                changed = True
+        return changed
+
+    def _encode_state(
+        self, workspace_commitment: str, state: _WorkspaceState, *, compact: bool = False
+    ) -> bytes:
         """Encode one state to its on-disk bytes, attributing the cost (#290)."""
 
         encode_started = self._now_mono()
         try:
-            return canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
+            return (
+                canonical_encode(self._state_to_json(workspace_commitment, state, compact=compact))
+                + b"\n"
+            )
         finally:
             self.stage_timings_ms["encode"] += (self._now_mono() - encode_started) * 1000
 
@@ -3038,6 +4289,7 @@ class LocalObservationStore:
         directory = self._root / "workspaces"
         _ensure_dir(directory)
         path = self._workspace_path(workspace_commitment)
+        replay_maps_changed = self._prune_session_replay_maps(state)
         quarantined_before = len(state.quarantine or ())
         notices_before = len(state.frontier_motion_notices or ())
         delivered_before = len(state.frontier_motion_delivered or ())
@@ -3046,6 +4298,7 @@ class LocalObservationStore:
         partials_dropped = self._drop_oversized_stream_partials(state)
         if (
             projected is not None
+            and not replay_maps_changed
             and not partials_dropped
             and len(state.quarantine or ()) == quarantined_before
             and len(state.frontier_motion_notices or ()) == notices_before
@@ -3072,38 +4325,42 @@ class LocalObservationStore:
             # Retain authority state and make every observation-detail loss explicit.
             assert state.envelopes is not None
             while state.envelopes and len(payload) > _MAX_STATE_BYTES:
-                del state.envelopes[0]
+                evicted_index = self._fair_envelope_index(state.envelopes)
+                if evicted_index is None:
+                    break
+                evicted = state.envelopes.pop(evicted_index)
                 assert state.gaps is not None
                 self._note_gap_state(state, ObservationGapCode.TRUNCATED_PAYLOAD.value)
+                self._note_session_gap_state(
+                    state, evicted.session_commitment, ObservationGapCode.TRUNCATED_PAYLOAD.value
+                )
                 truncated = True
                 payload = self._encode_state(workspace_commitment, state)
         assert state.pending_outbox is not None
         assert state.quarantine is not None
         assert state.gaps is not None
         while state.pending_outbox and len(payload) > _MAX_STATE_BYTES:
-            row = state.pending_outbox.pop(0)
-            already = any(
-                entry[0] == row.codex_session_id
-                and observation_envelope_to_json(entry[1])
-                == observation_envelope_to_json(row.envelope)
-                for entry in state.quarantine
+            evicted_index = self._fair_outbox_index(state.pending_outbox)
+            if evicted_index is None:
+                break
+            row = state.pending_outbox.pop(evicted_index)
+            self._quarantine_row_state(
+                state,
+                row,
+                ObservationGapCode.OUTBOX_OVERFLOW.value,
             )
-            if not already:
-                state.quarantine.append(
-                    (
-                        row.codex_session_id,
-                        row.envelope,
-                        ObservationGapCode.OUTBOX_OVERFLOW.value,
-                        self._wall_timestamp(),
-                    )
-                )
             self._note_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
             self._note_gap_state(state, ObservationGapCode.OUTBOX_QUARANTINED.value)
+            self._note_session_gap_state(
+                state, row.envelope.session_commitment, ObservationGapCode.OUTBOX_OVERFLOW.value
+            )
             payload = self._encode_state(workspace_commitment, state)
         while state.quarantine and len(payload) > _MAX_STATE_BYTES:
             evicted = state.quarantine.pop(0)
             self._record_quarantine_eviction(state, evicted[0], evicted[1], evicted[2])
             payload = self._encode_state(workspace_commitment, state)
+        if len(payload) > _MAX_STATE_BYTES:
+            payload = self._encode_state(workspace_commitment, state, compact=True)
         if len(payload) > _MAX_STATE_BYTES:
             raise _error(
                 PublicErrorCode.STORAGE_UNSAFE,
@@ -3124,7 +4381,25 @@ class LocalObservationStore:
             # retire the gap in the same pass that opened it. History stays in
             # gap_history; only the active flag, which reports live
             # degradation, is cleared (#310).
-            self._resolve_gap_state(state, ObservationGapCode.TRUNCATED_PAYLOAD.value)
+            assert state.session_gaps is not None
+            bounded_count_loss = any(
+                state.gaps.get(code) is not None and state.gaps[code].active
+                for code in (_LOCAL_DEDUP_EVICTED_GAP, _LOCAL_ENVELOPE_RETENTION_GAP)
+            ) or any(
+                _LOCAL_DEDUP_EVICTED_GAP in gaps or _LOCAL_ENVELOPE_RETENTION_GAP in gaps
+                for gaps in state.session_gaps.values()
+            )
+            for session, gaps in tuple(state.session_gaps.items()):
+                if not (_LOCAL_DEDUP_EVICTED_GAP in gaps or _LOCAL_ENVELOPE_RETENTION_GAP in gaps):
+                    self._resolve_session_gap_state(
+                        state,
+                        ObservationGapCode.TRUNCATED_PAYLOAD.value,
+                        session,
+                    )
+            if not bounded_count_loss:
+                self._resolve_gap_state(state, ObservationGapCode.TRUNCATED_PAYLOAD.value)
+                self._resolve_gap_state(state, _LOCAL_DEDUP_EVICTED_GAP)
+                self._resolve_session_gap_state(state, _LOCAL_DEDUP_EVICTED_GAP)
             payload = self._encode_state(workspace_commitment, state)
         write_started = self._now_mono()
         _atomic_write(path, payload)
@@ -3145,6 +4420,7 @@ class LocalObservationStore:
         reclaimed: bool = False,
     ) -> None:
         assert state.gaps is not None
+        assert state.session_gaps is not None
         material = JsonObject(
             {
                 "prior": state.quarantine_evicted_commitment,
@@ -3169,13 +4445,22 @@ class LocalObservationStore:
         if state.quarantine_evicted_last is None or state.quarantine_evicted_last < receipt:
             state.quarantine_evicted_last = receipt
         self._note_gap_state(state, ObservationGapCode.QUARANTINE_DETAIL_EVICTED.value)
+        self._note_session_gap_state(
+            state,
+            envelope.session_commitment,
+            ObservationGapCode.QUARANTINE_DETAIL_EVICTED.value,
+        )
 
     def _workspace_for_envelope(self, envelope: ObservationEnvelope) -> str:
-        for workspace, state in self._iter_workspaces():
-            assert state.session_workspaces is not None
-            bound = state.session_workspaces.get(envelope.session_commitment)
-            if bound is not None:
-                return bound
+        owners = self._session_workspace_owners_unlocked(envelope.session_commitment)
+        if len(owners) == 1:
+            return next(iter(owners))
+        if owners:
+            raise _error(
+                PublicErrorCode.SESSION_CONFLICT,
+                "Observation session has multiple workspace owners.",
+                retryable=False,
+            )
         active = [
             workspace
             for workspace, state in self._iter_workspaces()
@@ -3306,6 +4591,8 @@ class LocalObservationStore:
             ObservationGapCode.OUTBOX_QUARANTINED.value,
             _LOCAL_OUTBOX_OVERFLOW_GAP,
             _LOCAL_STREAM_PARTIAL_DROPPED_GAP,
+            _LOCAL_DEDUP_EVICTED_GAP,
+            _LOCAL_ENVELOPE_RETENTION_GAP,
         }
         current = {code for code, seen in state.gaps.items() if seen.active} - transient
         # A dropped stream partial means the source tail is pending a reread:
@@ -3358,13 +4645,18 @@ class LocalObservationStore:
             current.add(ObservationGapCode.MAPPING_MISSING.value)
         return tuple(sorted(current, key=str.encode))
 
-    def _state_to_json(self, workspace: str, state: _WorkspaceState) -> dict[str, JsonValue]:
+    def _state_to_json(
+        self, workspace: str, state: _WorkspaceState, *, compact: bool = False
+    ) -> dict[str, JsonValue]:
         consent = state.consent
         assert state.session_workspaces is not None
         assert state.cursors is not None
         assert state.dedup is not None
+        assert state.dedup_order is not None
+        assert state.dedup_lanes is not None
         assert state.envelopes is not None
         assert state.gaps is not None
+        assert state.session_gaps is not None
         assert state.unsupported_events is not None
         assert state.open_pre is not None
         assert state.stream_cursors is not None
@@ -3382,7 +4674,9 @@ class LocalObservationStore:
                     "paused": consent.paused,
                 }
             )
+        dedup_order = self._ordered_dedup_keys(state)
         payload: dict[str, JsonValue] = {
+            # /10 adds generation-fenced deferred host-session lifecycle intents.
             # /9 generation-fences call-id pairing and stream file identity. /8
             # persisted unfenced call-id to tool-name pairing for rollout outputs.
             # /7 attributes dropped stream-partial gaps per session. /6 adds one-shot
@@ -3390,7 +4684,7 @@ class LocalObservationStore:
             # corruption-session tracking. /3 added quarantined_at per
             # quarantine entry and the reclaimed counter. Readers tolerate both directions:
             # unknown keys are ignored and missing keys default safely.
-            "schema": "yoetz.observation-local/9",
+            "schema": "yoetz.observation-local/10",
             "workspace_commitment": workspace,
             "consent": consent_json,
             "session_workspaces": JsonObject(
@@ -3402,7 +4696,10 @@ class LocalObservationStore:
                     for key, cursor in sorted(state.cursors.items())
                 }
             ),
-            "dedup": tuple(sorted(state.dedup, key=str.encode)),
+            # The existing field is now insertion ordered so a restart keeps
+            # the same deterministic eviction sequence. Set membership still
+            # remains the authoritative duplicate check.
+            "dedup": tuple(dedup_order),
             "ended_sessions": tuple(sorted(state.ended_sessions or set(), key=str.encode)),
             "session_generations": JsonObject(
                 {
@@ -3485,6 +4782,7 @@ class LocalObservationStore:
                     )
                 }
             ),
+            "hook_sequence_clock": state.hook_sequence_clock,
             "last_stream_reconcile_mono_ms": state.last_stream_reconcile_mono_ms,
             "last_hook_receipt_mono_ms": state.last_hook_receipt_mono_ms,
             "last_successful_drain_mono_ms": state.last_successful_drain_mono_ms,
@@ -3537,6 +4835,33 @@ class LocalObservationStore:
                 {key: value for key, value in sorted(state.codex_session_bindings.items())}
             ),
         }
+        # Keep the normal local state compact.  These fields are present only during the bounded
+        # revoke transaction, when the durable token and generation snapshot must survive a
+        # restart; missing fields decode as no pending fence for older state files.
+        if state.pending_consent_revocation is not None:
+            payload["pending_consent_revocation"] = state.pending_consent_revocation
+            if state.pending_consent_projects is not None:
+                payload["pending_consent_projects"] = JsonObject(
+                    {
+                        project_id: generation
+                        for project_id, generation in sorted(
+                            state.pending_consent_projects.items(),
+                            key=lambda item: item[0].encode(),
+                        )
+                    }
+                )
+        if state.dedup_lanes:
+            payload["dedup_sessions"] = tuple(state.dedup_lanes.get(key) for key in dedup_order)
+        if state.session_gaps:
+            payload["session_gaps"] = JsonObject(
+                {
+                    session: tuple(sorted(gaps, key=str.encode))
+                    for session, gaps in sorted(
+                        state.session_gaps.items(), key=lambda item: item[0].encode()
+                    )
+                    if gaps
+                }
+            )
         if state.storage_corrupt_sessions:
             payload["storage_corrupt_sessions"] = tuple(
                 sorted(state.storage_corrupt_sessions, key=str.encode)
@@ -3622,6 +4947,56 @@ class LocalObservationStore:
                     )
                 }
             )
+        if state.pending_lifecycles:
+            payload["pending_lifecycles"] = tuple(
+                JsonObject(
+                    {
+                        "codex_session_id": intent.codex_session_id,
+                        "session_commitment": intent.session_commitment,
+                        "event_kind": intent.event_kind,
+                        "target_generation": intent.target_generation,
+                        "clear_mapping": intent.clear_mapping,
+                    }
+                )
+                for intent in state.pending_lifecycles
+            )
+        if compact:
+            # The eviction ladder above preserves every authority-bearing row and records detail
+            # loss in the bounded counters/gaps.  When the resulting aggregate still sits just
+            # over a caller-configured byte cap, omit empty optional projections whose readers
+            # already default safely.  This keeps the hard bound effective without dropping
+            # consent, route generations, commitments, or loss evidence.
+            for key in (
+                "cursors",
+                "dedup",
+                "ended_sessions",
+                "ended_session_generations",
+                "envelopes",
+                "unsupported_events",
+                "last_receipt",
+                "advice_frontier",
+                "advice_snapshot",
+                "last_advice_suppression",
+                "session_advice",
+                "session_advice_suppression",
+                "open_pre",
+                "stream_cursors",
+                "stream_partials",
+                "hook_sequences",
+                "hook_sequence_clock",
+                "last_stream_reconcile_mono_ms",
+                "last_hook_receipt_mono_ms",
+                "last_successful_drain_mono_ms",
+                "monotonic_epoch_ms",
+                "pending_outbox",
+                "quarantine",
+                "quarantine_reclaimed_count",
+                "trusted_policy_digest",
+                "trusted_policy_mac",
+            ):
+                value = payload.get(key)
+                if value is None or value == () or value == {} or value == 0:
+                    payload.pop(key, None)
         return payload
 
     def _state_from_json(self, raw: Mapping[str, JsonValue]) -> _WorkspaceState:
@@ -3636,6 +5011,32 @@ class LocalObservationStore:
                 revoked_at=None if revoked is None else Timestamp(str(revoked)),
                 paused=bool(row.get("paused", False)),
             )
+        pending_consent_revocation = raw.get("pending_consent_revocation")
+        if type(pending_consent_revocation) is not str:
+            pending_consent_revocation = None
+        else:
+            try:
+                validate_sha256_digest(pending_consent_revocation)
+            except ProtocolValueError, TypeError, ValueError:
+                pending_consent_revocation = None
+        pending_consent_projects: dict[str, int] | None = None
+        raw_pending_projects = raw.get("pending_consent_projects")
+        if isinstance(raw_pending_projects, Mapping):
+            pending_consent_projects = {}
+            for project_id, generation in raw_pending_projects.items():
+                if len(pending_consent_projects) >= _MAX_PENDING_CONSENT_PROJECTS:
+                    break
+                if type(project_id) is not str or type(generation) is not int:
+                    continue
+                if isinstance(generation, bool) or generation < 1:
+                    continue
+                try:
+                    validate_id(IdKind.PROJECT, project_id)
+                except ProtocolValueError, TypeError, ValueError:
+                    continue
+                pending_consent_projects[project_id] = generation
+        if pending_consent_revocation is None:
+            pending_consent_projects = None
         session_workspaces = {
             str(key): str(value)
             for key, value in cast(
@@ -3647,13 +5048,35 @@ class LocalObservationStore:
             for key, value in cast(Mapping[str, JsonValue], raw.get("cursors") or {}).items()
         }
         dedup_raw = raw.get("dedup") or ()
+        dedup_values = (
+            cast(tuple[JsonValue, ...] | list[JsonValue], dedup_raw)
+            if isinstance(dedup_raw, (tuple, list))
+            else ()
+        )
+        dedup_order: list[str] = []
+        for value in dedup_values:
+            if type(value) is str and value not in dedup_order:
+                dedup_order.append(value)
+        dedup_lanes: dict[str, str] = {}
+        dedup_sessions_raw = raw.get("dedup_sessions") or ()
+        if isinstance(dedup_sessions_raw, (tuple, list)):
+            for key, lane in zip(dedup_order, dedup_sessions_raw, strict=False):
+                if type(lane) is not str:
+                    continue
+                try:
+                    validate_commitment(lane)
+                except ProtocolValueError:
+                    continue
+                dedup_lanes[key] = lane
         ended_sessions_raw = raw.get("ended_sessions") or ()
         session_generations = {
             str(key): int(value)
             for key, value in cast(
                 Mapping[str, JsonValue], raw.get("session_generations") or {}
             ).items()
-            if type(value) is int and not isinstance(value, bool) and value >= 1
+            if type(value) is int
+            and not isinstance(value, bool)
+            and 0 <= value <= _MAX_SAFE_INTEGER
         }
         ended_session_generations = {
             str(key): int(value)
@@ -3662,9 +5085,61 @@ class LocalObservationStore:
             ).items()
             if type(value) is int and not isinstance(value, bool) and value >= 1
         }
+        pending_lifecycles: list[PendingSessionLifecycle] = []
+        for item in cast(
+            tuple[JsonValue, ...] | list[JsonValue], raw.get("pending_lifecycles") or ()
+        ):
+            if not isinstance(item, Mapping):
+                continue
+            pending = cast(Mapping[str, JsonValue], item)
+            try:
+                pending_lifecycles.append(
+                    PendingSessionLifecycle(
+                        codex_session_id=pending.get("codex_session_id"),  # type: ignore[arg-type]
+                        session_commitment=pending.get("session_commitment"),  # type: ignore[arg-type]
+                        event_kind=pending.get("event_kind"),  # type: ignore[arg-type]
+                        target_generation=pending.get("target_generation"),  # type: ignore[arg-type]
+                        clear_mapping=pending.get("clear_mapping", False),  # type: ignore[arg-type]
+                    )
+                )
+            except ProtocolValueError, TypeError, ValueError:
+                continue
+            if len(pending_lifecycles) >= _MAX_PENDING_LIFECYCLES:
+                break
         envelopes_raw = raw.get("envelopes") or ()
         gaps_raw = raw.get("gaps") or ()
         gap_history: dict[str, _GapState] = {}
+        session_gaps: dict[str, set[str]] = {}
+        raw_session_gaps = raw.get("session_gaps") or {}
+        if isinstance(raw_session_gaps, Mapping):
+            for session, codes in cast(Mapping[str, JsonValue], raw_session_gaps).items():
+                if len(session_gaps) >= _MAX_ENVELOPES:
+                    break
+                if type(session) is not str or not isinstance(codes, (tuple, list)):
+                    continue
+                try:
+                    validate_commitment(session)
+                except ProtocolValueError:
+                    continue
+                retained_codes = {
+                    code
+                    for code in cast(tuple[JsonValue, ...] | list[JsonValue], codes)
+                    if type(code) is str
+                    and (
+                        code in _OBSERVATION_GAP_CODES
+                        or code
+                        in {
+                            _LOCAL_DEDUP_EVICTED_GAP,
+                            _LOCAL_ENVELOPE_RETENTION_GAP,
+                            _LOCAL_OUTBOX_OVERFLOW_GAP,
+                            _LOCAL_STREAM_PARTIAL_DROPPED_GAP,
+                        }
+                    )
+                }
+                if retained_codes:
+                    session_gaps[session] = set(
+                        sorted(retained_codes, key=str.encode)[:_MAX_SESSION_GAP_CODES]
+                    )
         raw_gap_history = raw.get("gap_history") or {}
         if isinstance(raw_gap_history, Mapping):
             for code, value in cast(Mapping[str, JsonValue], raw_gap_history).items():
@@ -3780,6 +5255,15 @@ class LocalObservationStore:
         for key, value in cast(Mapping[str, JsonValue], raw.get("hook_sequences") or {}).items():
             if type(value) is int and not isinstance(value, bool) and value >= 0:
                 hook_sequences[str(key)] = value
+        raw_hook_sequence_clock = raw.get("hook_sequence_clock", 0)
+        hook_sequence_clock = (
+            raw_hook_sequence_clock
+            if type(raw_hook_sequence_clock) is int
+            and not isinstance(raw_hook_sequence_clock, bool)
+            and 0 <= raw_hook_sequence_clock <= _MAX_SAFE_INTEGER
+            else max(hook_sequences.values(), default=0)
+        )
+        hook_sequence_clock = max(hook_sequence_clock, max(hook_sequences.values(), default=0))
         reconcile_mono = raw.get("last_stream_reconcile_mono_ms")
         last_reconcile = (
             int(reconcile_mono)
@@ -3971,12 +5455,18 @@ class LocalObservationStore:
             consent=consent,
             session_workspaces=session_workspaces,
             cursors=cursors,
-            dedup=set(cast(tuple[str, ...], dedup_raw)),
+            dedup=set(dedup_order),
+            dedup_order=dedup_order,
+            dedup_lanes=dedup_lanes,
             ended_sessions=set(cast(tuple[str, ...], ended_sessions_raw)),
             session_generations=session_generations,
             ended_session_generations=ended_session_generations,
+            pending_lifecycles=pending_lifecycles,
+            pending_consent_revocation=pending_consent_revocation,
+            pending_consent_projects=pending_consent_projects,
             envelopes=envelopes,
             gaps=gap_history,
+            session_gaps=session_gaps,
             unsupported_events=set(cast(tuple[str, ...], unsupported_raw)),
             last_receipt=None if last_receipt is None else Timestamp(str(last_receipt)),
             advice_frontier=cast(str | None, raw.get("advice_frontier")),
@@ -4002,6 +5492,7 @@ class LocalObservationStore:
             stream_profiles=stream_profiles,
             stream_partial_dropped_sessions=stream_partial_dropped_sessions,
             hook_sequences=hook_sequences,
+            hook_sequence_clock=hook_sequence_clock,
             last_stream_reconcile_mono_ms=last_reconcile,
             last_hook_receipt_mono_ms=last_hook_mono,
             last_successful_drain_mono_ms=last_drain_mono,

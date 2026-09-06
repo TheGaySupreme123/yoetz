@@ -2115,6 +2115,75 @@ async def test_ready_maintenance_sweeps_immediately_repeats_and_cancels_before_c
 
 
 @pytest.mark.anyio
+async def test_ready_maintenance_recovers_lineage_before_and_during_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    recovered_twice = asyncio.Event()
+
+    class Application(_Application):
+        observation_sweep: object
+        recovery_calls = 0
+
+        async def recover_lineage(self) -> object:
+            events.append("recovery")
+            self.recovery_calls += 1
+            if self.recovery_calls >= 2:
+                recovered_twice.set()
+            return (), ()
+
+    application = Application()
+
+    async def sweep() -> ObservationDrainSummary:
+        events.append("sweep")
+        return ObservationDrainSummary(
+            attempted=0,
+            acknowledged=0,
+            retry_pending=0,
+            quarantined=0,
+            reasons=(),
+        )
+
+    application.observation_sweep = sweep
+    vault = _Vault()
+    vault.ready = False
+    lifecycle = ServiceLifecycle(
+        _Clock(),
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "2" * 64,
+        instance_id=_INSTANCE_ID,
+        singleton_lock_path=tmp_path / "service.lock",
+    )
+
+    async def factory(_service_generation: int, _vault_generation: int) -> _Application:
+        return application
+
+    daemon = ServiceDaemon(
+        _composition=ServiceComposition(
+            lifecycle=lifecycle,
+            control_listener=_Listener(),  # pyright: ignore[reportArgumentType]
+            secret_ingress_listener=None,
+            human_control_listener=None,
+            human_control_service=None,
+            session_monitor=None,
+            vault=vault,
+            ready_application_factory=factory,
+        )
+    )
+    monkeypatch.setattr(daemon_module, "_OBSERVATION_SWEEP_INTERVAL_SECONDS", 0.01)
+    await daemon.start()
+    await daemon.composition.lifecycle.transition(ServiceState.UNLOCKING)
+    vault.ready = True
+    await daemon.activate_ready_application(7, 3)
+
+    await asyncio.wait_for(recovered_twice.wait(), timeout=1)
+    assert events[0] == "recovery"
+    assert events.index("sweep") > events.index("recovery")
+    await daemon.lock()
+    await daemon.close()
+
+
+@pytest.mark.anyio
 async def test_sweep_resolved_rows_defer_idle_relock_until_the_spool_runs_dry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

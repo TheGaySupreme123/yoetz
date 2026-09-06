@@ -39,12 +39,12 @@ CSPRNG. Opaque, case-sensitive, never parsed for order or meaning.
 | `egress_authorization` | `aut_` | trusted local service privacy audit authority |
 | `egress_dispatch` | `dsp_` | trusted local service immediately before physical dispatch |
 | `egress_receipt` | `egr_` | trusted local service privacy audit |
+| `project` | `prj_` | trusted local service project coordinator |
 | `actor` | `agt_` (convention) | caller-asserted; format-validated only |
 
-**Accepted, not yet generated (ADR-027, issue #494).** `IdKind.project` uses prefix `prj_` and is
-server-generated under the same `<prefix>_<lowercase UUIDv4>` rule. Wire admission, catalog
-minting, and `new_id(IdKind.PROJECT)` land in #495/#496. Until then the live enum and
-`PREFIX_BY_KIND` map stay exactly the table above.
+`IdKind.project` uses prefix `prj_` and is server-generated under the same
+`<prefix>_<lowercase UUIDv4>` rule. Catalog minting and `new_id(IdKind.PROJECT)` use the shared
+identifier registry; membership commitments never substitute for a project identifier.
 
 For `publish_work`, public event IDs are caller-generated and stable across retry. The lifecycle,
 response, check, finding, and receipt events created by the engine receive IDs from the injected
@@ -105,14 +105,17 @@ keys. `SESSION_NOT_FOUND` with
 repository_identity_required` (the control handshake carried no workspace locator) or
 `repository_identity_mismatch` (the locator resolved to a different repository than the route, or
 the route holds no repository binding); neither discloses a commitment, and a hook uses the reason
-to keep a live mapping out of the `mapping_stale` class (issue #578). The separate
-`workspace_task_exists` conflict deliberately carries no task selector or count: possession of a
-workspace reference alone is not authority to discover or attach another task. Once a live,
-consented project membership is implemented, its service-side `status` projection may disclose
-bounded sibling task identity and state; membership still never authorizes attach, resume, or task
-selection. A host hook may recover from that exact conflict only with a validated selector it
-already holds in the private local lifecycle store; the public error remains unchanged and reveals
-no binding. For MCP
+to keep a live mapping out of the `mapping_stale` class (issue #578).
+`workspace_task_exists` identifies an explicit `mode=create` colliding with an identical
+workspace/external pair. It never refuses a new pair on the automatic admission path.
+Workspace membership alone never authorizes discovery,
+attachment, or task selection. A live, consented project status may disclose bounded sibling
+identity and state; attachment still requires a held session selector or the exact identity pair.
+Conflicting START selectors return `SESSION_CONFLICT` with `reason_code: selector_conflict`
+before consuming a handle or creating a child. An optional session accompanying an attach handle
+must select that handle's child, and a self-registration request cannot simultaneously select an
+existing session for attachment.
+For MCP
 `INVALID_REQUEST` validation failures, `safe_details` may also carry parallel `fields` and
 `reasons` arrays: each entry is an allowlisted JSON pointer and a closed reason token for that
 location (same index order; at most eight locations). `reason_code` may co-occur with
@@ -1583,45 +1586,36 @@ low-entropy plaintext from leaking through an unkeyed structural request digest.
 is the caller-declared workspace or working-tree identity and `external_ref` the stable task identity within that workspace;
 together they are the attach selector when `session_id` is absent (`mode=create_or_attach` or
 `attach` with the pair). The `workspace_ref_commitment` is a keyed HMAC of the exact caller
-string, so the single-task-per-workspace invariant below holds per spelling, not per repository,
-and remains executable until #497:
-hook auto-attach on every host commits the canonical absolute repository root (a linked worktree
-is its own root), the packaged guidance and the `start` tool description tell agents to use that
-same root and never a remote URL, and the SessionStart context names the mapped `session_id` and
-`writer_id` so an agent attaches to the hook-mapped task by session selector instead of guessing
-the hook's pair. A differently spelled `workspace_ref` is a distinct workspace and creates a
-sibling without conflict (issue #580). An identical pair attaches and rotates to a fresh session/writer; the
-historical session remains a valid `mode=attach` selector even though ordinary task routing accepts
-only the active session, and a routed request on the retired session receives the typed current
-binding. If the pair is new but the workspace already owns a non-quarantined task,
-`create_or_attach` returns the typed `workspace_task_exists` conflict instead of silently splitting
-lineage. An `initializing` route counts as occupied: ignoring a still-reclaimable start would let a
-concurrent drifted pair split lineage. The conflict discloses no binding; the caller must attach
-with a previously held session selector or choose `mode=create` explicitly for a separate sibling
-task. The observation hook's bounded recovery is one such previously held-selector path: after the
-exact conflict, it may choose the most recently written valid local mapping among same-host
-sessions bound to that consented workspace and no other local workspace, but only after a received
-`SessionEnd` durably marked every other bound host session ended and every eligible mapping names
-one task. It then issues `mode=attach` with the known Yoetz session selector plus the new paired
-host identity. The catalog admits that otherwise-unresolved pair only when the selector is still
-the route's active session, the route is the workspace's sole non-quarantined task, the trusted
-repository-privacy binding matches, and no start for that route is already pending. The pair is a
-one-request workspace proof, not a stored alias. The hook accepts only a success for the same task
-ID before mapping the new host session. It never infers death from age, derives a selector from the
-conflict, chooses among sibling tasks, crosses host families, supersedes a still-live host session,
-or implements the multi-task workspace admission planned by #494/#497/#498. Raw refs never land in
-durable state — only the commitments do. This
-model/agent-controlled `workspace_ref_commitment` is an attachment selector, not a
-repository-privacy commitment, and cannot select or inherit disclosure authority.
+string. Hook auto-attach on every host commits the canonical absolute repository root (a linked
+worktree is its own root), and guidance uses the same root rather than a remote URL. The
+SessionStart context names the mapped `session_id` and `writer_id`; an agent continues that task
+with the held session selector. With no selector or stored binding, a new pair creates new work,
+even beside a dormant task. An identical pair attaches and rotates to a fresh session and writer.
+Concurrent requests for one new pair converge on one task; different pairs admit separate tasks.
+An initializing route reserves its exact pair while recovery remains possible.
+
+Historical sessions remain valid `mode=attach` selectors, while ordinary routing accepts only the
+active session and returns the typed current binding for a retired session. Disagreeing selectors
+produce `selector_conflict`; membership never resolves that disagreement. The observation hook
+checks its private persisted predecessor bindings before admitting a new task. It resumes only a
+unique task selected by eligible, durably ended same-host mappings, held stable under the shared
+workspace and lifecycle locks. A lost lock or ambiguous binding is a typed retry/refusal, not
+permission to create a replacement task. An ambiguous refusal reports only the number of candidate
+tasks beside its closed reason; it never includes their task, session, or host-binding identities.
+No stored selector means new work. Successful recovery
+rewrites eligible predecessor mappings and preserves their pending rows for delivery on the
+successor route. Age alone does not establish a host session's end.
+
+Raw refs never enter structural durable state; only their commitments do. The caller-controlled
+`workspace_ref_commitment` is an attachment selector, not a repository-privacy commitment, and
+cannot select or inherit disclosure authority.
 
 ### Task lineage and project scope (ADR-027)
 
-Ratified identity and consent bounds; not yet generated, stored, or admitted. The current
-four-kind `AuthorizationScopeKind` and structural `contains()` remain the executable privacy
-contract. Wire fields land in #495, catalog columns and the storage ownership inventory in #496,
-admission in #497, service-wide multiplicity audit in #498, delegation lifecycle in #499, receipt
-rollup and check/status child views in #500/#501, and local coordination grants in #502. Packaged
-guidance is not rewritten here because this ADR adds no agent behavior.
+The 0.3 implementation adds the wire, catalog, runtime, host-correlation, and presentation
+contracts below. `AuthorizationScopeKind` and structural `contains()` retain their existing four
+kinds; lineage and project membership are separate authority facts and never add an egress scope.
+The storage ownership boundaries are recorded in [storage-ownership.md](storage-ownership.md).
 
 **Project identifier.** Accepted `IdKind.project` uses prefix `prj_` (see Identifiers). A project
 is host-agnostic and is a grouping object, not an egress scope. Its initial kinds are `repository`
@@ -1681,23 +1675,48 @@ for one worktree never covers another. General or cross-repository coordination 
 generation-bound `coordination_grants` authorization checked at admission and delivery. External
 semantic dispatch bundling content from two repositories is outside this series.
 
-**Bounded reversal and retired guards.** Once project membership and its service-side `status`
-projection exist, membership in a live, consented project may disclose bounded sibling task
-identity and state. It never authorizes attach, resume, or task selection and never widens content
-or egress authority. Until then, possession of a workspace reference alone remains insufficient
-to discover or attach another task. `workspace_task_exists` remains live on automatic
-`create_or_attach` until #497; explicit `mode=create` already admits a sibling. Only the #498
-inventory may designate shared-mutable state for relocation; task-owned 0004 inspection snapshots
-and session advice remain bundle-resident unless that inventory proves otherwise.
+`project dissolve` retires a general project and preserves its historical dependencies. Implicit
+repository projects use `project opt-out` and `project opt-in`; attempting to dissolve one returns
+`implicit_project_requires_opt_out` before any membership or generation changes.
+
+When an admitted task has no revealable attributable path, coordination records one bounded
+per-task coverage row with `coverage=unobservable` and `gap_code=not_observable`. The row carries
+only the task, project generation, and closed gap vocabulary. It is not a detection or delivery,
+and it contains no counterpart or resource identity; an unconsented, stale, dissolved, or
+out-of-project task produces no row.
+
+Detection detail is a separate encrypted object owned by one participant. A project status read
+may dereference it for either affected task only after both participants pass current-generation,
+workspace-consent, and source-policy checks; the recipient projection then applies its own sink
+policy to the relative-resource content. The typed project detection row carries either the
+approved repository-relative path tuple or a bounded omission. Catalog rows, delivery events, and
+MCP text summaries retain only identities, counts, and digests.
+The ordinary advice view carries the counterpart task and an exact project/detection/generation
+selector; its resource field follows the same sink-bound hydration and omission rules.
+
+**Bounded reversal and retired guards.** Live, consented project membership may disclose bounded
+sibling task identity and state through the service status projection. It never authorizes attach,
+resume, or task selection. Possession of a workspace reference alone remains insufficient to
+discover or attach another task. Automatic `create_or_attach` admits a new pair beside an existing
+task. Task-owned inspection snapshots and session advice remain bundle-resident; installation
+coordination uses the catalog without transferring their content or authority.
 
 **No new tools and future boundaries.** The series adds no MCP tool. Its seven existing model-facing
 operations are `start`, `publish_work`, `check`, `status`, `receipt`, `respond`, and `read_guidance`;
 lineage/project behavior composes those operations without adding another one. The 2026-09-05
-pre-trim measurement recorded an advertised surface of 204,404 bytes (policy) and 204,658 bytes
-(strict) against 205,000 bytes; those values are a reviewed budget snapshot rather than a claim
-about the current post-merge surface. #504 step 0 trims descriptors/instructions before schema
-growth. No code, catalog rows, wire schemas, host mapping, automatic admission, or capability claim
-ships in this ADR.
+pre-trim snapshot was 204,404 bytes (policy) and 204,658 bytes (strict) against 205,000 bytes.
+After #504 step 0, the source baseline is 148,308 bytes (policy) and 148,562 bytes (strict),
+including 12,385/12,409-byte initialize instructions and 8,218/8,304 bytes of descriptions; it
+leaves 56,692/56,438 bytes for later schema growth. These are reviewed baselines, measured before
+later series changes. Installed host capability claims remain separately evidence-bounded.
+
+The consolidated 0.3 descriptors advertise `start-request/1.1.0`,
+`publish-work-request/1.2.0`, `check-request/1.1.0`, and `status-request/1.2.0`, including separate
+child attach, self-registration, lifecycle, and coordination declaration and disposition examples. With those
+additions and conditional multi-agent guidance, the replicated surface is 168,941 bytes (policy)
+and 169,195 bytes (strict): 20,633 bytes above each step-0 baseline, leaving 36,059/35,805 bytes below the unchanged
+205,000-byte aggregate ceiling. Public lifecycle families are advertised; service-stamped
+delegation declarations and child manifests remain excluded from ordinary publication.
 
 ### Immutable objects and keys
 
@@ -2961,6 +2980,14 @@ and task-scoped
 key. Exact catalog routing and owner-generation fencing are mandatory; cwd/fuzzy/path fallback is
 forbidden.
 
+`RuntimeCachePolicy` makes multiplicity bounds explicit: `max_open_bundle_tasks` covers warm
+entries plus in-flight openings, `max_opening_tasks` bounds concurrent open work, and
+`max_writer_connections` bounds task-bundle writer authorities. `max_pending_leases_per_task`
+prevents one task from filling the validation window. A ready composition may provide a typed
+`RuntimeScope` resolver and repository/project limits; a scope refusal is retryable `BUNDLE_BUSY`
+with bounded `count` and `limit` details. The cache retains task ownership and route-generation
+fencing, so an idle writer remains counted until eviction or service close.
+
 `StartCompletionEvidence` proves `bundle_ready`, `lifecycle_committed`, or `result_published`
 against the current bundle generation. Catalog completion consumes that evidence while the same
 authoritative process holds the fence. This generation-fenced verification-then-catalog-commit is
@@ -3233,10 +3260,12 @@ Independent verification support (local control, not MCP):
 - `.yoetz/checks.toml` — fixed schema `yoetz.approved-check-policy/1`; raw bytes produce the trust
   digest. Repository content proposes no authority. One trusted-local exact-digest confirmation is
   retained as an encrypted workspace-scoped record. Any byte change is untrusted.
-- `ObservationVerificationWorker` plus its repository — one generation-fenced lease per workspace;
-  newer subject digests stale older pending work, identical workspace/policy/approval/state tuples
-  are cached, abandoned running work returns to pending, and immutable results record whether the
-  post-run state is still current.
+- `ObservationVerificationWorker` plus its repository — one generation-fenced lease per task
+  bundle/workspace lane; newer subject digests stale older pending work, identical
+  workspace/policy/approval/state tuples are cached, abandoned running work returns to pending,
+  and immutable results record whether the post-run state is still current. A repository can have
+  multiple task lanes observing the same workspace; their schedulers may run concurrently while
+  each lane keeps its own durable job/result rows.
 - Each completed approved check materializes a service-owned action/evidence/result graph. The
   captured evidence is a bounded canonical receipt binding approval commitment, result digest,
   output digest/byte count and encrypted output-object identity, subject state before/after, and
@@ -3251,8 +3280,10 @@ Independent verification support (local control, not MCP):
   bounded inspection prefix adds `truncated_payload`. Capture never upgrades to
   `artifact_verified` or `independently_reproduced`.
 - `ObservationVerificationSupervisor` — ready-lifecycle background owner that wakes on enqueue,
-  discovers pending work at startup, drains one serialized check per workspace through the
-  enforcing sandbox, reclaims expired leases, and stops before vault/runtime closure. Hook ingest
+  discovers pending work at startup, drains one serialized check per task/workspace lane through
+  the enforcing sandbox, and gives each registered lane one fair round before revisiting a busy
+  lane. Unrelated sibling lanes may run concurrently; each lane still has at most one active
+  worker lease. It reclaims expired leases and stops before vault/runtime closure. Hook ingest
   never executes approved checks inside the hook RPC budget. Pure-ingress hook handlers declare
   `"async": true` only when the exact probed Codex version supports registration; older or unknown
   hosts run them synchronously with the declared 10-second budget so no event is dropped. Handlers
@@ -3266,7 +3297,11 @@ safe locator. There is no ancestor-commitment fallback. A legacy grant recorded 
 Git subdirectory does not authorize its ancestor and must be explicitly granted again.
 The normalized locator is authenticated encrypted content; plaintext keeps only commitment and
 object ID. Revocation disables/removes the active locator and trust binding while retaining already
-encrypted evidence. Visible task messages, tool input/result, task-linked terminal output,
+encrypted evidence. The service first records a bounded private revocation token, then advances
+every active project generation selected by the affected task routes; queued detections from the
+older generation are permanently ineligible for delivery. An interrupted fence remains pending
+and blocks re-consent until recovery completes, so a later grant cannot revive an old detection.
+Visible task messages, tool input/result, task-linked terminal output,
 changed-file/diff material, approved-check output, lifecycle, and readiness facts may be captured.
 Hidden reasoning, system/platform/developer prompts, credentials, detected secrets, unrelated files,
 and untethered logs are excluded before storage. Every byte that reaches encrypted observation
@@ -3363,19 +3398,16 @@ canonical workspace locator the hook already bound consent to as `workspace_ref`
 host-session identity as `external_ref`; the service persists only HMAC commitments of both, and a
 hook that reached consent through the legacy session→workspace map without a canonical locator
 never sends an unpaired request (issue #459). The request validates through the public
-`StartRequest` contract before dispatch. If the new pair receives the exact
-`workspace_task_exists` conflict, the shared Claude Code/Codex/Cursor hook path may retry once with
-`mode=attach` only when the private local store already holds a valid mapping from a received,
-durably recorded same-host `SessionEnd`, every other bound host session is ended, and the candidate
-session belongs to that consented workspace and no other local workspace. All eligible mappings
-must name one task; within it, the newest mapping-file write wins and the host session ID breaks
-timestamp ties. The attach carries that selector plus the new host pair, while the control
-handshake carries the canonical workspace for repository privacy. The catalog requires the
-selector to remain active, the task to be the workspace's sole non-quarantined route, and no start
-for that route to be pending. Both calls share one five-second deadline. The response must retain
-the candidate's task ID. A successful recovery records the new mapping, rewrites every ended
-same-host predecessor mapping for that task to the rotated session and writer, and drains pending
-rows without publishing the intermediate conflict as a diagnostic. Predecessor rows still pending
+`StartRequest` contract before dispatch. Before a new admission, the shared Claude Code/Codex/
+Cursor hook path checks the private local store for a held mapping from a durably recorded
+same-host `SessionEnd`. Every eligible mapping must belong to the consented workspace alone and
+name one task; ambiguity refuses. The newest eligible mapping-file write selects among bindings
+for that same task. The hook holds the workspace and predecessor lifecycle locks while rechecking
+the candidate set and issuing `mode=attach` with the stored selector plus the new host pair.
+Repository privacy is checked from the trusted control handshake. The response must retain the
+candidate task ID. Recovery records the new mapping, rewrites eligible ended predecessor mappings,
+and drains pending rows. Without a persisted selector, the new pair creates new work. A contended
+or changed recovery binding retries without falling back to creation. Predecessor rows still pending
 at rotation follow the `session_superseded` binding on ingest (the current task session and the
 observation writer derived for it) so they are acknowledged on the successor route rather than
 quarantined. With no eligible local selector, or
@@ -4348,6 +4380,13 @@ kind, and defaults fail-safe to machine-readable/non-TTY when trusted presentati
 absent. The daemon first obtains catalog-backed `Application.projection_binding_facts(...)`, then
 `Application.project_result_for_client(context, binding, result)` is the only route from a
 content-capable internal result to an ordinary serialized success.
+Project title and description hydration checks the exact source-owned text reference, route,
+membership generation, and source disclosure policy before loading text, then revalidates after
+the recipient projection decision. A source denial contributes a content-free candidate with
+`source_disclosure_permitted=false`; this trusted internal restriction can only remove authority.
+The ordinary privacy classifier and audit record the blocked category and exact omission pointer.
+Recipient policy, including self-authorship, cannot override this source restriction. The service
+does not manufacture additional omissions or alter the recorded disclosure receipt after approval.
 For repository privacy setup/effective/propose, `ControlProjectionBinding` additionally carries the
 installation-keyed repository commitment from `ControlSession.repository_privacy_context`; the
 scope resolver uses that trusted commitment to select the workspace policy and receipt scope.
@@ -4568,8 +4607,14 @@ facade and are never MCP tools.
   Includes the ADR-012 `setup` sub-app and `integrate <harness> mcp` sub-app; bare invocation
   prints help except the bounded interactive first-run case, which launches the wizard once.
 - `cli/exits.py`: `exit_code_for(PublicErrorCode | success) -> int`.
-- `config/models.py`: service-owned nonsecret service/storage/verification/logging defaults plus a
+- `config/models.py`: service-owned nonsecret service/storage/verification/logging and bounded
+  lineage/delegation defaults plus a
   one-time denied first-run privacy seed and exact provider/local-model profile identifiers. The
+  `[lineage]` settings are bounded `start_lease_seconds=60`, `attach_handle_ttl_seconds=300`,
+  `contact_lost_recovery_seconds=300`, `max_depth=8`, and `max_fanout=32`; typed admission
+  refusals enforce the depth and fan-out ceilings.  `max_fanout` accepts values through 64,
+  matching the bounded child-manifest, check-preview, and receipt-child sections; larger values
+  are rejected at configuration load rather than silently truncating lineage state.
   durable policy store—not config—owns the machine policy/ancestor ceilings. Privacy profiles are
   the `PrivacyProfile` enum; provider credentials and unlock/recovery material cannot be represented
   by config or environment. Ordinary clients never load this object. `release-probe` is available

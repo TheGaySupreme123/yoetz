@@ -73,6 +73,16 @@ or any snapshot of it ([ADR-017](adr/ADR-017-full-screen-terminal-interface.md) 
 against both, so "the durable adapter behaves like the reference" is a test result rather than an
 assumption.
 
+Multi-agent work has three separate owners. `application/lineage.py` and
+`adapters/sqlite/lineage_catalog.py` own recoverable delegation and attachment capabilities;
+`application/lineage_coordinator.py` records authorized child dependency snapshots in the parent
+ledger, and `kernel/lineage.py` evaluates those frozen snapshots for checks and receipts.
+`application/projects.py` owns project membership and admission, while `application/coordination.py`
+and `adapters/sqlite/project_coordination.py` own attributable overlap detections and durable
+delivery. `application/task_views.py` builds their read-only status views. Host observations enter
+through `ports/host_lineage.py` and `adapters/sqlite/host_lineage.py`; a provisional observation has
+no task bundle until a separately authorized child start binds it.
+
 `tui/` sitting beside `cli/` rather than inside it is also deliberate. It is a second presentation
 of the same operations, not a second authority over them: every gate — preview digests, foreign
 MCP entries, privacy widening, vault state, provider readiness — is enforced by the owning service

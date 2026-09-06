@@ -44,8 +44,12 @@ __all__ = [
 type McpRouteProfile = Literal["policy", "strict"]
 
 _SCHEMA_VERSION: Final = "1.0.0"
-_TOOL_INPUT_SCHEMA_VERSIONS: Final = MappingProxyType({"publish_work": "1.1.0", "status": "1.1.0"})
-_TOOL_OUTPUT_SCHEMA_VERSIONS: Final = MappingProxyType({"status": "1.1.0"})
+_TOOL_INPUT_SCHEMA_VERSIONS: Final = MappingProxyType(
+    {"start": "1.1.0", "publish_work": "1.2.0", "check": "1.1.0", "status": "1.2.0"}
+)
+_TOOL_OUTPUT_SCHEMA_VERSIONS: Final = MappingProxyType(
+    {"start": "1.1.0", "check": "1.2.0", "status": "1.3.0", "receipt": "1.2.0"}
+)
 
 
 def _tool_input_schema_version(name: str) -> str:
@@ -88,6 +92,15 @@ ORDINARY_MCP_PUBLISH_EVENT_FAMILIES: Final[frozenset[str]] = frozenset(
         "evidence_recorded",
         "claim_recorded",
         "plan_revised",
+        "child_accepted",
+        "child_rejected",
+        "child_written_off",
+        "delegation_cancelled",
+        "work_closed",
+        "work_cancelled",
+        "work_written_off",
+        "coordination_disposition_recorded",
+        "coordination_obligation_declared",
     }
 )
 
@@ -98,9 +111,9 @@ _COMMON_INLINE_SCHEMA_IDS: Final[frozenset[str]] = frozenset(
         f"{SCHEMA_NAMESPACE}common/frontier-1.0.0.schema.json",
     }
 )
-_EVENT_DRAFT_SCHEMA_ID: Final = f"{SCHEMA_NAMESPACE}events/event-draft-1.1.0.schema.json"
+_EVENT_DRAFT_SCHEMA_ID: Final = f"{SCHEMA_NAMESPACE}events/event-draft-1.2.0.schema.json"
 _OPAQUE_EVENT_DRAFT_SCHEMA_ID: Final = (
-    f"{SCHEMA_NAMESPACE}events/opaque-unknown-event-draft-1.1.0.schema.json"
+    f"{SCHEMA_NAMESPACE}events/opaque-unknown-event-draft-1.2.0.schema.json"
 )
 
 # Reviewed keyword budgets for tools/list presentation schemas (agent-usability guardrails).
@@ -114,18 +127,18 @@ PRESENTATION_INPUT_SCHEMA_BUDGETS: Final[Mapping[str, Mapping[str, int]]] = Mapp
                 "max_conditional_nodes": 0,
                 "max_defs_count": 8,
                 "max_defs_nest_depth": 1,
-                "max_encoded_bytes": 4_000,
+                "max_encoded_bytes": 5_000,
             }
         ),
         "publish-work-request": MappingProxyType(
             {
                 "max_oneof_nodes": 8,
-                "max_oneof_branches": 28,
+                "max_oneof_branches": 36,
                 "max_ref_nodes": 0,
                 "max_conditional_nodes": 0,
-                "max_defs_count": 20,
+                "max_defs_count": 21,
                 "max_defs_nest_depth": 1,
-                "max_encoded_bytes": 34_000,
+                "max_encoded_bytes": 49_000,
             }
         ),
         "check-request": MappingProxyType(
@@ -260,6 +273,7 @@ def _example_draft(
     payload: dict[str, JsonValue],
     *,
     version: str = "1.0.0",
+    evidence_refs: list[JsonValue] | None = None,
 ) -> dict[str, JsonValue]:
     """One minimal valid draft envelope for a family, so agents copy shape rather than guess it.
 
@@ -274,7 +288,7 @@ def _example_draft(
         "causal_parents": [],
         "payload": payload,
         "artifact_refs": [],
-        "evidence_refs": [],
+        "evidence_refs": [] if evidence_refs is None else evidence_refs,
     }
 
 
@@ -290,6 +304,26 @@ _EXAMPLE_CLIENT: Final[dict[str, JsonValue]] = {
 # A syntactically valid non-genesis head. Read the real one from status; never reuse this value.
 _EXAMPLE_HEAD_DIGEST: Final = "sha256:" + "0" * 64
 
+
+def _lifecycle_example(ordinal: int, family: str) -> dict[str, JsonValue]:
+    """Separate requests keep mutually exclusive work transitions out of one example batch."""
+
+    payload: dict[str, JsonValue] = (
+        {"child_task_id": _example_id("task", 2)} if not family.startswith("work_") else {}
+    )
+    return {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": _example_id("request", ordinal),
+        "session_id": _example_id("session", 1),
+        "writer_id": _example_id("writer", 1),
+        "expected_frontier": {"sequence": "1", "head_digest": _EXAMPLE_HEAD_DIGEST},
+        "event_drafts": [_example_draft(ordinal, family, payload)],
+        "actor": dict(_EXAMPLE_ACTOR),
+        "client": dict(_EXAMPLE_CLIENT),
+    }
+
+
 _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = MappingProxyType(
     {
         "start-request": (
@@ -299,6 +333,45 @@ _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = 
                 "request_id": _example_id("request", 1),
                 "mode": "create",
                 "task_title": "Example task",
+                "requested_view": "compact",
+                "actor": dict(_EXAMPLE_ACTOR),
+                "client": dict(_EXAMPLE_CLIENT),
+            },
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _example_id("request", 30),
+                "mode": "delegate",
+                "session_id": _example_id("session", 1),
+                "task_title": "Example child task",
+                "requested_view": "compact",
+                "actor": dict(_EXAMPLE_ACTOR),
+                "client": dict(_EXAMPLE_CLIENT),
+            },
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _example_id("request", 31),
+                "mode": "attach",
+                "attach_handle": {
+                    "handle": "illustrative-only-replace-with-returned-handle",
+                    "child_task_id": _example_id("task", 2),
+                    "expires_at": "2026-01-01T00:10:00.000Z",
+                },
+                "task_title": "Example child task",
+                "requested_view": "compact",
+                "actor": dict(_EXAMPLE_ACTOR),
+                "client": dict(_EXAMPLE_CLIENT),
+            },
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _example_id("request", 32),
+                "mode": "create_or_attach",
+                "parent_session_id": _example_id("session", 1),
+                "workspace_ref": "/workspace/project",
+                "external_ref": "example-child-review",
+                "task_title": "Example self-registered child",
                 "requested_view": "compact",
                 "actor": dict(_EXAMPLE_ACTOR),
                 "client": dict(_EXAMPLE_CLIENT),
@@ -591,6 +664,69 @@ _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = 
                             "resolution_evidence_refs": [_example_id("evidence", 2)],
                         },
                     ),
+                ],
+                "actor": dict(_EXAMPLE_ACTOR),
+                "client": dict(_EXAMPLE_CLIENT),
+            },
+            *(
+                _lifecycle_example(40 + index, family)
+                for index, family in enumerate(
+                    (
+                        "child_accepted",
+                        "child_rejected",
+                        "child_written_off",
+                        "delegation_cancelled",
+                        "work_closed",
+                        "work_cancelled",
+                        "work_written_off",
+                    )
+                )
+            ),
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _example_id("request", 50),
+                "session_id": _example_id("session", 1),
+                "writer_id": _example_id("writer", 1),
+                "expected_frontier": {"sequence": "1", "head_digest": _EXAMPLE_HEAD_DIGEST},
+                "event_drafts": [
+                    _example_draft(
+                        50,
+                        "coordination_disposition_recorded",
+                        {
+                            "detection_id": _example_id("event", 49),
+                            "project_id": "prj_00000000-0000-4000-8000-000000000001",
+                            "membership_generation": "1",
+                            "recipient_task_id": _example_id("task", 1),
+                            "obligation_id": _example_id("obligation", 1),
+                            "disposition": "shared_work",
+                            "evidence_refs": [_example_id("evidence", 1)],
+                        },
+                        evidence_refs=[_example_id("evidence", 1)],
+                    )
+                ],
+                "actor": dict(_EXAMPLE_ACTOR),
+                "client": dict(_EXAMPLE_CLIENT),
+            },
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _example_id("request", 51),
+                "session_id": _example_id("session", 1),
+                "writer_id": _example_id("writer", 1),
+                "expected_frontier": {"sequence": "1", "head_digest": _EXAMPLE_HEAD_DIGEST},
+                "event_drafts": [
+                    _example_draft(
+                        51,
+                        "coordination_obligation_declared",
+                        {
+                            "detection_id": _example_id("event", 49),
+                            "project_id": "prj_00000000-0000-4000-8000-000000000001",
+                            "membership_generation": "1",
+                            "recipient_task_id": _example_id("task", 1),
+                            "obligation_id": _example_id("obligation", 1),
+                        },
+                    )
                 ],
                 "actor": dict(_EXAMPLE_ACTOR),
                 "client": dict(_EXAMPLE_CLIENT),
@@ -1434,22 +1570,18 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "Start or resume a work session",
         "Call for material multi-step, delegated, resumable, or verification-heavy work before "
         "substantive work; skip trivial questions or edits. Records or resumes a cooperative work "
-        "session and returns its compact record. It does not show that work outside the published "
-        "record occurred. Every request_id across these tools is a fresh req_ prefixed random "
-        "UUID, and workspace_ref and external_ref are admitted only as a pair. Call it once per "
-        "task. task_title and requested_view are required. Attach selectors are exactly one of: "
-        "(1) session_id for the session you hold, or "
-        "(2) workspace_ref + external_ref as a pair with no session_id — mode=create_or_attach "
-        "creates on first use and attaches on later conversations. task_id is not an accepted "
-        "field. workspace_ref is the canonical absolute repository root (never a remote URL; "
-        "the value hook observation auto-attaches with); external_ref is the stable task "
-        "identity within that project (branch, issue, or plan slug). When the session-start "
-        "context names a mapped task, use mode=attach with its session_id. Both refs are "
-        "redacted one-shot values; only HMAC commitments are persisted, "
-        "so do not self-censor into unstable refs. After resume or compaction, use status "
-        "view=obligations to recover exact requested_items and unattempted_items rather than "
-        "searching transcripts or source. Author the request from this input schema plus "
-        "the guidance below, never from memory. Guidance: yoetz://guidance/workflow.md.",
+        "session and returns its compact record. Every request_id is a fresh req_ prefixed random "
+        "UUID, and workspace_ref and external_ref are admitted only as a pair. task_title and "
+        "requested_view are required. Attach with exactly one of: attach_handle, session_id, or workspace_ref + "
+        "external_ref with no session_id; mode=create_or_attach creates on first use and attaches "
+        "later. A different complete pair creates a sibling. For a child, mode=delegate takes the "
+        "parent session_id; pass the complete returned attach_handle to the intended child for "
+        "mode=attach. Self-registration uses parent_session_id and remains pending until accepted. "
+        "task_id is not accepted. workspace_ref is the canonical absolute repository root "
+        "(never a remote URL); external_ref is the stable task identity within that project. When "
+        "session-start names a mapped task, use mode=attach with its session_id. After resume or "
+        "compaction, use status view=obligations for exact requested_items and unattempted_items, "
+        "not transcripts or source. Author from this schema and yoetz://guidance/workflow.md.",
         read_only=False,
         idempotent=True,
     ),
@@ -1457,94 +1589,66 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "publish_work",
         "Publish recorded work",
         "Records a bounded batch of agent-published work events and returns the accepted event "
-        "range and coverage. It has no information about work outside that batch. Every set-valued "
-        "reference list in a draft envelope or payload (obligation_refs, obligation_ids, "
-        "supporting_refs, and the other canonical set fields) is admitted only when its members "
-        "are unique and already in ascending ASCII order; uniqueItems does not express order, and "
-        "a rejection names unsorted_set_field at the owning field. Field ownership "
-        "is exact: attempted_items is admitted only by the action_recorded payload — copy each "
-        "attempted obligation requested_items value string exactly, and never place the field on "
-        "claim_recorded. decision_recorded authority is a structural actor id such as "
-        "harness:cli, never approval prose; the approval story belongs in rationale. action_kind "
-        "is a closed enum of command, edit, research, review, and other; a source or file change "
-        "is edit, and command additionally requires the command field. "
-        "claim_recorded at schema 1.1.0 keeps admissible supporting_refs separate from partial or "
-        "failed limitation_refs; a correction names only exact prior effective claim ids in "
-        "supersedes_claim_refs. Dry-run validates target and limitation existence, result outcome, "
-        "scope overlap, replacement effectiveness, and complete limitation linkage before append. "
-        "Read candidate_findings, history, and results to author the correction; disputes_refs "
-        "and decision supersedes_event_id keep their existing meanings and do not replace a claim. "
-        "Each draft "
-        "occurred_at is a caller-asserted RFC 3339 UTC time with millisecond precision: use the "
-        "best real time available and do not copy the illustrative example timestamp. Ledger order "
-        "follows ingestion sequence; receipt freshness is frontier-bound. Service accepted_at is "
-        "independent acceptance metadata, not a freshness or ordering key. Set dry_run true to "
-        "validate a batch and preview what would be accepted without appending; the preview is not "
-        "evidential and is not citable as a check, publication, or coverage source. Read exact "
-        "unattempted_items in status view=obligations before resolution. After "
-        "publishing the material claim and evidence, call check, disposition any findings with "
-        "respond, then call receipt before claiming completion. Cadence: one batch per "
-        "material transition, usually one to eight events and never one batch per file, per tool "
-        "call, or per message; a batch admits up to 100 drafts, so keep one transition together "
-        "rather than splitting it. Reading, searching, formatting, and unchanged state are not "
-        "publishable. Guidance: yoetz://guidance/publication-policy.md.",
+        "range and coverage. It has no information about work outside that batch. Set-valued "
+        "reference lists (obligation_refs, obligation_ids, supporting_refs, and other canonical "
+        "sets) must be unique and already in ascending ASCII order; rejection names "
+        "unsorted_set_field. attempted_items belongs only on action_recorded: copy each attempted "
+        "obligation requested_items value exactly, never onto claim_recorded. "
+        "decision_recorded.authority is a structural actor id, not approval prose. action_kind is "
+        "exactly command, edit, research, review, or other; source or file changes are edit and "
+        "command also requires command. claim_recorded at schema 1.1.0 separates supporting_refs from "
+        "limitation_refs; corrections name prior effective claims in supersedes_claim_refs. "
+        "Dry-run checks references, outcome, scope, replacement, and limitation linkage; use "
+        "candidate_findings, history, and results to author corrections. Each occurred_at is a "
+        "caller-asserted RFC 3339 UTC time with milliseconds: use the best real time and do not "
+        "copy the illustrative example timestamp. Ledger order follows ingestion sequence, Service "
+        "accepted_at is independent metadata, and receipt freshness is frontier-bound. dry_run "
+        "previews are not evidential or citable. Read status view=obligations for exact "
+        "unattempted_items before resolution; after claim and evidence, call check, respond, then "
+        "call receipt before claiming completion. Batch material transitions together (usually one "
+        "to eight events, max 100); "
+        "reading, searching, formatting, and unchanged state are not publishable. Guidance: "
+        "Lifecycle events record acceptance, cancellation, write-off, or explicit work closure; "
+        "receipts never close work. Coordination dispositions link an existing obligation and "
+        "evidence; a later qualifying check resolves the finding. Read "
+        "yoetz://guidance/publication-policy.md.",
         read_only=False,
         idempotent=True,
     ),
     _descriptor(
         "check",
         "Check recorded work",
-        "Runs the requested recorded-work checks and records the result; it returns at most "
-        "max_findings findings plus a suppressed count, and status with view=findings reads the "
-        "rest. A no_issue_detected verdict does not mean the work is correct. Choose mode "
-        "deliberately: semantic_if_configured for most material implementation or review claims; "
-        "semantic_required when the claim depends on qualitative correctness, design conformance, "
-        "security or privacy reasoning, interoperability, or whether the code satisfies the ask; "
-        "deterministic_only only for explicitly local or structural checks, a semantic-disabled "
-        "policy, or a deliberate no-egress choice, and then disclose that limitation. Omitting "
-        "mode resolves through the configured verification policy. This call cannot widen privacy "
-        "authority: an active semantic route was selected by the owner during setup as a bounded "
-        "standing policy, and check cannot change its route, workspace, scope, categories, "
-        "retention ceiling, or credential authority. Whether a case is dispatched stays enforced "
-        "by the installed route binding and privacy policy. A pre-invocation approval refusal or "
-        "hold is an invocation-authorization event, not a Yoetz result: Yoetz did not run, so "
-        "do not report a semantic status or outbound dispatch. When semantic review was "
-        "explicitly requested or mode is semantic_required, pause and present the manual approval "
-        "request for the exact proposed check body and request_id. Approval authorizes that "
-        "invocation only; it does not change Yoetz privacy policy, repository authority, "
-        "disclosure decisions, credentials, or outbound-admission rules. Do not "
-        "publish a completion claim, request a receipt, create a fresh semantic check, or switch "
-        "to deterministic_only while approval is pending. An unambiguous, still-applicable "
-        "first-party instruction for this exact semantic action may present the manual approval "
-        "request without redundant prose, but never bypasses that approval. After approval, "
-        "invoke the exact same proposed check body and request_id; if Yoetz then returns "
-        "awaiting_human, follow its separate continuation. After denial, cancellation, or expiry, "
-        "continue without semantic review only after the user explicitly chooses that fallback. "
-        "Omit scope for the whole case, "
-        "or send both claim_ids and obligation_ids as arrays of unique ids; two empty arrays also "
-        "mean the whole case, and sending only one of the two keys is rejected. Call it after "
-        "publishing the completion claim and its evidence, and again after any material edit or "
-        "new evidence; a check with no new events since the last one adds nothing. "
-        "awaiting_human is the one nonterminal result: its typed continuation identifies standing "
-        "repository setup or a one-use decision and carries the exact command to run. Show that "
-        "command, do not create a new "
-        "check request, do not inspect Yoetz storage or source, and replay this same request with "
-        "the same request_id after the decision. If Yoetz explicitly reports that the current "
-        "repository grant is missing, direct the owner to run yoetz --privacy and complete the "
-        "trusted local review there; assent in agent chat never authorizes that standing grant. "
-        "It is distinct from a one-use decision; recover either handoff through operation status "
-        "or replay this exact original request with the same request_id, never a fresh request. "
-        "Denial, expiry, cancellation, stale authority, or incomplete review means no dispatch. "
-        "Semantic "
-        "review that does not succeed is a coverage gap rather than a retry problem: "
-        "not_configured, blocked_by_policy, and human_denied will not change without owner "
-        "action; unavailable and timeout already spent that job's own attempt budget; "
-        "response_content_invalid may spend exactly one in-job repair retry and has already done "
-        "so by the time it is reported; refused, failed, and every other invalid reason are not "
-        "retried inside the job at all. When a second job in one "
-        "session again returns no judgment, stop requesting semantic review, run "
-        "deterministic_only, and disclose the gap with the recorded status and reason. Guidance: "
-        "yoetz://guidance/coverage-and-receipts.md.",
+        "Runs recorded-work checks and returns at most max_findings findings plus a suppressed "
+        "count; status view=findings reads the rest. A no_issue_detected verdict does not mean "
+        "the work is correct. Choose mode deliberately: semantic_if_configured for most material "
+        "implementation or review claims; semantic_required when the claim depends on qualitative "
+        "correctness, design conformance, security or privacy reasoning, interoperability, or "
+        "whether the code satisfies the ask; deterministic_only only for explicitly local or "
+        "structural checks, a semantic-disabled policy, or deliberate no-egress, with the "
+        "limitation disclosed. Omitting mode resolves through the configured verification policy. This call "
+        "cannot widen privacy authority: the owner selected an active semantic route during setup "
+        "as a bounded standing policy, and the installed route binding and privacy policy govern "
+        "dispatch. A pre-invocation approval refusal or hold is not a Yoetz result: Yoetz did not "
+        "run, so do not report semantic status or outbound dispatch. For explicit semantic review "
+        "or semantic_required, present the manual approval request for the exact proposed check "
+        "body and request_id; approval authorizes that invocation only and does not change Yoetz "
+        "privacy policy. Do not publish a completion claim, request a receipt, create a fresh "
+        "semantic check, or switch to deterministic_only while approval is pending. After approval, "
+        "invoke the exact same proposed check body and request_id. After denial, cancellation, or "
+        "expiry, continue without semantic review only after the user explicitly chooses that "
+        "fallback. Omit scope for the whole case, or send both claim_ids and obligation_ids arrays; "
+        "two empty arrays mean the whole case. Call after publishing the completion claim and evidence "
+        "and after material edits or new evidence. awaiting_human is the one nonterminal result: "
+        "show its exact command, do not create a new check request, do not inspect Yoetz storage or "
+        "source, and replay the same request_id after the decision. If the current repository grant "
+        "is missing, direct the owner to run yoetz --privacy; agent chat never authorizes that "
+        "standing grant. Recover through operation status or replay the exact original request, "
+        "never a fresh request; denial, expiry, cancellation, stale authority, or incomplete review "
+        "means no dispatch. Semantic failure is a coverage gap: do not retry not_configured, "
+        "blocked_by_policy, human_denied, unavailable, timeout, refused, failed, or invalid "
+        "reasons other than response_content_invalid; that reason gets at most one in-job repair. "
+        "After a second job returns no judgment, use deterministic_only and disclose the status and "
+        "reason. Guidance: yoetz://guidance/coverage-and-receipts.md.",
         read_only=False,
         idempotent=True,
         open_world=True,
@@ -1554,16 +1658,12 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "Respond to a finding",
         "Records an acknowledgement, provenance dispute, or rejection for one finding at the "
         "result frontier of the check that returned it, not its subject_frontier. It does not "
-        "resolve other findings or establish that underlying work changed. "
-        "A provenance_disputed response contests the finding's authorship or provenance premise "
-        "rather than its conclusion, requires a reason, and never resolves the finding. "
-        "Bounded waiver is reserved for an authorized local-CLI human and is not an agent option. "
-        "A readable response removes that finding from unanswered_finding_count without reducing "
-        "receipt_blocking_finding_count, erasing its historical record, or closing an independent "
-        "coverage gap; only a later qualifying check of the repaired record resolves a finding. "
-        "Call it once per finding; a "
-        "readable response identifying a finding that check returned is not material change and "
-        "needs no recheck, while a redacted or unreadable response does. Guidance: "
+        "resolve other findings or establish changed work. provenance_disputed contests authorship "
+        "or provenance, requires a reason, and never resolves the finding. Waiver is reserved for "
+        "an authorized local-CLI human. A readable response removes unanswered_finding_count but "
+        "does not reduce receipt_blocking_finding_count or close a coverage gap; only a later "
+        "qualifying check of repaired state resolves it. Call once per finding; readable responses "
+        "need no recheck, while redacted or unreadable responses do. Guidance: "
         "yoetz://guidance/publication-policy.md.",
         read_only=False,
         idempotent=True,
@@ -1572,28 +1672,21 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "status",
         "Read recorded status",
         "Reads one bounded, paginated view: advice, assignment, candidate_findings, compact, "
-        "evidence, findings, history, obligations, operation, results, or versions. Advice items carry a "
-        "recommended_next_action. Call it when uncertain what you already did or committed to, "
-        "rather than reconstructing from memory. view=history returns each event's caller-asserted "
-        "occurred_at beside the service-stamped accepted_at plus a closed forward-skew "
-        "classification; order follows ingestion sequence and the classification does not verify "
-        "caller time. "
-        "view=operation takes filter.operation_request_id and returns that operation's stored "
-        "result for recovery without resending the body. view=findings reads recorded findings; "
-        "view=candidate_findings returns unrecorded deterministic candidates without verdicts or "
-        "IDs. view=obligations exposes requested_items and the exact unattempted_items subset "
-        "under obligation-text projection policy. view=results resolves res_ ids to bounded "
-        "source-event, payload-availability, outcome, action, and evidence facts without result "
-        "prose. Read closure_readiness on any result before spending a check or a receipt: "
-        "unanswered_finding_count names response work, while receipt_blocking_finding_count names "
-        "current actionable findings; only a later qualifying check of the repaired record "
-        "resolves one, never a response, and a resolved finding stays visible as history with "
-        "resolved=true under filter.include_resolved. findings_unanswered should be answered; "
-        "receipt_findings_unresolved should be repaired and rechecked once, never answered again. "
-        "If that check does not re-fire the issue but resolved remains false, stop rechecking "
-        "unchanged state and disclose the limiting coverage in the receipt. Call it "
-        "after a resume, a compaction, or a delegate handoff, and before a "
-        "completion claim, rather than between routine tool calls. Guidance: "
+        "evidence, findings, history, obligations, operation, results, or versions. Advice items "
+        "carry a recommended_next_action. Call it when uncertain what you already did or committed "
+        "to, rather than reconstructing from memory. view=history returns each event's "
+        "caller-asserted occurred_at beside the service-stamped accepted_at plus a closed "
+        "forward-skew classification; order follows ingestion sequence and the classification does "
+        "not verify caller time. view=operation returns stored results by "
+        "filter.operation_request_id without resending the body. view=findings reads recorded "
+        "findings; view=candidate_findings returns deterministic candidates without verdicts or IDs; "
+        "view=obligations exposes exact requested_items and unattempted_items; view=results resolves "
+        "res_ ids to bounded structural facts without result prose. Read closure_readiness before "
+        "spending a check or receipt: unanswered_finding_count names response work, while "
+        "receipt_blocking_finding_count names actionable findings; only a later qualifying check "
+        "resolves one, never a response. Answer findings_unanswered; repair and recheck "
+        "receipt_findings_unresolved once, then disclose if unchanged state still limits coverage. "
+        "Call after resume, compaction, or delegate handoff and before a completion claim. Guidance: "
         "yoetz://guidance/workflow.md.",
         read_only=True,
         idempotent=True,
@@ -1601,12 +1694,11 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
     _descriptor(
         "receipt",
         "Record and read a receipt",
-        "Records and returns a receipt of the recorded conclusion and coverage limitations at one "
-        "frontier. It does not establish correctness beyond that recorded coverage. Prefer format "
-        "markdown or text; json is an owner-export format that stricter agent-context policies may "
-        "block. Call it once at the end, and again only if material state changed since the "
-        "previous receipt. Keep the final answer no stronger than this receipt's weakest material "
-        "coverage, freshness, unresolved findings, and limitations. Guidance: "
+        "Records and returns a receipt of the recorded conclusion and coverage limits at one "
+        "frontier; it does not establish correctness beyond that coverage. Prefer markdown or "
+        "text because stricter agent-context policies may block json. Call once at the end, again "
+        "only after material change, and keep the final answer no stronger than its weakest "
+        "coverage, freshness, findings, or limitation. Guidance: "
         "yoetz://guidance/coverage-and-receipts.md.",
         read_only=False,
         idempotent=True,
@@ -1614,12 +1706,10 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
     _descriptor(
         "read_guidance",
         "Read guidance",
-        "Read one registered Yoetz guidance document and return the full markdown as tool "
-        "text. The request names one registered guidance URI such as "
-        "yoetz://guidance/workflow.md. The result is the document text, not a 512-byte "
-        "summary. This tool is not a ledger operation and does not write the ledger. Extra "
-        "argument keys are rejected. An unknown URI is rejected without echoing the "
-        "requested value. Guidance: yoetz://guidance/agent-instructions.md.",
+        "Reads one registered Yoetz guidance URI and returns its full markdown as tool text. The "
+        "result is document text, not a 512-byte summary; this is not a ledger operation and does "
+        "not write the ledger. Extra keys and unknown URIs are rejected without echoing the value. "
+        "Guidance: yoetz://guidance/agent-instructions.md.",
         read_only=True,
         idempotent=True,
     ),
@@ -1671,32 +1761,32 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
     {
         "policy": MappingProxyType(
             {
-                "start": "sha256:ac5c4ac0bd12f67e08437f3aea4b7bc328c060f08809ef6f20e86b879d683a29",
-                "publish_work": "sha256:676036fa37e435770bb9d96d9ecb4a09121337576437023e3af5a4c4f8bbbad5",
-                "check": "sha256:db57da2058052843ebb583f2ac141ebf7925dcf920583b0cdad6533c3f7fa29a",
-                "respond": "sha256:669697ed16dc7cbb14bab5528a5e06d7782d3ce7b943b2a9036ae1dfd5ca8717",
-                "status": "sha256:c8fa1e75331e46ffe25b141f71fdf06265fd505353d798c902fada5895b588c0",
-                "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
-                "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
+                "start": "sha256:f144ec931d9a779f8bb3578555d0af6e4be51ac49b333938e222a0e94817a68d",
+                "publish_work": "sha256:67aa28758ebf694f0a033c1dc77937c56bfcbe0e6c71335b3fb01b98a5af5e6d",
+                "check": "sha256:8ae4bcb7e554c34942dbc0589f54a23bde5438eafbc0eebab1589378f8e10400",
+                "respond": "sha256:6beea83062000ab0b39ab865a64b0fbd849b7e7f7e2b10a4b9abe3aa69fd585c",
+                "status": "sha256:966c411c57d2c9b8f68d309517dabc8a7ab673e13e4718147606c6c52a47adfc",
+                "receipt": "sha256:d8ea381039f71bea80eb54fbcb40aab915d49a4ba8c317740575927842b89df2",
+                "read_guidance": "sha256:4198e5fd133f7b37cc25c0c1a63161657c5d4396a1718f1f4f1f3db7c302a13d",
             }
         ),
         "strict": MappingProxyType(
             {
-                "start": "sha256:ac5c4ac0bd12f67e08437f3aea4b7bc328c060f08809ef6f20e86b879d683a29",
-                "publish_work": "sha256:676036fa37e435770bb9d96d9ecb4a09121337576437023e3af5a4c4f8bbbad5",
-                "check": "sha256:89899d93b76ea85c90d79d3df150f076f6b64a28cdb8f410c263ce3c1aa89b91",
-                "respond": "sha256:669697ed16dc7cbb14bab5528a5e06d7782d3ce7b943b2a9036ae1dfd5ca8717",
-                "status": "sha256:c8fa1e75331e46ffe25b141f71fdf06265fd505353d798c902fada5895b588c0",
-                "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
-                "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
+                "start": "sha256:f144ec931d9a779f8bb3578555d0af6e4be51ac49b333938e222a0e94817a68d",
+                "publish_work": "sha256:67aa28758ebf694f0a033c1dc77937c56bfcbe0e6c71335b3fb01b98a5af5e6d",
+                "check": "sha256:36a849e85b1392231859152cb8b0aa1d6be70421d11f5dcfed895416a3016010",
+                "respond": "sha256:6beea83062000ab0b39ab865a64b0fbd849b7e7f7e2b10a4b9abe3aa69fd585c",
+                "status": "sha256:966c411c57d2c9b8f68d309517dabc8a7ab673e13e4718147606c6c52a47adfc",
+                "receipt": "sha256:d8ea381039f71bea80eb54fbcb40aab915d49a4ba8c317740575927842b89df2",
+                "read_guidance": "sha256:4198e5fd133f7b37cc25c0c1a63161657c5d4396a1718f1f4f1f3db7c302a13d",
             }
         ),
     }
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:f33f5ff45ccd9797daa0996b724e05fa7a0904c4223b062fb3c9bea83b0fccc4",
-        "strict": "sha256:e9633bcb7d0919405f64cd268c6a1c33e8707938a00d0545d967f7be17ac1016",
+        "policy": "sha256:a2d74a0e9f1604c60dc707996e0035711df07e8c27d448a7f911cc59f15fafb5",
+        "strict": "sha256:0c52e7d6c2c53c6b49d2bcf78eaecd1ee36bfc4f8e2fbd6e6786ed1efee703e9",
     }
 )
 

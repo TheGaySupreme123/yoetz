@@ -235,11 +235,11 @@ _COMMON_MODEL_SPECS: tuple[tuple[str, str, str | None], ...] = (
 )
 
 _REQUEST_MODEL_SPECS: tuple[tuple[str, str], ...] = (
-    ("StartRequestModel", "operations/start-request-1.0.0.schema.json"),
+    ("StartRequestModel", "operations/start-request-1.1.0.schema.json"),
     ("PublishWorkRequestModel", "operations/publish-work-request-1.1.0.schema.json"),
     ("CheckRequestModel", "operations/check-request-1.0.0.schema.json"),
     ("RespondRequestModel", "operations/respond-request-1.0.0.schema.json"),
-    ("StatusRequestModel", "operations/status-request-1.1.0.schema.json"),
+    ("StatusRequestModel", "operations/status-request-1.2.0.schema.json"),
     ("ReceiptRequestModel", "operations/receipt-request-1.0.0.schema.json"),
 )
 
@@ -303,30 +303,34 @@ _STATUS_PAGE_DEF_BY_VIEW_FOR_TEST: tuple[tuple[str, str], ...] = (
     ("obligations", "obligations_page"),
     ("operation", "operation_page"),
     ("results", "results_page"),
+    ("lineage", "lineage_page"),
+    ("project", "project_page"),
     ("versions", "versions_page"),
 )
 _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
-    ("check", None): 196,
+    ("check", None): 212,
     ("publish_work", None): 57,
-    ("receipt", None): 186,
+    ("receipt", None): 198,
     ("respond", None): 53,
-    ("start", None): 65,
+    ("start", None): 72,
     ("status", None): 47,
-    ("status", "advice"): 17,
+    ("status", "advice"): 25,
     ("status", "assignment"): 6,
     ("status", "candidate_findings"): 32,
     ("status", "compact"): 46,
     ("status", "evidence"): 18,
     ("status", "findings"): 97,
     ("status", "history"): 12,
+    ("status", "lineage"): 16,
     ("status", "obligations"): 29,
     ("status", "operation"): 24,
+    ("status", "project"): 67,
     ("status", "results"): 7,
     ("status", "versions"): 13,
 }
 
 _RESULT_SUPPORT_MODEL_SPECS: tuple[tuple[str, str, str], ...] = (
-    ("StartSuccessModel", "operations/start-result-1.0.0.schema.json", "success"),
+    ("StartSuccessModel", "operations/start-result-1.1.0.schema.json", "success"),
     ("StartCompactViewModel", "operations/start-result-1.0.0.schema.json", "compact_view"),
     ("StartVersionSliceModel", "operations/start-result-1.0.0.schema.json", "version_slice"),
     (
@@ -354,7 +358,7 @@ _RESULT_SUPPORT_MODEL_SPECS: tuple[tuple[str, str, str], ...] = (
         "operations/publish-work-result-1.0.0.schema.json",
         "version_slice",
     ),
-    ("CheckSuccessModel", "operations/check-result-1.0.0.schema.json", "success"),
+    ("CheckSuccessModel", "operations/check-result-1.2.0.schema.json", "success"),
     (
         "CheckPolicyExecutionModel",
         "operations/check-result-1.0.0.schema.json",
@@ -382,7 +386,7 @@ _RESULT_SUPPORT_MODEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("StatusSuccessModel", "operations/status-result-1.1.0.schema.json", "success"),
     (
         "StatusAdviceItemModel",
-        "operations/status-result-1.1.0.schema.json",
+        "operations/status-result-1.3.0.schema.json",
         "advice_item",
     ),
     (
@@ -662,7 +666,6 @@ def _check_result_wire() -> dict[str, JsonValue]:
         ],
         "semantic_status": "not_requested",
         "semantic_reason": "deterministic_mode",
-        "semantic_provenance": None,
         "coverage": _coverage_wire(),
         "versions": {
             "protocol_version": "0.1",
@@ -964,6 +967,9 @@ def _accepted_event_wire() -> dict[str, JsonValue]:
 def _receipt_result_wire() -> dict[str, JsonValue]:
     expected = _receipt_fixture_expected()
     document = cast(dict[str, JsonValue], expected["receipt_document"])
+    # The frozen receipt fixture predates the additive child rollup section.  Keep that fixture
+    # byte-identical and construct the current 1.2 result document at the wire boundary.
+    document["children"] = {"children": []}
     return {
         "protocol_version": "0.1",
         "schema_version": "1.0.0",
@@ -1128,6 +1134,15 @@ def test_protocol_models_public_exports_are_closed() -> None:
         PublicationChannel PublishWorkAcceptedMinimalEventModel
         PublishWorkAcceptedProjectionUnavailableModel PublishWorkRequest
         PublishWorkRequestModel PublishWorkResult PublishWorkResultModel
+        WorkState SessionHealth LineageOrigin LineageAcceptance ProjectKind MembershipKind
+        GrantState LineageRollupState LineageReadGapReason LineageProvenanceRestriction
+        AttachHandleModel ChildFindingSnapshotModel ChildDependencySnapshotModel
+        ChildDependenciesModel CheckChildPreviewItemModel CheckChildrenPreviewModel
+        CheckAdvisoryNoteModel StatusLineageChildModel StatusLineageAnnotationModel
+        StatusLineagePageModel ProjectTextRefModel StatusProjectMemberModel
+        StatusProjectCoverageModel StatusProjectDetectionModel StatusProjectReceiptModel
+        StatusProjectPageModel
+        ReceiptChildOutcomeModel ReceiptChildrenModel
         ProviderChallengeModel ProviderJudgmentChallengesModel
         ProviderJudgmentEnvelopeModel
         ProviderJudgmentInsufficientModel ProviderJudgmentModel
@@ -1686,17 +1701,16 @@ def test_check_semantic_status_reason_and_provenance_matrix() -> None:
             wire["semantic_status"] = status
             wire["semantic_reason"] = reason
             pair = (status, reason)
-            wire["semantic_provenance"] = (
-                _semantic_provenance_for(status, reason)
-                if pair in _REQUIRED_SEMANTIC_PROVENANCE_PAIRS
-                else None
-            )
+            if pair in _REQUIRED_SEMANTIC_PROVENANCE_PAIRS:
+                wire["semantic_provenance"] = _semantic_provenance_for(status, reason)
+            else:
+                wire.pop("semantic_provenance", None)
             parsed = models.CheckResultModel.model_validate(wire)
             assert models.public_model_to_wire(parsed) == wire
 
             if pair in _REQUIRED_SEMANTIC_PROVENANCE_PAIRS:
                 missing = dict(wire)
-                missing["semantic_provenance"] = None
+                missing.pop("semantic_provenance", None)
                 with pytest.raises(ValidationError):
                     models.CheckResultModel.model_validate(missing)
             elif pair not in _OPTIONAL_SEMANTIC_PROVENANCE_PAIRS:
@@ -1916,6 +1930,38 @@ def test_b1_prerequisite_event_and_receipt_schema_seams_are_exact() -> None:
     with pytest.raises(ProtocolValueError) as exc_info:
         validate_schema_instance("receipt-document", "1.0.0", missing_items_document)
     _assert_reason(exc_info, "schema_instance_invalid")
+
+
+def test_current_receipt_document_accepts_coordination_overlap_finding() -> None:
+    """The additive receipt artifact resolves current findings, including coordination overlap."""
+
+    expected = _receipt_fixture_expected()
+    document = cast(dict[str, JsonValue], expected["receipt_document"])
+    document["children"] = {"children": []}
+    versions = cast(dict[str, JsonValue], document["versions"])
+    schema_versions = cast(list[JsonValue], versions["schema_versions"])
+    for raw_entry in schema_versions:
+        entry = cast(dict[str, JsonValue], raw_entry)
+        if entry["schema_id"] == "findings/finding":
+            entry["schema_version"] = "1.2.0"
+        elif entry["schema_id"] == "receipts/receipt-document":
+            entry["schema_version"] = "1.2.0"
+    document["findings"] = [
+        {
+            "coverage": dict(_VALID_COVERAGE),
+            "detail": "Two admitted tasks overlap on a shared resource.",
+            "finding_id": _test_id("fnd_"),
+            "kind": "coordination_overlap",
+            "origin": "deterministic",
+            "policy_id": "coordination",
+            "policy_version": "0.1.0",
+            "priority": 2,
+            "subject_frontier": document["subject_frontier"],
+            "subject_refs": [_test_id("evt_"), _test_id("obl_")],
+            "summary": "Two admitted tasks overlap on a shared resource.",
+        }
+    ]
+    validate_schema_instance("receipt-document", "1.2.0", document)
 
 
 def test_check_recorded_schema_matches_final_semantic_provenance_identity() -> None:
@@ -2185,7 +2231,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     rules = cast(tuple[Any, ...], getattr(models, "_RESULT_LEAF_RULES"))
 
     derived_patterns = _derived_result_success_patterns(catalog)
-    assert len(derived_patterns) == 905
+    assert len(derived_patterns) == 1031
 
     derived_counts = {
         context: sum(1 for method, view, _ in derived_patterns if (method, view) == context)
@@ -2194,7 +2240,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert derived_counts == _EXPECTED_RESULT_PATTERN_COUNTS
 
     assert type(rules) is tuple
-    assert len(rules) == 923
+    assert len(rules) == 1053
     assert rules == tuple(sorted(rules, key=_test_rule_sort_key))
 
     rule_keys = {
@@ -2203,7 +2249,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert len(rule_keys) == len(rules)
 
     registry_patterns = {(rule.method, rule.status_view, rule.segments) for rule in rules}
-    assert len(registry_patterns) == 905
+    assert len(registry_patterns) == 1031
     assert registry_patterns == derived_patterns
 
     content_rules = _expected_nonpublish_content_rules(models)
@@ -2215,7 +2261,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
         for rule in rules
         if rule.method == "publish_work" and rule.segments == publish_summary_segments
     )
-    assert len(publish_summary_rules) == 19
+    assert len(publish_summary_rules) == 23
     assert all(rule.status_view is None for rule in publish_summary_rules)
 
     expected_publish = _expected_publish_summary_rules(models)
@@ -2567,12 +2613,15 @@ def _expected_nonpublish_content_rules(
     evidence_excerpt = models.DataCategory.EVIDENCE_EXCERPT
     obligation_text = models.DataCategory.OBLIGATION_TEXT
     task_description = models.DataCategory.TASK_DESCRIPTION
+    repository_excerpt = models.DataCategory.REPOSITORY_EXCERPT
 
     rows: tuple[tuple[str, str | None, str, object], ...] = (
         ("check", None, "/findings/*/detail", finding_summary),
         ("check", None, "/findings/*/summary", finding_summary),
         ("respond", None, "/response/evidence/*/description", evidence_excerpt),
         ("respond", None, "/response/reason", finding_summary),
+        ("status", "advice", "/page/items/*/coordination_resource_paths/*", repository_excerpt),
+        ("status", "project", "/page/detections/*/resource_paths/*", repository_excerpt),
         (
             "status",
             "candidate_findings",
@@ -2651,6 +2700,8 @@ def _expected_nonpublish_content_rules(
             "/page/items/*/unattempted_items/*/value",
             obligation_text,
         ),
+        ("status", "project", "/page/title", task_description),
+        ("status", "project", "/page/description", task_description),
         ("receipt", None, "/document/findings/*/detail", finding_summary),
         ("receipt", None, "/document/findings/*/summary", finding_summary),
         ("receipt", None, "/document/gaps/*/detail", finding_summary),
@@ -2675,11 +2726,15 @@ def _expected_publish_summary_rules(models: Any) -> dict[object, object]:
         ("assignment_recorded", "1.0.0"): "public_structural",
         ("check_recorded", "1.0.0"): "public_structural",
         ("check_recorded", "1.1.0"): "public_structural",
+        ("coordination_context_recorded", "1.0.0"): "public_structural",
+        ("coordination_obligation_declared", "1.0.0"): "public_structural",
+        ("coordination_disposition_recorded", "1.0.0"): "public_structural",
         ("claim_recorded", "1.0.0"): models.DataCategory.FINDING_SUMMARY,
         ("decision_recorded", "1.0.0"): models.DataCategory.DECISION_EXCERPT,
         ("evidence_recorded", "1.0.0"): models.DataCategory.EVIDENCE_EXCERPT,
         ("finding_recorded", "1.0.0"): models.DataCategory.FINDING_SUMMARY,
         ("finding_recorded", "1.1.0"): models.DataCategory.FINDING_SUMMARY,
+        ("finding_recorded", "1.2.0"): models.DataCategory.FINDING_SUMMARY,
         ("obligation_published", "1.0.0"): models.DataCategory.TASK_DESCRIPTION,
         ("plan_published", "1.0.0"): models.DataCategory.TASK_DESCRIPTION,
         ("plan_revised", "1.0.0"): models.DataCategory.TASK_DESCRIPTION,
@@ -2779,7 +2834,7 @@ def test_schema_catalog_reports_complete_registry() -> None:
     assert SCHEMA_NAMESPACE == "https://schemas.yoetz.dev/0.1/"
     assert SCHEMA_MANIFEST_SCHEMA == "yoetz.schema-manifest/1.0.0"
     assert SCHEMA_MANIFEST_VERSION == "1.0.0"
-    assert SCHEMA_MEMBER_COUNT == 127
+    assert SCHEMA_MEMBER_COUNT == 168
     assert len(catalog.documents) == SCHEMA_MEMBER_COUNT
 
     paths = tuple(document.relative_path for document in catalog.documents)
@@ -2863,7 +2918,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 3_901
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 4_898
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:
@@ -2872,18 +2927,25 @@ def test_schema_name_derivation_and_version_maps_are_exact() -> None:
     event_versions = event_schema_versions(catalog)
     assert request_versions is catalog.request_result_versions
     assert event_versions is catalog.event_schema_versions
-    assert len(request_versions) == 41
-    assert len(event_versions) == 16
+    assert len(request_versions) == 45
+    assert len(event_versions) == 29
     assert tuple(request_versions) == tuple(sorted(request_versions, key=str.encode))
     assert tuple(event_versions) == tuple(sorted(event_versions, key=str.encode))
-    assert set(request_versions.values()) == {"1.0.0", "1.1.0", "1.2.0", "2.4.0", "6.0.0"}
+    assert set(request_versions.values()) == {
+        "1.0.0",
+        "1.1.0",
+        "1.2.0",
+        "1.3.0",
+        "2.5.0",
+        "7.0.0",
+    }
     assert set(event_versions.values()) == {"1.0.0", "1.1.0", "1.2.0"}
     assert event_versions["action_recorded"] == "1.0.0"
     assert event_versions["evidence_recorded"] == "1.2.0"
     assert event_versions["check_recorded"] == "1.1.0"
     assert event_versions["claim_recorded"] == "1.1.0"
-    assert event_versions["finding_recorded"] == "1.1.0"
-    assert event_versions["session_opened"] == "1.1.0"
+    assert event_versions["finding_recorded"] == "1.2.0"
+    assert event_versions["session_opened"] == "1.2.0"
     assert event_versions["session_resumed"] == "1.1.0"
     assert "accepted_event" not in event_versions
     assert "event_draft" not in event_versions
