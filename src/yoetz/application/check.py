@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast
 
+from yoetz.domain.coordination import CoordinationError, CoordinationErrorCode
 from yoetz.domain.events import LedgerRecord
 from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
@@ -636,6 +637,19 @@ async def _duplicate_project_advisory_task_ids(
     return tuple(sorted({requester_task_id, *duplicate_tasks}, key=str.encode))
 
 
+_PROJECT_ADVICE_AUTHORITY_REFUSALS: Final = frozenset(
+    {
+        CoordinationErrorCode.CONSENT_REQUIRED,
+        CoordinationErrorCode.GRANT_REQUIRED,
+        CoordinationErrorCode.GRANT_REVOKED,
+        CoordinationErrorCode.GENERATION_MISMATCH,
+        CoordinationErrorCode.PROJECT_NOT_FOUND,
+        CoordinationErrorCode.PROJECT_DISSOLVED,
+        CoordinationErrorCode.MEMBER_NOT_FOUND,
+    }
+)
+
+
 async def _current_project_advisory_notes(
     app: Application,
     task_id: str,
@@ -711,6 +725,13 @@ async def _current_project_advisory_notes(
                     )
                 )
             except Exception as exc:
+                if (
+                    isinstance(exc, CoordinationError)
+                    and exc.code in _PROJECT_ADVICE_AUTHORITY_REFUSALS
+                ):
+                    # A missing or revoked authority is an expected absence of optional advice.
+                    # Do not retry it through the compatibility fallback or diagnose corruption.
+                    continue
                 live_lookup_failed = True
                 # A single stale or revoked project cannot suppress notes for other independently
                 # admitted projects, and never changes the recorded check verdict.
@@ -745,6 +766,11 @@ async def _current_project_advisory_notes(
                     )
                 )
             except Exception as exc:
+                if (
+                    isinstance(exc, CoordinationError)
+                    and exc.code in _PROJECT_ADVICE_AUTHORITY_REFUSALS
+                ):
+                    continue
                 record_unexpected_exception_without_raising(
                     exc,
                     component="check",

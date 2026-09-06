@@ -1685,6 +1685,11 @@ only the task, project generation, and closed gap vocabulary. It is not a detect
 and it contains no counterpart or resource identity; an unconsented, stale, dissolved, or
 out-of-project task produces no row.
 
+Optional project notes on a check use the same authority boundary. Missing consent, a missing or
+revoked grant, a changed generation, or a retired membership suppresses that project's notes without
+an internal-failure diagnostic or a fallback disclosure attempt. Independently admitted projects
+remain eligible; the optional note does not change the recorded check verdict.
+
 Detection detail is a separate encrypted object owned by one participant. A project status read
 may dereference it for either affected task only after both participants pass current-generation,
 workspace-consent, and source-policy checks; the recipient projection then applies its own sink
