@@ -43,7 +43,6 @@ from yoetz.domain.observation import (
     ObservationSource,
 )
 from yoetz.domain.observation_profiles import (
-    CLAUDE_CODE_ORDINARY_HOOK_MAPPING_VERSION,
     CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
     CURSOR_ORDINARY_HOOK_MAPPING_VERSION,
     CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
@@ -66,6 +65,16 @@ _CAPTURED_CONTENT_INNER_MEDIA_TYPE: Final = "text/plain"
 _MAX_WRAPPER_BYTES: Final = 1_048_576
 _CLAUDE_ORDINARY_PROFILE: Final = CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
 _CURSOR_ORDINARY_PROFILE: Final = CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
+# These are the only Claude ordinary hook mappings whose captured-content wire
+# contract has been reviewed. Keep the historical v1 literal so upgrading the
+# ingress mapping does not make already-authenticated v1 envelopes unreadable;
+# future or malformed hints must still fail closed until reviewed explicitly.
+_CLAUDE_ORDINARY_REVIEWED_MAPPINGS: Final = frozenset(
+    {
+        "claude-code-hooks-ordinary-v1",
+        "claude-code-hooks-ordinary-v2",
+    }
+)
 _AUTHORIZED_CAPTURE_PROFILES: Final = frozenset(
     {_CLAUDE_ORDINARY_PROFILE, _CURSOR_ORDINARY_PROFILE}
 )
@@ -269,7 +278,7 @@ def _profile_for_envelope(envelope: ObservationEnvelope) -> str | None:
     if envelope.source is ObservationSource.CLAUDE_HOOK:
         if (
             profile == _CLAUDE_ORDINARY_PROFILE
-            and mapping_hint == CLAUDE_CODE_ORDINARY_HOOK_MAPPING_VERSION
+            and mapping_hint in _CLAUDE_ORDINARY_REVIEWED_MAPPINGS
         ):
             return _CLAUDE_ORDINARY_PROFILE
     elif envelope.source is ObservationSource.CURSOR_HOOK:

@@ -3732,11 +3732,15 @@ async def test_native_content_requires_matching_local_and_task_profile_grants(
         async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
             del args, kwargs
 
+    class _Clock:
+        def now_utc(self) -> datetime:
+            return datetime(2026, 1, 1, tzinfo=UTC)
+
     runtime_port = _RuntimePort()
     coordinator = _Coordinator(
         runtime=runtime_port,  # type: ignore[arg-type]
         local=local,
-        clock=object(),  # type: ignore[arg-type]
+        clock=_Clock(),  # type: ignore[arg-type]
         ids=object(),  # type: ignore[arg-type]
         state_root=tmp_path,
         mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
@@ -3763,6 +3767,7 @@ async def test_native_content_requires_matching_local_and_task_profile_grants(
                 identity=identity,
                 ordinal=len(captured) + 1,
                 source=ObservationSource.CLAUDE_HOOK,
+                corr=identity,
             ),
             content_chunks=(chunk,),
             content_capture_profile=profile,
@@ -4101,6 +4106,9 @@ async def test_post_only_replay_includes_historical_unpaired_role_set(tmp_path: 
     replay_sets: list[tuple[tuple[str, ...], ...]] = []
 
     class _Store:
+        def load_capture_ticket(self, **kwargs: object) -> None:
+            del kwargs
+
         def grant_consent(self, *args: object, **kwargs: object) -> None:
             del args, kwargs
 

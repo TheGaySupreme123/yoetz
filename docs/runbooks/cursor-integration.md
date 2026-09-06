@@ -349,15 +349,20 @@ ordinary-profile native pass except teardown `sessionEnd` has a one-second drain
 its current structural row has no eligible chunks, such as a Yoetz-owned MCP mutation whose
 result is already durable elsewhere. When chunks exist, the pass prioritizes the current event
 after its same-session FIFO prefix, within that one-second drain and sixteen-row bound. Teardown
-keeps its host-clamped three-second hook and tighter ingest/drain window; a stale or blocked
+keeps its host-clamped three-second hook and tighter ingest/drain window, and skips local advice
+construction because the closing host cannot receive it; a stale or blocked
 backlog produces the explicit gap when the hook completes.
-A hard process kill before that diagnostic path completes may lose transient content without a
-durable gap marker; making native plaintext survive that boundary requires a separate service-owned
-staging protocol. The installed
-Cursor IDE `3.19.7` fact is a candidate local host observation while this runbook's pinned
-compatibility cells remain unchanged; it cannot certify the ordinary profile without an exact
-isolated fixture and receipt evidence for native hook delivery, accepted content, semantic
-selection, and influence.
+A hard process kill or service failure before authenticated service-side staging completes may
+lose transient content without a durable gap marker; there is no plaintext local spool or offline
+acceptance guarantee. For this ordinary Cursor profile, the capture-only service request can commit
+encrypted objects, manifests, and a metadata-only capture ticket before the structural FIFO ingest.
+After that boundary, a retry revalidates the original host/source and content-authority generations,
+requires the complete expected group/part set, and reuses the ticket rather than reminting content.
+The bounded staging handoff can therefore survive a service restart, while a revoked or incomplete
+ticket remains an honest content gap. The installed Cursor IDE `3.19.7` fact is a candidate local
+host observation while this runbook's pinned compatibility cells remain unchanged; it cannot
+certify the ordinary profile without an exact isolated fixture and receipt evidence for native hook
+delivery, accepted content, semantic selection, and influence.
 
 Cursor has no `codex exec --json` import surface. Issue #301's bounded import authorization makes
 no Cursor adapter change; Cursor evidence continues through cooperative MCP and native

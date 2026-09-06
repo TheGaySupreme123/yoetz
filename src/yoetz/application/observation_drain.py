@@ -19,6 +19,7 @@ from yoetz.adapters.integrations.observation_local import (
 )
 from yoetz.domain.observation import (
     OBSERVATION_BACKPRESSURE_REASON,
+    OBSERVATION_CONTENT_CAPTURE_PENDING_REASON,
     ObservationGapCode,
     ObservationIngestDisposition,
     ObservationIngestRequest,
@@ -54,13 +55,16 @@ _SWEEP_EXECUTOR_WORKERS: Final = 4
 # Designed coordination, not delivery failure (#351): the row stays pending and
 # retries, but the reason never becomes a coverage gap or a failure-shaped hook
 # diagnostic. ADR-022's check barrier is the canonical producer.
-EXPECTED_OBSERVATION_BACKPRESSURE_REASONS: Final = frozenset({OBSERVATION_BACKPRESSURE_REASON})
+EXPECTED_OBSERVATION_BACKPRESSURE_REASONS: Final = frozenset(
+    {OBSERVATION_BACKPRESSURE_REASON, OBSERVATION_CONTENT_CAPTURE_PENDING_REASON}
+)
 RETRYABLE_OBSERVATION_REJECTIONS: Final = frozenset(
     {
         ObservationGapCode.SERVICE_UNAVAILABLE.value,
         ObservationGapCode.VAULT_LOCKED.value,
         ObservationGapCode.MAPPING_MISSING.value,
         OBSERVATION_BACKPRESSURE_REASON,
+        OBSERVATION_CONTENT_CAPTURE_PENDING_REASON,
         "observation_disabled",
         "paused",
     }
@@ -171,6 +175,9 @@ class ObservationOutboxSweeper:
     # behind the entire 20-second sweep. Local outbox bookkeeping stays outside the gate and is
     # already fenced by the per-workspace lease.
     ingest_gate: asyncio.Lock | None = None
+    # Tests may provide a monotonic source so budget boundaries can be exercised without wall
+    # clock sleeps. Production leaves this unset and uses the running loop's monotonic clock.
+    _monotonic: Callable[[], float] | None = field(default=None, repr=False)
     _executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -225,7 +232,8 @@ class ObservationOutboxSweeper:
 
     async def sweep(self) -> ObservationDrainSummary:
         loop = asyncio.get_running_loop()
-        deadline = None if self.budget_seconds is None else loop.time() + self.budget_seconds
+        monotonic = loop.time if self._monotonic is None else self._monotonic
+        deadline = None if self.budget_seconds is None else monotonic() + self.budget_seconds
         rows, lifecycle_workspaces = await self._off_loop(
             self._fair_pending_rows_and_lifecycle_workspaces
         )
@@ -240,7 +248,7 @@ class ObservationOutboxSweeper:
             dict.fromkeys((*lifecycle_workspaces, *(workspace for workspace, _row in rows)))
         )
         for workspace in workspaces:
-            if deadline is not None and loop.time() >= deadline:
+            if deadline is not None and monotonic() >= deadline:
                 # Budget spent: return what this pass resolved so far. The rows
                 # left are still pending and the next pass selects them fairly.
                 break
@@ -293,7 +301,7 @@ class ObservationOutboxSweeper:
                 for selected_workspace, row in rows:
                     if selected_workspace != workspace:
                         continue
-                    if deadline is not None and loop.time() >= deadline:
+                    if deadline is not None and monotonic() >= deadline:
                         break
                     session_key = (workspace, row.codex_session_id)
                     if session_key in retired_sessions:

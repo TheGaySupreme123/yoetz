@@ -490,6 +490,48 @@ def _claim_v24_request() -> dict[str, Any]:
     return generated
 
 
+def _capture_v25_request() -> dict[str, Any]:
+    """Append the authenticated native capture handoff to the active 2.4 control wire."""
+
+    generated = _with_id("control-request", "2.5.0", _claim_v24_request())
+    ingest = generated["$defs"]["observation_ingest_body"]
+    # Native hook content is staged before the FIFO structural request.  Keep this opt-in marker
+    # outside the frozen 2.4 schema and accept only the literal true arm; ordinary structural
+    # requests omit it and retain the domain model's false default.
+    ingest["properties"]["capture_only"] = {"const": True}
+    # The capture lane is intentionally narrower than ordinary observation ingest.  Keep the
+    # discriminator and the authorization-bound payload in one schema branch so validation cannot
+    # admit a capture marker with an empty chunk set, an unknown profile, or a cross-host source.
+    ingest["oneOf"] = [
+        {"not": {"required": ["capture_only"]}},
+        {
+            "properties": {
+                "capture_only": {"const": True},
+                "content_capture_profile": {"const": "claude-code-ordinary-observation-v1"},
+                "content_chunks": {"minItems": 1},
+                "envelope": {
+                    "properties": {"source": {"const": "claude_hook"}},
+                    "required": ["source"],
+                },
+            },
+            "required": ["capture_only", "content_capture_profile", "content_chunks"],
+        },
+        {
+            "properties": {
+                "capture_only": {"const": True},
+                "content_capture_profile": {"const": "cursor-ordinary-observation-v1"},
+                "content_chunks": {"minItems": 1},
+                "envelope": {
+                    "properties": {"source": {"const": "cursor_hook"}},
+                    "required": ["source"],
+                },
+            },
+            "required": ["capture_only", "content_capture_profile", "content_chunks"],
+        },
+    ]
+    return generated
+
+
 def _semantic_provenance_v24_result() -> dict[str, Any]:
     generated = _with_id("control-result", "2.4.0", _status_v23_result())
     for old, new in (
@@ -550,6 +592,20 @@ def _documents() -> dict[Path, bytes]:
         ),
         ("control-request", "2.4.0"): _claim_v24_request(),
         ("control-result", "2.4.0"): _semantic_provenance_v24_result(),
+        ("control-hello", "2.5.0"): _with_id("control-hello", "2.5.0", _hello()),
+        ("control-hello-result", "2.5.0"): _with_id(
+            "control-hello-result",
+            "2.5.0",
+            _with_id(
+                "control-hello-result",
+                "2.4.0",
+                _with_id("control-hello-result", "2.0.0", _load("control-hello-result")),
+            ),
+        ),
+        ("control-request", "2.5.0"): _capture_v25_request(),
+        ("control-result", "2.5.0"): _with_id(
+            "control-result", "2.5.0", _semantic_provenance_v24_result()
+        ),
     }
     return {
         _SERVICE / f"{name}-{version}.schema.json": canonical_encode(document)

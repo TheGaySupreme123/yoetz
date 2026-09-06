@@ -25,7 +25,10 @@ from yoetz.adapters.integrations.hook_spool import (
     DEFAULT_HOOK_SPOOL_CLAIM_LIMIT,
     HookSpool,
 )
-from yoetz.adapters.integrations.observation_local import LocalObservationStore
+from yoetz.adapters.integrations.observation_local import (
+    LocalContentCaptureAuthority,
+    LocalObservationStore,
+)
 from yoetz.adapters.objects.encrypted_files import EncryptedFilesObjectStore
 from yoetz.adapters.privacy.catalog import CatalogPrivacyAudit, CatalogPrivacyPolicyStore
 from yoetz.adapters.privacy.gateway import PolicyEnforcingOutboundGateway
@@ -120,6 +123,7 @@ from yoetz.domain.findings import (
     SemanticProvenance,
     semantic_provenance_to_json,
 )
+from yoetz.domain.observation import ObservationCaptureTicket
 from yoetz.domain.privacy import (
     AuthorizationScope,
     AuthorizationScopeKind,
@@ -2409,6 +2413,56 @@ def _observation_workspace_for_runtime(runtime: TaskRuntime) -> str | None:
     return workspace
 
 
+async def _reconcile_observation_capture(
+    runtime: TaskRuntime,
+    local_observation: LocalObservationStore,
+) -> None:
+    """Retire stale native handoffs for the one task admitted to CHECK."""
+
+    store = runtime.observation
+    if store is None:
+        return
+    list_pending = getattr(store, "list_pending_capture_tickets", None)
+    tombstone = getattr(store, "tombstone_capture_ticket", None)
+    if not callable(list_pending) or not callable(tombstone):
+        return
+    tickets_raw = list_pending(runtime.task_id)
+    if type(tickets_raw) is not tuple:
+        raise PublicOperationError(
+            PublicErrorCode.STORAGE_CORRUPT,
+            "Observation capture ticket listing is invalid.",
+            retryable=False,
+        )
+    tickets = cast(tuple[object, ...], tickets_raw)
+    if any(type(ticket) is not ObservationCaptureTicket for ticket in tickets):
+        raise PublicOperationError(
+            PublicErrorCode.STORAGE_CORRUPT,
+            "Observation capture ticket listing is invalid.",
+            retryable=False,
+        )
+    authorities: dict[str, LocalContentCaptureAuthority | None] = {}
+    for ticket in cast(tuple[ObservationCaptureTicket, ...], tickets):
+        if ticket.task_id != runtime.task_id:
+            raise PublicOperationError(
+                PublicErrorCode.STORAGE_CORRUPT,
+                "Observation capture ticket task ownership is invalid.",
+                retryable=False,
+            )
+        if ticket.workspace_commitment not in authorities:
+            authorities[ticket.workspace_commitment] = local_observation.content_capture_authority(
+                ticket.workspace_commitment
+            )
+        authority = authorities[ticket.workspace_commitment]
+        if (
+            authority is None
+            or not authority.active
+            or not authority.runtime_enabled
+            or ticket.authority_generation != authority.generation
+            or ticket.content_capture_profile not in authority.profiles
+        ):
+            tombstone(ticket)
+
+
 def _privacy_gated_semantic_evaluator(
     privacy: PrivacyCoordinator,
     clock: ClockPort,
@@ -3356,6 +3410,10 @@ async def provide_service_ready_context(
     # retained bytes. The owner-private store is also the authoritative consent
     # fence while task-bundle propagation is still catching up.
     local_observation.set_runtime_enabled(config.observation.enabled)
+
+    async def reconcile_observation_capture(runtime: TaskRuntime) -> None:
+        await _reconcile_observation_capture(runtime, local_observation)
+
     if not semantic_configured:
         semantic_evaluator = _semantic_not_configured
     elif not provider_endpoint_bound:
@@ -3579,6 +3637,7 @@ async def provide_service_ready_context(
         ),
         observation_sweep_close=close_observation_maintenance,
         ready_recommendation_refresh=refresh_ready_recommendations,
+        reconcile_observation_capture=reconcile_observation_capture,
     )
 
 

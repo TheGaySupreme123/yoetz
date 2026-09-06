@@ -16,6 +16,7 @@ from builders.policy_cases import evd, make_case
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.application.observation_materialize import (
     MATERIALIZATION_MAPPING_VERSION,
+    materialize_observation_envelope,
     stable_observation_id,
 )
 from yoetz.application.semantic_case import (
@@ -31,6 +32,8 @@ from yoetz.domain.events import (
     EvidenceImmutability,
     EvidenceKind,
     EvidenceRecordedPayload,
+    ResultOutcome,
+    ResultRecordedPayload,
     encode_payload,
 )
 from yoetz.domain.observation import (
@@ -47,7 +50,14 @@ from yoetz.domain.observation_profiles import (
     CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
 )
 from yoetz.domain.privacy import ReviewContextProfile, ReviewSelectionPolicy
-from yoetz.domain.values import EvidenceId, JsonObject, event_id, object_id, timestamp_from_string
+from yoetz.domain.values import (
+    EvidenceId,
+    JsonObject,
+    JsonValue,
+    event_id,
+    object_id,
+    timestamp_from_string,
+)
 from yoetz.kernel.projections import EvidenceProjectionRecord
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort
@@ -523,6 +533,76 @@ async def test_resolver_requires_exact_ordinary_renderer_profile_identity() -> N
         frozen=frozen,
         workspace_commitment=_WORKSPACE,
     )
+    assert resolved.content == ()
+    assert "content_unselected" in resolved.gaps
+    assert objects.resolve_calls == []
+    assert objects.open_calls == 0
+
+
+@pytest.mark.anyio
+async def test_resolver_keeps_v1_content_and_unknown_result() -> None:
+    frozen, runtime, objects, observation, envelope = _fixture()
+    historical = replace(
+        envelope,
+        structural_payload=JsonObject(
+            {
+                **envelope.structural_payload,
+                "mapping_hint": "claude-code-hooks-ordinary-v1",
+                "result_status": "unknown",
+            }
+        ),
+    )
+    observation.envelope = historical
+
+    resolved = await resolve_captured_semantic_content(
+        runtime=runtime,
+        frozen=frozen,
+        workspace_commitment=_WORKSPACE,
+    )
+
+    assert len(resolved.content) == 1
+    assert resolved.content[0].content == b"planted-defect-marker: missing validation"
+    assert objects.open_calls == 1
+
+    batch = materialize_observation_envelope(
+        historical,
+        task_id=_TASK,
+        captured_content=(observation.manifest,),
+    )
+    result_payloads = [
+        cast(ResultRecordedPayload, item.draft.payload)
+        for item in batch.drafts
+        if item.draft.schema.name == "result_recorded"
+    ]
+    assert len(result_payloads) == 1
+    assert result_payloads[0].outcome is ResultOutcome.UNKNOWN
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "mapping_hint",
+    ("claude-code-hooks-ordinary-v3", "claude-code-hooks-ordinary", None),
+)
+async def test_resolver_rejects_unreviewed_or_malformed_claude_mapping_hint(
+    mapping_hint: JsonValue,
+) -> None:
+    frozen, runtime, objects, observation, envelope = _fixture()
+    observation.envelope = replace(
+        envelope,
+        structural_payload=JsonObject(
+            {
+                **envelope.structural_payload,
+                "mapping_hint": mapping_hint,
+            }
+        ),
+    )
+
+    resolved = await resolve_captured_semantic_content(
+        runtime=runtime,
+        frozen=frozen,
+        workspace_commitment=_WORKSPACE,
+    )
+
     assert resolved.content == ()
     assert "content_unselected" in resolved.gaps
     assert objects.resolve_calls == []

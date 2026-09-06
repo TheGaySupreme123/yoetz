@@ -109,6 +109,7 @@ from yoetz.protocol.models import CheckScopeModel, SemanticReason, SemanticStatu
 __all__ = ["CheckpointReport", "SqliteLedger"]
 
 _GENESIS_DIGEST: Final = "genesis"
+_CAPTURE_TICKET_SCHEMA_VERSION: Final = 11
 
 
 def _public_error(
@@ -331,6 +332,57 @@ class SqliteLedger:
         """
 
         return SqliteObservationStore(self._db)
+
+    def _pending_capture_ticket(self, task_id: str) -> tuple[object, ...] | None:
+        """Return one unfinished native handoff for this task.
+
+        The ticket table was added by bundle migration 0011.  Older bundles
+        intentionally retain the pre-handoff freeze behavior, but a current
+        schema must never silently bypass this barrier because a ticket query
+        failed for an unrelated SQLite reason.
+        """
+
+        try:
+            version_row = self._db.execute("PRAGMA user_version").fetchone()
+        except apsw.Error as exc:
+            raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
+        if version_row is None or type(version_row[0]) is not int:
+            raise _public_error(PublicErrorCode.STORAGE_CORRUPT)
+        if version_row[0] < _CAPTURE_TICKET_SCHEMA_VERSION:
+            return None
+        try:
+            pending = self._db.execute(
+                "SELECT workspace_commitment,logical_identity "
+                "FROM observation_capture_tickets "
+                "WHERE task_id=? AND state IN ('staging','pending') LIMIT 1",
+                (task_id,),
+            ).fetchone()
+        except apsw.Error as exc:
+            # A bundle claiming migration 0011 but missing its ticket table is
+            # corrupt.  Silently treating it like a legacy bundle would let a
+            # freeze outrun an encrypted handoff that the service can no
+            # longer inspect.
+            raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
+        if pending is None:
+            return None
+        if len(pending) != 2 or type(pending[0]) is not str or type(pending[1]) is not str:
+            raise _public_error(PublicErrorCode.STORAGE_CORRUPT)
+        try:
+            ticket = self.open_observation_store().load_capture_ticket(
+                workspace=pending[0],
+                logical_identity=pending[1],
+            )
+        except PublicOperationError:
+            raise
+        except apsw.Error as exc:
+            raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
+        if (
+            ticket is None
+            or ticket.task_id != task_id
+            or ticket.state not in {"staging", "pending"}
+        ):
+            raise _public_error(PublicErrorCode.STORAGE_CORRUPT)
+        return pending
 
     def _object_ref_from_inventory(self, object_id: str, task: str, media_type: str) -> ObjectRef:
         row = self._db.execute(
@@ -1824,13 +1876,13 @@ class SqliteLedger:
     ) -> AsyncIterator[LedgerRecord]:
         return self._load_events_recovered(session_id, after=after, through=through)
 
-    def _oracle(self) -> MemoryLedgerAdapter:
+    def _oracle(self, *, transaction_lock: asyncio.Lock | None = None) -> MemoryLedgerAdapter:
         return MemoryLedgerAdapter(
             task_id=self._task_id,
             ownership_fence=self._fence,
             state=self._state,
             import_state=_SqliteImportShim(),
-            transaction_lock=self._lock,
+            transaction_lock=self._lock if transaction_lock is None else transaction_lock,
             clock=self._clock,
             ids=self._ids,
             objects=self._objects,
@@ -1890,11 +1942,20 @@ class SqliteLedger:
         self._adopt_state(prior, clone)
         self._state = prior
 
-    def _sync_after_mutation_locked(self, new_records: tuple[LedgerRecord, ...] = ()) -> None:
+    def _sync_after_mutation_locked(
+        self,
+        new_records: tuple[LedgerRecord, ...] = (),
+        *,
+        pending_capture_task_id: str | None = None,
+    ) -> None:
         self._db.execute("BEGIN IMMEDIATE")
         try:
             self._db.execute("PRAGMA defer_foreign_keys=ON")
             self._verify_owner()
+            if pending_capture_task_id is not None:
+                pending_capture = self._pending_capture_ticket(pending_capture_task_id)
+                if pending_capture is not None:
+                    raise _public_error(PublicErrorCode.OPERATION_PENDING, retryable=True)
             self._persist_derived_records(new_records)
             self._sync_runtime_state()
             self._db.execute("COMMIT")
@@ -1903,9 +1964,17 @@ class SqliteLedger:
                 self._db.execute("ROLLBACK")
             raise
 
-    async def _sync_after_mutation(self, new_records: tuple[LedgerRecord, ...] = ()) -> None:
+    async def _sync_after_mutation(
+        self,
+        new_records: tuple[LedgerRecord, ...] = (),
+        *,
+        pending_capture_task_id: str | None = None,
+    ) -> None:
         async with self._lock:
-            self._sync_after_mutation_locked(new_records)
+            self._sync_after_mutation_locked(
+                new_records,
+                pending_capture_task_id=pending_capture_task_id,
+            )
 
     async def load_projection(
         self, session_id: str, view: ProjectionView
@@ -1959,12 +2028,46 @@ class SqliteLedger:
         request_digest: str,
     ) -> FrozenCase | CheckCommitResult:
         await self._ensure_recovered()
-        result = await self._oracle().freeze_case(
-            session_id, writer_id, expected_frontier, request_id, request_digest
-        )
-        if type(result) is FrozenCase:
-            await self._sync_after_mutation()
-        return result
+        async with self._lock:
+            operation_key = (writer_id, request_id)
+            existing_operation = self._state.operations.get(operation_key)
+            new_freeze = existing_operation is None
+            if new_freeze:
+                pending_capture = self._pending_capture_ticket(self._task_id)
+                if pending_capture is not None:
+                    raise _public_error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+            prior = self._state
+            clone = self._clone_state()
+            # The repository lock is held across the oracle and durable
+            # mirror transaction.  Give the in-memory oracle a private
+            # transaction lock for this already-serialized call; passing
+            # ``self._lock`` here would re-enter the same asyncio lock and
+            # deadlock every real SQLite freeze.
+            oracle = MemoryLedgerAdapter(
+                task_id=self._task_id,
+                ownership_fence=self._fence,
+                state=clone,
+                import_state=_SqliteImportShim(),
+                transaction_lock=asyncio.Lock(),
+                clock=self._clock,
+                ids=self._ids,
+                objects=self._objects,
+            )
+            result = await oracle.freeze_case(
+                session_id, writer_id, expected_frontier, request_id, request_digest
+            )
+            if type(result) is FrozenCase:
+                try:
+                    self._state = clone
+                    self._sync_after_mutation_locked(
+                        pending_capture_task_id=self._task_id if new_freeze else None,
+                    )
+                except BaseException:
+                    self._state = prior
+                    raise
+                self._adopt_state(prior, clone)
+                self._state = prior
+            return result
 
     async def advance_check_phase(
         self,

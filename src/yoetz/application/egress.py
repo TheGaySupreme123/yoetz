@@ -1189,11 +1189,18 @@ class PrivacyCoordinator:
         binding = candidate.provider_binding
         assert binding is not None
         now = self._clock.now_utc()
-        if proposal.expires_at <= now or deadline.expired(self._clock.monotonic_seconds()):
+        if proposal.expires_at <= now:
             return SemanticEgressBlocked(
                 candidate.request_id,
                 PrivacyOutcome.APPROVAL_EXPIRED,
                 PrivacyReason.AUTHORIZATION_EXPIRED,
+                privacy_proposal_id=proposal.privacy_proposal_id,
+            )
+        if deadline.expired(self._clock.monotonic_seconds()):
+            return SemanticEgressBlocked(
+                candidate.request_id,
+                PrivacyOutcome.TIMEOUT,
+                PrivacyReason.DEADLINE_EXPIRED,
                 privacy_proposal_id=proposal.privacy_proposal_id,
             )
         # A caller-owned retained-content fence may have changed while policy, audit, or

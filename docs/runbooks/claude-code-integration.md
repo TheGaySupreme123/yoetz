@@ -215,9 +215,14 @@ requests separate from tool execution. `PermissionRequest` has no tool-call iden
 retains an uncorrelated permission event without inventing a tool action. `PermissionDenied`
 reports auto-mode refusals; it does not cover manual dialog denial, deny rules, or a pre-tool hook
 blocking execution. `StopFailure` records an API-failed turn without ending the observed session,
-and emits no advice output. Cancellation and process outcomes are retained only when explicit
-native fields supply them; a successful shell tool call without an exit fact leaves command/test
-outcome unknown. These decisions do not add filesystem or batch observation.
+and emits no advice output. The ordinary Claude mapping is
+`claude-code-hooks-ordinary-v2`: Claude's `PostToolUse` event is an explicit host-tool success
+fact, so a successful `Read`, `Bash`, or other tool result is recorded as success even when the
+native result has no exit field. Yoetz never fabricates `exit_status: 0`; an exit status is retained
+only when Claude supplies one. `PostToolUseFailure`, denial, interruption, error, invalid or
+unknown status, and conflicting fields override that event-level success. A background Bash launch
+is recorded as partial until the host supplies completion evidence. These decisions do not add
+filesystem or batch observation.
 
 Select these hooks with `--observation-profile ordinary` on the existing Claude plugin
 preview/install/update/status commands, or on `yoetz integrate claude plugin export` for a
@@ -252,15 +257,21 @@ before attempting the bounded service drain. Every ordinary-profile native pass 
 chunks, such as a Yoetz-owned MCP mutation whose result is already durable elsewhere. When chunks
 exist, the pass prioritizes the current row after its same-session FIFO prefix, within that
 one-second drain and sixteen-row bound. Teardown keeps its host-clamped three-second hook and
-tighter ingest/drain window. A healthy accepted drain forwards the transient chunks and exact
+tighter ingest/drain window, and skips local advice construction because the closing host cannot
+receive it. A healthy accepted drain forwards the transient chunks and exact
 profile to the service; a bounded service failure or completed cancellation path leaves the
 structural record plus an explicit content gap.
-A hard process kill before that diagnostic path completes may lose transient content without a
-durable gap marker; making native plaintext survive that boundary requires a separate service-owned
-staging protocol. The current
-installed Claude `2.1.261` probe is a candidate host fact only; it does not
-certify this ordinary profile without an exact isolated fixture and a receipt that separately
-proves native hook delivery, accepted content, semantic selection, and any resulting influence.
+A hard process kill or service failure before authenticated service-side staging completes may
+lose transient content without a durable gap marker; there is no plaintext local spool or offline
+acceptance guarantee. For this ordinary Claude profile, the capture-only service request can commit
+encrypted objects, manifests, and a metadata-only capture ticket before the structural FIFO ingest.
+After that boundary, a retry revalidates the original host/source and content-authority generations,
+requires the complete expected group/part set, and reuses the ticket rather than reminting content.
+The bounded staging handoff can therefore survive a service restart, while a revoked or incomplete
+ticket remains an honest content gap. The current installed Claude `2.1.261` probe is a candidate
+host fact only; it does not certify this ordinary profile without an exact isolated fixture and a
+receipt that separately proves native hook delivery, accepted content, semantic selection, and any
+resulting influence.
 
 Claude Code has no `codex exec --json` import surface. Issue #301's bounded import authorization
 therefore makes no Claude adapter change; Claude evidence continues through cooperative MCP and

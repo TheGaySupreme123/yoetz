@@ -28,7 +28,11 @@ from tests.integration.objects.test_envelope_and_encrypted_files import (
 )
 
 import integration.service.test_semantic_non_dispatch as semantic_non_dispatch
-from yoetz.adapters.integrations.codex_lifecycle import LifecycleMapping, store_mapping
+from yoetz.adapters.integrations.codex_lifecycle import (
+    LifecycleMapping,
+    load_mapping,
+    store_mapping,
+)
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.adapters.objects.encrypted_files import EncryptedFilesObjectStore
 from yoetz.adapters.sqlite import connection as sqlite_connection
@@ -38,6 +42,10 @@ from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.application.check import FinalSemanticEvaluation
 from yoetz.application.egress import PrivacyCoordinator
 from yoetz.application.observation_coordinator import ObservationCoordinator
+from yoetz.application.observation_materialize import (
+    materialize_observation_envelope,
+    observation_content_identity,
+)
 from yoetz.application.semantic_case import (
     build_semantic_case,
     semantic_case_to_prepared_payload,
@@ -45,8 +53,15 @@ from yoetz.application.semantic_case import (
 from yoetz.application.semantic_content import resolve_captured_semantic_content
 from yoetz.cli.observe_hooks import handle_claude_observe, handle_cursor_observe
 from yoetz.domain.observation import (
+    OBSERVATION_CONTENT_CAPTURE_PENDING_REASON,
+    ObservationCaptureTicket,
     ObservationContentKind,
+    ObservationContentManifest,
+    ObservationGapCode,
+    ObservationIngestDisposition,
     ObservationIngestRequest,
+    ObservationIngestResult,
+    observation_capture_part_descriptors,
     observation_ingest_request_from_json,
     observation_ingest_result_to_json,
 )
@@ -69,6 +84,7 @@ from yoetz.ports.objects import (
     ObjectSource,
     ObjectStorePort,
 )
+from yoetz.ports.observation import TaskObservationPort
 from yoetz.ports.runtime import (
     BundleRuntimePort,
     OwnershipFence,
@@ -291,7 +307,7 @@ async def _pipeline(
         protocol_version="0.1",
         bundle_schema_version="1.0.0",
         fence=fence,
-        observation=observation,
+        observation=cast(TaskObservationPort, observation),
     )
     router = _RuntimeRouter(runtime)
     coordinator = ObservationCoordinator(
@@ -319,6 +335,124 @@ async def _pipeline(
         client,
         connect,
     )
+
+
+def _claude_hook_runner(
+    *,
+    project: Path,
+    state: Path,
+    connect: _Connector,
+    profile: str,
+) -> Callable[[str, Mapping[str, object]], int]:
+    def run_async(factory: Callable[[], Awaitable[object]]) -> object:
+        return asyncio.run(factory())
+
+    def run_hook(event_name: str, payload: Mapping[str, object]) -> int:
+        return handle_claude_observe(
+            event_name=event_name,
+            stdin_bytes=canonical_encode(cast(CanonicalJsonValue, payload)),
+            workspace=str(project),
+            _state=state,
+            stdout=io.BytesIO(),
+            connect=cast(object, connect),  # type: ignore[arg-type]
+            run_async=run_async,
+            observation_profile=profile,
+        )
+
+    return run_hook
+
+
+async def _capture_claude_post_requests(
+    *,
+    client: _ServiceClient,
+    monkeypatch: pytest.MonkeyPatch,
+    run_hook: Callable[[str, Mapping[str, object]], int],
+    session_id: str,
+    tool_use_id: str,
+    marker: bytes,
+) -> tuple[ObservationIngestRequest, ...]:
+    captured: list[ObservationIngestRequest] = []
+
+    async def capture_service_request(
+        body: DomainJsonValue,
+        *,
+        deadline_ms: int | None = None,
+    ) -> DomainJsonValue:
+        del deadline_ms
+        request = observation_ingest_request_from_json(body)
+        captured.append(request)
+        reason = (
+            OBSERVATION_CONTENT_CAPTURE_PENDING_REASON
+            if request.capture_only
+            else ObservationGapCode.SERVICE_UNAVAILABLE.value
+        )
+        return observation_ingest_result_to_json(
+            ObservationIngestResult(ObservationIngestDisposition.REJECTED, reason, None)
+        )
+
+    monkeypatch.setattr(client, "observation_ingest", capture_service_request)
+    assert (
+        await asyncio.to_thread(
+            run_hook,
+            "PostToolUse",
+            {
+                "hook_event_name": "PostToolUse",
+                "session_id": session_id,
+                "tool_name": "Bash",
+                "tool_use_id": tool_use_id,
+                "tool_response": marker.decode("utf-8"),
+                "exit_status": 0,
+            },
+        )
+        == 0
+    )
+    return tuple(captured)
+
+
+def _assert_native_handoff_requests(
+    requests: tuple[ObservationIngestRequest, ...],
+    *,
+    codex_session_id: str,
+    profile: str,
+    captured_bytes: bytes,
+    content_kind: ObservationContentKind,
+) -> tuple[
+    ObservationIngestRequest,
+    ObservationIngestRequest,
+    ObservationIngestRequest,
+]:
+    """Assert the durable native protocol's structural/capture/structural sequence."""
+
+    assert len(requests) == 3
+    pre_request, capture_request, structural_request = requests
+    assert pre_request.codex_session_id == codex_session_id
+    assert not pre_request.capture_only
+    assert pre_request.content_capture_profile == profile
+    assert pre_request.content_chunks == ()
+    assert pre_request.envelope.event_kind == "PreToolUse"
+
+    assert capture_request.codex_session_id == codex_session_id
+    assert capture_request.capture_only
+    assert capture_request.content_capture_profile == profile
+    assert len(capture_request.content_chunks) == 1
+    capture_chunk = capture_request.content_chunks[0]
+    assert capture_chunk.content_kind is content_kind
+    assert capture_chunk.content == captured_bytes
+    assert capture_request.envelope.event_kind == "PostToolUse"
+
+    assert structural_request.codex_session_id == codex_session_id
+    assert not structural_request.capture_only
+    assert structural_request.content_capture_profile == profile
+    assert structural_request.content_chunks == ()
+    assert structural_request.envelope.event_kind == "PostToolUse"
+    assert structural_request.envelope.source is capture_request.envelope.source
+    assert structural_request.envelope.source_identity == capture_request.envelope.source_identity
+    assert structural_request.envelope.cursor == capture_request.envelope.cursor
+    assert (
+        structural_request.envelope.session_commitment
+        == capture_request.envelope.session_commitment
+    )
+    return pre_request, capture_request, structural_request
 
 
 def _reopen_runtime(
@@ -364,7 +498,7 @@ def _reopen_runtime(
         protocol_version=runtime.protocol_version,
         bundle_schema_version=runtime.bundle_schema_version,
         fence=runtime.fence,
-        observation=ledger.open_observation_store(),
+        observation=cast(TaskObservationPort, ledger.open_observation_store()),
     )
     return database, ledger, reopened
 
@@ -402,20 +536,12 @@ async def _native_claude_case(
         profile=profile,
     )
 
-    def run_async(factory: Callable[[], Awaitable[object]]) -> object:
-        return asyncio.run(factory())
-
-    def run_hook(event_name: str, payload: Mapping[str, object]) -> int:
-        return handle_claude_observe(
-            event_name=event_name,
-            stdin_bytes=canonical_encode(cast(CanonicalJsonValue, payload)),
-            workspace=str(project),
-            _state=tmp_path / "state",
-            stdout=io.BytesIO(),
-            connect=cast(object, connect),  # type: ignore[arg-type]
-            run_async=run_async,
-            observation_profile=profile,
-        )
+    run_hook = _claude_hook_runner(
+        project=project,
+        state=tmp_path / "state",
+        connect=connect,
+        profile=profile,
+    )
 
     assert (
         await asyncio.to_thread(
@@ -445,8 +571,13 @@ async def _native_claude_case(
         )
         == 0
     )
-    assert len(client.requests) == 2
-    assert client.requests[1].content_chunks[0].content == marker
+    _pre_request, _capture_request, _structural_request = _assert_native_handoff_requests(
+        tuple(client.requests),
+        codex_session_id="claude:composition-capture-session",
+        profile=profile,
+        captured_bytes=marker,
+        content_kind=ObservationContentKind.TOOL_OUTPUT,
+    )
 
     observation.record_workspace_session_route(
         workspace=workspace,
@@ -682,16 +813,13 @@ async def test_ordinary_native_hook_content_reaches_prepared_semantic_packet(
 
     assert await asyncio.to_thread(run_hook, pre_event_name, pre_payload) == 0
     assert await asyncio.to_thread(run_hook, post_event_name, post_payload) == 0
-    assert len(client.requests) == 2, f"connector calls={client.connect_calls}"
-    pre_request, request = client.requests
-    assert pre_request.codex_session_id == codex_session_id
-    assert pre_request.content_capture_profile == profile
-    assert pre_request.content_chunks == ()
-    assert request.codex_session_id == codex_session_id
-    assert request.content_capture_profile == profile
-    assert len(request.content_chunks) == 1
-    assert request.content_chunks[0].content_kind is content_kind
-    assert request.content_chunks[0].content == captured_bytes
+    pre_request, _capture_request, structural_request = _assert_native_handoff_requests(
+        tuple(client.requests),
+        codex_session_id=codex_session_id,
+        profile=profile,
+        captured_bytes=captured_bytes,
+        content_kind=content_kind,
+    )
     assert marker in captured_bytes
 
     envelopes = task_observation.list_envelopes_for_session(workspace, session_commitment)
@@ -703,11 +831,13 @@ async def test_ordinary_native_hook_content_reaches_prepared_semantic_packet(
         item for item in envelopes if item.source_identity == pre_request.envelope.source_identity
     )
     envelope = next(
-        item for item in envelopes if item.source_identity == request.envelope.source_identity
+        item
+        for item in envelopes
+        if item.source_identity == structural_request.envelope.source_identity
     )
     assert pre_envelope.content_object_refs == ()
     assert pre_envelope.gap_codes == ()
-    assert envelope.source_identity == request.envelope.source_identity
+    assert envelope.source_identity == structural_request.envelope.source_identity
     assert envelope.content_object_refs
     assert envelope.gap_codes == ()
     manifest = task_observation.load_content_manifest(envelope.content_object_refs[0])
@@ -825,6 +955,760 @@ async def test_ordinary_native_hook_content_reaches_prepared_semantic_packet(
             is ArtifactObservation.CONTENT_CAPTURED
         )
     finally:
+        reopened_db.close(force=True)
+
+
+@pytest.mark.anyio
+async def test_native_manifest_binding_rejects_foreign_source_or_correlation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A native manifest cannot lend content across an envelope source binding."""
+
+    profile = CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+    (
+        project,
+        workspace,
+        _session_commitment,
+        _local,
+        observation,
+        _ledger,
+        runtime,
+        coordinator,
+        _client,
+        connect,
+    ) = await _pipeline(
+        tmp_path,
+        codex_session_id="claude:binding-rejection-session",
+        profile=profile,
+    )
+    run_hook = _claude_hook_runner(
+        project=project,
+        state=tmp_path / "state",
+        connect=connect,
+        profile=profile,
+    )
+    captured_requests = await _capture_claude_post_requests(
+        client=_client,
+        monkeypatch=monkeypatch,
+        run_hook=run_hook,
+        session_id="binding-rejection-session",
+        tool_use_id="binding-rejection-tool",
+        marker=b"binding-rejection-marker",
+    )
+    capture_request = next(item for item in captured_requests if item.capture_only)
+    chunk = capture_request.content_chunks[0]
+    foreign_commitment = "hmac-sha256:" + "f" * 64
+    malformed_chunks = (
+        replace(chunk, source_commitment=foreign_commitment),
+        replace(chunk, correlation_identity="hook:foreign-source:tool-output"),
+    )
+    logical_identity = observation_content_identity(capture_request.envelope)
+    before = observation.content_manifests_for_logical_identity(
+        workspace=workspace,
+        logical_identity=logical_identity,
+    )
+    for malformed in malformed_chunks:
+        captured, replay, _redacted, unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            runtime,
+            observation,
+            workspace=workspace,
+            envelope=capture_request.envelope,
+            chunks=(malformed,),
+        )
+        assert captured == ()
+        assert replay == ()
+        assert unavailable is True
+    after = observation.content_manifests_for_logical_identity(
+        workspace=workspace,
+        logical_identity=logical_identity,
+    )
+    assert after == before == ()
+
+    for index, malformed in enumerate(malformed_chunks, start=1):
+        object_value = f"obj_{index:08x}-0000-4000-8000-000000000001"
+        manifest = ObservationContentManifest(
+            object_id=object_value,
+            envelope_digest="sha256:" + "a" * 64,
+            content_kind=malformed.content_kind,
+            part_index=malformed.part_index,
+            part_count=malformed.part_count,
+            redacted=False,
+            content_digest="sha256:" + hashlib.sha256(malformed.content).hexdigest(),
+            content_bytes=len(malformed.content),
+            correlation_identity=malformed.correlation_identity,
+            source_commitment=malformed.source_commitment,
+        )
+        batch = materialize_observation_envelope(
+            replace(capture_request.envelope, content_object_refs=(object_value,)),
+            task_id=runtime.task_id,
+            captured_content=(manifest,),
+        )
+        assert ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value in batch.gaps
+        assert all(not item.role.startswith("captured_") for item in batch.drafts)
+
+
+@pytest.mark.anyio
+async def test_native_manifest_survives_preappend_cancellation_and_structural_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry after manifest persistence recovers bytes and appends only once."""
+
+    profile = CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+    marker = b"preappend-cancellation-native-marker: recover this"
+    (
+        project,
+        workspace,
+        session_commitment,
+        local,
+        observation,
+        ledger,
+        runtime,
+        coordinator,
+        client,
+        connect,
+    ) = await _pipeline(
+        tmp_path,
+        codex_session_id="claude:preappend-cancellation",
+        profile=profile,
+    )
+
+    run_hook = _claude_hook_runner(
+        project=project,
+        state=tmp_path / "state",
+        connect=connect,
+        profile=profile,
+    )
+
+    assert (
+        await asyncio.to_thread(
+            run_hook,
+            "PreToolUse",
+            {
+                "hook_event_name": "PreToolUse",
+                "session_id": "preappend-cancellation",
+                "tool_name": "Bash",
+                "tool_use_id": "preappend-tool-1",
+            },
+        )
+        == 0
+    )
+    captured_requests = await _capture_claude_post_requests(
+        client=client,
+        monkeypatch=monkeypatch,
+        run_hook=run_hook,
+        session_id="preappend-cancellation",
+        tool_use_id="preappend-tool-1",
+        marker=marker,
+    )
+    capture_request = next(request for request in captured_requests if request.capture_only)
+    structural_request = next(request for request in captured_requests if not request.capture_only)
+    assert capture_request.content_chunks[0].content == marker
+    before_failure = await ledger.load_frontier()
+
+    staged = await coordinator.ingest_request(capture_request)
+    assert staged.disposition is ObservationIngestDisposition.REJECTED
+    assert staged.reason == OBSERVATION_CONTENT_CAPTURE_PENDING_REASON
+
+    append_calls = 0
+
+    async def cancel_append(*args: object, **kwargs: object) -> object:
+        nonlocal append_calls
+        del args, kwargs
+        append_calls += 1
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(coordinator, "_append_materialized", cancel_append)
+    with pytest.raises(asyncio.CancelledError):
+        await coordinator.ingest_request(structural_request)
+    assert append_calls == 1
+
+    stored = next(
+        item
+        for item in observation.list_envelopes_for_session(workspace, session_commitment)
+        if item.source_identity == structural_request.envelope.source_identity
+    )
+    assert stored.content_object_refs
+    manifest = observation.load_content_manifest(stored.content_object_refs[0])
+    assert manifest is not None
+    assert manifest.content_digest == "sha256:" + hashlib.sha256(marker).hexdigest()
+    assert (await ledger.load_frontier()).sequence == before_failure.sequence
+    ticket = observation.load_capture_ticket(
+        workspace=workspace,
+        logical_identity=observation_content_identity(structural_request.envelope),
+    )
+    assert ticket is not None and ticket.state == "pending"
+
+    reopened_db, reopened_ledger, reopened_runtime = _reopen_runtime(tmp_path, runtime)
+    reopened_coordinator = ObservationCoordinator(
+        runtime=_RuntimeRouter(reopened_runtime),
+        local=local,
+        clock=_Clock(),
+        ids=_Ids(object_counter=96),
+        state_root=tmp_path / "state",
+    )
+    try:
+        structural_retry = ObservationIngestRequest(
+            codex_session_id=structural_request.codex_session_id,
+            envelope=structural_request.envelope,
+        )
+        first_retry = await reopened_coordinator.ingest_request(structural_retry)
+        assert first_retry.disposition is ObservationIngestDisposition.DUPLICATE
+        after_retry = await reopened_ledger.load_frontier()
+        assert after_retry.sequence > before_failure.sequence
+
+        second_retry = await reopened_coordinator.ingest_request(structural_retry)
+        assert second_retry.disposition is ObservationIngestDisposition.DUPLICATE
+        assert (await reopened_ledger.load_frontier()).sequence == after_retry.sequence
+
+        reopened_observation = cast(SqliteObservationStore, reopened_runtime.observation)
+        reopened_observation.record_workspace_session_route(
+            workspace=workspace,
+            yoetz_session_id=reopened_runtime.session_id,
+            yoetz_task_id=reopened_runtime.task_id,
+            yoetz_writer_id=cast(str, reopened_runtime.writer_id),
+            codex_session_commitment=session_commitment,
+            bound_at=Timestamp("2026-09-05T17:00:00.000Z"),
+        )
+        frozen = await reopened_ledger.freeze_case(
+            reopened_runtime.session_id,
+            cast(str, reopened_runtime.writer_id),
+            after_retry.sequence,
+            _ids(IdKind.REQUEST, 40),
+            _ZERO_DIGEST,
+        )
+        assert isinstance(frozen, FrozenCase)
+        resolved = await resolve_captured_semantic_content(
+            runtime=reopened_runtime,
+            frozen=frozen,
+            workspace_commitment=workspace,
+            local_observation=local,
+        )
+        assert resolved.gaps == ()
+        assert len(resolved.content) == 1
+        assert resolved.content[0].content == marker
+
+        semantic = build_semantic_case(
+            case_id=_ids(IdKind.OUTBOUND_CASE, 41),
+            frozen_case=frozen.case,
+            dependency_digest=frozen.lease.dependency_digest,
+            findings=(),
+            review_context_profile=ReviewContextProfile.EXPANDED,
+            review_selection=ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED),
+            policy_id="native-retry",
+            policy_version="0.1.0",
+            captured_content=resolved.content,
+            captured_content_scope=resolved.scope,
+            captured_content_gaps=resolved.gaps,
+        )
+        prepared = semantic_case_to_prepared_payload(
+            semantic,
+            {item.item_id for item in semantic.items},
+        )
+        assert marker.decode("utf-8") in prepared.decode("utf-8")
+    finally:
+        reopened_coordinator.close()
+        reopened_db.close(force=True)
+
+
+@pytest.mark.anyio
+async def test_native_pending_ticket_replays_through_same_task_successor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A validated same-task successor drains a predecessor's immutable handoff."""
+
+    profile = CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+    marker = b"same-task-successor-native-marker: retain this"
+    (
+        project,
+        workspace,
+        session_commitment,
+        local,
+        observation,
+        ledger,
+        runtime,
+        coordinator,
+        client,
+        connect,
+    ) = await _pipeline(
+        tmp_path,
+        codex_session_id="claude:same-task-successor",
+        profile=profile,
+    )
+    run_hook = _claude_hook_runner(
+        project=project,
+        state=tmp_path / "state",
+        connect=connect,
+        profile=profile,
+    )
+    assert (
+        await asyncio.to_thread(
+            run_hook,
+            "PreToolUse",
+            {
+                "hook_event_name": "PreToolUse",
+                "session_id": "same-task-successor",
+                "tool_name": "Bash",
+                "tool_use_id": "same-task-tool-1",
+            },
+        )
+        == 0
+    )
+    captured_requests = await _capture_claude_post_requests(
+        client=client,
+        monkeypatch=monkeypatch,
+        run_hook=run_hook,
+        session_id="same-task-successor",
+        tool_use_id="same-task-tool-1",
+        marker=marker,
+    )
+    capture_request = next(request for request in captured_requests if request.capture_only)
+    structural_request = next(request for request in captured_requests if not request.capture_only)
+    staged = await coordinator.ingest_request(capture_request)
+    assert staged.reason == OBSERVATION_CONTENT_CAPTURE_PENDING_REASON
+
+    predecessor_session = runtime.session_id
+    pending_ticket = observation.load_capture_ticket(
+        workspace=workspace,
+        logical_identity=observation_content_identity(structural_request.envelope),
+    )
+    assert pending_ticket is not None
+    assert pending_ticket.yoetz_session_id == predecessor_session
+    successor_session = _ids(IdKind.SESSION, 990)
+    successor_writer = _ids(IdKind.WRITER, 991)
+    successor_runtime = replace(runtime, session_id=successor_session, writer_id=successor_writer)
+
+    current_mapping = load_mapping("claude:same-task-successor", _state=tmp_path / "state")
+    assert current_mapping is not None
+    store_mapping(
+        LifecycleMapping(
+            mapping_version=current_mapping.mapping_version,
+            codex_session_id=current_mapping.codex_session_id,
+            yoetz_task_id=runtime.task_id,
+            yoetz_session_id=successor_session,
+            yoetz_writer_id=successor_writer,
+            last_frontier=current_mapping.last_frontier,
+        ),
+        _state=tmp_path / "state",
+    )
+
+    class _SuccessorRuntime:
+        async def route(self, command: RouteCommand) -> TaskRuntime:
+            assert command.session_id == successor_session
+            return successor_runtime
+
+        async def provision_start(self, command: object) -> TaskRuntime:
+            del command
+            raise AssertionError("successor replay must use its existing runtime")
+
+        async def verify_start(
+            self, runtime: TaskRuntime, expectation: object
+        ) -> StartCompletionEvidence:
+            del runtime, expectation
+            raise AssertionError("successor replay does not run start")
+
+        async def release(self, runtime: TaskRuntime) -> None:
+            assert runtime is successor_runtime
+
+        async def close(self) -> None:
+            return None
+
+    successor_coordinator = ObservationCoordinator(
+        runtime=_SuccessorRuntime(),
+        local=local,
+        clock=_Clock(),
+        ids=_Ids(object_counter=112),
+        state_root=tmp_path / "state",
+    )
+    first_retry = await successor_coordinator.ingest_request(
+        ObservationIngestRequest(
+            codex_session_id=structural_request.codex_session_id,
+            envelope=structural_request.envelope,
+        )
+    )
+    assert first_retry.disposition is ObservationIngestDisposition.ACCEPTED, first_retry.reason
+    assert (
+        observation.load_capture_ticket(
+            workspace=workspace,
+            logical_identity=observation_content_identity(structural_request.envelope),
+        )
+        is None
+    )
+
+    observation.record_workspace_session_route(
+        workspace=workspace,
+        yoetz_session_id=successor_session,
+        yoetz_task_id=runtime.task_id,
+        yoetz_writer_id=successor_writer,
+        codex_session_commitment=session_commitment,
+        bound_at=Timestamp("2026-09-05T17:00:00.000Z"),
+    )
+    frontier = await ledger.load_frontier()
+    frozen = await ledger.freeze_case(
+        successor_session,
+        successor_writer,
+        frontier.sequence,
+        _ids(IdKind.REQUEST, 992),
+        _ZERO_DIGEST,
+    )
+    assert isinstance(frozen, FrozenCase)
+    resolved = await resolve_captured_semantic_content(
+        runtime=successor_runtime,
+        frozen=frozen,
+        workspace_commitment=workspace,
+        local_observation=local,
+    )
+    assert resolved.gaps == ()
+    assert len(resolved.content) == 1
+    assert resolved.content[0].content == marker
+
+    after_first_retry = await ledger.load_frontier()
+    second_retry = await successor_coordinator.ingest_request(
+        ObservationIngestRequest(
+            codex_session_id=structural_request.codex_session_id,
+            envelope=structural_request.envelope,
+        )
+    )
+    assert second_retry.disposition is ObservationIngestDisposition.DUPLICATE
+    assert await ledger.load_frontier() == after_first_retry
+
+
+@pytest.mark.anyio
+async def test_terminal_cursor_rejection_tombstones_ticket_and_unblocks_freeze(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal structural refusal cannot leave its native handoff blocking checks."""
+
+    profile = CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+    marker = b"terminal-cursor-rejection-native-marker"
+    (
+        project,
+        workspace,
+        _session_commitment,
+        _local,
+        observation,
+        ledger,
+        runtime,
+        coordinator,
+        client,
+        connect,
+    ) = await _pipeline(
+        tmp_path,
+        codex_session_id="claude:terminal-cursor-rejection",
+        profile=profile,
+    )
+    run_hook = _claude_hook_runner(
+        project=project,
+        state=tmp_path / "state",
+        connect=connect,
+        profile=profile,
+    )
+    assert (
+        await asyncio.to_thread(
+            run_hook,
+            "PreToolUse",
+            {
+                "hook_event_name": "PreToolUse",
+                "session_id": "terminal-cursor-rejection",
+                "tool_name": "Bash",
+                "tool_use_id": "terminal-cursor-rejection-tool-1",
+            },
+        )
+        == 0
+    )
+    captured_requests = await _capture_claude_post_requests(
+        client=client,
+        monkeypatch=monkeypatch,
+        run_hook=run_hook,
+        session_id="terminal-cursor-rejection",
+        tool_use_id="terminal-cursor-rejection-tool-1",
+        marker=marker,
+    )
+    capture_request = next(request for request in captured_requests if request.capture_only)
+    structural_request = next(request for request in captured_requests if not request.capture_only)
+    staged = await coordinator.ingest_request(capture_request)
+    assert staged.reason == OBSERVATION_CONTENT_CAPTURE_PENDING_REASON
+
+    # Advance the task observation cursor through a different envelope. The original
+    # structural row now receives the terminal CURSOR_STALE refusal after it has
+    # successfully recovered the ticket's encrypted content.
+    newer_envelope = replace(
+        structural_request.envelope,
+        source_identity="hook:terminal-cursor-rejection-newer",
+        cursor=replace(
+            structural_request.envelope.cursor,
+            event_position=structural_request.envelope.cursor.event_position + 1,
+        ),
+    )
+    advanced = await observation.ingest(newer_envelope)
+    assert advanced.disposition is ObservationIngestDisposition.ACCEPTED
+
+    refused = await coordinator.ingest_request(structural_request)
+    assert refused.disposition is ObservationIngestDisposition.REJECTED
+    assert refused.reason == ObservationGapCode.CURSOR_STALE.value
+    ticket = observation.load_capture_ticket(
+        workspace=workspace,
+        logical_identity=observation_content_identity(structural_request.envelope),
+    )
+    assert ticket is not None and ticket.state == "revoked"
+
+    frontier = await ledger.load_frontier()
+    frozen = await ledger.freeze_case(
+        runtime.session_id,
+        cast(str, runtime.writer_id),
+        frontier.sequence,
+        _ids(IdKind.REQUEST, 993),
+        _ZERO_DIGEST,
+    )
+    assert isinstance(frozen, FrozenCase)
+
+
+@pytest.mark.anyio
+async def test_native_ticket_from_unproven_session_cannot_lend_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A same-task ticket without an admitted route lineage remains fenced."""
+
+    profile = CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+    marker = b"unproven-native-session-marker: do not lend"
+    (
+        project,
+        workspace,
+        _session_commitment,
+        local,
+        observation,
+        _ledger,
+        runtime,
+        coordinator,
+        client,
+        connect,
+    ) = await _pipeline(
+        tmp_path,
+        codex_session_id="claude:unproven-ticket",
+        profile=profile,
+    )
+    run_hook = _claude_hook_runner(
+        project=project,
+        state=tmp_path / "state",
+        connect=connect,
+        profile=profile,
+    )
+    assert (
+        await asyncio.to_thread(
+            run_hook,
+            "PreToolUse",
+            {
+                "hook_event_name": "PreToolUse",
+                "session_id": "unproven-ticket",
+                "tool_name": "Bash",
+                "tool_use_id": "unproven-tool-1",
+            },
+        )
+        == 0
+    )
+    captured_requests = await _capture_claude_post_requests(
+        client=client,
+        monkeypatch=monkeypatch,
+        run_hook=run_hook,
+        session_id="unproven-ticket",
+        tool_use_id="unproven-tool-1",
+        marker=marker,
+    )
+    capture_request = next(request for request in captured_requests if request.capture_only)
+    structural_request = next(request for request in captured_requests if not request.capture_only)
+    authority = local.content_capture_authority(workspace)
+    assert authority is not None
+    unproven_ticket = ObservationCaptureTicket(
+        workspace_commitment=workspace,
+        task_id=runtime.task_id,
+        yoetz_session_id=_ids(IdKind.SESSION, 993),
+        session_commitment=structural_request.envelope.session_commitment,
+        source=structural_request.envelope.source,
+        source_identity=structural_request.envelope.source_identity,
+        cursor=structural_request.envelope.cursor,
+        logical_identity=observation_content_identity(structural_request.envelope),
+        content_capture_profile=profile,
+        authority_generation=authority.generation,
+        object_ids=(),
+        captured_at=Timestamp("2026-09-05T17:00:00.000Z"),
+        state="staging",
+        expected_parts=observation_capture_part_descriptors(capture_request.content_chunks),
+    )
+    observation.record_capture_ticket(unproven_ticket)
+
+    refused = await coordinator.ingest_request(structural_request)
+    assert refused.disposition is ObservationIngestDisposition.REJECTED
+    assert refused.reason == ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+    retained = observation.load_capture_ticket(
+        workspace=workspace,
+        logical_identity=unproven_ticket.logical_identity,
+    )
+    assert retained is not None and retained.state == "staging"
+    assert not any(
+        item.source_identity == structural_request.envelope.source_identity
+        for item in observation.list_envelopes(workspace)
+    )
+
+
+@pytest.mark.anyio
+async def test_native_finalize_without_manifest_stays_orphan_on_structural_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finalized object without its manifest is never fabricated into captured evidence."""
+
+    profile = CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+    marker = b"finalize-before-manifest-native-marker: must stay unavailable"
+    (
+        project,
+        workspace,
+        session_commitment,
+        local,
+        observation,
+        _ledger,
+        runtime,
+        coordinator,
+        client,
+        connect,
+    ) = await _pipeline(
+        tmp_path,
+        codex_session_id="claude:finalize-before-manifest",
+        profile=profile,
+    )
+
+    run_hook = _claude_hook_runner(
+        project=project,
+        state=tmp_path / "state",
+        connect=connect,
+        profile=profile,
+    )
+
+    assert (
+        await asyncio.to_thread(
+            run_hook,
+            "PreToolUse",
+            {
+                "hook_event_name": "PreToolUse",
+                "session_id": "finalize-before-manifest",
+                "tool_name": "Bash",
+                "tool_use_id": "finalize-tool-1",
+            },
+        )
+        == 0
+    )
+
+    captured_requests = await _capture_claude_post_requests(
+        client=client,
+        monkeypatch=monkeypatch,
+        run_hook=run_hook,
+        session_id="finalize-before-manifest",
+        tool_use_id="finalize-tool-1",
+        marker=marker,
+    )
+
+    def object_files() -> set[Path]:
+        objects_root = tmp_path / "bundle" / "objects"
+        return {
+            path
+            for shard in objects_root.iterdir()
+            if shard.is_dir() and shard.name != ".staging"
+            for path in shard.iterdir()
+            if path.is_file()
+        }
+
+    def count_rows(database: apsw.Connection, query: str) -> int:
+        row = database.execute(query).fetchone()
+        assert row is not None
+        return cast(int, row[0])
+
+    before_files = object_files()
+    before_inventory = count_rows(
+        observation._db,  # pyright: ignore[reportPrivateUsage]
+        "SELECT COUNT(*) FROM objects",
+    )
+    before_manifests = count_rows(
+        observation._db,  # pyright: ignore[reportPrivateUsage]
+        "SELECT COUNT(*) FROM observation_content_manifests",
+    )
+
+    capture_request = next(request for request in captured_requests if request.capture_only)
+    structural_request = next(request for request in captured_requests if not request.capture_only)
+
+    def fail_manifest(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise RuntimeError("simulated_manifest_transaction_failure")
+
+    monkeypatch.setattr(observation, "record_content_manifest", fail_manifest)
+    failed_capture = await coordinator.ingest_request(capture_request)
+    assert failed_capture.disposition is ObservationIngestDisposition.REJECTED
+    assert failed_capture.reason == ObservationGapCode.SERVICE_UNAVAILABLE.value
+    after_failure_files = object_files()
+    orphan_files = after_failure_files - before_files
+    assert len(orphan_files) == 1
+    orphan = next(iter(orphan_files))
+    assert orphan.is_file()
+    assert (
+        count_rows(
+            observation._db,  # pyright: ignore[reportPrivateUsage]
+            "SELECT COUNT(*) FROM objects",
+        )
+        == before_inventory
+    )
+    assert (
+        count_rows(
+            observation._db,  # pyright: ignore[reportPrivateUsage]
+            "SELECT COUNT(*) FROM observation_content_manifests",
+        )
+        == before_manifests
+        == 0
+    )
+    # A fresh service process sees only the structural outbox envelope. It may commit that
+    # envelope, but it has no authenticated manifest pointer from which to invent the marker.
+    reopened_db, _reopened_ledger, reopened_runtime = _reopen_runtime(tmp_path, runtime)
+    reopened_coordinator = ObservationCoordinator(
+        runtime=_RuntimeRouter(reopened_runtime),
+        local=local,
+        clock=_Clock(),
+        ids=_Ids(object_counter=96),
+        state_root=tmp_path / "state",
+    )
+    try:
+        structural_retry = ObservationIngestRequest(
+            codex_session_id=structural_request.codex_session_id,
+            envelope=structural_request.envelope,
+        )
+        retry = await reopened_coordinator.ingest_request(structural_retry)
+        assert retry.disposition is ObservationIngestDisposition.ACCEPTED
+        reopened_observation = cast(SqliteObservationStore, reopened_runtime.observation)
+        stored = next(
+            item
+            for item in reopened_observation.list_envelopes_for_session(
+                workspace, session_commitment
+            )
+            if item.source_identity == structural_request.envelope.source_identity
+        )
+        assert stored.content_object_refs == ()
+        assert (
+            count_rows(
+                reopened_db,
+                "SELECT COUNT(*) FROM observation_content_manifests",
+            )
+            == 0
+        )
+        assert orphan.exists()
+        assert (
+            reopened_db.execute(  # pyright: ignore[reportPrivateUsage]
+                "SELECT 1 FROM objects WHERE object_id=?", (orphan.name,)
+            ).fetchone()
+            is None
+        )
+
+    finally:
+        reopened_coordinator.close()
         reopened_db.close(force=True)
 
 
@@ -1008,9 +1892,19 @@ async def test_unreadable_native_capture_degrades_without_semantic_content(tmp_p
             "exit_status": 0,
         },
     )
-    assert len(client.requests) == 2
+    _pre_request, _capture_request, structural_request = _assert_native_handoff_requests(
+        tuple(client.requests),
+        codex_session_id="claude:unreadable-content-session",
+        profile=CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+        captured_bytes=b"unreadable-native-capture-marker",
+        content_kind=ObservationContentKind.TOOL_OUTPUT,
+    )
     envelopes = observation.list_envelopes(workspace)
-    post = next(item for item in envelopes if item.event_kind == "PostToolUse")
+    post = next(
+        item
+        for item in envelopes
+        if item.source_identity == structural_request.envelope.source_identity
+    )
     assert post.content_object_refs
     object_id_value = post.content_object_refs[0]
     object_path = tmp_path / "bundle" / "objects" / object_id_value[4:6] / object_id_value

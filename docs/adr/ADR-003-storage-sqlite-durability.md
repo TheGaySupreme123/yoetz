@@ -37,8 +37,12 @@ fault/contention matrix on both advertised platforms.
    machines). Structural columns never contain user plaintext.
 6. **Object publication protocol:** encrypted temp file → flush → fsync(file) → atomic rename
    into `objects/<2-hex-prefix>/` → fsync(dir) → only then referenced inside the append
-   transaction. Orphans are collectable after a 24 h safety window, never while referenced by a
-   maintenance pin.
+   transaction. Native Claude Code and Cursor content uses the same service-side publication
+   protocol before its structural observation enters the FIFO ledger: the service reserves a
+   metadata-only capture ticket, writes the encrypted object and manifest, and marks the ticket
+   pending only after the expected set is complete. Orphans are
+   collectable after a 24 h safety window, never while referenced by a maintenance pin or an
+   outstanding capture ticket.
 7. **Backup/restore/migration:** online Backup API only (APSW destination-side `backup`);
    frontier-pinned manifests; restore into a quarantined new bundle then atomic catalog switch;
    canonical event bytes never rewritten by migration; newer unknown write-schema fails closed.
@@ -55,6 +59,39 @@ fault/contention matrix on both advertised platforms.
    `STORAGE_CORRUPT` does not reinterpret the bundle as healthy or retry indefinitely; ADR-010's
    terminal observation quarantine contains that delivery lane while preserving the original
    storage recovery contract.
+
+9. **Native capture handoff:** Claude Code and Cursor ordinary native profiles have a bounded
+   service-side staging lane. A capture-only request crosses the authenticated local-control
+   boundary, secret-scans and encrypts each eligible chunk, publishes its object and manifest
+   with the object protocol above, and records a ticket containing only commitments, encrypted
+   object IDs, source/session/cursor identity, the original source and content-authority
+   generations, profile, and expected content groups/parts. The structural observation request
+   may advance the FIFO ledger only after it revalidates both generations and the complete
+   expected group/part set; partial, conflicting, or unreadable sets remain unavailable and are
+   never promoted by inference.
+
+   `staging` and `pending` tickets are bounded to 512 outstanding entries per workspace.
+   Revoked tickets do not consume that quota, but their metadata-only tombstones remain so an
+   old ticket cannot be replayed after a pause, revoke, disable, or re-enable ABA cycle. A
+   successful structural append removes its consumed ticket. A new check/frozen-case acquisition
+   sees an outstanding ticket under the same bundle transaction and returns retryable
+   `OPERATION_PENDING`; retrying the same request reuses the ticket identity and encrypted
+   manifests rather than creating another capture or ledger append. The capture-only lane has its
+   own bounded lock and may stage while a heavy structural append is running; object and manifest
+   writes remain serialized and bounded.
+
+   When a new CHECK encounters the capture barrier, READY reconciles a bounded listing for the
+   exact routed task against current local content authority before one freeze retry. It tombstones
+   only tickets whose authority is absent, inactive, revoked, runtime-disabled, profile-unselected,
+   or from an old authority generation, so a direct capture-only request with no structural outbox
+   row cannot leave a permanent barrier. Matching active tickets remain retryable; a completed
+   same-request replay returns without inspecting newer tickets, and encrypted objects and
+   captured history are unchanged.
+
+   This handoff is a local durability boundary, not an offline guarantee. It contains no
+   plaintext spool. A host kill or service failure before authenticated staging completes may
+   leave an honest content gap; once the encrypted ticket is committed, service restart and a
+   retry may resume it without re-reading plaintext from a local spool.
 
 ## Consequences
 

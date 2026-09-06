@@ -2507,6 +2507,10 @@ for that outcome. `blocked_by_policy` admits the direct policy/scope/category/pu
 reasons plus `insufficient_approved_context`; `approval_expired` admits
 `authorization_expired|authorization_stale|authorization_reused`; all other pairings are exactly
 the table in the privacy protocol/receipt schema. Cross-pairs and missing failure reasons are invalid.
+At the final approved-dispatch guard, an expired disclosure proposal remains
+`approval_expired/authorization_expired`, while an exhausted in-process `Deadline` is
+`timeout/deadline_expired`. Both block provider dispatch; the distinction identifies whether human
+approval or the execution budget expired.
 
 Shared privacy values are `ProviderBinding`, `AuthorizationScope`, `ChannelPolicy`,
 `PrivacyPolicy`, `PolicyOverlay`, `CandidateContext`, `ClassifiedContext`, `PrivacyDecision`,
@@ -3043,6 +3047,13 @@ Shared closed types:
 - `ObservationContentManifest` — trusted-local binding from an encrypted captured-object envelope
   to the SHA-256 digest and byte count of its secret-scanned inner bytes. A row created before
   migration 0008 has NULL bindings and cannot earn capture provenance by inference.
+- `ObservationCaptureTicket` — metadata-only service-side handoff for Claude Code and Cursor
+  native content. It binds the encrypted object IDs and complete expected content groups/parts to
+  the workspace/task, Yoetz and host sessions, source cursor/generation, selected native profile,
+  and content-authority generation. `staging` means the ticket is reserved before object
+  publication; `pending` means its complete encrypted manifest set is durable and awaits the
+  structural FIFO ingest; `revoked` is a retained ABA-protection tombstone. The ticket never
+  carries plaintext or a local spool path.
 - `ObservationInspectionSnapshot` — one current subject-state/changed-path selection with optional
   independently encrypted facts and bounded-excerpt objects, each carrying its own inner-content
   digest and byte count. Durable redaction/truncation flags preserve weakening without reopening
@@ -3242,19 +3253,60 @@ Unrecognized visible events accept an opaque stable envelope plus encrypted cont
 or a compressed `.jsonl.zst` rollout records `unsupported_format` instead. Unknown semantics never
 infer success.
 
+Native service-side staging and FIFO handoff (ADR-003 and ADR-022 decision 22) applies only to the
+Claude Code and Cursor ordinary native profiles. A capture-only control request enters a separate
+bounded lane, reserves an `ObservationCaptureTicket`, secret-scans and encrypts eligible chunks,
+publishes the objects and manifests, and marks the ticket pending before the host's structural
+envelope advances the FIFO cursor. The structural retry must present the same source/session/
+cursor identity and original source and authority generations, and the service accepts the ticket
+only when every expected content group and part is present, readable, and digest-bound. A complete
+retry binds the existing manifests to the envelope and removes the ticket after the ledger append;
+it never remints an equivalent capture.
+
+Native chunks and recovered manifests must also match the envelope's source commitment and its
+admitted host correlation or native source/label identity before they can become captured evidence.
+Missing or conflicting native binding metadata retains `content_capture_unavailable`, including
+when materialization is called independently of semantic review. A terminal structural rejection
+retires only its exact admitted capture ticket so it cannot permanently block later checks;
+retryable coordination retains that ticket for the next attempt.
+
+`content_capture_pending` means encrypted staging is durable while structural ledger ingest is
+still pending. It is separate from `operation_pending`, which is generic observation back-pressure
+and makes no claim that content was retained. Up to 512 `staging`/`pending` tickets may be
+outstanding per workspace; revoked tombstones are excluded from that quota but retained to fence
+ABA reuse. A new check/frozen-case acquisition sees an outstanding ticket in the same bundle
+transaction and returns retryable `OPERATION_PENDING`; retrying the same request is idempotent.
+When a new CHECK encounters this barrier, READY performs a bounded listing for the exact routed
+task and reconciles each ticket against current local content authority before one freeze retry.
+This task-local preflight retires tickets
+whose authority is absent, inactive, revoked, runtime-disabled, profile-unselected, or from an old
+authority generation, including tickets left without a structural outbox row; matching active
+tickets retain the retryable barrier. A completed same-request replay returns without inspecting
+newer tickets. It does not rewrite captured history or encrypted objects.
+The capture lane can stage while a heavy append runs, while its bounded object/manifest writes stay
+serialized. This boundary provides local encrypted durability only: there is no plaintext spool or
+offline guarantee, and a host kill or service failure before authenticated staging may leave the
+honest `content_capture_unavailable` gap. Codex's historical session-stream path is unchanged;
+shared replay, generation-fence, and teardown behavior applies across hosts.
+
 Outcome semantics and back-pressure vocabulary (ADR-022 decisions 12–13):
 
 - Paired `PostToolUse` materialization consumes `exit_status`, `denied`, boolean `success`, and a
   closed `result_status` spelling table. Rollout `exit_code` preserves the structural wire range
   `-1..255` exactly (including `-1` as a nonzero failure); a present value outside that range or of
-  another JSON type is unsupported evidence, never a clean `completed` success. A payload with no
-  outcome fact records `UNKNOWN` and its
-  ledger entries carry the `host_outcome_unavailable` known gap. Check coverage and receipts fold
-  that gap into one bounded code regardless of how many observed calls lack outcome semantics; the
-  deterministic research-evidence policy does not mint one `material_limitation_omitted` candidate
-  per such record. Observed work facts (durable per-call action/result records), the acquisition
-  limitation (`host_outcome_unavailable` coverage gap), actionable findings (explicit
-  `FAILURE`/`PARTIAL`, cooperative `UNKNOWN`), and receipt gaps stay distinct surfaces.
+  another JSON type is unsupported evidence, never a clean `completed` success. The Claude ordinary
+  `claude-code-hooks-ordinary-v2` mapping also treats Claude's documented `PostToolUse` event as
+  an explicit host-tool success fact, without fabricating `exit_status: 0`; `PostToolUseFailure`
+  and explicit failure, denial, interruption, invalid/unknown status, or conflicting facts retain
+  their failure/partial/unknown meaning. A background Bash launch remains partial without
+  completion evidence. For mappings without such an event contract, a payload with no outcome fact
+  records `UNKNOWN` and its ledger entries carry the `host_outcome_unavailable` known gap. Check
+  coverage and receipts fold that gap into one bounded code regardless of how many observed calls
+  lack outcome semantics; the deterministic research-evidence policy does not mint one
+  `material_limitation_omitted` candidate per such record. Observed work facts (durable per-call
+  action/result records), the acquisition limitation (`host_outcome_unavailable` coverage gap),
+  actionable findings (explicit `FAILURE`/`PARTIAL`, cooperative `UNKNOWN`), and receipt gaps stay
+  distinct surfaces.
 - `operation_pending` is the retryable ingest-rejection reason for designed observation
   back-pressure (check-acquisition/frozen-case barriers and adjacent transient bundle/frontier
   contention). It keeps the outbox row pending and annotated, but is never a current observation

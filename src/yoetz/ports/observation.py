@@ -7,6 +7,7 @@ from typing import Protocol
 from yoetz.domain.observation import (
     AdviceItem,
     AdviceSnapshot,
+    ObservationCaptureTicket,
     ObservationContentChunk,
     ObservationContentKind,
     ObservationContentManifest,
@@ -35,6 +36,7 @@ __all__ = [
     "ObservationControlCommand",
     "ObservationContentChunk",
     "ObservationContentManifest",
+    "ObservationCaptureTicket",
     "ObservationContentKind",
     "ObservationCursor",
     "ObservationEnvelope",
@@ -205,6 +207,22 @@ class TaskObservationPort(Protocol):
     ) -> tuple[ObservationContentManifest, ...]: ...
 
     def load_content_manifest(self, object_id: str) -> ObservationContentManifest | None: ...
+
+    def record_capture_ticket(self, ticket: ObservationCaptureTicket) -> None: ...
+
+    def finalize_capture_ticket(
+        self,
+        staging_ticket: ObservationCaptureTicket,
+        complete_ticket: ObservationCaptureTicket,
+    ) -> None: ...
+
+    def load_capture_ticket(
+        self, *, workspace: str, logical_identity: str
+    ) -> ObservationCaptureTicket | None: ...
+
+    def delete_capture_ticket(self, ticket: ObservationCaptureTicket) -> None: ...
+
+    def tombstone_capture_ticket(self, ticket: ObservationCaptureTicket) -> None: ...
 
     def bind_workspace_locator(
         self,

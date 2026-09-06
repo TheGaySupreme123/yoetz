@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import platform
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -94,10 +94,16 @@ from yoetz.kernel.projections import (
 )
 from yoetz.kernel.receipt_capacity import (
     ReceiptCoverageCapacityExceeded,
+    _validate_receipt_coverage_capacity_validated,  # pyright: ignore[reportPrivateUsage]
     receipt_blocking_finding_count,
-    validate_receipt_coverage_capacity,
 )
-from yoetz.kernel.reducers import invalidates_recorded_check, replay
+from yoetz.kernel.reducers import (
+    invalidates_recorded_check,
+    replay,
+    replay_extension_with_index,
+    replay_with_index,
+)
+from yoetz.observability.logging import record_unexpected_exception_without_raising
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
@@ -251,6 +257,39 @@ def _frontier_conflict(head: Frontier) -> PublicOperationError:
         sequence=head.sequence,
         head_digest=head.head_digest,
     )
+
+
+async def _run_blocking_joined[ResultT](call: Callable[[], ResultT]) -> ResultT:
+    """Run a pure local calculation off-loop and join it before cancellation returns.
+
+    The worker only receives immutable records/projections. ``asyncio.wait`` deliberately leaves
+    the thread task alive when the caller is cancelled; the repeated wait below prevents the
+    ledger lock from being released while that worker can still compute a result.
+    """
+
+    worker = asyncio.create_task(asyncio.to_thread(call))
+    try:
+        await asyncio.wait((worker,))
+        return worker.result()
+    except asyncio.CancelledError:
+        while not worker.done():
+            try:
+                await asyncio.wait((worker,))
+            except asyncio.CancelledError:
+                # A second cancellation must not abandon the worker or release the ledger lock.
+                continue
+        if not worker.cancelled():
+            # Observe a late worker exception before preserving the caller's cancellation.
+            try:
+                worker.result()
+            except BaseException as worker_error:
+                if not isinstance(worker_error, asyncio.CancelledError):
+                    record_unexpected_exception_without_raising(
+                        worker_error,
+                        component="adapters.memory.ledger",
+                        operation="append_validation_worker_failed",
+                    )
+        raise
 
 
 @dataclass(frozen=True, slots=True)
@@ -1455,9 +1494,22 @@ class MemoryLedgerAdapter:
                 previous_ledger = record.entry_digest
                 previous_writer = record.entry_digest
                 prior_batch.add(record.event_id)
-            proposed = snapshot_records + tuple(new_records)
+            appended_records = tuple(new_records)
+            proposed = snapshot_records + appended_records
+            prior_projection = self._state.projection
             try:
-                projection = replay(proposed)
+                if observation_authored and appended_records:
+                    projection, replay_index = await _run_blocking_joined(
+                        lambda: replay_extension_with_index(
+                            prior_projection,
+                            snapshot_records,
+                            appended_records,
+                        )
+                    )
+                else:
+                    projection, replay_index = await _run_blocking_joined(
+                        lambda: replay_with_index(proposed)
+                    )
             except NoObligationsReasonMismatch as exc:
                 draft_index: int | None = None
                 if exc.event_id is not None:
@@ -1491,7 +1543,13 @@ class MemoryLedgerAdapter:
             except ValueError as exc:
                 raise _error(PublicErrorCode.EVENT_INVALID) from exc
             try:
-                validate_receipt_coverage_capacity(projection, proposed)
+                await _run_blocking_joined(
+                    lambda: _validate_receipt_coverage_capacity_validated(
+                        projection,
+                        proposed,
+                        replay_index=replay_index,
+                    )
+                )
             except ReceiptCoverageCapacityExceeded as exc:
                 raise _error(
                     PublicErrorCode.LIMIT_EXCEEDED,

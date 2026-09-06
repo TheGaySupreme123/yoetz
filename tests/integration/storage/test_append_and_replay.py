@@ -15,6 +15,7 @@ from pathlib import Path
 import apsw
 import pytest
 
+import yoetz.adapters.memory.ledger as memory_ledger_module
 import yoetz.adapters.sqlite.repository as sqlite_repository
 from builders.ledger_adapters import (
     FixedClock,
@@ -29,14 +30,17 @@ from yoetz.adapters.sqlite.migrations import initialize_bundle
 from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.domain.events import EventDraft, LedgerRecord, UnknownEvent, encode_payload
 from yoetz.domain.values import (
+    Actor,
+    ActorType,
     Frontier,
+    actor_id,
     event_id,
     format_rfc3339_millis,
     object_id,
     parse_rfc3339_millis,
 )
 from yoetz.kernel.projections import ProjectionState, projection_digest
-from yoetz.kernel.reducers import replay
+from yoetz.kernel.reducers import ReplayIndex, replay
 from yoetz.ports.ledger import (
     AppendCommand,
     AppendEntry,
@@ -49,6 +53,7 @@ from yoetz.ports.ledger import (
 )
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource
 from yoetz.protocol.canonical import canonical_digest, canonical_encode
+from yoetz.protocol.coverage import AuthorshipAssurance, PublicationChannel, coverage_for_channel
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 
 
@@ -664,6 +669,100 @@ async def test_cancelled_recovery_retry_reuses_one_replay(
     assert await retry is not None
     assert replay_calls == 1
     reopened_db.close()
+
+
+@pytest.mark.anyio
+async def test_cancelled_append_joins_offloop_replay_before_releasing_ledger_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command, objects = command_from_records(replay_records("projection-rebuild")[:1])
+    ledger = memory_for(command, objects)
+    original_replay = memory_ledger_module.replay_with_index
+    started = threading.Event()
+    release = threading.Event()
+    replay_threads: list[int] = []
+    calls = 0
+
+    def blocked_replay(records: tuple[LedgerRecord, ...]) -> tuple[ProjectionState, ReplayIndex]:
+        nonlocal calls
+        calls += 1
+        replay_threads.append(threading.get_ident())
+        if calls == 1:
+            started.set()
+            assert release.wait(timeout=2)
+        return original_replay(records)
+
+    monkeypatch.setattr(memory_ledger_module, "replay_with_index", blocked_replay)
+    event_loop_thread = threading.get_ident()
+    append = asyncio.create_task(ledger.append_batch(command))
+    assert await asyncio.to_thread(started.wait, 1)
+
+    ticks = 0
+    stop_heartbeat = asyncio.Event()
+
+    async def heartbeat() -> None:
+        nonlocal ticks
+        while not stop_heartbeat.is_set():
+            ticks += 1
+            await asyncio.sleep(0)
+
+    heartbeat_task = asyncio.create_task(heartbeat())
+    await asyncio.sleep(0)
+    append.cancel()
+    await asyncio.sleep(0)
+    append.cancel()
+
+    retry = asyncio.create_task(ledger.append_batch(command))
+    await asyncio.sleep(0)
+    assert not retry.done()
+    assert ticks > 0
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await append
+    assert (await retry).outcome == "accepted"
+    stop_heartbeat.set()
+    await heartbeat_task
+    assert replay_threads and all(thread_id != event_loop_thread for thread_id in replay_threads)
+
+
+@pytest.mark.anyio
+async def test_observation_append_extends_trusted_projection_off_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command, objects = command_from_records(replay_records("projection-rebuild")[:1])
+    observation = replace(
+        command,
+        entries=(
+            replace(
+                command.entries[0],
+                author=Actor(
+                    actor_id("yoetz:observation-coordinator"),
+                    ActorType.HARNESS,
+                    AuthorshipAssurance.HARNESS_OBSERVED,
+                ),
+                publication_channel=PublicationChannel.HOOK_OBSERVED,
+                coverage=coverage_for_channel(PublicationChannel.HOOK_OBSERVED),
+            ),
+        ),
+    )
+    ledger = memory_for(observation, objects)
+    original_extension = memory_ledger_module.replay_extension_with_index
+    loop_thread = threading.get_ident()
+    extension_threads: list[int] = []
+
+    def observed_extension(
+        prior_projection: ProjectionState,
+        prior_records: tuple[LedgerRecord, ...],
+        appended_records: tuple[LedgerRecord, ...],
+    ) -> tuple[ProjectionState, ReplayIndex]:
+        extension_threads.append(threading.get_ident())
+        return original_extension(prior_projection, prior_records, appended_records)
+
+    monkeypatch.setattr(memory_ledger_module, "replay_extension_with_index", observed_extension)
+    result = await ledger.append_batch(observation)
+
+    assert result.outcome == "accepted"
+    assert extension_threads and all(thread_id != loop_thread for thread_id in extension_threads)
 
 
 @pytest.mark.anyio

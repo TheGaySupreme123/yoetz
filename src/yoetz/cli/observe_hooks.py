@@ -60,6 +60,7 @@ from yoetz.cli.hook_io import (
     stderr_line as _stderr_line,
 )
 from yoetz.domain.observation import (
+    OBSERVATION_CONTENT_CAPTURE_PENDING_REASON,
     ObservationContentChunk,
     ObservationContentKind,
     ObservationCursor,
@@ -1039,6 +1040,7 @@ async def _try_service_ingest(
     *,
     content_chunks: tuple[ObservationContentChunk, ...] = (),
     content_capture_profile: str | None = None,
+    capture_only: bool = False,
     deadline_ms: int,
 ) -> ObservationIngestResult:
     """Attempt one typed ingest through an already-open preflight client."""
@@ -1052,6 +1054,7 @@ async def _try_service_ingest(
                 envelope=envelope,
                 content_chunks=content_chunks,
                 content_capture_profile=content_capture_profile,
+                capture_only=capture_only,
             )
         )
         raw = await client.observation_ingest(body, deadline_ms=deadline_ms)
@@ -1216,6 +1219,45 @@ async def _drain_outbox_leased(
     # SessionEnd budget is smaller than the preflight by design).
     started = monotonic()
 
+    # Stage native content through the already-open service connection before
+    # choosing a bounded FIFO prefix. The service returns the distinct pending
+    # reason only after encrypted manifests and the retry ticket are durable;
+    # capture_only never advances the cursor or ledger.
+    staged_content_sources: set[str] = set()
+    if content_by_source_identity and content_capture_profile is not None:
+        for source_identity, chunks in content_by_source_identity.items():
+            if not chunks:
+                continue
+            source_row = next(
+                (row for row in all_pending if row.envelope.source_identity == source_identity),
+                None,
+            )
+            if source_row is None or source_row.envelope.source not in {
+                ObservationSource.CLAUDE_HOOK,
+                ObservationSource.CURSOR_HOOK,
+            }:
+                continue
+            remaining = budget_seconds - (monotonic() - started)
+            if remaining <= 0:
+                break
+            try:
+                staged = await asyncio.wait_for(
+                    _try_service_ingest(
+                        client,
+                        source_row.codex_session_id,
+                        source_row.envelope,
+                        content_chunks=chunks,
+                        content_capture_profile=content_capture_profile,
+                        capture_only=True,
+                        deadline_ms=max(1, int(remaining * 1_000)),
+                    ),
+                    timeout=remaining,
+                )
+            except TimeoutError:
+                break
+            if staged.reason == OBSERVATION_CONTENT_CAPTURE_PENDING_REASON:
+                staged_content_sources.add(source_identity)
+
     grouped: dict[str, list[ObservationOutboxRow]] = {}
     for row in all_pending:
         grouped.setdefault(row.codex_session_id, []).append(row)
@@ -1297,10 +1339,11 @@ async def _drain_outbox_leased(
     )
     consecutive_unavailable = 0
     # The hook owns a bounded slice; the service sweeper owns bulk delivery.
-    # Hitting the slice after moving backlog (acknowledged or quarantined rows)
-    # is a capacity yield, not a failed drain, so budget expiry records a
-    # diagnostic only when the pass made no progress at all (#351).
-    progressed = 0
+    # Hitting the slice after moving backlog or durably staging native content
+    # is a capacity yield, not a failed drain. Staging leaves the structural
+    # row pending, but it is useful progress: its transient bytes survived.
+    # Budget expiry records a diagnostic only when no progress occurred (#351).
+    progressed = len(staged_content_sources)
     try:
         for row in pending:
             if row.codex_session_id in skipped_sessions:
@@ -1326,6 +1369,7 @@ async def _drain_outbox_leased(
             chunks = (
                 ()
                 if content_by_source_identity is None
+                or row.envelope.source_identity in staged_content_sources
                 else content_by_source_identity.get(row.envelope.source_identity, ())
             )
             try:
@@ -1430,6 +1474,8 @@ async def _drain_outbox_leased(
     finally:
         if content_by_source_identity:
             for source_identity in content_by_source_identity:
+                if source_identity in staged_content_sources:
+                    continue
                 if source_identity not in delivered_content:
                     with contextlib.suppress(Exception):
                         store.note_coverage_gap(
@@ -2725,8 +2771,13 @@ def handle_observe(
         # below the service drain and stdout write, preserving commit-after-
         # output semantics.
         advice_started = _monotonic()
-        with contextlib.suppress(Exception):
-            store.refresh_advice(workspace_commitment)
+        # Teardown cannot deliver advice to a closing host. Its structural end
+        # intent is already durable and the service refreshes advice when it
+        # drains that intent, so avoid cold advice construction inside the
+        # host's hard three-second SessionEnd window.
+        if resolved_event != "SessionEnd":
+            with contextlib.suppress(Exception):
+                store.refresh_advice(workspace_commitment)
         stages["advice"] = _elapsed_ms(advice_started, _monotonic())
 
         # SessionStart: auto-start/attach first, persist mapping, then drain outbox.
@@ -3253,13 +3304,16 @@ def _native_outcome_facts(
     force_failure: bool = False,
     force_denied: bool = False,
     require_process_exit: bool = False,
+    host_event_success: bool = False,
+    background_launch: bool = False,
 ) -> _NativeOutcomeFacts:
     """Extract closed native outcome facts without retaining host prose.
 
     Command-like tools require an explicit process exit when
-    ``require_process_exit`` is true. A host-level success flag or an
-    ``isError=false`` wrapper then proves tool delivery only, so the command
-    result stays unknown until an exit/status fact is present.
+    ``require_process_exit`` is true, unless the selected host contract says
+    that the event itself is an authoritative tool-level success signal. The
+    latter still never manufactures an exit status. A background launch is
+    only a partial result until the host supplies completion evidence.
     """
 
     success_true = False
@@ -3377,9 +3431,16 @@ def _native_outcome_facts(
             valid_exits[0],
             "success" if all(value == 0 for value in valid_exits) else "nonzero_exit",
         )
-    if require_process_exit:
-        return _NativeOutcomeFacts(None, denied, None, "unknown")
     if unknown:
+        return _NativeOutcomeFacts(None, denied, None, "unknown")
+    if background_launch:
+        return _NativeOutcomeFacts(None, denied, None, "partial")
+    if host_event_success:
+        # Claude's PostToolUse event is the host's closed success fact. Keep
+        # exit_status absent: an event-level success proves the tool call, not
+        # an invented process-exit integer.
+        return _NativeOutcomeFacts(True, denied, None, "success")
+    if require_process_exit:
         return _NativeOutcomeFacts(None, denied, None, "unknown")
     if success_true or success_status or error_false:
         return _NativeOutcomeFacts(True, denied, None, "success")
@@ -3584,10 +3645,18 @@ def handle_claude_observe(
                 hook_io.stdout_json({}, stdout)
                 return 0
             if ordinary_profile:
+                tool_input = payload.get("tool_input")
+                background_launch = (
+                    isinstance(tool_input, Mapping)
+                    and type(tool_input.get("run_in_background")) is bool
+                    and tool_input.get("run_in_background") is True
+                )
                 outcome = _native_outcome_facts(
                     payload,
                     force_failure=raw_event == "PostToolUseFailure",
                     require_process_exit=(tool_token.lower() in _SHELL_TOOLS),
+                    host_event_success=raw_event == "PostToolUse",
+                    background_launch=background_launch,
                 )
                 structural["action"] = (
                     "claude_tool_success"

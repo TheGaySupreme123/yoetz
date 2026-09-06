@@ -703,7 +703,14 @@ def test_claude_ordinary_cancellation_and_invalid_status_are_closed(
             **base,
             "hook_event_name": "PostToolUse",
             "tool_use_id": "call-tool-only",
-            "tool_response": {"success": True},
+            # Claude's built-in Bash result has no exit-code field. The
+            # PostToolUse event itself is the host-level success fact.
+            "tool_response": {
+                "stdout": "TOOL_SUCCESS_OUTPUT",
+                "stderr": "",
+                "interrupted": False,
+                "isImage": False,
+            },
         },
     )
     emit(
@@ -738,7 +745,7 @@ def test_claude_ordinary_cancellation_and_invalid_status_are_closed(
             "hook_event_name": "PostToolUse",
             "tool_name": "Read",
             "tool_use_id": "call-after-stop-failure",
-            "tool_response": {"success": True},
+            "tool_response": "1\tREAD_RESULT_OUTPUT\n",
         },
     )
 
@@ -747,9 +754,10 @@ def test_claude_ordinary_cancellation_and_invalid_status_are_closed(
     assert cancelled["success"] is False
     assert cancelled["result_status"] == "interrupted"
     tool_only = envelopes[3].structural_payload
-    assert tool_only["action"] == "claude_tool_outcome_unknown"
-    assert "success" not in tool_only
-    assert tool_only["result_status"] == "unknown"
+    assert tool_only["action"] == "claude_tool_success"
+    assert tool_only["success"] is True
+    assert tool_only["result_status"] == "success"
+    assert "exit_status" not in tool_only
     unknown = envelopes[5].structural_payload
     assert unknown["action"] == "claude_tool_outcome_unknown"
     assert "success" not in unknown
@@ -760,6 +768,10 @@ def test_claude_ordinary_cancellation_and_invalid_status_are_closed(
     assert envelopes[6].event_kind == "Stop"
     assert envelopes[7].event_kind == "PostToolUse"
     assert envelopes[7].structural_payload["tool_name"] == "Read"
+    assert envelopes[7].structural_payload["action"] == "routine_read"
+    assert envelopes[7].structural_payload["success"] is True
+    assert envelopes[7].structural_payload["result_status"] == "success"
+    assert "exit_status" not in envelopes[7].structural_payload
     state_bytes = b"".join(
         path.read_bytes()
         for path in (tmp_path / "state").rglob("*")
@@ -768,6 +780,145 @@ def test_claude_ordinary_cancellation_and_invalid_status_are_closed(
     assert b"CANCEL_CANARY" not in state_bytes
     assert b"future-status" not in state_bytes
     assert b"API_ERROR_PROSE_CANARY" not in state_bytes
+
+
+def test_claude_ordinary_posttooluse_event_success_preserves_unknown_boundaries(
+    tmp_path: Path,
+) -> None:
+    """Use Claude's native result shapes without inventing an exit status."""
+
+    store = LocalObservationStore(_state=tmp_path / "state")
+    commitment = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(commitment)
+    store.enable_content_capture(commitment, CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID)
+
+    def emit(event: str, payload: Mapping[str, object]) -> None:
+        assert (
+            observe_hooks.handle_claude_observe(
+                event_name=event,
+                stdin_bytes=canonical_encode(cast(JsonValue, payload)),
+                stdout=io.BytesIO(),
+                workspace=str(tmp_path),
+                _state=tmp_path / "state",
+                skip_service=True,
+                observation_profile=CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+            )
+            == 0
+        )
+
+    def pair(
+        call_id: str,
+        tool_input: Mapping[str, object],
+        post_event: str = "PostToolUse",
+        **post_fields: object,
+    ) -> None:
+        base: dict[str, object] = {
+            "session_id": "claude-native-contract",
+            "tool_name": "Bash",
+            "tool_use_id": call_id,
+        }
+        emit(
+            "PreToolUse",
+            {
+                **base,
+                "hook_event_name": "PreToolUse",
+                "tool_input": dict(tool_input),
+            },
+        )
+        emit(
+            post_event,
+            {
+                **base,
+                "hook_event_name": post_event,
+                "tool_input": dict(tool_input),
+                **post_fields,
+            },
+        )
+
+    # Read returns display text, while Bash returns stdout/stderr metadata;
+    # neither shape contains a success or exit field. PostToolUse is still the
+    # documented host-level success signal for both calls.
+    emit(
+        "PreToolUse",
+        {
+            "hook_event_name": "PreToolUse",
+            "session_id": "claude-native-contract",
+            "tool_name": "Read",
+            "tool_use_id": "call-read",
+            "tool_input": {"file_path": str(tmp_path / "README.md")},
+        },
+    )
+    emit(
+        "PostToolUse",
+        {
+            "hook_event_name": "PostToolUse",
+            "session_id": "claude-native-contract",
+            "tool_name": "Read",
+            "tool_use_id": "call-read",
+            "tool_input": {"file_path": str(tmp_path / "README.md")},
+            "tool_response": "1\tread output\n",
+        },
+    )
+    pair(
+        "call-bash",
+        {"command": "python3 -m unittest -v", "run_in_background": False},
+        tool_response={
+            "stdout": "OK",
+            "stderr": "",
+            "interrupted": False,
+            "isImage": False,
+        },
+    )
+    pair(
+        "call-background",
+        {"command": "python3 -m unittest -v", "run_in_background": True},
+        tool_response={
+            "stdout": "started",
+            "stderr": "",
+            "interrupted": False,
+            "isImage": False,
+        },
+    )
+    pair(
+        "call-failure",
+        {"command": "python3 -m unittest -v", "run_in_background": False},
+        post_event="PostToolUseFailure",
+        error="Exit code 1\nFAILED_TEST_CANARY",
+        is_interrupt=False,
+    )
+    pair(
+        "call-conflict",
+        {"command": "python3 -m unittest -v", "run_in_background": False},
+        tool_response={"success": True, "status": "future-status"},
+    )
+
+    envelopes = LocalObservationStore(_state=tmp_path / "state").list_envelopes(commitment)
+    read = envelopes[1].structural_payload
+    assert read["action"] == "routine_read"
+    assert read["success"] is True
+    assert read["result_status"] == "success"
+    assert "exit_status" not in read
+
+    bash = envelopes[3].structural_payload
+    assert bash["action"] == "claude_tool_success"
+    assert bash["success"] is True
+    assert bash["result_status"] == "success"
+    assert "exit_status" not in bash
+
+    background = envelopes[5].structural_payload
+    assert background["action"] == "claude_tool_outcome_unknown"
+    assert "success" not in background
+    assert background["result_status"] == "partial"
+
+    failure = envelopes[7].structural_payload
+    assert failure["action"] == "claude_tool_failure"
+    assert failure["success"] is False
+    assert failure["result_status"] == "error"
+
+    conflict = envelopes[9].structural_payload
+    assert conflict["action"] == "claude_tool_outcome_unknown"
+    assert "success" not in conflict
+    assert conflict["result_status"] == "unknown"
 
 
 @pytest.mark.parametrize("host", ["claude", "cursor"])
