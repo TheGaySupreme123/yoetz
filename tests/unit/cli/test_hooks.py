@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import threading
 import uuid
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,8 @@ from typer.testing import CliRunner
 from yoetz.adapters.integrations.codex_lifecycle import (
     load_mapping,
     mapping_from_start_ids,
+    mapping_path,
+    queue_mapping_store,
     store_mapping,
 )
 from yoetz.cli import app as app_module
@@ -207,6 +210,283 @@ def test_post_tool_use_duplicate_idempotent(tmp_path: Path) -> None:
     mapping = load_mapping("codex-dup", _state=tmp_path)
     assert mapping is not None
     assert mapping.yoetz_task_id == task_id
+
+
+def test_start_bind_reconciles_crashed_applying_before_store(tmp_path: Path) -> None:
+    """A queued owner result follows an interrupted apply before it is stored."""
+
+    session = "codex-residual-start"
+    old = mapping_from_start_ids(
+        codex_session_id=session,
+        yoetz_task_id=new_id(IdKind.TASK),
+        yoetz_session_id=new_id(IdKind.SESSION),
+        yoetz_writer_id=new_id(IdKind.WRITER),
+        last_frontier="1:sha256:" + "a" * 64,
+    )
+    current = mapping_from_start_ids(
+        codex_session_id=session,
+        yoetz_task_id=new_id(IdKind.TASK),
+        yoetz_session_id=new_id(IdKind.SESSION),
+        yoetz_writer_id=new_id(IdKind.WRITER),
+        last_frontier="3:sha256:" + "c" * 64,
+    )
+    queue_mapping_store(old, _state=tmp_path)
+    pending = mapping_path(session, _state=tmp_path).with_name(f".{session}.pending.json")
+    applying = pending.with_name(pending.name + ".applying")
+    pending.replace(applying)
+
+    payload = {
+        "session_id": session,
+        "tool_name": "mcp__yoetz__start",
+        "tool_response": {
+            "structuredContent": {
+                "ok": True,
+                "task_id": current.yoetz_task_id,
+                "session_id": current.yoetz_session_id,
+                "writer_id": current.yoetz_writer_id,
+                "frontier": {
+                    "sequence": "3",
+                    "head_digest": "sha256:" + "c" * 64,
+                },
+            }
+        },
+    }
+
+    assert hooks_module.bind_start_mapping_outcome(payload, _state=tmp_path) == "bound"
+    assert load_mapping(session, _state=tmp_path) == current
+    assert not pending.exists()
+    assert not applying.exists()
+
+
+def test_session_start_clear_reconciles_crashed_applying_before_clear(tmp_path: Path) -> None:
+    """Clear removes the route after an interrupted predecessor apply is replayed."""
+
+    session = "codex-residual-clear"
+    existing = mapping_from_start_ids(
+        codex_session_id=session,
+        yoetz_task_id=new_id(IdKind.TASK),
+        yoetz_session_id=new_id(IdKind.SESSION),
+        yoetz_writer_id=new_id(IdKind.WRITER),
+        last_frontier=None,
+    )
+    store_mapping(existing, _state=tmp_path)
+    queue_mapping_store(existing, _state=tmp_path)
+    pending = mapping_path(session, _state=tmp_path).with_name(f".{session}.pending.json")
+    applying = pending.with_name(pending.name + ".applying")
+    pending.replace(applying)
+    assert (
+        handle_session_start(
+            stdin_bytes=json.dumps(
+                {"session_id": session, "source": "clear", "hook_event_name": "SessionStart"}
+            ).encode(),
+            stdout=io.BytesIO(),
+            _state=tmp_path,
+        )
+        == 0
+    )
+    assert load_mapping(session, _state=tmp_path) is None
+    assert not pending.exists()
+    assert not pending.with_name(pending.name + ".applying").exists()
+
+
+def test_start_bind_owner_coalesces_loser_queue_before_reconcile(tmp_path: Path) -> None:
+    """A lock loser queued during owner recovery cannot overwrite after owner return."""
+
+    session = "codex-synchronized-bind"
+    owner_mapping = mapping_from_start_ids(
+        codex_session_id=session,
+        yoetz_task_id=new_id(IdKind.TASK),
+        yoetz_session_id=new_id(IdKind.SESSION),
+        yoetz_writer_id=new_id(IdKind.WRITER),
+        last_frontier="2:sha256:" + "a" * 64,
+    )
+    loser_mapping = mapping_from_start_ids(
+        codex_session_id=session,
+        yoetz_task_id=new_id(IdKind.TASK),
+        yoetz_session_id=new_id(IdKind.SESSION),
+        yoetz_writer_id=new_id(IdKind.WRITER),
+        last_frontier="1:sha256:" + "b" * 64,
+    )
+    owner_queue_entered = threading.Event()
+    loser_queued = threading.Event()
+    errors: list[BaseException] = []
+    outcomes: dict[str, str] = {}
+    original_queue = hooks_module.queue_mapping_store
+
+    def queue_with_owner_order(mapping: object, *, _state: Path | None = None) -> None:
+        assert type(mapping) is type(owner_mapping)
+        if mapping == owner_mapping:
+            owner_queue_entered.set()
+            assert loser_queued.wait(5)
+        original_queue(mapping, _state=_state)  # type: ignore[arg-type]
+        if mapping == loser_mapping:
+            loser_queued.set()
+
+    hooks_module.queue_mapping_store = queue_with_owner_order  # type: ignore[assignment]
+    try:
+
+        def owner() -> None:
+            try:
+                outcomes["owner"] = hooks_module.bind_start_mapping_outcome(
+                    {
+                        "session_id": session,
+                        "tool_name": "mcp__yoetz__start",
+                        "tool_response": {
+                            "structuredContent": {
+                                "ok": True,
+                                "task_id": owner_mapping.yoetz_task_id,
+                                "session_id": owner_mapping.yoetz_session_id,
+                                "writer_id": owner_mapping.yoetz_writer_id,
+                                "frontier": {
+                                    "sequence": "2",
+                                    "head_digest": "sha256:" + "a" * 64,
+                                },
+                            }
+                        },
+                    },
+                    _state=tmp_path,
+                )
+            except BaseException as exc:  # pragma: no cover - failure relay
+                errors.append(exc)
+
+        def loser() -> None:
+            try:
+                outcomes["loser"] = hooks_module.bind_start_mapping_outcome(
+                    {
+                        "session_id": session,
+                        "tool_name": "mcp__yoetz__start",
+                        "tool_response": {
+                            "structuredContent": {
+                                "ok": True,
+                                "task_id": loser_mapping.yoetz_task_id,
+                                "session_id": loser_mapping.yoetz_session_id,
+                                "writer_id": loser_mapping.yoetz_writer_id,
+                                "frontier": {
+                                    "sequence": "1",
+                                    "head_digest": "sha256:" + "b" * 64,
+                                },
+                            }
+                        },
+                    },
+                    _state=tmp_path,
+                )
+            except BaseException as exc:  # pragma: no cover - failure relay
+                errors.append(exc)
+
+        owner_thread = threading.Thread(target=owner)
+        owner_thread.start()
+        assert owner_queue_entered.wait(5)
+        loser_thread = threading.Thread(target=loser)
+        loser_thread.start()
+        assert loser_queued.wait(5)
+        owner_thread.join(5)
+        loser_thread.join(5)
+    finally:
+        hooks_module.queue_mapping_store = original_queue
+
+    assert not errors
+    assert outcomes == {"loser": "start_bind_deferred", "owner": "bound"}
+    assert load_mapping(session, _state=tmp_path) == owner_mapping
+    pending = mapping_path(session, _state=tmp_path).with_name(f".{session}.pending.json")
+    assert not pending.exists()
+    assert not pending.with_name(pending.name + ".applying").exists()
+
+
+def test_clear_owner_coalesces_loser_store_before_reconcile(tmp_path: Path) -> None:
+    """A clear owner replaces a lock-loser store before the durable apply pass."""
+
+    from yoetz.cli import observe_hooks as observe_hooks_module
+
+    session = "codex-synchronized-clear"
+    existing = mapping_from_start_ids(
+        codex_session_id=session,
+        yoetz_task_id=new_id(IdKind.TASK),
+        yoetz_session_id=new_id(IdKind.SESSION),
+        yoetz_writer_id=new_id(IdKind.WRITER),
+        last_frontier=None,
+    )
+    loser = mapping_from_start_ids(
+        codex_session_id=session,
+        yoetz_task_id=new_id(IdKind.TASK),
+        yoetz_session_id=new_id(IdKind.SESSION),
+        yoetz_writer_id=new_id(IdKind.WRITER),
+        last_frontier=None,
+    )
+    store_mapping(existing, _state=tmp_path)
+    clear_queue_entered = threading.Event()
+    loser_queued = threading.Event()
+    errors: list[BaseException] = []
+    outcomes: dict[str, str] = {}
+    original_clear_queue = observe_hooks_module.queue_mapping_clear
+    original_store_queue = hooks_module.queue_mapping_store
+
+    def clear_with_owner_order(codex_session_id: str, *, _state: Path | None = None) -> None:
+        clear_queue_entered.set()
+        assert loser_queued.wait(5)
+        original_clear_queue(codex_session_id, _state=_state)
+
+    def store_from_loser(mapping: object, *, _state: Path | None = None) -> None:
+        original_store_queue(mapping, _state=_state)  # type: ignore[arg-type]
+        loser_queued.set()
+
+    observe_hooks_module.queue_mapping_clear = clear_with_owner_order  # type: ignore[assignment]
+    hooks_module.queue_mapping_store = store_from_loser  # type: ignore[assignment]
+    try:
+
+        def owner() -> None:
+            try:
+                handle_session_start(
+                    stdin_bytes=json.dumps(
+                        {
+                            "session_id": session,
+                            "source": "clear",
+                            "hook_event_name": "SessionStart",
+                        }
+                    ).encode(),
+                    stdout=io.BytesIO(),
+                    _state=tmp_path,
+                )
+            except BaseException as exc:  # pragma: no cover - failure relay
+                errors.append(exc)
+
+        def loser_thread_fn() -> None:
+            try:
+                outcomes["loser"] = hooks_module.bind_start_mapping_outcome(
+                    {
+                        "session_id": session,
+                        "tool_name": "mcp__yoetz__start",
+                        "tool_response": {
+                            "structuredContent": {
+                                "ok": True,
+                                "task_id": loser.yoetz_task_id,
+                                "session_id": loser.yoetz_session_id,
+                                "writer_id": loser.yoetz_writer_id,
+                            }
+                        },
+                    },
+                    _state=tmp_path,
+                )
+            except BaseException as exc:  # pragma: no cover - failure relay
+                errors.append(exc)
+
+        owner_thread = threading.Thread(target=owner)
+        owner_thread.start()
+        assert clear_queue_entered.wait(5)
+        loser_thread = threading.Thread(target=loser_thread_fn)
+        loser_thread.start()
+        assert loser_queued.wait(5)
+        owner_thread.join(5)
+        loser_thread.join(5)
+    finally:
+        observe_hooks_module.queue_mapping_clear = original_clear_queue
+        hooks_module.queue_mapping_store = original_store_queue
+
+    assert not errors
+    assert outcomes == {"loser": "start_bind_deferred"}
+    assert load_mapping(session, _state=tmp_path) is None
+    pending = mapping_path(session, _state=tmp_path).with_name(f".{session}.pending.json")
+    assert not pending.exists()
+    assert not pending.with_name(pending.name + ".applying").exists()
 
 
 def test_post_tool_use_malformed_json_no_traceback(tmp_path: Path) -> None:
@@ -565,6 +845,50 @@ def test_session_start_clear_removes_mapping(tmp_path: Path) -> None:
     assert load_mapping("codex-clear", _state=tmp_path) is None
 
 
+def test_session_start_defers_service_while_pending_mapping_lock_is_busy(tmp_path: Path) -> None:
+    """Legacy SessionStart keeps the local fence when recovery cannot claim its lock."""
+
+    from yoetz.adapters.integrations.observation_local import LocalObservationStore
+
+    session = "codex-busy-session-start"
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, session)
+    mapping = mapping_from_start_ids(
+        codex_session_id=session,
+        yoetz_task_id=new_id(IdKind.TASK),
+        yoetz_session_id=new_id(IdKind.SESSION),
+        yoetz_writer_id=new_id(IdKind.WRITER),
+        last_frontier=None,
+    )
+    connects: list[str] = []
+
+    async def connect(_kind: ControlClientKind) -> hooks_module._StatusClient:  # pyright: ignore[reportPrivateUsage]
+        connects.append("connect")
+        raise AssertionError("a fenced SessionStart must not call the service")
+
+    with hooks_module.acquire_session_lock(session, _state=tmp_path) as owned:
+        assert owned is True
+        queue_mapping_store(mapping, _state=tmp_path)
+        assert (
+            handle_session_start(
+                stdin_bytes=json.dumps(
+                    {"session_id": session, "source": "resume", "hook_event_name": "SessionStart"}
+                ).encode(),
+                stdout=io.BytesIO(),
+                _state=tmp_path,
+                workspace=str(tmp_path),
+                connect=connect,
+            )
+            == 0
+        )
+        assert connects == []
+        assert load_mapping(session, _state=tmp_path) is None
+        pending = mapping_path(session, _state=tmp_path).with_name(f".{session}.pending.json")
+        assert pending.exists()
+
+
 def test_session_start_startup_is_noop(tmp_path: Path) -> None:
     stdout = io.BytesIO()
     code = handle_session_start(
@@ -582,7 +906,7 @@ def test_session_start_startup_is_noop(tmp_path: Path) -> None:
 def test_session_start_resume_with_missing_mapping_runs_recovery_under_owned_lock(
     tmp_path: Path,
 ) -> None:
-    """A resume handler's owned session lock must not suppress auto-attach."""
+    """A resume handler uses the ended selector while holding its session lock."""
 
     from types import SimpleNamespace
 
@@ -620,11 +944,6 @@ def test_session_start_resume_with_missing_mapping_runs_recovery_under_owned_loc
         async def start(self, request: object, *, deadline_ms: int | None = None) -> object:
             del deadline_ms
             self.requests.append(request)
-            if len(self.requests) == 1:
-                return _failure_result(
-                    PublicErrorCode.SESSION_CONFLICT,
-                    safe_details={"reason_code": "workspace_task_exists"},
-                ).root
             assert getattr(request, "mode", None) == "attach"
             return SimpleNamespace(
                 ok=True,
@@ -657,10 +976,7 @@ def test_session_start_resume_with_missing_mapping_runs_recovery_under_owned_loc
     assert mapping.yoetz_task_id == task_id
     assert mapping.yoetz_session_id == successor_session_id
     assert mapping.yoetz_writer_id == successor_writer_id
-    assert [getattr(request, "mode", None) for request in client.requests] == [
-        "create_or_attach",
-        "attach",
-    ]
+    assert [getattr(request, "mode", None) for request in client.requests] == ["attach"]
     assert task_id in stdout.getvalue().decode()
 
 

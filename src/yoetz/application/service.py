@@ -2480,6 +2480,19 @@ class Application:
             ControlMethod.PROJECT,
         }
         advice_status = source.get("view") == "advice" and method is ControlMethod.STATUS
+        # The advice page is also a valid empty structural snapshot when the observation/project
+        # subsystem is not installed in a composed application.  There is no source-owned
+        # selector to hydrate or revalidate in that shape.  Any populated advice item still
+        # requires the project application below, preserving the fail-closed privacy boundary.
+        advice_items: Sequence[JsonValue] | None = None
+        if advice_status:
+            page = source.get("page")
+            raw_items = page.get("items") if isinstance(page, Mapping) else None
+            if type(raw_items) in {tuple, list}:
+                advice_items = cast(Sequence[JsonValue], raw_items)
+        advice_needs_project_application = advice_status and (
+            advice_items is None or bool(advice_items)
+        )
         if project_status:
             from yoetz.application.project_projection import (
                 hydrate_project_status_coordination_resources,
@@ -2492,7 +2505,7 @@ class Application:
             source = await hydrate_project_status_coordination_resources(
                 self.project_application, source, sink
             )
-        elif advice_status:
+        elif advice_needs_project_application:
             from yoetz.application.project_projection import (
                 hydrate_status_advice_coordination_resources,
             )
@@ -2527,9 +2540,9 @@ class Application:
                     )
         if advice_status:
             page = source.get("page")
-            advice_items = page.get("items") if isinstance(page, Mapping) else None
-            if type(advice_items) in {tuple, list}:
-                for index, raw_item in enumerate(cast(Sequence[JsonValue], advice_items)):
+            raw_advice_items = page.get("items") if isinstance(page, Mapping) else None
+            if type(raw_advice_items) in {tuple, list}:
+                for index, raw_item in enumerate(cast(Sequence[JsonValue], raw_advice_items)):
                     if not isinstance(raw_item, Mapping):
                         raise TypeError("advice_item_projection_invalid")
                     resource_paths = raw_item.get("coordination_resource_paths")
@@ -2622,7 +2635,7 @@ class Application:
 
             assert self.project_application is not None
             await revalidate_project_status_sources(self.project_application, source, sink)
-        elif advice_status:
+        elif advice_needs_project_application:
             from yoetz.application.project_projection import revalidate_status_advice_sources
 
             assert self.project_application is not None

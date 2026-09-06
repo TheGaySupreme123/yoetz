@@ -16,11 +16,10 @@ from yoetz.adapters.integrations.codex_lifecycle import (
     LifecycleMapping,
     acquire_session_lock,
     apply_pending_mapping,
-    clear_mapping,
     encode_frontier_token,
     load_mapping,
     mapping_from_start_ids,
-    queue_mapping_clear,
+    mapping_path,
     queue_mapping_store,
     store_mapping,
     validate_codex_session_id,
@@ -59,6 +58,7 @@ __all__ = [
     "handle_user_prompt_submit",
     "intake_cue_text",
     "read_hook_payload",
+    "recover_pending_start_mapping",
 ]
 
 
@@ -103,9 +103,18 @@ class StatusOutcome:
     replacement: StaleReplacement | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class PendingMappingRecovery:
+    """Result of one bounded replay pass for a session's pending mappings."""
+
+    applied: bool
+    pending: bool
+
+
 _MAX_STDIN_BYTES: Final = 262_144
 _STATUS_DEADLINE_MS: Final = 5_000
 _INTAKE_CUE_BYTES: Final = 512
+_MAX_PENDING_MAPPING_REPLAYS: Final = 8
 
 YOETZ_START_TOOL_NAMES: Final = frozenset(
     {"start", "mcp__yoetz__start", "mcp__plugin_yoetz_yoetz__start"}
@@ -284,6 +293,22 @@ def _classify_status_failure(failure: OperationFailureModel) -> StatusOutcome:
 # Reasons absent here (a future addition) fall back to "unavailable".
 _CONTROL_ERROR_CLASSES: Final[Mapping[str, str]] = MappingProxyType(
     {
+        # Coordination command refusals are bounded, non-retryable input or authority
+        # conditions.  A hook status read cannot repair them, so keep them in the
+        # unavailable bucket rather than pretending a retry will change the command.
+        "coordination_invalid": "unavailable",
+        "project_not_found": "unavailable",
+        "project_dissolved": "unavailable",
+        "implicit_project_requires_opt_out": "unavailable",
+        "general_project_membership_conflict": "unavailable",
+        "project_member_not_found": "unavailable",
+        "selector_conflict": "unavailable",
+        "coordination_consent_required": "unavailable",
+        "coordination_grant_required": "unavailable",
+        "coordination_generation_revoked": "unavailable",
+        "coordination_generation_mismatch": "unavailable",
+        "cross_repository_lineage_requires_grant": "unavailable",
+        "project_member_already_unbound": "unavailable",
         "vault_locked": "locked",
         "request_timeout": "retry",
         "service_draining": "retry",
@@ -503,9 +528,21 @@ def bind_start_mapping_outcome(
                 except Exception:
                     return "start_bind_write_failed"
                 return "start_bind_deferred"
-            with contextlib.suppress(Exception):
-                apply_pending_mapping(codex_session_id, _state=_state)
-            store_mapping(mapping, _state=_state)
+            try:
+                # Queue the owner result before replaying the lane. If another
+                # producer lost this lock and queued while the owner was
+                # recovering, this durable write coalesces that older pending
+                # intent before the bounded apply pass.
+                queue_mapping_store(mapping, _state=_state)
+            except Exception:
+                return "start_bind_write_failed"
+            recovery = recover_pending_start_mapping(
+                codex_session_id,
+                _state=_state,
+                _session_lock_owned=True,
+            )
+            if recovery.pending:
+                return "start_bind_deferred"
     except Exception:
         return "start_bind_write_failed"
     return "bound"
@@ -519,6 +556,51 @@ def bind_start_mapping_from_hook(
     """Compatibility wrapper: ``True`` only when a mapping was persisted."""
 
     return bind_start_mapping_outcome(payload, _state=_state) == "bound"
+
+
+def recover_pending_start_mapping(
+    codex_session_id: str,
+    *,
+    _state: Path | None = None,
+    _session_lock_owned: bool = False,
+) -> PendingMappingRecovery:
+    """Replay durable start mappings when the session lock is available.
+
+    A cancelled or contended ``SessionStart`` may leave a validated mapping in
+    the lifecycle pending file after the hook that produced it has exited.  A
+    later hook may retry this exact session, but it must use the same lifecycle
+    lock and FIFO ``.applying`` protocol as the start path.  Contention,
+    malformed state, or an interrupted apply are all a no-op; the next hook
+    can retry without inventing a mapping or changing another session lane.
+    The bounded pass drains residual queued operations in FIFO order. ``pending``
+    remains true when an operation could not be applied, so
+    callers can defer mapping-sensitive delivery for this pass.
+    """
+
+    try:
+        mapping = mapping_path(codex_session_id, _state=_state)
+        pending = mapping.parent / f".{codex_session_id}.pending.json"
+        applying = pending.with_name(pending.name + ".applying")
+        paths = (pending, applying)
+        if not any(path.exists() or path.is_symlink() for path in paths):
+            return PendingMappingRecovery(applied=False, pending=False)
+        lifecycle_lock = (
+            contextlib.nullcontext(True)
+            if _session_lock_owned
+            else acquire_session_lock(codex_session_id, _state=_state)
+        )
+        with lifecycle_lock as owned:
+            if not owned:
+                return PendingMappingRecovery(applied=False, pending=True)
+            applied = False
+            for _ in range(_MAX_PENDING_MAPPING_REPLAYS):
+                if not apply_pending_mapping(codex_session_id, _state=_state):
+                    break
+                applied = True
+        still_pending = any(path.exists() or path.is_symlink() for path in paths)
+        return PendingMappingRecovery(applied=applied, pending=still_pending)
+    except Exception:
+        return PendingMappingRecovery(applied=False, pending=True)
 
 
 def record_start_bind_diagnostic(
@@ -767,8 +849,11 @@ def handle_session_start(
         if source == "startup":
             with acquire_session_lock(codex_session_id, _state=_state) as owned:
                 if owned:
-                    with contextlib.suppress(Exception):
-                        apply_pending_mapping(codex_session_id, _state=_state)
+                    recover_pending_start_mapping(
+                        codex_session_id,
+                        _state=_state,
+                        _session_lock_owned=True,
+                    )
             from yoetz.cli.observe_hooks import handle_observe
 
             return handle_observe(
@@ -781,45 +866,20 @@ def handle_session_start(
                 run_async=run_async,
             )
         if source == "clear":
-            # Clearing a host route is a lifecycle mutation too.  Serialize it
-            # with recovery so a predecessor cannot lose its mapping after the
-            # recovery snapshot and before the attach request.
-            with acquire_session_lock(codex_session_id, _state=_state) as owned:
-                if not owned:
-                    with contextlib.suppress(Exception):
-                        queue_mapping_clear(codex_session_id, _state=_state)
-                    # Preserve the SessionStart observation even when another
-                    # lifecycle handler owns this session lock. The delegated
-                    # path must not claim the lock; it records a targeted local
-                    # envelope and defers the clear until a later safe turn.
-                    from yoetz.cli.observe_hooks import handle_observe
+            # The shared observation path owns the durable clear. Keeping one
+            # owner avoids queueing/replaying the same logical clear twice and
+            # lets it coalesce a concurrent pending producer deterministically.
+            from yoetz.cli.observe_hooks import handle_observe
 
-                    return handle_observe(
-                        event_name="SessionStart",
-                        stdin_bytes=raw,
-                        stdout=stdout,
-                        workspace=workspace,
-                        _state=_state,
-                        connect=connect,
-                        run_async=run_async,
-                    )
-                with contextlib.suppress(Exception):
-                    apply_pending_mapping(codex_session_id, _state=_state)
-                clear_mapping(codex_session_id, _state=_state)
-                from yoetz.cli.observe_hooks import handle_observe
-
-                handle_observe(
-                    event_name="SessionStart",
-                    stdin_bytes=raw,
-                    stdout=__import__("io").BytesIO(),
-                    workspace=workspace,
-                    _state=_state,
-                    connect=connect,
-                    run_async=run_async,
-                    _session_lock_owned=True,
-                )
-            _stdout_json({}, stdout)
-            return 0
+            return handle_observe(
+                event_name="SessionStart",
+                stdin_bytes=raw,
+                stdout=stdout,
+                workspace=workspace,
+                _state=_state,
+                connect=connect,
+                run_async=run_async,
+            )
         if source not in {"resume", "compact"}:
             from yoetz.cli.observe_hooks import handle_observe
 
@@ -848,8 +908,36 @@ def handle_session_start(
                     connect=connect,
                     run_async=run_async,
                 )
-            with contextlib.suppress(Exception):
-                apply_pending_mapping(codex_session_id, _state=_state)
+            recovery = recover_pending_start_mapping(
+                codex_session_id,
+                _state=_state,
+                _session_lock_owned=True,
+            )
+            if recovery.pending:
+                from yoetz.cli.observe_hooks import handle_observe
+
+                observe_out = __import__("io").BytesIO()
+                handle_observe(
+                    event_name="SessionStart",
+                    stdin_bytes=raw,
+                    stdout=observe_out,
+                    workspace=workspace,
+                    _state=_state,
+                    connect=connect,
+                    run_async=run_async,
+                    _session_lock_owned=True,
+                )
+                observed = observe_out.getvalue()
+                if observed and observed not in {b"{}\n", b"{}\r\n"}:
+                    if stdout is not None:
+                        stdout.write(observed)
+                        stdout.flush()
+                    else:
+                        sys.stdout.buffer.write(observed)
+                        sys.stdout.buffer.flush()
+                else:
+                    _stdout_json(_context_output("SessionStart", INACTIVE_CONTEXT), stdout)
+                return 0
             mapping = load_mapping(codex_session_id, _state=_state)
             if mapping is None:
                 from yoetz.cli.observe_hooks import handle_observe

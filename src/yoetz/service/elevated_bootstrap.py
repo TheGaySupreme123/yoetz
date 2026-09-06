@@ -1823,11 +1823,18 @@ def complete_review(
 
 def projection_for_status(
     pending: PendingElevatedConsent | None,
+    *,
+    _version: Literal["6", "7"] | None = None,
 ) -> dict[str, JsonValue] | None:
     """Versioned agent-safe projection with exact bounded recovery/authorization guidance."""
 
     if pending is None:
         return None
+    version = _version
+    if version is None:
+        version = "7" if pending.coordination_binding is not None else "6"
+    if version == "6" and pending.coordination_binding is not None:
+        raise ElevatedBootstrapError("coordination_binding_requires_pending_v7")
     grant_preview = (
         None
         if pending.grant_binding is None
@@ -1836,11 +1843,7 @@ def projection_for_status(
         )
     )
     model_values: dict[str, object] = {
-        "schema": (
-            "yoetz.consent.pending-agent/7"
-            if pending.coordination_binding is not None
-            else "yoetz.consent.pending-agent/6"
-        ),
+        "schema": f"yoetz.consent.pending-agent/{version}",
         "operation": pending.operation,
         "risk_class": pending.risk_class,
         "pending_id": pending.pending_id,
@@ -1864,7 +1867,11 @@ def projection_for_status(
             else None
         ),
     }
-    if pending.coordination_binding is not None:
+    if version == "7":
+        model_values["coordination_binding"] = (
+            None if pending.coordination_binding is None else dict(pending.coordination_binding)
+        )
+    elif pending.coordination_binding is not None:
         model_values["coordination_binding"] = dict(pending.coordination_binding)
     model = AgentSafePendingModel.model_validate(model_values)
     return cast(dict[str, JsonValue], model.model_dump(mode="json", by_alias=True))
@@ -1951,7 +1958,7 @@ def status_payload(*, _state: Path | None = None) -> dict[str, JsonValue]:
     model = ConsentStatusModel.model_validate(
         {
             "schema": "yoetz.elevated-bootstrap.status/7",
-            "pending": projection_for_status(load_pending(_state=_state)),
+            "pending": projection_for_status(load_pending(_state=_state), _version="7"),
             "consent_catalog": catalog_payload(),
         }
     )

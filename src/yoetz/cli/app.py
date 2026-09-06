@@ -8,7 +8,6 @@ import os
 import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from enum import Enum
 from functools import cache
 from pathlib import Path
 from types import MappingProxyType
@@ -20,6 +19,22 @@ from pydantic import BaseModel, ValidationError
 
 from yoetz import __version__
 from yoetz.cli.agent_start import AGENT_START_HANDOFF
+from yoetz.cli.bootstrap import (
+    control_failure as _shared_control_failure,
+)
+from yoetz.cli.bootstrap import (
+    human_or_json as _shared_human_or_json,
+)
+from yoetz.cli.bootstrap import (
+    plain_json as _shared_plain_json,
+)
+from yoetz.cli.bootstrap import resolve_cli_workspace_locator
+from yoetz.cli.bootstrap import (
+    stderr as _shared_stderr,
+)
+from yoetz.cli.bootstrap import (
+    stdout_json as _shared_stdout_json,
+)
 from yoetz.cli.exits import (
     ceremony_refusal_message,
     exit_code_for,
@@ -34,7 +49,6 @@ from yoetz.cli.render import (
     render_human_receipt,
     render_human_status,
 )
-from yoetz.domain.coordination import CoordinationErrorCode
 from yoetz.domain.values import JsonObject
 from yoetz.ports.control import (
     ControlClientKind,
@@ -66,8 +80,7 @@ from yoetz.protocol.models import (
     public_model_to_wire,
 )
 from yoetz.protocol.schemas import schema_document_for
-from yoetz.service.client import ServiceClient, accepted_but_unresponsive, connect_service
-from yoetz.service.control_protocol import public_error_code_for_control_reason
+from yoetz.service.client import ServiceClient, connect_service
 from yoetz.version import ResourceIntegrityError
 
 if TYPE_CHECKING:
@@ -86,39 +99,6 @@ __all__ = [
     "usage_failure",
     "with_body_schema_version",
 ]
-
-_COORDINATION_CONTROL_ERROR_REASONS: Final[frozenset[str]] = frozenset(
-    code.value for code in CoordinationErrorCode
-)
-_COORDINATION_CONTROL_GUIDANCE: Final[Mapping[str, str]] = MappingProxyType(
-    {
-        "coordination_invalid": "correct the project command fields and retry",
-        "project_not_found": "choose an existing project and retry",
-        "project_dissolved": "choose an active project and retry",
-        "implicit_project_requires_opt_out": (
-            "run `yoetz project opt-out` for the repository before retrying"
-        ),
-        "general_project_membership_conflict": (
-            "unlink the task from its current general project before linking another"
-        ),
-        "project_member_not_found": "refresh project status and choose an active member",
-        "selector_conflict": "provide selectors that identify the same task",
-        "coordination_consent_required": (
-            "obtain current source-workspace consent before retrying"
-        ),
-        "coordination_grant_required": "obtain the current project grant before retrying",
-        "coordination_generation_revoked": (
-            "refresh project status and grant, then retry with the current generation"
-        ),
-        "coordination_generation_mismatch": (
-            "refresh project status and retry with the current generation"
-        ),
-        "cross_repository_lineage_requires_grant": (
-            "obtain a cross-repository project grant before retrying"
-        ),
-        "project_member_already_unbound": "refresh project status; the member is already unlinked",
-    }
-)
 
 _MAX_INPUT_BYTES: Final = 1_048_576
 _INPUT = Annotated[
@@ -363,9 +343,9 @@ async def build_service_client(
     """
 
     locator = (
-        WorkspaceLocator(os.fspath(Path.cwd().resolve(strict=True)))
+        resolve_cli_workspace_locator()
         if workspace_locator is _WORKSPACE_LOCATOR_DEFAULT
-        else cast(WorkspaceLocator | None, workspace_locator)
+        else resolve_cli_workspace_locator(cast(WorkspaceLocator | None, workspace_locator))
     )
     return await connect_service(
         client_kind,
@@ -414,42 +394,24 @@ def _safe_write(stream: BinaryIO, data: bytes) -> None:
 
 
 def _stdout_json(value: JsonValue) -> None:
-    _safe_write(sys.stdout.buffer, canonical_encode(value) + b"\n")
+    _shared_stdout_json(value)
 
 
 def _stderr(message: str) -> None:
-    try:
-        typer.echo(message, err=True)
-    except BrokenPipeError:
-        pass
+    _shared_stderr(message)
 
 
 def _plain_json(value: object) -> JsonValue:
-    if value is None or type(value) in {bool, int, str}:
-        return cast(JsonValue, value)
-    if isinstance(value, Enum):
-        return cast(JsonValue, value.value)
-    if isinstance(value, BaseModel):
-        return cast(JsonValue, value.model_dump(mode="json", by_alias=True, exclude_none=False))
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return _plain_json(dataclasses.asdict(value))
-    if isinstance(value, Mapping):
-        source = cast(Mapping[object, object], value)
-        return {str(key): _plain_json(item) for key, item in source.items()}
-    if isinstance(value, (list, tuple)):
-        sequence = cast(list[object] | tuple[object, ...], value)
-        return [_plain_json(item) for item in sequence]
-    if isinstance(value, (set, frozenset)):
-        members = cast(set[object] | frozenset[object], value)
-        return [_plain_json(item) for item in sorted(members, key=str)]
-    raise TypeError("cli_result_not_json")
+    return _shared_plain_json(value)
 
 
 def _human_or_json(value: object, *, json_output: bool) -> None:
-    if json_output or not sys.stdout.isatty():
-        _stdout_json(_plain_json(value))
-    else:
-        typer.echo(canonical_encode(_plain_json(value)).decode("utf-8"))
+    _shared_human_or_json(
+        value,
+        json_output=json_output,
+        stdout_writer=_stdout_json,
+        plain_json_converter=_plain_json,
+    )
 
 
 def _usage_failure() -> int:
@@ -541,69 +503,6 @@ def _with_holder_pid(line: str) -> str:
     return line if holder is None else f"{line} (holder pid {holder})"
 
 
-def _with_holder_identity(line: str) -> str:
-    """Append the stamped holder's pid/version/manifest identity when it is readable."""
-
-    try:
-        from yoetz.config.paths import state_dir
-        from yoetz.service.lifecycle import SINGLETON_LOCK_NAME, probe_singleton_holder_identity
-
-        holder = probe_singleton_holder_identity(state_dir() / SINGLETON_LOCK_NAME)
-    except Exception:
-        holder = None
-    if holder is None:
-        return line
-    version = holder.service_version or "unknown"
-    digest = holder.schema_manifest_digest or "unknown"
-    return f"{line} (holder pid {holder.pid}, service version {version}, schema manifest {digest})"
-
-
-def _with_correlation(line: str, error: ControlError) -> str:
-    if error.correlation_id is None:
-        return line
-    return f"{line}; correlation_id {error.correlation_id}"
-
-
-def _holder_identity_json() -> dict[str, JsonValue] | None:
-    """Bounded singleton-stamp fields for machine-readable control failures."""
-
-    try:
-        from yoetz.config.paths import state_dir
-        from yoetz.service.lifecycle import SINGLETON_LOCK_NAME, probe_singleton_holder_identity
-
-        holder = probe_singleton_holder_identity(state_dir() / SINGLETON_LOCK_NAME)
-    except Exception:
-        return None
-    if holder is None:
-        return None
-    body: dict[str, JsonValue] = {"pid": holder.pid}
-    if holder.service_version is not None:
-        body["service_version"] = holder.service_version
-    if holder.schema_manifest_digest is not None:
-        body["schema_manifest_digest"] = holder.schema_manifest_digest
-    return body
-
-
-def _bind_handshake_correlation(error: ControlError) -> ControlError:
-    if error.reason not in {"service_incompatible", "protocol_mismatch"}:
-        return error
-    if error.correlation_id is not None:
-        return error
-    from yoetz.observability.logging import record_public_error_without_raising
-
-    correlation_id = record_public_error_without_raising(
-        component="cli.service",
-        operation="control_handshake",
-        reason=error.reason,
-    )
-    return ControlError(
-        error.reason,
-        retryable=error.retryable,
-        accepted_state=error.accepted_state or None,
-        correlation_id=correlation_id,
-    )
-
-
 def _lifecycle_exit_code(error: BaseException) -> int | None:
     """Exit code for a bounded lifecycle refusal, or None for anything else.
 
@@ -632,79 +531,12 @@ def _lifecycle_failure(error: LifecycleError) -> int:
 
 
 def _control_failure(error: ControlError, *, json_output: bool = False) -> int:
-    error = _bind_handshake_correlation(error)
-    code = public_error_code_for_control_reason(error.reason)
-    if error.reason in _COORDINATION_CONTROL_ERROR_REASONS:
-        remedy = _COORDINATION_CONTROL_GUIDANCE[error.reason]
-        _stderr(f"{error.reason}: {remedy}")
-        if json_output:
-            payload: dict[str, JsonValue] = {
-                "ok": False,
-                "public_code": code.value,
-                "reason": error.reason,
-                "retryable": error.retryable,
-            }
-            if error.correlation_id is not None:
-                payload["correlation_id"] = error.correlation_id
-            _stdout_json(payload)
-        return exit_code_for(code)
-    if error.reason in {"service_incompatible", "protocol_mismatch"}:
-        # The endpoint answered, but with a service of another installation or protocol
-        # generation. Neither 'service run' (refused while the holder lives) nor a plain retry
-        # helps; the explicit repair replaces that holder with this installation's service.
-        guidance = _with_correlation(
-            _with_holder_identity(
-                f"{error.reason}: the running local service was started by a different Yoetz "
-                "installation than this command and rejected its handshake. Run "
-                "'yoetz service restart' on a local terminal to replace it with this "
-                "installation's service, then retry"
-            ),
-            error,
-        )
-        _stderr(guidance)
-        if json_output:
-            payload: dict[str, JsonValue] = {
-                "ok": False,
-                "public_code": code.value,
-                "reason": error.reason,
-                "retryable": error.retryable,
-            }
-            if error.correlation_id is not None:
-                payload["correlation_id"] = error.correlation_id
-            holder = _holder_identity_json()
-            if holder is not None:
-                payload["holder"] = holder
-            _stdout_json(payload)
-        return exit_code_for(code)
-    if code is PublicErrorCode.SERVICE_UNAVAILABLE and accepted_but_unresponsive(error):
-        # A service that answered the connect and then went silent is running. Prescribing
-        # 'service run' here sent an operator to a command that must refuse, and the refusal
-        # then read as "the service died" (#237).
-        _stderr(
-            _with_holder_pid(
-                "service_unavailable: a local service is listening but did not answer within "
-                "5 seconds; it may still be starting or may be wedged. Wait and retry "
-                "'yoetz service status'. Do not run 'yoetz service run' -- it will refuse "
-                "while that process holds the singleton; stop it with 'yoetz service stop' "
-                "instead"
-            )
-        )
-        return exit_code_for(code)
-    guidance = {
-        PublicErrorCode.VAULT_LOCKED: (
-            "vault_locked: run `yoetz service unlock` on a local terminal "
-            "(uses the platform credential store when setup provisioned auto-unlock); "
-            "if auto-unlock is stale, run `yoetz service auto-unlock repair`; "
-            "if ordinary unlock authority may be lost, run `yoetz service recovery status`; "
-            "if uninitialized with no TTY, prepare `vault_initialize`, then "
-            "`yoetz consent review` on a trusted console"
-        ),
-        PublicErrorCode.SERVICE_UNAVAILABLE: (
-            "service_unavailable: run 'yoetz service run' under your selected user supervisor"
-        ),
-    }.get(code, f"{code.value.lower()}: the local request could not be completed")
-    _stderr(guidance)
-    return exit_code_for(code)
+    return _shared_control_failure(
+        error,
+        json_output=json_output,
+        stderr_writer=_stderr,
+        stdout_writer=_stdout_json,
+    )
 
 
 def control_failure(error: ControlError, *, json_output: bool = False) -> int:

@@ -42,7 +42,9 @@ def _coverage(*, gaps: tuple[str, ...] = ()) -> Coverage:
 
 def _finding(index: int, kind: FindingKind, coverage: Coverage) -> Finding:
     policy_id = (
-        "research-evidence"
+        "coordination"
+        if kind is FindingKind.COORDINATION_OVERLAP
+        else "research-evidence"
         if kind
         in {
             FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM,

@@ -8,6 +8,11 @@ from typing import cast
 
 import pytest
 
+from yoetz.adapters.integrations.codex_lifecycle import (
+    load_mapping,
+    mapping_from_start_ids,
+    store_mapping,
+)
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.application.recommendations import (
     RecommendationState,
@@ -18,6 +23,7 @@ from yoetz.cli import observe_hooks
 from yoetz.domain.observation import ObservationSource
 from yoetz.kernel.policies.observation_advice import ObservationCompositionFact
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
+from yoetz.protocol.ids import IdKind, new_id
 
 
 def _consented_store(tmp_path: Path) -> tuple[LocalObservationStore, str]:
@@ -299,13 +305,8 @@ def test_cursor_real_ingress_uses_bounded_profile_and_privacy_canaries(
         == 0
     )
     emitted = json.loads(stdout.getvalue())
-    assert set(emitted) == {"additional_context"}
-    assert "no ledger task is mapped yet" in emitted["additional_context"]
-    assert stdout.getvalue() == (
-        b'{"additional_context":"Yoetz observation is consented for this workspace; '
-        b"no ledger task is mapped yet (observation-derived binding only). Call start to attach "
-        b'a task."}\n'
-    )
+    assert emitted == {}
+    assert stdout.getvalue() == b"{}\n"
 
     envelopes = store.list_envelopes(commitment)
     assert len(envelopes) == 1
@@ -331,6 +332,43 @@ def test_cursor_real_ingress_uses_bounded_profile_and_privacy_canaries(
     ):
         assert canary.encode() not in stored
         assert canary.encode() not in state_bytes
+
+
+def test_cursor_received_clear_clears_existing_lifecycle_mapping(tmp_path: Path) -> None:
+    """The closed Cursor source=clear flag reaches the shared mapping fence."""
+
+    _store, _commitment = _consented_store(tmp_path)
+    session = "cursor:received-clear"
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=session,
+            yoetz_task_id=new_id(IdKind.TASK),
+            yoetz_session_id=new_id(IdKind.SESSION),
+            yoetz_writer_id=new_id(IdKind.WRITER),
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+    assert load_mapping(session, _state=tmp_path) is not None
+
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name="sessionStart",
+            stdin_bytes=canonical_encode(
+                {
+                    "hook_event_name": "sessionStart",
+                    "conversation_id": "received-clear",
+                    "source": "clear",
+                }
+            ),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    assert load_mapping(session, _state=tmp_path) is None
 
 
 def test_cursor_outputless_event_does_not_lease_or_commit_frontier_motion(

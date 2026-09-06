@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final, Literal, cast
 
 from yoetz.domain.events import (
@@ -59,6 +59,7 @@ from yoetz.domain.values import (
     object_id,
     result_id,
 )
+from yoetz.ports.integrations import observation_pairing_contract
 from yoetz.protocol.canonical import request_digest
 from yoetz.protocol.coverage import (
     ArtifactObservation,
@@ -214,11 +215,42 @@ def _tool_name(payload: Mapping[str, JsonValue]) -> str | None:
     return value if type(value) is str else None
 
 
-def _correlation(payload: Mapping[str, JsonValue]) -> str | None:
+def _pairing_contract(
+    envelope: ObservationEnvelope, payload: Mapping[str, JsonValue]
+) -> tuple[str, str]:
+    harness = (
+        "claude"
+        if envelope.source is ObservationSource.CLAUDE_HOOK
+        else "cursor"
+        if envelope.source is ObservationSource.CURSOR_HOOK
+        else "codex"
+    )
+    profile_id = payload.get("capability_profile_id")
+    return observation_pairing_contract(harness, profile_id if type(profile_id) is str else None)
+
+
+def _correlation(
+    payload: Mapping[str, JsonValue],
+    correlation_kind: str | None = None,
+    pairing_mode: str | None = None,
+) -> str | None:
     # Codex spells the host tool-call id ``tool_use_id``; ingress normalizes it
     # to ``tool_call_id``, but read the host spelling first too so a payload
     # that reaches this seam un-normalized still correlates (#274).
-    for key in ("tool_use_id", "tool_call_id", "correlation_id", "parent_tool_call_id"):
+    if pairing_mode == "post_only" or correlation_kind == "none":
+        return None
+    kind = correlation_kind or (
+        payload.get("correlation_kind")
+        if type(payload.get("correlation_kind")) is str
+        else "tool_call_id"
+    )
+    for key in ("tool_use_id", "tool_call_id"):
+        value = payload.get(key)
+        if type(value) is str and value:
+            return value
+    if kind == "generation_id":
+        return None
+    for key in ("correlation_id", "parent_tool_call_id"):
         value = payload.get(key)
         if type(value) is str and value:
             return value
@@ -603,6 +635,20 @@ def materialize_observation_envelope(
         )
 
     structural = cast(Mapping[str, JsonValue], envelope.structural_payload)
+    pairing_mode, correlation_kind = _pairing_contract(envelope, structural)
+    if (
+        pairing_mode == "post_only"
+        and ObservationGapCode.UNPAIRED_EVENT.value in envelope.gap_codes
+    ):
+        # A pre-#607 native post-only observation may carry the old false gap.
+        # Keep its immutable envelope history, but do not expose that stale
+        # pairing diagnosis to materialization or coverage.
+        envelope = replace(
+            envelope,
+            gap_codes=tuple(
+                gap for gap in envelope.gap_codes if gap != ObservationGapCode.UNPAIRED_EVENT.value
+            ),
+        )
     captured, gaps = _eligible_captured_content(envelope, captured_content)
     coverage = _coverage_for(envelope, gaps=gaps, content_captured=bool(captured))
     channel = PublicationChannel.HOOK_OBSERVED
@@ -617,11 +663,11 @@ def materialize_observation_envelope(
     if (
         envelope.source is ObservationSource.CODEX_SESSION_STREAM
         and completed_stream
-        and _correlation(structural) is not None
+        and _correlation(structural, correlation_kind, pairing_mode) is not None
     ):
         kind = "PostToolUse"
     tool = _tool_name(structural)
-    correlation = _correlation(structural)
+    correlation = _correlation(structural, correlation_kind, pairing_mode)
     unpaired = ObservationGapCode.UNPAIRED_EVENT.value in gaps
     unsupported = (
         ObservationGapCode.UNSUPPORTED_EVENT.value in gaps
@@ -706,28 +752,40 @@ def materialize_observation_envelope(
             return MaterializedObservationBatch(
                 (), coverage, channel, gaps, "routine_read_coalesced"
             )
-        if unpaired or correlation is None:
-            # Standalone structural observation: evidence only; do not invent the action.
+        if pairing_mode == "post_only" or unpaired or correlation is None:
+            # Standalone structural observation: evidence only; do not invent
+            # an action. A post-only profile has an intentional identity limit,
+            # so its result is evidence without an ``unpaired_event`` gap.
+            post_only = pairing_mode == "post_only"
+            evidence_role = "post_only_result" if post_only else "unpaired_result"
+            event_role = "post_only_result_event" if post_only else "unpaired_result_event"
             evidence = stable_observation_id(
                 kind=IdKind.EVIDENCE,
                 task_id=task_id,
                 source_identity=envelope.source_identity,
                 mapping_version=mapping,
-                role="unpaired_result",
+                role=evidence_role,
             )
             event = stable_observation_id(
                 kind=IdKind.EVENT,
                 task_id=task_id,
                 source_identity=envelope.source_identity,
                 mapping_version=mapping,
-                role="unpaired_result_event",
+                role=event_role,
             )
             exit_status = _exit_status(structural)
-            summary = (
-                f"Unpaired observed tool result exit={exit_status}"
-                if exit_status is not None
-                else "Unpaired observed tool result"
-            )
+            if pairing_mode == "post_only":
+                summary = (
+                    f"Post-only observed tool result exit={exit_status}"
+                    if exit_status is not None
+                    else "Post-only observed tool result"
+                )
+            else:
+                summary = (
+                    f"Unpaired observed tool result exit={exit_status}"
+                    if exit_status is not None
+                    else "Unpaired observed tool result"
+                )
             drafts.append(
                 _draft(
                     event=event,
@@ -740,7 +798,7 @@ def materialize_observation_envelope(
                         envelope.receipt_time,
                         description=summary,
                     ),
-                    role="unpaired_evidence",
+                    role="post_only_evidence" if post_only else "unpaired_evidence",
                 )
             )
             captured_drafts, _captured_refs = _captured_evidence_drafts(
@@ -750,8 +808,10 @@ def materialize_observation_envelope(
                 parents=(event,),
             )
             drafts.extend(captured_drafts)
-            merged_gaps = tuple(
-                sorted({*gaps, ObservationGapCode.UNPAIRED_EVENT.value}, key=str.encode)
+            merged_gaps = (
+                gaps
+                if pairing_mode == "post_only"
+                else tuple(sorted({*gaps, ObservationGapCode.UNPAIRED_EVENT.value}, key=str.encode))
             )
             return MaterializedObservationBatch(tuple(drafts), coverage, channel, merged_gaps, None)
 
@@ -1072,7 +1132,8 @@ def materialize_observation_outcome_correction(
     """
 
     structural = cast(Mapping[str, JsonValue], envelope.structural_payload)
-    correlation = _correlation(structural)
+    pairing_mode, correlation_kind = _pairing_contract(envelope, structural)
+    correlation = _correlation(structural, correlation_kind, pairing_mode)
     tool = _tool_name(structural)
     coverage = _coverage_for(envelope)
     channel = PublicationChannel.HOOK_OBSERVED
@@ -1198,7 +1259,8 @@ def canonical_logical_identity(envelope: ObservationEnvelope) -> str:
         # phase is idempotent. The service registry reconciles the stronger
         # host correlation fields separately.
         return _logical_identity_digest(("subagent", lineage.logical_identity, lineage.phase))
-    host_call = _correlation(structural)
+    pairing_mode, correlation_kind = _pairing_contract(envelope, structural)
+    host_call = _correlation(structural, correlation_kind, pairing_mode)
     if host_call is None:
         return _logical_identity_digest(("opaque", envelope.source.value, envelope.source_identity))
     family = _action_kind(_tool_name(structural)).value
@@ -1218,16 +1280,23 @@ def observation_content_identity(envelope: ObservationEnvelope) -> str:
     if type(envelope) is not ObservationEnvelope:
         return _logical_identity_digest(("content", "opaque", "invalid"))
     structural = cast(Mapping[str, JsonValue], envelope.structural_payload)
+    pairing_mode, correlation_kind = _pairing_contract(envelope, structural)
     kind = envelope.event_kind
     if (
         envelope.source is ObservationSource.CODEX_SESSION_STREAM
         and stream_event_is_completed_tool(kind, structural)
-        and _correlation(structural) is not None
+        and _correlation(structural, correlation_kind, pairing_mode) is not None
     ):
         kind = "PostToolUse"
     phase = (
         f"{kind}:unpaired"
-        if kind == "PostToolUse" and ObservationGapCode.UNPAIRED_EVENT.value in envelope.gap_codes
+        if (
+            kind == "PostToolUse"
+            and ObservationGapCode.UNPAIRED_EVENT.value in envelope.gap_codes
+            and pairing_mode == "paired"
+        )
+        else f"{kind}:post_only"
+        if kind == "PostToolUse" and pairing_mode == "post_only"
         else kind
     )
     return _logical_identity_digest(

@@ -70,8 +70,10 @@ from yoetz.protocol.models import (
     RespondEvidenceSummaryModel,
     RespondResponseModel,
     StartSuccessModel,
+    StatusAdviceItemModel,
     StatusCompactObligationModel,
     StatusObligationItemModel,
+    StatusProjectDetectionModel,
     StatusProjectPageModel,
     StatusRequest,
     StatusStructuralSubjectStateModel,
@@ -133,6 +135,19 @@ _RESULT_OPTIONAL_NON_NULL: tuple[tuple[type[BaseModel], frozenset[str]], ...] = 
     ),
     (StatusCompactObligationModel, frozenset({"acceptance_criteria"})),
     (StatusObligationItemModel, frozenset({"acceptance_criteria"})),
+    (
+        StatusAdviceItemModel,
+        frozenset(
+            {
+                "coordination_project_id",
+                "coordination_detection_id",
+                "coordination_membership_generation",
+                "coordination_counterpart_task_id",
+                "coordination_resource_paths",
+            }
+        ),
+    ),
+    (StatusProjectDetectionModel, frozenset({"resource_paths"})),
     (StatusProjectPageModel, frozenset({"title", "description", "title_ref", "description_ref"})),
     (StatusStructuralSubjectStateModel, frozenset({"tree_digest", "diff_digest"})),
     (StatusVersionSliceModel, frozenset({"route_profile"})),
@@ -690,6 +705,33 @@ async def test_public_error_omits_unset_safe_details() -> None:
             },
         ),
         (
+            StatusAdviceItemModel,
+            {
+                "finding_id": protocol_id("fnd_", 2808),
+                "rule_code": "coordination_overlap",
+                "priority": 50,
+                "evidence_commitments": (_DIGEST,),
+                "coverage": dict(
+                    coverage_to_json(coverage_for_channel(PublicationChannel.COOPERATIVE_MCP))
+                ),
+                "freshness_frontier": "membership_generation:1",
+                "verification_state": "not_required",
+                "semantic_state": "disabled",
+                "recommended_next_action": "review_coordination_advice",
+                "coordination_project_id": None,
+            },
+        ),
+        (
+            StatusProjectDetectionModel,
+            {
+                "detection_id": protocol_id("evt_", 2809),
+                "task_ids": (protocol_id("tsk_", 2810), protocol_id("tsk_", 2811)),
+                "resource_count": "0",
+                "open": True,
+                "resource_paths": None,
+            },
+        ),
+        (
             PublishWorkAcceptedEventModel,
             {
                 "event_id": protocol_id("evt_", 2803),
@@ -853,6 +895,39 @@ async def test_root_start_and_check_omit_unset_multi_agent_fields() -> None:
             },
             ("title", "description", "title_ref", "description_ref"),
         ),
+        (
+            StatusAdviceItemModel,
+            {
+                "finding_id": protocol_id("fnd_", 2914),
+                "rule_code": "coordination_overlap",
+                "priority": 50,
+                "evidence_commitments": (_DIGEST,),
+                "coverage": dict(
+                    coverage_to_json(coverage_for_channel(PublicationChannel.COOPERATIVE_MCP))
+                ),
+                "freshness_frontier": "membership_generation:1",
+                "verification_state": "not_required",
+                "semantic_state": "disabled",
+                "recommended_next_action": "review_coordination_advice",
+            },
+            (
+                "coordination_project_id",
+                "coordination_detection_id",
+                "coordination_membership_generation",
+                "coordination_counterpart_task_id",
+                "coordination_resource_paths",
+            ),
+        ),
+        (
+            StatusProjectDetectionModel,
+            {
+                "detection_id": protocol_id("evt_", 2915),
+                "task_ids": (protocol_id("tsk_", 2916), protocol_id("tsk_", 2917)),
+                "resource_count": "0",
+                "open": True,
+            },
+            ("resource_paths",),
+        ),
     ),
 )
 def test_nested_multi_agent_results_omit_unset_fields(
@@ -957,6 +1032,17 @@ def test_every_result_optional_non_null_field_has_an_unset_projection_case() -> 
         ),
         ("ProjectTextRefModel", ("envelope_digest",)),
         ("StatusProjectPageModel", ("title", "description", "title_ref", "description_ref")),
+        (
+            "StatusAdviceItemModel",
+            (
+                "coordination_project_id",
+                "coordination_detection_id",
+                "coordination_membership_generation",
+                "coordination_counterpart_task_id",
+                "coordination_resource_paths",
+            ),
+        ),
+        ("StatusProjectDetectionModel", ("resource_paths",)),
     ):
         for field in fields:
             covered[model, field] = "test_nested_multi_agent_results_omit_unset_fields"

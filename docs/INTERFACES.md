@@ -745,6 +745,12 @@ Research/evidence-assessment kinds: `evidence_does_not_support_claim`, `diff_doe
 `material_limitation_omitted`, `questionable_finding_rejection` (flags a current hollow
 rejection/waiver of a deterministic finding).
 
+Project coordination adds the local-only `coordination_overlap` kind under the
+`coordination/0.1.0` runtime policy. It is generated from an admitted coordination projection and
+is deliberately excluded from the external semantic case and the frozen
+`provider-judgment-1.0.0` wire under D7. Adding it to an external provider requires a new
+versioned provider contract; the historical 1.0 artifact remains unchanged.
+
 Those two response predicates overlap on one case: a current rejection or waiver of a
 deterministic finding whose support is inadmissible under both packs' evidence criteria. Each pack
 is a closed rule table that cannot observe the other, so both still report it. The check
@@ -759,8 +765,9 @@ lost to a pack that did not run. Selecting a single pack therefore yields that p
 
 The ownership partition is exhaustive and disjoint: the first ten kinds belong to the built-in
 `work-integrity/0.1.0` pack, and the latter four belong to the built-in
-`research-evidence/0.1.0` pack. `semantic-review` is only a review-context / recipe label; it is
-not a `PolicyPack` value and it never appears as `Finding.policy_id`.
+`research-evidence/0.1.0` pack. `coordination_overlap` belongs to the local coordination runtime,
+not either built-in pack. `semantic-review` is only a review-context / recipe label; it is not a
+`PolicyPack` value and it never appears as `Finding.policy_id`.
 
 Finding kind identifies the problem, not who detected it. The research-evidence pack may produce
 the latter four deterministically, and a semantic reviewer may propose the same kinds. `origin`
@@ -789,6 +796,7 @@ inferable from the frozen case.
 | `diff_does_not_match_account` | 1 | true |
 | `material_limitation_omitted` | 1 | true |
 | `questionable_finding_rejection` | 2 | true |
+| `coordination_overlap` | 2 | true |
 
 Ranking uses no prose or implementation-defined scoring. The evidence-strength bucket is the
 lexicographic pair `(artifact_observation ordinal, evidence_immutability ordinal)` using the
@@ -1605,6 +1613,15 @@ tasks beside its closed reason; it never includes their task, session, or host-b
 No stored selector means new work. Successful recovery
 rewrites eligible predecessor mappings and preserves their pending rows for delivery on the
 successor route. Age alone does not establish a host session's end.
+
+Host-session mapping writes are durable lifecycle operations. A cancelled or interrupted start
+may leave a validated `.pending` or claimed `.applying` operation; the next lock owner replays a
+bounded sequence of residual operations after queueing its latest mapping store or clear intent. The
+pending file is the durable last-write queue: an owner operation coalesces an older pending loser
+before apply, while a later producer remains the later operation. While that fence cannot be
+completed, SessionStart and hook delivery defer service access and retain the operation for a later
+retry. Claude and Cursor SessionStart wrappers preserve the reviewed closed lifecycle meaning
+through their structural action, including `clear`; unknown source values are discarded.
 
 Raw refs never enter structural durable state; only their commitments do. The caller-controlled
 `workspace_ref_commitment` is an attachment selector, not a repository-privacy commitment, and
@@ -3545,9 +3562,14 @@ bounded local observation store but is enqueued for delivery only as distinct ev
 host failure or denial in either phase, or the post-event of `start`, `publish_work`, `check`, or
 `respond`. The pre-event of every Yoetz-owned call and the post-event of a non-failed `status`,
 `receipt`, or `read_guidance` stay local, and Yoetz-owned tool input/output is never captured as
-content. Local pairing is unaffected, so a delivered post-event carries no `unpaired_event` gap and
-the service materializes its action from the post alone. No coverage gap is recorded: the service
-already holds the authoritative record of every Yoetz-owned call it served.
+content. Codex hooks are the paired carrier: `tool_call_id` is scoped to source, session, and
+generation, and an orphan post retains `unpaired_event` until explicitly repaired. The currently
+installed Claude and Cursor native profiles are post-only carriers: their post observations never
+diagnose a missing pre-event, and they materialize metadata-only evidence rather than inventing an
+action/result pair. Cursor `generation_id` is retained as metadata only and never serves as a tool
+identity. A legacy false `unpaired_event` from a post-only profile may be retired from the current
+projection only when retained history is complete and contains no true paired orphan; its gap
+history remains auditable.
 
 The local observation state also owns a sparse, one-shot `FrontierMotionNotice` per Codex session:
 `from_sequence`, `to_sequence`, final `head_digest`, and exact accepted observation-record count.

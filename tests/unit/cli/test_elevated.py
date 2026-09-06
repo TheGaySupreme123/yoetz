@@ -930,7 +930,7 @@ def test_catalog_and_prepare_are_agent_safe(tmp_path: Path) -> None:
     with _patch_state(tmp_path):
         catalog = cast(dict[str, Any], elevated.catalog_elevated())
         prepared = cast(dict[str, Any], elevated.prepare_elevated("vault_initialize"))
-    assert catalog["schema"] == "yoetz.consent.catalog/6"
+    assert catalog["schema"] == "yoetz.consent.catalog/7"
     assert prepared["schema"] == "yoetz.elevated-bootstrap.prepare-result/6"
     assert prepared["pending"]["review_command"] == ["yoetz", "consent", "review"]
     validate_schema_instance("prepare-result", "6.0.0", prepared)

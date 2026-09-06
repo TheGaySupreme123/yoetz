@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -313,6 +314,70 @@ def _force_envelope_eviction(
     # Below the current size, so the next save must shed durable envelopes.
     monkeypatch.setattr(local_mod, "_MAX_STATE_BYTES", state_path.stat().st_size - 1_024)
     store.note_coverage_gap(workspace, ObservationGapCode.SERVICE_UNAVAILABLE.value)
+
+
+def test_envelope_eviction_persists_retention_provenance_for_pairing_reconciliation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A size-pressure eviction must block legacy false-gap retirement."""
+
+    store, workspace, session = _consented_store(tmp_path)
+    legacy_post_only = replace(
+        _envelope(
+            session=session,
+            identity="hook:legacy-post-only",
+            ordinal=1,
+            source=ObservationSource.CLAUDE_HOOK,
+        ),
+        event_kind="PostToolUse",
+        structural_payload=JsonObject(
+            {
+                "capability_profile_id": "claude-code-cli-local-project-2.1.241",
+                "tool_call_id": "legacy-call",
+            }
+        ),
+        gap_codes=(ObservationGapCode.UNPAIRED_EVENT.value,),
+    )
+    true_orphan = replace(
+        _envelope(session=session, identity="hook:true-orphan", ordinal=2),
+        event_kind="PostToolUse",
+        gap_codes=(ObservationGapCode.UNPAIRED_EVENT.value,),
+    )
+    state = store._load(workspace)  # pyright: ignore[reportPrivateUsage]
+    state.envelopes = [legacy_post_only, true_orphan]
+    store._note_gap_state(  # pyright: ignore[reportPrivateUsage]
+        state, ObservationGapCode.UNPAIRED_EVENT.value
+    )
+    both_size = len(store._encode_state(workspace, state))  # pyright: ignore[reportPrivateUsage]
+    state.envelopes = [legacy_post_only]
+    one_size = len(store._encode_state(workspace, state))  # pyright: ignore[reportPrivateUsage]
+    state.envelopes = [legacy_post_only, true_orphan]
+    cap = one_size + max(64, (both_size - one_size) // 2)
+    if cap >= both_size:
+        cap = both_size - 1
+    monkeypatch.setattr(local_mod, "_MAX_STATE_BYTES", cap)
+
+    def choose_envelope_index(envelopes: list[ObservationEnvelope]) -> int | None:
+        return 1 if len(envelopes) > 1 else None
+
+    monkeypatch.setattr(
+        store,
+        "_fair_envelope_index",
+        choose_envelope_index,
+    )
+
+    store._save(workspace, state)  # pyright: ignore[reportPrivateUsage]
+
+    persisted = _state_json(tmp_path)
+    assert persisted["envelopes_truncated"] is True
+    assert len(cast(list[object], persisted["envelopes"])) == 1
+    reopened = LocalObservationStore(_state=tmp_path)
+    assert (
+        ObservationGapCode.UNPAIRED_EVENT.value
+        in reopened.status(ObservationStatusQuery(workspace)).gaps
+    )
+    history = cast(dict[str, dict[str, object]], persisted["gap_history"])
+    assert history[ObservationGapCode.UNPAIRED_EVENT.value]["active"] is True
 
 
 def test_truncation_gap_clears_once_the_store_stops_shedding_history(

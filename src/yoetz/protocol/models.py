@@ -10,7 +10,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from types import MappingProxyType
-from typing import Annotated, ClassVar, Final, Literal, Union, cast, get_args, get_origin
+from typing import (
+    Annotated,
+    ClassVar,
+    Final,
+    Literal,
+    Union,
+    cast,
+    get_args,
+    get_origin,
+)
 
 from pydantic import (
     BaseModel,
@@ -908,10 +917,30 @@ AsciiString1To160 = Annotated[str, Field(min_length=1, max_length=160, pattern=r
 type FreshnessWire = Literal[
     "current", "partial", "redacted_gap", "stale_after_material_change", "unknown"
 ]
+# Public finding projections include local coordination findings. Provider judgment uses the
+# separate historical alias below because D7 keeps the frozen external semantic wire at fourteen
+# kinds. The provider adapter preserves the historical schema definition key.
 type FindingKindWire = Literal[
     "action_without_result",
     "claim_without_admissible_evidence",
     "coordination_overlap",
+    "completion_with_open_obligations",
+    "contradictory_claims_unresolved",
+    "diff_does_not_match_account",
+    "evidence_does_not_support_claim",
+    "failed_work_omitted",
+    "ledger_stale_or_incomplete",
+    "material_limitation_omitted",
+    "questionable_finding_rejection",
+    "requested_item_never_attempted",
+    "result_without_action",
+    "stale_evidence_for_changed_state",
+    "weak_or_stale_response",
+]
+
+type ProviderFindingKindWire = Literal[
+    "action_without_result",
+    "claim_without_admissible_evidence",
     "completion_with_open_obligations",
     "contradictory_claims_unresolved",
     "diff_does_not_match_account",
@@ -1770,7 +1799,7 @@ ProviderReviewTextWire = Annotated[
 class ProviderChallengeModel(_ClosedModel):
     """One provider-facing reviewer challenge; owns the constrained-output shape."""
 
-    finding_kind: FindingKindWire
+    finding_kind: ProviderFindingKindWire
     summary: ProviderReviewTextWire
     cited_refs: Annotated[
         tuple[SubjectIdWire, ...],

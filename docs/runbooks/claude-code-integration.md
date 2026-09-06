@@ -208,15 +208,27 @@ and `transcript_path`; stop additionally carried `agent_transcript_path` and `pe
 Neither event carried a parent tool-call id, so child-only correlation is a required supported input
 shape.
 
-The same isolated exact-wheel run completed a Yoetz parent `start`, `mode=delegate`, native child
-`Agent`, child `mode=attach`, one `publish_work`, deterministic `check`, and JSON `receipt`. The
-parent and child ledgers durably recorded delegation, the child action, check, and receipt. The
-provider remained a loopback synthetic Messages server, Claude auth status was
-`loggedIn=false`/`authMethod=none`, and no normal credentials or vault material entered the root.
-The first `SessionStart` hook was cancelled during this run; the child and operation hooks returned
-success. This proves the bounded host and Yoetz workflow under the recorded limits; it does not
-promote either installed version to the pinned `2.1.241` capability cell or prove production model
-use.
+The final exact-wheel cell used `yoetz-0.1.0-py3-none-any.whl` at SHA256
+`8d54a73c87e5e49b0b6179ad58f673d2b2f40b1a93c80c4393ce56ae36e82988` from source commit
+`2e8b0b48`, with 216 packaged resources (`sha256:1e4cc667456c1cf9ac579d7bc1db186937c29abd9637025c42569ffc7701895c`)
+and a strict plugin export (`sha256:f2f7249ef47e43cde1fb0004d2bb770125665c7fc15664c8c6d116242dec6fdb`) loaded
+through Claude's development `--plugin-dir` carrier in a fresh mode-0700 isolated root; this is not
+marketplace-installed activation. It completed a Yoetz parent `start`, `mode=delegate`, native
+child `Agent`, child `mode=attach`, one `publish_work`, deterministic `check`, and JSON `receipt`;
+the child receipt was `rcp_f567225d-a34f-4a07-beda-2866649a3b57` with digest
+`sha256:47a578bbdaedd7f93e3389ee7d212b84feb132dd44ff2f02a1c8d10e63ba3e3a` and the recorded
+conclusion `insufficient_coverage` (`semantic_review_not_requested`). The parent and child ledgers
+durably recorded delegation, the child action, check, and receipt. The provider remained a loopback
+synthetic Messages server, Claude auth status was `loggedIn=false`/`authMethod=none`, and no normal
+credentials or user vault material entered the root; only a throwaway synthetic passphrase vault was
+initialized inside that isolated root. Consent covered only the synthetic project. Post-run status
+recorded `claude_hook:true` but `mapping_present:false`, ten `mapping_missing` quarantines, and
+`outbox_quarantined`/`unpaired_event` gaps, so this cell proves hook execution but does not claim
+attributed host observation or accepted hook coverage. The first `SessionStart` hook was cancelled;
+child and operation hooks returned success. The parent's advice/frontier remained independent and
+recommended `refresh_observation`. This proves the bounded host and Yoetz workflow under the
+recorded limits; it does not promote either installed version to the pinned `2.1.241` capability
+cell or prove production model use.
 
 When a future exact cell proves a child signal, the service may normalize `agent_id` to a bounded
 subagent identity and retain only structural correlation. `origin=host_observed` and

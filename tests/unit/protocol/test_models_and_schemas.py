@@ -2006,6 +2006,57 @@ def test_current_receipt_document_accepts_coordination_overlap_finding() -> None
     validate_schema_instance("receipt-document", "1.2.0", document)
 
 
+def test_public_status_finding_models_accept_coordination_overlap() -> None:
+    """Public status projections retain the local coordination finding kind.
+
+    The provider judgment wire intentionally has a narrower frozen allowlist, but public status
+    and candidate-finding projections must carry every current ``FindingKind`` value.
+    """
+
+    models = _models_module()
+    candidate_result = _candidate_status_result_wire()
+    candidate_page = cast(dict[str, JsonValue], candidate_result["page"])
+    candidate = cast(list[JsonValue], candidate_page["items"])[0]
+    candidate_item = cast(dict[str, JsonValue], candidate)
+    candidate_item["kind"] = "coordination_overlap"
+    candidate_item["priority"] = 2
+    candidate_item["subject_refs"] = [_test_id("evt_"), _test_id("obl_")]
+    candidate_item["policy_id"] = "coordination"
+    candidate_basis = cast(dict[str, JsonValue], candidate_item["basis"])
+    candidate_basis["rule_id"] = "coordination_overlap"
+    candidate_basis["observed_refs"] = [_test_id("evt_"), _test_id("obl_")]
+    parsed_candidates = models.StatusResultModel.model_validate(candidate_result)
+    candidate_row = parsed_candidates.root.page.items[0]
+    assert candidate_row.kind == "coordination_overlap"
+    assert candidate_row.policy_id == "coordination"
+
+    finding_result = _status_result_wire()
+    finding_result["view"] = "findings"
+    finding_item = dict(candidate_item)
+    finding_item.pop("basis")
+    finding_result["page"] = {
+        "items": [
+            {
+                **finding_item,
+                "finding_id": _test_id("fnd_"),
+                "origin": "deterministic",
+                "provenance": None,
+                "disposition": "none",
+                "resolved": False,
+                "response_event_id": None,
+                "reason": None,
+                "waiver_scope": None,
+                "waiver_expiry": None,
+            }
+        ],
+        "next_cursor": None,
+    }
+    parsed_findings = models.StatusResultModel.model_validate(finding_result)
+    finding_row = parsed_findings.root.page.items[0]
+    assert finding_row.kind == "coordination_overlap"
+    assert finding_row.policy_id == "coordination"
+
+
 def test_check_recorded_schema_matches_final_semantic_provenance_identity() -> None:
     for status, reasons in _EXPECTED_SEMANTIC_STATUS_REASONS.items():
         for reason in reasons:

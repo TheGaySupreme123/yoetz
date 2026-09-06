@@ -398,6 +398,12 @@ each. Cursor's hook payload states no outcome fact for MCP executions, so a fail
 indistinguishable from a successful one at this ingress; the service's own record of the call is
 the authority on its outcome. `afterFileEdit` and lifecycle events are unchanged.
 
+Cursor's currently reviewed native profile is post-only: `afterMCPExecution` and `afterFileEdit`
+do not imply a missing `PreToolUse`, so accepted observations carry no synthetic `unpaired_event`
+gap. Their `generation_id` is retained as bounded host metadata and is never used as a tool-call
+identity; the materializer records metadata-only evidence instead of fabricating an action/result
+pair. Codex's paired hook profile keeps its source/session/generation-scoped orphan diagnostics.
+
 Measured on 2026-08-28 with Cursor Agent CLI `2026.08.25-3e8eec8` (payload `cursor_version`;
 `cursor-agent --version` printed `2026.08.11-e8db854`) loading the native plugin through
 `--plugin-dir` in an isolated cell: the plugin-sourced `sessionStart` hook ran with `$PWD` equal to

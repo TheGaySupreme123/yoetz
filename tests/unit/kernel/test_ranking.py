@@ -86,7 +86,9 @@ def _finding(
     coverage: Coverage | None = None,
 ) -> Finding:
     policy_id = (
-        "work-integrity"
+        "coordination"
+        if kind is FindingKind.COORDINATION_OVERLAP
+        else "work-integrity"
         if kind
         in {
             FindingKind.COMPLETION_WITH_OPEN_OBLIGATIONS,

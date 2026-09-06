@@ -184,7 +184,9 @@ def _versions() -> ReceiptVersionSlice:
             PolicyVersionEntry("research-evidence", "0.1.0"),
             PolicyVersionEntry("work-integrity", "0.1.0"),
         ),
-        schema_versions=(SchemaVersionEntry("receipts/receipt-document", "1.0.0"),),
+        # Keep this workflow on the current receipt artifact so the latest catalog schema's
+        # required additive children section is present in the projected document.
+        schema_versions=(SchemaVersionEntry("receipts/receipt-document", "1.2.0"),),
         resource_manifest_digest=_DIGEST,
     )
 

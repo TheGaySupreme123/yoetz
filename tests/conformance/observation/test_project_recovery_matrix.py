@@ -16,7 +16,12 @@ from typing import cast
 
 import pytest
 
-from builders.multi_agent import MultiAgentService, ScenarioClock, multi_agent_service
+from builders.multi_agent import (
+    MultiAgentService,
+    ScenarioClock,
+    multi_agent_service,
+    private_service_root,
+)
 from yoetz.adapters.keys.encrypted_vault import EncryptedVaultStore
 from yoetz.adapters.keys.secret_memory import LocalSecretMemory
 from yoetz.adapters.keys.vault_passphrase import VaultRootEnvelope
@@ -191,12 +196,14 @@ class _RestartableReadyInstallation:
 
 @asynccontextmanager
 async def _installation(root: Path) -> AsyncGenerator[_RestartableReadyInstallation]:
-    installation = _RestartableReadyInstallation(root)
-    await installation.open()
-    try:
-        yield installation
-    finally:
-        await installation.close()
+    del root  # pytest's basetemp is shared /tmp; the synthetic installation needs a private root.
+    with private_service_root() as private_root:
+        installation = _RestartableReadyInstallation(private_root)
+        await installation.open()
+        try:
+            yield installation
+        finally:
+            await installation.close()
 
 
 @pytest.fixture

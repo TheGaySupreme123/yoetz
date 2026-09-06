@@ -356,9 +356,9 @@ The #509 matrix keeps the native subagent row evidence-gated until an isolated `
 cell exercises hook, stream, replay, and cooperative binding behavior. Parent-minted delegation is
 the supported design path once that cell is proven; host hooks alone never mint a child.
 
-The bounded legacy native cell has now exercised that parent-minted path with the reviewed candidate
+The bounded legacy native cell has now exercised that parent-minted path with the reviewed final
 wheel `yoetz-0.1.0-py3-none-any.whl` (SHA-256
-`670c4244f06532f728e9d0f697be3554d9cd028f66afc800f303e789a072a9e1`). In a fresh
+`8d54a73c87e5e49b0b6179ad58f673d2b2f40b1a93c80c4393ce56ae36e82988`). In a fresh
 `YOETZ_ISOLATED_ROOT`, Codex-testing `0.150.1` ran with `multi_agent_v2=false` against a local
 loopback Responses provider and no subscription credential: one parent `start`, one `delegate`, one
 legacy `multi_agent_v1` native child, `wait_agent`, then the child's `start mode=attach`, one
@@ -367,15 +367,40 @@ source/wheel mechanics and native child execution in that synthetic cell; it doe
 provider semantics, authentication, or production model use.
 
 The same non-ephemeral run's two persisted Codex streams were reconciled by the source-owned
-`codex-rollout-jsonl/0.150.1/v1` adapter: 34 and 28 records accepted, zero duplicates, both
-resolved. They contained `CollabAgentToolCall` records but no `SubAgentActivity`,
+`codex-rollout-jsonl/0.150.1/v1` adapter: the cursors reached event positions 34 and 28 with no
+rotation or truncation, and 62 structural envelopes were materialized. They contained
+`CollabAgentToolCall` records but no `SubAgentActivity`,
 `SubagentStart`, `SubagentStop`, or usable child identity. Isolated public status therefore reports
 `codex_session_stream=true`, `mapping_present=false`, and the permanent `unsupported_event` gap.
-It must not mint `host_observed` or reinterpret this absence as `missing_subagent_identity`;
-the latter applies only when a subagent activity event exists without an identity. Keep this
-observation gap separate from the successful source-artifact and native-ceremony proof. Repeat the
-cell only with a fresh isolated root and replace this candidate digest with the exact final wheel
-digest after the final build.
+This cell loaded direct MCP and set `features.hooks=true`, but it did not install a rendered Yoetz
+Codex hook carrier: no Yoetz plugin directory, `.agents` carrier, or hook manifest was present in
+the isolated project or Codex home. The absent subagent activity is therefore permanent for the
+records emitted by this stream; it does not establish that Codex `0.150.1` native hook delivery
+is unsupported. Keep that native hook capability evidence-gated until a carrier-enabled cell
+delivers and reconciles the hook events.
+The bounded drain retained `mapping_missing` delivery rows because no host session mapping was
+delivered. It must not mint `host_observed` or reinterpret this absence as
+`missing_subagent_identity`; the latter applies only when a subagent activity event exists without
+an identity. Keep these observation and delivery gaps separate from the successful source-artifact
+and native-ceremony proof. Repeat the cell only with a fresh isolated root and replace this digest
+when a later final artifact is reviewed.
+
+A separate carrier-only preparation cell then used the same reviewed wheel in a fresh owner-private
+project and Codex home. The supported sequence was `yoetz setup run --accept`, followed by the
+exact `codex-plugin-activation` recommendation preview and acceptance. It rendered the managed
+`.agents/plugins/yoetz` source, wrote the repository-local marketplace and enabled
+`[plugins."yoetz@yoetz"]`, and seeded the host-specific versioned cache with the rendered hook
+manifest. Codex `0.150.1`'s `plugin list --marketplace yoetz --json` reported one installed and
+enabled `yoetz@yoetz` plugin with a local repository source, and Yoetz plugin status reported
+`active` (activation preview digest `sha256:537587407abd0634d84c7f12a299eedca9256296559dbcb4868ad6af54bfee82`,
+plugin source/install digest `sha256:dbefae99b081dfa24a6844c7a8e6fa74b891b79eb13fd2b0d00dabb8c6d6d7fa`).
+The same selected home reported one enabled `yoetz` stdio MCP entry using the strict
+`mcp serve --semantic off` route, so the carrier and the owned MCP route were present together.
+The truthful carrier label for this cell is **native project marketplace**; it is not a Claude
+development directory. This proves configured activation and host inventory only: no new Codex
+agent session was started, and the read-only observation status remained `codex_hook=false` with
+no hook events. A fresh final-wheel native session must still prove that the active host process
+loads these hooks and delivers reconcilable activity.
 
 The rendered `SessionStart`, `UserPromptSubmit`, tool, and turn-boundary commands bind
 `--workspace .`. Codex's hooks contract (re-read 2026-09-03) gives every hook the session `cwd` and
