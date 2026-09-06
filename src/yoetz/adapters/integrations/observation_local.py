@@ -145,6 +145,12 @@ _MAX_RUNTIME_GATE_BYTES: Final = 256
 # A legacy runtime-gate marker has no persisted nonce.  It remains readable,
 # but it can never be confused with a nonce emitted by the current writer.
 _LEGACY_RUNTIME_GATE_GENERATION: Final = "sha256:" + "0" * 64
+_PAIRING_PROVENANCE_SCHEMAS: Final = (
+    "yoetz.observation-local/11",
+    "yoetz.observation-local/12",
+    "yoetz.observation-local/13",
+)
+_RETENTION_PROVENANCE_SCHEMAS: Final = _PAIRING_PROVENANCE_SCHEMAS
 # Never a legal character in an event-kind token. An interim build stamped
 # hook timing after the kind as ``<kind>|<...>``; the reader below still trims
 # it so such a value can never be mistaken for an event kind.
@@ -5114,7 +5120,7 @@ class LocalObservationStore:
         # truncation gap is the only durable indication that older envelope
         # history may have been evicted, so preserve that uncertainty when
         # deciding whether a historical pairing diagnostic can be retired.
-        if not envelopes_truncated and raw.get("schema") != "yoetz.observation-local/11":
+        if not envelopes_truncated and raw.get("schema") not in _RETENTION_PROVENANCE_SCHEMAS:
             envelopes_truncated = ObservationGapCode.TRUNCATED_PAYLOAD.value in gap_history
         unsupported_raw = raw.get("unsupported_events") or ()
         advice_raw = raw.get("advice_snapshot")
@@ -5272,9 +5278,10 @@ class LocalObservationStore:
         raw_pairing_state_unknown = raw.get("pairing_state_unknown")
         # A pre-/11 writer can read a /11 file and save it again while dropping
         # the scoped orphan set. Missing or malformed provenance is therefore
-        # incomplete history, even when the file claims /11.
+        # incomplete history, even when the file claims a provenance-aware
+        # schema.
         pairing_state_unknown = not (
-            raw.get("schema") == "yoetz.observation-local/11"
+            raw.get("schema") in _PAIRING_PROVENANCE_SCHEMAS
             and type(raw_pairing_state_unknown) is bool
             and raw_pairing_state_unknown is False
         )

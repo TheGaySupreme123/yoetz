@@ -34,10 +34,12 @@ yoetz observe content-disable --workspace /exact/project \
   --profile claude-code-ordinary-observation-v1
 ```
 
-Status keeps the configured profiles separate from effective capture. A configured profile is the
-profile you selected; it is effective only while observation consent is active and the local runtime
-gate is enabled. Pausing observation or disabling the runtime gate preserves the configured choice
-but makes effective capture empty. Disabling a profile removes that configured choice.
+Status keeps configured profiles separate from locally effective capture. A configured profile is the
+profile you selected; local status lists it as effective only while observation consent is active and
+the local runtime gate is enabled. Retaining plaintext additionally requires that exact profile in
+the mapped task's consent grant. Local status does not establish that task-level permission; without
+it, ingress drops content chunks. Pausing observation or disabling the runtime gate preserves the
+configured choice but empties locally effective capture. Disabling a profile removes that choice.
 
 Native content capture and semantic review have separate authority. Enabling a host profile does not
 authorize external review, choose a provider, or permit any content to leave the computer. Semantic
