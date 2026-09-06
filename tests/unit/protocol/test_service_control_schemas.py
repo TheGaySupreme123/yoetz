@@ -558,6 +558,77 @@ def test_v24_updates_only_publish_provenance_and_privacy_policy_contracts() -> N
         assert (_ROOT / filename).read_bytes() == _PACKAGE_ROOT.joinpath(filename).read_bytes()
 
 
+def test_v25_control_check_uses_current_request_wire_and_coordination_pack() -> None:
+    """The current control envelope must carry the current check operation schema."""
+
+    def operation_refs(filename: str) -> set[str]:
+        document = cast(dict[str, Any], strict_json_parse((_ROOT / filename).read_bytes()))
+        references: set[str] = set()
+
+        def collect_refs(value: object) -> None:
+            if isinstance(value, dict):
+                mapping = cast(dict[str, object], value)
+                reference = mapping.get("$ref")
+                if isinstance(reference, str) and "/operations/" in reference:
+                    references.add(reference.rsplit("/", 1)[-1])
+                for member in mapping.values():
+                    collect_refs(member)
+            elif isinstance(value, list):
+                for member in cast(list[object], value):
+                    collect_refs(member)
+
+        collect_refs(document)
+        return references
+
+    assert operation_refs("control-request-2.5.0.schema.json") == {
+        "check-request-1.1.0.schema.json",
+        "publish-work-request-1.2.0.schema.json",
+        "receipt-request-1.0.0.schema.json",
+        "respond-request-1.0.0.schema.json",
+        "start-request-1.1.0.schema.json",
+        "status-request-1.2.0.schema.json",
+    }
+    assert operation_refs("control-result-2.5.0.schema.json") == {
+        "check-result-1.2.0.schema.json",
+        "publish-work-result-1.0.0.schema.json",
+        "receipt-result-1.2.0.schema.json",
+        "respond-result-1.0.0.schema.json",
+        "start-result-1.1.0.schema.json",
+        "status-result-1.3.0.schema.json",
+    }
+
+    request: JsonValue = cast(
+        JsonValue,
+        {
+            "kind": "call",
+            "protocol_version": "1.0",
+            "rpc_id": _RPC_ID,
+            "service_instance_id": _INSTANCE_ID,
+            "service_generation": "1",
+            "method": "check",
+            "body": {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _REQUEST_ID,
+                "session_id": "ses_00000000-0000-4000-8000-000000000004",
+                "writer_id": "wri_00000000-0000-4000-8000-000000000005",
+                "expected_frontier": {"sequence": "0", "head_digest": "genesis"},
+                "mode": "deterministic_only",
+                "policy_packs": ["coordination/0.1.0"],
+                "actor": {"actor_id": "harness:test", "actor_type": "harness"},
+                "client": {
+                    "kind": "test_client",
+                    "version": "0.3.0",
+                    "integration": "cooperative_mcp",
+                },
+            },
+        },
+    )
+    validate_schema_instance("control-request", "2.5.0", request)
+    with pytest.raises(ProtocolValueError):
+        validate_schema_instance("control-request", "2.4.0", request)
+
+
 def test_control_request_and_result_unions_are_exact_and_disjoint() -> None:
     request_schema = _schema("control-request")
     result_schema = _schema("control-result")

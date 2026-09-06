@@ -113,6 +113,7 @@ async def multi_agent_service(
         )
         vault: VaultService | None = None
         app: Application | None = None
+        service: MultiAgentService | None = None
         try:
             await lifecycle.acquire_singleton()
             await lifecycle.transition(ServiceState.LOCKED)
@@ -140,10 +141,16 @@ async def multi_agent_service(
                 diagnostics=_Diagnostics(),
             )
             app = await factory(1, vault.generation)
-            yield MultiAgentService(app, clock, vault, lifecycle, root)
+            service = MultiAgentService(app, clock, vault, lifecycle, root)
+            yield service
         finally:
-            if app is not None:
-                await app.close()
+            # Tests may replace ``service.app`` while exercising a relock/reopen.  Close the
+            # current yielded application so its runtime entries (and importer writer threads)
+            # cannot outlive the private installation; retain the captured app as the setup-failure
+            # fallback before the service wrapper exists.
+            current_app = service.app if service is not None else app
+            if current_app is not None:
+                await current_app.close()
             if vault is not None:
                 await vault.close()
             memory.close()

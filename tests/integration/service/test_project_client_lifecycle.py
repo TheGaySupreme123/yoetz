@@ -333,6 +333,33 @@ async def test_project_lifecycle_uses_real_ready_client_and_exact_grant_retries(
                 cast(AuthenticatedUnixStream, client_stream_b), session_b, ControlClientKind.CLI
             )
 
+            checked = await client.check(
+                CheckRequest.model_validate(
+                    {
+                        "protocol_version": "0.1",
+                        "schema_version": "1.0.0",
+                        "request_id": new_id(IdKind.REQUEST),
+                        "actor": {
+                            "actor_id": "harness:project-client",
+                            "actor_type": "harness",
+                        },
+                        "client": {
+                            "kind": "cooperative_agent",
+                            "version": "0.3.0",
+                            "integration": "cooperative_mcp",
+                        },
+                        "session_id": first.session_id,
+                        "writer_id": first.writer_id,
+                        "expected_frontier": first.frontier.model_dump(mode="json"),
+                        "mode": "deterministic_only",
+                        "policy_packs": ["coordination/0.1.0"],
+                    }
+                )
+            )
+            assert checked.root.ok is True
+            assert checked.root.state == "complete"
+            assert checked.root.versions.policy_packs == ("coordination/0.1.0",)
+
             created = await client.project(
                 JsonObject(
                     {

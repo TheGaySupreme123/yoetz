@@ -3509,6 +3509,8 @@ def _control_v2_5_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         + "operations/start-result-1.1.0.schema.json",
         SCHEMA_NAMESPACE + "operations/publish-work-request-1.1.0.schema.json": SCHEMA_NAMESPACE
         + "operations/publish-work-request-1.2.0.schema.json",
+        SCHEMA_NAMESPACE + "operations/check-request-1.0.0.schema.json": SCHEMA_NAMESPACE
+        + "operations/check-request-1.1.0.schema.json",
         SCHEMA_NAMESPACE + "operations/check-result-1.1.0.schema.json": SCHEMA_NAMESPACE
         + "operations/check-result-1.2.0.schema.json",
         SCHEMA_NAMESPACE + "operations/status-request-1.1.0.schema.json": SCHEMA_NAMESPACE

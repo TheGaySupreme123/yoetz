@@ -221,6 +221,7 @@ class _Application:
         self.publish_response_store_error: PublicOperationError | None = None
         self.privacy_setup_contexts: list[RepositoryPrivacyContext | None] = []
         self.observation_requests: list[JsonObject] = []
+        self.check_requests: list[CheckRequest] = []
 
     async def start(
         self,
@@ -256,6 +257,7 @@ class _Application:
     ) -> JsonObject:
         del route_profile, repository_privacy_context
         assert isinstance(request, CheckRequest)
+        self.check_requests.append(request)
         await asyncio.sleep(0)
         # Unprojected stand-in only. Projection is forced to fail in the dedicated correlation
         # tests before any public CheckResult is required.
@@ -1387,6 +1389,38 @@ async def test_connected_control_session_carries_trusted_presentation_to_daemon_
         assert application.projections == [expected_context]
         assert resolve_client_disclosure_sink(expected_context) is expected_sink
     finally:
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_connected_service_client_accepts_coordination_check_pack() -> None:
+    """A current coordination check survives the real client and control-wire path."""
+
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    client_stream, server_stream = _connected_control_pair()
+    server_task = asyncio.create_task(daemon._serve_control_connection(server_stream))  # pyright: ignore[reportPrivateUsage]
+    service_client = None
+    try:
+        session = await client_handshake(client_stream, ControlClientKind.CLI, "0.3.0")
+        service_client = _connected_client(  # pyright: ignore[reportPrivateUsage]
+            client_stream,  # pyright: ignore[reportArgumentType]
+            session,
+            ControlClientKind.CLI,
+        )
+        application.projection_error = RuntimeError("test_projection_failure")
+        request = _check_body().model_copy(update={"policy_packs": ("coordination/0.1.0",)})
+
+        with pytest.raises(ControlError) as caught:
+            await service_client.check(request, deadline_ms=3_000)
+
+        assert caught.value.reason == "response_projection_failed"
+        assert application.check_requests == [request]
+    finally:
+        if service_client is not None:
+            await service_client.close()
         server_task.cancel()
         await asyncio.gather(server_task, return_exceptions=True)
         await daemon.close()
