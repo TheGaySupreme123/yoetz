@@ -365,6 +365,16 @@ def test_longest_disclosure_fits_the_reviewed_instructions_budgets() -> None:
     assert SERVER_INSTRUCTIONS_BUDGET["max_encoded_bytes"] == (
         SERVER_INSTRUCTIONS_BUDGET["packaged_max_encoded_bytes"] + MAX_DISCLOSURE_ENCODED_BYTES
     )
+    # The aggregate allowance is charged once per advertised descriptor, read_guidance included,
+    # which is exactly what advertised_surface_metrics replicates.
+    assert ADVERTISED_SURFACE_BUDGET["max_encoded_bytes"] == (
+        ADVERTISED_SURFACE_BUDGET["packaged_max_encoded_bytes"]
+        + packaged["tool_count"] * MAX_DISCLOSURE_ENCODED_BYTES
+    )
+    joiner = 1  # the single space that joins the disclosure to the policy tail
+    assert metrics["replicated_encoded_bytes"] - packaged["replicated_encoded_bytes"] == (
+        packaged["tool_count"] * (len(longest.sentence.encode("utf-8")) + joiner)
+    )
 
 
 def test_policy_instructions_append_the_disclosure_and_strict_ignores_it() -> None:
