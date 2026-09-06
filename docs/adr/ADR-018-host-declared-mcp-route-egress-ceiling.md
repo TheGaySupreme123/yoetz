@@ -57,7 +57,9 @@ semantic review would be dishonest.
 
 6. **Initialize and versions status disclose the active profile.** Initialize instructions name
    `policy` or `strict` and state the corresponding bounded promise. MCP-originated
-   `status(view=versions)` includes the same route profile.
+   `status(view=versions)` includes the same route profile. On the policy route the instructions
+   also name the configured semantic review destination and payload bound, read once at bridge
+   startup (destination-disclosure amendment below, issue #479).
 
 7. **Registration binds the exact command.** A host registration preview includes the exact argv,
    route profile, and digest. Zero-egress setup registers Codex with
@@ -171,3 +173,46 @@ authority, privacy authorization, nor Codex child launch, and reports the existi
 `blocked_by_policy/route_semantic_ceiling` pair. A policy route merely permits the ordinary privacy
 decision path; it does not imply ChatGPT login, model entitlement, repository approval, or a live
 semantic attempt.
+
+## Destination-disclosure amendment (2026-09-06, issue #479)
+
+The #467 amendment made the owner's host admission the lever that admits the policy-route
+`check`; it left the initialize `instructions` saying only that external semantic review
+"follows the configured policy". A reviewer that reads descriptions — Codex copies the
+instructions into every tool description — therefore scored the call from no named destination,
+and a repository without admission had nothing better to show it. Decision 6 is extended: on the
+policy route the bridge appends one bounded passage, rendered by `mcp/semantic_destination.py`
+from the configuration it reads once at startup, that names the destination the route would
+dispatch to and the payload bound.
+
+What the passage may contain is closed. The endpoint profile id and provider id are echoed only
+when they are bundled catalog tokens (`BUNDLED_ENDPOINT_HOSTS`, `DISCLOSABLE_PROVIDER_IDS`); the
+host is the catalog's host for that endpoint profile, which a unit test locks to the adapter that
+dials it, or — for the owner-declared Responses profile — the hostname and port that already
+passed the HTTPS-origin validator, never the origin string itself. The Codex subscription runtime
+is named as a runtime class under its own ChatGPT login, and the passage states that Yoetz does not
+name that runtime's upstream host. A provider id outside the allowlist renders as *unlisted*; an
+endpoint profile outside the catalog renders as an *unknown* host; absent, unreadable, or invalid
+configuration renders as *unknown*, never as a guess; `verification.semantic = "disabled"`, a
+strict-local or test-fake profile, and a local-model-only binding render as *none* with the
+reason. A `[semantic_fallback]` pairing discloses the fallback endpoint beside the primary, because
+a reviewer told that only the primary can receive data would be misled. No secret, filesystem path,
+URL, query string, model name, repository handle, or free-form configuration prose can reach the
+text; the value is typed (`SemanticDestinationDisclosure`) so no caller can pass a string.
+
+Staleness is handled by disclosure, not detection. The bridge process has one immutable route
+(decision 1) and reads configuration once, so the passage is stamped "read once at bridge
+startup" and a later route change is reflected only when the host restarts the bridge. The live
+authority for what a given check did remains that check's recorded `semantic_status`, provider
+attempt, and receipt. Strict instructions are byte-identical to before this amendment whatever the
+configuration says, and annotations are unchanged (decision 5 stands).
+
+The passage is disclosure, not authority. It does not admit the call — Codex's guardian policy
+still requires trusted user content, Cursor's classifier inputs are undocumented, and Claude Code
+auto mode separates permissions from classifier context — and it does not widen privacy policy,
+prove a dispatch, or replace the privacy ceremony that authorized the destination. Because the
+packaged `agent-instructions.md` already sat within a few hundred bytes of the #300 instructions
+budget, `SERVER_INSTRUCTIONS_BUDGET` and `ADVERTISED_SURFACE_BUDGET` now carry two numbers each:
+the unchanged bound on the packaged text, and that bound plus the disclosure ceiling
+(`MAX_DISCLOSURE_ENCODED_BYTES`, charged once per advertised tool in the aggregate), which the
+longest admissible passage is tested against.

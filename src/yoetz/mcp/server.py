@@ -56,6 +56,10 @@ from yoetz.mcp.resources import (
 from yoetz.mcp.resources import (
     read_resource as read_guidance_resource,
 )
+from yoetz.mcp.semantic_destination import (
+    SemanticDestinationDisclosure,
+    read_semantic_destination_disclosure,
+)
 from yoetz.mcp.summaries import render_safe_compact_summary
 from yoetz.observability.logging import (
     LogMode,
@@ -310,6 +314,7 @@ def build_bridge_runtime(
     *,
     host_profile: McpHostProfile = "generic",
     workspace_locator: WorkspaceLocator | None = None,
+    semantic_destination: SemanticDestinationDisclosure | None = None,
 ) -> BridgeRuntime:
     """Verify every agent-readable byte and construct an unconnected bridge runtime.
 
@@ -318,14 +323,29 @@ def build_bridge_runtime(
     may start from the user's home directory. ``workspace_locator`` is an internal injection point
     for an already trusted host binding and for transport tests; it is never read from a public
     workflow request.
+
+    On the policy route the initialize instructions name the configured semantic review
+    destination (issue #479). The bridge reads its configuration once here, at startup, through
+    the same tolerant loader the logging sink uses; an unreadable configuration renders as an
+    unknown destination rather than blocking serving. ``semantic_destination`` is an internal
+    injection point for tests; the strict route never reads configuration and ignores it.
     """
 
     if route_profile not in TOOL_DESCRIPTORS:
         raise ValueError("mcp_route_profile_invalid")
     if host_profile not in {"generic", "codex", "claude", "cursor"}:
         raise ValueError("mcp_host_profile_invalid")
+    if semantic_destination is not None and (
+        type(semantic_destination) is not SemanticDestinationDisclosure
+    ):
+        raise TypeError("semantic_destination_wrong_type")
     resources = list_guidance_resources()
-    instructions = server_instructions(route_profile)
+    if route_profile == "policy" and semantic_destination is None:
+        semantic_destination = read_semantic_destination_disclosure()
+    instructions = server_instructions(
+        route_profile,
+        semantic_destination=semantic_destination if route_profile == "policy" else None,
+    )
     if not instructions:
         raise RuntimeError("mcp_instructions_empty")
     # Accessing every schema verifies its checked-in public identity before serving.

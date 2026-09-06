@@ -186,7 +186,9 @@ a security boundary" (`cursor.com/docs/agent/security/run-modes`, `/reference/pe
 `/cli/reference/permissions`, re-read 2026-08-30). The levers are `mcpAllowlist` (`server:tool`,
 case-insensitive, `~/.cursor/permissions.json` and `<workspace>/.cursor/permissions.json`
 concatenate; no deny list exists) and the Agent CLI's `permissions.allow` `Mcp(server:tool)` in
-`<project>/.cursor/cli.json` (deny wins over allow).
+`<project>/.cursor/cli.json` (deny wins over allow). Cursor does not document whether the
+classifier sees MCP initialize `instructions`, so the policy-route destination disclosure (issue
+#479) is not relied on on this host; `mcpAllowlist` remains the lever.
 
 Host admission (issue #467) writes both project-scoped entries for exactly `check`:
 

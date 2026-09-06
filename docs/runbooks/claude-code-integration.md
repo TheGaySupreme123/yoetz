@@ -435,6 +435,12 @@ can show a held check as host authorization, never as a semantic status. Yoetz d
 ships no `PermissionRequest` hook returning `decision: allow`, which would make the plugin the
 authority over the host's own review.
 
+Claude Code surfaces MCP initialize `instructions` as server instructions in the model's context.
+Whether the auto-mode classifier reads them is not documented, so the policy-route destination
+disclosure (issue #479: provider, endpoint profile, and host, or the Codex runtime class, plus the
+payload bound, read once at bridge startup) is informational on this host; it is not relied on for
+admission, which stays with `permissions.allow`.
+
 ## Update
 
 A released plugin byte change requires a new generated manifest version. Preview `--action update`,
