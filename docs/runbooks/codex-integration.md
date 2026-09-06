@@ -374,7 +374,9 @@ denial in either phase, or the `PostToolUse` of `start`, `publish_work`, `check`
 and keeps the pre-event of every Yoetz call and the post-event of a non-failed `status`, `receipt`,
 or `read_guidance` in the bounded local store only. Yoetz tool input/output is never captured as
 content. The same policy applies to the legacy spool replay and to the Codex session stream, so
-neither path reintroduces the rows. Ordinary tools are unchanged. To confirm closure converged,
+neither path reintroduces the rows. The shared host-spelling advice guard also suppresses pending
+frontier or recommendation delivery on a Yoetz-owned hook, while explicit self-call failures stay
+retained and enqueued. Ordinary tools are unchanged. To confirm closure converged,
 run `yoetz observe drain --workspace . --json` after the agent stops and require
 `terminal: drained` with `pending_after: 0`; `retry_pending` names the retryable head cause in
 `reasons` (a check barrier's `operation_pending` clears when the check completes), and

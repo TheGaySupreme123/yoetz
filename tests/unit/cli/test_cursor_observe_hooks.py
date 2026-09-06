@@ -705,6 +705,16 @@ def test_cursor_advice_delivery_stays_pending_until_session_start(
             {"tool_name": "MCP:fixture_echo", "result_json": "fixture result"},
             False,
         ),
+        (
+            "postToolUse",
+            {"tool_name": "yoetz:publish_work", "tool_output": "{}"},
+            False,
+        ),
+        (
+            "postToolUse",
+            {"tool_name": "plugin-yoetz-yoetz:publish_work", "tool_output": "{}"},
+            False,
+        ),
     ],
 )
 def test_cursor_ordinary_advice_delivery_matches_native_output_channels(

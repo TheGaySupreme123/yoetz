@@ -394,6 +394,45 @@ def test_post_tool_hook_delivers_pending_frontier_motion_once(tmp_path: Path) ->
     assert "observation writer appended 2 ledger record(s)" in advanced_context
 
 
+@pytest.mark.parametrize("tool_name", ["start", "mcp__yoetz__publish_work"])
+def test_codex_owned_tool_does_not_lease_frontier_advice(tmp_path: Path, tool_name: str) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = "codex:self-advice"
+    store.bind_codex_session(workspace, session)
+    store.note_frontier_motion(
+        workspace,
+        session,
+        from_sequence=1,
+        to_sequence=2,
+        head_digest="sha256:" + "5" * 64,
+        observation_record_count=1,
+        task_id="tsk-codex-self-advice",
+    )
+    stdout = io.BytesIO()
+
+    assert (
+        handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=json.dumps(
+                {
+                    "session_id": session,
+                    "tool_name": tool_name,
+                    "exit_status": 0,
+                }
+            ).encode(),
+            stdout=stdout,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    assert stdout.getvalue() == b"{}\n"
+    assert store.peek_frontier_motion(workspace, session) is not None
+
+
 def test_stdout_teardown_failure_exits_zero_and_records_diagnostic(tmp_path: Path) -> None:
     class _ClosedStdout(io.BytesIO):
         def write(self, data: object) -> int:

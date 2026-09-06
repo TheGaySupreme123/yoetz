@@ -162,6 +162,13 @@ clause an `EVENT_INVALID` set-order rejection arrives as a bare code. The native
 repeats the exact canonical JSON wire body in text `content`, which already includes those
 `safe_details`; tests lock both projections.
 
+For `claim_revision_mismatch`, the generic text projection additionally carries `Invariant:` and
+`Correction:` clauses when the message exactly matches the checked-in domain error shape and its
+registered invariant and field agree with `safe_details`. The clauses are generated from a closed
+MCP registry; the projector never echoes the public error message or infers an invariant from a
+field alone. A changed or unrecognized message therefore retains only the bounded `Reason:`
+clause, and this text-only repair does not add a wire field.
+
 Every MCP result also carries a bounded ASCII text projection (at most 512 bytes) for hosts that
 drop `structuredContent`. A successful projection includes the first valid returned frontier's
 `sequence` and canonical `head_digest` when both are present. Generic successful operations also
@@ -3554,7 +3561,10 @@ host failure or denial in either phase, or the post-event of `start`, `publish_w
 `receipt`, or `read_guidance` stay local, and Yoetz-owned tool input/output is never captured as
 content. Local pairing is unaffected, so a delivered post-event carries no `unpaired_event` gap and
 the service materializes its action from the post alone. No coverage gap is recorded: the service
-already holds the authoritative record of every Yoetz-owned call it served.
+already holds the authoritative record of every Yoetz-owned call it served. The same complete
+host-spelling set gates advice delivery, so a Yoetz-owned hook does not lease pending frontier or
+recommendation context for the call that is being observed. This advice guard does not change
+local retention or the delivery of explicit self-call failures.
 
 The local observation state also owns a sparse, one-shot `FrontierMotionNotice` per Codex session:
 `from_sequence`, `to_sequence`, final `head_digest`, and exact accepted observation-record count.

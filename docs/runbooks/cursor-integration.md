@@ -49,6 +49,10 @@ its native plugin projection: when `YOETZ_ISOLATED_ROOT` is set, the exact valid
 rendered into the plugin-managed `mcp.json` environment and every native hook command, and is
 bound by that artifact's preview and marker digests. Cursor uses its own
 `isolation_binding` status field; it does not consume the Codex `mcp add --env` path.
+The status comparison selects the hook set from the installed profile: ordinary artifacts use
+`postToolUse`, `postToolUseFailure`, and `preToolUse` alongside lifecycle hooks, while structural
+artifacts use `afterFileEdit` and `afterMCPExecution`. An exact MCP binding alone is insufficient;
+a root drift in any expected hook surface reports `isolation_binding: different`.
 
 ```text
 yoetz integrate cursor plugin preview \
@@ -525,7 +529,10 @@ is repaired by restarting a service that already reports ready.
 not enqueued for delivery, while `start`, `publish_work`, `check`, and `respond` enqueue one row
 each. Cursor's hook payload states no outcome fact for MCP executions, so a failed Yoetz call is
 indistinguishable from a successful one at this ingress; the service's own record of the call is
-the authority on its outcome. Cursor reports `duration` as a finite decimal number of milliseconds
+the authority on its outcome. The shared advice guard recognizes both Cursor server spellings, so
+a self-owned hook does not lease pending frontier or recommendation context for the call being
+observed; this does not change local retention or explicit failure delivery. Cursor reports
+`duration` as a finite decimal number of milliseconds
 for MCP executions, while the canonical structural field is the bounded integer `duration_ms`.
 Cursor ingress truncates that vendor value to whole milliseconds before structural filtering; the canonical parser
 continues to reject floats on every ledger and non-Cursor host surface. Decimal values in discarded

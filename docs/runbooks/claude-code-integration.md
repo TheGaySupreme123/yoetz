@@ -391,7 +391,9 @@ or `_respond` enqueues one row; every `PostToolUseFailure` enqueues one row. Cla
 `PreToolUse` on this profile, so its reviewed pairing contract is post-only and there is no
 pre-event to hold back. Its `tool_use_id`, when present, identifies the observed result; no
 missing-pre gap is created for a legacy post-only hook. The `PostToolUse` advice
-channel is unchanged by this policy; only outbox delivery is governed. The manual
+guard recognizes Claude's plugin spelling together with the other host spellings, so a self-owned
+hook does not lease pending frontier or recommendation context for the call being observed.
+Explicit self-call failures remain retained and enqueued. The manual
 `yoetz observe drain --json` reports `terminal: drained` once nothing is pending.
 
 Grant observation separately for the exact project. Exercise every advertised event and inspect

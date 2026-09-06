@@ -32,7 +32,6 @@ from yoetz.adapters.integrations.hook_spool import HookSpool
 from yoetz.adapters.integrations.observation_local import (
     HOOK_MAPPING_VERSION,
     YOETZ_OWNED_TOOL_NAMES,
-    YOETZ_TOOL_NAMES,
     AdviceDelivery,
     FrontierMotionNotice,
     LocalObservationConsent,
@@ -2590,7 +2589,13 @@ def handle_observe(
                 gap_codes.append(ObservationGapCode.UNSUPPORTED_EVENT.value)
 
             tool_name = _token_or_none(payload.get("tool_name"))
-            skip_advice_loop = tool_name is not None and tool_name in YOETZ_TOOL_NAMES
+            # Every host spelling of a Yoetz-owned call must suppress the shared
+            # advice loop.  The older Codex-only set missed Claude's plugin
+            # scope and Cursor's server-qualified names, so those hosts could
+            # receive frontier advice from the hook observing the same call.
+            # This affects only advice delivery; explicit self-call failures
+            # still follow ``self_observation_deliverable`` and remain queued.
+            skip_advice_loop = tool_name is not None and tool_name in YOETZ_OWNED_TOOL_NAMES
 
             supplied_ordinal = _event_ordinal_from_payload(payload)
             event_ordinal = (
