@@ -2687,7 +2687,10 @@ endpoint bindings, initial readiness, retry budgets, and cutoffs. `endpoint_role
 the endpoint from this frozen plan and durable prior rows, so changed configuration cannot relabel
 an attempt on replay. Legacy terminal cases recover their stored result; a legacy pending case
 without frozen execution authority terminates without dispatch: `coordinator_failure` before
-dispatch or during a disclosure wait. An uncertain started attempt retains `outcome_unknown`
+dispatch or during a disclosure wait. A task-local `awaiting` row can lag the independent privacy
+audit and does not prove an expired started attempt was never admitted. Deadline recovery keeps
+that attempt `outcome_unknown` without re-entering authorization, retry, or fallback; a new,
+unattempted job still reports `provider_timeout` (issue #625). An uncertain started attempt retains `outcome_unknown`
 in its durable row; without reconstructable provider provenance its public gap is
 `receipt_persistence_unknown`. Each
 fallback attempt is a fresh physical attempt with its own authorization, dispatch id, credential
