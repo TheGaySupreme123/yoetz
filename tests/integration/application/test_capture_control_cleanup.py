@@ -34,6 +34,7 @@ from yoetz.domain.observation import (
     ObservationContentKind,
     ObservationIngestDisposition,
     ObservationIngestRequest,
+    ObservationRevokeCommand,
     ObservationSource,
 )
 from yoetz.domain.observation_profiles import CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
@@ -124,6 +125,84 @@ async def test_disabled_runtime_sweeper_revokes_native_ticket_before_successor_f
         _ZERO_DIGEST,
     )
     assert isinstance(frozen, FrozenCase)
+
+
+@pytest.mark.anyio
+async def test_global_disable_retires_profileless_codex_ticket_idempotently(
+    tmp_path: Path,
+) -> None:
+    codex_session = "codex-disabled-ticket"
+    (
+        _project,
+        workspace,
+        session_commitment,
+        local,
+        observation,
+        _ledger,
+        _runtime,
+        coordinator,
+        _client,
+        _connect,
+    ) = await _pipeline(tmp_path, codex_session_id=codex_session, profile=None)
+    envelope = map_hook_payload_to_envelope(
+        "PostToolUse",
+        {"tool_name": "shell", "tool_call_id": "disabled-ticket-tool"},
+        session_commitment=session_commitment,
+        event_ordinal=1,
+        key_material=local.key_material(),
+        source=ObservationSource.CODEX_HOOK,
+    )
+    capture = ObservationIngestRequest(
+        codex_session_id=codex_session,
+        envelope=envelope,
+        content_chunks=(
+            ObservationContentChunk(
+                content_kind=ObservationContentKind.TOOL_OUTPUT,
+                correlation_identity=f"{envelope.source_identity}:tool-output",
+                source_commitment=envelope.cursor.last_source_commitment,
+                media_type="text/plain",
+                part_index=0,
+                part_count=1,
+                content=b"disabled-codex-ticket-marker",
+            ),
+        ),
+        capture_only=True,
+    )
+    staged = await coordinator.ingest_request(capture)
+    assert staged.reason == OBSERVATION_CONTENT_CAPTURE_PENDING_REASON
+    logical_identity = observation_content_identity(envelope)
+    pending = observation.load_capture_ticket(
+        workspace=workspace, logical_identity=logical_identity
+    )
+    assert pending is not None and pending.state == "pending"
+    assert pending.object_ids
+
+    structural = ObservationIngestRequest(codex_session_id=codex_session, envelope=envelope)
+    coordinator.observation_enabled = False
+    for _ in range(2):
+        rejected = await coordinator.ingest_request(structural)
+        assert rejected.reason == "observation_disabled"
+        retired = observation.load_capture_ticket(
+            workspace=workspace,
+            logical_identity=logical_identity,
+        )
+        assert retired is not None and retired.state == "revoked"
+        assert retired.object_ids == pending.object_ids
+
+    # A later generation cannot resurrect the retired handoff.
+    local.revoke(ObservationRevokeCommand(workspace))
+    local.grant_consent(workspace)
+    coordinator.observation_enabled = True
+    resumed = await coordinator.ingest_request(structural)
+    # Structural history may still be recorded under the new grant, but the old
+    # content must not follow it into the ledger.
+    assert resumed.disposition is ObservationIngestDisposition.ACCEPTED
+    recorded = observation.list_envelopes(workspace)
+    assert recorded and all(not item.content_object_refs for item in recorded)
+    retired = observation.load_capture_ticket(
+        workspace=workspace, logical_identity=logical_identity
+    )
+    assert retired is not None and retired.state == "revoked"
 
 
 @pytest.mark.anyio

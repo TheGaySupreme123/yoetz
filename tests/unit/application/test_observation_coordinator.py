@@ -2309,7 +2309,9 @@ async def test_storage_corrupt_blocks_session_for_coordinator_generation(tmp_pat
 
 
 @pytest.mark.anyio
-async def test_coordinator_rejects_disabled_before_mapping_or_runtime(tmp_path: Path) -> None:
+async def test_coordinator_rejects_disabled_stream_before_mapping_or_runtime(
+    tmp_path: Path,
+) -> None:
     class _NoRuntime:
         async def route(self, command: object) -> object:
             raise AssertionError("disabled observation must not route")
@@ -2340,7 +2342,9 @@ async def test_coordinator_rejects_disabled_before_mapping_or_runtime(tmp_path: 
     result = await coordinator.ingest_request(
         ObservationIngestRequest(
             codex_session_id="disabled-sess",
-            envelope=_envelope(session=session),
+            envelope=replace(
+                _envelope(session=session), source=ObservationSource.CODEX_SESSION_STREAM
+            ),
         )
     )
     assert result.disposition is ObservationIngestDisposition.REJECTED
