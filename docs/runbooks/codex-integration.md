@@ -415,6 +415,22 @@ ambiguous, or foreign-workspace session as `mapping_missing` before ingesting it
 left visible as legacy recovery gaps; a filename cannot authorize rebinding or deletion of their
 pending rows.
 
+The repair was installed from source `931acec4`, wheel SHA256
+`1a378d66b71c945a1f2d507f8534f0308265ec7c7fc238f500559539a2956a3a`; all 475 installed package
+files matched the artifact. Two public `observe reconcile` calls over the captured parent rollout
+returned exit `0`, accepted zero new records, and retained event position 39 and generation 1
+without rotation or truncation. The unmapped captured child rollout returned `mapping_missing`.
+Full-row digests confirmed all 62 historical pending rows and the four existing bindings remained
+unchanged. Before/after file digests also confirmed the original capture and mappings were
+unchanged. This installed CLI replay used copied structural state and read-only captured inputs;
+it did not launch another native host or service.
+
+The composed READY regression separately exercises parent session/writer rotation, a late
+`SubagentStop`, service close/reopen, and a subsequent parent `Stop`. Public lineage and advice
+retain the same annotation ID, without a duplicate annotation or changed observation timestamps
+from rebuilding advice. This is service conformance evidence; the native cell above did not emit
+a child-finding outcome.
+
 The rendered `SessionStart`, `UserPromptSubmit`, tool, and turn-boundary commands bind
 `--workspace .`. Codex's hooks contract (re-read 2026-09-03) gives every hook the session `cwd` and
 runs command hooks from that directory, so `.` is the current project/subdirectory and the shared
