@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -20,7 +21,12 @@ from yoetz.adapters.memory.privacy import (
     MemoryPrivacyCatalogState,
     MemoryPrivacyPolicyStore,
 )
-from yoetz.adapters.privacy.catalog import CatalogPrivacyAudit, CatalogPrivacyPolicyStore
+from yoetz.adapters.privacy.catalog import (  # pyright: ignore[reportPrivateUsage]
+    _LOOKUP_DOMAIN,  # pyright: ignore[reportPrivateUsage]
+    CatalogPrivacyAudit,
+    CatalogPrivacyPolicyStore,
+    _mac,  # pyright: ignore[reportPrivateUsage]
+)
 from yoetz.adapters.privacy.local_enforcer import LocalPrivacyEnforcer
 from yoetz.application.egress import (
     PrivacyCoordinator,
@@ -70,6 +76,7 @@ from yoetz.ports.privacy import (
     PolicyOverlay,
     PolicyTransitionMember,
     PolicyTransitionProposal,
+    PrivacyAuditPort,
     PrivacyAuditState,
     PrivacyClassifierPort,
     PrivacyPolicyStorePort,
@@ -951,6 +958,94 @@ def test_catalog_disclosure_attempt_rejects_tampered_lookup_identity() -> None:
             )
 
     asyncio.run(run())
+
+
+@pytest.fixture(params=("memory", "catalog"))
+def disclosure_audit(request: pytest.FixtureRequest) -> PrivacyAuditPort:
+    if request.param == "memory":
+        return MemoryPrivacyAudit(
+            MemoryPrivacyCatalogState(routes={_TASK: _ROUTE_DIGEST}),
+            cast(ObjectStorePort, _StoredObjects()),
+            _Key(),
+            _Clock(),
+        )  # type: ignore[arg-type]
+    db = _database()
+    _insert_task_route(db)
+    return CatalogPrivacyAudit(db, _StoredObjects(), _Key(), _Clock())  # type: ignore[arg-type]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("request_id", "digest", "error"),
+    (
+        (None, _DIGEST, TypeError),
+        (_REQUEST, None, TypeError),
+        (True, _DIGEST, TypeError),
+        (_REQUEST, b"digest", TypeError),
+        ("req_invalid", _DIGEST, ValueError),
+        (_REQUEST.upper(), _DIGEST, ValueError),
+        (_REQUEST, "sha256:bad", ValueError),
+        (_REQUEST, "sha256:" + "A" * 64, ValueError),
+    ),
+)
+async def test_disclosure_lookup_input_contract_matches_across_adapters(
+    disclosure_audit: PrivacyAuditPort,
+    request_id: object,
+    digest: object,
+    error: type[Exception],
+) -> None:
+    with pytest.raises(error, match="privacy_disclosure_attempt_lookup_invalid"):
+        await disclosure_audit.load_disclosure_attempt(cast(str, request_id), cast(str, digest))
+
+
+@pytest.mark.anyio
+async def test_disclosure_lookup_distinguishes_absence_match_and_mismatch(
+    disclosure_audit: PrivacyAuditPort,
+) -> None:
+    assert await disclosure_audit.load_disclosure_attempt(_REQUEST, _DIGEST) is None
+    prepared = await disclosure_audit.prepare_disclosure_proposal(_external_disclosure_request())
+    state = await disclosure_audit.load_disclosure_attempt(_REQUEST, _DIGEST)
+    assert state is not None and state.reservation == prepared.reservation
+    assert await disclosure_audit.load_disclosure_attempt(_REQUEST_2, _DIGEST) is None
+    with pytest.raises(ValueError, match="privacy_audit_attempt_case_mismatch"):
+        await disclosure_audit.load_disclosure_attempt(_REQUEST, "sha256:" + "4" * 64)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mutation", ("absent", "null", "number", "malformed"))
+async def test_authenticated_disclosure_sidecar_requires_a_valid_case_digest(mutation: str) -> None:
+    db = _database()
+    _insert_task_route(db)
+    audit = CatalogPrivacyAudit(db, _StoredObjects(), _Key(), _Clock())  # type: ignore[arg-type]
+    await audit.prepare_disclosure_proposal(_external_disclosure_request())
+    row = db.execute("SELECT subject_structural_canonical FROM privacy_audit_records").fetchone()
+    assert row is not None and isinstance(row[0], bytes)
+    structural = json.loads(row[0])
+    if mutation == "absent":
+        del structural["prepared_case_digest"]
+    else:
+        structural["prepared_case_digest"] = {"null": None, "number": 3, "malformed": "bad"}[
+            mutation
+        ]
+    raw = canonical_encode(structural)
+    # Authenticate the synthetic malformed sidecar, so the test reaches structural
+    # validation rather than passing merely because its MAC is invalid.
+    identity = _mac(_Key(), _LOOKUP_DOMAIN, raw)
+    db.execute(
+        "UPDATE privacy_audit_records SET subject_structural_canonical = ?, subject_lookup_identity = ?",
+        (raw, identity),
+    )
+    with pytest.raises(ValueError, match="privacy_audit_attempt_corrupt"):
+        await audit.load_disclosure_attempt(_REQUEST, _DIGEST)
+
+
+@pytest.mark.anyio
+async def test_disclosure_lookup_storage_failure_is_not_absence() -> None:
+    db = _database()
+    audit = CatalogPrivacyAudit(db, _StoredObjects(), _Key(), _Clock())  # type: ignore[arg-type]
+    db.close()
+    with pytest.raises(apsw.ConnectionClosedError):
+        await audit.load_disclosure_attempt(_REQUEST, _DIGEST)
 
 
 def test_catalog_disclosure_attempt_rejects_multiple_rows_for_request() -> None:

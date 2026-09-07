@@ -1954,6 +1954,10 @@ class CatalogPrivacyAudit:
                     _mac(self._key, _LOOKUP_DOMAIN, structural_bytes), lookup_identity
                 ):
                     raise ValueError("privacy_audit_attempt_corrupt")
+                prepared_case_digest = structural.get("prepared_case_digest")
+                if type(prepared_case_digest) is not str:
+                    raise ValueError("privacy_audit_attempt_corrupt")
+                validate_sha256_digest(prepared_case_digest)
             except (TypeError, ValueError) as exc:
                 raise ValueError("privacy_audit_attempt_corrupt") from exc
             if structural.get("prepared_case_digest") != case_digest:
