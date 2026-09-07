@@ -1834,8 +1834,24 @@ def _source_event_for_ref(case: DeterministicCase, ref: FindingBasisRef) -> Even
         return None
     if ref.startswith("evt_"):
         return event_id(ref)
-    logical_sources = _logical_sources(case.projection)
-    return logical_sources.get(ref)
+    # Each logical family already owns an indexed map. Rebuilding all six maps for
+    # each policy reference makes repeated lookups quadratic in the task size.
+    match ref[:4]:
+        case "obl_":
+            record = case.projection.obligations.get(cast(ObligationId, ref))
+        case "act_":
+            record = case.projection.actions.get(cast(ActionId, ref))
+        case "res_":
+            record = case.projection.results.get(cast(ResultId, ref))
+        case "evd_":
+            record = case.projection.evidence.get(cast(EvidenceId, ref))
+        case "clm_":
+            record = case.projection.claims.get(cast(ClaimId, ref))
+        case "fnd_":
+            record = case.projection.findings.get(cast(FindingId, ref))
+        case _:
+            return None
+    return None if record is None else record.source_event_id
 
 
 def policy_public_root(
