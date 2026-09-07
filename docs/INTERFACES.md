@@ -3230,9 +3230,9 @@ Independent verification support (local control, not MCP):
   bytes, and workspace-diff bytes become `observation_captured` immutable evidence. For the
   source-qualified profileless Codex hook arm, those bytes must be explicitly linked to the hook
   event. Session-stream records are a separate source and are excluded from semantic selection;
-  tool input and path/locator content are also excluded from semantic selection. The current
-  Codex hook path may still stage consented input/locator chunks in the bounded encrypted local
-  capture lane pending a follow-up staging filter. Visible messages, unsupported visible payloads,
+  tool input and path/locator content are also excluded from semantic selection. The Codex hook
+  extractor omits raw tool-input bytes but keeps the encrypted workspace locator needed by local
+  inspection and verification; existing structural evidence remains intact (issue #623). Visible messages, unsupported visible payloads,
   and approved-check output do not enter this capture path. The repository privacy authority and
   each provider attempt authorize semantic selection independently of local encrypted capture.
   Inspection fact/excerpt objects materialize through their own idempotent evidence operation.
@@ -3322,9 +3322,12 @@ admitted host correlation or native source/label identity before they can become
 For `codex_hook`, only explicitly linked tool output, selected changed-file/code bytes, and
 workspace-diff bytes are eligible for semantic selection. Session-stream records remain outside
 this native handoff and are excluded from semantic selection. Tool input and path/locator content
-are excluded from semantic selection too, although the current Codex hook path may still stage
-consented input/locator chunks in the bounded encrypted local capture lane pending a follow-up
-staging filter. Missing or conflicting native binding metadata retains
+are excluded from semantic selection too. The Codex hook extractor omits raw `TOOL_INPUT` bytes
+while retaining structural tool identity and correlation. It keeps the encrypted
+`WORKSPACE_LOCATOR` from SessionStart because the local inspection and verification scheduler
+opens that locator to resolve the workspace and its approved-check policy. Removing it would
+break a supported local consumer. Neither kind becomes semantic content; ordinary Claude/Cursor
+profile contracts remain unchanged (issue #623). Missing or conflicting native binding metadata retains
 `content_capture_unavailable`, including when materialization is called independently of semantic
 review. A terminal structural rejection retires only its exact admitted capture ticket so it
 cannot permanently block later checks; retryable coordination retains that ticket for the next
