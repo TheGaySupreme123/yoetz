@@ -350,6 +350,13 @@ resolve through the same child/parent-tool aliases; an event with no usable chil
 the permanent `missing_subagent_identity` gap and does not also produce an annotation. Parent
 advice and frontier delivery are never redirected to the child.
 
+When a retained child stop reports a finding, `subagent_finding_unaddressed` advice names the
+registry's annotation ID, or the bound child task ID when available. Advice refresh resolves that
+identity through a read-only, parent-scoped lookup; it does not update the annotation's timestamps
+or session ownership. The original observation reference remains attached as evidence. If no
+unambiguous annotation is available, advice retains that observation reference without inventing
+a lineage identity.
+
 Native child tool callbacks can carry the parent's host session ID together with a child
 `agent_id`. A successful delegated `start` preserves the parent mapping: its task result names the
 reserved child, but its session and writer still belong to `parent_task_id`. A successful child
@@ -363,64 +370,50 @@ route; replay cannot change its task owner. `SubagentStart` and
 nor supply missing registry correlation, and they are excluded from parent session recovery and
 parent stream reconciliation.
 
-The installed `codex-cli 0.150.1` matches the current rollout parser cell, but this read-only version
-probe and the native renderer do not prove live subagent delivery, acceptance, or receipt behavior.
-The #509 matrix keeps the native subagent row evidence-gated until an isolated `YOETZ_ISOLATED_ROOT`
-cell exercises hook, stream, replay, and cooperative binding behavior. Parent-minted delegation is
-the supported design path once that cell is proven; host hooks alone never mint a child.
+The isolated native cell below proves the parent-minted path for the reviewed legacy
+`codex-cli 0.150.1` profile. Broader host profiles need their own execution evidence; host hooks
+alone never mint a child.
 
-An intermediate diagnostic legacy native cell used source commit `952bec0e` and the exact
-`yoetz-0.1.0-py3-none-any.whl` (SHA-256
-`30fed12caad1176229bb55ee09b5c7fcb585f9a5cf314a582ecd8d236fb48fde`) in a fresh
-`YOETZ_ISOLATED_ROOT`. Its runtime import and `direct_url.json` matched that wheel. Codex-testing
-`0.150.1` ran with `multi_agent_v2=false` against a loopback Responses provider with no provider
-credential. The supported project-marketplace carrier was active, `features.hooks=true`, and a
-fresh synthetic project completed the host TUI's **Trust all and continue** ceremony; app-server
-`hooks/list` then reported all 13 enabled Yoetz hooks trusted with zero warnings or errors.
+A fresh project-marketplace carrier requires the supported TUI **Trust all and continue**
+ceremony. Before native verification, inspect app-server `hooks/list`: the reviewed carrier has
+13 enabled, trusted hooks, including `SubagentStart` and `SubagentStop`, with no warnings or errors.
+An active marketplace entry and `features.hooks=true` establish configuration; actual hook
+diagnostics and admitted observations establish execution. Keep source-stream coverage separate:
+a rollout may contain `spawn_agent` and `wait_agent` records without a usable subagent identity.
+Such a stream cannot establish a parent lineage annotation or a late-stop replay by itself.
 
-The native stream completed one parent `start`, one parent-minted `delegate`, exactly one legacy
-`multi_agent_v1` child, `wait_agent`, child `start mode=attach`, one `publish_work`, one deterministic
-`check`, one JSON `receipt`, and child terminal completion. Every required Yoetz response was
-structured and successful: the check reached `state=complete` with `verdict=insufficient_coverage`,
-and the receipt reached `ok=true` with the matching `insufficient_coverage` conclusion. Its document
-contains `semantic_review_not_requested` as the coverage limitation and no `check_not_recorded` gap;
-the public operation history finds both the check and receipt as complete. Parent lineage exposes
-one accepted `parent_minted` child and no duplicate child. This is a bounded source/wheel ceremony
-against a synthetic loopback provider; it does not prove real provider semantics, authentication,
-or production model use. The harness preserved the native `turn.completed` stream but lost the
-numeric process exit code while recording it, so this cell does not claim exit status 0.
+The 2026-09-07 native cell used source `80d0d94c` and the development `0.1.0` wheel at SHA256
+`18b0e5ecd9cc09acb06dd805d90c01dc506241a26e2405b152dec36a51ec6f9d`. All 475 installed package
+files matched the wheel. `codex-testing 0.150.1` ran in an isolated home and workspace, with a
+trusted project-marketplace carrier, a strict owned MCP route, `multi_agent_v2=false`, and a
+synthetic loopback Responses provider. The native process exited `0`; parent start, delegation,
+one legacy child, child attach, publication, deterministic check, receipt, and child terminal
+completion were recorded. The check and receipt returned structured success with deterministic
+coverage and matching child/check frontiers. Parent mapping snapshots remained stable and a
+separate child route appeared after attach.
 
-The source-owned `codex-rollout-jsonl/0.150.1/v1` adapter reconciled three persisted streams and 74
-structural records. The streams contain native `spawn_agent`/`wait_agent` tool records but no
-`SubAgentActivity` or usable subagent activity identity. The trusted hook carrier did execute:
-public observation reports `codex_hook=true`, `codex_session_stream=true`, and 20 hook diagnostics,
-including one structural `SubagentStart` and one structural `SubagentStop` with the same child
-identity. The registry retained both phases as one provisional Codex annotation, but the row was
-recorded under the attached child task and carried no parent-tool alias, so it was not safely
-bindable to the parent; the parent annotation page remains empty. Public status therefore keeps
-`unsupported_event` and `unpaired_event` as explicit observation gaps; it must not infer that
-native hooks are unsupported from the missing stream activity item, and it must not mint
-`host_observed` parent attribution from the absence of a safe parent correlation.
+Actual native hooks recorded one `SubagentStart` and one `SubagentStop` with the same child
+identity and no gaps on those events. Parent lineage showed one accepted `parent_minted` child and
+one provisional `host_observed` annotation. The native payload omitted `parent_tool_call_id`, so
+the annotation remained unbound. Two native rollout streams contained 39 and 29 records but no
+`SubAgentActivity` or usable child identity fields. Replaying the exact captured streams accepted
+zero new records; this proves cursor idempotency, not a newly emitted late stop or session rotation.
+The host supplied no structural child-finding outcome, so synthetic advice-policy checks remain
+separate from this native evidence.
 
-The three `unpaired_event` rows have structural tool-call IDs: each is a repeated `PostToolUse`
-for a call whose earlier post already consumed its pre-event. The IDs are present; the gap is the
-source-ordinal duplicate/orphan condition, not missing identity. Parent lineage currently leaves
-the child `rollup_state=unavailable`, `session_health=contact_lost`, and annotations empty. The
-child check and receipt remain recorded history, while later hook-observed ledger events advanced
-the child frontier and made that checked snapshot `stale_after_material_change`; the parent
-manifest guard therefore reports `lineage_manifest_state_changed` until a new qualifying check.
+The native record retains `content_capture_unavailable`, `unpaired_event`, and `unsupported_event`
+coverage gaps, plus four bounded `drain_budget_exhausted` diagnostics. A later manual-reconcile
+pass on that artifact exposed UUID truncation and left 62 stream rows with `mapping_missing`;
+those rows were not native hook or provider failures. The child remained open with contact lost
+after host exit, and its recorded receipt did not close work or erase incomplete coverage. This
+cell does not prove production model behavior, semantic review, or other Codex profiles.
 
-That cell's observation status also reports `content_capture_unavailable`, `ledger_rejected`, and
-`outbox_quarantined`; 68 delivery rows remain pending with `mapping_missing` after the bounded drain.
-Those pending rows belong to three separate stream session commitments with no task-route mapping;
-none belongs to the child ledger session that contains the accepted check/receipt and 58 accepted
-observation rows. `mapping_present=true` is a workspace-level fact and does not make each stream
-alias deliverable. Service diagnostics correlate the two current `ledger_rejected` rows with
-non-retryable session-conflict route failures; that routing/lifecycle defect is separate from the
-profile's explicit unsupported-event coverage. These stream, hook, lineage, and
-delivery-recovery gaps remain separate from the successful native parent/child/check/receipt
-ceremony. Late or replayed activity was not observed in this bounded cell; repeat it with a fresh
-isolated root when those paths are under test.
+Manual reconciliation of a native `rollout-*` file requires one full session identity already
+bound to the selected workspace. It shares the automatic stream cursor and refuses an unmapped,
+ambiguous, or foreign-workspace session as `mapping_missing` before ingesting it. Compressed
+`.jsonl.zst` files retain the bounded `unsupported_format` result. Existing truncated aliases are
+left visible as legacy recovery gaps; a filename cannot authorize rebinding or deletion of their
+pending rows.
 
 The rendered `SessionStart`, `UserPromptSubmit`, tool, and turn-boundary commands bind
 `--workspace .`. Codex's hooks contract (re-read 2026-09-03) gives every hook the session `cwd` and

@@ -2873,6 +2873,45 @@ class ObservationCoordinator:
         except ValueError, TypeError:
             return self.ids.new(IdKind.REQUEST)
 
+    async def _lineage_refs_for_advice(
+        self,
+        parent_task_id: str,
+        envelopes: tuple[ObservationEnvelope, ...],
+    ) -> tuple[tuple[str, str], ...]:
+        """Resolve retained host observations to service-owned annotation or child IDs.
+
+        The kernel receives these references as already-authorized facts.  Reconciliation is
+        read-only so advice refresh/restart cannot rewrite host annotation clocks or session
+        ownership merely because an old envelope was retained.
+        """
+
+        registry = self.host_lineage_registry
+        if registry is None:
+            return ()
+        resolver = registry.find_host_lineage_observation
+        resolved: dict[tuple[str, str, str | None], str | None] = {}
+        refs: list[tuple[str, str]] = []
+        for envelope in envelopes:
+            observation = host_lineage_from_envelope(envelope)
+            if observation is None:
+                continue
+            correlation = observation.correlation
+            key = (correlation.host, correlation.subagent_id, correlation.parent_tool_call_id)
+            if key not in resolved:
+                try:
+                    annotation = await resolver(parent_task_id, observation)
+                except HostLineageRegistryError:
+                    annotation = None
+                resolved[key] = (
+                    None
+                    if annotation is None
+                    else (annotation.bound_child_task_id or annotation.correlation_id)
+                )
+            reference = resolved[key]
+            if reference is not None:
+                refs.append((envelope.source_identity, reference))
+        return tuple(sorted(refs, key=lambda item: item[0].encode("ascii")))
+
     async def _run_advice(
         self,
         workspace: str,
@@ -2897,11 +2936,13 @@ class ObservationCoordinator:
                 if type(routed) is str:
                     session_commitment = routed
         envelopes = scoped_session_envelopes(store, workspace, session_commitment)
+        lineage_refs = await self._lineage_refs_for_advice(task_id, envelopes)
         snapshot = await self.advice_context_builder.build(
             workspace,
             store,
             yoetz_session_id=session_id if type(session_id) is str else None,
             session_commitment=session_commitment,
+            lineage_refs=lineage_refs,
         )
         if snapshot is not None:
             # Materialize before publishing the snapshot to either durable cache.

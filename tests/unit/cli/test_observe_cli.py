@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from yoetz.adapters.integrations.codex_lifecycle import mapping_from_start_ids, store_mapping
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.cli import observe as observe_cli
 from yoetz.cli.app import app
@@ -26,6 +27,7 @@ from yoetz.domain.observation import (
     ObservationStatusQuery,
     observation_ingest_result_to_json,
 )
+from yoetz.protocol.ids import IdKind, new_id
 
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
@@ -1416,7 +1418,8 @@ def test_explicit_recovery_persists_profile_and_rotation_frontier(
     store = LocalObservationStore(_state=state)
     commitment = store.workspace_commitment(str(workspace))
     store.grant_consent(commitment)
-    path = tmp_path / "recovery.jsonl"
+    # Keep the established opaque-tail fallback for non-native explicit paths.
+    path = tmp_path / "manual-recovery.jsonl"
     session = store.session_commitment("recovery")
     path.write_bytes(encode_lines(session_meta(), function_call(name="shell", call_id="first")))
 
@@ -1458,3 +1461,186 @@ def test_explicit_recovery_persists_profile_and_rotation_frontier(
             commitment, session, source_generation=cursor.source_generation
         )
         assert set(tools) == ({"first"} if version == "0.148.0" else {"second", "third"})
+
+
+def test_explicit_recovery_uses_full_mapped_native_session_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A native rollout filename must retain the full mapped UUID for recovery."""
+
+    from builders.codex_rollout import encode_lines, function_call, session_meta
+
+    state = tmp_path / "state"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    codex_home = tmp_path / "codex-home"
+    session_id = "019f8b27-b98e-7061-bbb5-d0b897594de6"
+    path = codex_home / "sessions" / "2026" / "09" / "07"
+    path.mkdir(parents=True)
+    session_file = path / f"rollout-2026-09-07T12-00-00-{session_id}.jsonl"
+    session_file.write_bytes(
+        encode_lines(session_meta(), function_call(name="shell", call_id="native-call"))
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    store = LocalObservationStore(_state=state)
+    workspace_commitment = store.workspace_commitment(str(workspace))
+    store.grant_consent(workspace_commitment)
+    full_session_commitment = store.session_commitment(session_id)
+    store.bind_codex_session(workspace_commitment, session_id)
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=session_id,
+            yoetz_task_id=new_id(IdKind.TASK),
+            yoetz_session_id=new_id(IdKind.SESSION),
+            yoetz_writer_id=new_id(IdKind.WRITER),
+            last_frontier=None,
+        ),
+        _state=state,
+    )
+
+    assert (
+        observe_cli.reconcile_session_stream(
+            session_file=str(session_file),
+            workspace=str(workspace),
+            json_output=True,
+            _state=state,
+        )
+        == 0
+    )
+    cursor = store.get_stream_cursor(workspace_commitment, full_session_commitment)
+    assert cursor is not None
+    assert cursor.byte_position == session_file.stat().st_size
+    assert (
+        store.get_stream_cursor(
+            workspace_commitment, store.session_commitment(session_id.rsplit("-", 1)[-1])
+        )
+        is None
+    )
+
+    # The automatic adapter path sees the same cursor/profile and does not create a
+    # second stream identity after manual recovery.
+    from yoetz.adapters.integrations.codex_session_stream import (
+        CodexSessionStreamLocator,
+        reconcile_session_stream,
+    )
+
+    again = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace_commitment,
+        session_commitment=full_session_commitment,
+        codex_session_id=session_id,
+        locator=CodexSessionStreamLocator(codex_home),
+    )
+    assert again["accepted"] == 0
+    assert store.stream_profile_for_session(workspace_commitment, full_session_commitment) == (
+        "codex-rollout-jsonl/0.148.0/v1"
+    )
+
+
+def test_explicit_recovery_refuses_unmapped_native_rollout(tmp_path: Path, capsys: object) -> None:
+    state = tmp_path / "state"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    session_id = "019f8b27-b98e-7061-bbb5-d0b897594de6"
+    session_file = tmp_path / f"rollout-2026-09-07T12-00-00-{session_id}.jsonl"
+    session_file.write_bytes(b"{}\n")
+    store = LocalObservationStore(_state=state)
+    workspace_commitment = store.workspace_commitment(str(workspace))
+    store.grant_consent(workspace_commitment)
+
+    assert (
+        observe_cli.reconcile_session_stream(
+            session_file=str(session_file),
+            workspace=str(workspace),
+            json_output=False,
+            _state=state,
+        )
+        == 20
+    )
+    assert "observation_reconcile_failed:mapping_missing" in capsys.readouterr().err  # type: ignore[attr-defined]
+    assert store.codex_sessions_for_workspace(workspace_commitment) == ()
+
+
+def test_explicit_recovery_refuses_rollout_bound_to_another_workspace(
+    tmp_path: Path, capsys: object
+) -> None:
+    state = tmp_path / "state"
+    selected_workspace = tmp_path / "selected"
+    other_workspace = tmp_path / "other"
+    selected_workspace.mkdir()
+    other_workspace.mkdir()
+    session_id = "019f8b27-b98e-7061-bbb5-d0b897594de6"
+    session_file = tmp_path / f"rollout-2026-09-07T12-00-00-{session_id}.jsonl"
+    session_file.write_bytes(b"{}\n")
+    store = LocalObservationStore(_state=state)
+    selected_commitment = store.workspace_commitment(str(selected_workspace))
+    other_commitment = store.workspace_commitment(str(other_workspace))
+    store.grant_consent(selected_commitment)
+    store.grant_consent(other_commitment)
+    store.bind_codex_session(other_commitment, session_id)
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=session_id,
+            yoetz_task_id=new_id(IdKind.TASK),
+            yoetz_session_id=new_id(IdKind.SESSION),
+            yoetz_writer_id=new_id(IdKind.WRITER),
+            last_frontier=None,
+        ),
+        _state=state,
+    )
+
+    assert (
+        observe_cli.reconcile_session_stream(
+            session_file=str(session_file),
+            workspace=str(selected_workspace),
+            json_output=False,
+            _state=state,
+        )
+        == 20
+    )
+    assert "observation_reconcile_failed:mapping_missing" in capsys.readouterr().err  # type: ignore[attr-defined]
+    assert store.codex_sessions_for_workspace(selected_commitment) == ()
+
+
+def test_explicit_recovery_uses_full_mapping_for_compressed_rollout_variant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = tmp_path / "state"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    codex_home = tmp_path / "codex-home"
+    session_id = "019f8b27-b98e-7061-bbb5-d0b897594de6"
+    rollout_id = "019f8b27-cccc-7061-bbb5-d0b897594de6"
+    path = codex_home / "sessions" / "2026" / "09" / "07"
+    path.mkdir(parents=True)
+    session_file = path / f"rollout-2026-09-07T12-00-00-{session_id}_{rollout_id}.jsonl.zst"
+    session_file.write_bytes(b"\x28\xb5\x2f\xfdnot-a-real-frame")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    store = LocalObservationStore(_state=state)
+    workspace_commitment = store.workspace_commitment(str(workspace))
+    store.grant_consent(workspace_commitment)
+    store.bind_codex_session(workspace_commitment, session_id)
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=session_id,
+            yoetz_task_id=new_id(IdKind.TASK),
+            yoetz_session_id=new_id(IdKind.SESSION),
+            yoetz_writer_id=new_id(IdKind.WRITER),
+            last_frontier=None,
+        ),
+        _state=state,
+    )
+
+    assert (
+        observe_cli.reconcile_session_stream(
+            session_file=str(session_file),
+            workspace=str(workspace),
+            json_output=True,
+            _state=state,
+        )
+        == 0
+    )
+    status = store.status(ObservationStatusQuery(workspace_commitment))
+    assert "unsupported_format" in status.gaps

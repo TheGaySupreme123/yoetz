@@ -552,6 +552,47 @@ class SqliteHostLineageRegistry(HostLineageRegistryPort):
         except apsw.Error as exc:
             raise HostLineageRegistryError(HostLineageRegistryReason.STORAGE_CORRUPT) from exc
 
+    async def find_host_lineage_observation(
+        self,
+        parent_task_id: str,
+        observation: HostLineageObservation,
+    ) -> HostLineageAnnotation | None:
+        """Resolve a recorded annotation without updating its observation clocks.
+
+        Advice refreshes may revisit retained host envelopes after the original ingest.  This
+        lookup recomputes only the keyed aliases and reads the existing row, so rebuilding advice
+        cannot mutate ``last_session_commitment`` or observed timestamps.
+        """
+
+        parent = _id(IdKind.TASK, parent_task_id)
+        if type(observation) is not HostLineageObservation:
+            raise HostLineageRegistryError(HostLineageRegistryReason.IDENTITY_CONFLICT)
+        commitments = self._commitments(parent, observation)
+        candidate_rows = self._alias_rows_locked(
+            parent,
+            host=observation.correlation.host,
+            aliases=commitments.aliases,
+        )
+        strong_aliases = tuple(
+            (kind, value) for kind, value in commitments.aliases if kind == "strong"
+        )
+        exact_rows = self._alias_rows_locked(
+            parent,
+            host=observation.correlation.host,
+            aliases=strong_aliases,
+            alias_kind="strong",
+        )
+        compatible = [row for row in candidate_rows if self._compatible(row, commitments)]
+        if exact_rows:
+            if len(exact_rows) > 1:
+                raise HostLineageRegistryError(HostLineageRegistryReason.ANNOTATION_AMBIGUOUS)
+            if not self._compatible(exact_rows[0], commitments):
+                raise HostLineageRegistryError(HostLineageRegistryReason.IDENTITY_CONFLICT)
+            return self._annotation_from_row(exact_rows[0])
+        if len(compatible) > 1:
+            raise HostLineageRegistryError(HostLineageRegistryReason.ANNOTATION_AMBIGUOUS)
+        return None if not compatible else self._annotation_from_row(compatible[0])
+
     async def list_provisional_annotations(
         self,
         parent_task_id: str,

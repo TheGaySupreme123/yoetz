@@ -1681,6 +1681,12 @@ keeps the child's provenance, category, never-send, task-scope, minimization, an
 restrictions. Project membership is unnecessary for lineage; cross-repository lineage is
 prohibited in increment A. `AuthorizationScope.contains()` stays unchanged.
 
+`HostLineageRegistryPort.find_host_lineage_observation` resolves an already recorded host
+observation within its installation, parent task, and host. It returns the persisted annotation,
+refuses conflicting or ambiguous aliases, and never updates observation timestamps or session
+ownership. Observation advice uses its bound child task ID, or its keyed correlation ID, alongside
+the original envelope reference. Rebuilding advice cannot manufacture lineage or refresh children.
+
 **Project birth and coordination.** With `projects.auto_grouping` enabled, the second concurrent
 live task in one repository materializes an implicit repository project. When disabled, the task
 is admitted without creating a project row (#497). General or multi-repository projects are explicit

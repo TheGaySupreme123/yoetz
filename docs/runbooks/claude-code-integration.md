@@ -230,8 +230,8 @@ recommended `refresh_observation`. This proves the bounded host and Yoetz workfl
 recorded limits; it does not promote either installed version to the pinned `2.1.241` capability
 cell or prove production model use.
 
-When a future exact cell proves a child signal, the service may normalize `agent_id` to a bounded
-subagent identity and retain only structural correlation. `origin=host_observed` and
+For a validated child signal, the service normalizes `agent_id` to a bounded
+subagent identity and retains only structural correlation. `origin=host_observed` and
 `acceptance=pending` stay service-stamped until an accepted `mode=delegate` handle or cooperative
 self-registration binds the same correlation. A hook carrying only the parent's `session_id`, or a
 PostToolUse row fired inside a child without a validated child identity, is an attribution gap and
@@ -252,26 +252,37 @@ matrix records the `2.1.261` child-hook fixture and the later installed `2.1.263
 parent/delegate publication, check, and receipt run as separate evidence cells. Cooperative MCP
 self-registration remains a separate, explicitly bounded path.
 
-An intermediate diagnostic wheel cell used source commit `952bec0efdfd9b2ed05f64e4a35a6f35b70ebd09`
-and `yoetz-0.1.0-py3-none-any.whl` SHA256
-`30fed12caad1176229bb55ee09b5c7fcb585f9a5cf314a582ecd8d236fb48fde`, with 216 packaged resources
-(`sha256:9df067b42abbba673362c5574832d83b960dab1e4ef0a551a12cc76d24343c7c`). Claude Code `2.1.263`
-ran from a fresh mode-0700 isolated root with a passphrase-only synthetic vault, active consent for
-that synthetic project, and the development `--plugin-dir` carrier (`plugin_managed`, strict route);
-this remains development loading, not marketplace activation. The native host completed parent
-`start`, `mode=delegate`, native `Agent`, child `mode=attach`, `publish_work`, deterministic `check`,
-and JSON `receipt`. Installed public models validated the child attach, a check with `ok:true` and
-`state:complete` containing deterministic coverage, and an `ok:true` receipt whose child identity
-and subject frontier matched the issued check and receipt request; the receipt document had no
-`check_not_recorded` gap and reported `semantic_review_not_requested`. All recorded native
-`SessionStart`, `SubagentStart`, `SubagentStop`, and `Stop` hook responses succeeded. Post-run
-observation reported `mapping_present:true`, `source_coverage.claude_hook:true`, and no
-`unpaired_event` or `mapping_missing`; ten hook observations remained quarantined as
-`ledger_rejected`/`outbox_quarantined`, and the bounded drain ended with no pending rows, so the
-workspace projection does not establish separate parent-versus-child host mappings. The advice
-lane remained independent and emitted no final advice. The provider was a loopback synthetic
-Messages server, so this cell proves native plumbing and the bounded structural workflow only; it
-does not claim production model use, semantic review, or support for the pinned `2.1.241` cell.
+Current control 2.5 admits the `pairing_mode` and `correlation_kind` metadata emitted by Claude
+ingress. Earlier development artifacts omitted those fields from the closed schema: the client
+returned `frame_invalid` before sending the observation, and the hook layer reported
+`ledger_rejected`. That refusal did not establish a service-stage failure or an unsupported host
+signal. The frozen control 2.4 schema remains unchanged. Verify admitted observations separately
+from successful cooperative tool calls and local queue drainage.
+
+The 2026-09-07 native cell used source `80d0d94c` and the development `0.1.0` wheel at SHA256
+`18b0e5ecd9cc09acb06dd805d90c01dc506241a26e2405b152dec36a51ec6f9d`. All 475 installed package
+files matched the wheel. Claude Code `2.1.263` ran with an isolated synthetic workspace and
+passphrase vault, the development `--plugin-dir` carrier, a strict MCP route, and a synthetic
+loopback Messages provider. The native host and driver exited `0` without timeout. Parent attach,
+delegation, native `Agent`, child attach, publication, deterministic check, and receipt completed;
+request/result models, child identity, operation ordering, and receipt/check bindings validated.
+`SessionStart`, `SubagentStart`, `SubagentStop`, and `Stop` hooks succeeded without cancellation.
+
+Consented hook envelopes retained one validated child identity across `SubagentStart`, four child
+`PostToolUse` callbacks, and `SubagentStop`. The four child callbacks used a separate scoped route;
+five mapping snapshots preserved the parent identity. Child frontier delivery and advice state
+remained separate from the parent, and the parent lineage contained an annotation. Native output
+stream records omitted the child identity fields, so this attribution is supported by the installed
+hook ingress and retained structural state, not independently attested by the output stream.
+
+Final observation status showed Claude hook coverage, zero pending rows, zero quarantines, and a
+completed drain. One bounded `drain_budget_exhausted` diagnostic remained; a historical parent
+`mapping_missing` event did not recur in child callbacks. Public status retained
+`content_capture_unavailable`. The check and receipt used deterministic coverage with
+`semantic_review_not_requested`; their validation allowed later observation-related frontiers but
+did not independently prove the intervening digest chain. This cell proves the bounded native
+workflow and lane separation. Production model behavior, semantic advice content, marketplace
+activation, and support for the pinned `2.1.241` capability cell remain outside its coverage.
 
 Advice uses Claude Code's documented output contract. `SessionStart`, `PostToolUse`,
 `PostToolUseFailure`, and `Stop` may emit `hookSpecificOutput.additionalContext`. The failure event

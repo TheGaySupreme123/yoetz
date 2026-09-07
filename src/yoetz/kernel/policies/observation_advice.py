@@ -157,6 +157,7 @@ class ObservationAdviceContext:
     envelopes: tuple[ObservationEnvelope, ...]
     lifecycle: ObservationLifecycle
     gaps: tuple[str, ...]
+    lineage_refs: tuple[tuple[str, str], ...] = ()
     check_facts: tuple[ObservationCheckFact, ...] = ()
     inspect_fact: ObservationInspectFact | None = None
     composition: ObservationCompositionFact | None = None
@@ -422,9 +423,11 @@ def _static_for_live(envelopes: Sequence[ObservationEnvelope]) -> list[Observati
 
 def _subagent_unaddressed(
     envelopes: Sequence[ObservationEnvelope],
+    lineage_refs: Sequence[tuple[str, str]] = (),
 ) -> list[ObservationAdviceCandidate]:
-    findings: dict[str, str] = {}
+    findings: dict[str, ObservationEnvelope] = {}
     addressed: set[str] = set()
+    authorized_refs = dict(lineage_refs)
     for envelope in envelopes:
         sub = _subagent_id(envelope)
         if envelope.event_kind == "SubagentStop" and sub is not None:
@@ -432,7 +435,7 @@ def _subagent_unaddressed(
                 _result_status(envelope) in {"finding", "failed", "issue"}
                 or _success(envelope) is False
             ):
-                findings[sub] = _envelope_ref(envelope)
+                findings[sub] = envelope
         if sub is not None and envelope.event_kind in {"PostToolUse", "UserPromptSubmit"}:
             if _result_status(envelope) in {"resolved", "addressed", "fixed"}:
                 addressed.add(sub)
@@ -441,14 +444,17 @@ def _subagent_unaddressed(
         if claim is not None and sub is not None and claim in {"resolved", "addressed"}:
             addressed.add(sub)
     results: list[ObservationAdviceCandidate] = []
-    for sub, ref in findings.items():
+    for sub, envelope in findings.items():
         if sub not in addressed:
+            ref = _envelope_ref(envelope)
+            authorized_ref = authorized_refs.get(ref)
+            evidence_refs = (ref,) if authorized_ref is None else (authorized_ref, ref)
             results.append(
                 _candidate(
                     FindingKind.FAILED_WORK_OMITTED,
                     "subagent_finding_unaddressed",
                     "address_subagent_finding",
-                    (ref,),
+                    evidence_refs,
                     f"subagent:{sub[:48]}",
                 )
             )
@@ -592,7 +598,7 @@ def observation_advice_findings(
     collected.extend(_edits_after_check(envelopes, context.check_facts))
     collected.extend(_completion_without_verification(envelopes, context.check_facts))
     collected.extend(_static_for_live(envelopes))
-    collected.extend(_subagent_unaddressed(envelopes))
+    collected.extend(_subagent_unaddressed(envelopes, context.lineage_refs))
     collected.extend(_outside_plan(envelopes, context.inspect_fact, context.plan_path_digests))
     collected.extend(_observation_gaps(context.lifecycle, context.gaps, envelopes))
     collected.extend(_provider_not_ready(context.composition))

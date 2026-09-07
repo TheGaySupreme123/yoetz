@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from builders.multi_agent import multi_agent_service
+from builders.multi_agent import multi_agent_service, relock_and_reopen_multi_agent_service
 from yoetz.adapters.integrations.codex_lifecycle import load_mapping, scoped_child_session_id
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.application.publish_work import PublishWorkInternalResult
@@ -84,6 +84,46 @@ def _workspace(root: Path) -> Path:
     root.mkdir()
     subprocess.run(["git", "init", "--quiet", str(root)], check=True, capture_output=True)
     return root.resolve()
+
+
+async def test_multi_agent_teardown_attempts_every_close_after_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed close cannot strand a later service resource or its writer."""
+
+    calls: list[str] = []
+
+    with pytest.raises(RuntimeError, match="injected app close failure"):
+        async with multi_agent_service(tmp_path / "state") as service:
+            original_app_close = service.app.close
+            original_vault_close = service.vault.close
+            original_memory_close = service.memory.close
+            original_lifecycle_close = service.lifecycle.close
+
+            async def fail_app_close(_app: object) -> None:
+                calls.append("app")
+                await original_app_close()
+                raise RuntimeError("injected app close failure")
+
+            async def close_vault(_vault: object) -> None:
+                calls.append("vault")
+                await original_vault_close()
+
+            def close_memory(_memory: object) -> None:
+                calls.append("memory")
+                original_memory_close()
+
+            async def close_lifecycle(_lifecycle: object) -> None:
+                calls.append("lifecycle")
+                await original_lifecycle_close()
+
+            monkeypatch.setattr(type(service.app), "close", fail_app_close)
+            monkeypatch.setattr(type(service.vault), "close", close_vault)
+            monkeypatch.setattr(type(service.memory), "close", close_memory)
+            monkeypatch.setattr(type(service.lifecycle), "close", close_lifecycle)
+
+    assert calls == ["app", "vault", "memory", "lifecycle"]
 
 
 async def test_explicit_siblings_have_independent_public_checks_receipts_and_work_state(
@@ -566,9 +606,7 @@ async def test_codex_shared_host_child_alias_routes_observation_to_attached_chil
             workspace_commitment,
             yoetz_session_id=parent.session_id,
             snapshot=AdviceSnapshot(
-                ranked_finding_ids=(
-                    finding_id("fnd_00000000-0000-4000-8000-000000000001"),
-                ),
+                ranked_finding_ids=(finding_id("fnd_00000000-0000-4000-8000-000000000001"),),
                 evidence_basis_digest="sha256:" + "a" * 64,
                 confidence_coverage=Coverage(
                     publication_channels=(PublicationChannel.HOOK_OBSERVED,),
@@ -669,6 +707,297 @@ async def test_codex_shared_host_child_alias_routes_observation_to_attached_chil
         )
         assert parent_advice_after is not None
         assert parent_advice_after.delivery_identity == parent_advice_before.delivery_identity
+
+
+async def test_late_subagent_stop_after_parent_reattach_keeps_registry_annotation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Public advice cites the registry HMAC, never a recomputed host identity."""
+
+    workspace = _workspace(tmp_path / "workspace")
+    async with multi_agent_service(tmp_path / "state") as service:
+        app = service.app
+        monkeypatch.setenv("YOETZ_ISOLATED_ROOT", str(service.root))
+        parent = await app.start(
+            StartRequest.model_validate(
+                {
+                    **_identity(),
+                    "mode": "create",
+                    "task_title": "Observed parent",
+                    "workspace_ref": str(workspace),
+                    "external_ref": "observed-parent",
+                    "requested_view": "compact",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        parent_host_session = "observed-parent-host-session"
+        lifecycle_state = service.root / "state"
+        assert (
+            bind_start_mapping_outcome(
+                {
+                    "session_id": parent_host_session,
+                    "tool_name": "mcp__yoetz__start",
+                    "tool_response": {"structuredContent": parent.as_wire()},
+                },
+                _state=lifecycle_state,
+            )
+            == "bound"
+        )
+
+        observation_store = LocalObservationStore(_state=lifecycle_state)
+        workspace_commitment = observation_store.workspace_commitment(str(workspace))
+        observation_store.grant_consent(workspace_commitment)
+        output = io.BytesIO()
+        assert (
+            handle_observe(
+                event_name=None,
+                stdin_bytes=json.dumps(
+                    {
+                        "hook_event_name": "SubagentStart",
+                        "session_id": parent_host_session,
+                        "subagent_id": "observed-child",
+                    }
+                ).encode(),
+                stdout=output,
+                workspace=str(workspace),
+                _state=lifecycle_state,
+                skip_service=True,
+            )
+            == 0
+        )
+        rows = observation_store.list_pending_outbox_rows(workspace_commitment)
+        assert len(rows) == 1
+        row = rows[0]
+        result = observation_ingest_result_from_json(
+            await app.observation_ingest(
+                observation_ingest_request_to_json(
+                    ObservationIngestRequest(
+                        codex_session_id=parent_host_session,
+                        envelope=row.envelope,
+                    )
+                )
+            )
+        )
+        assert result.disposition.value == "accepted"
+        assert observation_store.acknowledge_outbox_row(workspace_commitment, row)
+
+        registry = app.host_lineage_registry
+        assert registry is not None
+        annotations = await registry.list_provisional_annotations(parent.task_id)
+        assert len(annotations) == 1
+        initial_annotation = annotations[0]
+
+        # Reattach the same parent task through the same host session.  The service rotates its
+        # Yoetz session/writer while retaining the host mapping and registry correlation.
+        resumed = await app.start(
+            StartRequest.model_validate(
+                {
+                    **_identity(),
+                    "mode": "create_or_attach",
+                    "task_title": "Observed parent resumed",
+                    "workspace_ref": str(workspace),
+                    "external_ref": "observed-parent",
+                    "requested_view": "compact",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        assert resumed.task_id == parent.task_id
+        assert (resumed.session_id, resumed.writer_id) != (
+            parent.session_id,
+            parent.writer_id,
+        )
+        assert (
+            bind_start_mapping_outcome(
+                {
+                    "session_id": parent_host_session,
+                    "tool_name": "mcp__yoetz__start",
+                    "tool_response": {"structuredContent": resumed.as_wire()},
+                },
+                _state=lifecycle_state,
+            )
+            == "bound"
+        )
+        rotated_mapping = load_mapping(parent_host_session, _state=lifecycle_state)
+        assert rotated_mapping is not None
+        assert (rotated_mapping.yoetz_session_id, rotated_mapping.yoetz_writer_id) == (
+            resumed.session_id,
+            resumed.writer_id,
+        )
+
+        # The late stop arrives on the rotated route and must complete the original annotation.
+        output = io.BytesIO()
+        assert (
+            handle_observe(
+                event_name=None,
+                stdin_bytes=json.dumps(
+                    {
+                        "hook_event_name": "SubagentStop",
+                        "session_id": parent_host_session,
+                        "subagent_id": "observed-child",
+                        "result_status": "finding",
+                        "success": False,
+                    }
+                ).encode(),
+                stdout=output,
+                workspace=str(workspace),
+                _state=lifecycle_state,
+                skip_service=True,
+            )
+            == 0
+        )
+        late_rows = observation_store.list_pending_outbox_rows(workspace_commitment)
+        assert len(late_rows) == 1
+        late_row = late_rows[0]
+        late_result = observation_ingest_result_from_json(
+            await app.observation_ingest(
+                observation_ingest_request_to_json(
+                    ObservationIngestRequest(
+                        codex_session_id=parent_host_session,
+                        envelope=late_row.envelope,
+                    )
+                )
+            )
+        )
+        assert late_result.disposition.value == "accepted"
+        assert observation_store.acknowledge_outbox_row(workspace_commitment, late_row)
+
+        annotations = await registry.list_provisional_annotations(parent.task_id)
+        assert len(annotations) == 1
+        annotation = annotations[0]
+        assert annotation.correlation_id == initial_annotation.correlation_id
+        assert annotation.observed_phases == ("start", "stop")
+        snapshot = observation_store.advice_snapshot_for(workspace_commitment)
+        assert snapshot is not None
+        finding = next(
+            item
+            for item in snapshot.ranked_items
+            if item.rule_code == "subagent_finding_unaddressed"
+        )
+        assert finding.evidence_refs[0] == annotation.correlation_id
+
+        lineage_status = await app.status(
+            StatusRequest.model_validate(
+                {
+                    **_identity(),
+                    "session_id": resumed.session_id,
+                    "writer_id": resumed.writer_id,
+                    "view": "lineage",
+                    "limit": "10",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        assert isinstance(lineage_status.page, StatusLineagePageModel)
+        assert any(
+            item.correlation_id == annotation.correlation_id
+            for item in lineage_status.page.annotations
+        )
+        delivery = observation_store.peek_advice_for_delivery(
+            workspace_commitment,
+            yoetz_session_id=resumed.session_id,
+            allow_standing=False,
+            session_commitment=observation_store.session_commitment(parent_host_session),
+        )
+        assert delivery is not None
+        assert delivery.item is not None
+        assert delivery.item.rule_code == "subagent_finding_unaddressed"
+        assert delivery.item.evidence_refs[0] == annotation.correlation_id
+
+        # A later parent lifecycle event forces another advice build.  The service must resolve
+        # the retained stop through the read-only registry lookup rather than dropping back to the
+        # opaque hook identity.
+        output = io.BytesIO()
+        assert (
+            handle_observe(
+                event_name="Stop",
+                stdin_bytes=json.dumps({"session_id": parent_host_session}).encode(),
+                stdout=output,
+                workspace=str(workspace),
+                _state=lifecycle_state,
+                skip_service=True,
+            )
+            == 0
+        )
+        refresh_rows = observation_store.list_pending_outbox_rows(workspace_commitment)
+        assert len(refresh_rows) == 1
+        refresh_row = refresh_rows[0]
+        refreshed = observation_ingest_result_from_json(
+            await app.observation_ingest(
+                observation_ingest_request_to_json(
+                    ObservationIngestRequest(
+                        codex_session_id=parent_host_session,
+                        envelope=refresh_row.envelope,
+                    )
+                )
+            )
+        )
+        assert refreshed.disposition.value == "accepted"
+        assert observation_store.acknowledge_outbox_row(workspace_commitment, refresh_row)
+        refreshed_snapshot = observation_store.advice_snapshot_for(workspace_commitment)
+        assert refreshed_snapshot is not None
+        refreshed_finding = next(
+            item
+            for item in refreshed_snapshot.ranked_items
+            if item.rule_code == "subagent_finding_unaddressed"
+        )
+        assert refreshed_finding.evidence_refs[0] == annotation.correlation_id
+
+        # Reopen the READY composition around the same encrypted catalog and task bundles.  The
+        # registry row, its clocks, and the scoped host mapping must survive that service restart.
+        await relock_and_reopen_multi_agent_service(service)
+        app = service.app
+        reopened_registry = app.host_lineage_registry
+        assert reopened_registry is not None
+        reopened_annotations = await reopened_registry.list_provisional_annotations(parent.task_id)
+        assert len(reopened_annotations) == 1
+        reopened_annotation = reopened_annotations[0]
+        assert reopened_annotation.correlation_id == annotation.correlation_id
+        assert reopened_annotation.first_observed_at == annotation.first_observed_at
+        assert reopened_annotation.last_observed_at == annotation.last_observed_at
+
+        # A normal parent Stop after restart rebuilds advice from retained envelopes and must
+        # still resolve the original annotation instead of dropping to the hook identity.
+        output = io.BytesIO()
+        assert (
+            handle_observe(
+                event_name="Stop",
+                stdin_bytes=json.dumps({"session_id": parent_host_session}).encode(),
+                stdout=output,
+                workspace=str(workspace),
+                _state=lifecycle_state,
+                skip_service=True,
+            )
+            == 0
+        )
+        post_restart_rows = observation_store.list_pending_outbox_rows(workspace_commitment)
+        assert len(post_restart_rows) == 1
+        post_restart_row = post_restart_rows[0]
+        post_restart_result = observation_ingest_result_from_json(
+            await app.observation_ingest(
+                observation_ingest_request_to_json(
+                    ObservationIngestRequest(
+                        codex_session_id=parent_host_session,
+                        envelope=post_restart_row.envelope,
+                    )
+                )
+            )
+        )
+        assert post_restart_result.disposition.value == "accepted"
+        assert observation_store.acknowledge_outbox_row(workspace_commitment, post_restart_row)
+        final_snapshot = observation_store.advice_snapshot_for(workspace_commitment)
+        assert final_snapshot is not None
+        final_finding = next(
+            item
+            for item in final_snapshot.ranked_items
+            if item.rule_code == "subagent_finding_unaddressed"
+        )
+        assert final_finding.evidence_refs[0] == reopened_annotation.correlation_id
+        assert await reopened_registry.list_provisional_annotations(parent.task_id) == (
+            reopened_annotation,
+        )
 
 
 async def test_delegated_child_does_not_consume_parent_selector(

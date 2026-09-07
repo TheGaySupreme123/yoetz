@@ -182,6 +182,11 @@ async def test_registry_reconciles_hook_stream_aliases_and_replays_after_restart
         assert stop.source_mask == 3
         assert stop.parent_tool_call_id == start.parent_tool_call_id
         assert await registry.list_provisional_annotations(parent) == (stop,)
+        resolved = await registry.find_host_lineage_observation(
+            parent,
+            _observation("SubagentStop", "worker-1"),
+        )
+        assert resolved == stop
 
         # Replaying either source is idempotent and does not create a second annotation.
         replay = await registry.record_host_lineage_observation(
@@ -236,6 +241,11 @@ async def test_registry_scopes_reused_host_identity_to_parent_and_binds_hidden_r
         assert bound.bound_child_task_id == child_a
         assert bound.bound_at is not None
         assert await registry.list_provisional_annotations(parent_a) == ()
+        resolved_bound = await registry.find_host_lineage_observation(
+            parent_a,
+            _observation("SubagentStop", "reused-worker", parent_tool_call_id="call-a"),
+        )
+        assert resolved_bound == bound
         assert (
             await registry.bind_provisional_annotation(parent_a, first.correlation_id, child_a)
         ).bound_child_task_id == child_a

@@ -206,6 +206,12 @@ class HostLineageRegistryPort(Protocol):
         source: ObservationSource,
     ) -> HostLineageAnnotation: ...
 
+    async def find_host_lineage_observation(
+        self,
+        parent_task_id: str,
+        observation: HostLineageObservation,
+    ) -> HostLineageAnnotation | None: ...
+
     async def list_provisional_annotations(
         self,
         parent_task_id: str,
