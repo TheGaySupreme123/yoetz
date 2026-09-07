@@ -37,7 +37,7 @@ def _hermetic_yoetz_environment(  # pyright: ignore[reportUnusedFunction]
     extended with ``XDG_RUNTIME_DIR`` so endpoint resolution cannot fall back to a platform
     default outside the tree (on Linux that would be the real ``/run/user/<uid>``), and with a
     scrub of inherited ``YOETZ_*`` variables so neither a developer's exports nor the CI job's
-    own ``YOETZ_DENY_NETWORK``/``YOETZ_CANDIDATE_PYTHON`` reach the strict config loader, which
+    own ``YOETZ_CANDIDATE_PYTHON`` reaches the strict config loader, which
     refuses every unknown ``YOETZ_``-prefixed name. Underscore-prefixed harness variables such
     as ``_YOETZ_TEST_INSTALLATION`` are not product configuration and survive.
 
