@@ -407,6 +407,11 @@ do not imply a missing `PreToolUse`, so accepted observations carry no synthetic
 gap. Their `generation_id` is retained as bounded host metadata and is never used as a tool-call
 identity; the materializer records metadata-only evidence instead of fabricating an action/result
 pair. Codex's paired hook profile keeps its source/session/generation-scoped orphan diagnostics.
+Current control 2.5 admits `pairing_mode`, `correlation_kind`, and `generation_id` on structural
+observation payloads. An older development artifact omitted these fields from its closed schema,
+so the client refused a valid Cursor-shaped frame before sending it and the hook layer reported
+`ledger_rejected`. The frozen control 2.4 schema still rejects the newer fields; metadata is not
+stripped to disguise an incompatible contract.
 
 Measured on 2026-08-28 with Cursor Agent CLI `2026.08.25-3e8eec8` (payload `cursor_version`;
 `cursor-agent --version` printed `2026.08.11-e8db854`) loading the native plugin through

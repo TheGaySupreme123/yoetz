@@ -1843,6 +1843,10 @@ privacy_pending_list|privacy_receipts_list|privacy_receipts_get`. The observatio
 `observation_ingest|observation_status|observation_pause|observation_resume|observation_revoke`
 (local CLI/UI only; never MCP tools — the public MCP surface remains the six workflow tools
 plus read-only `read_guidance`).
+Observation status uses a versioned body containing `schema_version`, `request_id`, and `query`;
+pause, resume, and revoke use `command` in place of `query`. Their successful control responses
+contain `schema_version`, the same `request_id`, and `status`. The support adapter translates these
+wire envelopes to the domain query or command; the observation-ingest envelope is separate.
 It has no privacy decision, unlock, secret, credential, key-handle, decrypted-object,
 operation-body arbitrary-path, or policy-loosening field or method. The versioned handshake locator
 below is the sole narrow path-bearing exception. `service_status` is available while locked;

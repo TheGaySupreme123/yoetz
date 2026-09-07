@@ -272,6 +272,13 @@ _PROJECTION_EXEMPT_METHODS = _STRUCTURAL_METHODS | {
     # cursor. Running it through result disclosure projection both adds no privacy protection and
     # breaks the exact direct response schema used by hook/outbox clients.
     ControlMethod.OBSERVATION_INGEST,
+    # Observation control results are schema-defined wrappers containing only a bounded status
+    # object and the request correlation id. They do not carry workflow result branches and must
+    # bypass client disclosure projection just like ingest.
+    ControlMethod.OBSERVATION_STATUS,
+    ControlMethod.OBSERVATION_PAUSE,
+    ControlMethod.OBSERVATION_RESUME,
+    ControlMethod.OBSERVATION_REVOKE,
     ControlMethod.PRIVACY_PENDING_LIST,
     ControlMethod.PRIVACY_RECEIPTS_LIST,
     ControlMethod.PRIVACY_RECEIPTS_GET,
@@ -281,6 +288,7 @@ _PROJECTION_EXEMPT_METHODS = _STRUCTURAL_METHODS | {
 _READ_ONLY_METHODS: Final[frozenset[ControlMethod]] = frozenset(
     {
         ControlMethod.STATUS,
+        ControlMethod.OBSERVATION_STATUS,
         ControlMethod.PRIVACY_GET_SETUP,
         ControlMethod.PRIVACY_GET_EFFECTIVE,
         ControlMethod.PRIVACY_PENDING_LIST,

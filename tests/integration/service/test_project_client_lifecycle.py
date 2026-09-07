@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import subprocess
 from collections.abc import Buffer
@@ -19,6 +20,15 @@ from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.adapters.repository_identity import resolve_repository_privacy_context
 from yoetz.application.coordination import CoordinationRuntime
 from yoetz.application.start import StartInternalResult
+from yoetz.cli.hooks import bind_start_mapping_outcome
+from yoetz.cli.observe_hooks import handle_claude_observe, handle_cursor_observe
+from yoetz.domain.observation import (
+    ObservationIngestDisposition,
+    ObservationIngestRequest,
+    ObservationSource,
+    observation_ingest_request_to_json,
+    observation_ingest_result_from_json,
+)
 from yoetz.domain.values import JsonObject
 from yoetz.ports.control import (
     ControlClientKind,
@@ -28,9 +38,11 @@ from yoetz.ports.control import (
 )
 from yoetz.ports.keys import MacKeyPurpose
 from yoetz.ports.ledger import CheckCommitResult
+from yoetz.protocol.canonical import canonical_encode
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import CheckRequest, StartRequest, StatusRequest
 from yoetz.service.client import _connected_client  # pyright: ignore[reportPrivateUsage]
+from yoetz.service.control_protocol import client_handshake
 from yoetz.service.daemon import ServiceComposition, ServiceDaemon
 from yoetz.service.elevated_bootstrap import (
     load_pending,
@@ -720,4 +732,309 @@ async def test_project_lifecycle_uses_real_ready_client_and_exact_grant_retries(
             if server_task_b is not None:
                 server_task_b.cancel()
                 await asyncio.gather(server_task_b, return_exceptions=True)
+            await daemon.close()
+
+
+async def test_ready_service_client_admits_claude_and_cursor_observation_wire(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Current host observation frames reach one real READY task through the client."""
+
+    workspace = (tmp_path / "observation-workspace").resolve()
+    workspace.mkdir()
+    git_environment = {"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"}
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Yoetz Test",
+            "-c",
+            "user.email=test@yoetz.invalid",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+            "-C",
+            str(workspace),
+            "init",
+        ],
+        check=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=git_environment,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Yoetz Test",
+            "-c",
+            "user.email=test@yoetz.invalid",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+            "-C",
+            str(workspace),
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ],
+        check=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=git_environment,
+    )
+
+    async with multi_agent_service(tmp_path / "state") as service:
+        # READY composition stores its synthetic installation under ``service.root`` while
+        # lifecycle mapping resolution follows the isolated-root contract.
+        monkeypatch.setenv("YOETZ_ISOLATED_ROOT", str(service.root))
+        lookup = service.vault.installation_mac_handle(MacKeyPurpose.CATALOG_LOOKUP)
+        repository = await resolve_repository_privacy_context(
+            WorkspaceLocator(str(workspace)), lookup
+        )
+        local = LocalObservationStore(_state=service.root / "state")
+        workspace_commitment = local.workspace_commitment(str(workspace))
+        local.grant_consent(workspace_commitment)
+        task = await service.app.start(
+            _start_request(workspace, 0),
+            repository_privacy_context=repository,
+        )
+        lifecycle_state = service.root / "state"
+        claude_session = "claude:ready-observation"
+        cursor_session = "cursor:ready-observation"
+        assert (
+            bind_start_mapping_outcome(
+                {
+                    "session_id": claude_session,
+                    "tool_name": "mcp__yoetz__start",
+                    "tool_response": {"structuredContent": task.as_wire()},
+                },
+                _state=lifecycle_state,
+                host="claude",
+            )
+            == "bound"
+        )
+        assert (
+            bind_start_mapping_outcome(
+                {
+                    "session_id": cursor_session,
+                    "tool_name": "mcp__yoetz__start",
+                    "tool_response": {"structuredContent": task.as_wire()},
+                },
+                _state=lifecycle_state,
+                host="cursor",
+            )
+            == "bound"
+        )
+
+        daemon_clock = _Clock()
+        lifecycle = ServiceLifecycle(
+            daemon_clock,
+            generation_store=_Generations(),
+            process_start_identity_commitment="sha256:" + "e" * 64,
+            instance_id=INSTANCE_ID,
+            singleton_lock_path=tmp_path / "observation-daemon.lock",
+        )
+        daemon = ServiceDaemon(
+            _composition=ServiceComposition(
+                lifecycle=lifecycle,
+                control_listener=_Listener(),  # pyright: ignore[reportArgumentType]
+                secret_ingress_listener=None,
+                human_control_listener=None,
+                human_control_service=None,
+                session_monitor=_Monitor(),  # pyright: ignore[reportArgumentType]
+                vault=service.vault,  # pyright: ignore[reportArgumentType]
+                application=cast(Any, service.app),
+            )
+        )
+        await daemon.start()
+        client_stream, server_stream = _pair()
+        server_task = asyncio.create_task(daemon._serve_control_connection(server_stream))  # pyright: ignore[reportPrivateUsage]
+        client = None
+        try:
+            session = await client_handshake(
+                client_stream,
+                ControlClientKind.CLI,
+                "0.3.0",
+                workspace_locator=WorkspaceLocator(str(workspace)),
+                projection_render_mode=ProjectionRenderMode.MACHINE_READABLE,
+                output_is_controlling_tty=False,
+            )
+            client = _connected_client(
+                cast(AuthenticatedUnixStream, client_stream), session, ControlClientKind.CLI
+            )
+
+            assert (
+                handle_claude_observe(
+                    event_name="PostToolUse",
+                    stdin_bytes=canonical_encode(
+                        {
+                            "hook_event_name": "PostToolUse",
+                            "session_id": "ready-observation",
+                            "claude_code_version": "2.1.241",
+                            "tool_name": "mcp__plugin_yoetz_yoetz__check",
+                            "tool_use_id": "claude-observation-call",
+                        }
+                    ),
+                    stdout=io.BytesIO(),
+                    workspace=str(workspace),
+                    _state=lifecycle_state,
+                    skip_service=True,
+                )
+                == 0
+            )
+            assert (
+                handle_cursor_observe(
+                    event_name="afterMCPExecution",
+                    stdin_bytes=canonical_encode(
+                        {
+                            "hook_event_name": "afterMCPExecution",
+                            "conversation_id": "ready-observation",
+                            "cursor_version": "3.17.8",
+                            "generation_id": "cursor-generation-1",
+                            "tool_name": "mcp__yoetz__respond",
+                            "tool_call_id": "cursor-observation-call",
+                        }
+                    ),
+                    stdout=io.BytesIO(),
+                    workspace=str(workspace),
+                    _state=lifecycle_state,
+                    skip_service=True,
+                )
+                == 0
+            )
+
+            rows = local.list_pending_outbox_rows(workspace_commitment)
+            assert {row.envelope.source for row in rows} == {
+                ObservationSource.CLAUDE_HOOK,
+                ObservationSource.CURSOR_HOOK,
+            }
+            assert len(rows) == 2
+            by_source = {row.envelope.source: row for row in rows}
+            claude_envelope = by_source[ObservationSource.CLAUDE_HOOK].envelope
+            cursor_envelope = by_source[ObservationSource.CURSOR_HOOK].envelope
+            assert claude_envelope.structural_payload["pairing_mode"] == "post_only"
+            assert claude_envelope.structural_payload["correlation_kind"] == "tool_call_id"
+            assert cursor_envelope.structural_payload["pairing_mode"] == "post_only"
+            assert cursor_envelope.structural_payload["correlation_kind"] == "generation_id"
+            assert cursor_envelope.structural_payload["generation_id"] == "cursor-generation-1"
+
+            for row in rows:
+                raw = await client.observation_ingest(
+                    observation_ingest_request_to_json(
+                        ObservationIngestRequest(
+                            codex_session_id=row.codex_session_id,
+                            envelope=row.envelope,
+                        )
+                    ),
+                    deadline_ms=3_000,
+                )
+                result = observation_ingest_result_from_json(raw)
+                assert result.disposition is ObservationIngestDisposition.ACCEPTED
+                assert result.advanced_cursor == row.envelope.cursor
+                assert local.acknowledge_outbox_row(workspace_commitment, row)
+
+            status_request_id = new_id(IdKind.REQUEST)
+            observation_status = await client.observation_status(
+                JsonObject(
+                    {
+                        "schema_version": "1.0.0",
+                        "request_id": status_request_id,
+                        "query": {"workspace_commitment": workspace_commitment},
+                    }
+                ),
+                deadline_ms=3_000,
+            )
+            assert observation_status["schema_version"] == "1.0.0"
+            assert observation_status["request_id"] == status_request_id
+            observation_status_body = cast(JsonObject, observation_status["status"])
+            assert observation_status_body["source_coverage"] == {
+                "claude_hook": True,
+                "codex_hook": False,
+                "codex_session_stream": False,
+                "cursor_hook": True,
+            }
+            assert observation_status_body["last_observation_receipt_time"] is not None
+
+            pause_request_id = new_id(IdKind.REQUEST)
+            paused = await client.observation_pause(
+                JsonObject(
+                    {
+                        "schema_version": "1.0.0",
+                        "request_id": pause_request_id,
+                        "command": {"workspace_commitment": workspace_commitment},
+                    }
+                ),
+                deadline_ms=3_000,
+            )
+            assert paused["schema_version"] == "1.0.0"
+            assert paused["request_id"] == pause_request_id
+            paused_body = cast(JsonObject, paused["status"])
+            assert paused_body["lifecycle"] == "stopped"
+            resume_request_id = new_id(IdKind.REQUEST)
+            resumed = await client.observation_resume(
+                JsonObject(
+                    {
+                        "schema_version": "1.0.0",
+                        "request_id": resume_request_id,
+                        "command": {"workspace_commitment": workspace_commitment},
+                    }
+                ),
+                deadline_ms=3_000,
+            )
+            assert resumed["schema_version"] == "1.0.0"
+            assert resumed["request_id"] == resume_request_id
+            resumed_body = cast(JsonObject, resumed["status"])
+            assert resumed_body["lifecycle"] in {"active", "degraded"}
+            revoke_request_id = new_id(IdKind.REQUEST)
+            revoked = await client.observation_revoke(
+                JsonObject(
+                    {
+                        "schema_version": "1.0.0",
+                        "request_id": revoke_request_id,
+                        "command": {
+                            "workspace_commitment": workspace_commitment,
+                            "retain_evidence": True,
+                        },
+                    }
+                ),
+                deadline_ms=3_000,
+            )
+            assert revoked["schema_version"] == "1.0.0"
+            assert revoked["request_id"] == revoke_request_id
+            revoked_body = cast(JsonObject, revoked["status"])
+            assert revoked_body["lifecycle"] == "stopped"
+
+            status = await client.status(
+                StatusRequest.model_validate(
+                    {
+                        "protocol_version": "0.1",
+                        "schema_version": "1.0.0",
+                        "request_id": new_id(IdKind.REQUEST),
+                        "actor": {"actor_id": "harness:ready-observation", "actor_type": "harness"},
+                        "client": {
+                            "kind": "cooperative_agent",
+                            "version": "0.3.0",
+                            "integration": "cooperative_mcp",
+                        },
+                        "session_id": task.session_id,
+                        "writer_id": task.writer_id,
+                        "view": "compact",
+                        "limit": "10",
+                    }
+                )
+            )
+            assert status.root.ok is True
+            assert int(status.root.result_frontier.sequence) > int(task.frontier.sequence)
+        finally:
+            if client is not None:
+                await client.close()
+            server_task.cancel()
+            await asyncio.gather(server_task, return_exceptions=True)
             await daemon.close()

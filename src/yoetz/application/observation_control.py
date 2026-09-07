@@ -57,6 +57,42 @@ def _as_json_object(request: object) -> JsonObject:
     return normalized
 
 
+def _support_argument(request: object, *, field: str) -> tuple[JsonObject, str | None]:
+    """Accept the versioned control body while retaining the direct app-port shape.
+
+    The daemon validates the outer ``*_body`` schema before invoking the application.  Direct
+    application callers historically pass the nested query/command itself, so keep that port
+    useful while unwrapping the schema-owned envelope at the support boundary.
+    """
+
+    body = _as_json_object(request)
+    if field not in body:
+        if "schema_version" in body or "request_id" in body:
+            raise ControlError("frame_invalid")
+        return body, None
+    if set(body) != {"schema_version", "request_id", field}:
+        raise ControlError("frame_invalid")
+    if body.get("schema_version") != "1.0.0":
+        raise ControlError("frame_invalid")
+    request_id = body.get("request_id")
+    if type(request_id) is not str:
+        raise ControlError("frame_invalid")
+    return _as_json_object(body[field]), request_id
+
+
+def _support_result(status: ObservationStatus, *, request_id: str | None) -> JsonObject:
+    result = observation_status_to_json(status)
+    if request_id is None:
+        return result
+    return JsonObject(
+        {
+            "schema_version": "1.0.0",
+            "request_id": request_id,
+            "status": result,
+        }
+    )
+
+
 def _map_public_error(error: PublicOperationError) -> ControlError:
     code = error.code.value.lower()
     if code in {"invalid_request", "session_conflict"}:
@@ -92,7 +128,8 @@ def build_observation_support_handlers(
 
     async def status(request: object) -> JsonObject:
         try:
-            query = observation_status_query_from_json(_as_json_object(request))
+            argument, request_id = _support_argument(request, field="query")
+            query = observation_status_query_from_json(argument)
         except ProtocolValueError as exc:
             raise ControlError("frame_invalid") from exc
         if type(query) is not ObservationStatusQuery:
@@ -101,11 +138,12 @@ def build_observation_support_handlers(
             result = await port.status(query)
         except PublicOperationError as exc:
             raise _map_public_error(exc) from exc
-        return observation_status_to_json(result)
+        return _support_result(result, request_id=request_id)
 
     async def pause(request: object) -> JsonObject:
         try:
-            command = observation_control_command_from_json(_as_json_object(request))
+            argument, request_id = _support_argument(request, field="command")
+            command = observation_control_command_from_json(argument)
         except ProtocolValueError as exc:
             raise ControlError("frame_invalid") from exc
         if type(command) is not ObservationControlCommand:
@@ -114,11 +152,12 @@ def build_observation_support_handlers(
             result = await port.pause(command)
         except PublicOperationError as exc:
             raise _map_public_error(exc) from exc
-        return observation_status_to_json(result)
+        return _support_result(result, request_id=request_id)
 
     async def resume(request: object) -> JsonObject:
         try:
-            command = observation_control_command_from_json(_as_json_object(request))
+            argument, request_id = _support_argument(request, field="command")
+            command = observation_control_command_from_json(argument)
         except ProtocolValueError as exc:
             raise ControlError("frame_invalid") from exc
         if type(command) is not ObservationControlCommand:
@@ -127,11 +166,12 @@ def build_observation_support_handlers(
             result = await port.resume(command)
         except PublicOperationError as exc:
             raise _map_public_error(exc) from exc
-        return observation_status_to_json(result)
+        return _support_result(result, request_id=request_id)
 
     async def revoke(request: object) -> JsonObject:
         try:
-            command = observation_revoke_command_from_json(_as_json_object(request))
+            argument, request_id = _support_argument(request, field="command")
+            command = observation_revoke_command_from_json(argument)
         except ProtocolValueError as exc:
             raise ControlError("frame_invalid") from exc
         if type(command) is not ObservationRevokeCommand:
@@ -140,7 +180,7 @@ def build_observation_support_handlers(
             result = await port.revoke(command)
         except PublicOperationError as exc:
             raise _map_public_error(exc) from exc
-        return observation_status_to_json(result)
+        return _support_result(result, request_id=request_id)
 
     return {
         ControlMethod.OBSERVATION_INGEST: ingest,

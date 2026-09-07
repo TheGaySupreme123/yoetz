@@ -3550,6 +3550,37 @@ def _control_v2_5_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         return document
     definitions = cast(dict[str, JsonValue], document["$defs"])
     branches = cast(list[JsonValue], document["oneOf"])
+    if entry.schema_name == "control-request":
+        # Native Claude/Cursor ingress adds the reviewed pairing contract to the structural
+        # observation payload.  These fields are intentionally current 2.5-only: the 2.4
+        # document is frozen, while cloning it here must still track every field the domain
+        # serializer can emit (including Cursor's generation identity).
+        observation_envelope = cast(dict[str, JsonValue], definitions["observation_envelope"])
+        envelope_properties = cast(dict[str, JsonValue], observation_envelope["properties"])
+        structural_payload = cast(
+            dict[str, JsonValue], envelope_properties["structural_payload"]
+        )
+        structural_properties = cast(
+            dict[str, JsonValue], structural_payload["properties"]
+        )
+        structural_properties.update(
+            {
+                "correlation_kind": {
+                    "enum": ["generation_id", "none", "tool_call_id"],
+                    "type": "string",
+                },
+                "generation_id": {
+                    "maxLength": 128,
+                    "minLength": 1,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$",
+                    "type": "string",
+                },
+                "pairing_mode": {
+                    "enum": ["paired", "post_only"],
+                    "type": "string",
+                },
+            }
+        )
     if entry.schema_name == "control-result":
         # Project lifecycle refusals are bounded application reasons, not transport failures. 2.5
         # is the first control envelope that carries the CLI-only project method, so extend only
