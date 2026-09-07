@@ -109,6 +109,58 @@ separate proof facets; a clean cell must verify which plugin directory Cursor ac
 
 ## MCP ownership and source precedence
 
+### Project registration when plugin MCP supplies no roots
+
+A user-local plugin can be discovered and its MCP tools can be connected while Cursor supplies
+no repository roots to that server. The observed desktop implementation attaches project paths
+to project-managed MCP definitions; plugin definitions do not carry those paths. In that case a
+workspace operation returns `SESSION_CONFLICT` with `repository_identity_required`. Reloading the
+same definition does not add project authority. Hook `workspace_roots` and an agent's terminal
+working directory are separate facts and are not substitutes for the MCP client's `roots/list`.
+
+For this host behavior, use an explicit project registration and an external-registration plugin
+for the skill and hooks. First remove the existing plugin-managed artifact through its normal
+preview, consent, and authenticated remove lifecycle. There must be only one `yoetz` MCP owner.
+Then invoke the exact intended Yoetz launcher to preview and install the project entry:
+
+```text
+/absolute/yoetz integrate cursor project-mcp preview \
+  --project-root /exact/project --cursor-config-root /exact/cursor/config \
+  --route-profile policy --json
+/absolute/yoetz integrate cursor project-mcp install \
+  --project-root /exact/project --cursor-config-root /exact/cursor/config \
+  --route-profile policy --accept --preview-digest <preview_digest> --json
+```
+
+Install the native plugin with `--mcp-ownership external-registration` through the authenticated
+plugin lifecycle. Its launcher and isolated root must match the project entry. The project entry
+is `.cursor/mcp.json`, has exactly the pinned launcher plus `mcp serve --host cursor`, and carries
+only the validated `YOETZ_ISOLATED_ROOT` environment binding when isolated. Strict mode appends
+`--semantic off`; omitting `--route-profile` preserves an existing owned route. The project
+registration command never launches a service and never grants semantic egress or host trust.
+Use the existing project admission commands for an authorized policy route.
+
+`project-mcp status` reports configuration ownership separately from unknown host trust and
+unobserved runtime binding. Open that project in Cursor, activate the changed server through
+Cursor's MCP controls, and use a fresh agent conversation. Verify a model-controlled `start`,
+native hook evidence, captured content, and any authorized semantic dispatch separately. Multiple
+distinct repository roots remain ambiguous; the bridge continues to refuse rather than choosing
+one. Codex and Claude Code retain their own existing registration paths.
+
+Reverse the registration with `project-mcp preview-remove`, then `project-mcp remove` using the
+exact preview digest and `--accept`. Removal and strict registration sweep only Yoetz-owned
+project admission entries and report that result, including an already-absent registration.
+Unrelated MCP servers and top-level JSON values are preserved; changed files are serialized as
+canonical JSON. Foreign, duplicate, malformed, oversized, hard-linked, or symlinked configuration
+is refused. This explicit writer currently requires POSIX descriptor-relative filesystem APIs.
+
+The preview binds both target directories, all three known source preimages, the launcher, the
+isolated root, and the before/after project configuration digests. Apply rereads those facts and
+atomically replaces the project file through a pinned directory. Cursor does not share a lock
+with this writer, so `host_config_not_compare_and_swap` discloses the remaining cross-process
+race; this is not a multi-file transaction. After a lost result, inspect `status` and obtain a
+fresh preview before retrying. No automatic migration or overwrite of another source occurs.
+
 Ownership mode is exactly `external_registration` or `plugin_managed`. Observed state is exactly
 `absent|external|plugin|dual|foreign|ambiguous`. Configuration source is plugin, project, user,
 inline-create, or inline-send. Preserve duplicate and foreign same-name entries.

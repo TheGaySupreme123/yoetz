@@ -119,6 +119,9 @@ integrate_skill_app = typer.Typer(help="Manage the Yoetz harness skill.", no_arg
 integrate_mcp_app = typer.Typer(
     help="Manage the Yoetz MCP server registration.", no_args_is_help=True
 )
+integrate_project_mcp_app = typer.Typer(
+    help="Manage Cursor's project-scoped Yoetz MCP registration.", no_args_is_help=True
+)
 integrate_plugin_app = typer.Typer(
     help=(
         "Manage an explicit host plugin artifact. Claude Code supports the full lifecycle plus "
@@ -200,6 +203,7 @@ app.add_typer(state_app, name="state")
 app.add_typer(integrate_app, name="integrate")
 integrate_app.add_typer(integrate_skill_app, name="skill")
 integrate_app.add_typer(integrate_mcp_app, name="mcp")
+integrate_app.add_typer(integrate_project_mcp_app, name="project-mcp")
 integrate_app.add_typer(integrate_plugin_app, name="plugin")
 integrate_app.add_typer(integrate_admission_app, name="admission")
 app.add_typer(setup_app, name="setup")
@@ -1815,6 +1819,52 @@ def _integration_mcp_command(action: str) -> Callable[..., None]:
 
 for _mcp_action in ("preview", "preview-remove", "install", "status", "remove"):
     integrate_mcp_app.command(_mcp_action)(_integration_mcp_command(_mcp_action))
+
+
+def _cursor_project_mcp_command(action: str) -> Callable[..., None]:
+    def command(
+        context: typer.Context,
+        project_root: Annotated[
+            Path,
+            typer.Option(
+                "--project-root", help="Exact trusted project containing .cursor/mcp.json."
+            ),
+        ],
+        cursor_config_root: Annotated[
+            Path,
+            typer.Option("--cursor-config-root", help="Exact Cursor user configuration root."),
+        ],
+        route_profile: _ROUTE_PROFILE = None,
+        accept: _ACCEPT = False,
+        preview_digest: Annotated[
+            str | None,
+            typer.Option("--preview-digest", help="Exact reviewed project MCP preview digest."),
+        ] = None,
+        json_output: _JSON = False,
+    ) -> None:
+        harness = cast(str, context.find_root().find_object(str) or context.obj)
+        module = importlib.import_module("yoetz.cli.cursor_project_mcp")
+        operation = cast(Callable[..., int], getattr(module, "run_cursor_project_mcp_command"))
+        _finish(
+            operation(
+                action,
+                harness,
+                project_root=project_root,
+                cursor_config_root=cursor_config_root,
+                route_profile=_validated_route_profile(route_profile),
+                accept=accept,
+                preview_digest=preview_digest,
+                json_output=json_output,
+            )
+        )
+
+    return command
+
+
+for _project_mcp_action in ("preview", "preview-remove", "install", "status", "remove"):
+    integrate_project_mcp_app.command(_project_mcp_action)(
+        _cursor_project_mcp_command(_project_mcp_action)
+    )
 
 
 # The per-host plugin command surface (issue #465). Codex activation is the

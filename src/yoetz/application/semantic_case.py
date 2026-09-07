@@ -1301,11 +1301,32 @@ def build_semantic_case(
                 continue
             linked_subjects.update(str(ref) for ref in claim_record.payload.supporting_refs)
 
-        evidence_rows = sorted(projection.evidence.items(), key=lambda pair: str(pair[0]))
+        # Authenticated native captures are more useful than a metadata-only description, and
+        # their retained bytes are otherwise easy to starve: the evidence cap is shared by every
+        # evidence row while the projection can contain many opaque stream events.  Keep the
+        # ordering deterministic within each class and use the captured-group leaders only; a
+        # payload merely lacking a captured object is still metadata, never native capture.
+        evidence_rows = sorted(
+            projection.evidence.items(),
+            key=lambda pair: (
+                0 if str(pair[0]) in captured_groups else 1,
+                str(pair[0]).encode("ascii"),
+            ),
+        )
+        processed_evidence_refs: set[str] = set()
+        captured_rows_omitted_by_limit: set[str] = set()
         for evidence_id, record in evidence_rows:
             if len(targeted) >= selection.max_excerpts:
+                # Captured groups are ordered first, so anything not visited here is excluded by
+                # the excerpt-count cap. Keep that loss visible instead of silently reporting a
+                # complete coverage snapshot. Rows excluded by a deliberate kind/relevance
+                # selection are processed below and retain their ordinary omission reason.
+                captured_rows_omitted_by_limit.update(
+                    set(captured_groups) - processed_evidence_refs
+                )
                 break
             ref = str(evidence_id)
+            processed_evidence_refs.add(ref)
             if ref not in allowed:
                 continue
             payload = record.payload
@@ -1333,6 +1354,8 @@ def build_semantic_case(
                 else _EVIDENCE_EXCERPT_KIND.get(payload.evidence_kind, "evidence")
             )
             if excerpt_kind not in selection.excerpt_kinds:
+                if captured_group is not None:
+                    capture_gap_set.add("content_unselected")
                 omissions.append(
                     _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
                 )
@@ -1340,6 +1363,8 @@ def build_semantic_case(
             if selection.relevance == "linked_subjects_only":
                 source_event = str(record.source_event_id)
                 if ref not in linked_subjects and source_event not in linked_subjects:
+                    if captured_group is not None:
+                        capture_gap_set.add("content_unselected")
                     omissions.append(
                         _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
                     )
@@ -1461,6 +1486,8 @@ def build_semantic_case(
                 )
             )[:16]
             if not linked:
+                if captured_group is not None:
+                    capture_gap_set.add("content_unselected")
                 omissions.append(
                     _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
                 )
@@ -1504,6 +1531,19 @@ def build_semantic_case(
                 # actually admitted to the packet.
                 capture_gap_set.add("truncated_payload")
             excerpt_bytes_used += item.content_bytes
+
+        if captured_rows_omitted_by_limit:
+            capture_gap_set.add("content_unselected")
+            for ref in sorted(captured_rows_omitted_by_limit, key=str.encode):
+                captured_group = captured_groups[ref]
+                omissions.append(
+                    _omit(
+                        ref,
+                        DataCategory.EVIDENCE_EXCERPT,
+                        captured_group.source_kind,
+                        "not_selected",
+                    )
+                )
 
         # Optional command excerpts from actions when expanded selection allows exact commands.
         if selection.include_exact_command_text and "command" in selection.excerpt_kinds:
@@ -1633,6 +1673,23 @@ def build_semantic_case(
                     )
                 )
                 excerpt_bytes_used += item.content_bytes
+
+    # A valid capture can exist even when a custom policy disables the excerpt section entirely or
+    # sets its excerpt count to zero. Keep that policy exclusion visible just as we do for a group
+    # rejected by kind/relevance, while retaining only bounded identity metadata in the omission.
+    if captured_groups and ("targeted_excerpts" not in sections or selection.max_excerpts == 0):
+        capture_gap_set.add("content_unselected")
+        for ref, captured_group in sorted(
+            captured_groups.items(), key=lambda pair: pair[0].encode("ascii")
+        ):
+            omissions.append(
+                _omit(
+                    ref,
+                    DataCategory.EVIDENCE_EXCERPT,
+                    captured_group.source_kind,
+                    "not_selected",
+                )
+            )
 
     # Cap lists per selection.
     goal_ids = goal_ids[:4]

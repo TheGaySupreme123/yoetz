@@ -682,9 +682,12 @@ def _cursor_workspace_error(
     result = structured_error_result(
         PublicErrorCode.SESSION_CONFLICT,
         (
-            "The Cursor MCP session did not provide one safe local project root. Fully quit and "
-            "relaunch Cursor, or create a new MCP process with the project open, then retry this "
-            "operation."
+            "Cursor did not provide one safe local project root through MCP roots/list. "
+            "If a plugin-managed server has no roots, use yoetz integrate cursor project-mcp "
+            "to register one project .cursor/mcp.json entry with an external-registration "
+            "plugin and no duplicate Yoetz MCP sources. Reconnect the MCP server with that "
+            "project open, then retry in a fresh conversation. Hook workspace data and CLI "
+            "CWD cannot substitute for roots/list."
         ),
         request_id=request_id,
         correlation_id=slot.workspace_binding_correlation_id,

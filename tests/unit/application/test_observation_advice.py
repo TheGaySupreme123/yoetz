@@ -14,6 +14,7 @@ from yoetz.adapters.observation_semantic_advice import NullSemanticAdvice, Optio
 from yoetz.application.observation_advice import (
     ObservationAdviceBuildInput,
     ObservationAdviceContextBuilder,
+    ObservationAdviceSemanticAddon,
     advice_delivery_identity,
     build_observation_advice_snapshot,
     hook_advice_context,
@@ -35,11 +36,14 @@ from yoetz.domain.observation import (
     ObservationStatus,
     ObservationStatusQuery,
 )
-from yoetz.domain.values import JsonObject, Timestamp
+from yoetz.domain.values import JsonObject, Timestamp, finding_id
 from yoetz.kernel.policies.observation_advice import (
+    OBSERVATION_ADVICE_POLICY_ID,
+    OBSERVATION_ADVICE_POLICY_VERSION,
     AdviceNextAction,
     ObservationAdviceContext,
     ObservationCompositionFact,
+    evidence_basis_digest,
     observation_advice_findings,
 )
 from yoetz.mcp.resources import read_resource
@@ -114,6 +118,200 @@ def test_completion_without_verification_is_clear() -> None:
         and item.summary == "Completion not supported by current evidence"
         for item in snapshot.ranked_items
     )
+
+
+def test_tool_completion_status_does_not_create_completion_advice() -> None:
+    """Native tool outcomes are not authored completion claims."""
+
+    snapshot = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=tuple(
+                _envelope(
+                    f"hook:tool-completed-{index}",
+                    {"tool_name": "publish_work", "result_status": "completed"},
+                    pos=index,
+                )
+                for index in range(1, 28)
+            ),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            has_real_observation=True,
+        )
+    )
+    assert snapshot is None
+
+
+def test_completion_advice_bounds_refs_but_keeps_full_basis() -> None:
+    envelopes = tuple(
+        _envelope(
+            f"hook:completion-{index:02d}",
+            {"claim_kind": "completion"},
+            pos=index,
+        )
+        for index in range(1, 18)
+    )
+    context = ObservationAdviceContext(
+        envelopes=envelopes,
+        lifecycle=ObservationLifecycle.ACTIVE,
+        gaps=(),
+    )
+    candidates = observation_advice_findings(context)
+    assert len(candidates) == 1
+    assert len(candidates[0].evidence_refs) == 17
+    snapshot = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=envelopes,
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            has_real_observation=True,
+        )
+    )
+    assert snapshot is not None
+    item = snapshot.ranked_items[0]
+    assert len(item.evidence_refs) == 16
+    assert item.evidence_refs == candidates[0].evidence_refs[:16]
+    assert "advice_evidence_refs_truncated" in item.coverage.known_gaps
+    assert snapshot.evidence_basis_digest == evidence_basis_digest(
+        candidates,
+        envelopes,
+        extra={
+            "policy": f"{OBSERVATION_ADVICE_POLICY_ID}/{OBSERVATION_ADVICE_POLICY_VERSION}",
+            "lifecycle": "active",
+            "coverage_gaps": ("advice_evidence_refs_truncated",),
+        },
+    )
+
+
+def test_ranked_advice_bounds_findings_and_known_gaps() -> None:
+    envelopes = tuple(
+        _envelope(
+            f"hook:failed-{index:02d}",
+            {
+                "tool_name": "shell",
+                "exit_status": 1,
+                "correlation_id": f"call-{index:02d}",
+            },
+            pos=index,
+        )
+        for index in range(1, 66)
+    )
+    snapshot = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=envelopes,
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=tuple(f"gap_{index:02d}" for index in range(64)),
+            has_real_observation=True,
+        )
+    )
+    assert snapshot is not None
+    assert len(snapshot.ranked_finding_ids) == 64
+    assert len(snapshot.ranked_items) == 64
+    assert "advice_ranked_findings_truncated" in snapshot.confidence_coverage.known_gaps
+    assert len(snapshot.confidence_coverage.known_gaps) == 64
+    assert "advice_coverage_gaps_truncated" in snapshot.confidence_coverage.known_gaps
+    candidates = observation_advice_findings(
+        ObservationAdviceContext(
+            envelopes=envelopes,
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=tuple(f"gap_{index:02d}" for index in range(64)),
+        )
+    )
+    assert snapshot.evidence_basis_digest == evidence_basis_digest(
+        candidates,
+        envelopes,
+        extra={
+            "policy": f"{OBSERVATION_ADVICE_POLICY_ID}/{OBSERVATION_ADVICE_POLICY_VERSION}",
+            "lifecycle": "active",
+            "coverage_gaps": tuple(
+                sorted(
+                    {
+                        *(f"gap_{index:02d}" for index in range(64)),
+                        "advice_ranked_findings_truncated",
+                    },
+                    key=str.encode,
+                )
+            ),
+        },
+    )
+
+
+def test_semantic_addon_dedup_preserves_indexes_and_fences_invalid_text() -> None:
+    first = finding_id("fnd_00000000-0000-4000-8000-000000000001")
+    second = finding_id("fnd_00000000-0000-4000-8000-000000000002")
+    addon = ObservationAdviceSemanticAddon(
+        finding_ids=(first, first, second),
+        evidence_digest="sha256:" + "c" * 64,
+        summaries=("", "duplicate summary", "Second safe summary"),
+        details=("/fixture/private-detail", "duplicate detail", "Second safe detail"),
+    )
+    snapshot = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(_envelope("hook:failure", {"tool_name": "shell", "exit_status": 1}),),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            semantic_addon=addon,
+            has_real_observation=True,
+        )
+    )
+    assert snapshot is not None
+    semantic_items = [
+        item for item in snapshot.ranked_items if item.origin == "semantic_model_derived"
+    ]
+    assert [item.finding_id for item in semantic_items] == [first, second]
+    assert semantic_items[0].summary == "Model-derived observation note"
+    assert semantic_items[0].detail == "Additive semantic advice over minimized evidence"
+    assert semantic_items[1].summary == "Second safe summary"
+    assert semantic_items[1].detail == "Second safe detail"
+    assert "advice_semantic_output_invalid" in semantic_items[0].coverage.known_gaps
+
+
+def test_semantic_addon_skips_invalid_finding_ids_without_poisoning_valid_rows() -> None:
+    valid = finding_id("fnd_00000000-0000-4000-8000-000000000003")
+    addon = ObservationAdviceSemanticAddon(
+        finding_ids=("invalid-finding-id", valid),  # type: ignore[arg-type]
+        evidence_digest="sha256:" + "d" * 64,
+        summaries=("bad row", "Valid row"),
+        details=("bad row", "Valid detail"),
+    )
+    snapshot = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(_envelope("hook:failure", {"tool_name": "shell", "exit_status": 1}),),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            semantic_addon=addon,
+            has_real_observation=True,
+        )
+    )
+    assert snapshot is not None
+    semantic_items = [
+        item for item in snapshot.ranked_items if item.origin == "semantic_model_derived"
+    ]
+    assert [item.finding_id for item in semantic_items] == [valid]
+    assert semantic_items[0].summary == "Valid row"
+    assert semantic_items[0].detail == "Valid detail"
+    assert "advice_semantic_output_invalid" in semantic_items[0].coverage.known_gaps
+
+
+def test_semantic_only_invalid_next_action_falls_back_before_snapshot_validation() -> None:
+    finding = finding_id("fnd_00000000-0000-4000-8000-000000000004")
+    snapshot = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            semantic_addon=ObservationAdviceSemanticAddon(
+                finding_ids=(finding,),
+                evidence_digest="sha256:" + "e" * 64,
+                next_action="/fixture/private-action",
+                summaries=("Provider note",),
+                details=("Provider detail",),
+            ),
+        )
+    )
+    assert snapshot is not None
+    assert snapshot.recommended_next_action == "reground_status"
+    assert snapshot.ranked_items[0].recommended_next_action == "reground_status"
+    assert "advice_semantic_output_invalid" in snapshot.confidence_coverage.known_gaps
 
 
 def test_standing_provider_condition_keeps_one_candidate_identity_as_envelopes_grow() -> None:

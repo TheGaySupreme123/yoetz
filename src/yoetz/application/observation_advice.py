@@ -18,6 +18,7 @@ from yoetz.domain.observation import (
     ObservationStatus,
     ObservationStatusQuery,
 )
+from yoetz.domain.values import validate_sha256_digest
 from yoetz.kernel.policies.observation_advice import (
     OBSERVATION_ADVICE_POLICY_ID,
     OBSERVATION_ADVICE_POLICY_VERSION,
@@ -33,6 +34,7 @@ from yoetz.kernel.policies.observation_advice import (
 )
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.coverage import (
+    MAX_KNOWN_GAPS,
     ArtifactObservation,
     AuthorshipAssurance,
     CheckType,
@@ -41,6 +43,7 @@ from yoetz.protocol.coverage import (
     LedgerFreshness,
     PublicationChannel,
 )
+from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 
 __all__ = [
@@ -65,6 +68,28 @@ __all__ = [
 _SUPPRESSION_DOMAIN: Final = b"yoetz/observation-advice-suppress/v1\x00"
 _FINDING_DOMAIN: Final = b"yoetz/observation-advice-finding/v1\x00"
 _DELIVERY_DOMAIN: Final = b"yoetz/observation-advice-delivery/v1\x00"
+_MAX_ADVICE_EVIDENCE_REFS: Final = 16
+_MAX_ADVICE_RANKED_FINDINGS: Final = 64
+_ADVICE_EVIDENCE_REFS_TRUNCATED_GAP: Final = "advice_evidence_refs_truncated"
+_ADVICE_RANKED_FINDINGS_TRUNCATED_GAP: Final = "advice_ranked_findings_truncated"
+_ADVICE_SEMANTIC_OUTPUT_INVALID_GAP: Final = "advice_semantic_output_invalid"
+_ADVICE_COVERAGE_GAPS_TRUNCATED_GAP: Final = "advice_coverage_gaps_truncated"
+_SEMANTIC_SUMMARY_FALLBACK: Final = "Model-derived observation note"
+_SEMANTIC_DETAIL_FALLBACK: Final = "Additive semantic advice over minimized evidence"
+_VALID_ADVICE_NEXT_ACTIONS: Final[frozenset[str]] = frozenset(
+    {
+        "resolve_failed_command",
+        "rerun_approved_check",
+        "provide_verification",
+        "disclose_limitation",
+        "address_subagent_finding",
+        "revise_plan_scope",
+        "refresh_observation",
+        "connect_provider",
+        "attempt_semantic_dispatch",
+        "reground_status",
+    }
+)
 
 _RULE_SUMMARIES: Final[Mapping[str, str]] = {
     "failed_command_unresolved": "Unresolved failed command observed",
@@ -270,6 +295,7 @@ class ObservationAdviceContextBuilder:
                 extra={
                     "policy": f"{OBSERVATION_ADVICE_POLICY_ID}/{OBSERVATION_ADVICE_POLICY_VERSION}",
                     "lifecycle": status.lifecycle.value,
+                    "coverage_gaps": _sorted_coverage_gaps(status.gaps),
                 },
             )
             reviewed = self.semantic_review(candidates, basis, status.gaps, yoetz_session_id)
@@ -314,7 +340,13 @@ def stable_advice_finding_id(rule_code: str, detail_token: str, evidence_digest:
     return finding_id(PREFIX_BY_KIND[IdKind.FINDING] + str(uuid.UUID(bytes=bytes(raw))))
 
 
-def _coverage(*, observation_qualified: bool, semantic: bool, gaps: Sequence[str]) -> Coverage:
+def _coverage(
+    *,
+    observation_qualified: bool,
+    semantic: bool,
+    gaps: Sequence[str],
+    additional_gaps: Sequence[str] = (),
+) -> Coverage:
     channels = (PublicationChannel.ENGINE_DERIVED,)
     authorship = AuthorshipAssurance.SERVICE_AUTHENTICATED
     observation = ArtifactObservation.PUBLISHED_ONLY
@@ -325,7 +357,7 @@ def _coverage(*, observation_qualified: bool, semantic: bool, gaps: Sequence[str
     checks = [CheckType.DETERMINISTIC]
     if semantic:
         checks.append(CheckType.SEMANTIC_MODEL_DERIVED)
-    known = tuple(sorted({gap for gap in gaps if gap}, key=str.encode))
+    known = _bounded_coverage_gaps(gaps, additional_gaps)
     freshness = LedgerFreshness.PARTIAL if known else LedgerFreshness.CURRENT
     return Coverage(
         publication_channels=tuple(sorted(channels, key=lambda item: item.value.encode("ascii"))),
@@ -336,6 +368,48 @@ def _coverage(*, observation_qualified: bool, semantic: bool, gaps: Sequence[str
         check_types=tuple(sorted(checks, key=lambda item: item.value.encode("ascii"))),
         known_gaps=known,
     )
+
+
+def _bounded_coverage_gaps(gaps: Sequence[str], additional_gaps: Sequence[str]) -> tuple[str, ...]:
+    """Keep coverage gaps bounded while retaining an explicit overflow marker.
+
+    Observation status normally supplies at most ``MAX_KNOWN_GAPS`` values. Advice
+    projection can add its own honest truncation markers, so the union can exceed
+    the wire bound even though neither input is malformed. Preserve all additive
+    markers when possible and retain a fixed truncation marker when the union is
+    too large. The complete gap set is committed in the snapshot's evidence basis
+    digest, so the marker never silently drops coverage from the identity.
+    """
+
+    known = _sorted_coverage_gaps(gaps, additional_gaps)
+    if len(known) <= MAX_KNOWN_GAPS:
+        return known
+    extra = tuple(
+        sorted(
+            {gap for gap in additional_gaps if gap and gap != _ADVICE_COVERAGE_GAPS_TRUNCATED_GAP},
+            key=str.encode,
+        )
+    )
+    known_without_marker = tuple(gap for gap in known if gap != _ADVICE_COVERAGE_GAPS_TRUNCATED_GAP)
+    retained_extra = set(extra[: max(0, MAX_KNOWN_GAPS - 1)])
+    remaining = max(0, MAX_KNOWN_GAPS - 1 - len(retained_extra))
+    retained_base = tuple(gap for gap in known_without_marker if gap not in retained_extra)[
+        :remaining
+    ]
+    return tuple(
+        sorted(
+            (*retained_extra, *retained_base, _ADVICE_COVERAGE_GAPS_TRUNCATED_GAP),
+            key=str.encode,
+        )
+    )
+
+
+def _sorted_coverage_gaps(
+    gaps: Sequence[str], additional_gaps: Sequence[str] = ()
+) -> tuple[str, ...]:
+    """Return the complete deterministic gap set before the wire bound."""
+
+    return tuple(sorted({gap for gap in (*gaps, *additional_gaps) if gap}, key=str.encode))
 
 
 def _suppression_identity(
@@ -416,7 +490,10 @@ def _item_from_candidate(
         summary=summary,
         detail=detail,
         recommended_next_action=candidate.next_action,
-        evidence_refs=candidate.evidence_refs,
+        # The kernel retains the complete evidence basis, while the durable
+        # advice item follows the domain's 16-reference wire bound.  The
+        # caller adds a coverage gap when this projection omits refs.
+        evidence_refs=candidate.evidence_refs[:_MAX_ADVICE_EVIDENCE_REFS],
         coverage=coverage,
         freshness_frontier=freshness_frontier,
         origin="deterministic",
@@ -436,6 +513,114 @@ def _delivery_condition_identity(candidate: ObservationAdviceCandidate) -> str:
     return f"condition-{hashlib.sha256(material).hexdigest()[:48]}"
 
 
+def _semantic_finding_entries(
+    semantic: ObservationAdviceSemanticAddon,
+    existing: Sequence[FindingId],
+) -> tuple[tuple[tuple[int, FindingId], ...], bool]:
+    """Normalize provider finding ids while retaining the source-field index."""
+
+    raw_ids = semantic.finding_ids
+    if type(raw_ids) is not tuple:
+        return (), True
+    seen = {str(item) for item in existing}
+    entries: list[tuple[int, FindingId]] = []
+    invalid = False
+    for index, raw_finding in enumerate(cast(tuple[object, ...], raw_ids)):
+        if type(raw_finding) is not str:
+            invalid = True
+            continue
+        try:
+            normalized = finding_id(raw_finding)
+        except ProtocolValueError:
+            invalid = True
+            continue
+        key = str(normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append((index, normalized))
+    return tuple(entries), invalid
+
+
+def _semantic_item(
+    *,
+    finding: FindingId,
+    summary: object,
+    detail: object,
+    next_action: str,
+    coverage: Coverage,
+    freshness_frontier: str,
+) -> tuple[AdviceItem | None, bool]:
+    """Build one fenced semantic item, falling back on invalid provider text."""
+
+    raw_summary = summary if type(summary) is str else _SEMANTIC_SUMMARY_FALLBACK
+    raw_detail = detail if type(detail) is str else _SEMANTIC_DETAIL_FALLBACK
+    invalid = type(summary) is not str or type(detail) is not str
+    try:
+        item = AdviceItem(
+            finding_id=finding,
+            rule_code="semantic-additive-review",
+            priority=90,
+            summary=raw_summary[:160],
+            detail=raw_detail[:240],
+            recommended_next_action=next_action,
+            evidence_refs=("semantic:minimized",),
+            coverage=coverage,
+            freshness_frontier=freshness_frontier,
+            origin="semantic_model_derived",
+        )
+        return item, invalid
+    except ProtocolValueError:
+        invalid = True
+    try:
+        return (
+            AdviceItem(
+                finding_id=finding,
+                rule_code="semantic-additive-review",
+                priority=90,
+                summary=_SEMANTIC_SUMMARY_FALLBACK,
+                detail=_SEMANTIC_DETAIL_FALLBACK,
+                recommended_next_action="reground_status",
+                evidence_refs=("semantic:minimized",),
+                coverage=coverage,
+                freshness_frontier=freshness_frontier,
+                origin="semantic_model_derived",
+            ),
+            invalid,
+        )
+    except ProtocolValueError:
+        return None, True
+
+
+def _semantic_items(
+    *,
+    semantic_indexes: Sequence[int],
+    semantic_ids: Sequence[FindingId],
+    summaries: Sequence[object],
+    details: Sequence[object],
+    next_action: str,
+    coverage: Coverage,
+    freshness_frontier: str,
+) -> tuple[list[AdviceItem], bool]:
+    items: list[AdviceItem] = []
+    invalid = False
+    for index, finding in zip(semantic_indexes, semantic_ids, strict=True):
+        summary = summaries[index] if index < len(summaries) else _SEMANTIC_SUMMARY_FALLBACK
+        detail = details[index] if index < len(details) else _SEMANTIC_DETAIL_FALLBACK
+        item, item_invalid = _semantic_item(
+            finding=finding,
+            summary=summary,
+            detail=detail,
+            next_action=next_action,
+            coverage=coverage,
+            freshness_frontier=freshness_frontier,
+        )
+        invalid = invalid or item_invalid
+        if item is not None:
+            items.append(item)
+    return items, invalid
+
+
 def build_observation_advice_snapshot(
     input_value: ObservationAdviceBuildInput,
 ) -> AdviceSnapshot | None:
@@ -453,33 +638,64 @@ def build_observation_advice_snapshot(
         plan_path_digests=input_value.plan_path_digests,
     )
     candidates = observation_advice_findings(context)
-    basis = evidence_basis_digest(
-        candidates,
-        input_value.envelopes,
-        extra={
-            "policy": f"{OBSERVATION_ADVICE_POLICY_ID}/{OBSERVATION_ADVICE_POLICY_VERSION}",
-            "lifecycle": input_value.lifecycle.value,
-        },
+    # Keep the complete policy result for the evidence-basis digest, but only
+    # materialize the domain's bounded ranked surface.  The policy result is
+    # already deterministically ordered by severity/rule/cause, so this keeps
+    # the highest-ranked conditions without making the cap depend on arrival
+    # order or hash iteration.
+    candidate_overflow = len(candidates) > _MAX_ADVICE_RANKED_FINDINGS
+    selected_candidates = candidates[:_MAX_ADVICE_RANKED_FINDINGS]
+    evidence_ref_overflow = any(
+        len(candidate.evidence_refs) > _MAX_ADVICE_EVIDENCE_REFS for candidate in candidates
     )
     finding_ids = tuple(
         stable_advice_finding_id(item.rule_code, item.detail_token, advice_candidate_digest(item))
-        for item in candidates
+        for item in selected_candidates
     )
     semantic = input_value.semantic_addon
     semantic_ids: tuple[FindingId, ...] = ()
-    if semantic is not None and semantic.finding_ids:
-        semantic_ids = semantic.finding_ids
+    semantic_indexes: tuple[int, ...] = ()
+    semantic_overflow = False
+    semantic_invalid = False
+    semantic_summaries: tuple[object, ...] = ()
+    semantic_details: tuple[object, ...] = ()
+    semantic_evidence_digest: str | None = None
+    if semantic is not None:
+        if semantic.next_action is not None and (
+            type(semantic.next_action) is not str
+            or semantic.next_action not in _VALID_ADVICE_NEXT_ACTIONS
+        ):
+            semantic_invalid = True
+        if type(semantic.finding_ids) is not tuple:
+            semantic_invalid = True
+        if type(semantic.summaries) is tuple:
+            semantic_summaries = cast(tuple[object, ...], semantic.summaries)
+        else:
+            semantic_invalid = True
+        if type(semantic.details) is tuple:
+            semantic_details = cast(tuple[object, ...], semantic.details)
+        else:
+            semantic_invalid = True
         if semantic.evidence_digest is not None:
-            basis = evidence_basis_digest(
-                candidates,
-                input_value.envelopes,
-                extra={
-                    "policy": f"{OBSERVATION_ADVICE_POLICY_ID}/{OBSERVATION_ADVICE_POLICY_VERSION}",
-                    "lifecycle": input_value.lifecycle.value,
-                    "semantic_evidence": semantic.evidence_digest,
-                },
-            )
-    ranked = finding_ids + tuple(item for item in semantic_ids if item not in finding_ids)
+            try:
+                semantic_evidence_digest = validate_sha256_digest(semantic.evidence_digest)
+            except ProtocolValueError:
+                semantic_invalid = True
+            else:
+                semantic_evidence_digest = semantic.evidence_digest
+    if semantic is not None and type(semantic.finding_ids) is tuple and semantic.finding_ids:
+        # Semantic add-ons are provider data rather than policy output, so
+        # defensively deduplicate and fit them into the remaining ranked
+        # surface.  A malformed oversized add-on must not turn a hook update
+        # into a ProtocolValueError at AdviceSnapshot construction.
+        unique_semantic, invalid_ids = _semantic_finding_entries(semantic, finding_ids)
+        semantic_invalid = semantic_invalid or invalid_ids
+        remaining = max(0, _MAX_ADVICE_RANKED_FINDINGS - len(finding_ids))
+        semantic_overflow = len(unique_semantic) > remaining
+        selected_semantic = unique_semantic[:remaining]
+        semantic_indexes = tuple(index for index, _ in selected_semantic)
+        semantic_ids = tuple(finding for _, finding in selected_semantic)
+    ranked = finding_ids + semantic_ids
     if not ranked:
         # Zero cooperative publications still yield observation-gap advice when empty/degraded.
         return None
@@ -488,22 +704,58 @@ def build_observation_advice_snapshot(
         if semantic is not None and semantic.next_action is not None and not candidates
         else _next_action(candidates)
     )
-    # next_action must be a token; semantic addon may supply one.
-    if type(next_action) is not str or not next_action:
+    # Semantic output uses the same closed action vocabulary as deterministic advice. Validate
+    # before building the snapshot: item-level fallback alone cannot protect the snapshot's
+    # top-level recommended_next_action field.
+    if type(next_action) is not str or next_action not in _VALID_ADVICE_NEXT_ACTIONS:
         next_action = "reground_status"
+    observation_qualified = input_value.has_real_observation and (
+        input_value.lifecycle is ObservationLifecycle.ACTIVE
+    )
+    qualification_partial = bool(input_value.envelopes) and not observation_qualified
+    additional_gaps = tuple(
+        gap
+        for gap, present in (
+            (
+                _ADVICE_EVIDENCE_REFS_TRUNCATED_GAP,
+                evidence_ref_overflow,
+            ),
+            (
+                _ADVICE_RANKED_FINDINGS_TRUNCATED_GAP,
+                candidate_overflow or semantic_overflow,
+            ),
+            (
+                _ADVICE_SEMANTIC_OUTPUT_INVALID_GAP,
+                semantic_invalid,
+            ),
+            (
+                "observation_qualified_partial",
+                qualification_partial,
+            ),
+        )
+        if present
+    )
+    basis_extra: dict[str, JsonValue] = {
+        "policy": f"{OBSERVATION_ADVICE_POLICY_ID}/{OBSERVATION_ADVICE_POLICY_VERSION}",
+        "lifecycle": input_value.lifecycle.value,
+        # Commit the complete pre-projection gap set even when Coverage must
+        # retain only its bounded visible prefix plus a fixed truncation gap.
+        "coverage_gaps": _sorted_coverage_gaps(input_value.gaps, additional_gaps),
+    }
+    if semantic_evidence_digest is not None:
+        basis_extra["semantic_evidence"] = semantic_evidence_digest
+    basis = evidence_basis_digest(candidates, input_value.envelopes, extra=basis_extra)
     coverage = _coverage(
-        observation_qualified=input_value.has_real_observation
-        and input_value.lifecycle is ObservationLifecycle.ACTIVE,
+        observation_qualified=observation_qualified,
         semantic=semantic is not None and bool(semantic_ids),
         gaps=input_value.gaps,
+        additional_gaps=additional_gaps,
     )
     # Honest observation-qualified coverage: when envelopes exist but lifecycle is not active,
     # keep engine-derived coverage and include known gaps.
     if input_value.envelopes and not (
         input_value.has_real_observation and input_value.lifecycle is ObservationLifecycle.ACTIVE
     ):
-        gap_set = set(coverage.known_gaps)
-        gap_set.add("observation_qualified_partial")
         coverage = Coverage(
             publication_channels=coverage.publication_channels,
             authorship_assurance=AuthorshipAssurance.SERVICE_AUTHENTICATED,
@@ -511,41 +763,57 @@ def build_observation_advice_snapshot(
             evidence_immutability=coverage.evidence_immutability,
             ledger_freshness=LedgerFreshness.PARTIAL,
             check_types=coverage.check_types,
-            known_gaps=tuple(sorted(gap_set, key=str.encode)),
+            known_gaps=coverage.known_gaps,
         )
     frontier = _freshness_frontier(input_value.envelopes, basis)
+    semantic_items, semantic_item_invalid = _semantic_items(
+        semantic_indexes=semantic_indexes,
+        semantic_ids=semantic_ids,
+        summaries=semantic_summaries,
+        details=semantic_details,
+        next_action=next_action,
+        coverage=coverage,
+        freshness_frontier=frontier,
+    )
+    if semantic_item_invalid and not semantic_invalid:
+        # AdviceItem is the single source of truth for safe semantic text and
+        # action tokens. Rebuild coverage and items after it rejects provider
+        # output so the rejection remains visible as a bounded gap.
+        semantic_invalid = True
+        additional_gaps = (*additional_gaps, _ADVICE_SEMANTIC_OUTPUT_INVALID_GAP)
+        basis_extra["coverage_gaps"] = _sorted_coverage_gaps(input_value.gaps, additional_gaps)
+        basis = evidence_basis_digest(candidates, input_value.envelopes, extra=basis_extra)
+        frontier = _freshness_frontier(input_value.envelopes, basis)
+        coverage = _coverage(
+            observation_qualified=observation_qualified,
+            semantic=bool(semantic_ids),
+            gaps=input_value.gaps,
+            additional_gaps=additional_gaps,
+        )
+        if qualification_partial:
+            coverage = Coverage(
+                publication_channels=coverage.publication_channels,
+                authorship_assurance=AuthorshipAssurance.SERVICE_AUTHENTICATED,
+                artifact_observation=ArtifactObservation.PUBLISHED_ONLY,
+                evidence_immutability=coverage.evidence_immutability,
+                ledger_freshness=LedgerFreshness.PARTIAL,
+                check_types=coverage.check_types,
+                known_gaps=coverage.known_gaps,
+            )
+        semantic_items, _ = _semantic_items(
+            semantic_indexes=semantic_indexes,
+            semantic_ids=semantic_ids,
+            summaries=semantic_summaries,
+            details=semantic_details,
+            next_action=next_action,
+            coverage=coverage,
+            freshness_frontier=frontier,
+        )
     items: list[AdviceItem] = [
         _item_from_candidate(candidate, finding, coverage=coverage, freshness_frontier=frontier)
-        for candidate, finding in zip(candidates, finding_ids, strict=True)
+        for candidate, finding in zip(selected_candidates, finding_ids, strict=True)
     ]
-    if semantic is not None and semantic_ids:
-        for index, finding in enumerate(semantic_ids):
-            if finding in finding_ids:
-                continue
-            summary = (
-                semantic.summaries[index]
-                if index < len(semantic.summaries)
-                else "Model-derived observation note"
-            )
-            detail = (
-                semantic.details[index]
-                if index < len(semantic.details)
-                else "Additive semantic advice over minimized evidence"
-            )
-            items.append(
-                AdviceItem(
-                    finding_id=finding,
-                    rule_code="semantic-additive-review",
-                    priority=90,
-                    summary=summary[:160],
-                    detail=detail[:240],
-                    recommended_next_action=next_action,
-                    evidence_refs=("semantic:minimized",),
-                    coverage=coverage,
-                    freshness_frontier=frontier,
-                    origin="semantic_model_derived",
-                )
-            )
+    items.extend(semantic_items)
     suppression = _suppression_identity(ranked, basis, next_action)
     snapshot = AdviceSnapshot(
         ranked_finding_ids=ranked,

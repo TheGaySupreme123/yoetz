@@ -103,6 +103,36 @@ def test_failed_command_cleared_by_retry() -> None:
     assert "failed_command_unresolved" not in rules
 
 
+def test_failed_stream_output_uses_originating_tool_name() -> None:
+    envelopes = (
+        _envelope(
+            "response_item",
+            pos=1,
+            identity="stream:call",
+            payload={"action": "function_call", "tool_name": "shell", "tool_call_id": "call-1"},
+        ),
+        _envelope(
+            "response_item",
+            pos=2,
+            identity="stream:output",
+            payload={
+                "action": "function_call_output",
+                "tool_call_id": "call-1",
+                "exit_status": 1,
+                "result_status": "completed",
+            },
+        ),
+    )
+    rules = _rules(
+        ObservationAdviceContext(
+            envelopes=envelopes,
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+        )
+    )
+    assert "failed_command_unresolved" in rules
+
+
 def test_edit_after_successful_check() -> None:
     envelopes = (
         _envelope(
@@ -151,6 +181,30 @@ def test_completion_without_verification() -> None:
         )
     )
     assert "completion_without_verification" in rules
+
+
+def test_completed_tool_result_is_not_an_authored_completion_claim() -> None:
+    """Host/tool completion status cannot stand in for the agent's claim."""
+
+    rules = _rules(
+        ObservationAdviceContext(
+            envelopes=(
+                _envelope(
+                    "PostToolUse",
+                    pos=1,
+                    identity="hook:tool-completed",
+                    payload={
+                        "tool_name": "publish_work",
+                        "result_status": "completed",
+                    },
+                ),
+            ),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            check_facts=(),
+        )
+    )
+    assert "completion_without_verification" not in rules
 
 
 def test_static_test_for_live_claim() -> None:

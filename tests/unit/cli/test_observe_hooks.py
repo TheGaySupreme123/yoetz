@@ -4692,10 +4692,11 @@ def test_hook_invocation_writes_the_state_file_once_not_fourteen_times(
     # Exact accounting, so a regression cannot hide inside a loose ceiling:
     #   1 local-pass batch flush
     # + 1 per drained outbox row, bounded by _HOOK_DRAIN_ROW_LIMIT (4 here)
+    # + 1 advice-snapshot persistence now that oversized advice projects safely
     # + 1 advice-delivery commit, and only when advice actually reached stdout.
     # Seventeen were measured before the write batch. Nothing else writes: the
     # advice sidecar and the async-pair sample are gone.
-    assert _suffix_counts(written) == {".json": 5 + int(delivered)}, written
+    assert _suffix_counts(written) == {".json": 6 + int(delivered)}, written
 
 
 def test_refresh_advice_does_not_rewrite_state_when_the_snapshot_is_unchanged(

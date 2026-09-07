@@ -26,7 +26,7 @@ __all__ = [
 ]
 
 OBSERVATION_ADVICE_POLICY_ID: Final = "observation-advice"
-OBSERVATION_ADVICE_POLICY_VERSION: Final = "0.1.2"
+OBSERVATION_ADVICE_POLICY_VERSION: Final = "0.1.3"
 
 OBSERVATION_ADVICE_FACT_CODES: Final = frozenset(
     {
@@ -270,16 +270,34 @@ def _failed_commands(envelopes: Sequence[ObservationEnvelope]) -> list[Observati
     results: list[ObservationAdviceCandidate] = []
     unresolved: dict[str, ObservationEnvelope] = {}
     shell_tools = _CHECK_TOOLS | {"shell", "Bash", "bash"}
+    originating_tools: dict[str, str] = {}
+    fallback_tools: dict[str, str] = {}
     for envelope in envelopes:
         tool = _tool(envelope)
-        if tool is None or tool not in shell_tools:
-            continue
+        key = (
+            envelope.structural_payload.get(_FIELD_CORRELATION_ID)
+            or envelope.structural_payload.get(_FIELD_TOOL_CALL_ID)
+            or envelope.source_identity
+        )
+        if type(tool) is str and type(key) is str:
+            if envelope.structural_payload.get(_FIELD_ACTION) == "function_call":
+                # A paired stream output may omit tool_name. The originating
+                # function call is authoritative if an output self-names.
+                originating_tools[key] = tool
+            else:
+                fallback_tools.setdefault(key, tool)
+    for envelope in envelopes:
+        tool = _tool(envelope)
         key = (
             envelope.structural_payload.get(_FIELD_CORRELATION_ID)
             or envelope.structural_payload.get(_FIELD_TOOL_CALL_ID)
             or envelope.source_identity
         )
         if type(key) is not str:
+            continue
+        if tool is None:
+            tool = originating_tools.get(key) or fallback_tools.get(key)
+        if tool is None or tool not in shell_tools:
             continue
         if envelope.event_kind in {"PreToolUse"}:
             continue
@@ -359,8 +377,12 @@ def _completion_without_verification(
     completion_refs: list[str] = []
     for envelope in envelopes:
         claim = _claim_kind(envelope)
-        result = _result_status(envelope)
-        if claim in {"completion", "done", "finished"} or result in {"completed", "done"}:
+        # ``result_status`` describes the outcome of a host/tool event.  It is
+        # not an authored statement that the agent's work is complete.  Native
+        # Codex completion events commonly carry ``result_status=completed``
+        # while retaining no completion claim at all; treating every such row
+        # as a claim both raised false advice and accumulated unbounded refs.
+        if claim in {"completion", "done", "finished"}:
             completion_refs.append(_envelope_ref(envelope))
     if not completion_refs:
         return []

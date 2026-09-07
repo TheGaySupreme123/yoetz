@@ -258,6 +258,22 @@ absence only; a modified or untrusted byte-present tree is `installed_not_activa
 `active` (issue #347). None of them—and not even
 `active`—proves a later Codex process loaded a hook or delivered an observation.
 
+Complete Codex's own trust step in a fresh native process before testing hook delivery. Open
+`/hooks`, review the commands from the intended Yoetz plugin, and approve those hooks through
+Codex's normal review UI. Confirm the hooks are active, then start a fresh session so its
+`SessionStart` runs with that trust. New or changed hooks can remain installed but inactive;
+the plugin's skill and MCP tools may still work in that state. A non-interactive run with no
+observation rows is therefore not, by itself, evidence of a Yoetz ingestion failure. Installation
+inspection reports hook trust as unknown because it does not inspect Codex's effective trust
+decision. Do not replace this check with a hook-trust bypass flag.
+
+Project trust is a separate gate for the project-local MCP admission table above. When a check
+returns `MCP tool call requires approval, but approval policy is never`, it was refused by Codex
+before Yoetz dispatched it. Confirm the project is trusted in the selected Codex home and test a
+fresh process with the intended MCP owner and per-tool policy. An installed admission entry or
+`codex mcp get` output alone does not prove the running process applied that policy. A normal
+interactive process can present any remaining approval request without changing the sandbox.
+
 The managed project source always carries the canonical async-free render; the host-specific form
 (async pure-ingress hooks from Codex `0.148.0-alpha.6`) exists only in the versioned activation
 cache, which apply seeds and verifies against the previewed install digest. Because the package

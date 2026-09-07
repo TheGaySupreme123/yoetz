@@ -441,8 +441,9 @@ Yoetz's own tool calls are observed without recursively feeding the outbox they 
 from, and
 cooperative writers learn about meaningful observation-authored frontier motion before their next
 state-sensitive operation. Captured objects contribute immutable byte identity without being
-upgraded to validation, reproduction, or disclosure authority. Observation-advice policy `0.1.2`
-applies the condition-scoped identity
-to new materialization (`0.1.1` first introduced it; `0.1.2` rebased the standing
-`provider_not_ready` condition onto per-build structural machine facts for issue #265). Historical duplicate findings remain append-only evidence; this change does
-not erase or rewrite an existing task ledger.
+upgraded to validation, reproduction, or disclosure authority. Observation-advice policy `0.1.3`
+applies the condition-scoped identity to new materialization (`0.1.1` first introduced it;
+`0.1.2` rebased the standing `provider_not_ready` condition onto per-build structural machine facts
+for issue #265; `0.1.3` keeps the full evidence basis while bounding advice projection and requires
+an explicit authored completion claim). Historical duplicate findings remain append-only evidence;
+this change does not erase or rewrite an existing task ledger.

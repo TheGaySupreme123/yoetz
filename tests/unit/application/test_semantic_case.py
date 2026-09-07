@@ -13,6 +13,7 @@ import pytest
 
 from builders.policy_cases import (
     act,
+    claim_record,
     clm,
     evd,
     evidence_record,
@@ -248,6 +249,56 @@ def _captured_case_values(
         phase_bindings=((str(evd(1)), phase_identity),),
     )
     return observed, captured, scope
+
+
+def _opaque_before_capture_case() -> tuple[
+    DeterministicCase, CapturedSemanticContent, CapturedContentScope, EvidenceId
+]:
+    """Build a case where metadata-only evidence sorts before authenticated capture."""
+
+    base, captured, scope = _captured_case_values(b"captured-selection-marker")
+    opaque: dict[EvidenceId, EvidenceProjectionRecord] = {}
+    for index in range(1, 17):
+        ref = evd(index)
+        opaque[ref] = evidence_record(
+            EvidenceRecordedPayload(
+                evidence_id=ref,
+                evidence_kind=EvidenceKind.OTHER,
+                strength=EvidenceImmutability.METADATA_ONLY,
+                observed_at=timestamp_from_string("2026-07-01T00:00:00.000Z"),
+                description="Opaque observation kind=event_msg",
+            ),
+            index + 3,
+        )
+
+    captured_ref = evd(20)
+    captured_record = base.projection.evidence[evd(1)]
+    assert captured_record.payload is not None
+    captured_payload = replace(captured_record.payload, evidence_id=captured_ref)
+    evidence = {
+        **opaque,
+        captured_ref: evidence_record(captured_payload, 20),
+    }
+    claim_recorded = base.projection.claims[clm(1)]
+    assert claim_recorded.payload is not None
+    claims = {
+        clm(1): claim_record(
+            replace(claim_recorded.payload, supporting_refs=tuple(evidence)),
+            3,
+        )
+    }
+    case = make_case(
+        plans=base.projection.plans,
+        obligations=base.projection.obligations,
+        claims=claims,
+        evidence=evidence,
+        extra_refs=tuple(evidence),
+    )
+    scope = replace(
+        scope,
+        phase_bindings=((str(captured_ref), scope.phase_bindings[0][1]),),
+    )
+    return case, captured, scope, captured_ref
 
 
 def test_structural_profile_sends_no_prose_and_declares_omitted_sections() -> None:
@@ -675,6 +726,379 @@ def test_authenticated_captured_bytes_reach_selected_case_and_prepared_packet() 
         {item.item_id for item in semantic.items},
     )
     assert captured.content in prepared
+
+
+def test_authenticated_capture_is_selected_before_opaque_metadata_rows() -> None:
+    case, captured, scope, captured_ref = _opaque_before_capture_case()
+
+    semantic = _build(
+        case,
+        ReviewContextProfile.EXPANDED,
+        captured_content=(captured,),
+        captured_content_scope=scope,
+    )
+
+    assert len(semantic.packet.targeted_excerpts) == 16
+    selected = semantic.packet.targeted_excerpts[0]
+    assert selected.excerpt_item_id == f"excerpt-{captured_ref}"
+    assert selected.content_visibility == "available"
+    assert selected.digest_provenance is not None
+    assert selected.digest_provenance.provenance is EvidenceDigestProvenance.OBSERVATION_CAPTURED
+    selected_item = next(
+        item for item in semantic.items if item.item_id == selected.excerpt_item_id
+    )
+    assert selected_item.content == captured.content
+
+    metadata_rows = semantic.packet.targeted_excerpts[1:]
+    assert len(metadata_rows) == 15
+    assert all(row.content_visibility == "available" for row in metadata_rows)
+    assert all(row.digest_provenance is None for row in metadata_rows)
+    assert "content_unselected" not in semantic.packet.coverage.known_gaps
+
+
+def test_captured_multipart_group_is_one_deterministic_excerpt() -> None:
+    case, captured, scope, captured_ref = _opaque_before_capture_case()
+    first = b"captured-part-a"
+    second = b"captured-part-b"
+    first_digest = "sha256:" + hashlib.sha256(first).hexdigest()
+    second_digest = "sha256:" + hashlib.sha256(second).hexdigest()
+    first_object = object_id("obj_00000000-0000-4000-8000-000000000302")
+    second_object = object_id("obj_00000000-0000-4000-8000-000000000303")
+    first_envelope = "sha256:" + "5" * 64
+    second_envelope = "sha256:" + "9" * 64
+    captured_ref_two = evd(21)
+
+    first_payload = EvidenceRecordedPayload(
+        evidence_id=captured_ref,
+        evidence_kind=EvidenceKind.OTHER,
+        strength=EvidenceImmutability.IMMUTABLE_SNAPSHOT,
+        observed_at=timestamp_from_string("2026-07-01T00:00:00.000Z"),
+        captured_object_id=first_object,
+        content_digest=first_digest,
+        description="Observation-captured tool output bytes part=1/2",
+        digest_binding=EvidenceDigestBinding(
+            subject=EvidenceDigestSubject.BOUNDED_EXCERPT,
+            content_availability=EvidenceContentAvailability.CAPTURED,
+            byte_count=len(first),
+            provenance=EvidenceDigestProvenance.OBSERVATION_CAPTURED,
+        ),
+    )
+    first_binding = first_payload.digest_binding
+    assert type(first_binding) is EvidenceDigestBinding
+    second_payload = replace(
+        first_payload,
+        evidence_id=captured_ref_two,
+        captured_object_id=second_object,
+        content_digest=second_digest,
+        description="Observation-captured tool output bytes part=2/2",
+        digest_binding=replace(first_binding, byte_count=len(second)),
+    )
+    evidence = dict(case.projection.evidence)
+    evidence[captured_ref] = evidence_record(first_payload, 20)
+    evidence[captured_ref_two] = evidence_record(second_payload, 21)
+    claim_recorded = case.projection.claims[clm(1)]
+    assert claim_recorded.payload is not None
+    claims = {
+        clm(1): claim_record(
+            replace(
+                claim_recorded.payload,
+                supporting_refs=tuple(evidence),
+            ),
+            3,
+        )
+    }
+    case = make_case(
+        plans=case.projection.plans,
+        obligations=case.projection.obligations,
+        claims=claims,
+        evidence=evidence,
+        extra_refs=tuple(evidence),
+    )
+    first_manifest = replace(
+        captured.manifest,
+        object_id=first_object,
+        envelope_digest=first_envelope,
+        part_index=0,
+        part_count=2,
+        content_digest=first_digest,
+        content_bytes=len(first),
+    )
+    first_ref = replace(
+        captured.object_ref,
+        object_id=first_object,
+        envelope_digest=first_envelope,
+    )
+    first_captured = replace(
+        captured,
+        object_ref=first_ref,
+        manifest=first_manifest,
+        content=first,
+    )
+    second_manifest = replace(
+        captured.manifest,
+        object_id=second_object,
+        envelope_digest=second_envelope,
+        part_index=1,
+        part_count=2,
+        content_digest=second_digest,
+        content_bytes=len(second),
+    )
+    second_ref = replace(
+        captured.object_ref,
+        object_id=second_object,
+        envelope_digest=second_envelope,
+    )
+    second_captured = replace(
+        captured,
+        object_ref=second_ref,
+        manifest=second_manifest,
+        content=second,
+    )
+    scope = replace(
+        scope,
+        phase_bindings=(
+            (str(captured_ref), scope.phase_bindings[0][1]),
+            (str(captured_ref_two), scope.phase_bindings[0][1]),
+        ),
+    )
+
+    semantic = _build(
+        case,
+        ReviewContextProfile.EXPANDED,
+        captured_content=(second_captured, first_captured),
+        captured_content_scope=scope,
+    )
+
+    selected = semantic.packet.targeted_excerpts[0]
+    assert selected.excerpt_item_id == f"excerpt-{captured_ref}"
+    selected_item = next(
+        item for item in semantic.items if item.item_id == selected.excerpt_item_id
+    )
+    assert selected_item.content == first + second
+    assert selected.content_bytes == len(first + second)
+    assert selected.digest_provenance is not None
+    assert selected.digest_provenance.content_digest == (
+        "sha256:" + hashlib.sha256(first + second).hexdigest()
+    )
+    assert all(
+        f"excerpt-{ref}" not in {item.excerpt_item_id for item in semantic.packet.targeted_excerpts}
+        for ref in (captured_ref_two,)
+    )
+
+
+def test_capture_quota_tie_selects_first_capture_and_discloses_the_rest() -> None:
+    case, captured, scope, captured_ref = _opaque_before_capture_case()
+    second_ref = evd(21)
+    second_content = b"second-capture"
+    second_digest = "sha256:" + hashlib.sha256(second_content).hexdigest()
+    second_object = object_id("obj_00000000-0000-4000-8000-000000000303")
+    second_envelope = "sha256:" + "9" * 64
+    source_payload = case.projection.evidence[captured_ref].payload
+    assert type(source_payload) is EvidenceRecordedPayload
+    source_binding = source_payload.digest_binding
+    assert type(source_binding) is EvidenceDigestBinding
+    second_payload = replace(
+        source_payload,
+        evidence_id=second_ref,
+        captured_object_id=second_object,
+        content_digest=second_digest,
+        description="Observation-captured tool output bytes part=1/1",
+        digest_binding=replace(
+            source_binding,
+            byte_count=len(second_content),
+        ),
+    )
+    evidence = dict(case.projection.evidence)
+    evidence[second_ref] = evidence_record(second_payload, 21)
+    claim_recorded = case.projection.claims[clm(1)]
+    assert claim_recorded.payload is not None
+    claims = {
+        clm(1): claim_record(
+            replace(claim_recorded.payload, supporting_refs=tuple(evidence)),
+            3,
+        )
+    }
+    case = make_case(
+        plans=case.projection.plans,
+        obligations=case.projection.obligations,
+        claims=claims,
+        evidence=evidence,
+        extra_refs=tuple(evidence),
+    )
+    second_manifest = replace(
+        captured.manifest,
+        object_id=second_object,
+        envelope_digest=second_envelope,
+        correlation_identity="tool-use-2",
+        source_commitment="hmac-sha256:" + "a" * 64,
+        content_digest=second_digest,
+        content_bytes=len(second_content),
+    )
+    second_ref_object = replace(
+        captured.object_ref,
+        object_id=second_object,
+        envelope_digest=second_envelope,
+    )
+    second_captured = replace(
+        captured,
+        object_ref=second_ref_object,
+        manifest=second_manifest,
+        content=second_content,
+    )
+    scope = replace(
+        scope,
+        phase_bindings=(
+            (str(captured_ref), scope.phase_bindings[0][1]),
+            (str(second_ref), scope.phase_bindings[0][1]),
+        ),
+    )
+    selection = replace(
+        ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED),
+        max_total_excerpt_bytes=len(captured.content),
+    )
+    semantic = build_semantic_case(
+        case_id="cas_10000000-0000-4000-8000-000000000001",
+        frozen_case=case,
+        dependency_digest="sha256:" + "b" * 64,
+        findings=(),
+        review_context_profile=ReviewContextProfile.EXPANDED,
+        review_selection=selection,
+        policy_id="pvy_10000000-0000-4000-8000-000000000001",
+        policy_version="1",
+        captured_content=(second_captured, captured),
+        captured_content_scope=scope,
+    )
+
+    assert [item.excerpt_item_id for item in semantic.packet.targeted_excerpts] == [
+        f"excerpt-{captured_ref}"
+    ]
+    assert "content_unselected" in semantic.packet.coverage.known_gaps
+    assert any(
+        omission.subject_ref == str(second_ref) and omission.reason == "not_selected"
+        for omission in semantic.packet.omissions
+    )
+
+    replayed_case = make_case(
+        plans=case.projection.plans,
+        obligations=case.projection.obligations,
+        claims=claims,
+        evidence=dict(reversed(tuple(evidence.items()))),
+        extra_refs=tuple(reversed(tuple(evidence))),
+    )
+    replayed = build_semantic_case(
+        case_id="cas_10000000-0000-4000-8000-000000000001",
+        frozen_case=replayed_case,
+        dependency_digest="sha256:" + "b" * 64,
+        findings=(),
+        review_context_profile=ReviewContextProfile.EXPANDED,
+        review_selection=selection,
+        policy_id="pvy_10000000-0000-4000-8000-000000000001",
+        policy_version="1",
+        captured_content=(captured, second_captured),
+        captured_content_scope=scope,
+    )
+    assert replayed.case_digest == semantic.case_digest
+    assert replayed.packet.targeted_excerpts == semantic.packet.targeted_excerpts
+
+
+def test_authenticated_capture_excluded_by_zero_excerpt_selection_is_disclosed() -> None:
+    case, captured, scope = _captured_case_values()
+    selection = ReviewSelectionPolicy.for_profile(ReviewContextProfile.STRUCTURAL)
+    semantic = build_semantic_case(
+        case_id="cas_10000000-0000-4000-8000-000000000001",
+        frozen_case=case,
+        dependency_digest="sha256:" + "b" * 64,
+        findings=(),
+        review_context_profile=ReviewContextProfile.CUSTOM,
+        review_selection=selection,
+        policy_id="pvy_10000000-0000-4000-8000-000000000001",
+        policy_version="1",
+        captured_content=(captured,),
+        captured_content_scope=scope,
+    )
+
+    assert semantic.packet.targeted_excerpts == ()
+    assert "content_unselected" in semantic.packet.coverage.known_gaps
+    assert any(
+        omission.subject_ref == str(evd(1))
+        and omission.source_kind == "evidence"
+        and omission.reason == "not_selected"
+        for omission in semantic.packet.omissions
+    )
+    assert captured.content not in semantic_case_to_prepared_payload(
+        semantic,
+        {item.item_id for item in semantic.items},
+    )
+
+
+def test_authenticated_capture_excluded_by_excerpt_kind_is_disclosed() -> None:
+    case, captured, scope = _captured_case_values()
+    selection = replace(
+        ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED),
+        excerpt_kinds=("test",),
+    )
+    semantic = build_semantic_case(
+        case_id="cas_10000000-0000-4000-8000-000000000001",
+        frozen_case=case,
+        dependency_digest="sha256:" + "b" * 64,
+        findings=(),
+        review_context_profile=ReviewContextProfile.CUSTOM,
+        review_selection=selection,
+        policy_id="pvy_10000000-0000-4000-8000-000000000001",
+        policy_version="1",
+        captured_content=(captured,),
+        captured_content_scope=scope,
+    )
+
+    assert semantic.packet.targeted_excerpts == ()
+    assert "content_unselected" in semantic.packet.coverage.known_gaps
+    assert any(
+        omission.subject_ref == str(evd(1))
+        and omission.source_kind == "evidence"
+        and omission.reason == "not_selected"
+        for omission in semantic.packet.omissions
+    )
+    assert captured.content not in semantic_case_to_prepared_payload(
+        semantic,
+        {item.item_id for item in semantic.items},
+    )
+
+
+def test_authenticated_capture_excluded_by_assisted_relevance_is_disclosed() -> None:
+    case, captured, scope = _captured_case_values()
+    claim_recorded = case.projection.claims[clm(1)]
+    assert claim_recorded.payload is not None
+    unlinked_case = make_case(
+        plans=case.projection.plans,
+        obligations=case.projection.obligations,
+        claims={
+            clm(1): claim_record(
+                replace(claim_recorded.payload, supporting_refs=()),
+                3,
+            )
+        },
+        evidence=case.projection.evidence,
+        extra_refs=(clm(1), obl(1), evd(1)),
+    )
+    semantic = _build(
+        unlinked_case,
+        ReviewContextProfile.ASSISTED,
+        captured_content=(captured,),
+        captured_content_scope=scope,
+    )
+
+    assert semantic.packet.targeted_excerpts == ()
+    assert "content_unselected" in semantic.packet.coverage.known_gaps
+    assert any(
+        omission.subject_ref == str(evd(1))
+        and omission.source_kind == "evidence"
+        and omission.reason == "not_selected"
+        for omission in semantic.packet.omissions
+    )
+    assert captured.content not in semantic_case_to_prepared_payload(
+        semantic,
+        {item.item_id for item in semantic.items},
+    )
 
 
 def test_wrong_phase_captured_bytes_are_excluded_even_with_valid_digest() -> None:

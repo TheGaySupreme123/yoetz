@@ -3159,6 +3159,16 @@ Shared closed types:
   `afterMCPExecution`, and `sessionEnd` emit `{}`. Cursor leases and commits advice only for a
   nonempty `sessionStart` object after its bytes are written successfully. Output-less events never
   lease or consume advice or frontier-motion notices.
+  Advice projection is bounded by the domain wire limits: each item carries at most 16 evidence
+  refs and a snapshot carries at most 64 ranked findings. The evidence-basis digest still commits
+  to every policy candidate, ref, semantic coverage input, and discarded condition. When a
+  projection limit is reached, the visible coverage carries `advice_evidence_refs_truncated` or
+  `advice_ranked_findings_truncated`; if those markers would exceed the 64-gap coverage bound,
+  `advice_coverage_gaps_truncated` remains visible and the complete gap set stays committed in
+  the basis digest. Invalid semantic finding ids are discarded, invalid semantic text falls back
+  to service-authored safe text, and `advice_semantic_output_invalid` weakens coverage. A host/tool
+  `result_status=completed` outcome is not an authored completion claim; completion advice requires
+  an explicit `claim_kind` value such as `completion`, `done`, or `finished`.
 
 Independent verification support (local control, not MCP):
 
@@ -4250,6 +4260,19 @@ same-name source cannot create a plugin-managed pass: plugin plus external is `d
 same-class sources are `ambiguous`, and any non-exact same-name entry is `foreign`. Route
 recognition is key-set exact — exactly `command`, `type`, `args`, or those three plus the one
 `env` binding above; arbitrary additional keys such as `cwd` remain foreign.
+
+`CursorProjectMcpTarget` names an explicit absolute project root and Cursor configuration root.
+The POSIX project-registration adapter exposes preview, status, apply, and removal through
+`integrate cursor project-mcp`; its only owned file entry is project `.cursor/mcp.json` key
+`mcpServers.yoetz` with the exact invoking launcher, native Cursor serve suffix, and isolated-root
+binding. It refuses any same-name user or plugin source, duplicate source, or foreign project
+entry. A preview binds target directory identities, all three configuration preimages, route,
+launcher, and replacement digest. Apply rereads the inputs, atomically replaces through a pinned
+directory, and verifies the resulting configuration before reporting success. Host writers do
+not participate in compare-and-swap, so that limitation remains explicit. Status proves only
+configuration ownership; host trust remains unknown and runtime binding unobserved. This route
+lets Cursor supply native project roots without widening the bridge's workspace authority.
+Removal and strict registration compose the existing project admission reverse sweep.
 
 `CursorSdkBinding` is exactly `typescript|python`. `CursorArtifactIdentity` carries binding,
 package version/digest, bridge protocol exactly `sdk.v1`, and optional bridge digest.

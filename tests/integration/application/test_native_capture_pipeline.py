@@ -51,7 +51,7 @@ from yoetz.application.semantic_case import (
     semantic_case_to_prepared_payload,
 )
 from yoetz.application.semantic_content import resolve_captured_semantic_content
-from yoetz.cli.observe_hooks import handle_claude_observe, handle_cursor_observe
+from yoetz.cli.observe_hooks import handle_claude_observe, handle_cursor_observe, handle_observe
 from yoetz.domain.observation import (
     OBSERVATION_CONTENT_CAPTURE_PENDING_REASON,
     ObservationCaptureTicket,
@@ -61,6 +61,7 @@ from yoetz.domain.observation import (
     ObservationIngestDisposition,
     ObservationIngestRequest,
     ObservationIngestResult,
+    ObservationSource,
     observation_capture_part_descriptors,
     observation_ingest_request_from_json,
     observation_ingest_result_to_json,
@@ -210,7 +211,7 @@ async def _pipeline(
     tmp_path: Path,
     *,
     codex_session_id: str,
-    profile: str,
+    profile: str | None,
 ) -> tuple[
     Path,
     str,
@@ -230,7 +231,8 @@ async def _pipeline(
     local = LocalObservationStore(_state=state)
     workspace = local.workspace_commitment(str(project.resolve()))
     local.grant_consent(workspace)
-    local.enable_content_capture(workspace, profile)
+    if profile is not None:
+        local.enable_content_capture(workspace, profile)
     session_commitment = local.bind_codex_session(workspace, codex_session_id)
 
     task_id = _ids(IdKind.TASK, 1)
@@ -761,6 +763,85 @@ def _assisted_composition_evaluator(
         semantic_non_dispatch.ready_composition_module.IdPort(),
         local_observation=local_observation,
     )
+
+
+@pytest.mark.anyio
+async def test_profileless_codex_hook_content_reaches_guarded_task_bundle(
+    tmp_path: Path,
+) -> None:
+    """A Codex PostToolUse body reaches capture on the production SQLite authorizer path."""
+
+    codex_session_id = "codex:profileless-authorizer"
+    (
+        project,
+        workspace,
+        session_commitment,
+        _local,
+        task_observation,
+        _ledger,
+        _runtime,
+        _coordinator,
+        client,
+        connect,
+    ) = await _pipeline(
+        tmp_path,
+        codex_session_id=codex_session_id,
+        profile=None,
+    )
+    marker = b"codex-profileless-capture-authorizer-marker"
+    payload: Mapping[str, object] = {
+        "cwd": str(project),
+        "hook_event_name": "PostToolUse",
+        "model": "gpt-5.6-luna",
+        "permission_mode": "on-request",
+        "session_id": codex_session_id,
+        "tool_input": {"command": "printf fixture"},
+        "tool_name": "Bash",
+        "tool_response": {
+            "aggregated_output": marker.decode("utf-8"),
+            "exit_code": 0,
+            "stdout": marker.decode("utf-8"),
+        },
+        "tool_use_id": "codex-profileless-tool-1",
+        "transcript_path": str(project / "rollout.jsonl"),
+        "turn_id": "codex-profileless-turn-1",
+    }
+
+    def run_async(factory: Callable[[], Awaitable[object]]) -> object:
+        return asyncio.run(factory())
+
+    assert (
+        await asyncio.to_thread(
+            handle_observe,
+            event_name="PostToolUse",
+            stdin_bytes=canonical_encode(cast(CanonicalJsonValue, payload)),
+            workspace=str(project),
+            _state=tmp_path / "state",
+            stdout=io.BytesIO(),
+            connect=cast(object, connect),  # type: ignore[arg-type]
+            run_async=run_async,
+            source=ObservationSource.CODEX_HOOK,
+        )
+        == 0
+    )
+
+    assert len(client.requests) == 1
+    request = client.requests[0]
+    assert request.envelope.source is ObservationSource.CODEX_HOOK
+    assert request.content_capture_profile is None
+    assert len(request.content_chunks) == 1
+    captured_chunk = request.content_chunks[0]
+    assert marker in captured_chunk.content
+
+    envelopes = task_observation.list_envelopes_for_session(workspace, session_commitment)
+    assert len(envelopes) == 1
+    envelope = envelopes[0]
+    assert envelope.content_object_refs
+    manifest = task_observation.load_content_manifest(envelope.content_object_refs[0])
+    assert manifest is not None
+    assert manifest.content_kind is ObservationContentKind.TOOL_OUTPUT
+    assert manifest.content_digest == "sha256:" + hashlib.sha256(captured_chunk.content).hexdigest()
+    assert manifest.content_bytes == len(captured_chunk.content)
 
 
 @pytest.mark.anyio
