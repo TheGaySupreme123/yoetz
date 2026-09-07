@@ -183,24 +183,19 @@ def _active_requested_obligations(case: DeterministicCase) -> frozenset[Obligati
 def _action_subject_key(
     obligation_refs: tuple[str, ...],
     attempted_items: tuple[str, ...],
-) -> tuple[str, frozenset[str]] | None:
+) -> tuple[str, tuple[str, ...]] | None:
     if obligation_refs:
-        return ("obligations", frozenset(obligation_refs))
+        return ("obligations", obligation_refs)
     if attempted_items:
-        return ("requested_items", frozenset(attempted_items))
+        return ("requested_items", attempted_items)
     return None
 
 
 def _keys_are_disjoint(
-    left: tuple[str, frozenset[str]] | None,
-    right: tuple[str, frozenset[str]] | None,
+    left: tuple[str, frozenset[str]],
+    right: tuple[str, tuple[str, ...]] | None,
 ) -> bool:
-    return (
-        left is not None
-        and right is not None
-        and left[0] == right[0]
-        and left[1].isdisjoint(right[1])
-    )
+    return right is not None and left[0] == right[0] and left[1].isdisjoint(right[1])
 
 
 def _response_support_admissible(
@@ -381,7 +376,11 @@ def _unresolved_action_findings(case: DeterministicCase) -> list[DeterministicAs
         action = record.payload
         if action is None or action_id in linked_actions:
             continue
-        key = _action_subject_key(action.obligation_refs, action.attempted_items)
+        subjects = _action_subject_key(action.obligation_refs, action.attempted_items)
+        if subjects is None:
+            continue
+        # Reuse the later action's tuple instead of rebuilding its set for every pair.
+        key = (subjects[0], frozenset(subjects[1]))
         later = tuple(
             later_id
             for later_id, later_record in actions
