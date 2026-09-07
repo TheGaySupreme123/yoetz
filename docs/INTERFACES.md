@@ -3166,9 +3166,10 @@ Shared closed types:
   `advice_ranked_findings_truncated`; if those markers would exceed the 64-gap coverage bound,
   `advice_coverage_gaps_truncated` remains visible and the complete gap set stays committed in
   the basis digest. Invalid semantic finding ids are discarded, invalid semantic text falls back
-  to service-authored safe text, and `advice_semantic_output_invalid` weakens coverage. A host/tool
-  `result_status=completed` outcome is not an authored completion claim; completion advice requires
-  an explicit `claim_kind` value such as `completion`, `done`, or `finished`.
+  to service-authored safe text, and `advice_semantic_output_invalid` weakens coverage. Length-capped
+  semantic summaries/details carry `advice_semantic_text_truncated` so the clipping is explicit. A
+  host/tool `result_status=completed` outcome is not an authored completion claim; completion advice
+  requires an explicit `claim_kind` value such as `completion`, `done`, or `finished`.
 
 Independent verification support (local control, not MCP):
 

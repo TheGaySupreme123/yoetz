@@ -314,6 +314,83 @@ def test_semantic_only_invalid_next_action_falls_back_before_snapshot_validation
     assert "advice_semantic_output_invalid" in snapshot.confidence_coverage.known_gaps
 
 
+def test_semantic_only_invalid_finding_ids_yield_deterministic_gap_advice() -> None:
+    snapshot = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            semantic_addon=ObservationAdviceSemanticAddon(
+                finding_ids=("invalid-finding-id",),  # type: ignore[arg-type]
+                evidence_digest="sha256:" + "f" * 64,
+                summaries=("Provider note",),
+                details=("Provider detail",),
+            ),
+        )
+    )
+    assert snapshot is not None
+    assert len(snapshot.ranked_items) == 1
+    item = snapshot.ranked_items[0]
+    assert item.origin == "deterministic"
+    assert item.rule_code == "observation_gap_or_stale"
+    assert item.recommended_next_action == "reground_status"
+    assert "advice_semantic_output_invalid" in item.coverage.known_gaps
+
+
+def test_semantic_text_clipping_is_an_explicit_coverage_gap() -> None:
+    finding = finding_id("fnd_00000000-0000-4000-8000-000000000005")
+    summary = "Summary " + "s" * 200
+    detail = "Detail " + "d" * 300
+    snapshot = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            semantic_addon=ObservationAdviceSemanticAddon(
+                finding_ids=(finding,),
+                evidence_digest="sha256:" + "a" * 64,
+                summaries=(summary,),
+                details=(detail,),
+            ),
+        )
+    )
+    assert snapshot is not None
+    item = snapshot.ranked_items[0]
+    assert len(item.summary) == 160
+    assert len(item.detail) == 240
+    assert item.summary == summary[:160]
+    assert item.detail == detail[:240]
+    assert "advice_semantic_text_truncated" in item.coverage.known_gaps
+    assert "advice_semantic_output_invalid" not in item.coverage.known_gaps
+    assert snapshot.evidence_basis_digest == evidence_basis_digest(
+        (),
+        (),
+        extra={
+            "policy": f"{OBSERVATION_ADVICE_POLICY_ID}/{OBSERVATION_ADVICE_POLICY_VERSION}",
+            "lifecycle": "active",
+            "coverage_gaps": ("advice_semantic_text_truncated",),
+            "semantic_evidence": "sha256:" + "a" * 64,
+        },
+    )
+
+
+def test_empty_semantic_result_does_not_create_deterministic_fallback() -> None:
+    snapshot = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            semantic_addon=ObservationAdviceSemanticAddon(
+                finding_ids=(),
+                evidence_digest="sha256:" + "b" * 64,
+                summaries=(),
+                details=(),
+            ),
+        )
+    )
+    assert snapshot is None
+
+
 def test_standing_provider_condition_keeps_one_candidate_identity_as_envelopes_grow() -> None:
     composition = ObservationCompositionFact(
         semantic_configured=True,

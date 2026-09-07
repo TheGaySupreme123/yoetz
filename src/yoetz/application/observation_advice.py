@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final, Protocol, cast
 
-from yoetz.domain.findings import FindingId, finding_id
+from yoetz.domain.findings import FINDING_KIND_TRAITS, FindingId, FindingKind, finding_id
 from yoetz.domain.observation import (
     AdviceItem,
     AdviceSnapshot,
@@ -73,6 +73,7 @@ _MAX_ADVICE_RANKED_FINDINGS: Final = 64
 _ADVICE_EVIDENCE_REFS_TRUNCATED_GAP: Final = "advice_evidence_refs_truncated"
 _ADVICE_RANKED_FINDINGS_TRUNCATED_GAP: Final = "advice_ranked_findings_truncated"
 _ADVICE_SEMANTIC_OUTPUT_INVALID_GAP: Final = "advice_semantic_output_invalid"
+_ADVICE_SEMANTIC_TEXT_TRUNCATED_GAP: Final = "advice_semantic_text_truncated"
 _ADVICE_COVERAGE_GAPS_TRUNCATED_GAP: Final = "advice_coverage_gaps_truncated"
 _SEMANTIC_SUMMARY_FALLBACK: Final = "Model-derived observation note"
 _SEMANTIC_DETAIL_FALLBACK: Final = "Additive semantic advice over minimized evidence"
@@ -621,6 +622,38 @@ def _semantic_items(
     return items, invalid
 
 
+def _candidate_projection(
+    candidates: Sequence[ObservationAdviceCandidate],
+) -> tuple[tuple[ObservationAdviceCandidate, ...], tuple[FindingId, ...], bool, bool]:
+    """Select the bounded deterministic surface while retaining overflow facts."""
+
+    candidate_overflow = len(candidates) > _MAX_ADVICE_RANKED_FINDINGS
+    selected = tuple(candidates[:_MAX_ADVICE_RANKED_FINDINGS])
+    evidence_ref_overflow = any(
+        len(candidate.evidence_refs) > _MAX_ADVICE_EVIDENCE_REFS for candidate in candidates
+    )
+    finding_ids = tuple(
+        stable_advice_finding_id(item.rule_code, item.detail_token, advice_candidate_digest(item))
+        for item in selected
+    )
+    return selected, finding_ids, candidate_overflow, evidence_ref_overflow
+
+
+def _semantic_invalid_fallback_candidate() -> ObservationAdviceCandidate:
+    """Represent an invalid semantic-only result as bounded engine advice."""
+
+    kind = FindingKind.LEDGER_STALE_OR_INCOMPLETE
+    priority, _ = FINDING_KIND_TRAITS[kind]
+    return ObservationAdviceCandidate(
+        kind=kind,
+        rule_code="observation_gap_or_stale",
+        next_action="reground_status",
+        evidence_refs=("advice:invalid",),
+        priority=priority,
+        detail_token="semantic-output-invalid",
+    )
+
+
 def build_observation_advice_snapshot(
     input_value: ObservationAdviceBuildInput,
 ) -> AdviceSnapshot | None:
@@ -643,20 +676,15 @@ def build_observation_advice_snapshot(
     # already deterministically ordered by severity/rule/cause, so this keeps
     # the highest-ranked conditions without making the cap depend on arrival
     # order or hash iteration.
-    candidate_overflow = len(candidates) > _MAX_ADVICE_RANKED_FINDINGS
-    selected_candidates = candidates[:_MAX_ADVICE_RANKED_FINDINGS]
-    evidence_ref_overflow = any(
-        len(candidate.evidence_refs) > _MAX_ADVICE_EVIDENCE_REFS for candidate in candidates
-    )
-    finding_ids = tuple(
-        stable_advice_finding_id(item.rule_code, item.detail_token, advice_candidate_digest(item))
-        for item in selected_candidates
+    selected_candidates, finding_ids, candidate_overflow, evidence_ref_overflow = (
+        _candidate_projection(candidates)
     )
     semantic = input_value.semantic_addon
     semantic_ids: tuple[FindingId, ...] = ()
     semantic_indexes: tuple[int, ...] = ()
     semantic_overflow = False
     semantic_invalid = False
+    semantic_text_truncated = False
     semantic_summaries: tuple[object, ...] = ()
     semantic_details: tuple[object, ...] = ()
     semantic_evidence_digest: str | None = None
@@ -670,11 +698,23 @@ def build_observation_advice_snapshot(
             semantic_invalid = True
         if type(semantic.summaries) is tuple:
             semantic_summaries = cast(tuple[object, ...], semantic.summaries)
+            semantic_text_truncated = semantic_text_truncated or any(
+                type(value) is str and len(value) > 160 for value in semantic_summaries
+            )
         else:
             semantic_invalid = True
         if type(semantic.details) is tuple:
             semantic_details = cast(tuple[object, ...], semantic.details)
+            semantic_text_truncated = semantic_text_truncated or any(
+                type(value) is str and len(value) > 240 for value in semantic_details
+            )
         else:
+            semantic_invalid = True
+        if (
+            type(semantic.finding_ids) is tuple
+            and not semantic.finding_ids
+            and (semantic_summaries or semantic_details)
+        ):
             semantic_invalid = True
         if semantic.evidence_digest is not None:
             try:
@@ -695,6 +735,14 @@ def build_observation_advice_snapshot(
         selected_semantic = unique_semantic[:remaining]
         semantic_indexes = tuple(index for index, _ in selected_semantic)
         semantic_ids = tuple(finding for _, finding in selected_semantic)
+    if semantic is not None and semantic_invalid and not candidates and not semantic_ids:
+        # A malformed semantic-only response cannot mint an additive finding.
+        # Keep the actual lifecycle unchanged and use the existing deterministic
+        # gap rendering machinery for one actionable engine record.
+        candidates = (_semantic_invalid_fallback_candidate(),)
+        selected_candidates, finding_ids, candidate_overflow, evidence_ref_overflow = (
+            _candidate_projection(candidates)
+        )
     ranked = finding_ids + semantic_ids
     if not ranked:
         # Zero cooperative publications still yield observation-gap advice when empty/degraded.
@@ -727,6 +775,10 @@ def build_observation_advice_snapshot(
             (
                 _ADVICE_SEMANTIC_OUTPUT_INVALID_GAP,
                 semantic_invalid,
+            ),
+            (
+                _ADVICE_SEMANTIC_TEXT_TRUNCATED_GAP,
+                semantic_text_truncated,
             ),
             (
                 "observation_qualified_partial",

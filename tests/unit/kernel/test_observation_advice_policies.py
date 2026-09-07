@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from yoetz.domain.findings import FindingKind
 from yoetz.domain.observation import (
     ObservationCursor,
@@ -131,6 +133,129 @@ def test_failed_stream_output_uses_originating_tool_name() -> None:
         )
     )
     assert "failed_command_unresolved" in rules
+
+
+def test_conflicting_stream_output_uses_originating_tool_name() -> None:
+    envelopes = (
+        _envelope(
+            "response_item",
+            pos=1,
+            identity="stream:call-conflict",
+            payload={"action": "function_call", "tool_name": "shell", "tool_call_id": "call-2"},
+        ),
+        _envelope(
+            "response_item",
+            pos=2,
+            identity="stream:output-conflict",
+            payload={
+                "action": "function_call_output",
+                "tool_call_id": "call-2",
+                "tool_name": "publish_work",
+                "exit_status": 1,
+                "result_status": "completed",
+            },
+        ),
+    )
+    rules = _rules(
+        ObservationAdviceContext(
+            envelopes=envelopes,
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+        )
+    )
+    assert "failed_command_unresolved" in rules
+
+
+def test_completion_uses_originating_tool_for_successful_stream_output() -> None:
+    envelopes = (
+        _envelope(
+            "response_item",
+            pos=1,
+            identity="stream:call-success",
+            payload={"action": "function_call", "tool_name": "shell", "tool_call_id": "call-3"},
+        ),
+        _envelope(
+            "response_item",
+            pos=2,
+            identity="stream:output-success",
+            payload={
+                "action": "function_call_output",
+                "tool_call_id": "call-3",
+                "exit_status": 0,
+                "result_status": "completed",
+            },
+        ),
+        _envelope(
+            "PostToolUse",
+            pos=3,
+            identity="hook:completion-after-success",
+            payload={"claim_kind": "completion"},
+        ),
+    )
+    rules = _rules(
+        ObservationAdviceContext(
+            envelopes=envelopes,
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+        )
+    )
+    assert "completion_without_verification" not in rules
+
+
+def test_stream_pairing_does_not_cross_session_boundary() -> None:
+    origin = _envelope(
+        "response_item",
+        pos=1,
+        identity="stream:call-session-boundary",
+        payload={"action": "function_call", "tool_name": "shell", "tool_call_id": "call-4"},
+    )
+    output = _envelope(
+        "response_item",
+        pos=2,
+        identity="stream:output-session-boundary",
+        payload={
+            "action": "function_call_output",
+            "tool_call_id": "call-4",
+            "exit_status": 1,
+        },
+    )
+    output = replace(output, session_commitment="hmac-sha256:" + "b" * 64)
+    rules = _rules(
+        ObservationAdviceContext(
+            envelopes=(origin, output),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+        )
+    )
+    assert "failed_command_unresolved" not in rules
+
+
+def test_stream_pairing_does_not_cross_source_boundary() -> None:
+    origin = _envelope(
+        "response_item",
+        pos=1,
+        identity="stream:call-source-boundary",
+        payload={"action": "function_call", "tool_name": "shell", "tool_call_id": "call-5"},
+    )
+    output = _envelope(
+        "response_item",
+        pos=2,
+        identity="stream:output-source-boundary",
+        payload={
+            "action": "function_call_output",
+            "tool_call_id": "call-5",
+            "exit_status": 1,
+        },
+    )
+    output = replace(output, source=ObservationSource.CODEX_SESSION_STREAM)
+    rules = _rules(
+        ObservationAdviceContext(
+            envelopes=(origin, output),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+        )
+    )
+    assert "failed_command_unresolved" not in rules
 
 
 def test_edit_after_successful_check() -> None:
