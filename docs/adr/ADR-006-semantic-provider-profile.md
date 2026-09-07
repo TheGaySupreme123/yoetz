@@ -254,6 +254,14 @@ launch a child. A neighboring version, changed binary/config, absent ChatGPT log
 exact model/reasoning cell, or unproved isolation fails before case disclosure. This cell has
 unknown data-use posture and receives no Assisted recommendation badge.
 
+The September 7, 2026 amendment for issue #584 pins `codex-evaluator/0.150.1/v2` to the same
+native binary, schema, configuration, and expiry. It accepts the pinned schema's sparse rate-limit
+bookkeeping independently of bucket name; malformed bookkeeping after acknowledgement records
+only a bounded nonterminal diagnostic. Native quota and 429 errors remain authoritative. Tool
+and unreviewed event failures stay terminal but are unavailable rather than invalid model answers.
+The runbook records the exact new cell digest and synthetic evidence boundary. Existing bindings
+require explicit setup to accept the new identity; no privacy authority migrates implicitly.
+
 The gateway issues a secret-free, dispatch-bound `ExternalRuntimeAuthority` instead of minting a
 vault handle. The runtime may receive only the already-approved canonical case through stdin. Its
 `RuntimeAttemptEvidence` commits to the disclosed case, instruction, output schema, launcher,
