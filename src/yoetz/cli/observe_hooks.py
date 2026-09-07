@@ -1222,7 +1222,7 @@ async def _drain_outbox_leased(
     # reason only after encrypted manifests and the retry ticket are durable;
     # capture_only never advances the cursor or ledger.
     staged_content_sources: set[str] = set()
-    if content_by_source_identity and content_capture_profile is not None:
+    if content_by_source_identity:
         for source_identity, chunks in content_by_source_identity.items():
             if not chunks:
                 continue
@@ -1230,10 +1230,22 @@ async def _drain_outbox_leased(
                 (row for row in all_pending if row.envelope.source_identity == source_identity),
                 None,
             )
-            if source_row is None or source_row.envelope.source not in {
-                ObservationSource.CLAUDE_HOOK,
-                ObservationSource.CURSOR_HOOK,
-            }:
+            if source_row is None:
+                continue
+            source = source_row.envelope.source
+            codex_profileless = (
+                source is ObservationSource.CODEX_HOOK and content_capture_profile is None
+            )
+            profiled_native = (
+                source
+                in {
+                    ObservationSource.CLAUDE_HOOK,
+                    ObservationSource.CURSOR_HOOK,
+                }
+                and content_capture_profile is not None
+                and content_capture_profile_matches_source(source.value, content_capture_profile)
+            )
+            if not codex_profileless and not profiled_native:
                 continue
             remaining = budget_seconds - (monotonic() - started)
             if remaining <= 0:
@@ -2449,15 +2461,22 @@ def handle_observe(
         assert workspace_commitment is not None
         native_content_reservation = (
             not skip_service
-            and source
-            in {
-                ObservationSource.CLAUDE_HOOK,
-                ObservationSource.CURSOR_HOOK,
-            }
             and capture_authority_known
-            and _content_capture_profile is not None
-            and content_capture_profile_matches_source(source.value, _content_capture_profile)
-            and _content_capture_profile in consent.content_capture_profiles
+            and (
+                (source is ObservationSource.CODEX_HOOK and _content_capture_profile is None)
+                or (
+                    source
+                    in {
+                        ObservationSource.CLAUDE_HOOK,
+                        ObservationSource.CURSOR_HOOK,
+                    }
+                    and _content_capture_profile is not None
+                    and content_capture_profile_matches_source(
+                        source.value, _content_capture_profile
+                    )
+                    and _content_capture_profile in consent.content_capture_profiles
+                )
+            )
         )
         if native_content_reservation:
             try:
@@ -2614,29 +2633,31 @@ def handle_observe(
                 gap_codes=tuple(sorted(set(gap_codes), key=str.encode)),
                 source=source,
             )
-            # Native host content requires both the explicit profile argument
-            # emitted by the rendered artifact and the matching user consent
-            # arm.  Old/native structural hooks therefore remain contentless;
-            # Codex's historical session-stream path keeps its prior behavior.
+            # Claude/Cursor native content requires the explicit profile emitted
+            # by the rendered artifact and its matching consent arm. Codex hook
+            # content is the profileless arm of the structural observation grant;
+            # Codex session-stream content keeps its historical behavior.
             native_content_source = source in {
                 ObservationSource.CLAUDE_HOOK,
+                ObservationSource.CODEX_HOOK,
                 ObservationSource.CURSOR_HOOK,
             }
             content_authorized = capture_authority_known and not native_content_source
             if native_content_source:
-                content_authorized = (
-                    capture_authority_known
-                    and _content_capture_profile is not None
-                    and content_capture_profile_matches_source(
-                        source.value, _content_capture_profile
+                if source is ObservationSource.CODEX_HOOK:
+                    content_authorized = (
+                        capture_authority_known and _content_capture_profile is None
                     )
-                    and _content_capture_profile in consent.content_capture_profiles
-                )
-                if (
-                    capture_authority_known
-                    and _content_capture_profile is not None
-                    and not content_authorized
-                ):
+                else:
+                    content_authorized = (
+                        capture_authority_known
+                        and _content_capture_profile is not None
+                        and content_capture_profile_matches_source(
+                            source.value, _content_capture_profile
+                        )
+                        and _content_capture_profile in consent.content_capture_profiles
+                    )
+                if capture_authority_known and not content_authorized:
                     gap_codes.append(ObservationGapCode.CONTENT_UNSELECTED.value)
             if not capture_authority_known:
                 gap_codes.append(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
@@ -2669,7 +2690,12 @@ def handle_observe(
             native_content_priority = (
                 next(iter(content_map))
                 if content_map
-                and source in {ObservationSource.CLAUDE_HOOK, ObservationSource.CURSOR_HOOK}
+                and source
+                in {
+                    ObservationSource.CLAUDE_HOOK,
+                    ObservationSource.CODEX_HOOK,
+                    ObservationSource.CURSOR_HOOK,
+                }
                 else None
             )
             # A contentless ordinary-native row has no transient bytes that need a foreground
@@ -2677,10 +2703,19 @@ def handle_observe(
             # sweeper deliver it; opening a fresh service connection here would add latency to
             # self-observation and structural-only host events. Content-bearing native rows still
             # use the longer foreground window and priority path.
-            native_profile_drain = (
-                native_content_source
-                and _content_capture_profile is not None
-                and content_capture_profile_matches_source(source.value, _content_capture_profile)
+            native_profile_drain = native_content_source and (
+                (
+                    source is ObservationSource.CODEX_HOOK
+                    and _content_capture_profile is None
+                    and content_map is not None
+                )
+                or (
+                    source is not ObservationSource.CODEX_HOOK
+                    and _content_capture_profile is not None
+                    and content_capture_profile_matches_source(
+                        source.value, _content_capture_profile
+                    )
+                )
             )
             defer_contentless_native_drain = (
                 native_profile_drain and content_map is None and resolved_event != "SessionStart"

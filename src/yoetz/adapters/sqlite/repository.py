@@ -1111,7 +1111,7 @@ class SqliteLedger:
                     case_ref = self._object_ref_from_inventory(
                         cast(str, case_object_id),
                         self._task_id,
-                        "application/vnd.yoetz.semantic-case+json",
+                        "application/json",
                     )
                     selected_ref = (
                         None
@@ -1119,7 +1119,7 @@ class SqliteLedger:
                         else self._object_ref_from_inventory(
                             cast(str, selected_result_object_id),
                             self._task_id,
-                            "application/vnd.yoetz.semantic-response+json",
+                            "application/json",
                         )
                     )
                     job = SemanticJobRecord(
@@ -2049,10 +2049,23 @@ class SqliteLedger:
         self, writer_id: str, operation_id: str, request_digest: str
     ) -> OperationLease | PendingVerdict:
         await self._ensure_recovered()
-        result = await self._oracle().reclaim_operation(writer_id, operation_id, request_digest)
-        if type(result) is OperationLease:
-            await self._sync_after_mutation()
-        return result
+        async with self._lock:
+            prior = self._state
+            clone = self._clone_state()
+            oracle = MemoryLedgerAdapter(
+                task_id=self._task_id,
+                ownership_fence=self._fence,
+                state=clone,
+                import_state=_SqliteImportShim(),
+                transaction_lock=asyncio.Lock(),
+                clock=self._clock,
+                ids=self._ids,
+                objects=self._objects,
+            )
+            result = await oracle.reclaim_operation(writer_id, operation_id, request_digest)
+            if type(result) is OperationLease:
+                self._sync_clone_locked(prior, clone)
+            return result
 
     async def freeze_case(
         self,
@@ -2264,9 +2277,22 @@ class SqliteLedger:
 
     async def renew_leases(self, lease: OperationLease) -> OperationLease:
         await self._ensure_recovered()
-        result = await self._oracle().renew_leases(lease)
-        await self._sync_after_mutation()
-        return result
+        async with self._lock:
+            prior = self._state
+            clone = self._clone_state()
+            oracle = MemoryLedgerAdapter(
+                task_id=self._task_id,
+                ownership_fence=self._fence,
+                state=clone,
+                import_state=_SqliteImportShim(),
+                transaction_lock=asyncio.Lock(),
+                clock=self._clock,
+                ids=self._ids,
+                objects=self._objects,
+            )
+            result = await oracle.renew_leases(lease)
+            self._sync_clone_locked(prior, clone)
+            return result
 
     async def commit_check_if_current(
         self,

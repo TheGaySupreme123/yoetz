@@ -61,6 +61,7 @@ from yoetz.application.check import FinalSemanticEvaluation
 from yoetz.application.egress import (
     PrivacyCoordinator,
     RepositoryGrantAdmission,
+    SemanticEgressAttemptUnknown,
     SemanticEgressAwaitingHuman,
     SemanticEgressBlocked,
     SemanticEgressProviderOutcome,
@@ -1915,6 +1916,11 @@ def _map_egress_to_final(
                 ),
             ),
         )
+    if type(result) is SemanticEgressAttemptUnknown:
+        return FinalSemanticEvaluation(
+            SemanticStatus.UNAVAILABLE,
+            SemanticReason.OUTCOME_UNKNOWN,
+        )
     if type(result) is SemanticEgressBlocked:
         return _map_blocked(result.outcome, result.reason)
     if type(result) is SemanticEgressProviderOutcome:
@@ -2458,7 +2464,10 @@ async def _reconcile_observation_capture(
             or not authority.active
             or not authority.runtime_enabled
             or ticket.authority_generation != authority.generation
-            or ticket.content_capture_profile not in authority.profiles
+            or (
+                ticket.content_capture_profile is not None
+                and ticket.content_capture_profile not in authority.profiles
+            )
         ):
             tombstone(ticket)
 
@@ -2954,10 +2963,9 @@ def _privacy_gated_semantic_evaluator(
                             SemanticStatus.BLOCKED_BY_POLICY,
                             SemanticReason.SCOPE_NOT_AUTHORIZED,
                         )
-                    # Rebuilt per attempt for a fresh request identity so authorization cannot
-                    # be reused. The envelope itself is a pure function of the case, so the
-                    # bytes are identical to the ones validated above; only the request id — and,
-                    # for a fallback attempt, the exact destination — differs.
+                    # A newly claimed attempt gets a fresh request identity. A reclaimed started
+                    # attempt deliberately keeps its original identity so the privacy audit can
+                    # prove whether it was pre-admission or already consumed before replay.
                     candidate = semantic_case_to_candidate_context(
                         semantic_case,
                         request_id=handle.provider_request_id,
@@ -2972,6 +2980,20 @@ def _privacy_gated_semantic_evaluator(
                             SemanticStatus.BLOCKED_BY_POLICY,
                             SemanticReason.SCOPE_NOT_AUTHORIZED,
                         )
+                    if type(privacy) is PrivacyCoordinator:
+                        recovered = await privacy.recover_started_attempt(
+                            handle.provider_request_id,
+                            semantic_case.case_digest,
+                            attempt_deadline,
+                            dispatch_guard=_captured_content_fence_current,
+                        )
+                        if recovered is not None:
+                            return _map_egress_to_final(
+                                recovered,
+                                ids,
+                                attempt_id=handle.attempt_id,
+                                operation_request_id=frozen.lease.operation_id,
+                            )
                     if (
                         wait is not None
                         and wait.job_id == handle.job_id

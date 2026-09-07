@@ -332,10 +332,18 @@ def _is_valid_capture_only_observation(request: ControlCallRequest) -> bool:
     return (
         type(parsed) is ObservationIngestRequest
         and parsed.capture_only is True
-        and parsed.content_capture_profile is not None
-        and content_capture_profile_matches_source(
-            parsed.envelope.source.value,
-            parsed.content_capture_profile,
+        and (
+            (
+                parsed.envelope.source.value == "codex_hook"
+                and parsed.content_capture_profile is None
+            )
+            or (
+                parsed.content_capture_profile is not None
+                and content_capture_profile_matches_source(
+                    parsed.envelope.source.value,
+                    parsed.content_capture_profile,
+                )
+            )
         )
     )
 

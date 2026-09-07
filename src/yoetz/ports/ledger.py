@@ -1552,7 +1552,17 @@ class LedgerPort(Protocol):
 
     async def resolve_disclosure_wait(self, job_id: str) -> SemanticDisclosureWait: ...
 
-    async def renew_leases(self, lease: OperationLease) -> OperationLease: ...
+    async def renew_leases(self, lease: OperationLease) -> OperationLease:
+        """Return a replacement lease under the operation's authenticated lifetime policy.
+
+        For a queued or leased ``semantic-case/2`` job, the ledger reads the frozen case object
+        named by that job and caps the operation and active-job lease at its persisted execution
+        expiry plus the fixed cleanup grace. The caller supplies no deadline authority. Claiming
+        a job inherits the replacement operation expiry, including after a same-task recovery
+        rebind of an existing started attempt.
+        """
+
+        ...
 
     async def reclaim_operation(
         self, writer_id: str, operation_id: str, request_digest: str

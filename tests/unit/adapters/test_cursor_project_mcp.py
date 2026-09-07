@@ -68,7 +68,15 @@ def _entry(
     route: str = "policy",
     isolation_root: str | None = None,
 ) -> dict[str, Any]:
-    args = [*launcher[1:], "mcp", "serve", "--host", "cursor"]
+    args = [
+        *launcher[1:],
+        "mcp",
+        "serve",
+        "--host",
+        "cursor",
+        "--project-root",
+        "${workspaceFolder}",
+    ]
     if route == "strict":
         args.extend(("--semantic", "off"))
     result: dict[str, Any] = {
@@ -78,6 +86,19 @@ def _entry(
     }
     if isolation_root is not None:
         result["env"] = {"YOETZ_ISOLATED_ROOT": isolation_root}
+    return result
+
+
+def _legacy_entry(
+    launcher: tuple[str, ...] = LAUNCHER,
+    *,
+    route: str = "policy",
+    isolation_root: str | None = None,
+) -> dict[str, Any]:
+    result = _entry(launcher, route=route, isolation_root=isolation_root)
+    result["args"] = [*launcher[1:], "mcp", "serve", "--host", "cursor"]
+    if route == "strict":
+        result["args"].extend(("--semantic", "off"))
     return result
 
 
@@ -231,6 +252,39 @@ def test_strict_route_is_preserved_when_route_is_none_and_can_be_changed_explici
     assert _read_json(project)["mcpServers"]["yoetz"] == _entry(isolation_root=root)
 
 
+def test_legacy_project_entry_is_owned_for_upgrade_and_emits_the_selector(tmp_path: Path) -> None:
+    target = _target(tmp_path)
+    root = _isolation_root(tmp_path)
+    project = _project_config(target)
+    _write_json(project, {"mcpServers": {"yoetz": _legacy_entry(isolation_root=root)}})
+
+    status = status_cursor_project_mcp(target, launcher=LAUNCHER, isolation_root=root)
+    assert status["source"] == "project"
+    assert status["state"] == "yoetz_owned"
+    assert status["route_profile"] == "policy"
+
+    preview = preview_cursor_project_mcp(
+        target,
+        action="install",
+        launcher=LAUNCHER,
+        route_profile=None,
+        isolation_root=root,
+    )
+    assert preview["action"] == "reregister"
+    assert preview["route_profile"] == "policy"
+    applied = apply_cursor_project_mcp(
+        target,
+        action="install",
+        launcher=LAUNCHER,
+        route_profile=None,
+        isolation_root=root,
+        preview_digest=str(preview["preview_digest"]),
+        accept=True,
+    )
+    assert applied["state_after"] == "yoetz_owned"
+    assert _read_json(project)["mcpServers"]["yoetz"] == _entry(isolation_root=root)
+
+
 def test_changed_launcher_or_isolation_root_is_not_treated_as_owned(
     tmp_path: Path,
 ) -> None:
@@ -345,6 +399,69 @@ def test_stale_preview_refuses_without_mutating_a_changed_project_file(tmp_path:
         )
     )
     assert project.read_bytes() == changed_bytes
+
+
+def test_same_bytes_recreated_after_preview_are_stale_by_file_identity(tmp_path: Path) -> None:
+    target = _target(tmp_path)
+    root = _isolation_root(tmp_path)
+    project = _project_config(target)
+    original = {"mcpServers": {"other": {"command": "one"}}}
+    _write_json(project, original)
+    preview = preview_cursor_project_mcp(
+        target,
+        action="install",
+        launcher=LAUNCHER,
+        route_profile="policy",
+        isolation_root=root,
+    )
+    before = project.read_bytes()
+    project.unlink()
+    _write_json(project, original)
+    assert project.read_bytes() == before
+
+    _assert_fixed_reason(
+        lambda: apply_cursor_project_mcp(
+            target,
+            action="install",
+            launcher=LAUNCHER,
+            route_profile="policy",
+            isolation_root=root,
+            preview_digest=str(preview["preview_digest"]),
+            accept=True,
+        )
+    )
+    assert project.read_bytes() == before
+
+
+def test_absent_project_config_directory_replacement_is_stale_by_directory_identity(
+    tmp_path: Path,
+) -> None:
+    target = _target(tmp_path)
+    root = _isolation_root(tmp_path)
+    project = _project_config(target)
+    _secure_directory(project.parent)
+    preview = preview_cursor_project_mcp(
+        target,
+        action="install",
+        launcher=LAUNCHER,
+        route_profile="policy",
+        isolation_root=root,
+    )
+
+    project.parent.rename(tmp_path / "old-cursor-config")
+    _secure_directory(project.parent)
+    _assert_fixed_reason(
+        lambda: apply_cursor_project_mcp(
+            target,
+            action="install",
+            launcher=LAUNCHER,
+            route_profile="policy",
+            isolation_root=root,
+            preview_digest=str(preview["preview_digest"]),
+            accept=True,
+        )
+    )
+    assert not project.exists()
 
 
 def test_refuses_unrelated_user_plugin_and_dual_sources(tmp_path: Path) -> None:
@@ -506,9 +623,12 @@ def test_apply_rejects_a_project_replaced_after_atomic_write(
     original_write = getattr(adapter, "_write")
 
     def clobber_after_write(
-        write_target: CursorProjectMcpTarget, before: bytes | None, after: bytes
+        write_target: CursorProjectMcpTarget,
+        before: bytes | None,
+        after: bytes,
+        **kwargs: Any,
     ) -> None:
-        original_write(write_target, before, after)
+        original_write(write_target, before, after, **kwargs)
         _write_json(project, {"mcpServers": {"other": {"command": "foreign"}}})
 
     monkeypatch.setattr(adapter, "_write", clobber_after_write)
@@ -524,6 +644,95 @@ def test_apply_rejects_a_project_replaced_after_atomic_write(
         )
     assert raised.value.reason == "cursor_project_mcp_write_failed"
     assert _read_json(project) == {"mcpServers": {"other": {"command": "foreign"}}}
+
+
+def test_apply_rejects_project_replacement_between_precheck_and_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = _target(tmp_path)
+    root = _isolation_root(tmp_path)
+    project = _project_config(target)
+    preview = preview_cursor_project_mcp(
+        target,
+        action="install",
+        launcher=LAUNCHER,
+        route_profile="policy",
+        isolation_root=root,
+    )
+
+    from yoetz.adapters.integrations import cursor_project_mcp as adapter
+
+    original_write = getattr(adapter, "_write")
+
+    def replace_before_write(
+        write_target: CursorProjectMcpTarget,
+        before: bytes | None,
+        after: bytes,
+        **kwargs: Any,
+    ) -> None:
+        write_target.project_root.rename(tmp_path / "old-project")
+        _secure_directory(write_target.project_root)
+        original_write(write_target, before, after, **kwargs)
+
+    monkeypatch.setattr(adapter, "_write", replace_before_write)
+    _assert_fixed_reason(
+        lambda: apply_cursor_project_mcp(
+            target,
+            action="install",
+            launcher=LAUNCHER,
+            route_profile="policy",
+            isolation_root=root,
+            preview_digest=str(preview["preview_digest"]),
+            accept=True,
+        )
+    )
+    assert not project.exists()
+    assert not (target.project_root / ".cursor").exists()
+
+
+def test_apply_rejects_project_config_directory_replacement_between_precheck_and_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = _target(tmp_path)
+    root = _isolation_root(tmp_path)
+    project = _project_config(target)
+    _secure_directory(project.parent)
+    preview = preview_cursor_project_mcp(
+        target,
+        action="install",
+        launcher=LAUNCHER,
+        route_profile="policy",
+        isolation_root=root,
+    )
+
+    from yoetz.adapters.integrations import cursor_project_mcp as adapter
+
+    original_write = getattr(adapter, "_write")
+
+    def replace_config_directory_before_write(
+        write_target: CursorProjectMcpTarget,
+        before: bytes | None,
+        after: bytes,
+        **kwargs: Any,
+    ) -> None:
+        config_directory = write_target.project_root / ".cursor"
+        config_directory.rename(tmp_path / "old-cursor-config")
+        _secure_directory(config_directory)
+        original_write(write_target, before, after, **kwargs)
+
+    monkeypatch.setattr(adapter, "_write", replace_config_directory_before_write)
+    _assert_fixed_reason(
+        lambda: apply_cursor_project_mcp(
+            target,
+            action="install",
+            launcher=LAUNCHER,
+            route_profile="policy",
+            isolation_root=root,
+            preview_digest=str(preview["preview_digest"]),
+            accept=True,
+        )
+    )
+    assert not project.exists()
 
 
 def test_apply_rejects_a_user_source_appearing_after_project_write(
@@ -545,9 +754,12 @@ def test_apply_rejects_a_user_source_appearing_after_project_write(
     original_write = getattr(adapter, "_write")
 
     def add_external_source(
-        write_target: CursorProjectMcpTarget, before: bytes | None, after: bytes
+        write_target: CursorProjectMcpTarget,
+        before: bytes | None,
+        after: bytes,
+        **kwargs: Any,
     ) -> None:
-        original_write(write_target, before, after)
+        original_write(write_target, before, after, **kwargs)
         _write_json(_user_config(write_target), {"mcpServers": {"yoetz": _entry()}})
 
     monkeypatch.setattr(adapter, "_write", add_external_source)

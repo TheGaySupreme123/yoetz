@@ -20,7 +20,7 @@ _COMMITMENT = "hmac-sha256:" + "1" * 64
 def _native_frame(
     *,
     source: str = "claude_hook",
-    profile: str = "claude-code-ordinary-observation-v1",
+    profile: str | None = "claude-code-ordinary-observation-v1",
     mapping: str = "claude-code-hooks-ordinary-v2",
     include_capture_marker: bool = True,
 ) -> dict[str, Any]:
@@ -43,7 +43,6 @@ def _native_frame(
             "source_identity": "hook:control-schema-250",
             "structural_payload": {"tool_name": "Bash"},
         },
-        "content_capture_profile": profile,
         "content_chunks": [
             {
                 "content_kind": "tool_input",
@@ -57,6 +56,8 @@ def _native_frame(
             }
         ],
     }
+    if profile is not None:
+        body["content_capture_profile"] = profile
     if include_capture_marker:
         body["capture_only"] = True
     return {
@@ -75,10 +76,11 @@ def _native_frame(
     (
         ("claude_hook", "claude-code-ordinary-observation-v1", "claude-code-hooks-ordinary-v2"),
         ("cursor_hook", "cursor-ordinary-observation-v1", "cursor-hooks-ordinary-v1"),
+        ("codex_hook", None, "codex-obs-hook/1.0.0"),
     ),
 )
 def test_v25_accepts_matching_native_capture_arms_and_keeps_outer_protocol_1_0(
-    source: str, profile: str, mapping: str
+    source: str, profile: str | None, mapping: str
 ) -> None:
     frame = _native_frame(source=source, profile=profile, mapping=mapping)
 
@@ -86,6 +88,15 @@ def test_v25_accepts_matching_native_capture_arms_and_keeps_outer_protocol_1_0(
     assert frame["protocol_version"] == "1.0"
     decoded = decode_control_frame(encode_control_frame(cast(JsonValue, frame)))
     assert canonical_encode(decoded) == canonical_encode(cast(JsonValue, frame))
+
+
+def test_v25_rejects_a_profile_on_the_profileless_codex_arm() -> None:
+    frame = _native_frame(source="codex_hook", profile=None, mapping="codex-obs-hook/1.0.0")
+    cast(dict[str, Any], frame["body"])["content_capture_profile"] = (
+        "claude-code-ordinary-observation-v1"
+    )
+    with pytest.raises(ProtocolValueError):
+        validate_schema_instance("control-request", "2.5.0", cast(JsonValue, frame))
 
 
 def test_v24_rejects_native_capture_while_ordinary_body_remains_compatible() -> None:

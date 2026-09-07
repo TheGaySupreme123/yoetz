@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -98,6 +99,37 @@ def test_cursor_project_mcp_route_surface_exposes_all_actions_and_bound_roots() 
         "--json",
     ):
         assert option in action_help.output
+
+
+def test_mcp_serve_forwards_cursor_project_selector_to_the_bridge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir(mode=0o700)
+    calls: list[dict[str, object]] = []
+
+    def fake_main(**kwargs: object) -> None:
+        calls.append(kwargs)
+
+    fake_server = SimpleNamespace(main=fake_main)
+
+    import yoetz.cli.app as app_module
+
+    real_import = app_module.importlib.import_module
+
+    def import_module(name: str) -> object:
+        if name == "yoetz.mcp.server":
+            return fake_server
+        return real_import(name)
+
+    monkeypatch.setattr(app_module.importlib, "import_module", import_module)
+    result = _RUNNER.invoke(
+        app,
+        ["mcp", "serve", "--host", "cursor", "--project-root", str(project)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [{"semantic": "on", "host": "cursor", "project_root": project}]
 
 
 def test_status_is_local_read_only_and_forwards_pinned_launcher_and_root(
@@ -203,6 +235,8 @@ def test_preview_and_mutation_require_exact_preview_and_bind_launcher_route_and_
             "serve",
             "--host",
             "cursor",
+            "--project-root",
+            "${workspaceFolder}",
             "--semantic",
             "off",
         ],

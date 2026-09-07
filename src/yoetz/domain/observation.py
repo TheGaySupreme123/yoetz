@@ -73,6 +73,7 @@ __all__ = [
     "observation_capture_ticket_id",
     "observation_capture_part_descriptors",
     "observation_content_binding_matches",
+    "observation_source_qualified_content_binding_matches",
     "observation_cursor_from_json",
     "observation_cursor_to_json",
     "observation_earns_hook_observed",
@@ -285,7 +286,8 @@ class ObservationCaptureTicket:
     The ticket never contains plaintext.  Its source, cursor, phase identity,
     profile, and local authority generation are all bound to the encrypted
     manifest object IDs, so a retry cannot borrow content from another event,
-    consent generation, or host session.
+    consent generation, or host session.  Codex hook captures are deliberately
+    profile-less; the ``source`` field is their closed source qualification.
     """
 
     workspace_commitment: str
@@ -296,7 +298,7 @@ class ObservationCaptureTicket:
     source_identity: str
     cursor: ObservationCursor
     logical_identity: str
-    content_capture_profile: str
+    content_capture_profile: str | None
     authority_generation: str
     object_ids: tuple[str, ...]
     captured_at: Timestamp
@@ -310,6 +312,7 @@ class ObservationCaptureTicket:
         validate_commitment(self.session_commitment)
         if type(self.source) is not ObservationSource or self.source not in {
             ObservationSource.CLAUDE_HOOK,
+            ObservationSource.CODEX_HOOK,
             ObservationSource.CURSOR_HOOK,
         }:
             raise _invalid("invalid_event_enum")
@@ -317,7 +320,10 @@ class ObservationCaptureTicket:
         if type(self.cursor) is not ObservationCursor:
             raise _invalid()
         object.__setattr__(self, "logical_identity", _token(self.logical_identity))
-        if not content_capture_profile_matches_source(
+        if self.content_capture_profile is None:
+            if self.source is not ObservationSource.CODEX_HOOK:
+                raise _invalid("invalid_event_value_type")
+        elif not content_capture_profile_matches_source(
             self.source.value, self.content_capture_profile
         ):
             raise _invalid("invalid_event_value_type")
@@ -774,12 +780,13 @@ def observation_content_binding_matches(
     correlation_identity: str | None,
     source_commitment: str | None,
 ) -> bool:
-    """Check the source binding emitted by native hook content extraction.
+    """Check the historical materialization binding for an observation.
 
-    Codex and historical structural observations predate this metadata and keep
-    their existing replay behavior. Claude/Cursor ordinary content must bind to
-    the exact envelope cursor commitment and either an admitted structural host
-    correlation or the source-identity/label form emitted by ``observe_hooks``.
+    Codex hook and session-stream observations predate the source-qualified
+    content ticket and keep their replay behavior. Claude/Cursor ordinary
+    content uses the exact native binding introduced for their profile arms.
+    New ticketed capture must call
+    :func:`observation_source_qualified_content_binding_matches` instead.
     """
 
     if envelope.source not in {
@@ -787,6 +794,27 @@ def observation_content_binding_matches(
         ObservationSource.CURSOR_HOOK,
     }:
         return True
+    return _source_qualified_content_binding_matches(
+        envelope,
+        content_kind=content_kind,
+        correlation_identity=correlation_identity,
+        source_commitment=source_commitment,
+    )
+
+
+def _source_qualified_content_binding_matches(
+    envelope: ObservationEnvelope,
+    *,
+    content_kind: ObservationContentKind,
+    correlation_identity: str | None,
+    source_commitment: str | None,
+) -> bool:
+    if envelope.source not in {
+        ObservationSource.CLAUDE_HOOK,
+        ObservationSource.CODEX_HOOK,
+        ObservationSource.CURSOR_HOOK,
+    }:
+        return False
     if source_commitment != envelope.cursor.last_source_commitment:
         return False
     if type(correlation_identity) is not str or not correlation_identity:
@@ -803,7 +831,42 @@ def observation_content_binding_matches(
     if not correlation_identity.startswith(prefix):
         return False
     suffix = correlation_identity[len(prefix) :]
+    if (
+        envelope.source is ObservationSource.CODEX_HOOK
+        and suffix == "captured"
+        and content_kind
+        in {
+            ObservationContentKind.TOOL_INPUT,
+            ObservationContentKind.TOOL_OUTPUT,
+        }
+    ):
+        # Preserve the pre-ticket Codex inline-capture label without widening
+        # the Claude/Cursor binding vocabulary.
+        return True
     return suffix in _NATIVE_CONTENT_CORRELATION_SUFFIXES.get(content_kind, frozenset())
+
+
+def observation_source_qualified_content_binding_matches(
+    envelope: ObservationEnvelope,
+    *,
+    content_kind: ObservationContentKind,
+    correlation_identity: str | None,
+    source_commitment: str | None,
+) -> bool:
+    """Check the closed source binding for a ticketed native capture.
+
+    The caller cannot opt out of this check.  In particular, profileless
+    Codex content is eligible only when its hook source identity, cursor
+    commitment, and correlation label all match the same envelope.  Session
+    stream content is intentionally outside this capture-only contract.
+    """
+
+    return _source_qualified_content_binding_matches(
+        envelope,
+        content_kind=content_kind,
+        correlation_identity=correlation_identity,
+        source_commitment=source_commitment,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1164,8 +1227,9 @@ class ObservationIngestRequest:
     envelope: ObservationEnvelope
     content_chunks: tuple[ObservationContentChunk, ...] = ()
     # Native Claude/Cursor content is admitted only with the exact profile
-    # explicitly enabled by the user.  Codex's historical session-stream
-    # content remains profile-less for backward compatibility.
+    # explicitly enabled by the user.  Profile-less Codex hook content is
+    # admitted only by the source-qualified capture-only arm below; the
+    # historical session-stream path remains profile-less and unchanged.
     content_capture_profile: str | None = None
     # Internal service handoff: stage authenticated native content and a
     # durable capture ticket without advancing the observation cursor/ledger.
@@ -1194,13 +1258,19 @@ class ObservationIngestRequest:
                 raise _invalid() from exc
         if type(self.capture_only) is not bool:
             raise _invalid()
-        if self.capture_only and (
-            self.envelope.source
-            not in {ObservationSource.CLAUDE_HOOK, ObservationSource.CURSOR_HOOK}
-            or not self.content_chunks
-            or self.content_capture_profile is None
-        ):
-            raise _invalid()
+        if self.capture_only:
+            native_capture_sources = {
+                ObservationSource.CLAUDE_HOOK,
+                ObservationSource.CODEX_HOOK,
+                ObservationSource.CURSOR_HOOK,
+            }
+            if self.envelope.source not in native_capture_sources or not self.content_chunks:
+                raise _invalid()
+            if self.envelope.source is ObservationSource.CODEX_HOOK:
+                if self.content_capture_profile is not None:
+                    raise _invalid("invalid_event_value_type")
+            elif self.content_capture_profile is None:
+                raise _invalid("invalid_event_value_type")
 
 
 @dataclass(frozen=True, slots=True)

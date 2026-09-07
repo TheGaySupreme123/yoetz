@@ -27,6 +27,7 @@ from yoetz.protocol.canonical import (
 type Route = Literal["policy", "strict"]
 
 _MAX_BYTES = 262144
+_CURSOR_PROJECT_SELECTOR = "${workspaceFolder}"
 _REASONS = frozenset(
     {
         "cursor_project_mcp_target_unsafe",
@@ -56,6 +57,16 @@ class CursorProjectMcpError(ValueError):
 class CursorProjectMcpTarget:
     project_root: Path
     cursor_config_root: Path
+
+
+@dataclass(frozen=True, slots=True)
+class CursorProjectMcpRegistrationSnapshot:
+    """Stable identity of the project registration used by a running Cursor bridge."""
+
+    project_identity: tuple[int, int]
+    config_directory_identity: tuple[int, int]
+    config_identity: tuple[int, int, int, int, int]
+    config_digest: str
 
 
 def _fail(reason: str) -> CursorProjectMcpError:
@@ -107,7 +118,38 @@ def _directory(path: Path, *, optional: bool = False) -> Generator[int | None]:
         os.close(descriptor)
 
 
+def _open_directory_at(parent: int, name: str) -> int | None:
+    """Open one pinned child directory, preserving a genuinely absent child."""
+
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=parent,
+        )
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise _fail("target_unsafe") from None
+    try:
+        _owned(os.fstat(descriptor))
+        return descriptor
+    except CursorProjectMcpError:
+        os.close(descriptor)
+        raise
+    except OSError:
+        os.close(descriptor)
+        raise _fail("target_unsafe") from None
+
+
 def _read_at(parent: int, name: str) -> bytes | None:
+    observed = _read_at_with_identity(parent, name)
+    return None if observed is None else observed[0]
+
+
+def _read_at_with_identity(
+    parent: int, name: str
+) -> tuple[bytes, tuple[int, int, int, int, int]] | None:
     try:
         descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
     except FileNotFoundError:
@@ -133,7 +175,7 @@ def _read_at(parent: int, name: str) -> bytes | None:
             or _identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) != _identity(after)
         ):
             raise _fail("preview_stale")
-        return raw
+        return raw, after_stamp
     except OSError:
         raise _fail("target_unsafe") from None
     finally:
@@ -143,6 +185,101 @@ def _read_at(parent: int, name: str) -> bytes | None:
 def _read(path: Path) -> bytes | None:
     with _directory(path.parent, optional=True) as parent:
         return None if parent is None else _read_at(parent, path.name)
+
+
+def _directory_identity(path: Path, *, optional: bool = False) -> tuple[int, int] | None:
+    """Capture one safe directory identity, preserving an explicitly absent directory."""
+
+    with _directory(path, optional=optional) as descriptor:
+        return None if descriptor is None else _identity(os.fstat(descriptor))
+
+
+def _file_identity(path: Path) -> tuple[int, int, int, int, int] | None:
+    """Capture one stable, owner-checked config-file identity without following links."""
+
+    with _directory(path.parent, optional=True) as parent:
+        return None if parent is None else _file_identity_at(parent, path.name)
+
+
+def _file_identity_at(parent: int, name: str) -> tuple[int, int, int, int, int] | None:
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=parent,
+        )
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise _fail("target_unsafe") from None
+    try:
+        facts = os.fstat(descriptor)
+        _owned(facts)
+        if not stat.S_ISREG(facts.st_mode) or facts.st_nlink != 1:
+            raise _fail("target_unsafe")
+        return facts.st_dev, facts.st_ino, facts.st_size, facts.st_mtime_ns, facts.st_ctime_ns
+    finally:
+        os.close(descriptor)
+
+
+def _canonical_identity(value: tuple[int, ...]) -> list[str]:
+    """Encode filesystem identity numbers as bounded canonical text.
+
+    ``st_ino`` and nanosecond timestamps can exceed the protocol's JSON-safe integer range.
+    They are used only for local comparison, while the public target digest needs a stable
+    canonical representation, so stringify each value before hashing.
+    """
+
+    return [str(item) for item in value]
+
+
+def inspect_project_mcp_registration(
+    project_root: Path,
+    *,
+    launcher: tuple[str, ...],
+    route_profile: Route,
+    isolation_root: str | None,
+) -> CursorProjectMcpRegistrationSnapshot:
+    """Verify the exact project entry and capture its non-content identity for a live bridge.
+
+    This narrow read path deliberately inspects only the opened project's ``.cursor/mcp.json``.
+    It keeps the configured project directory separate from its canonical Git repository root;
+    the latter is resolved by the MCP bridge's roots/list binding.
+    """
+
+    if route_profile not in {"policy", "strict"}:
+        raise _fail("command_invalid")
+    expected = _expected(launcher, isolation_root, route_profile)
+    with _directory(project_root) as project_descriptor:
+        assert project_descriptor is not None
+        project_identity = _identity(os.fstat(project_descriptor))
+    config = project_root / ".cursor" / "mcp.json"
+    with _directory(config.parent) as config_directory:
+        assert config_directory is not None
+        config_directory_identity = _identity(os.fstat(config_directory))
+        observed = _read_at_with_identity(config_directory, config.name)
+        if observed is None:
+            raise _fail("config_invalid")
+        raw, config_identity = observed
+        document = _document(raw)
+        if not _present(document) or _entry(document) != expected:
+            raise _fail("foreign_present")
+        if _identity(os.fstat(config_directory)) != config_directory_identity:
+            raise _fail("preview_stale")
+    with _directory(config.parent) as current_config_directory:
+        assert current_config_directory is not None
+        if _identity(os.fstat(current_config_directory)) != config_directory_identity:
+            raise _fail("preview_stale")
+    with _directory(project_root) as current_project_directory:
+        assert current_project_directory is not None
+        if _identity(os.fstat(current_project_directory)) != project_identity:
+            raise _fail("preview_stale")
+    return CursorProjectMcpRegistrationSnapshot(
+        project_identity,
+        config_directory_identity,
+        config_identity,
+        _digest(raw),
+    )
 
 
 def _document(raw: bytes | None) -> dict[str, JsonValue]:
@@ -173,7 +310,9 @@ def _present(document: Mapping[str, JsonValue]) -> bool:
     return "yoetz" in servers
 
 
-def _expected(launcher: tuple[str, ...], root: str | None, route: Route) -> dict[str, JsonValue]:
+def _expected(
+    launcher: tuple[str, ...], root: str | None, route: Route, *, project_selector: bool = True
+) -> dict[str, JsonValue]:
     if not valid_launcher(launcher):
         raise _fail("launcher_invalid")
     if root is not None:
@@ -182,6 +321,8 @@ def _expected(launcher: tuple[str, ...], root: str | None, route: Route) -> dict
         with _directory(Path(root)):
             pass
     args: list[JsonValue] = [*launcher[1:], "mcp", "serve", "--host", "cursor"]
+    if project_selector:
+        args.extend(("--project-root", _CURSOR_PROJECT_SELECTOR))
     if route == "strict":
         args.extend(("--semantic", "off"))
     entry: dict[str, JsonValue] = {"type": "stdio", "command": launcher[0], "args": args}
@@ -201,6 +342,10 @@ def _digest(raw: bytes | None) -> str:
 @dataclass(frozen=True, slots=True)
 class _Inspection:
     raws: tuple[bytes | None, ...]
+    project_identity: tuple[int, int]
+    project_config_directory_identity: tuple[int, int] | None
+    config_identities: tuple[tuple[int, int, int, int, int] | None, ...]
+    config_identity_digest: str
     document: dict[str, JsonValue]
     target_identity: str
     state: str
@@ -212,11 +357,24 @@ def _inspect(
     target: CursorProjectMcpTarget, launcher: tuple[str, ...], root: str | None
 ) -> _Inspection:
     policy, strict = _expected(launcher, root, "policy"), _expected(launcher, root, "strict")
+    # Entries written before the explicit project selector remain safe to recognize as Yoetz's
+    # own project source so the next preview can upgrade them in place.  They never get emitted
+    # again, and foreign/user/plugin sources remain untouched.
+    legacy_policy = _expected(launcher, root, "policy", project_selector=False)
+    legacy_strict = _expected(launcher, root, "strict", project_selector=False)
     identities: list[JsonValue] = []
+    project_identity: tuple[int, int] | None = None
     for path in (target.project_root, target.cursor_config_root):
         with _directory(path) as descriptor:
             assert descriptor is not None
-            identities.append([str(path), *_identity(os.fstat(descriptor))])
+            identity = _identity(os.fstat(descriptor))
+            identities.append([str(path), *_canonical_identity(identity)])
+            if path == target.project_root:
+                project_identity = identity
+    assert project_identity is not None
+    project_config_directory_identity = _directory_identity(
+        target.project_root / ".cursor", optional=True
+    )
     raws = tuple(
         _read(path)
         for path in (
@@ -225,6 +383,24 @@ def _inspect(
             target.cursor_config_root / "plugins" / "local" / "yoetz" / "mcp.json",
         )
     )
+    config_identities = tuple(
+        _file_identity(path)
+        for path in (
+            target.project_root / ".cursor" / "mcp.json",
+            target.cursor_config_root / "mcp.json",
+            target.cursor_config_root / "plugins" / "local" / "yoetz" / "mcp.json",
+        )
+    )
+    config_identity_values: list[JsonValue] = [
+        None
+        if project_config_directory_identity is None
+        else cast(JsonValue, _canonical_identity(project_config_directory_identity))
+    ]
+    config_identity_values.extend(
+        None if item is None else cast(JsonValue, _canonical_identity(item))
+        for item in config_identities
+    )
+    config_identity_digest = canonical_digest(config_identity_values)
     documents = tuple(_document(raw) for raw in raws)
     present = [i for i, document in enumerate(documents) if _present(document)]
     source = ("project", "user", "plugin")[present[0]] if len(present) == 1 else "none"
@@ -237,9 +413,26 @@ def _inspect(
         state = "external_source"
     else:
         entry = _entry(documents[0])
-        route = "policy" if entry == policy else "strict" if entry == strict else None
+        route = (
+            "policy"
+            if entry == policy or entry == legacy_policy
+            else "strict"
+            if entry == strict or entry == legacy_strict
+            else None
+        )
         state = "yoetz_owned" if route is not None else "foreign_present"
-    return _Inspection(raws, documents[0], canonical_digest(identities), state, source, route)
+    return _Inspection(
+        raws,
+        project_identity,
+        project_config_directory_identity,
+        config_identities,
+        config_identity_digest,
+        documents[0],
+        canonical_digest(identities),
+        state,
+        source,
+        route,
+    )
 
 
 def status_cursor_project_mcp(
@@ -299,6 +492,7 @@ def _plan(
         "source": observed.source,
         "route_profile": route if action == "install" else observed.route,
         "target_identity": observed.target_identity,
+        "config_identity_digest": observed.config_identity_digest,
         "launcher": list(launcher),
         "isolated_root": isolation_root,
         "config_digest_before": _digest(observed.raws[0]),
@@ -321,16 +515,38 @@ def preview_cursor_project_mcp(
     return _plan(target, action, launcher, route_profile, isolation_root)[0]
 
 
-def _write(target: CursorProjectMcpTarget, before: bytes | None, after: bytes) -> None:
+def _write(
+    target: CursorProjectMcpTarget,
+    before: bytes | None,
+    after: bytes,
+    *,
+    project_identity: tuple[int, int],
+    project_config_directory_identity: tuple[int, int] | None,
+) -> None:
     """Pinned-parent atomic replacement with a final preimage check; no host-wide CAS claim."""
     with _directory(target.project_root) as root:
         assert root is not None
-        try:
-            os.mkdir(".cursor", 0o700, dir_fd=root)
-        except FileExistsError:
-            pass
-        descriptor = os.open(".cursor", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
-        temporary = ".yoetz-mcp-" + uuid.uuid4().hex
+        if _identity(os.fstat(root)) != project_identity:
+            raise _fail("preview_stale")
+        descriptor: int | None = _open_directory_at(root, ".cursor")
+        if descriptor is None:
+            if project_config_directory_identity is not None:
+                raise _fail("preview_stale")
+            try:
+                os.mkdir(".cursor", 0o700, dir_fd=root)
+            except FileExistsError:
+                raise _fail("preview_stale") from None
+            except OSError:
+                raise _fail("target_unsafe") from None
+            descriptor = _open_directory_at(root, ".cursor")
+            if descriptor is None:
+                raise _fail("preview_stale")
+        elif project_config_directory_identity is None or (
+            _identity(os.fstat(descriptor)) != project_config_directory_identity
+        ):
+            os.close(descriptor)
+            raise _fail("preview_stale")
+        temporary: str | None = ".yoetz-mcp-" + uuid.uuid4().hex
         try:
             _owned(os.fstat(descriptor))
             if _read_at(descriptor, "mcp.json") != before:
@@ -348,7 +564,8 @@ def _write(target: CursorProjectMcpTarget, before: bytes | None, after: bytes) -
             with _directory(target.project_root / ".cursor") as current:
                 assert current is not None
                 if (
-                    _identity(os.fstat(current)) != _identity(os.fstat(descriptor))
+                    _identity(os.fstat(root)) != project_identity
+                    or _identity(os.fstat(descriptor)) != _identity(os.fstat(current))
                     or _read_at(descriptor, "mcp.json") != before
                 ):
                     raise _fail("preview_stale")
@@ -383,7 +600,13 @@ def apply_cursor_project_mcp(
         if _inspect(target, launcher, isolation_root) != observed:
             raise _fail("preview_stale")
         try:
-            _write(target, observed.raws[0], replacement)
+            _write(
+                target,
+                observed.raws[0],
+                replacement,
+                project_identity=observed.project_identity,
+                project_config_directory_identity=observed.project_config_directory_identity,
+            )
         except OSError:
             raise _fail("write_failed") from None
     try:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -21,7 +22,11 @@ from yoetz.adapters.memory.privacy import (
 )
 from yoetz.adapters.privacy.catalog import CatalogPrivacyAudit, CatalogPrivacyPolicyStore
 from yoetz.adapters.privacy.local_enforcer import LocalPrivacyEnforcer
-from yoetz.application.egress import PrivacyCoordinator
+from yoetz.application.egress import (
+    PrivacyCoordinator,
+    SemanticEgressAttemptUnknown,
+    SemanticEgressAwaitingHuman,
+)
 from yoetz.domain.privacy import (
     AuthorizationScope,
     AuthorizationScopeKind,
@@ -29,6 +34,7 @@ from yoetz.domain.privacy import (
     ChannelPolicy,
     ConsentSource,
     DataClass,
+    EgressAuthorization,
     EgressChannel,
     LocalDisclosureApproved,
     LocalDisclosureReceipt,
@@ -37,6 +43,7 @@ from yoetz.domain.privacy import (
     PrivacyPolicy,
     PrivacyProfile,
     ProjectionAuditContext,
+    ProviderBinding,
     ReceiptCounts,
     ReceiptPolicyBinding,
     ReceiptSecretScan,
@@ -55,17 +62,23 @@ from yoetz.ports.objects import (
 from yoetz.ports.privacy import (
     AgentProjectionRequest,
     CompletedAgentProjection,
+    ConsumedAuthorization,
     DisclosureProposalRequest,
     HumanPolicyDecision,
     MinimizedDisclosure,
+    OutboundGatewayPort,
     PolicyOverlay,
     PolicyTransitionMember,
     PolicyTransitionProposal,
+    PrivacyAuditState,
+    PrivacyClassifierPort,
+    PrivacyPolicyStorePort,
     PrivacyReceiptAudience,
     PrivacyReceiptPage,
     PrivacyReceiptQuery,
     PrivacyReceiptView,
 )
+from yoetz.ports.semantic import Deadline
 from yoetz.protocol.canonical import canonical_digest, canonical_encode
 from yoetz.protocol.ids import IdKind
 from yoetz.protocol.models import DataCategory
@@ -76,6 +89,7 @@ _REQUEST = "req_30000000-0000-4000-8000-000000000002"
 _RPC = "rpc_30000000-0000-4000-8000-000000000003"
 _SERVICE = "svc_30000000-0000-4000-8000-000000000004"
 _PROPOSAL = "ppr_30000000-0000-4000-8000-000000000005"
+_DISPATCH = "dsp_30000000-0000-4000-8000-000000000006"
 _POLICY = "pvy_30000000-0000-4000-8000-000000000006"
 _RECEIPT = "egr_30000000-0000-4000-8000-000000000007"
 _DIGEST = f"sha256:{'3' * 64}"
@@ -85,6 +99,7 @@ _RECEIPT_2 = "egr_30000000-0000-4000-8000-00000000000a"
 _TASK = "tsk_30000000-0000-4000-8000-00000000000b"
 _SESSION = "ses_30000000-0000-4000-8000-00000000000c"
 _OBJECT = "obj_30000000-0000-4000-8000-00000000000d"
+_OBJECT_2 = "obj_30000000-0000-4000-8000-00000000000e"
 _ROUTE_DIGEST = f"sha256:{'5' * 64}"
 _WORKSPACE = f"hmac-sha256:{'6' * 64}"
 
@@ -134,6 +149,30 @@ class _Objects:
         )
 
 
+class _StoredObjects(_Objects):
+    """Small proposal object store so the real Catalog adapter can reload a disclosure."""
+
+    def __init__(self, object_ids: tuple[str, ...] = (_OBJECT,)) -> None:
+        self._payloads: dict[str, bytes] = {}
+        self._object_ids = object_ids
+        self._stage_count = 0
+
+    async def stage(self, source: ObjectSource, metadata: ObjectMetadata) -> StagedObject:
+        assert source.data is not None
+        staged = await super().stage(source, metadata)
+        object_id = self._object_ids[min(self._stage_count, len(self._object_ids) - 1)]
+        self._stage_count += 1
+        staged = replace(staged, object_id=object_id)
+        self._payloads[staged.object_id] = source.data
+        return staged
+
+    def open_verified(self, ref: ObjectRef) -> AsyncIterator[bytes]:
+        async def chunks() -> AsyncIterator[bytes]:
+            yield self._payloads[ref.object_id]
+
+        return chunks()
+
+
 class _Ids:
     def new(self, kind: IdKind) -> str:
         return _PROPOSAL if kind is IdKind.PRIVACY_PROPOSAL else _RECEIPT
@@ -157,6 +196,59 @@ def _scope() -> AuthorizationScope:
 
 def _task_scope() -> AuthorizationScope:
     return AuthorizationScope(AuthorizationScopeKind.TASK, _INSTALLATION, _WORKSPACE, _TASK)
+
+
+def _insert_task_route(db: apsw.Connection) -> None:
+    db.execute(
+        """INSERT INTO task_routes (
+               task_id, workspace_ref_commitment, external_ref_commitment,
+               active_session_id, bundle_relpath, route_generation, active_route_identity_digest,
+               state, quarantine_code, created_at, updated_at
+           ) VALUES (?, NULL, NULL, ?, ?, 1, ?, 'active', NULL, ?, ?)""",
+        (
+            _TASK,
+            _SESSION,
+            f"tasks/{_TASK}",
+            _ROUTE_DIGEST,
+            _NOW.isoformat().replace("+00:00", "Z"),
+            _NOW.isoformat().replace("+00:00", "Z"),
+        ),
+    )
+
+
+def _external_disclosure_request() -> DisclosureProposalRequest:
+    payload = canonical_encode({"semantic": "recovery-test"})
+    minimized = MinimizedDisclosure(
+        payload,
+        ("item-1",),
+        (_DIGEST,),
+        (),
+        (),
+        (("removed_items", 0),),
+        len(payload),
+        1,
+        _DIGEST,
+        "scanner-v1",
+        _DIGEST,
+        (),
+    )
+    return DisclosureProposalRequest(
+        _PROPOSAL,
+        _REQUEST,
+        _TASK,
+        minimized,
+        ProviderBinding("provider-test", "model-test", "endpoint-test", "1.0.0", "external"),
+        None,
+        "semantic-review",
+        _task_scope(),
+        _POLICY,
+        1,
+        1,
+        _DIGEST,
+        len(payload),
+        1,
+        _NOW + timedelta(minutes=1),
+    )
 
 
 def _receipt() -> LocalDisclosureReceipt:
@@ -807,3 +899,138 @@ def test_coordinator_empty_client_projection_completes_one_durable_receipt() -> 
     assert result.omissions == ()
     assert result.receipt.outcome is PrivacyOutcome.COMPLETED
     assert len(state.audit) == 1
+
+
+def test_catalog_resume_finds_disclosure_by_case_digest() -> None:
+    """Semantic resume must translate the public case digest to the private audit identity."""
+
+    db = _database()
+    _insert_task_route(db)
+    objects = _StoredObjects()
+    audit = CatalogPrivacyAudit(db, objects, _Key(), _Clock())  # type: ignore[arg-type]
+    coordinator = PrivacyCoordinator(
+        cast(PrivacyPolicyStorePort, object()),
+        cast(PrivacyClassifierPort, object()),
+        audit,
+        cast(OutboundGatewayPort, _Gateway()),
+        _Clock(),
+        _Ids(),
+    )
+
+    async def run() -> object:
+        await audit.prepare_disclosure_proposal(_external_disclosure_request())
+        return await coordinator.resume(
+            _REQUEST,
+            _DIGEST,
+            Deadline(_NOW + timedelta(minutes=5), 301.0),
+        )
+
+    result = asyncio.run(run())
+
+    assert isinstance(result, SemanticEgressAwaitingHuman)
+    assert result.request_id == _REQUEST
+    assert result.privacy_proposal_id == _PROPOSAL
+
+
+def test_catalog_disclosure_attempt_rejects_tampered_lookup_identity() -> None:
+    db = _database()
+    _insert_task_route(db)
+    objects = _StoredObjects()
+    audit = CatalogPrivacyAudit(db, objects, _Key(), _Clock())  # type: ignore[arg-type]
+
+    async def run() -> None:
+        prepared = await audit.prepare_disclosure_proposal(_external_disclosure_request())
+        db.execute(
+            "UPDATE privacy_audit_records SET subject_lookup_identity = ? WHERE proposal_id = ?",
+            (f"hmac-sha256:{'9' * 64}", prepared.proposal.privacy_proposal_id),
+        )
+        with pytest.raises(ValueError, match="privacy_audit_attempt_corrupt"):
+            await audit.load_disclosure_attempt(
+                prepared.proposal.request_id,
+                prepared.proposal.prepared_case_digest,
+            )
+
+    asyncio.run(run())
+
+
+def test_catalog_disclosure_attempt_rejects_multiple_rows_for_request() -> None:
+    db = _database()
+    _insert_task_route(db)
+    objects = _StoredObjects((_OBJECT, _OBJECT_2))
+    audit = CatalogPrivacyAudit(db, objects, _Key(), _Clock())  # type: ignore[arg-type]
+
+    async def run() -> None:
+        request = _external_disclosure_request()
+        await audit.prepare_disclosure_proposal(request)
+        await audit.prepare_disclosure_proposal(replace(request, privacy_proposal_id=_PROPOSAL_2))
+        with pytest.raises(ValueError, match="privacy_audit_attempt_ambiguous"):
+            await audit.load_disclosure_attempt(_REQUEST, _DIGEST)
+
+    asyncio.run(run())
+
+
+def test_catalog_consumed_disclosure_attempt_is_durable_and_one_use() -> None:
+    """A consumed authorization remains receipt-pending and cannot be consumed twice."""
+
+    db = _database()
+    _insert_task_route(db)
+    audit = CatalogPrivacyAudit(db, _StoredObjects(), _Key(), _Clock())  # type: ignore[arg-type]
+
+    async def run() -> tuple[
+        EgressAuthorization,
+        ConsumedAuthorization,
+        PrivacyAuditState | None,
+        PrivacyAuditState | None,
+        SemanticEgressAttemptUnknown,
+    ]:
+        prepared = await audit.prepare_disclosure_proposal(_external_disclosure_request())
+        authorization = await audit.authorize(
+            prepared.proposal.privacy_proposal_id,
+            prepared.proposal.prepared_case_digest,
+            _NOW,
+        )
+        consumed = await audit.consume(authorization.authorization_id, _DISPATCH, _NOW)
+        state = await audit.load(
+            prepared.proposal.request_id,
+            prepared.reservation.subject_digest,
+        )
+        attempt_state = await audit.load_disclosure_attempt(
+            prepared.proposal.request_id,
+            prepared.proposal.prepared_case_digest,
+        )
+        with pytest.raises(ValueError, match="privacy_audit_attempt_case_mismatch"):
+            await audit.load_disclosure_attempt(
+                prepared.proposal.request_id,
+                f"sha256:{'4' * 64}",
+            )
+        with pytest.raises(ValueError, match="privacy_audit_authorization_unavailable"):
+            await audit.consume(authorization.authorization_id, _DISPATCH, _NOW)
+        coordinator = PrivacyCoordinator(
+            cast(PrivacyPolicyStorePort, object()),
+            cast(PrivacyClassifierPort, object()),
+            audit,
+            cast(OutboundGatewayPort, _Gateway()),
+            _Clock(),
+            _Ids(),
+        )
+        recovered = await coordinator.recover_started_attempt(
+            prepared.proposal.request_id,
+            prepared.proposal.prepared_case_digest,
+            Deadline(_NOW + timedelta(minutes=5), 301.0),
+        )
+        assert isinstance(recovered, SemanticEgressAttemptUnknown)
+        return authorization, consumed, state, attempt_state, recovered
+
+    authorization, consumed, state, attempt_state, recovered = asyncio.run(run())
+
+    assert authorization.authorization_id
+    assert consumed.dispatch_id == _DISPATCH  # type: ignore[attr-defined]
+    assert state is not None
+    assert state.status == "receipt_pending"
+    assert state.authorization_id == authorization.authorization_id
+    assert state.dispatch_id == _DISPATCH
+    assert state.receipt_id is None
+    assert attempt_state == state
+    assert recovered.request_id == _REQUEST
+    assert recovered.privacy_proposal_id == _PROPOSAL
+    assert asyncio.run(audit.load(_REQUEST, _DIGEST)) is None

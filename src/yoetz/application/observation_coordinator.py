@@ -119,6 +119,7 @@ from yoetz.domain.observation import (
     observation_capture_part_descriptors,
     observation_content_binding_matches,
     observation_envelope_to_json,
+    observation_source_qualified_content_binding_matches,
 )
 from yoetz.domain.observation_profiles import content_capture_profile_matches_source
 from yoetz.domain.values import (
@@ -734,12 +735,22 @@ class ObservationCoordinator:
 
         if admitted_ticket_session_ids is None:
             admitted_ticket_session_ids = frozenset({runtime.session_id})
-        native_source = request.envelope.source in {
+        profiled_native_source = request.envelope.source in {
             ObservationSource.CLAUDE_HOOK,
             ObservationSource.CURSOR_HOOK,
         }
+        profileless_codex_source = request.envelope.source is ObservationSource.CODEX_HOOK
+        # A Codex structural request with inline chunks retains the historical
+        # capture path. It enters the ticketed lane only when the hook has
+        # explicitly requested capture-only staging or a prior handoff is
+        # being recovered below.
+        native_source = profiled_native_source
         requested_profile = request.content_capture_profile
-        content_identity = observation_content_identity(request.envelope) if native_source else None
+        content_identity = (
+            observation_content_identity(request.envelope)
+            if profiled_native_source or profileless_codex_source
+            else None
+        )
         pending_ticket: ObservationCaptureTicket | None = None
         ticket_revoked = False
         rejection_reason: str | None = None
@@ -767,6 +778,12 @@ class ObservationCoordinator:
                 elif requested_profile is None:
                     requested_profile = pending_ticket.content_capture_profile
                 ticket_revoked = pending_ticket.state == "revoked"
+        if profileless_codex_source and (
+            request.capture_only
+            or pending_ticket is not None
+            or bool(request.envelope.content_object_refs)
+        ):
+            native_source = True
         expected_capture_parts: tuple[ObservationCapturePart, ...] | None = None
         if ticket_schema_available and (pending_ticket is not None or request.content_chunks):
             expected_capture_parts = requested_capture_parts
@@ -778,7 +795,7 @@ class ObservationCoordinator:
             rejection_reason is None
             and requested_profile is not None
             and (
-                not native_source
+                not profiled_native_source
                 or not content_capture_profile_matches_source(
                     request.envelope.source.value, requested_profile
                 )
@@ -820,7 +837,7 @@ class ObservationCoordinator:
                 authority is None
                 or not authority.active
                 or not authority.runtime_enabled
-                or not authority.profiles
+                or (profiled_native_source and not authority.profiles)
             ):
                 content_blocked = True
             else:
@@ -848,14 +865,20 @@ class ObservationCoordinator:
                 capture_fence = current_capture_fence
         if native_source and (request.content_chunks or pending_ticket is not None):
             stored_profiles = store.content_capture_profiles(workspace)
-            content_authorized = (
-                requested_profile is not None
-                and requested_profile in stored_profiles
-                and requested_profile in fence_profiles
-                and content_capture_profile_matches_source(
-                    request.envelope.source.value, requested_profile
+            if profileless_codex_source:
+                # Codex hook content uses the existing structural observation
+                # grant as its authority arm. There is intentionally no Codex
+                # profile in the public profile vocabulary.
+                content_authorized = requested_profile is None
+            else:
+                content_authorized = (
+                    requested_profile is not None
+                    and requested_profile in stored_profiles
+                    and requested_profile in fence_profiles
+                    and content_capture_profile_matches_source(
+                        request.envelope.source.value, requested_profile
+                    )
                 )
-            )
             content_authorization_missing = not content_authorized
         if native_requested and not content_blocked:
             assert capture_fence is not None
@@ -871,7 +894,6 @@ class ObservationCoordinator:
             and not content_blocked
             and content_authorized
             and content_identity is not None
-            and requested_profile is not None
             and fence_generation is not None
         ):
             if pending_ticket is not None:
@@ -1133,7 +1155,6 @@ class ObservationCoordinator:
                     if capture.rejection_reason is not None:
                         return _reject(capture.rejection_reason)
                     native_content_source = capture.native_source
-                    requested_content_profile = capture.requested_content_profile
                     content_identity = capture.content_identity
                     content_authorized = capture.content_authorized
                     content_authorization_missing = capture.content_authorization_missing
@@ -1160,6 +1181,11 @@ class ObservationCoordinator:
                             capture_fence=capture_fence,
                             expected_capture_parts=expected_capture_parts,
                             allow_incomplete_recovery=capture_staging_ticket is not None,
+                            source_qualified_capture=(
+                                request.capture_only
+                                or capture_staging_ticket is not None
+                                or staged_ticket is not None
+                            ),
                         )
                         (
                             captured_content,
@@ -1187,7 +1213,6 @@ class ObservationCoordinator:
                     if (
                         native_content_source
                         and content_identity is not None
-                        and requested_content_profile is not None
                         and fence_generation is not None
                         and captured_content
                         and not content_unavailable
@@ -2611,6 +2636,7 @@ class ObservationCoordinator:
         capture_fence: Callable[[], Awaitable[bool]] | None = None,
         expected_capture_parts: tuple[ObservationCapturePart, ...] | None = None,
         allow_incomplete_recovery: bool = False,
+        source_qualified_capture: bool = False,
     ) -> tuple[
         tuple[ObservationContentManifest, ...],
         tuple[tuple[ObservationContentManifest, ...], ...],
@@ -2639,6 +2665,30 @@ class ObservationCoordinator:
         replay_candidates: list[tuple[ObservationContentManifest, ...]] = []
         any_redacted = False
         any_unavailable = False
+
+        def content_binding_matches(
+            content_kind: ObservationContentKind,
+            correlation_identity: str | None,
+            source_commitment: str | None,
+        ) -> bool:
+            """Select the binding contract after request admission.
+
+            ``source_qualified_capture`` is derived only from the already
+            validated capture-only request arm. Direct legacy coordinator
+            calls retain their historical Codex materialization behavior.
+            """
+
+            checker = (
+                observation_source_qualified_content_binding_matches
+                if source_qualified_capture
+                else observation_content_binding_matches
+            )
+            return checker(
+                envelope,
+                content_kind=content_kind,
+                correlation_identity=correlation_identity,
+                source_commitment=source_commitment,
+            )
 
         async def capture_fence_current() -> bool:
             """Check the native capture fence before any persisted plaintext boundary."""
@@ -2713,11 +2763,10 @@ class ObservationCoordinator:
                     correlation_identity=cast(str, parsed["correlation_identity"]),
                     source_commitment=cast(str, parsed["source_commitment"]),
                 )
-                if not observation_content_binding_matches(
-                    envelope,
-                    content_kind=verified.content_kind,
-                    correlation_identity=verified.correlation_identity,
-                    source_commitment=verified.source_commitment,
+                if not content_binding_matches(
+                    verified.content_kind,
+                    verified.correlation_identity,
+                    verified.source_commitment,
                 ):
                     return loaded, False, False
                 return verified, True, verified == loaded
@@ -2861,11 +2910,10 @@ class ObservationCoordinator:
         # operation identity. The existing set remains authoritative.
         freeze_roles = bool(primary_recovered) and not allow_incomplete_recovery
         for chunk in chunks:
-            if not observation_content_binding_matches(
-                envelope,
-                content_kind=chunk.content_kind,
-                correlation_identity=chunk.correlation_identity,
-                source_commitment=chunk.source_commitment,
+            if not content_binding_matches(
+                chunk.content_kind,
+                chunk.correlation_identity,
+                chunk.source_commitment,
             ):
                 any_unavailable = True
                 await note_unavailable()

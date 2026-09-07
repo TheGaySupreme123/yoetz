@@ -355,27 +355,46 @@ canonicalizer resolves it to the safe Git root. `UserPromptSubmit` must keep tha
 without it, a fresh unmapped session has no older session binding from which to recover the
 workspace and its bounded auto-attach retry stops before a service call.
 
-For supported content-bearing Codex events, the ready service secret-scans and encrypts selected
-tool output, changed-file, and workspace-diff bytes before materializing their exact digest/object
-bindings as `observation_captured` ledger evidence. Inspection facts and bounded excerpts receive
-separate evidence records. This proves retained byte identity only; it is not an approved check,
-artifact verification, independent reproduction, or permission to send the bytes to a model.
+For supported content-bearing Codex hook events, the native adapter reads the documented
+`PostToolUse.tool_response` output and the explicitly linked code/diff fields. The ready service
+secret-scans and encrypts selected tool output, changed-file/code, and workspace-diff bytes before
+materializing their exact digest/object bindings as `observation_captured` ledger evidence. This is
+the source-qualified,
+profileless `codex_hook` arm: active observation consent and the exact hook source bind it; no
+Claude/Cursor content profile is inferred or accepted. Inspection facts and bounded excerpts
+receive separate evidence records. This proves retained byte identity only; it is not an approved
+check, artifact verification, independent reproduction, or permission to send the bytes to a model.
+Installation, an object header, a successful structural receipt, and a typed MCP response are
+separate evidence; none proves that the provider selected native Codex bytes.
+
+The Codex hook capture arm is eligible only for content explicitly linked to the hook event and
+its exact task, workspace, host/Yoetz session, source generation, tool-call correlation, multipart
+set, object kind, and digest. Codex session-stream records remain outside the native ticket lane
+and are excluded from semantic selection. Tool input and path/locator content are excluded from
+semantic selection too, although the current Codex hook path may still stage consented input/locator
+chunks locally in the bounded encrypted capture lane pending a follow-up staging filter. Encrypted
+capture and semantic disclosure have separate authority: selecting these bytes into a frozen
+semantic case still requires the effective repository privacy grant and the independently authorized
+provider attempt.
 
 For the supported native `hooks observe` path, the hook first closes its local structural envelope,
-pairing, lifecycle intent, and outbox state; service status and drain happen afterward. Native
-content remains transient at that boundary and is never copied into the structural spool. If the
-service cannot accept it during the bounded pass, a completed hook records
-`content_capture_unavailable` alongside the structural record. A host process killed before that
-diagnostic path completes may lose the transient content without a durable gap marker; making native
-plaintext survive that boundary requires a separate service-owned staging protocol. Advice selection
-remains after drain, and advice is committed only after the host output is emitted.
+pairing, lifecycle intent, and outbox state, then presents eligible content to the service-owned
+capture lane before the structural FIFO advances. The capture acknowledgement follows durable
+encrypted object/manifest and metadata-ticket publication; native content is never copied into the
+structural spool. If authenticated staging cannot complete during the bounded pass, a completed
+hook records `content_capture_unavailable` alongside the structural record. A host process killed
+before that boundary may still leave the honest content gap; after the ticket is durable, a later
+structural retry can reuse its fenced manifests without rereading a plaintext spool. Advice
+selection remains after drain, and advice is committed only after the host output is emitted.
 `SessionEnd` records its lifecycle intent and defers service delivery without rebuilding local
 advice, because the closing host cannot receive it. A later hook or the service sweeper drains the
 end event and refreshes advice.
-The encrypted capture-ticket handoff is a Claude/Cursor ordinary-native-profile contract and does
-not change Codex's historical session-stream or structural-hook content path. Codex keeps its
-existing replay and content semantics; the shared operation-replay, source-generation fencing, and
-teardown repairs apply to all host adapters.
+The encrypted capture-ticket handoff does not change Codex's historical session-stream path.
+Session-stream reconciliation remains a separate source and cannot supply content to a `codex_hook`
+ticket; session-stream, input, and locator content remain excluded from semantic selection. The
+current hook path may still stage consented input/locator chunks locally pending the follow-up
+staging filter. Codex keeps its existing replay semantics; the shared operation-replay,
+source-generation fencing, and teardown repairs apply to all host adapters.
 
 Legacy synchronous `hooks spool` is a separate structural fast path. It only appends the owner-only
 structural spool record and returns; it does not normalize or pair the event, open the service, drain

@@ -1120,7 +1120,7 @@ class SqliteObservationStore:
                     )
                 ),
                 logical_identity=cast(str, row[12]),
-                content_capture_profile=cast(str, row[13]),
+                content_capture_profile=cast(str | None, row[13]),
                 authority_generation=cast(str, row[14]),
                 object_ids=cast(tuple[str, ...], parsed_object_ids),
                 captured_at=Timestamp(cast(str, row[17])),

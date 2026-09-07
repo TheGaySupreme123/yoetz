@@ -48,6 +48,7 @@ from yoetz.domain.observation import (
 from yoetz.domain.observation_profiles import (
     CLAUDE_CODE_ORDINARY_HOOK_MAPPING_VERSION,
     CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+    CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
 )
 from yoetz.domain.privacy import ReviewContextProfile, ReviewSelectionPolicy
 from yoetz.domain.values import (
@@ -306,6 +307,44 @@ def _fixture(
     return FrozenCase(case, lease), runtime, objects, observation, envelope
 
 
+def _codex_profileless_fixture() -> tuple[FrozenCase, TaskRuntime, _Objects, _Observation]:
+    """Build a Codex-hook capture with the original profileless grant semantics."""
+
+    frozen, runtime, objects, observation, envelope = _fixture()
+    codex_envelope = replace(
+        envelope,
+        source=ObservationSource.CODEX_HOOK,
+        source_identity="codex-phase-1",
+        structural_payload=JsonObject(
+            {
+                "tool_name": "Bash",
+                "tool_call_id": "tool-use-1",
+            }
+        ),
+    )
+    expected_event = stable_observation_id(
+        kind=IdKind.EVENT,
+        task_id=_TASK,
+        source_identity=f"{codex_envelope.source_identity}:captured:{observation.manifest.object_id}",
+        mapping_version=MATERIALIZATION_MAPPING_VERSION,
+        role="captured_evidence_event",
+    )
+    current_record = frozen.case.projection.evidence[evd(1)]
+    projection = replace(
+        frozen.case.projection,
+        evidence={evd(1): replace(current_record, source_event_id=event_id(expected_event))},
+    )
+    observation.envelope = codex_envelope
+    observation.profiles = ()
+    runtime = replace(runtime, observation=cast(TaskObservationPort, observation))
+    return (
+        FrozenCase(replace(frozen.case, projection=projection), frozen.lease),
+        runtime,
+        objects,
+        observation,
+    )
+
+
 def _multipart_fixture() -> tuple[FrozenCase, TaskRuntime, _Objects]:
     base_frozen, base_runtime, base_objects, _observation, base_envelope = _fixture()
     object_values = tuple(
@@ -452,6 +491,219 @@ async def test_resolver_authenticates_content_and_binds_phase_before_builder() -
         {item.item_id for item in semantic.items},
     )
     assert captured.content in prepared
+
+
+@pytest.mark.anyio
+async def test_profileless_codex_hook_content_reaches_guarded_semantic_packet(
+    tmp_path: Path,
+) -> None:
+    frozen, runtime, objects, _observation = _codex_profileless_fixture()
+    local = LocalObservationStore(_state=tmp_path / "local-state")
+    local.grant_consent(
+        _WORKSPACE,
+        timestamp_from_string("2026-07-01T00:00:00.000Z"),
+    )
+
+    resolved = await resolve_captured_semantic_content(
+        runtime=runtime,
+        frozen=frozen,
+        workspace_commitment=_WORKSPACE,
+        local_observation=local,
+    )
+
+    assert len(objects.resolve_calls) == 1
+    assert objects.open_calls == 1
+    assert len(resolved.content) == 1
+    assert resolved.content[0].capture_profile == ObservationSource.CODEX_HOOK.value
+    assert resolved.scope is not None
+    assert resolved.scope.authorized_profiles == (ObservationSource.CODEX_HOOK.value,)
+    assert resolved.gaps == ()
+
+    semantic = build_semantic_case(
+        case_id="cas_10000000-0000-4000-8000-000000000002",
+        frozen_case=frozen.case,
+        dependency_digest=frozen.lease.dependency_digest,
+        findings=(),
+        review_context_profile=ReviewContextProfile.EXPANDED,
+        review_selection=ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED),
+        policy_id="pvy_10000000-0000-4000-8000-000000000002",
+        policy_version="1",
+        captured_content=resolved.content,
+        captured_content_scope=resolved.scope,
+        captured_content_gaps=resolved.gaps,
+    )
+    prepared = semantic_case_to_prepared_payload(
+        semantic,
+        {item.item_id for item in semantic.items},
+    )
+    assert b"planted-defect-marker: missing validation" in prepared
+
+
+@pytest.mark.anyio
+async def test_profileless_codex_selection_coexists_with_ordinary_host_profiles(
+    tmp_path: Path,
+) -> None:
+    frozen, runtime, objects, observation = _codex_profileless_fixture()
+    ordinary_profiles = (
+        CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+        CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+    )
+    observation.profiles = ordinary_profiles
+    local = LocalObservationStore(_state=tmp_path / "local-state")
+    local.grant_consent(
+        _WORKSPACE,
+        timestamp_from_string("2026-07-01T00:00:00.000Z"),
+        content_capture_profiles=ordinary_profiles,
+    )
+
+    resolved = await resolve_captured_semantic_content(
+        runtime=runtime,
+        frozen=frozen,
+        workspace_commitment=_WORKSPACE,
+        local_observation=local,
+    )
+
+    assert len(resolved.content) == 1
+    assert resolved.scope is not None
+    assert resolved.scope.authorized_profiles == tuple(
+        sorted(
+            (*ordinary_profiles, ObservationSource.CODEX_HOOK.value),
+            key=str.encode,
+        )
+    )
+    assert objects.open_calls == 1
+
+
+@pytest.mark.anyio
+async def test_profileless_codex_session_stream_never_selects_captured_content(
+    tmp_path: Path,
+) -> None:
+    frozen, runtime, objects, observation = _codex_profileless_fixture()
+    observation.envelope = replace(
+        observation.envelope,
+        source=ObservationSource.CODEX_SESSION_STREAM,
+    )
+    local = LocalObservationStore(_state=tmp_path / "local-state")
+    local.grant_consent(
+        _WORKSPACE,
+        timestamp_from_string("2026-07-01T00:00:00.000Z"),
+    )
+
+    resolved = await resolve_captured_semantic_content(
+        runtime=runtime,
+        frozen=frozen,
+        workspace_commitment=_WORKSPACE,
+        local_observation=local,
+    )
+
+    assert resolved.content == ()
+    assert resolved.scope is None
+    assert objects.resolve_calls == []
+    assert objects.open_calls == 0
+    assert "content_unselected" in resolved.gaps
+
+
+@pytest.mark.anyio
+async def test_profileless_codex_selection_requires_a_codex_hook_envelope(
+    tmp_path: Path,
+) -> None:
+    frozen, runtime, objects, observation = _codex_profileless_fixture()
+    observation.envelope = replace(
+        observation.envelope,
+        source=ObservationSource.CLAUDE_HOOK,
+    )
+    local = LocalObservationStore(_state=tmp_path / "local-state")
+    local.grant_consent(
+        _WORKSPACE,
+        timestamp_from_string("2026-07-01T00:00:00.000Z"),
+    )
+
+    resolved = await resolve_captured_semantic_content(
+        runtime=runtime,
+        frozen=frozen,
+        workspace_commitment=_WORKSPACE,
+        local_observation=local,
+    )
+
+    assert resolved.content == ()
+    assert resolved.scope is None
+    assert objects.resolve_calls == []
+    assert objects.open_calls == 0
+    assert "content_unselected" in resolved.gaps
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mutation", ("correlation", "source_commitment"))
+async def test_profileless_codex_capture_rejects_binding_mismatch_before_open(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    frozen, runtime, objects, observation = _codex_profileless_fixture()
+    if mutation == "correlation":
+        observation.envelope = replace(
+            observation.envelope,
+            structural_payload=JsonObject(
+                {
+                    "tool_name": "Bash",
+                    "tool_call_id": "foreign-tool",
+                }
+            ),
+        )
+    else:
+        observation.envelope = replace(
+            observation.envelope,
+            cursor=replace(
+                observation.envelope.cursor,
+                last_source_commitment="hmac-sha256:" + "4" * 64,
+            ),
+        )
+    local = LocalObservationStore(_state=tmp_path / "local-state")
+    local.grant_consent(
+        _WORKSPACE,
+        timestamp_from_string("2026-07-01T00:00:00.000Z"),
+    )
+
+    resolved = await resolve_captured_semantic_content(
+        runtime=runtime,
+        frozen=frozen,
+        workspace_commitment=_WORKSPACE,
+        local_observation=local,
+    )
+
+    assert resolved.content == ()
+    assert objects.resolve_calls == []
+    assert objects.open_calls == 0
+    assert "content_unselected" in resolved.gaps
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "content_kind",
+    (ObservationContentKind.TOOL_INPUT, ObservationContentKind.WORKSPACE_LOCATOR),
+)
+async def test_profileless_codex_input_and_locator_are_excluded(
+    tmp_path: Path,
+    content_kind: ObservationContentKind,
+) -> None:
+    frozen, runtime, objects, observation = _codex_profileless_fixture()
+    observation.manifest = replace(observation.manifest, content_kind=content_kind)
+    local = LocalObservationStore(_state=tmp_path / "local-state")
+    local.grant_consent(
+        _WORKSPACE,
+        timestamp_from_string("2026-07-01T00:00:00.000Z"),
+    )
+
+    resolved = await resolve_captured_semantic_content(
+        runtime=runtime,
+        frozen=frozen,
+        workspace_commitment=_WORKSPACE,
+        local_observation=local,
+    )
+
+    assert resolved.content == ()
+    assert objects.resolve_calls == []
+    assert objects.open_calls == 0
+    assert "content_unselected" in resolved.gaps
 
 
 @pytest.mark.anyio

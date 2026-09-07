@@ -109,14 +109,15 @@ separate proof facets; a clean cell must verify which plugin directory Cursor ac
 
 ## MCP ownership and source precedence
 
-### Project registration when plugin MCP supplies no roots
+### Project registration and root selection
 
-A user-local plugin can be discovered and its MCP tools can be connected while Cursor supplies
-no repository roots to that server. The observed desktop implementation attaches project paths
-to project-managed MCP definitions; plugin definitions do not carry those paths. In that case a
-workspace operation returns `SESSION_CONFLICT` with `repository_identity_required`. Reloading the
-same definition does not add project authority. Hook `workspace_roots` and an agent's terminal
-working directory are separate facts and are not substitutes for the MCP client's `roots/list`.
+A user-local plugin can be discovered and its MCP tools can be connected while a workspace
+operation returns `SESSION_CONFLICT` with `repository_identity_required`. The reviewed Cursor
+implementation can emit absolute filesystem paths in `roots/list.uri` and include multiple open
+projects in the shared MCP process's root inventory. Yoetz accepts that strict local path shape
+through its Cursor adapter and safely canonicalizes every root. An explicit project registration
+selects the intended repository from the host's inventory. Hook `workspace_roots` and an agent's
+terminal working directory remain separate facts and cannot replace the MCP client's roots.
 
 For this host behavior, use an explicit project registration and an external-registration plugin
 for the skill and hooks. First remove the existing plugin-managed artifact through its normal
@@ -134,18 +135,25 @@ Then invoke the exact intended Yoetz launcher to preview and install the project
 
 Install the native plugin with `--mcp-ownership external-registration` through the authenticated
 plugin lifecycle. Its launcher and isolated root must match the project entry. The project entry
-is `.cursor/mcp.json`, has exactly the pinned launcher plus `mcp serve --host cursor`, and carries
+is `.cursor/mcp.json`, has the pinned launcher plus
+`mcp serve --host cursor --project-root ${workspaceFolder}`, and carries
 only the validated `YOETZ_ISOLATED_ROOT` environment binding when isolated. Strict mode appends
 `--semantic off`; omitting `--route-profile` preserves an existing owned route. The project
 registration command never launches a service and never grants semantic egress or host trust.
-Use the existing project admission commands for an authorized policy route.
+The startup selector is validated against the exact owned project entry, launcher, route, and
+directory/configuration identity. It must match a repository in the active client's validated
+root inventory; empty or unsupported roots, malformed responses, timeouts, and mismatches still
+fail. A changed registration or selected repository retires the MCP session. Use the existing
+project admission commands for an authorized policy route.
 
 `project-mcp status` reports configuration ownership separately from unknown host trust and
 unobserved runtime binding. Open that project in Cursor, activate the changed server through
-Cursor's MCP controls, and use a fresh agent conversation. Verify a model-controlled `start`,
-native hook evidence, captured content, and any authorized semantic dispatch separately. Multiple
-distinct repository roots remain ambiguous; the bridge continues to refuse rather than choosing
-one. Codex and Claude Code retain their own existing registration paths.
+Cursor's MCP controls, and use a fresh agent conversation. After changing the entry, disable and
+enable its project source to create a new connection, then verify the active command: Reload can
+retain an older process or cached definition. Verify a model-controlled `start`, native hook
+evidence, captured content, and authorized semantic dispatch separately. Multiple distinct roots
+still require a validated selector that matches one host-reported repository. Codex and Claude
+Code retain their own existing registration paths.
 
 Reverse the registration with `project-mcp preview-remove`, then `project-mcp remove` using the
 exact preview digest and `--accept`. Removal and strict registration sweep only Yoetz-owned
@@ -512,9 +520,11 @@ can erase a deferred intent when it saves.
 
 The native Cursor MCP bridge has a separate workspace binding. It does not use the helper's process
 CWD, because a Cursor MCP child can be launched from the user home directory. On the first workflow
-tool call, the `--host cursor` bridge asks the active MCP client for `roots/list` and accepts only
-safe local `file:` roots that canonicalize to one repository. An unavailable, remote, malformed, or
-multi-repository response returns `SESSION_CONFLICT` with
+tool call, the `--host cursor` bridge asks the active MCP client for `roots/list`. Its Cursor adapter
+accepts safe local file URIs and strict absolute local paths. They must canonicalize to one repository,
+or the validated owned project selector must match one repository in the returned inventory.
+An unavailable, remote, malformed, nonmatching, or unresolved multi-repository response returns
+`SESSION_CONFLICT` with
 `safe_details.reason_code: repository_identity_required` before any local-service call. The bridge
 retains and revalidates that binding before each workflow call; a changed or unusable root result
 retires the session and its local client. A `notifications/roots/list_changed` message does the same,

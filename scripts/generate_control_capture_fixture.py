@@ -20,44 +20,46 @@ _SERVICE_INSTANCE_ID = "svc_00000000-0000-4000-8000-000000000001"
 
 
 def _request(
-    *, host: str, rpc_suffix: str, source: str, profile: str, mapping: str
+    *, host: str, rpc_suffix: str, source: str, profile: str | None, mapping: str
 ) -> dict[str, Any]:
     source_identity = f"hook:{host}-control-schema-250"
-    return {
-        "body": {
-            "capture_only": True,
-            "codex_session_id": f"{host}:control-schema-250",
-            "content_capture_profile": profile,
-            "content_chunks": [
-                {
-                    "content_b64": "Y2FwdHVyZQ==",
-                    "content_kind": "tool_input",
-                    "correlation_identity": f"{source_identity}:tool-input",
-                    "media_type": "text/plain",
-                    "part_count": 1,
-                    "part_index": 0,
-                    "redacted": False,
-                    "source_commitment": _COMMITMENT,
-                }
-            ],
-            "envelope": {
-                "content_object_refs": [],
-                "cursor": {
-                    "byte_position": 0,
-                    "event_position": 1,
-                    "last_source_commitment": _COMMITMENT,
-                    "mapping_version": mapping,
-                    "source_generation": 1,
-                },
-                "event_kind": "PostToolUse",
-                "gap_codes": [],
-                "receipt_time": "2026-09-06T12:00:00.000Z",
-                "session_commitment": _COMMITMENT,
-                "source": source,
-                "source_identity": source_identity,
-                "structural_payload": {"tool_name": "Bash"},
+    body: dict[str, Any] = {
+        "capture_only": True,
+        "codex_session_id": f"{host}:control-schema-250",
+        "content_chunks": [
+            {
+                "content_b64": "Y2FwdHVyZQ==",
+                "content_kind": "tool_input",
+                "correlation_identity": f"{source_identity}:tool-input",
+                "media_type": "text/plain",
+                "part_count": 1,
+                "part_index": 0,
+                "redacted": False,
+                "source_commitment": _COMMITMENT,
+            }
+        ],
+        "envelope": {
+            "content_object_refs": [],
+            "cursor": {
+                "byte_position": 0,
+                "event_position": 1,
+                "last_source_commitment": _COMMITMENT,
+                "mapping_version": mapping,
+                "source_generation": 1,
             },
+            "event_kind": "PostToolUse",
+            "gap_codes": [],
+            "receipt_time": "2026-09-06T12:00:00.000Z",
+            "session_commitment": _COMMITMENT,
+            "source": source,
+            "source_identity": source_identity,
+            "structural_payload": {"tool_name": "Bash"},
         },
+    }
+    if profile is not None:
+        body["content_capture_profile"] = profile
+    return {
+        "body": body,
         "kind": "call",
         "method": "observation_ingest",
         "protocol_version": "1.0",
@@ -93,29 +95,43 @@ def _fixture_document() -> dict[str, Any]:
             "cursor_hook",
             "cursor-ordinary-observation-v1",
         ),
+        (
+            "codex-native-capture",
+            _request(
+                host="codex",
+                rpc_suffix="12",
+                source="codex_hook",
+                profile=None,
+                mapping="codex-obs-hook/1.0.0",
+            ),
+            "codex_hook",
+            None,
+        ),
     )
     expected: list[dict[str, Any]] = []
     for vector_id, request, source, profile in vectors:
-        encoded = canonical_encode(cast(dict[str, Any], request))
+        encoded = canonical_encode(request)
+        expected_result: dict[str, Any] = {
+            "capture_only": True,
+            "protocol_version": "1.0",
+            "schema_name": "control-request",
+            "schema_validation": "valid",
+            "schema_version": "2.5.0",
+            "service_result": {
+                "advanced_cursor": None,
+                "disposition": "rejected",
+                "reason": "content_capture_pending",
+            },
+            "source": source,
+        }
+        if profile is not None:
+            expected_result["content_capture_profile"] = profile
         expected.append(
             {
                 "canonical_byte_length": len(encoded),
                 "canonical_hex": encoded.hex(),
                 "canonical_sha256": canonical_digest(request),
-                "expected_result": {
-                    "capture_only": True,
-                    "content_capture_profile": profile,
-                    "protocol_version": "1.0",
-                    "schema_name": "control-request",
-                    "schema_validation": "valid",
-                    "schema_version": "2.5.0",
-                    "service_result": {
-                        "advanced_cursor": None,
-                        "disposition": "rejected",
-                        "reason": "content_capture_pending",
-                    },
-                    "source": source,
-                },
+                "expected_result": expected_result,
                 "request_identity": {
                     "method": "observation_ingest",
                     "rpc_id": request["rpc_id"],
@@ -135,7 +151,7 @@ def _fixture_document() -> dict[str, Any]:
         "expected": {
             "outer_protocol_version": "1.0",
             "schema_version": "2.5.0",
-            "vector_count": 2,
+            "vector_count": 3,
             "vectors": expected,
         },
         "fixture_id": _FIXTURE_ID,
@@ -153,14 +169,14 @@ def _fixture_document() -> dict[str, Any]:
         },
         "owns_requirements": ["CONTROL-2.5:native-observation-handoff", "ISSUE-616:main-repair"],
         "purpose": (
-            "Freeze canonical Claude and Cursor native capture requests admitted by the additive "
-            "2.5 control schema, including their request identities, valid schema results, and "
-            "content-pending ingest outcomes."
+            "Freeze canonical Claude, Cursor, and profileless Codex native capture requests "
+            "admitted by the additive 2.5 control schema, including their request identities, "
+            "valid schema results, and content-pending ingest outcomes."
         ),
     }
 
 
-def _manifest_bytes(path: Path, fixture_bytes: bytes) -> bytes:
+def _manifest_bytes(path: Path, fixture_bytes: bytes, *, allow_owned_update: bool = False) -> bytes:
     parsed = strict_json_parse(path.read_bytes())
     if not isinstance(parsed, dict) or set(parsed) != {
         "manifest_schema",
@@ -184,7 +200,7 @@ def _manifest_bytes(path: Path, fixture_bytes: bytes) -> bytes:
     existing = [item for item in previous if item["path"] == _FIXTURE_MANIFEST_PATH]
     if len(existing) > 1:
         raise ValueError("fixture_manifest_duplicate_path")
-    if existing and existing[0] != member:
+    if existing and existing[0] != member and not allow_owned_update:
         raise ValueError("fixture_manifest_owned_member_changed")
     if any(
         item["fixture_id"] == _FIXTURE_ID and item["path"] != _FIXTURE_MANIFEST_PATH
@@ -192,7 +208,7 @@ def _manifest_bytes(path: Path, fixture_bytes: bytes) -> bytes:
     ):
         raise ValueError("fixture_manifest_id_already_owned")
     updated_members = (
-        previous
+        [member if item["path"] == _FIXTURE_MANIFEST_PATH else item for item in previous]
         if existing
         else sorted([*previous, member], key=lambda item: str(item["path"]).encode("ascii"))
     )
@@ -200,14 +216,18 @@ def _manifest_bytes(path: Path, fixture_bytes: bytes) -> bytes:
         item for item in previous if item["path"] != _FIXTURE_MANIFEST_PATH
     ]:
         raise ValueError("fixture_manifest_existing_member_changed")
-    updated = dict(parsed)
+    updated = cast(dict[str, Any], dict(parsed))
     updated["members"] = updated_members
     return json.dumps(updated).encode("utf-8") + b"\n"
 
 
-def _expected(root: Path) -> tuple[bytes, bytes]:
-    fixture_bytes = canonical_encode(cast(dict[str, Any], _fixture_document()))
-    return fixture_bytes, _manifest_bytes(root / _MANIFEST_RELATIVE, fixture_bytes)
+def _expected(root: Path, *, allow_owned_update: bool = False) -> tuple[bytes, bytes]:
+    fixture_bytes = canonical_encode(_fixture_document())
+    return fixture_bytes, _manifest_bytes(
+        root / _MANIFEST_RELATIVE,
+        fixture_bytes,
+        allow_owned_update=allow_owned_update,
+    )
 
 
 def main() -> int:
@@ -219,7 +239,7 @@ def main() -> int:
     if args.check == args.write:
         parser.error("choose exactly one of --check or --write")
     root = args.repo_root.resolve()
-    fixture_bytes, manifest_bytes = _expected(root)
+    fixture_bytes, manifest_bytes = _expected(root, allow_owned_update=args.write)
     fixture_path = root / _FIXTURE_RELATIVE
     manifest_path = root / _MANIFEST_RELATIVE
     if args.check:
@@ -231,7 +251,7 @@ def main() -> int:
             return 1
         print("control capture fixture and manifest are current")
         return 0
-    if fixture_path.exists() and fixture_path.read_bytes() != fixture_bytes:
+    if fixture_path.exists() and fixture_path.read_bytes() != fixture_bytes and not args.write:
         raise SystemExit("control capture fixture has unexpected existing bytes")
     fixture_path.parent.mkdir(parents=True, exist_ok=True)
     fixture_path.write_bytes(fixture_bytes)

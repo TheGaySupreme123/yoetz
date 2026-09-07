@@ -751,7 +751,10 @@ def _assisted_composition_evaluator(
     )
     return factory(
         cast(PrivacyCoordinator, privacy),
-        semantic_non_dispatch.FixedClock(),
+        # Keep the composition clock in the same UTC domain as the task ledger. The production
+        # service supplies one clock to both; using the generic July fixture clock here would
+        # make a freshly-created September semantic case appear expired before its first claim.
+        _Clock(),
         semantic_non_dispatch._INSTALLATION,  # pyright: ignore[reportPrivateUsage]
         resolve_provider,
         cast(
@@ -825,13 +828,17 @@ async def test_profileless_codex_hook_content_reaches_guarded_task_bundle(
         == 0
     )
 
-    assert len(client.requests) == 1
-    request = client.requests[0]
+    assert len(client.requests) == 2
+    capture_request, request = client.requests
+    assert capture_request.capture_only is True
+    assert capture_request.content_capture_profile is None
+    assert len(capture_request.content_chunks) == 1
+    captured_chunk = capture_request.content_chunks[0]
+    assert marker in captured_chunk.content
+    assert request.capture_only is False
     assert request.envelope.source is ObservationSource.CODEX_HOOK
     assert request.content_capture_profile is None
-    assert len(request.content_chunks) == 1
-    captured_chunk = request.content_chunks[0]
-    assert marker in captured_chunk.content
+    assert request.content_chunks == ()
 
     envelopes = task_observation.list_envelopes_for_session(workspace, session_commitment)
     assert len(envelopes) == 1

@@ -38,7 +38,11 @@ from yoetz.domain.events import (
     encode_payload,
 )
 from yoetz.domain.findings import Finding, FindingKind
-from yoetz.domain.observation import ObservationContentKind, ObservationContentManifest
+from yoetz.domain.observation import (
+    ObservationContentKind,
+    ObservationContentManifest,
+    ObservationSource,
+)
 from yoetz.domain.observation_profiles import ORDINARY_CONTENT_CAPTURE_PROFILE_IDS
 from yoetz.domain.privacy import (
     MAX_EGRESS_ENVELOPE_BYTES,
@@ -175,7 +179,14 @@ _CAPTURED_CONTENT_KINDS: Final = frozenset(
 )
 # The resolver and pure builder share the closed profile vocabulary. The builder still
 # treats its scope as a service-authenticated assertion; it does not discover consent.
-_AUTHORIZED_CAPTURE_PROFILES: Final = ORDINARY_CONTENT_CAPTURE_PROFILE_IDS
+#
+# Codex's original observation consent predates the opt-in Claude/Cursor content profiles.  The
+# source token below is an internal scope label for that historical, profileless grant; it is not a
+# user-selectable content profile and is never accepted by the local consent/profile adapters.
+_CODEX_HISTORICAL_CAPTURE_SCOPE: Final = ObservationSource.CODEX_HOOK.value
+_AUTHORIZED_CAPTURE_PROFILES: Final = frozenset(
+    {*ORDINARY_CONTENT_CAPTURE_PROFILE_IDS, _CODEX_HISTORICAL_CAPTURE_SCOPE}
+)
 MAX_CAPTURED_SEMANTIC_CONTENT_PARTS: Final = 64
 MAX_CAPTURED_SEMANTIC_INPUT_BYTES: Final = 2 * MAX_CAPTURED_SEMANTIC_CONTENT_BYTES
 _CAPTURE_GAP_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)

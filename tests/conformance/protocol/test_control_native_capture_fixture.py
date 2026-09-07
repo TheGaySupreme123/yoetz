@@ -23,7 +23,7 @@ def test_manifest_bound_claude_and_cursor_capture_vectors_are_canonical(
     expected_document = cast(dict[str, Any], document["expected"])
     vectors = cast(list[dict[str, Any]], input_document["vectors"])
     expected_vectors = cast(list[dict[str, Any]], expected_document["vectors"])
-    assert len(vectors) == len(expected_vectors) == 2
+    assert len(vectors) == len(expected_vectors) == 3
     assert expected_document["outer_protocol_version"] == "1.0"
     assert expected_document["schema_version"] == "2.5.0"
 
@@ -46,7 +46,10 @@ def test_manifest_bound_claude_and_cursor_capture_vectors_are_canonical(
         assert request["service_instance_id"] == identity["service_instance_id"]
         assert request["protocol_version"] == result["protocol_version"] == "1.0"
         assert body["capture_only"] is result["capture_only"] is True
-        assert body["content_capture_profile"] == result["content_capture_profile"]
+        if "content_capture_profile" in body:
+            assert body["content_capture_profile"] == result["content_capture_profile"]
+        else:
+            assert "content_capture_profile" not in result
         assert envelope["source"] == result["source"]
         assert result["schema_validation"] == "valid"
         assert result["service_result"] == {

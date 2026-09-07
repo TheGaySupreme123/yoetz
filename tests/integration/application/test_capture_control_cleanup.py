@@ -27,9 +27,14 @@ from integration.application.test_native_capture_pipeline import (
 )
 from yoetz.application.observation_drain import ObservationOutboxSweeper
 from yoetz.application.observation_materialize import observation_content_identity
+from yoetz.cli.observe_hooks import map_hook_payload_to_envelope
 from yoetz.domain.observation import (
     OBSERVATION_CONTENT_CAPTURE_PENDING_REASON,
+    ObservationContentChunk,
+    ObservationContentKind,
     ObservationIngestDisposition,
+    ObservationIngestRequest,
+    ObservationSource,
 )
 from yoetz.domain.observation_profiles import CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
 from yoetz.ports.ledger import FrozenCase
@@ -274,6 +279,73 @@ async def test_check_preflight_retires_disabled_ticket_without_structural_outbox
         _ZERO_DIGEST,
     )
     assert isinstance(frozen, FrozenCase)
+
+
+@pytest.mark.anyio
+async def test_check_reconciliation_keeps_profileless_codex_ticket_active(
+    tmp_path: Path,
+) -> None:
+    """READY cleanup does not treat the Codex structural grant as a profile arm."""
+
+    codex_session = "codex:profileless-check"
+    (
+        _project,
+        workspace,
+        session_commitment,
+        local,
+        observation,
+        _ledger,
+        runtime,
+        coordinator,
+        _client,
+        _connect,
+    ) = await _pipeline(tmp_path, codex_session_id=codex_session, profile=None)
+    envelope = map_hook_payload_to_envelope(
+        "PostToolUse",
+        {
+            "hook_event_name": "PostToolUse",
+            "session_id": codex_session,
+            "tool_name": "Bash",
+            "tool_use_id": "profileless-check-tool",
+            "tool_response": "profileless-check-marker",
+        },
+        session_commitment=session_commitment,
+        event_ordinal=1,
+        key_material=local.key_material(),
+        source=ObservationSource.CODEX_HOOK,
+    )
+    request = ObservationIngestRequest(
+        codex_session_id=codex_session,
+        envelope=envelope,
+        content_chunks=(
+            ObservationContentChunk(
+                content_kind=ObservationContentKind.TOOL_OUTPUT,
+                correlation_identity=f"{envelope.source_identity}:tool-output",
+                source_commitment=envelope.cursor.last_source_commitment,
+                media_type="text/plain",
+                part_index=0,
+                part_count=1,
+                content=b"profileless-check-marker",
+            ),
+        ),
+        capture_only=True,
+    )
+    staged = await coordinator.ingest_request(request)
+    assert staged.reason == OBSERVATION_CONTENT_CAPTURE_PENDING_REASON
+    logical_identity = observation_content_identity(envelope)
+    pending = observation.load_capture_ticket(
+        workspace=workspace,
+        logical_identity=logical_identity,
+    )
+    assert pending is not None and pending.state == "pending"
+
+    await getattr(ready_composition, "_reconcile_observation_capture")(runtime, local)
+
+    retained = observation.load_capture_ticket(
+        workspace=workspace,
+        logical_identity=logical_identity,
+    )
+    assert retained is not None and retained.state == "pending"
 
 
 @pytest.mark.anyio

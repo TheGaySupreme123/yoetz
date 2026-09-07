@@ -17,7 +17,9 @@ for moderator-approved issue #244 and the reopened issue #216 recurrence; 2026-0
 #607 (host/profile pairing contracts, scoped orphan diagnostics, and identity fencing, decision 21).
 **Amended (continued):** 2026-09-06 for issue #616 (bounded host-hook maintenance: lightweight
 ordinary-profile ingress and bounded native-content draining, with cancellation limits kept
-explicit); 2026-09-06 for the native capture handoff and FIFO/check barrier contract.
+explicit); 2026-09-06 for the native capture handoff and FIFO/check barrier contract; 2026-09-07
+for the source-qualified, profileless Codex hook capture handoff and its independent semantic
+selection fence.
 **Implemented by:** `src/yoetz/application/observation_materialize.py`,
 `src/yoetz/application/observation_coordinator.py`, `src/yoetz/cli/observe_hooks.py`,
 `src/yoetz/adapters/memory/ledger.py`,
@@ -377,14 +379,18 @@ rewrites, and pruning; contention or changed state falls back to the ordinary re
     source generation in canonical/action/result identities; legacy 1.5/1.4/1.3/1.2 identities
     remain replayable under their historical semantics.
 
-22. Native Claude Code and Cursor ordinary profiles use a two-phase encrypted-content handoff.
-    The capture-only request runs in a separate bounded lane while a heavy structural append may
-    be active. After the local service authenticates the request, it secret-scans and encrypts the
-    eligible chunks, durably publishes their objects and manifests, and records a metadata-only
-    capture ticket before the structural FIFO cursor advances. The ticket binds the encrypted
-    object IDs to the exact workspace/task/Yoetz session, host session and source cursor,
-    content profile, original source generation, content-authority generation, and expected
-    content groups/parts. It contains no plaintext and cannot be borrowed by another event.
+22. Native Claude Code and Cursor ordinary profiles, and the source-qualified profileless Codex
+    hook arm, use a two-phase encrypted-content handoff. The capture-only request runs in a
+    separate bounded lane while a heavy structural append may be active. After the local service
+    authenticates the request, it secret-scans and encrypts the eligible chunks, durably publishes
+    their objects and manifests, and records a metadata-only capture ticket before the structural
+    FIFO cursor advances. The ticket binds the encrypted object IDs to the exact
+    workspace/task/Yoetz session, host session and source cursor, content profile when applicable,
+    original source generation, content-authority generation, and expected content groups/parts.
+    For Codex, the source-qualified profileless arm additionally fences the exact active consent
+    authority/generation, workspace commitment, `codex_hook` source identity and commitment,
+    tool-call correlation, expected multipart groups/parts, object kinds, and object/content
+    digests. It contains no plaintext and cannot be borrowed by another event.
 
     A structural retry consumes a ticket only after revalidating the original source and
     authority generations and proving the complete expected group/part set. A partial, conflicting,
@@ -414,9 +420,22 @@ rewrites, and pruning; contention or changed state falls back to the ordinary re
     `OPERATION_PENDING` barrier atomically; the same request can retry after the ticket is
     consumed without reminting content or ledger identities. A host kill or service failure before
     authenticated staging completes may leave an honest content gap. There is no plaintext local
-    spool or offline acceptance guarantee. Codex's historical session-stream path does not adopt
-    this native ticket lane; its existing replay and content rules remain unchanged, while the
-    shared generation, operation-replay, and teardown repairs apply to all hosts.
+    spool or offline acceptance guarantee. The Codex arm admits only explicitly linked hook tool
+    output, selected changed-file/code bytes, and workspace-diff bytes for captured-content
+    evidence and semantic selection. Its session-stream records remain outside this native ticket
+    lane and are excluded from semantic selection. Tool input and path/locator content are excluded
+    from semantic selection too, although the current Codex hook path may still stage consented
+    input/locator chunks in the bounded encrypted local capture lane pending a follow-up staging
+    filter. Captured-content staging does not authorize egress: semantic-case selection still
+    requires effective repository privacy authority and an independently authorized provider/attempt
+    route. Codex's historical session-stream path otherwise remains unchanged, while the shared
+    generation, operation-replay, and teardown repairs apply to all hosts.
+
+    Acceptance of the Codex arm requires a blocked-FIFO capture with bounded acknowledgement,
+    guarded-store materialization through the semantic packet, and negative coverage for source,
+    correlation, task/session, authority-generation, multipart, cancellation, restart, and retry
+    fences. Metadata-only objects, a successful structural receipt, or a typed MCP result alone do
+    not prove that native Codex bytes became eligible provider input.
 
 ## Security and privacy consequences
 
@@ -424,6 +443,14 @@ The observation writer id is derivable from public task/session identifiers, but
 no publication authority. `publish_work` derives its channel from the closed integration kind; a
 caller cannot request `hook_observed` or `engine_derived`, and a spoofed harness actor therefore does
 not pass the observation predicate.
+
+The Codex native hook arm is source-qualified and profileless. Active local observation consent
+authorizes local encrypted capture for the exact `codex_hook` source; it does not authorize a
+Claude/Cursor content profile, semantic selection, or provider disclosure. Only linked output,
+changed-file/code, and workspace-diff roles can enter a semantic case after the repository privacy
+authority and the individual provider attempt authorize that case. Session-stream, input, and
+locator content remain excluded from semantic selection. Consented input/locator chunks may
+still be locally staged by the current hook path until the staging filter follow-up lands.
 
 ADR-009 includes `other_writer` disclosure provenance. The production privacy enforcer currently
 ships without a provenance resolver. When that resolver is implemented, this harness writer must

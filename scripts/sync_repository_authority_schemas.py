@@ -528,6 +528,21 @@ def _capture_v25_request() -> dict[str, Any]:
             },
             "required": ["capture_only", "content_capture_profile", "content_chunks"],
         },
+        {
+            "not": {"required": ["content_capture_profile"]},
+            "properties": {
+                "capture_only": {"const": True},
+                "content_chunks": {"minItems": 1},
+                "envelope": {
+                    "properties": {"source": {"const": "codex_hook"}},
+                    "required": ["source"],
+                },
+            },
+            # Codex's native hook arm is authorized by the existing structural
+            # observation grant. It is intentionally profile-less: adding a
+            # public Codex profile would create a second consent vocabulary.
+            "required": ["capture_only", "content_chunks"],
+        },
     ]
     return generated
 

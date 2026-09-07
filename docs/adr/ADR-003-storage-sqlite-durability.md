@@ -37,10 +37,13 @@ fault/contention matrix on both advertised platforms.
    machines). Structural columns never contain user plaintext.
 6. **Object publication protocol:** encrypted temp file → flush → fsync(file) → atomic rename
    into `objects/<2-hex-prefix>/` → fsync(dir) → only then referenced inside the append
-   transaction. Native Claude Code and Cursor content uses the same service-side publication
-   protocol before its structural observation enters the FIFO ledger: the service reserves a
-   metadata-only capture ticket, writes the encrypted object and manifest, and marks the ticket
-   pending only after the expected set is complete. Orphans are
+   transaction. Native Claude Code and Cursor content, and source-qualified Codex hook content,
+   use the same service-side publication protocol before their structural observation enters the
+   FIFO ledger: the service reserves a metadata-only capture ticket, writes the encrypted object
+   and manifest, and marks the ticket pending only after the expected set is complete. The Codex
+   hook arm is profileless: it is selected by the exact `codex_hook` source and active observation
+   consent authority, not by a Claude/Cursor content profile. Codex session-stream content remains
+   on its separate path. Orphans are
    collectable after a 24 h safety window, never while referenced by a maintenance pin or an
    outstanding capture ticket.
 7. **Backup/restore/migration:** online Backup API only (APSW destination-side `backup`);
@@ -60,15 +63,29 @@ fault/contention matrix on both advertised platforms.
    terminal observation quarantine contains that delivery lane while preserving the original
    storage recovery contract.
 
-9. **Native capture handoff:** Claude Code and Cursor ordinary native profiles have a bounded
-   service-side staging lane. A capture-only request crosses the authenticated local-control
-   boundary, secret-scans and encrypts each eligible chunk, publishes its object and manifest
-   with the object protocol above, and records a ticket containing only commitments, encrypted
-   object IDs, source/session/cursor identity, the original source and content-authority
-   generations, profile, and expected content groups/parts. The structural observation request
-   may advance the FIFO ledger only after it revalidates both generations and the complete
-   expected group/part set; partial, conflicting, or unreadable sets remain unavailable and are
-   never promoted by inference.
+9. **Native capture handoff:** Claude Code and Cursor ordinary native profiles, and the
+   source-qualified profileless Codex hook arm, have a bounded service-side staging lane. A
+   capture-only request crosses the authenticated local-control boundary, secret-scans and
+   encrypts each eligible chunk, publishes its object and manifest with the object protocol above,
+   and records a ticket containing only commitments, encrypted object IDs, source/session/cursor
+   identity, the original source and content-authority generations, profile when applicable, and
+   expected content groups/parts. For Codex, the ticket is fenced to the exact active consent
+   authority/generation, task, workspace commitment, Yoetz and host session, `codex_hook` source
+   identity and commitment, source generation, tool-call correlation, expected multipart
+   groups/parts, object kinds, and object/content digests. No Codex content profile is inferred or
+   accepted. The
+   structural observation request may advance the FIFO ledger only after it revalidates the source
+   and authority generations and the complete expected group/part set; partial, conflicting, or
+   unreadable sets remain unavailable and are never promoted by inference.
+
+   For the Codex hook arm, only explicitly linked tool output, selected changed-file/code bytes,
+   and workspace-diff bytes are eligible for captured-content evidence and semantic selection.
+   Session-stream records remain outside this native ticket lane and are excluded from semantic
+   selection. Tool input and path/locator content are excluded from semantic selection too, though
+   the current Codex hook path may still stage consented input/locator chunks in the bounded
+   encrypted local capture lane pending a follow-up staging filter. Encrypted staging does not
+   authorize disclosure: semantic-case selection still requires the effective repository privacy
+   authority and the independently authorized provider/attempt route.
 
    `staging` and `pending` tickets are bounded to 512 outstanding entries per workspace.
    Revoked tickets do not consume that quota, but their metadata-only tombstones remain so an

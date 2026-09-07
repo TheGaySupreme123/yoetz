@@ -102,6 +102,7 @@ _PROJECTION_DOMAIN = b"yoetz/privacy-audit/projection/v1\x00"
 _APPROVAL_DOMAIN = b"yoetz/privacy-audit/local-approval/v1\x00"
 _AUTHORIZATION_DOMAIN = b"yoetz/privacy-audit/authorization/v1\x00"
 _CURSOR_DOMAIN = b"yoetz/privacy-audit/receipt-cursor/v1\x00"
+_MAX_DISCLOSURE_ATTEMPT_LOOKUP_ROWS: Final = 16
 
 _PRIVACY_POLICY_WIRE_SCHEMA_VERSION: Final = "1.1.0"
 _WIRE_CHANNEL_ORDER: Final = (
@@ -1905,6 +1906,83 @@ class CatalogPrivacyAudit:
             cast(str | None, row[5]),
             cast(str | None, row[6]),
         )
+
+    async def load_disclosure_attempt(
+        self, request_id: str, case_digest: str
+    ) -> PrivacyAuditState | None:
+        """Find the audit row for one physical semantic request and frozen case.
+
+        ``load`` intentionally keys on the private HMAC subject identity.  Semantic replay only
+        has the public case digest, so this bounded internal lookup authenticates the match from
+        the non-secret structural canonical stored with the disclosure row and returns the real
+        subject identity for subsequent resume operations.  Absence is distinct from malformed,
+        ambiguous, or unavailable storage: callers may continue an attempt only on exact absence.
+        """
+
+        if type(request_id) is not str or type(case_digest) is not str:
+            raise TypeError("privacy_disclosure_attempt_lookup_invalid")
+        try:
+            validate_id(IdKind.REQUEST, request_id)
+            validate_sha256_digest(case_digest)
+        except ValueError as exc:
+            raise ValueError("privacy_disclosure_attempt_lookup_invalid") from exc
+        rows = self._db.execute(
+            """SELECT proposal_id, request_id, subject_lookup_identity, state,
+                      policy_digest, created_at, authorization_id, dispatch_id, receipt_id,
+                      subject_structural_canonical
+               FROM privacy_audit_records
+               WHERE request_id = ? AND subject_kind = 'disclosure'
+               LIMIT ?""",
+            (request_id, _MAX_DISCLOSURE_ATTEMPT_LOOKUP_ROWS + 1),
+        ).fetchall()
+        if len(rows) > _MAX_DISCLOSURE_ATTEMPT_LOOKUP_ROWS:
+            raise ValueError("privacy_audit_attempt_ambiguous")
+        if len(rows) > 1:
+            raise ValueError("privacy_audit_attempt_ambiguous")
+        match: tuple[object, ...] | None = None
+        saw_disclosure_row = bool(rows)
+        for row in rows:
+            if len(row) != 10 or type(row[9]) is not bytes:
+                raise ValueError("privacy_audit_attempt_corrupt")
+            try:
+                structural_bytes = cast(bytes, row[9])
+                structural = _mapping(strict_json_parse(structural_bytes))
+                if canonical_encode(structural) != structural_bytes:
+                    raise ValueError("privacy_audit_attempt_corrupt")
+                lookup_identity = row[2]
+                if type(lookup_identity) is not str or not hmac.compare_digest(
+                    _mac(self._key, _LOOKUP_DOMAIN, structural_bytes), lookup_identity
+                ):
+                    raise ValueError("privacy_audit_attempt_corrupt")
+            except (TypeError, ValueError) as exc:
+                raise ValueError("privacy_audit_attempt_corrupt") from exc
+            if structural.get("prepared_case_digest") != case_digest:
+                continue
+            if match is not None:
+                raise ValueError("privacy_audit_attempt_ambiguous")
+            match = tuple(cast(object, value) for value in row)
+        if match is None:
+            if saw_disclosure_row:
+                raise ValueError("privacy_audit_attempt_case_mismatch")
+            return None
+        try:
+            reservation = PrivacyAuditReservation(
+                cast(str, match[0]),
+                request_id,
+                cast(str, match[2]),
+                cast(str, match[3]),
+                self._policy_generation(cast(str, match[4])),
+                parse_rfc3339_millis(match[5]),
+            )
+            return PrivacyAuditState(
+                reservation,
+                cast(str, match[3]),
+                cast(str | None, match[6]),
+                cast(str | None, match[7]),
+                cast(str | None, match[8]),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("privacy_audit_attempt_corrupt") from exc
 
     async def load_disclosure_proposal(self, proposal_id: str) -> DisclosureProposal | None:
         row = self._db.execute(

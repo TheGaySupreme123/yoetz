@@ -1650,12 +1650,22 @@ def mcp_serve(
             help="MCP serving identity for the exact local host; generic leaves host unknown.",
         ),
     ] = "generic",
+    project_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--project-root",
+            help=(
+                "Cursor only: expanded project selector from the host's ${workspaceFolder}; "
+                "it must also be present in MCP roots/list."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Run the MCP stdio bridge."""
 
     module = importlib.import_module("yoetz.mcp.server")
     mcp_main = cast(Callable[..., None], getattr(module, "main"))
-    mcp_main(semantic=semantic, host=host)
+    mcp_main(semantic=semantic, host=host, project_root=project_root)
 
 
 @state_app.command("capture")

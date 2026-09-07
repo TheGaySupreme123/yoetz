@@ -14,7 +14,7 @@ CREATE TABLE observation_capture_tickets (
     task_id TEXT NOT NULL CHECK (length(task_id) = 40),
     yoetz_session_id TEXT NOT NULL CHECK (length(yoetz_session_id) = 40),
     session_commitment TEXT NOT NULL CHECK (length(session_commitment) = 76),
-    source TEXT NOT NULL CHECK (source IN ('claude_hook', 'cursor_hook')),
+    source TEXT NOT NULL CHECK (source IN ('claude_hook', 'codex_hook', 'cursor_hook')),
     source_identity TEXT NOT NULL CHECK (length(source_identity) BETWEEN 1 AND 128),
     source_generation INTEGER NOT NULL CHECK (source_generation > 0),
     byte_position INTEGER NOT NULL CHECK (byte_position >= 0),
@@ -22,10 +22,14 @@ CREATE TABLE observation_capture_tickets (
     last_source_commitment TEXT NOT NULL CHECK (length(last_source_commitment) = 76),
     mapping_version TEXT NOT NULL CHECK (length(mapping_version) BETWEEN 1 AND 128),
     logical_identity TEXT NOT NULL CHECK (length(logical_identity) BETWEEN 1 AND 128),
-    content_capture_profile TEXT NOT NULL CHECK (
-        content_capture_profile IN (
-            'claude-code-ordinary-observation-v1',
-            'cursor-ordinary-observation-v1'
+    content_capture_profile TEXT CHECK (
+        (source = 'codex_hook' AND content_capture_profile IS NULL)
+        OR (
+            source IN ('claude_hook', 'cursor_hook')
+            AND content_capture_profile IN (
+                'claude-code-ordinary-observation-v1',
+                'cursor-ordinary-observation-v1'
+            )
         )
     ),
     authority_generation TEXT NOT NULL CHECK (
