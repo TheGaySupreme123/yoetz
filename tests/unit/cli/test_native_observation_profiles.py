@@ -21,7 +21,11 @@ from yoetz.adapters.integrations.cursor_integration import (
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.cli import observe as observe_cli
 from yoetz.cli import observe_hooks
-from yoetz.domain.observation import ObservationSource
+from yoetz.domain.observation import (
+    ObservationControlCommand,
+    ObservationRevokeCommand,
+    ObservationSource,
+)
 from yoetz.domain.observation_profiles import (
     CLAUDE_CODE_ORDINARY_HOOK_MAPPING_VERSION,
     CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
@@ -86,7 +90,58 @@ def test_content_profiles_are_independent_and_user_controls_are_reversible(
     )
     status = json.loads(capsys.readouterr().out)
     assert status["enabled"] is True
+    assert status["content_capture_scope"] == "ordinary_profiles"
+    assert status["codex_hook_capture_scope"] == "observation_consent"
     assert status["content_capture_profiles"] == [CURSOR_ORDINARY_OBSERVATION_PROFILE_ID]
+
+
+@pytest.mark.parametrize("mode", ("active", "paused", "revoked", "runtime_disabled", "mixed"))
+def test_profileless_codex_status_names_the_ordinary_profile_scope(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    mode: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "state"
+    store = LocalObservationStore(_state=state)
+    commitment = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(commitment)
+    if mode == "paused":
+        store.pause(ObservationControlCommand(commitment))
+    elif mode == "revoked":
+        store.revoke(ObservationRevokeCommand(commitment))
+    elif mode == "runtime_disabled":
+        store.set_runtime_enabled(False)
+    elif mode == "mixed":
+        store.enable_content_capture(commitment, CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID)
+        store.enable_content_capture(commitment, CURSOR_ORDINARY_OBSERVATION_PROFILE_ID)
+
+    observe_cli.observation_content_status(workspace=str(tmp_path), json_output=True, _state=state)
+    status = json.loads(capsys.readouterr().out)
+    assert status["content_capture_scope"] == "ordinary_profiles"
+    assert status["codex_hook_capture_scope"] == "observation_consent"
+    assert status["enabled"] is (mode == "mixed")
+    assert status["consent_active"] is (mode not in {"paused", "revoked"})
+    assert status["runtime_enabled"] is (mode != "runtime_disabled")
+    assert all("codex" not in profile for profile in status["content_capture_profiles"])
+
+    observe_cli.observation_content_status(workspace=str(tmp_path), json_output=False, _state=state)
+    text = capsys.readouterr().out
+    assert "scope=ordinary_profiles" in text
+    assert "Codex hook capture follows observation consent" in text
+    assert "does not prove captured evidence or semantic selection" in text
+
+    def no_activation_probe(*args: object, **kwargs: object) -> dict[str, JsonValue]:
+        return {}
+
+    monkeypatch.setattr(observe_cli, "_activation_state", no_activation_probe)
+    observe_cli.observe_status(workspace=str(tmp_path), json_output=True, _state=state)
+    overall = json.loads(capsys.readouterr().out)
+    assert overall["content_capture_scope"] == status["content_capture_scope"]
+    assert overall["codex_hook_capture_scope"] == status["codex_hook_capture_scope"]
+    assert overall["content_capture_enabled"] == status["enabled"]
+    observe_cli.observe_status(workspace=str(tmp_path), json_output=False, _state=state)
+    assert "ordinary profiles; Codex hooks follow observation consent" in capsys.readouterr().out
 
 
 def test_content_actions_report_requested_and_effective_profiles(

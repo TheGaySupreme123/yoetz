@@ -3264,7 +3264,14 @@ retains its structural contract, while its eligible hook content uses the fenced
 below.
 
 `yoetz observe content-enable`, `content-disable`, and `content-status` operate on the same canonical
-workspace as observation consent. The local content fence combines a durable per-workspace epoch
+workspace as observation consent. Their JSON responses and `observe status` identify
+`content_capture_scope: ordinary_profiles` and `codex_hook_capture_scope: observation_consent`.
+The profile list, effective profile list, and `enabled`/`content_capture_enabled` describe only the
+Claude Code and Cursor ordinary profiles. An empty list does not disable profileless Codex hooks,
+whose local authority follows observation consent and the runtime gate. Text status names the same
+scope. These are configuration facts, not proof of actual capture, successful execution, or
+semantic selection; those require evidence and the check/receipt (issue #622).
+The local content fence combines a durable per-workspace epoch
 with a persisted runtime-gate nonce; every real consent or runtime transition advances it, including
 pause/resume and off/on ABA cycles, and legacy state receives a fresh epoch before authority is
 accepted. Pause, disable, and revoke must fence retained native content reads and subsequent
