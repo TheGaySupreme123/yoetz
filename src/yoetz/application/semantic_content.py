@@ -71,6 +71,9 @@ _CURSOR_ORDINARY_PROFILE: Final = CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
 # that historical, profileless grant; it is never accepted as a local consent
 # profile or as a capture-only request profile.
 _CODEX_HISTORICAL_CAPTURE_SCOPE: Final = ObservationSource.CODEX_HOOK.value
+# Only the reviewed native hook vocabulary can authorize selection. A shared
+# source token does not make future or session-stream mappings compatible.
+_CODEX_REVIEWED_HOOK_MAPPINGS: Final = frozenset({"codex-obs-hook/1.0.0"})
 # These are the only Claude ordinary hook mappings whose captured-content wire
 # contract has been reviewed. Keep the historical v1 literal so upgrading the
 # ingress mapping does not make already-authenticated v1 envelopes unreadable;
@@ -290,7 +293,11 @@ def _profile_for_envelope(envelope: ObservationEnvelope) -> str | None:
         # unselected rather than letting the source-only historical arm hide that
         # contradiction. The hook mapper itself does not stamp either field for
         # Codex.
-        if profile is None and mapping_hint is None:
+        if (
+            profile is None
+            and mapping_hint is None
+            and envelope.cursor.mapping_version in _CODEX_REVIEWED_HOOK_MAPPINGS
+        ):
             return _CODEX_HISTORICAL_CAPTURE_SCOPE
     elif envelope.source is ObservationSource.CLAUDE_HOOK:
         if (
