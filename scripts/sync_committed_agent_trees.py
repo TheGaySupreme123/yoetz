@@ -102,8 +102,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         existing = {name: _existing_tree(_ROOT / name) for name in _TREES}
-        if args.preflight:
-            return 0
         expected = _expected_trees()
         # Validate both trees before writing either one. Foreign files are never removed.
         for name, members in expected.items():
@@ -114,6 +112,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 1
+        if args.preflight:
+            return 0
         drifted = [name for name in expected if existing[name] != expected[name]]
         if args.check and drifted:
             for name in drifted:

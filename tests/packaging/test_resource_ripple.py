@@ -209,15 +209,30 @@ def test_linked_agent_parent_fails_before_resource_writes(tmp_path: Path) -> Non
     assert (outside / "yoetz/.yoetz-install.json").read_bytes() == marker
 
 
-def test_foreign_agent_file_is_preserved(tmp_path: Path) -> None:
+@pytest.mark.parametrize("tree", [".agents/skills/yoetz", ".agents/plugins/yoetz"])
+def test_foreign_agent_file_fails_before_resource_writes(tmp_path: Path, tree: str) -> None:
     checkout = tmp_path / "checkout"
     _copy_checkout(checkout)
-    foreign = checkout / ".agents/skills/yoetz/foreign.txt"
+    foreign = checkout / tree / "foreign.txt"
     foreign.write_bytes(b"keep this file\n")
+    guidance = checkout / "guidance/workflow.md"
+    guidance.write_bytes(guidance.read_bytes() + b"\n<!-- pending source change -->\n")
+    before = {
+        path.relative_to(checkout): path.read_bytes()
+        for root in (".agents", "src/yoetz/resources", "schemas", "skills", "support")
+        for path in (checkout / root).rglob("*")
+        if path.is_file()
+    }
     written = _run("--write", "--repo-root", str(checkout))
     assert written.returncode == 1
     assert "foreign_agent_files" in written.stderr
     assert foreign.read_bytes() == b"keep this file\n"
+    assert before == {
+        path.relative_to(checkout): path.read_bytes()
+        for root in (".agents", "src/yoetz/resources", "schemas", "skills", "support")
+        for path in (checkout / root).rglob("*")
+        if path.is_file()
+    }
 
 
 def test_obsolete_generated_member_requires_its_old_marker_binding(tmp_path: Path) -> None:
