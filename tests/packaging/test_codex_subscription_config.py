@@ -220,7 +220,7 @@ def _bound_runtime_config(root: Path) -> tuple[Path, Path]:
         f'app_server_schema_sha256 = "{digest}"\n'
         f'capability_cell_sha256 = "{digest}"\n'
         f'isolated_config_sha256 = "{digest}"\n'
-        'capability_profile = "codex-evaluator/0.150.1/v1"\n'
+        'capability_profile = "codex-evaluator/0.150.1/v2"\n'
         'capability_evidence_expires_at = "2026-11-30T00:00:00Z"\n'
         f'codex_home = "{root / "dedicated-home"}"\n'
         'model = "gpt-5.6-sol"\n'
