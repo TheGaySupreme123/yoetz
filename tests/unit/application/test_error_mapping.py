@@ -192,6 +192,12 @@ def _call_windows(source: str, code_name: str) -> tuple[str, ...]:
             elif source[cursor] == ")":
                 depth -= 1
             cursor += 1
+        if cursor <= index:
+            # The token may be a comparison outside the call whose opening parenthesis happens to
+            # precede it. It is not an error-construction window, and retrying from the closing
+            # parenthesis would rediscover the same token forever.
+            search_from = index + len(needle)
+            continue
         windows.append(source[call_start:cursor])
         search_from = cursor
     return tuple(windows)

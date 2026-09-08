@@ -327,7 +327,7 @@ def test_bridge_startup_emits_drift_on_mismatch(tmp_path: Path) -> None:
         _DIGEST,
         _state=tmp_path,
     )
-    record_startup_route_drift("strict", _state=tmp_path)
+    record_startup_route_drift("strict", host_profile="codex", _state=tmp_path)
     assert _reasons_in(tmp_path) == ["registration_drift"]
     row = json.loads(_diagnostic_path(tmp_path).read_text(encoding="utf-8").splitlines()[-1])
     assert row["event"] == "mcp_serve"
@@ -341,12 +341,12 @@ def test_bridge_startup_emits_nothing_when_matching(tmp_path: Path) -> None:
         _DIGEST,
         _state=tmp_path,
     )
-    record_startup_route_drift("strict", _state=tmp_path)
+    record_startup_route_drift("strict", host_profile="codex", _state=tmp_path)
     assert _reasons_in(tmp_path) == []
 
 
 def test_bridge_startup_emits_nothing_without_record(tmp_path: Path) -> None:
-    record_startup_route_drift("strict", _state=tmp_path)
+    record_startup_route_drift("strict", host_profile="codex", _state=tmp_path)
     assert _reasons_in(tmp_path) == []
 
 
@@ -359,6 +359,23 @@ def test_bridge_startup_emits_nothing_for_an_unknown_serving_route(tmp_path: Pat
         _state=tmp_path,
     )
     record_startup_route_drift("unknown", _state=tmp_path)
+    assert _reasons_in(tmp_path) == []
+
+
+@pytest.mark.parametrize("host_profile", ["generic", "claude", "cursor"])
+def test_bridge_startup_does_not_compare_other_host_to_codex_record(
+    host_profile: str, tmp_path: Path
+) -> None:
+    """Only an explicit Codex bridge may emit Codex registration drift."""
+
+    record_applied_route(
+        "policy",
+        list(MCP_SERVE_COMMAND),
+        list(MCP_SERVE_COMMAND),
+        _DIGEST,
+        _state=tmp_path,
+    )
+    record_startup_route_drift("strict", host_profile=host_profile, _state=tmp_path)  # type: ignore[arg-type]
     assert _reasons_in(tmp_path) == []
 
 

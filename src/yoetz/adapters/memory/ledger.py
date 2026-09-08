@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import platform
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -69,6 +69,7 @@ from yoetz.domain.values import (
     finding_id,
     object_id,
     occurred_at_consistency,
+    parse_rfc3339_millis,
     request_id,
     session_id,
     task_id,
@@ -94,10 +95,16 @@ from yoetz.kernel.projections import (
 )
 from yoetz.kernel.receipt_capacity import (
     ReceiptCoverageCapacityExceeded,
+    _validate_receipt_coverage_capacity_validated,  # pyright: ignore[reportPrivateUsage]
     receipt_blocking_finding_count,
-    validate_receipt_coverage_capacity,
 )
-from yoetz.kernel.reducers import invalidates_recorded_check, replay
+from yoetz.kernel.reducers import (
+    invalidates_recorded_check,
+    replay,
+    replay_extension_with_index,
+    replay_with_index,
+)
+from yoetz.observability.logging import record_unexpected_exception_without_raising
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
@@ -253,6 +260,39 @@ def _frontier_conflict(head: Frontier) -> PublicOperationError:
     )
 
 
+async def _run_blocking_joined[ResultT](call: Callable[[], ResultT]) -> ResultT:
+    """Run a pure local calculation off-loop and join it before cancellation returns.
+
+    The worker only receives immutable records/projections. ``asyncio.wait`` deliberately leaves
+    the thread task alive when the caller is cancelled; the repeated wait below prevents the
+    ledger lock from being released while that worker can still compute a result.
+    """
+
+    worker = asyncio.create_task(asyncio.to_thread(call))
+    try:
+        await asyncio.wait((worker,))
+        return worker.result()
+    except asyncio.CancelledError:
+        while not worker.done():
+            try:
+                await asyncio.wait((worker,))
+            except asyncio.CancelledError:
+                # A second cancellation must not abandon the worker or release the ledger lock.
+                continue
+        if not worker.cancelled():
+            # Observe a late worker exception before preserving the caller's cancellation.
+            try:
+                worker.result()
+            except BaseException as worker_error:
+                if not isinstance(worker_error, asyncio.CancelledError):
+                    record_unexpected_exception_without_raising(
+                        worker_error,
+                        component="adapters.memory.ledger",
+                        operation="append_validation_worker_failed",
+                    )
+        raise
+
+
 @dataclass(frozen=True, slots=True)
 class _WriterState:
     task_id: str
@@ -324,6 +364,11 @@ def _case_dependency_digest(case: DeterministicCase) -> str:
     )
 
 
+_OPERATION_LEASE_SECONDS: Final = 60
+_SEMANTIC_EXECUTION_CLEANUP_GRACE_SECONDS: Final = 5
+_SEMANTIC_EXECUTION_MAX_SECONDS: Final = 600
+
+
 async def _open_exact_object(objects: ObjectStorePort, expected: ObjectRef) -> bytes:
     resolved = await objects.resolve_verified(expected.object_id, expected.envelope_digest)
     if resolved != expected:
@@ -338,6 +383,49 @@ def _strict_mapping(value: object, *, reason: str) -> Mapping[str, object]:
     if any(type(key) is not str for key in mapping):
         raise ValueError(reason)
     return cast(Mapping[str, object], value)
+
+
+async def _semantic_execution_lease_bound(
+    objects: ObjectStorePort,
+    job: SemanticJobRecord,
+    *,
+    task: str,
+    now: datetime,
+) -> datetime | None:
+    """Return the authenticated semantic execution expiry plus cleanup grace.
+
+    The execution deadline is part of the frozen ``semantic-case/2`` object. Reading it through
+    the exact object reference keeps lease renewal tied to the case that was prepared for this
+    job; callers cannot extend a provider operation by supplying a new deadline. Legacy
+    ``semantic-case/1`` objects predate durable endpoint execution metadata and are handled by
+    the legacy coordinator path, so they retain the ordinary operation lease behavior here.
+    """
+
+    ref = job.case_object_ref
+    if ref.metadata.kind is not ObjectKind.SEMANTIC_CASE or ref.metadata.task_id != task:
+        raise ValueError("semantic_case_object_binding_invalid")
+    raw = await _open_exact_object(objects, ref)
+    parsed = strict_json_parse(raw)
+    if canonical_encode(parsed) != raw:
+        raise ValueError("semantic_case_object_noncanonical")
+    source = _strict_mapping(parsed, reason="semantic_case_object_shape_invalid")
+    if source.get("case_digest") != job.case_digest:
+        raise ValueError("semantic_case_object_binding_invalid")
+    schema = source.get("schema")
+    if schema == "yoetz.semantic-case/1":
+        return None
+    if schema != "yoetz.semantic-case/2":
+        raise ValueError("semantic_case_object_schema_invalid")
+    execution = _strict_mapping(
+        source.get("execution"), reason="semantic_case_execution_shape_invalid"
+    )
+    primary_expires_at = parse_rfc3339_millis(execution.get("primary_expires_at"))
+    expires_at = parse_rfc3339_millis(execution.get("expires_at"))
+    if primary_expires_at > expires_at:
+        raise ValueError("semantic_case_execution_deadline_invalid")
+    if expires_at > now + timedelta(seconds=_SEMANTIC_EXECUTION_MAX_SECONDS):
+        raise ValueError("semantic_case_execution_deadline_invalid")
+    return expires_at + timedelta(seconds=_SEMANTIC_EXECUTION_CLEANUP_GRACE_SECONDS)
 
 
 async def load_frozen_case_from_resume(
@@ -1342,7 +1430,20 @@ class MemoryLedgerAdapter:
         *,
         phase: CheckPhase | None = None,
         resume_object_ref: ObjectRef | None = None,
+        lease_expires_at: datetime | None = None,
+        semantic_job_id: str | None = None,
     ) -> tuple[OperationRecord, OperationLease]:
+        job: SemanticJobRecord | None = None
+        if semantic_job_id is not None:
+            job = self._state.jobs.get(semantic_job_id)
+            if (
+                job is None
+                or job.writer_id != record.writer_id
+                or job.operation_id != record.operation_id
+                or job.state != "leased"
+                or job.lease_owner_id != record.lease_owner_id
+            ):
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
         updated = replace(
             record,
             phase=record.phase if phase is None else phase,
@@ -1352,11 +1453,22 @@ class MemoryLedgerAdapter:
             owner_generation=str(self._fence.owner_generation),
             lease_owner_id=self._fence.service_instance_id,
             lease_generation=cast(int, record.lease_generation) + 1,
-            lease_expires_at=_now(self._clock) + timedelta(seconds=60),
+            lease_expires_at=(
+                _now(self._clock) + timedelta(seconds=_OPERATION_LEASE_SECONDS)
+                if lease_expires_at is None
+                else lease_expires_at
+            ),
             suspension_kind=None,
         )
         key = (record.writer_id, record.operation_id)
         self._state.operations[key] = (updated, None)
+        if job is not None:
+            assert semantic_job_id is not None
+            self._state.jobs[semantic_job_id] = replace(
+                job,
+                lease_owner_id=updated.lease_owner_id,
+                lease_expires_at=updated.lease_expires_at,
+            )
         return updated, self._lease_for(updated)
 
     async def append_batch(self, command: AppendCommand) -> AppendResult:
@@ -1455,9 +1567,22 @@ class MemoryLedgerAdapter:
                 previous_ledger = record.entry_digest
                 previous_writer = record.entry_digest
                 prior_batch.add(record.event_id)
-            proposed = snapshot_records + tuple(new_records)
+            appended_records = tuple(new_records)
+            proposed = snapshot_records + appended_records
+            prior_projection = self._state.projection
             try:
-                projection = replay(proposed)
+                if observation_authored and appended_records:
+                    projection, replay_index = await _run_blocking_joined(
+                        lambda: replay_extension_with_index(
+                            prior_projection,
+                            snapshot_records,
+                            appended_records,
+                        )
+                    )
+                else:
+                    projection, replay_index = await _run_blocking_joined(
+                        lambda: replay_with_index(proposed)
+                    )
             except NoObligationsReasonMismatch as exc:
                 draft_index: int | None = None
                 if exc.event_id is not None:
@@ -1491,7 +1616,13 @@ class MemoryLedgerAdapter:
             except ValueError as exc:
                 raise _error(PublicErrorCode.EVENT_INVALID) from exc
             try:
-                validate_receipt_coverage_capacity(projection, proposed)
+                await _run_blocking_joined(
+                    lambda: _validate_receipt_coverage_capacity_validated(
+                        projection,
+                        proposed,
+                        replay_index=replay_index,
+                    )
+                )
             except ReceiptCoverageCapacityExceeded as exc:
                 raise _error(
                     PublicErrorCode.LIMIT_EXCEEDED,
@@ -1520,6 +1651,10 @@ class MemoryLedgerAdapter:
                 **{
                     entry.payload_object.object_id: entry.payload_object
                     for entry in command.entries
+                },
+                **{
+                    artifact_ref.object_id: artifact_ref
+                    for artifact_ref in command.artifact_object_refs
                 },
                 **(
                     {}
@@ -2167,10 +2302,10 @@ class MemoryLedgerAdapter:
                 raise _error(PublicErrorCode.INVALID_REQUEST)
             now = _now(self._clock)
             # A live disclosure wait suspends the lease clock. The human may take longer than a
-            # lease TTL to answer, and the reclaim path below would expire the started attempt and
-            # mint a new provider request id — changing the prepared bytes the human approved and
-            # silently orphaning their decision. The bound on this wait is the proposal's own
-            # expiry, which the resume path checks before dispatching anything.
+            # lease TTL to answer. Reclaim rebinds the started attempt rather than minting a new
+            # provider request id, preserving the prepared bytes the human approved. The bound on
+            # this wait is the proposal's own expiry, which the resume path checks before
+            # dispatching anything.
             wait = self._state.disclosure_waits.get(job_id)
             if (
                 wait is not None
@@ -2179,13 +2314,8 @@ class MemoryLedgerAdapter:
                 and wait.attempt_id == job.active_attempt_id
             ):
                 attempt = self._state.attempts.get(job.active_attempt_id)
-                if attempt is not None and attempt.state == "started":
-                    self._state.jobs[job_id] = replace(
-                        job,
-                        lease_owner_id=lease.lease_owner_id,
-                        lease_expires_at=min(lease.lease_expires_at, now + timedelta(seconds=60)),
-                    )
-                    return attempt.handle
+                if attempt is not None and attempt.state in {"started", "response_durable"}:
+                    return self._rebind_semantic_attempt(job, attempt, lease)
             if (
                 job.state == "leased"
                 and job.lease_expires_at is not None
@@ -2195,8 +2325,8 @@ class MemoryLedgerAdapter:
                 # Crash-before-authorization-consumption must not mint a new attempt identity.
                 if job.lease_owner_id == lease.lease_owner_id and job.active_attempt_id is not None:
                     attempt = self._state.attempts.get(job.active_attempt_id)
-                    if attempt is not None and attempt.state == "started":
-                        return attempt.handle
+                    if attempt is not None and attempt.state in {"started", "response_durable"}:
+                        return self._rebind_semantic_attempt(job, attempt, lease)
                 raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
             if job.state not in {"queued", "leased"}:
                 raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
@@ -2207,14 +2337,16 @@ class MemoryLedgerAdapter:
                 and job.active_attempt_id in self._state.attempts
             ):
                 prior = self._state.attempts[job.active_attempt_id]
-                if prior.state == "started":
-                    self._state.attempts[job.active_attempt_id] = replace(
-                        prior,
-                        state="expired",
-                        terminal_code=SemanticReason.LEASE_AUTHORITY_LOST,
-                    )
+                if prior.state in {"started", "response_durable"}:
+                    # A provider may still be running after the old operation lease expires.
+                    # Rebind that durable attempt to the freshly fenced lease so replay reports
+                    # the same provider request instead of dispatching a duplicate. A durable
+                    # response is included because a crash can occur between response
+                    # publication and selection; replay must select it rather than dispatching
+                    # a new request.
+                    return self._rebind_semantic_attempt(job, prior, lease)
             ordinal = job.attempt_count + 1
-            expiry = min(lease.lease_expires_at, now + timedelta(seconds=60))
+            expiry = lease.lease_expires_at
             handle = SemanticAttemptHandle(
                 job_id,
                 self._ids.new(IdKind.SEMANTIC_ATTEMPT),
@@ -2242,6 +2374,37 @@ class MemoryLedgerAdapter:
                 lease_expires_at=expiry,
             )
             return handle
+
+    def _rebind_semantic_attempt(
+        self,
+        job: SemanticJobRecord,
+        attempt: _AttemptState,
+        lease: OperationLease,
+    ) -> SemanticAttemptHandle:
+        if attempt.handle.job_id != job.job_id or attempt.state not in {
+            "started",
+            "response_durable",
+        }:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        rebound = replace(
+            attempt.handle,
+            owner_generation=lease.owner_generation,
+            lease_owner_id=lease.lease_owner_id,
+            lease_expires_at=lease.lease_expires_at,
+            frontier=lease.frontier,
+            dependency_digest=lease.dependency_digest,
+        )
+        self._state.attempts[attempt.handle.attempt_id] = replace(
+            attempt,
+            handle=rebound,
+        )
+        self._state.jobs[job.job_id] = replace(
+            job,
+            state="leased",
+            lease_owner_id=lease.lease_owner_id,
+            lease_expires_at=lease.lease_expires_at,
+        )
+        return rebound
 
     async def record_attempt_outcome(
         self,
@@ -2486,7 +2649,51 @@ class MemoryLedgerAdapter:
     async def renew_leases(self, lease: OperationLease) -> OperationLease:
         async with self._lock:
             record = self._require_lease(lease)
-            _, replacement = self._replace_pending_record(record)
+            now = _now(self._clock)
+            live_jobs = tuple(
+                job
+                for job in self._state.jobs.values()
+                if job.writer_id == record.writer_id
+                and job.operation_id == record.operation_id
+                and job.state in {"queued", "leased"}
+            )
+            if len(live_jobs) > 1:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            job = live_jobs[0] if live_jobs else None
+            bound: datetime | None = None
+            if job is not None:
+                assert self._objects is not None
+                try:
+                    bound = await _semantic_execution_lease_bound(
+                        self._objects,
+                        job,
+                        task=self._task_id,
+                        now=now,
+                    )
+                except (KeyError, OSError, TypeError, ValueError) as exc:
+                    raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
+            if bound is None:
+                assert record.lease_expires_at is not None
+                expiry = max(
+                    record.lease_expires_at,
+                    now + timedelta(seconds=_OPERATION_LEASE_SECONDS),
+                )
+            else:
+                expiry = bound
+                if expiry <= now:
+                    raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+            active_job_id = (
+                job.job_id
+                if job is not None
+                and job.state == "leased"
+                and job.lease_owner_id == record.lease_owner_id
+                else None
+            )
+            _, replacement = self._replace_pending_record(
+                record,
+                lease_expires_at=expiry,
+                semantic_job_id=active_job_id,
+            )
             return replacement
 
     async def commit_check_if_current(

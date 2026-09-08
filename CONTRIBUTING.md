@@ -54,10 +54,26 @@ The pinned toolchain is Ruff for lint/format and the official npm-distributed Py
 (`npx --no-install pyright`) in strict mode for type checking; Node/npm are contributor and CI
 prerequisites only, never an end-user runtime requirement.
 
+### Testing against a real installed Yoetz without touching your own
+
+When a change needs an installed launcher, a running service, a host registration, or an upgrade
+path — not just `uv run pytest` — provision an independent test instance instead of using your
+everyday installation:
+
+```text
+uv run python scripts/provision_test_instance.py create --tag <name> --lifecycle disposable
+uv run python scripts/provision_test_instance.py dispose --tag <name>
+```
+
+It builds a wheel from the exact revision, installs it into its own runtime, and pins that runtime
+to its own root, service, and vault, so it can never reach the everyday install even when a host
+drops the environment. Procedure, constraints, and concurrency rules:
+[`docs/runbooks/test-instances.md`](docs/runbooks/test-instances.md) (ADR-028).
+
 ### Packaged resource ripple
 
 Resource inventory changes feed the package manifest, version-manifest schema, schema inventory,
-runtime-support digest, and packaged byte mirrors. Do not run those generators in a hand-selected
+runtime-support digest, packaged byte mirrors, and both committed Codex agent trees. Do not run those generators in a hand-selected
 order — a wrong order leaves a stale artifact that is still internally byte-consistent, so no byte
 parity check can see it. After adding, removing, or changing a packaged resource inventory entry
 (or any file one of those entries points at), run:
@@ -74,6 +90,16 @@ catches a stale cardinality constant locally instead of in CI. When the number o
 changes, review and update the single `REVIEWED_RESOURCE_COUNT` tripwire in `src/yoetz/version.py`
 before running it; every per-kind count and generated cardinality is derived from the manifest
 entries.
+
+After the package digests converge, the same command renders `.agents/plugins/yoetz` and
+`.agents/skills/yoetz` through the supported integration renderers, including their ownership
+markers. Their complete file sets participate in the fixed point and in CI's `--check`. Edit
+`guidance/`, `skills/codex/yoetz/`, or the owning integration renderer, then run the command above.
+Agent-only drift reports those canonical owners and the same remediation. Repository generation
+uses only these two checkout-relative destinations. Preflight refuses linked paths and foreign
+files before any package resources or committed agent trees are written;
+obsolete generated members can be removed only when their previous marker still binds their
+bytes. Normal installers retain their existing modified/foreign-tree protections.
 
 ## Making a change
 

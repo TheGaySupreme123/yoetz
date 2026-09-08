@@ -37,6 +37,7 @@ def _envelope(
     identity: str,
     ordinal: int = 1,
     source: ObservationSource = ObservationSource.CODEX_HOOK,
+    gap_codes: tuple[str, ...] = (),
 ) -> ObservationEnvelope:
     return ObservationEnvelope(
         session_commitment=session,
@@ -47,7 +48,7 @@ def _envelope(
         receipt_time=Timestamp("2026-01-01T00:00:00.000Z"),
         structural_payload=JsonObject({"tool_name": "shell", "tool_call_id": f"c{ordinal}"}),
         content_object_refs=(),
-        gap_codes=(),
+        gap_codes=gap_codes,
     )
 
 
@@ -357,6 +358,39 @@ def test_renewed_shedding_reopens_the_truncation_gap(
 
     _force_envelope_eviction(store, workspace, session, monkeypatch, tmp_path)
     assert truncated in store.status(ObservationStatusQuery(workspace)).gaps
+
+
+def test_pairing_history_does_not_reconcile_after_envelope_eviction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retained post-only suffix cannot prove an evicted true orphan healed."""
+
+    store, workspace, session = _consented_store(tmp_path)
+    store.ingest(
+        _envelope(
+            session=session,
+            identity="hook:legacy-codex-orphan",
+            ordinal=1,
+            gap_codes=(ObservationGapCode.UNPAIRED_EVENT.value,),
+        )
+    )
+    # Simulate the bounded suffix retaining only a later legacy Claude false
+    # positive.  The missing Codex row must keep the active diagnostic honest.
+    monkeypatch.setattr(local_mod, "_MAX_ENVELOPES", 1)
+    store.ingest(
+        _envelope(
+            session=session,
+            identity="hook:legacy-claude-post-only",
+            ordinal=2,
+            source=ObservationSource.CLAUDE_HOOK,
+            gap_codes=(ObservationGapCode.UNPAIRED_EVENT.value,),
+        )
+    )
+
+    assert (
+        ObservationGapCode.UNPAIRED_EVENT.value
+        in store.status(ObservationStatusQuery(workspace)).gaps
+    )
 
 
 def test_store_stage_timings_attribute_hydrate_encode_write(tmp_path: Path) -> None:

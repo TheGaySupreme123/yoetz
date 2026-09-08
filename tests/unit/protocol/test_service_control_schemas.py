@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 import pytest
 
-from yoetz.protocol.canonical import JsonValue, strict_json_parse
+from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.schemas import load_schema_catalog, validate_schema_instance
 
@@ -484,7 +484,7 @@ def test_v23_updates_only_the_status_operation_schema_refs() -> None:
         assert (_ROOT / filename).read_bytes() == _PACKAGE_ROOT.joinpath(filename).read_bytes()
 
 
-def test_v24_updates_only_publish_provenance_and_privacy_policy_contracts() -> None:
+def test_v24_updates_publish_provenance_privacy_and_ordinary_content_contracts() -> None:
     request_v23 = cast(
         dict[str, Any],
         strict_json_parse((_ROOT / "control-request-2.3.0.schema.json").read_bytes()),
@@ -508,6 +508,56 @@ def test_v24_updates_only_publish_provenance_and_privacy_policy_contracts() -> N
     new_result_id = result_v24.pop("$id")
     assert "publish-work-request-1.0.0.schema.json" in str(request_v23)
     assert "publish-work-request-1.1.0.schema.json" in str(request_v24)
+
+    structural_v23 = request_v23["$defs"]["observation_envelope"]["properties"][
+        "structural_payload"
+    ]["properties"]
+    structural_v24 = request_v24["$defs"]["observation_envelope"]["properties"][
+        "structural_payload"
+    ]["properties"]
+    pairing_fields = ("pairing_mode", "correlation_kind", "generation_id")
+    assert all(name not in structural_v23 for name in pairing_fields)
+    assert structural_v24["pairing_mode"] == {
+        "enum": ["paired", "post_only"],
+        "type": "string",
+    }
+    assert structural_v24["correlation_kind"] == {
+        "enum": ["tool_call_id", "generation_id", "none"],
+        "type": "string",
+    }
+    assert structural_v24["generation_id"]["pattern"] == ("^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$")
+    check_v24 = next(
+        branch
+        for branch in request_v24["oneOf"]
+        if branch.get("properties", {}).get("method", {}).get("const") == "check"
+    )
+    assert check_v24["properties"]["host_profile"] == {
+        "enum": ["generic", "codex", "claude", "cursor"],
+        "type": "string",
+    }
+
+    # Strip the current-schema additions before comparing the historical
+    # contract below. This keeps the existing byte-preservation assertion
+    # precise while making the v2.4-only expansion explicit above.
+    for name in pairing_fields:
+        del structural_v24[name]
+    del check_v24["properties"]["host_profile"]
+    request_v24_defs = cast(dict[str, dict[str, Any]], request_v24["$defs"])
+    request_v24_ingest = request_v24_defs["observation_ingest_body"]
+    content_profile = cast(
+        dict[str, Any],
+        cast(dict[str, Any], request_v24_ingest["properties"])["content_capture_profile"],
+    )
+    assert content_profile == {
+        "enum": [
+            "claude-code-ordinary-observation-v1",
+            "cursor-ordinary-observation-v1",
+        ],
+        "type": "string",
+    }
+    # This selector is the only ordinary-observation wire addition in 2.4;
+    # remove it before comparing the inherited 2.3 contract below.
+    del cast(dict[str, Any], request_v24_ingest["properties"])["content_capture_profile"]
 
     policy_ref = "https://schemas.yoetz.dev/0.1/privacy/privacy-policy-1.0.0.schema.json"
     policy_union = [
@@ -556,6 +606,28 @@ def test_v24_updates_only_publish_provenance_and_privacy_policy_contracts() -> N
     for stem in ("control-hello", "control-hello-result", "control-request", "control-result"):
         filename = f"{stem}-2.4.0.schema.json"
         assert (_ROOT / filename).read_bytes() == _PACKAGE_ROOT.joinpath(filename).read_bytes()
+
+
+def test_v24_pairing_structural_fields_round_trip_and_are_rejected_by_v23() -> None:
+    """Pairing metadata is accepted on the active wire and closed in older versions."""
+
+    frame = _cursor_ingest_frame(
+        {
+            "capability_profile_id": "cursor-ide-3.17.8",
+            "correlation_kind": "generation_id",
+            "generation_id": "turn-607",
+            "pairing_mode": "post_only",
+        }
+    )
+    validate_schema_instance("control-request", "2.4.0", cast(JsonValue, frame))
+    with pytest.raises(ProtocolValueError):
+        validate_schema_instance("control-request", "2.3.0", cast(JsonValue, frame))
+
+    from yoetz.service.control_protocol import decode_control_frame, encode_control_frame
+
+    encoded = encode_control_frame(cast(JsonValue, frame))
+    decoded = decode_control_frame(encoded)
+    assert canonical_encode(decoded) == canonical_encode(frame)
 
 
 def test_control_request_and_result_unions_are_exact_and_disjoint() -> None:

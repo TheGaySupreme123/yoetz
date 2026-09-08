@@ -3,28 +3,37 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import os
+import re
 import stat
 import sys
 import tempfile
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal, cast
 
 from platformdirs import PlatformDirs
 
 __all__ = [
     "ISOLATED_ROOT_ENV",
+    "RUNTIME_PIN_NAME",
+    "RUNTIME_PIN_SCHEMA",
+    "IsolationBinding",
     "PathSafetyError",
+    "RuntimePin",
     "bundle_root",
     "cache_dir",
     "catalog_path",
     "config_file_path",
     "ensure_owner_only_dir",
     "isolated_root",
+    "isolation_binding",
     "log_dir",
+    "read_runtime_pin",
     "runtime_dir",
+    "runtime_pin_path",
     "service_generation_path",
     "setup_marker_path",
     "state_dir",
@@ -35,6 +44,17 @@ __all__ = [
 
 _APP_NAME: Final = "yoetz"
 ISOLATED_ROOT_ENV: Final = "YOETZ_ISOLATED_ROOT"
+# A runtime pin lives inside the snapshot's own virtual environment (``sys.prefix``), next to the
+# interpreter that every launcher, hook, and MCP bridge of that snapshot resolves. It binds the
+# executable to one isolated root so a dropped environment cannot select the ambient install
+# (issue #604). ``config/installation.py`` writes and removes it; this module only reads it.
+RUNTIME_PIN_NAME: Final = "yoetz-instance-pin.json"
+RUNTIME_PIN_SCHEMA: Final = "yoetz.runtime-instance-pin/1"
+_MAX_RUNTIME_PIN_BYTES: Final = 4_096
+_INSTALLATION_ID: Final = re.compile(
+    r"^ins_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.ASCII
+)
+type IsolationBinding = Literal["ambient", "environment", "runtime_pin", "environment_and_pin"]
 _PRIVATE_DIR_MODE: Final = 0o700
 _VCS_MARKERS: Final = frozenset({".git", ".hg", ".svn", ".jj"})
 _NETWORK_FILESYSTEMS_LINUX: Final = frozenset(
@@ -61,6 +81,7 @@ _LINUX_SYNC_COMPONENTS: Final = frozenset(
 _SYNC_METADATA_NAMES: Final = frozenset({".dropbox", ".dropbox.cache", ".stfolder", ".sync"})
 _PATH_SAFETY_REASONS: Final = frozenset(
     {
+        "isolation_root_conflict",
         "isolation_root_invalid",
         "path_contains_symlink",
         "path_in_repository",
@@ -69,6 +90,7 @@ _PATH_SAFETY_REASONS: Final = frozenset(
         "path_on_network_filesystem",
         "path_shared_temp",
         "permissions_too_broad",
+        "runtime_pin_invalid",
     }
 )
 
@@ -98,6 +120,15 @@ class _PathProbe:
     mount_table: Callable[[], str]
     macos_fstype: Callable[[Path], str | None]
     diagnostic: Callable[[str], None]
+    runtime_prefix: Path = field(default_factory=lambda: Path(sys.prefix))
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimePin:
+    """The exact root and installation identity a runtime prefix is bound to."""
+
+    isolated_root: Path
+    installation_id: str
 
 
 def _ignore_diagnostic(_reason_code: str) -> None:
@@ -163,6 +194,75 @@ def _probe_or_default(probe: _PathProbe | None) -> _PathProbe:
     return _default_probe() if probe is None else probe
 
 
+def runtime_pin_path(*, _probe: _PathProbe | None = None) -> Path:
+    """Return the fixed pin location inside this process's runtime prefix."""
+
+    return _probe_or_default(_probe).runtime_prefix / RUNTIME_PIN_NAME
+
+
+def read_runtime_pin(*, _probe: _PathProbe | None = None) -> RuntimePin | None:
+    """Return the runtime pin bound into this prefix, ``None`` when absent, or fail closed.
+
+    A pin that exists but is a symlink, foreign-owned, group/world-writable, oversized, or not
+    exactly the reviewed shape is ``runtime_pin_invalid``: a pin anyone else could have written
+    is a way to redirect one installation to another, so it is refused rather than ignored.
+    """
+
+    probe = _probe_or_default(_probe)
+    path = runtime_pin_path(_probe=probe)
+    try:
+        facts = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise PathSafetyError("runtime_pin_invalid") from exc
+    if (
+        not stat.S_ISREG(facts.st_mode)
+        or (hasattr(facts, "st_uid") and facts.st_uid != probe.effective_uid)
+        or stat.S_IMODE(facts.st_mode) & 0o022
+        or facts.st_size > _MAX_RUNTIME_PIN_BYTES
+    ):
+        raise PathSafetyError("runtime_pin_invalid")
+    try:
+        parsed: object = json.loads(path.read_bytes())
+    except (OSError, ValueError) as exc:
+        raise PathSafetyError("runtime_pin_invalid") from exc
+    if not isinstance(parsed, dict):
+        raise PathSafetyError("runtime_pin_invalid")
+    fields = cast(dict[object, object], parsed)
+    if set(fields) != {"schema", "isolated_root", "installation_id"} or (
+        fields.get("schema") != RUNTIME_PIN_SCHEMA
+    ):
+        raise PathSafetyError("runtime_pin_invalid")
+    root = fields.get("isolated_root")
+    installation_id = fields.get("installation_id")
+    if (
+        type(root) is not str
+        or not root
+        or not Path(root).is_absolute()
+        or type(installation_id) is not str
+        or not _INSTALLATION_ID.match(installation_id)
+    ):
+        raise PathSafetyError("runtime_pin_invalid")
+    return RuntimePin(Path(root), installation_id)
+
+
+def _validated_isolated_root(raw: str, probe: _PathProbe) -> Path:
+    if not raw:
+        raise PathSafetyError("isolation_root_invalid")
+    root = Path(raw)
+    if not root.is_absolute():
+        raise PathSafetyError("isolation_root_invalid")
+    verify_private_local_bundle(root, _probe=probe)
+    try:
+        facts = root.lstat()
+    except OSError as exc:
+        raise PathSafetyError("isolation_root_invalid") from exc
+    if not stat.S_ISDIR(facts.st_mode):
+        raise PathSafetyError("isolation_root_invalid")
+    return root
+
+
 def isolated_root(*, _probe: _PathProbe | None = None) -> Path | None:
     """Return the validated exact-target isolation root, or ``None`` in ambient mode.
 
@@ -173,25 +273,39 @@ def isolated_root(*, _probe: _PathProbe | None = None) -> Path | None:
     a set-but-unusable root raises instead of falling back to the ambient platform directories.
     The root must already exist as an absolute, owner-only, symlink-free private directory
     outside shared temp, repositories, and sync folders.
+
+    A runtime pin (issue #604) is the second, executable-bound source of the same root: when the
+    variable is unset, a pinned runtime resolves the pinned root under the same validation, so a
+    host or hook that drops the environment still reaches the snapshot's own state and never the
+    everyday singleton. When both are present they must name the same root;
+    ``isolation_root_conflict`` fails closed instead of choosing either.
     """
 
-    raw = os.environ.get(ISOLATED_ROOT_ENV)
-    if raw is None:
-        return None
-    if not raw:
-        raise PathSafetyError("isolation_root_invalid")
-    root = Path(raw)
-    if not root.is_absolute():
-        raise PathSafetyError("isolation_root_invalid")
     probe = _probe_or_default(_probe)
-    verify_private_local_bundle(root, _probe=probe)
-    try:
-        facts = root.lstat()
-    except OSError as exc:
-        raise PathSafetyError("isolation_root_invalid") from exc
-    if not stat.S_ISDIR(facts.st_mode):
-        raise PathSafetyError("isolation_root_invalid")
-    return root
+    raw = os.environ.get(ISOLATED_ROOT_ENV)
+    pin = read_runtime_pin(_probe=probe)
+    if raw is None and pin is None:
+        return None
+    if raw is not None:
+        root = _validated_isolated_root(raw, probe)
+        if pin is not None and pin.isolated_root != root:
+            raise PathSafetyError("isolation_root_conflict")
+        return root
+    assert pin is not None
+    return _validated_isolated_root(str(pin.isolated_root), probe)
+
+
+def isolation_binding(*, _probe: _PathProbe | None = None) -> IsolationBinding:
+    """Name which source selected the isolation root, after validating it."""
+
+    probe = _probe_or_default(_probe)
+    if isolated_root(_probe=probe) is None:
+        return "ambient"
+    from_environment = os.environ.get(ISOLATED_ROOT_ENV) is not None
+    from_pin = read_runtime_pin(_probe=probe) is not None
+    if from_environment and from_pin:
+        return "environment_and_pin"
+    return "environment" if from_environment else "runtime_pin"
 
 
 def bundle_root(*, _data_dir: Path | None = None, _probe: _PathProbe | None = None) -> Path:

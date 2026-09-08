@@ -11,6 +11,7 @@ import base64
 import contextlib
 import dataclasses
 import errno
+import hashlib
 import os
 import re
 import stat
@@ -46,6 +47,10 @@ from yoetz.domain.observation import (
     observation_envelope_to_json,
     workspace_commitment_from_path,
 )
+from yoetz.domain.observation_profiles import (
+    is_content_capture_profile,
+    validate_content_capture_profile,
+)
 from yoetz.domain.values import (
     Frontier,
     JsonObject,
@@ -55,7 +60,7 @@ from yoetz.domain.values import (
     validate_commitment,
     validate_sha256_digest,
 )
-from yoetz.ports.integrations import YOETZ_WORKFLOW_TOOL_NAMES
+from yoetz.ports.integrations import YOETZ_WORKFLOW_TOOL_NAMES, observation_pairing_contract
 from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 
@@ -68,6 +73,7 @@ __all__ = [
     "HOOK_MAPPING_VERSION",
     "AdviceDelivery",
     "FrontierMotionNotice",
+    "LocalContentCaptureAuthority",
     "LocalObservationConsent",
     "LocalObservationStore",
     "ObservationOutboxRow",
@@ -92,6 +98,10 @@ _MAX_LEGACY_STATE_BYTES: Final = 36 * 1_048_576
 _MAX_ENVELOPES: Final = 256
 _MAX_DEDUP: Final = 4_096
 _MAX_OPEN_PRE: Final = 256
+# Keep true paired-profile orphan identities separate from the aggregate gap
+# history.  A valid pair in another source/session/generation must not clear
+# one of these conditions.
+_MAX_UNPAIRED_SCOPES: Final = 256
 _MAX_OUTBOX: Final = 512
 _MAX_PENDING_LIFECYCLES: Final = 256
 _MAX_QUARANTINE: Final = 512
@@ -132,6 +142,15 @@ _OBSERVATION_GAP_CODES: Final = frozenset(item.value for item in ObservationGapC
 _RUNTIME_GATE_SCHEMA: Final = "yoetz.observation-runtime-gate/1"
 _RUNTIME_GATE_NAME: Final = "runtime-gate.json"
 _MAX_RUNTIME_GATE_BYTES: Final = 256
+# A legacy runtime-gate marker has no persisted nonce.  It remains readable,
+# but it can never be confused with a nonce emitted by the current writer.
+_LEGACY_RUNTIME_GATE_GENERATION: Final = "sha256:" + "0" * 64
+_PAIRING_PROVENANCE_SCHEMAS: Final = (
+    "yoetz.observation-local/11",
+    "yoetz.observation-local/12",
+    "yoetz.observation-local/13",
+)
+_RETENTION_PROVENANCE_SCHEMAS: Final = _PAIRING_PROVENANCE_SCHEMAS
 # Never a legal character in an event-kind token. An interim build stamped
 # hook timing after the kind as ``<kind>|<...>``; the reader below still trims
 # it so such a value can never be mistaken for an event kind.
@@ -510,10 +529,64 @@ class LocalObservationConsent:
     granted_at: Timestamp
     revoked_at: Timestamp | None = None
     paused: bool = False
+    # Structural observation consent predates native ordinary-work capture.
+    # ``None`` is therefore meaningful: old grants must never be widened by a
+    # reader that learns about content profiles later.
+    content_capture_profiles: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        profiles = self.content_capture_profiles
+        if type(profiles) is not tuple or len(profiles) > 2:
+            raise ProtocolValueError("invalid_event_value_type")
+        if any(not is_content_capture_profile(profile) for profile in profiles):
+            raise ProtocolValueError("invalid_event_value_type")
+        if tuple(sorted(set(profiles), key=str.encode)) != profiles:
+            raise ProtocolValueError("invalid_event_value_type")
 
     @property
     def active(self) -> bool:
         return self.revoked_at is None and not self.paused
+
+
+@dataclass(frozen=True, slots=True)
+class LocalContentCaptureAuthority:
+    """The current local fence for the retained-content arm.
+
+    This snapshot contains no plaintext. Its generation and exact profile set
+    are read under the owner-private local-store lock and are rechecked by the
+    semantic service immediately before it opens an object or dispatches a
+    packet. The local store remains authoritative while task-bundle consent
+    propagation is pending.
+    """
+
+    workspace_commitment: str
+    generation: str
+    active: bool
+    revoked: bool
+    runtime_enabled: bool
+    profiles: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        try:
+            object.__setattr__(
+                self,
+                "workspace_commitment",
+                validate_commitment(self.workspace_commitment),
+            )
+            validate_sha256_digest(self.generation)
+        except (ProtocolValueError, TypeError, ValueError) as exc:
+            raise ProtocolValueError("invalid_event_value_type") from exc
+        if (
+            type(self.generation) is not str
+            or type(self.active) is not bool
+            or type(self.revoked) is not bool
+            or type(self.runtime_enabled) is not bool
+            or type(self.profiles) is not tuple
+            or len(self.profiles) > 2
+            or any(not is_content_capture_profile(profile) for profile in self.profiles)
+            or tuple(sorted(set(self.profiles), key=str.encode)) != self.profiles
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
 
 
 @dataclass(frozen=True, slots=True)
@@ -638,6 +711,9 @@ class _WorkspaceState:
     cursors: dict[str, ObservationCursor] | None = None
     dedup: set[str] | None = None
     envelopes: list[ObservationEnvelope] | None = None
+    # True once bounded retention has discarded any envelope.  Historical
+    # gap reconciliation must never claim completeness after that point.
+    envelopes_truncated: bool = False
     gaps: dict[str, _GapState] | None = None
     unsupported_events: set[str] | None = None
     last_receipt: Timestamp | None = None
@@ -652,6 +728,11 @@ class _WorkspaceState:
     frontier_motion_delivered: dict[str, _FrontierMotionDelivered] | None = None
     frontier_motion_recency: int = 0
     open_pre: dict[str, str] | None = None
+    unpaired_scopes: set[str] | None = None
+    # True when a state was written by a pre-/11 reader that could not retain
+    # scoped pairing provenance. It is deliberately sticky: a later save must
+    # not turn unknown history into proof that a gap was false.
+    pairing_state_unknown: bool = False
     stream_cursors: dict[str, ObservationCursor] | None = None
     stream_partials: dict[str, bytes] | None = None
     stream_call_tools: dict[str, dict[str, str]] | None = None
@@ -681,6 +762,12 @@ class _WorkspaceState:
     session_generations: dict[str, int] | None = None
     ended_session_generations: dict[str, int] | None = None
     pending_lifecycles: list[PendingSessionLifecycle] | None = None
+    # Opaque, durable nonce for the native content-consent arm.  This is
+    # separate from the human-readable consent fields because those fields
+    # can return to an earlier value (pause/resume and disable/enable).  A
+    # fresh nonce on every real authority transition prevents that ABA from
+    # revalidating an old semantic case.
+    content_capture_epoch: str | None = None
     quarantine_evicted_count: int = 0
     quarantine_reclaimed_count: int = 0
     quarantine_evicted_commitment: str | None = None
@@ -698,12 +785,18 @@ class _WorkspaceState:
             self.dedup = set()
         if self.envelopes is None:
             self.envelopes = []
+        if type(self.envelopes_truncated) is not bool:
+            raise ProtocolValueError("invalid_event_value_type")
         if self.gaps is None:
             self.gaps = {}
         if self.unsupported_events is None:
             self.unsupported_events = set()
         if self.open_pre is None:
             self.open_pre = {}
+        if self.unpaired_scopes is None:
+            self.unpaired_scopes = set()
+        if type(self.pairing_state_unknown) is not bool:
+            raise ProtocolValueError("invalid_event_value_type")
         if self.stream_cursors is None:
             self.stream_cursors = {}
         if self.stream_partials is None:
@@ -748,6 +841,100 @@ class _WorkspaceState:
 
 def _cursor_key(source: ObservationSource, session_commitment: str) -> str:
     return f"{source.value}:{session_commitment}"
+
+
+def _pairing_key(
+    *,
+    source: ObservationSource,
+    session_commitment: str,
+    source_generation: int,
+    correlation_id: str,
+) -> str:
+    """Scope a pre/post identity to its source lane and generation.
+
+    Host call ids are only meaningful inside the source session and source
+    generation that issued them.  Hashing the tuple keeps the state key
+    bounded even when a host's correlation spelling contains separators.
+    """
+
+    return canonical_digest(
+        JsonObject(
+            {
+                "kind": "observation-pairing",
+                "source": source.value,
+                "session_commitment": session_commitment,
+                "source_generation": source_generation,
+                "correlation_id": correlation_id,
+            }
+        )
+    )
+
+
+def _orphan_scope_key(
+    *,
+    source: ObservationSource,
+    session_commitment: str,
+    source_generation: int,
+    source_identity: str,
+) -> str:
+    """Return the durable identity for one accepted orphan post event."""
+
+    return canonical_digest(
+        JsonObject(
+            {
+                "kind": "observation-orphan",
+                "source": source.value,
+                "session_commitment": session_commitment,
+                "source_generation": source_generation,
+                "source_identity": source_identity,
+            }
+        )
+    )
+
+
+def _profile_harness(source: ObservationSource) -> str:
+    if source is ObservationSource.CLAUDE_HOOK:
+        return "claude"
+    if source is ObservationSource.CURSOR_HOOK:
+        return "cursor"
+    return "codex"
+
+
+def _envelope_pairing_contract(
+    envelope: ObservationEnvelope,
+) -> tuple[str, str]:
+    profile_id = envelope.structural_payload.get("capability_profile_id")
+    return observation_pairing_contract(
+        _profile_harness(envelope.source), profile_id if type(profile_id) is str else None
+    )
+
+
+def _envelope_pairing_correlation(
+    envelope: ObservationEnvelope, correlation_kind: str
+) -> str | None:
+    """Derive the pairing identity from the admitted structural payload."""
+
+    structural = envelope.structural_payload
+    if correlation_kind == "none":
+        return None
+    for key in ("tool_use_id", "tool_call_id"):
+        value = structural.get(key)
+        if type(value) is str and value:
+            return value
+    if correlation_kind == "generation_id":
+        return None
+    for key in ("correlation_id", "parent_tool_call_id"):
+        value = structural.get(key)
+        if type(value) is str and value:
+            return value
+    return None
+
+
+def _is_post_only_profile(envelope: ObservationEnvelope) -> bool:
+    """Recognize only an exact, reviewed post-only host/profile cell."""
+
+    mode, _correlation = _envelope_pairing_contract(envelope)
+    return mode == "post_only"
 
 
 def _load_session_advice(raw: object) -> dict[str, AdviceSnapshot]:
@@ -952,6 +1139,7 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         cursors=dict(state.cursors or {}),
         dedup=set(state.dedup or ()),
         envelopes=list(state.envelopes or ()),
+        envelopes_truncated=state.envelopes_truncated,
         gaps=dict(state.gaps or {}),
         unsupported_events=set(state.unsupported_events or ()),
         session_advice=dict(state.session_advice or {}),
@@ -959,6 +1147,8 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         frontier_motion_notices=dict(state.frontier_motion_notices or {}),
         frontier_motion_delivered=dict(state.frontier_motion_delivered or {}),
         open_pre=dict(state.open_pre or {}),
+        unpaired_scopes=set(state.unpaired_scopes or ()),
+        pairing_state_unknown=state.pairing_state_unknown,
         stream_cursors=dict(state.stream_cursors or {}),
         stream_partials=dict(state.stream_partials or {}),
         stream_call_tools={
@@ -977,6 +1167,58 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         session_generations=dict(state.session_generations or {}),
         ended_session_generations=dict(state.ended_session_generations or {}),
         pending_lifecycles=list(state.pending_lifecycles or ()),
+        content_capture_epoch=state.content_capture_epoch,
+    )
+
+
+def _new_content_capture_epoch() -> str:
+    """Create an unguessable persisted epoch for one consent authority."""
+
+    return "sha256:" + hashlib.sha256(os.urandom(_KEY_BYTES)).hexdigest()
+
+
+def _ensure_content_capture_epoch(state: _WorkspaceState) -> str:
+    """Return the state nonce, upgrading a pre-epoch state to a fresh one."""
+
+    epoch = state.content_capture_epoch
+    if type(epoch) is str:
+        try:
+            return validate_sha256_digest(epoch)
+        except ProtocolValueError, TypeError, ValueError:
+            pass
+    epoch = _new_content_capture_epoch()
+    state.content_capture_epoch = epoch
+    return epoch
+
+
+def _rotate_content_capture_epoch(state: _WorkspaceState) -> str:
+    """Advance the local content fence after a real authority transition."""
+
+    epoch = _new_content_capture_epoch()
+    state.content_capture_epoch = epoch
+    return epoch
+
+
+def _consent_generation(
+    consent: LocalObservationConsent,
+    *,
+    content_capture_epoch: str,
+    runtime_gate_generation: str,
+) -> str:
+    """Derive a fence token from the durable consent and runtime epochs."""
+
+    return canonical_digest(
+        JsonObject(
+            {
+                "content_capture_epoch": content_capture_epoch,
+                "granted_at": consent.granted_at.wire,
+                "paused": consent.paused,
+                "profiles": list(consent.content_capture_profiles),
+                "revoked_at": None if consent.revoked_at is None else consent.revoked_at.wire,
+                "runtime_gate_generation": runtime_gate_generation,
+                "workspace_commitment": consent.workspace_commitment,
+            }
+        )
     )
 
 
@@ -992,6 +1234,22 @@ def _stream_profile_id_valid(profile_id: object) -> bool:
         and profile_id[0].isalnum()
         and all(char.isalnum() or char in "._+/-" for char in profile_id)
     )
+
+
+def _content_capture_profiles_from_json(row: Mapping[str, JsonValue]) -> tuple[str, ...]:
+    """Load the bounded plural consent arm, tolerating an early singular draft."""
+
+    raw = row.get("content_capture_profiles")
+    if raw is None:
+        legacy = row.get("content_capture_profile")
+        raw = () if legacy is None else (legacy,)
+    if not isinstance(raw, (tuple, list)):
+        return ()
+    profiles: list[str] = []
+    for value in cast(tuple[JsonValue, ...] | list[JsonValue], raw):
+        if type(value) is str and is_content_capture_profile(value):
+            profiles.append(value)
+    return tuple(sorted(set(profiles), key=str.encode))[:2]
 
 
 def _dedup_key(workspace: str, envelope: ObservationEnvelope) -> str:
@@ -1106,19 +1364,43 @@ class LocalObservationStore:
         The marker is synchronized when a fresh READY composition is built.  A
         missing marker preserves the typed configuration default (enabled);
         malformed or unsafe markers fail closed in :meth:`runtime_enabled`.
+
+        The runtime gate carries the nonce that participates in every content
+        fence.  Repeating the same value is a no-op so READY repair and restart
+        retries do not invalidate an unchanged in-flight review; an actual
+        transition gets a new nonce atomically with the enabled bit.
         """
 
         if type(enabled) is not bool:
             raise TypeError("observation_runtime_gate_invalid")
-        payload = (
-            canonical_encode(JsonObject({"schema": _RUNTIME_GATE_SCHEMA, "enabled": enabled}))
-            + b"\n"
-        )
         with self._lock:
-            _atomic_write(self._root / _RUNTIME_GATE_NAME, payload)
+            gate_path = self._root / _RUNTIME_GATE_NAME
+            marker_present = gate_path.exists() and not gate_path.is_symlink()
+            try:
+                current, _generation = self._runtime_gate_facts()
+            except PublicOperationError:
+                # Preserve the existing repair behavior for a malformed
+                # marker: the authorized service setter may replace it with a
+                # fresh, valid gate and a fresh fence nonce.
+                current = None
+            if marker_present and current is enabled:
+                return
+            payload = (
+                canonical_encode(
+                    JsonObject(
+                        {
+                            "enabled": enabled,
+                            "generation": _new_content_capture_epoch(),
+                            "schema": _RUNTIME_GATE_SCHEMA,
+                        }
+                    )
+                )
+                + b"\n"
+            )
+            _atomic_write(gate_path, payload)
 
-    def runtime_enabled(self) -> bool:
-        """Return the current service-synchronized capture gate, failing closed.
+    def _runtime_gate_facts(self) -> tuple[bool, str]:
+        """Read the enabled bit and fence nonce from one marker descriptor.
 
         Deliberately lock-free: the marker is a tiny owner-only file that
         :meth:`set_runtime_enabled` only ever replaces atomically, and every
@@ -1135,7 +1417,7 @@ class LocalObservationStore:
         try:
             descriptor = os.open(path, flags)
         except FileNotFoundError:
-            return True
+            return True, _LEGACY_RUNTIME_GATE_GENERATION
         except OSError as exc:
             message = (
                 "Observation runtime gate is unsafe."
@@ -1187,7 +1469,11 @@ class LocalObservationStore:
             ) from exc
         if (
             not isinstance(parsed, Mapping)
-            or set(parsed) != {"schema", "enabled"}
+            or set(parsed)
+            not in (
+                {"schema", "enabled"},
+                {"schema", "enabled", "generation"},
+            )
             or parsed.get("schema") != _RUNTIME_GATE_SCHEMA
             or type(parsed.get("enabled")) is not bool
         ):
@@ -1196,7 +1482,35 @@ class LocalObservationStore:
                 "Observation runtime gate is invalid.",
                 retryable=False,
             )
-        return cast(bool, parsed["enabled"])
+        raw_generation = parsed.get("generation")
+        if raw_generation is None:
+            generation = _LEGACY_RUNTIME_GATE_GENERATION
+        elif type(raw_generation) is str:
+            try:
+                generation = validate_sha256_digest(raw_generation)
+            except (ProtocolValueError, TypeError, ValueError) as exc:
+                raise _error(
+                    PublicErrorCode.STORAGE_UNSAFE,
+                    "Observation runtime gate is invalid.",
+                    retryable=False,
+                ) from exc
+        else:
+            raise _error(
+                PublicErrorCode.STORAGE_UNSAFE,
+                "Observation runtime gate is invalid.",
+                retryable=False,
+            )
+        return cast(bool, parsed["enabled"]), generation
+
+    def runtime_enabled(self) -> bool:
+        """Return the current service-synchronized capture gate, failing closed."""
+
+        return self._runtime_gate_facts()[0]
+
+    def runtime_gate_generation(self) -> str:
+        """Return the persisted runtime nonce without taking the store lock."""
+
+        return self._runtime_gate_facts()[1]
 
     def workspace_commitment(self, path: str) -> str:
         return workspace_commitment_from_path(self.key_material(), path)
@@ -1204,17 +1518,175 @@ class LocalObservationStore:
     def session_commitment(self, codex_session_id: str) -> str:
         return session_commitment_from_codex_id(self.key_material(), codex_session_id)
 
-    def grant_consent(self, workspace_commitment: str, granted_at: Timestamp | None = None) -> None:
+    def grant_consent(
+        self,
+        workspace_commitment: str,
+        granted_at: Timestamp | None = None,
+        *,
+        content_capture_profiles: tuple[str, ...] = (),
+    ) -> None:
+        if type(content_capture_profiles) is not tuple:
+            raise ProtocolValueError("invalid_event_value_type")
+        for profile in content_capture_profiles:
+            validate_content_capture_profile(profile)
         with self._lock:
             state = self._load(workspace_commitment)
             stamp = granted_at if granted_at is not None else _now()
-            state.consent = LocalObservationConsent(
+            next_consent = LocalObservationConsent(
                 workspace_commitment=workspace_commitment,
                 granted_at=stamp,
                 revoked_at=None,
                 paused=False,
+                content_capture_profiles=content_capture_profiles,
             )
+            if state.consent != next_consent:
+                _rotate_content_capture_epoch(state)
+            state.consent = next_consent
             self._save(workspace_commitment, state)
+
+    def enable_content_capture(self, workspace_commitment: str, profile: str) -> None:
+        """Explicitly enable one versioned native-host content profile.
+
+        This is a second consent arm.  A historical structural grant remains
+        contentless until this operation is performed, and a revoked grant can
+        never be re-enabled without a fresh structural grant.
+        """
+
+        validate_content_capture_profile(profile)
+        with self._lock:
+            state = self._load(workspace_commitment)
+            consent = state.consent
+            if consent is None:
+                raise _error(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "Observation consent is missing.",
+                    retryable=False,
+                )
+            if consent.revoked_at is not None:
+                raise _error(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "Observation consent is revoked.",
+                    retryable=False,
+                )
+            profiles = tuple(
+                sorted(
+                    {*consent.content_capture_profiles, profile},
+                    key=str.encode,
+                )
+            )
+            next_consent = dataclasses.replace(
+                consent,
+                content_capture_profiles=profiles,
+            )
+            if next_consent != consent:
+                _rotate_content_capture_epoch(state)
+            state.consent = next_consent
+            self._save(workspace_commitment, state)
+
+    def disable_content_capture(
+        self, workspace_commitment: str, profile: str | None = None
+    ) -> None:
+        """Disable one native-host content arm, or all arms when omitted."""
+
+        if profile is not None:
+            validate_content_capture_profile(profile)
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            consent = state.consent
+            if consent is None:
+                raise _error(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "Observation consent is missing.",
+                    retryable=False,
+                )
+            profiles = (
+                ()
+                if profile is None
+                else tuple(item for item in consent.content_capture_profiles if item != profile)
+            )
+            next_consent = dataclasses.replace(
+                consent,
+                content_capture_profiles=profiles,
+            )
+            if next_consent != consent:
+                _rotate_content_capture_epoch(state)
+            state.consent = next_consent
+            self._save(workspace_commitment, state)
+
+    def content_capture_profiles(self, workspace_commitment: str) -> tuple[str, ...]:
+        """Return the persisted content arms, including while observation is paused."""
+
+        with self._lock:
+            consent = self._load(workspace_commitment).consent
+            return () if consent is None else consent.content_capture_profiles
+
+    def content_capture_authority(
+        self, workspace_commitment: str
+    ) -> LocalContentCaptureAuthority | None:
+        """Read the authoritative local content fence under the store lock."""
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            prior_epoch = state.content_capture_epoch
+            content_capture_epoch = _ensure_content_capture_epoch(state)
+            if content_capture_epoch != prior_epoch:
+                self._save(workspace_commitment, state)
+            consent = state.consent
+            if consent is None:
+                return None
+            runtime_enabled, runtime_generation = self._runtime_gate_facts()
+            return LocalContentCaptureAuthority(
+                workspace_commitment=workspace_commitment,
+                generation=_consent_generation(
+                    consent,
+                    content_capture_epoch=content_capture_epoch,
+                    runtime_gate_generation=runtime_generation,
+                ),
+                active=consent.active,
+                revoked=consent.revoked_at is not None,
+                runtime_enabled=runtime_enabled,
+                profiles=consent.content_capture_profiles,
+            )
+
+    def content_capture_authority_is_current(
+        self,
+        workspace_commitment: str,
+        generation: str,
+        profiles: tuple[str, ...],
+    ) -> bool:
+        """Atomically test a previously read content fence against current consent."""
+
+        if (
+            type(generation) is not str
+            or not generation.startswith("sha256:")
+            or type(profiles) is not tuple
+        ):
+            return False
+        try:
+            validate_sha256_digest(generation)
+        except ProtocolValueError, TypeError, ValueError:
+            return False
+        with self._lock:
+            state = self._load(workspace_commitment)
+            prior_epoch = state.content_capture_epoch
+            content_capture_epoch = _ensure_content_capture_epoch(state)
+            if content_capture_epoch != prior_epoch:
+                self._save(workspace_commitment, state)
+            consent = state.consent
+            runtime_enabled, runtime_generation = self._runtime_gate_facts()
+            return (
+                consent is not None
+                and consent.active
+                and runtime_enabled
+                and _consent_generation(
+                    consent,
+                    content_capture_epoch=content_capture_epoch,
+                    runtime_gate_generation=runtime_generation,
+                )
+                == generation
+                and consent.content_capture_profiles == profiles
+            )
 
     def bind_session(self, workspace_commitment: str, session_commitment: str) -> None:
         with self._lock:
@@ -1603,37 +2075,136 @@ class LocalObservationStore:
             ]
             return tuple(sorted(result, key=str.encode))
 
-    def note_open_pre(self, workspace: str, correlation_id: str, event_kind: str) -> None:
-        """Record an open Pre event awaiting its Post."""
+    def note_open_pre(
+        self,
+        workspace: str,
+        correlation_id: str,
+        event_kind: str,
+        *,
+        source: ObservationSource | None = None,
+        session_commitment: str | None = None,
+        source_generation: int | None = None,
+    ) -> None:
+        """Record an open Pre event awaiting its Post.
+
+        New hook callers provide the complete source/session/generation scope.
+        The unscoped form remains readable for pre-#607 local state and tests,
+        but it is never used by the shared ingress.
+        """
 
         with self._lock:
             state = self._load(workspace)
             assert state.open_pre is not None
+            key = (
+                _pairing_key(
+                    source=source,
+                    session_commitment=session_commitment,
+                    source_generation=source_generation,
+                    correlation_id=correlation_id,
+                )
+                if source is not None
+                and session_commitment is not None
+                and source_generation is not None
+                else correlation_id
+            )
             if len(state.open_pre) >= _MAX_OPEN_PRE:
                 # Drop oldest insertion order by rebuilding from remaining items.
                 oldest = next(iter(state.open_pre))
                 del state.open_pre[oldest]
-            state.open_pre[correlation_id] = event_kind
+            state.open_pre[key] = event_kind
             self._save(workspace, state)
 
-    def consume_open_pre(self, workspace: str, correlation_id: str) -> str | None:
+    def consume_open_pre(
+        self,
+        workspace: str,
+        correlation_id: str,
+        *,
+        source: ObservationSource | None = None,
+        session_commitment: str | None = None,
+        source_generation: int | None = None,
+    ) -> str | None:
         with self._lock:
             state = self._load(workspace)
             assert state.open_pre is not None
-            raw = state.open_pre.pop(correlation_id, None)
+            key = (
+                _pairing_key(
+                    source=source,
+                    session_commitment=session_commitment,
+                    source_generation=source_generation,
+                    correlation_id=correlation_id,
+                )
+                if source is not None
+                and session_commitment is not None
+                and source_generation is not None
+                else correlation_id
+            )
+            raw = state.open_pre.pop(key, None)
             if raw is None:
                 return None
-            # A post consuming its open pre is live proof pairing works now;
-            # a latched unpaired_event no longer describes this workspace (#274).
-            self._resolve_gap_state(state, ObservationGapCode.UNPAIRED_EVENT.value)
             self._save(workspace, state)
             return raw.split(_OPEN_PRE_SEPARATOR, 1)[0]
 
-    def has_open_pre(self, workspace: str, correlation_id: str) -> bool:
+    def has_open_pre(
+        self,
+        workspace: str,
+        correlation_id: str,
+        *,
+        source: ObservationSource | None = None,
+        session_commitment: str | None = None,
+        source_generation: int | None = None,
+    ) -> bool:
         with self._lock:
             state = self._load(workspace)
             assert state.open_pre is not None
-            return correlation_id in state.open_pre
+            key = (
+                _pairing_key(
+                    source=source,
+                    session_commitment=session_commitment,
+                    source_generation=source_generation,
+                    correlation_id=correlation_id,
+                )
+                if source is not None
+                and session_commitment is not None
+                and source_generation is not None
+                else correlation_id
+            )
+            return key in state.open_pre
+
+    def note_unpaired_event(
+        self,
+        workspace: str,
+        *,
+        source: ObservationSource,
+        session_commitment: str,
+        source_generation: int,
+        source_identity: str,
+    ) -> None:
+        """Retain one accepted paired-profile orphan without broad resolution.
+
+        The aggregate ``unpaired_event`` gap is intentionally append-only for
+        true paired-profile orphans.  A later pair in another lane may prove
+        only that lane's pairing and cannot erase this condition.
+        """
+
+        with self._lock:
+            state = self._load(workspace)
+            assert state.unpaired_scopes is not None
+            scope = _orphan_scope_key(
+                source=source,
+                session_commitment=session_commitment,
+                source_generation=source_generation,
+                source_identity=source_identity,
+            )
+            if scope not in state.unpaired_scopes:
+                if len(state.unpaired_scopes) >= _MAX_UNPAIRED_SCOPES:
+                    # The aggregate gap remains active even when the bounded
+                    # detail set is full; never drop evidence by resolving it.
+                    self._note_gap_state(state, ObservationGapCode.UNPAIRED_EVENT.value)
+                    self._save(workspace, state)
+                    return
+                state.unpaired_scopes.add(scope)
+            self._note_gap_state(state, ObservationGapCode.UNPAIRED_EVENT.value)
+            self._save(workspace, state)
 
     def set_advice_snapshot(self, workspace: str, snapshot: AdviceSnapshot | None) -> None:
         with self._lock:
@@ -3262,6 +3833,7 @@ class LocalObservationStore:
             state.cursors[cursor_key] = envelope.cursor
             state.envelopes.append(envelope)
             if len(state.envelopes) > _MAX_ENVELOPES:
+                state.envelopes_truncated = True
                 del state.envelopes[: len(state.envelopes) - _MAX_ENVELOPES]
             state.last_receipt = envelope.receipt_time
             mono_ms = int(self._now_mono() * 1000)
@@ -3301,6 +3873,212 @@ class LocalObservationStore:
                 envelope.cursor,
             )
 
+    def ingest_with_pairing(
+        self,
+        envelope: ObservationEnvelope,
+        *,
+        workspace_commitment: str,
+        pairing_mode: str,
+        correlation_id: str | None,
+        source: ObservationSource,
+        session_commitment: str,
+        source_generation: int,
+        is_pre_event: bool,
+        is_post_event: bool,
+    ) -> tuple[ObservationIngestResult, ObservationEnvelope]:
+        """Atomically admit one hook envelope and update its pairing state.
+
+        The batch is owned here when a direct caller has not already opened
+        one. Hook ingress opens an outer batch so its outbox enqueue remains in
+        the same local transaction; nested use keeps that transaction intact.
+        """
+
+        if type(envelope) is not ObservationEnvelope:
+            raise _error(
+                PublicErrorCode.INVALID_REQUEST,
+                "Observation envelope is invalid.",
+                retryable=False,
+            )
+        if type(workspace_commitment) is not str:
+            raise _error(
+                PublicErrorCode.INVALID_REQUEST,
+                "Observation workspace is invalid.",
+                retryable=False,
+            )
+        try:
+            validate_commitment(workspace_commitment)
+        except ProtocolValueError as exc:
+            raise _error(
+                PublicErrorCode.INVALID_REQUEST,
+                "Observation workspace is invalid.",
+                retryable=False,
+            ) from exc
+        expected_mode, expected_kind = _envelope_pairing_contract(envelope)
+        expected_correlation = _envelope_pairing_correlation(envelope, expected_kind)
+        expected_pre = envelope.event_kind in {
+            "PreToolUse",
+            "PreCompact",
+            "SubagentStart",
+            "PermissionRequest",
+        }
+        expected_post = envelope.event_kind in {
+            "PostToolUse",
+            "PostCompact",
+            "SubagentStop",
+        }
+        if (
+            source is not envelope.source
+            or session_commitment != envelope.session_commitment
+            or type(source_generation) is not int
+            or source_generation != envelope.cursor.source_generation
+            or type(is_pre_event) is not bool
+            or type(is_post_event) is not bool
+            or is_pre_event is not expected_pre
+            or is_post_event is not expected_post
+            or pairing_mode != expected_mode
+            or correlation_id != expected_correlation
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        with self.batched(workspace_commitment):
+            return self._ingest_with_pairing(
+                envelope,
+                workspace_commitment=workspace_commitment,
+                pairing_mode=expected_mode,
+                correlation_id=expected_correlation,
+                source=envelope.source,
+                session_commitment=envelope.session_commitment,
+                source_generation=envelope.cursor.source_generation,
+                is_pre_event=expected_pre,
+                is_post_event=expected_post,
+            )
+
+    def _ingest_with_pairing(
+        self,
+        envelope: ObservationEnvelope,
+        *,
+        workspace_commitment: str,
+        pairing_mode: str,
+        correlation_id: str | None,
+        source: ObservationSource,
+        session_commitment: str,
+        source_generation: int,
+        is_pre_event: bool,
+        is_post_event: bool,
+    ) -> tuple[ObservationIngestResult, ObservationEnvelope]:
+        """Admit one hook envelope and update its pairing state atomically.
+
+        Pairing is part of durable admission, rather than a probe performed
+        before ``ingest`` and a follow-up mutation afterwards.  The caller
+        receives the exact envelope that was admitted, including an orphan
+        gap when the post had no matching pre.  This keeps the retained
+        envelope, outbox row, and materialized receipt on the same side of a
+        concurrent duplicate/reorder race.
+
+        The public wrapper owns the batch for direct callers; this internal
+        method runs inside that batch and keeps the lock held through the
+        envelope rewrite.
+        """
+
+        if type(envelope) is not ObservationEnvelope:
+            raise _error(
+                PublicErrorCode.INVALID_REQUEST,
+                "Observation envelope is invalid.",
+                retryable=False,
+            )
+        if type(workspace_commitment) is not str:
+            raise _error(
+                PublicErrorCode.INVALID_REQUEST,
+                "Observation workspace is invalid.",
+                retryable=False,
+            )
+        paired = pairing_mode == "paired"
+        pairing_pre_open = False
+        with self._lock:
+            if paired and correlation_id is not None and is_post_event:
+                pairing_pre_open = self.has_open_pre(
+                    workspace_commitment,
+                    correlation_id,
+                    source=source,
+                    session_commitment=session_commitment,
+                    source_generation=source_generation,
+                )
+                if not pairing_pre_open:
+                    envelope = dataclasses.replace(
+                        envelope,
+                        gap_codes=tuple(
+                            sorted(
+                                {
+                                    *envelope.gap_codes,
+                                    ObservationGapCode.UNPAIRED_EVENT.value,
+                                },
+                                key=str.encode,
+                            )
+                        ),
+                    )
+
+            result = self.ingest(envelope, workspace_commitment=workspace_commitment)
+            if result.disposition is not ObservationIngestDisposition.ACCEPTED:
+                return result, envelope
+
+            if paired and correlation_id is not None and is_pre_event:
+                self.note_open_pre(
+                    workspace_commitment,
+                    correlation_id,
+                    envelope.event_kind,
+                    source=source,
+                    session_commitment=session_commitment,
+                    source_generation=source_generation,
+                )
+            elif paired and correlation_id is not None and is_post_event:
+                if pairing_pre_open:
+                    # With the lock held, a true pre cannot disappear between
+                    # the probe and consume. Treat an unexpected miss as an
+                    # orphan anyway so the durable result stays conservative.
+                    consumed = self.consume_open_pre(
+                        workspace_commitment,
+                        correlation_id,
+                        source=source,
+                        session_commitment=session_commitment,
+                        source_generation=source_generation,
+                    )
+                    if consumed is None:
+                        envelope = dataclasses.replace(
+                            envelope,
+                            gap_codes=tuple(
+                                sorted(
+                                    {
+                                        *envelope.gap_codes,
+                                        ObservationGapCode.UNPAIRED_EVENT.value,
+                                    },
+                                    key=str.encode,
+                                )
+                            ),
+                        )
+                        state = self._load(workspace_commitment)
+                        assert state.envelopes is not None
+                        for index in range(len(state.envelopes) - 1, -1, -1):
+                            retained = state.envelopes[index]
+                            if retained.source_identity == envelope.source_identity:
+                                state.envelopes[index] = envelope
+                                self._save(workspace_commitment, state)
+                                break
+                        self.note_unpaired_event(
+                            workspace_commitment,
+                            source=source,
+                            session_commitment=session_commitment,
+                            source_generation=source_generation,
+                            source_identity=envelope.source_identity,
+                        )
+                else:
+                    self.note_unpaired_event(
+                        workspace_commitment,
+                        source=source,
+                        session_commitment=session_commitment,
+                        source_generation=source_generation,
+                        source_identity=envelope.source_identity,
+                    )
+            return result, envelope
+
     def status(self, query: ObservationStatusQuery) -> ObservationStatus:
         with self._lock:
             return self._status_unlocked(query.workspace_commitment)
@@ -3321,12 +4099,16 @@ class LocalObservationStore:
                     "Observation consent is revoked.",
                     retryable=False,
                 )
-            state.consent = LocalObservationConsent(
+            next_consent = LocalObservationConsent(
                 workspace_commitment=consent.workspace_commitment,
                 granted_at=consent.granted_at,
                 revoked_at=consent.revoked_at,
                 paused=True,
+                content_capture_profiles=consent.content_capture_profiles,
             )
+            if next_consent != consent:
+                _rotate_content_capture_epoch(state)
+            state.consent = next_consent
             self._save(command.workspace_commitment, state)
             return self._status_unlocked(command.workspace_commitment)
 
@@ -3346,12 +4128,16 @@ class LocalObservationStore:
                     "Observation consent is revoked.",
                     retryable=False,
                 )
-            state.consent = LocalObservationConsent(
+            next_consent = LocalObservationConsent(
                 workspace_commitment=consent.workspace_commitment,
                 granted_at=consent.granted_at,
                 revoked_at=None,
                 paused=False,
+                content_capture_profiles=consent.content_capture_profiles,
             )
+            if next_consent != consent:
+                _rotate_content_capture_epoch(state)
+            state.consent = next_consent
             self._save(command.workspace_commitment, state)
             return self._status_unlocked(command.workspace_commitment)
 
@@ -3365,15 +4151,19 @@ class LocalObservationStore:
                     "Observation consent is missing.",
                     retryable=False,
                 )
-            revoked_at = (
+            revoked_at = consent.revoked_at or (
                 state.last_receipt if state.last_receipt is not None else consent.granted_at
             )
-            state.consent = LocalObservationConsent(
+            next_consent = LocalObservationConsent(
                 workspace_commitment=consent.workspace_commitment,
                 granted_at=consent.granted_at,
                 revoked_at=revoked_at,
                 paused=True,
+                content_capture_profiles=(),
             )
+            if next_consent != consent:
+                _rotate_content_capture_epoch(state)
+            state.consent = next_consent
             self._save(command.workspace_commitment, state)
             return self._status_unlocked(command.workspace_commitment)
 
@@ -3618,6 +4408,7 @@ class LocalObservationStore:
             assert state.envelopes is not None
             while state.envelopes and len(payload) > _MAX_STATE_BYTES:
                 del state.envelopes[0]
+                state.envelopes_truncated = True
                 assert state.gaps is not None
                 self._note_gap_state(state, ObservationGapCode.TRUNCATED_PAYLOAD.value)
                 truncated = True
@@ -3787,6 +4578,12 @@ class LocalObservationStore:
             last_drain = None
         consent_active = consent is not None and consent.revoked_at is None and not consent.paused
         mapping_available = bool(state.session_workspaces) or bool(state.codex_session_bindings)
+        pairing_gap_reconciled = self._reconcile_legacy_unpaired_gap(state)
+        if pairing_gap_reconciled:
+            # Status is the first durable read after an upgrade that can
+            # observe this legacy false diagnostic.  Preserve its inactive
+            # history while making the current projection honest.
+            self._save(workspace_commitment, state)
         current_gaps = self._current_gaps(
             state, workspace_commitment=workspace_commitment, mapping_available=mapping_available
         )
@@ -3828,6 +4625,38 @@ class LocalObservationStore:
             advice_frontier=state.advice_frontier,
         )
 
+    @staticmethod
+    def _reconcile_legacy_unpaired_gap(state: _WorkspaceState) -> bool:
+        """Retire only historical false post-only pairing diagnostics.
+
+        Before issue #607, Claude and Cursor post-only hooks were fed through
+        Codex's pre/post pairing path.  Their old envelopes may therefore
+        carry ``unpaired_event`` even though no pre-event was part of the
+        installed profile.  Resolve that current diagnostic only when every
+        retained historical unpaired envelope belongs to an exact reviewed
+        post-only profile and no scoped true orphan has been recorded.  The
+        gap-history row remains immutable evidence of the old behavior.
+        """
+
+        prior = (state.gaps or {}).get(ObservationGapCode.UNPAIRED_EVENT.value)
+        if (
+            prior is None
+            or not prior.active
+            or state.unpaired_scopes
+            or state.pairing_state_unknown
+            or state.envelopes_truncated
+        ):
+            return False
+        candidates = [
+            envelope
+            for envelope in (state.envelopes or ())
+            if ObservationGapCode.UNPAIRED_EVENT.value in envelope.gap_codes
+        ]
+        if not candidates or not all(_is_post_only_profile(envelope) for envelope in candidates):
+            return False
+        LocalObservationStore._resolve_gap_state(state, ObservationGapCode.UNPAIRED_EVENT.value)
+        return True
+
     def _current_gaps(
         self,
         state: _WorkspaceState,
@@ -3853,6 +4682,11 @@ class LocalObservationStore:
             _LOCAL_STREAM_PARTIAL_DROPPED_GAP,
         }
         current = {code for code, seen in state.gaps.items() if seen.active} - transient
+        if state.unpaired_scopes:
+            # A true paired-profile orphan is session/source/generation scoped
+            # detail; it keeps the aggregate gap active until an explicit
+            # operator-level repair, regardless of unrelated valid pairs.
+            current.add(ObservationGapCode.UNPAIRED_EVENT.value)
         # A dropped stream partial means the source tail is pending a reread:
         # the stream is observably behind its source until reconcile catches
         # up, which is exactly SOURCE_LAG on the wire vocabulary (#289).
@@ -3905,6 +4739,7 @@ class LocalObservationStore:
 
     def _state_to_json(self, workspace: str, state: _WorkspaceState) -> dict[str, JsonValue]:
         consent = state.consent
+        content_capture_epoch = _ensure_content_capture_epoch(state)
         assert state.session_workspaces is not None
         assert state.cursors is not None
         assert state.dedup is not None
@@ -3912,6 +4747,7 @@ class LocalObservationStore:
         assert state.gaps is not None
         assert state.unsupported_events is not None
         assert state.open_pre is not None
+        assert state.unpaired_scopes is not None
         assert state.stream_cursors is not None
         assert state.stream_call_tools is not None
         assert state.stream_call_tool_generations is not None
@@ -3919,16 +4755,21 @@ class LocalObservationStore:
         assert state.codex_session_bindings is not None
         consent_json: JsonValue = None
         if consent is not None:
-            consent_json = JsonObject(
-                {
-                    "workspace_commitment": consent.workspace_commitment,
-                    "granted_at": consent.granted_at.wire,
-                    "revoked_at": None if consent.revoked_at is None else consent.revoked_at.wire,
-                    "paused": consent.paused,
-                }
-            )
+            consent_body: dict[str, JsonValue] = {
+                "workspace_commitment": consent.workspace_commitment,
+                "granted_at": consent.granted_at.wire,
+                "revoked_at": None if consent.revoked_at is None else consent.revoked_at.wire,
+                "paused": consent.paused,
+            }
+            if consent.content_capture_profiles:
+                consent_body["content_capture_profiles"] = consent.content_capture_profiles
+            consent_json = JsonObject(consent_body)
         payload: dict[str, JsonValue] = {
-            # /10 adds generation-fenced deferred host-session lifecycle intents.
+            # /13 adds durable content-consent and runtime-gate fence epochs after /12's
+            # explicit native-host content-consent arm, /11's
+            # source/session/generation-scoped paired-profile orphan identities,
+            # retention provenance, and pairing-history fencing. /10 adds
+            # generation-fenced deferred host-session lifecycle intents.
             # /9 generation-fences call-id pairing and stream file identity. /8
             # persisted unfenced call-id to tool-name pairing for rollout outputs.
             # /7 attributes dropped stream-partial gaps per session. /6 adds one-shot
@@ -3936,8 +4777,10 @@ class LocalObservationStore:
             # corruption-session tracking. /3 added quarantined_at per
             # quarantine entry and the reclaimed counter. Readers tolerate both directions:
             # unknown keys are ignored and missing keys default safely.
-            "schema": "yoetz.observation-local/10",
+            "schema": "yoetz.observation-local/13",
+            "pairing_state_unknown": state.pairing_state_unknown,
             "workspace_commitment": workspace,
+            "content_capture_epoch": content_capture_epoch,
             "consent": consent_json,
             "session_workspaces": JsonObject(
                 {key: value for key, value in sorted(state.session_workspaces.items())}
@@ -4168,6 +5011,10 @@ class LocalObservationStore:
                     )
                 }
             )
+        if state.envelopes_truncated:
+            payload["envelopes_truncated"] = True
+        if state.unpaired_scopes:
+            payload["unpaired_scopes"] = tuple(sorted(state.unpaired_scopes, key=str.encode))
         if state.pending_lifecycles:
             payload["pending_lifecycles"] = tuple(
                 JsonObject(
@@ -4194,6 +5041,7 @@ class LocalObservationStore:
                 granted_at=Timestamp(str(row["granted_at"])),
                 revoked_at=None if revoked is None else Timestamp(str(revoked)),
                 paused=bool(row.get("paused", False)),
+                content_capture_profiles=_content_capture_profiles_from_json(row),
             )
         session_workspaces = {
             str(key): str(value)
@@ -4243,6 +5091,7 @@ class LocalObservationStore:
             if len(pending_lifecycles) >= _MAX_PENDING_LIFECYCLES:
                 break
         envelopes_raw = raw.get("envelopes") or ()
+        envelopes_truncated = raw.get("envelopes_truncated") is True
         gaps_raw = raw.get("gaps") or ()
         gap_history: dict[str, _GapState] = {}
         raw_gap_history = raw.get("gap_history") or {}
@@ -4267,6 +5116,12 @@ class LocalObservationStore:
         for code in cast(tuple[str, ...], gaps_raw):
             if type(code) is str and code not in gap_history:
                 gap_history[code] = _GapState(legacy_seen, legacy_seen)
+        # /10 and earlier did not persist retention provenance. Their
+        # truncation gap is the only durable indication that older envelope
+        # history may have been evicted, so preserve that uncertainty when
+        # deciding whether a historical pairing diagnostic can be retired.
+        if not envelopes_truncated and raw.get("schema") not in _RETENTION_PROVENANCE_SCHEMAS:
+            envelopes_truncated = ObservationGapCode.TRUNCATED_PAYLOAD.value in gap_history
         unsupported_raw = raw.get("unsupported_events") or ()
         advice_raw = raw.get("advice_snapshot")
         stream_cursors = {
@@ -4408,6 +5263,28 @@ class LocalObservationStore:
             str(key): str(value)
             for key, value in cast(Mapping[str, JsonValue], raw.get("open_pre") or {}).items()
         }
+        unpaired_raw = raw.get("unpaired_scopes")
+        unpaired_scopes = (
+            {
+                value
+                for value in cast(tuple[JsonValue, ...] | list[JsonValue], unpaired_raw)
+                if type(value) is str and value
+            }
+            if isinstance(unpaired_raw, (tuple, list))
+            else set[str]()
+        )
+        if len(unpaired_scopes) > _MAX_UNPAIRED_SCOPES:
+            unpaired_scopes = set(sorted(unpaired_scopes, key=str.encode)[:_MAX_UNPAIRED_SCOPES])
+        raw_pairing_state_unknown = raw.get("pairing_state_unknown")
+        # A pre-/11 writer can read a /11 file and save it again while dropping
+        # the scoped orphan set. Missing or malformed provenance is therefore
+        # incomplete history, even when the file claims a provenance-aware
+        # schema.
+        pairing_state_unknown = not (
+            raw.get("schema") in _PAIRING_PROVENANCE_SCHEMAS
+            and type(raw_pairing_state_unknown) is bool
+            and raw_pairing_state_unknown is False
+        )
         last_receipt = raw.get("last_receipt")
         envelopes: list[ObservationEnvelope] = []
         for item in cast(tuple[JsonValue, ...] | list[JsonValue], envelopes_raw):
@@ -4417,6 +5294,11 @@ class LocalObservationStore:
                 )
             else:
                 envelopes.append(observation_envelope_from_json(item))
+        if len(envelopes) > _MAX_ENVELOPES:
+            # A handoff from an older writer may carry over-limit detail even
+            # though it has no explicit truncation marker.  Treat the missing
+            # prefix as unknown rather than resolving a gap from the suffix.
+            envelopes_truncated = True
         advice_snapshot = None
         if advice_raw is not None:
             if isinstance(advice_raw, Mapping):
@@ -4547,6 +5429,16 @@ class LocalObservationStore:
                 *(mark.recency_ordinal for mark in frontier_motion_delivered.values()),
             ]
         )
+        raw_content_capture_epoch = raw.get("content_capture_epoch")
+        content_capture_epoch = None
+        if type(raw_content_capture_epoch) is str:
+            try:
+                content_capture_epoch = validate_sha256_digest(raw_content_capture_epoch)
+            except ProtocolValueError, TypeError, ValueError:
+                # A malformed or absent epoch is upgraded to a fresh nonce on
+                # the next durable save.  It must never make an old fence
+                # current by falling back to consent fields alone.
+                content_capture_epoch = None
         state = _WorkspaceState(
             consent=consent,
             session_workspaces=session_workspaces,
@@ -4556,7 +5448,9 @@ class LocalObservationStore:
             session_generations=session_generations,
             ended_session_generations=ended_session_generations,
             pending_lifecycles=pending_lifecycles,
+            content_capture_epoch=content_capture_epoch,
             envelopes=envelopes,
+            envelopes_truncated=envelopes_truncated,
             gaps=gap_history,
             unsupported_events=set(cast(tuple[str, ...], unsupported_raw)),
             last_receipt=None if last_receipt is None else Timestamp(str(last_receipt)),
@@ -4575,6 +5469,8 @@ class LocalObservationStore:
             frontier_motion_delivered=frontier_motion_delivered,
             frontier_motion_recency=frontier_motion_recency,
             open_pre=open_pre,
+            unpaired_scopes=unpaired_scopes,
+            pairing_state_unknown=pairing_state_unknown,
             stream_cursors=stream_cursors,
             stream_partials=stream_partials,
             stream_call_tools=stream_call_tools,

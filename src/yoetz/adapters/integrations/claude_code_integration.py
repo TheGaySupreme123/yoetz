@@ -27,6 +27,10 @@ from typing import Final, Literal, Protocol, cast
 from yoetz import __version__
 from yoetz.adapters.integrations.launcher import resolve_yoetz_launcher, valid_launcher
 from yoetz.adapters.integrations.portable_plugin import PackagedPortableResources
+from yoetz.domain.observation_profiles import (
+    CLAUDE_CODE_ORDINARY_HOOK_MAPPING_VERSION,
+    CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+)
 from yoetz.domain.values import JsonObject, RequestId
 from yoetz.domain.values import request_id as validate_request_id
 from yoetz.ports.integrations import (
@@ -62,6 +66,9 @@ __all__ = [
     "CLAUDE_CODE_HOOK_EVENTS",
     "CLAUDE_CODE_MINIMUM_VERSION",
     "CLAUDE_CODE_NATIVE_PROFILE_ID",
+    "CLAUDE_CODE_ORDINARY_HOOK_MAPPING_VERSION",
+    "CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID",
+    "CLAUDE_CODE_ORDINARY_HOOK_EVENTS",
     "ClaudeCodeCapabilityIdentity",
     "ClaudeCodeCommandPort",
     "ClaudeCodeCommandResult",
@@ -100,6 +107,17 @@ CLAUDE_CODE_HOOK_EVENTS: Final = (
     "SessionStart",
     "Stop",
 )
+CLAUDE_CODE_ORDINARY_HOOK_EVENTS: Final = (
+    "PermissionDenied",
+    "PermissionRequest",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "PreToolUse",
+    "SessionEnd",
+    "SessionStart",
+    "Stop",
+    "StopFailure",
+)
 _CLAUDE_HOOK_PROFILE: Final = HarnessHookProfile(
     trigger_event="SessionStart",
     trigger_payload_profile_id=CLAUDE_CODE_HOOK_MAPPING_VERSION,
@@ -110,6 +128,8 @@ _CLAUDE_HOOK_PROFILE: Final = HarnessHookProfile(
     # unpopulated until each event has installed-host delivery, privacy, and
     # accepted-observation evidence.
     observation_events=(),
+    pairing_mode="post_only",
+    correlation_kind="tool_call_id",
 )
 CLAUDE_CODE_HARNESS_PROFILE: Final = HarnessProfile(
     harness_id=HarnessId.CLAUDE,
@@ -634,7 +654,7 @@ def _inventory(members: Mapping[str, bytes]) -> tuple[ManagedPluginFile, ...]:
 
 
 def _mcp_json(route_profile: Literal["strict", "policy"], yoetz_launcher: tuple[str, ...]) -> bytes:
-    args = [*yoetz_launcher[1:], "mcp", "serve"]
+    args = [*yoetz_launcher[1:], "mcp", "serve", "--host", "claude"]
     if route_profile == "strict":
         args.extend(("--semantic", "off"))
     return canonical_encode(
@@ -649,12 +669,41 @@ def _mcp_json(route_profile: Literal["strict", "policy"], yoetz_launcher: tuple[
     )
 
 
-def _hooks_json(yoetz_launcher: tuple[str, ...]) -> bytes:
+def _hooks_json(
+    yoetz_launcher: tuple[str, ...], *, observation_profile: Literal["structural", "ordinary"]
+) -> bytes:
     launcher = " ".join(shlex.quote(part) for part in yoetz_launcher)
     command = f'{launcher} hooks claude-observe --workspace "${{CLAUDE_PROJECT_DIR}}"'
 
     def hook(event: str) -> dict[str, JsonValue]:
-        return {"command": f"{command} --event {event}", "timeout": 3, "type": "command"}
+        # The hook entrypoint has a small import path, but a fresh process can
+        # still spend time on local state hydration and one bounded service
+        # drain. Keep ordinary events above that base budget while giving
+        # lifecycle attach/advice events enough room for their documented
+        # service work. SessionEnd is intentionally local-first and remains
+        # within Claude's three-second teardown window (#616).
+        timeout = 3 if event == "SessionEnd" else 10 if event in {"SessionStart", "Stop"} else 5
+        return {"command": f"{command} --event {event}", "timeout": timeout, "type": "command"}
+
+    if observation_profile == "ordinary":
+        command = (
+            f"{command} --observation-profile "
+            f"{shlex.quote(CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID)}"
+        )
+        hooks: dict[str, JsonValue] = {
+            "PermissionDenied": [{"hooks": [hook("PermissionDenied")]}],
+            "PermissionRequest": [{"hooks": [hook("PermissionRequest")]}],
+            "PreToolUse": [{"hooks": [hook("PreToolUse")], "matcher": ".*"}],
+            "PostToolUse": [{"hooks": [hook("PostToolUse")], "matcher": ".*"}],
+            "PostToolUseFailure": [{"hooks": [hook("PostToolUseFailure")], "matcher": ".*"}],
+            "SessionEnd": [{"hooks": [hook("SessionEnd")]}],
+            "SessionStart": [
+                {"hooks": [hook("SessionStart")], "matcher": "startup|resume|clear|compact|fork"}
+            ],
+            "Stop": [{"hooks": [hook("Stop")]}],
+            "StopFailure": [{"hooks": [hook("StopFailure")]}],
+        }
+        return canonical_encode(cast(JsonValue, {"hooks": hooks}))
 
     hooks: dict[str, JsonValue] = {
         # Fires when auto mode (or a rule or another hook) denies the call, after the denial;
@@ -684,6 +733,7 @@ def render_claude_code_plugin(
     version: str = __version__,
     yoetz_launcher: Path | str | Sequence[str] | None = None,
     development_enabled: bool = False,
+    observation_profile: Literal["structural", "ordinary"] = "structural",
 ) -> ClaudeCodePluginArtifact:
     """Render Claude-native bytes from canonical packaged guidance.
 
@@ -698,6 +748,8 @@ def render_claude_code_plugin(
         raise ValueError("claude_code_mcp_ownership_invalid")
     if type(development_enabled) is not bool:
         raise ValueError("claude_code_artifact_invalid")
+    if observation_profile not in {"structural", "ordinary"}:
+        raise ValueError("claude_code_observation_profile_invalid")
     resolved_launcher = resolve_yoetz_launcher(yoetz_launcher)
     if (mcp_ownership is McpOwnership.PLUGIN_MANAGED) != (route_profile in {"strict", "policy"}):
         raise ValueError(
@@ -719,7 +771,7 @@ def render_claude_code_plugin(
     }
     members: dict[str, bytes] = {
         ".claude-plugin/plugin.json": canonical_encode(manifest),
-        "hooks/hooks.json": _hooks_json(resolved_launcher),
+        "hooks/hooks.json": _hooks_json(resolved_launcher, observation_profile=observation_profile),
         "skills/yoetz/SKILL.md": resources.read_bytes("skills/portable/yoetz/SKILL.md"),
     }
     for name in _GUIDANCE_NAMES:
@@ -734,7 +786,11 @@ def render_claude_code_plugin(
         format_profile=PluginFormatProfile.CLAUDE_CODE_PLUGIN_NATIVE,
         mcp_ownership=mcp_ownership,
         mcp_route_profile=route_profile,
-        host_extension_profile=CLAUDE_CODE_NATIVE_PROFILE_ID,
+        host_extension_profile=(
+            CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+            if observation_profile == "ordinary"
+            else CLAUDE_CODE_NATIVE_PROFILE_ID
+        ),
         specification_version="1.0.0",
         renderer_version=_RENDERER_VERSION,
         source_refs=tuple(
@@ -878,12 +934,22 @@ def _source_members(artifact: ClaudeCodePluginArtifact) -> dict[str, bytes]:
     return members
 
 
+def _hook_mapping_version_for_artifact(artifact: ClaudeCodePluginArtifact) -> str:
+    """Return the mapping bound into this artifact's rendered hook command."""
+
+    return (
+        CLAUDE_CODE_ORDINARY_HOOK_MAPPING_VERSION
+        if artifact.plan.host_extension_profile == CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+        else CLAUDE_CODE_HOOK_MAPPING_VERSION
+    )
+
+
 def _marker(artifact: ClaudeCodePluginArtifact) -> bytes:
     source = _source_members(artifact)
     body: dict[str, JsonValue] = {
         "artifact_digest": artifact.artifact_digest,
         "format_profile": artifact.plan.format_profile.value,
-        "hook_mapping_version": CLAUDE_CODE_HOOK_MAPPING_VERSION,
+        "hook_mapping_version": _hook_mapping_version_for_artifact(artifact),
         "managed_files": [
             {"relative_path": path, "sha256": _sha(data), "size": len(data)}
             for path, data in sorted(source.items(), key=lambda item: item[0].encode("ascii"))
@@ -1087,7 +1153,9 @@ def _route_profile(
 
     An exact route launches either a bare ``yoetz`` console script (external registrations
     the owner wrote by hand) or this artifact's exact bound launcher (plugin-owned entries and
-    launcher-bound external registrations), followed by the exact ``mcp serve`` arguments.
+    launcher-bound external registrations), followed by the exact Claude ``mcp serve`` arguments.
+    The pre-host-identity bare forms remain readable for an upgrade/remove transition but are
+    never emitted by the renderer.
     """
 
     if entry is None or set(entry) != {"args", "command", "type"}:
@@ -1108,9 +1176,15 @@ def _route_profile(
     if args[: len(prefix)] != prefix:
         return None
     rest = args[len(prefix) :]
-    if rest == ("mcp", "serve"):
+    if rest in {
+        ("mcp", "serve", "--host", "claude"),
+        ("mcp", "serve"),
+    }:
         return "policy"
-    if rest == ("mcp", "serve", "--semantic", "off"):
+    if rest in {
+        ("mcp", "serve", "--host", "claude", "--semantic", "off"),
+        ("mcp", "serve", "--semantic", "off"),
+    }:
         return "strict"
     return None
 
@@ -1774,7 +1848,7 @@ def _export_marker(artifact: ClaudeCodePluginArtifact) -> bytes:
         "artifact_digest": artifact.artifact_digest,
         "development": artifact.development,
         "format_profile": artifact.plan.format_profile.value,
-        "hook_mapping_version": CLAUDE_CODE_HOOK_MAPPING_VERSION,
+        "hook_mapping_version": _hook_mapping_version_for_artifact(artifact),
         "managed_files": [
             {"relative_path": path, "sha256": _sha(data), "size": len(data)}
             for path, data in sorted(

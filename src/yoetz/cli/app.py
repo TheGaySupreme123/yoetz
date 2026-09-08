@@ -119,6 +119,9 @@ integrate_skill_app = typer.Typer(help="Manage the Yoetz harness skill.", no_arg
 integrate_mcp_app = typer.Typer(
     help="Manage the Yoetz MCP server registration.", no_args_is_help=True
 )
+integrate_project_mcp_app = typer.Typer(
+    help="Manage Cursor's project-scoped Yoetz MCP registration.", no_args_is_help=True
+)
 integrate_plugin_app = typer.Typer(
     help=(
         "Manage an explicit host plugin artifact. Claude Code supports the full lifecycle plus "
@@ -136,6 +139,13 @@ integrate_admission_app = typer.Typer(
 )
 setup_app = typer.Typer(help="Guided first-run harness and provider setup.", no_args_is_help=True)
 service_app = typer.Typer(help="Manage the foreground local service.", no_args_is_help=True)
+instance_app = typer.Typer(
+    help=(
+        "Create, inspect, and dispose independent Yoetz instances (persistent development "
+        "instances and disposable test snapshots with their own root, service, and vault)."
+    ),
+    no_args_is_help=True,
+)
 auto_unlock_app = typer.Typer(
     help="Inspect or repair restart-safe passphrase unlock.", no_args_is_help=True
 )
@@ -193,10 +203,12 @@ app.add_typer(state_app, name="state")
 app.add_typer(integrate_app, name="integrate")
 integrate_app.add_typer(integrate_skill_app, name="skill")
 integrate_app.add_typer(integrate_mcp_app, name="mcp")
+integrate_app.add_typer(integrate_project_mcp_app, name="project-mcp")
 integrate_app.add_typer(integrate_plugin_app, name="plugin")
 integrate_app.add_typer(integrate_admission_app, name="admission")
 app.add_typer(setup_app, name="setup")
 app.add_typer(service_app, name="service")
+app.add_typer(instance_app, name="instance")
 service_app.add_typer(auto_unlock_app, name="auto-unlock")
 service_app.add_typer(recovery_app, name="recovery")
 app.add_typer(provider_app, name="provider")
@@ -796,13 +808,24 @@ def hooks_cursor_observe(
             ),
         ),
     ] = None,
+    observation_profile: Annotated[
+        str | None,
+        typer.Option(
+            "--observation-profile",
+            help="Exact profile emitted by the rendered native Cursor artifact.",
+        ),
+    ] = None,
 ) -> None:
     """Privacy-minimized, fail-open observation ingress for local Cursor hooks."""
 
     try:
         module = importlib.import_module("yoetz.cli.observe_hooks")
         handler = cast(Callable[..., int], getattr(module, "handle_cursor_observe"))
-        handler(event_name=event, workspace=workspace)
+        handler(
+            event_name=event,
+            workspace=workspace,
+            observation_profile=observation_profile,
+        )
     except BaseException:
         try:
             _stdout_json({})
@@ -823,13 +846,24 @@ def hooks_claude_observe(
             ),
         ),
     ] = None,
+    observation_profile: Annotated[
+        str | None,
+        typer.Option(
+            "--observation-profile",
+            help="Exact profile emitted by the rendered native Claude artifact.",
+        ),
+    ] = None,
 ) -> None:
     """Privacy-minimized, fail-open observation ingress for Claude Code hooks."""
 
     try:
         module = importlib.import_module("yoetz.cli.observe_hooks")
         handler = cast(Callable[..., int], getattr(module, "handle_claude_observe"))
-        handler(event_name=event, workspace=workspace)
+        handler(
+            event_name=event,
+            workspace=workspace,
+            observation_profile=observation_profile,
+        )
     except BaseException:
         try:
             _stdout_json({})
@@ -934,6 +968,62 @@ def observe_grant_cmd(
     """One-time observation consent; stores a private workspace commitment only."""
 
     _finish(_observe_operation("grant_observation")(workspace=workspace))
+
+
+@observe_app.command("content-enable")
+def observe_content_enable_cmd(
+    workspace: Annotated[str, typer.Option("--workspace", help="Workspace path to consent.")],
+    profile: Annotated[
+        str,
+        typer.Option(
+            "--profile",
+            help=(
+                "Versioned native-host content profile; use the exact profile emitted by the "
+                "host integration renderer."
+            ),
+        ),
+    ],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Enable one versioned native-host content capture arm."""
+
+    _finish(
+        _observe_operation("enable_observation_content")(
+            workspace=workspace, profile=profile, json_output=json_output
+        )
+    )
+
+
+@observe_app.command("content-disable")
+def observe_content_disable_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+    profile: Annotated[
+        str | None,
+        typer.Option("--profile", help="Disable one profile; omit to disable all profiles."),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Disable one native-host content arm or all native-host content capture."""
+
+    _finish(
+        _observe_operation("disable_observation_content")(
+            workspace=workspace, profile=profile, json_output=json_output
+        )
+    )
+
+
+@observe_app.command("content-status")
+def observe_content_status_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Show exact native-host content arms and their active state."""
+
+    _finish(
+        _observe_operation("observation_content_status")(
+            workspace=workspace, json_output=json_output
+        )
+    )
 
 
 @observe_app.command("pause")
@@ -1322,12 +1412,18 @@ def service_run() -> None:
         raise typer.Exit(exit_code_for(PublicErrorCode.SERVICE_UNAVAILABLE)) from None
 
     # Free at this point: the daemon import above already composed the lifecycle module.
+    from yoetz.config.installation import InstanceIdentityError
+    from yoetz.config.paths import PathSafetyError
     from yoetz.service.lifecycle import LifecycleError
 
     try:
         daemon_main()
     except LifecycleError as error:
         _finish(_lifecycle_failure(error))
+    except (InstanceIdentityError, PathSafetyError) as error:
+        # An instance whose identity, pin, root, or lifetime cannot be trusted is refused before
+        # the singleton is taken (issue #604); name the condition, never a traceback.
+        _finish(_instance_failure(error))
 
 
 @service_app.command("isolation")
@@ -1340,6 +1436,7 @@ def service_isolation(json_output: _JSON = False) -> None:
     """
 
     from yoetz.cli.isolation_status import isolation_report
+    from yoetz.config.installation import InstanceIdentityError
     from yoetz.config.models import ConfigError
     from yoetz.config.paths import PathSafetyError
 
@@ -1351,9 +1448,157 @@ def service_isolation(json_output: _JSON = False) -> None:
     except ConfigError as error:
         _stderr(f"isolation_unprovable: {error.reason_code}")
         _finish(2)
+    except InstanceIdentityError as error:
+        _stderr(f"isolation_unprovable: {error.reason}")
+        _finish(2)
     else:
         _human_or_json(cast(JsonValue, dict(report)), json_output=json_output)
         _finish(0)
+
+
+def _instance_failure(error: BaseException) -> int:
+    """Report a bounded instance-identity or isolation-root refusal (issue #604)."""
+
+    from yoetz.cli.exits import INSTANCE_PUBLIC_CODES
+    from yoetz.cli.instance import instance_failure_line
+    from yoetz.config.installation import InstanceIdentityError
+    from yoetz.config.paths import PathSafetyError
+
+    if isinstance(error, InstanceIdentityError):
+        reason = error.reason
+    elif isinstance(error, PathSafetyError):
+        reason = error.reason_code
+    else:
+        _stderr("internal_error: the command could not be completed")
+        return exit_code_for(PublicErrorCode.INTERNAL_ERROR)
+    _stderr(instance_failure_line(error))
+    return exit_code_for(INSTANCE_PUBLIC_CODES.get(reason, PublicErrorCode.STORAGE_UNSAFE))
+
+
+def _run_instance_operation(operation: Callable[[], object], *, json_output: bool) -> None:
+    from yoetz.config.installation import InstanceIdentityError
+    from yoetz.config.paths import PathSafetyError
+
+    try:
+        result = operation()
+    except (InstanceIdentityError, PathSafetyError) as error:
+        _finish(_instance_failure(error))
+    else:
+        _human_or_json(cast(JsonValue, result), json_output=json_output)
+        _finish(0)
+
+
+_INSTANCE_ROOT_OPTION = Annotated[
+    Path,
+    typer.Option(
+        "--root",
+        help="Absolute isolated root the instance owns (created by 'create', removed by 'dispose').",
+    ),
+]
+
+
+@instance_app.command("create")
+def instance_create(
+    root: _INSTANCE_ROOT_OPTION,
+    lifecycle: Annotated[
+        Literal["persistent", "disposable"],
+        typer.Option(
+            "--lifecycle",
+            help="persistent: a kept development instance; disposable: a bounded test snapshot.",
+        ),
+    ],
+    source_ref: Annotated[
+        str | None,
+        typer.Option(
+            "--source-ref", help="Exact 40/64-hex source revision the runtime was built from."
+        ),
+    ] = None,
+    source_state: Annotated[
+        Literal["clean", "modified", "unknown"],
+        typer.Option("--source-state", help="Whether that revision's tree was clean when built."),
+    ] = "unknown",
+    package_digest: Annotated[
+        str | None,
+        typer.Option("--package-digest", help="sha256:<hex> of the installed wheel, when known."),
+    ] = None,
+    expires_in: Annotated[
+        float | None,
+        typer.Option("--expires-in", help="Hours until a disposable instance stops serving."),
+    ] = None,
+    expires_at: Annotated[
+        str | None,
+        typer.Option("--expires-at", help="RFC 3339 UTC millisecond time the instance expires."),
+    ] = None,
+    bind_runtime: Annotated[
+        bool,
+        typer.Option(
+            "--bind-runtime",
+            help=(
+                "Pin this runtime (its virtual environment) to the root so it resolves the root "
+                "even without YOETZ_ISOLATED_ROOT."
+            ),
+        ),
+    ] = False,
+    json_output: _JSON = False,
+) -> None:
+    """Create an isolated instance root with a sealed identity; connection-free."""
+
+    from datetime import UTC, datetime
+
+    from yoetz.cli.instance import create_instance, parse_expiry
+
+    def operation() -> object:
+        now = datetime.now(UTC)
+        return create_instance(
+            root=root,
+            lifecycle=lifecycle,
+            now=now,
+            expires_at=parse_expiry(now=now, expires_in_hours=expires_in, expires_at=expires_at),
+            source_ref=source_ref,
+            source_state=source_state,
+            package_digest=package_digest,
+            bind_runtime=bind_runtime,
+        )
+
+    _run_instance_operation(operation, json_output=json_output)
+
+
+@instance_app.command("status")
+def instance_status_command(json_output: _JSON = False) -> None:
+    """Report this runtime's instance (mode, binding, lifecycle, provenance); digest-only."""
+
+    from yoetz.cli.instance import instance_status
+
+    _run_instance_operation(instance_status, json_output=json_output)
+
+
+@instance_app.command("dispose")
+def instance_dispose(
+    root: _INSTANCE_ROOT_OPTION,
+    retain_logs: Annotated[
+        Path | None,
+        typer.Option(
+            "--retain-logs",
+            help="Directory that receives a copy of the instance's log files before removal.",
+        ),
+    ] = None,
+    no_stop: Annotated[
+        bool,
+        typer.Option(
+            "--no-stop",
+            help="Refuse instead of stopping a service that still holds the root's singleton.",
+        ),
+    ] = False,
+    json_output: _JSON = False,
+) -> None:
+    """Remove one persistent or disposable instance root; repeated calls are a no-op."""
+
+    from yoetz.cli.instance import dispose_instance
+
+    _run_instance_operation(
+        lambda: dispose_instance(root=root, retain_logs=retain_logs, stop_service=not no_stop),
+        json_output=json_output,
+    )
 
 
 @service_app.command("diagnostics")
@@ -1399,18 +1644,28 @@ def mcp_serve(
         ),
     ] = "on",
     host: Annotated[
-        Literal["generic", "cursor"],
+        Literal["generic", "codex", "claude", "cursor"],
         typer.Option(
             "--host",
-            help="MCP result presentation profile for the exact local host.",
+            help="MCP serving identity for the exact local host; generic leaves host unknown.",
         ),
     ] = "generic",
+    project_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--project-root",
+            help=(
+                "Cursor only: expanded project selector from the host's ${workspaceFolder}; "
+                "it must also be present in MCP roots/list."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Run the MCP stdio bridge."""
 
     module = importlib.import_module("yoetz.mcp.server")
     mcp_main = cast(Callable[..., None], getattr(module, "main"))
-    mcp_main(semantic=semantic, host=host)
+    mcp_main(semantic=semantic, host=host, project_root=project_root)
 
 
 @state_app.command("capture")
@@ -1576,6 +1831,52 @@ for _mcp_action in ("preview", "preview-remove", "install", "status", "remove"):
     integrate_mcp_app.command(_mcp_action)(_integration_mcp_command(_mcp_action))
 
 
+def _cursor_project_mcp_command(action: str) -> Callable[..., None]:
+    def command(
+        context: typer.Context,
+        project_root: Annotated[
+            Path,
+            typer.Option(
+                "--project-root", help="Exact trusted project containing .cursor/mcp.json."
+            ),
+        ],
+        cursor_config_root: Annotated[
+            Path,
+            typer.Option("--cursor-config-root", help="Exact Cursor user configuration root."),
+        ],
+        route_profile: _ROUTE_PROFILE = None,
+        accept: _ACCEPT = False,
+        preview_digest: Annotated[
+            str | None,
+            typer.Option("--preview-digest", help="Exact reviewed project MCP preview digest."),
+        ] = None,
+        json_output: _JSON = False,
+    ) -> None:
+        harness = cast(str, context.find_root().find_object(str) or context.obj)
+        module = importlib.import_module("yoetz.cli.cursor_project_mcp")
+        operation = cast(Callable[..., int], getattr(module, "run_cursor_project_mcp_command"))
+        _finish(
+            operation(
+                action,
+                harness,
+                project_root=project_root,
+                cursor_config_root=cursor_config_root,
+                route_profile=_validated_route_profile(route_profile),
+                accept=accept,
+                preview_digest=preview_digest,
+                json_output=json_output,
+            )
+        )
+
+    return command
+
+
+for _project_mcp_action in ("preview", "preview-remove", "install", "status", "remove"):
+    integrate_project_mcp_app.command(_project_mcp_action)(
+        _cursor_project_mcp_command(_project_mcp_action)
+    )
+
+
 # The per-host plugin command surface (issue #465). Codex activation is the
 # digest-bound setup/recommendation ceremony (ADR-012), so its standalone
 # lifecycle is removal-shaped; Cursor has no update/enable/disable states; the
@@ -1687,6 +1988,13 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
             typer.Option("--project-root", help="Exact trusted project for MCP source checks."),
         ] = None,
         format_name: Annotated[str, typer.Option("--format", help="portable or native")] = "native",
+        observation_profile: Annotated[
+            str,
+            typer.Option(
+                "--observation-profile",
+                help="structural or ordinary native hooks; content capture requires separate consent.",
+            ),
+        ] = "structural",
         ownership_name: Annotated[
             str,
             typer.Option("--mcp-ownership", help="external-registration or plugin-managed"),
@@ -1732,6 +2040,10 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
         if harness in _PLUGIN_HOSTS and harness not in _PLUGIN_COMMAND_HOSTS[command_name]:
             _refuse_unsupported_plugin_command(harness, command_name)
             return
+        if observation_profile not in {"structural", "ordinary"}:
+            raise typer.BadParameter("--observation-profile must be structural or ordinary")
+        if observation_profile == "ordinary" and (harness == "codex" or format_name != "native"):
+            raise typer.BadParameter("ordinary observation requires native Claude or Cursor")
         if harness == "codex":
             module = importlib.import_module("yoetz.cli.codex_plugin")
             operation = cast(Callable[..., int], getattr(module, "run_codex_plugin_command"))
@@ -1761,6 +2073,7 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
                 "cursor_config_root": cursor_config_root,
                 "project_root": project_root,
                 "format_name": format_name,
+                "observation_profile": observation_profile,
                 "ownership_name": ownership_name,
                 "route_profile": route_profile,
                 "requested_action": requested_action,
@@ -1780,6 +2093,7 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
                     ownership_name=ownership_name,
                     route_profile=route_profile,
                     development_enabled=development_enabled,
+                    observation_profile=observation_profile,
                     json_output=json_output,
                 )
             )
@@ -1809,6 +2123,7 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
                 "marketplace_root": marketplace_root,
                 "project_root": project_root,
                 "format_name": format_name,
+                "observation_profile": observation_profile,
                 "ownership_name": ownership_name,
                 "route_profile": route_profile,
                 "requested_action": requested_action,

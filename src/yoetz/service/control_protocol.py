@@ -23,6 +23,7 @@ from yoetz.ports.control import (
     ControlMethod,
     ControlRequest,
     ControlResult,
+    McpHostProfile,
     ProjectionRenderMode,
     RepositoryPrivacyContext,
     ServiceState,
@@ -81,7 +82,7 @@ MAX_CONTROL_FRAME_BYTES: Final = 6_291_456
 MAX_ORDINARY_CONTROL_FRAME_BYTES: Final = 1_048_576
 MAX_ACTIVE_REQUESTS_PER_SESSION: Final = 32
 
-_CONTROL_SCHEMA_VERSION: Final = "2.4.0"
+_CONTROL_SCHEMA_VERSION: Final = "2.5.0"
 _SCHEMA_VERSION: Final = "1.0.0"
 _MAX_IMPORT_SOURCE_BYTES: Final = 4 * 1024 * 1024
 _ERROR_REASONS: Final = frozenset(
@@ -640,6 +641,10 @@ def parse_control_request(frame: ControlFrame) -> ControlRequest:
             body=body,
             deadline_ms=cast(int | None, deadline),
             route_profile=cast(Literal["policy", "strict"] | None, wire.get("route_profile")),
+            host_profile=cast(
+                McpHostProfile | None,
+                wire.get("host_profile"),
+            ),
         )
     except KeyError, TypeError, ValueError:
         raise ControlProtocolError("frame_invalid") from None

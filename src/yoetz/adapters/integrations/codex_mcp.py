@@ -2,8 +2,9 @@
 
 Automates exactly the runbook's manual check-then-add sequence:
 ``codex mcp get yoetz --json`` first, a bounded ``codex mcp list --json``
-fallback when ``get`` fails, and ``codex mcp add yoetz -- yoetz mcp serve`` only
-after absence is positively observed. A foreign same-name entry is never replaced.
+fallback when ``get`` fails, and registration of this runtime's proven absolute console script
+after absence is positively observed or an owned re-registration is accepted. Bare and legacy
+entries remain recognizable. A foreign same-name entry is never replaced.
 """
 
 from __future__ import annotations
@@ -14,12 +15,15 @@ import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from types import MappingProxyType
 from typing import Final, Literal, cast
 
+from yoetz.adapters.integrations.codex_launcher import installed_launcher
+from yoetz.adapters.integrations.launcher import invoking_launcher
 from yoetz.config.paths import ISOLATED_ROOT_ENV, PathSafetyError, isolated_root
 from yoetz.domain.values import JsonValue
 from yoetz.ports.harness_mcp import (
+    MCP_LEGACY_SERVE_COMMAND,
+    MCP_LEGACY_STRICT_SERVE_COMMAND,
     MCP_SERVE_COMMAND,
     MCP_SERVER_NAME,
     MCP_STRICT_SERVE_COMMAND,
@@ -32,6 +36,7 @@ from yoetz.ports.harness_mcp import (
     McpRegistrationReason,
     McpRegistrationResult,
     McpRegistrationState,
+    mcp_command_profile,
 )
 from yoetz.ports.integrations import HarnessId
 from yoetz.protocol.canonical import canonical_digest
@@ -43,10 +48,6 @@ __all__ = [
 
 _COMMAND_TIMEOUT_SECONDS: Final = 10.0
 _OUTPUT_LIMIT_BYTES: Final = 65_536
-# The registered argv is the only durable evidence of which route the agent actually gets.
-_ROUTE_PROFILE_BY_COMMAND: Final[Mapping[tuple[str, ...], Literal["policy", "strict"]]] = (
-    MappingProxyType({MCP_SERVE_COMMAND: "policy", MCP_STRICT_SERVE_COMMAND: "strict"})
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,8 +145,8 @@ def _entry_isolated_root(entry: Mapping[str, object]) -> tuple[bool, str | None]
 
     The command tokens establish Yoetz ownership; this separate parser refuses to bless a
     same-command entry with any other environment key, inherited variable, or malformed root.
-    A known but different absolute root remains readable so the digest-bound lifecycle can
-    re-register or remove the Yoetz-owned entry without gaining an arbitrary-env force path.
+    A known but different absolute root remains readable for legacy bare-command repair;
+    absolute-launcher classification additionally requires this runtime's exact root.
     """
 
     transport = entry.get("transport")
@@ -200,12 +201,29 @@ class CodexMcpAdapter:
     def _run(self, argv: tuple[str, ...]) -> CommandOutput:
         return self._runner(argv)
 
-    @staticmethod
     def _classify_entry(
+        self,
         entry: Mapping[str, object],
     ) -> tuple[McpRegistrationState, tuple[str, ...] | None, str | None]:
         tokens = _entry_command_tokens(entry)
-        for command in (MCP_STRICT_SERVE_COMMAND, MCP_SERVE_COMMAND):
+        if tokens and tokens[0] != "yoetz" and mcp_command_profile(tokens) is not None:
+            proof = installed_launcher()
+            readable, root = _entry_isolated_root(entry)
+            if (
+                proof is not None
+                and tokens[0] == proof[0]
+                and readable
+                and (root is None or root == self._expected_isolated_root())
+                and self._unambiguous_absolute_entry(entry)
+            ):
+                return McpRegistrationState.YOETZ_OWNED, tokens, root
+            return McpRegistrationState.FOREIGN_PRESENT, None, None
+        for command in (
+            MCP_STRICT_SERVE_COMMAND,
+            MCP_SERVE_COMMAND,
+            MCP_LEGACY_STRICT_SERVE_COMMAND,
+            MCP_LEGACY_SERVE_COMMAND,
+        ):
             if tokens == command:
                 environment_readable, registered_root = _entry_isolated_root(entry)
                 if not environment_readable:
@@ -215,6 +233,36 @@ class CodexMcpAdapter:
                 return McpRegistrationState.YOETZ_OWNED, command, registered_root
         # An unreadable or different command is preserved, never replaced.
         return McpRegistrationState.FOREIGN_PRESENT, None, None
+
+    @staticmethod
+    def _unambiguous_absolute_entry(entry: Mapping[str, object]) -> bool:
+        """Do not choose between conflicting transport definitions or execution modifiers."""
+
+        transport = entry.get("transport")
+        source = entry
+        if transport is not None:
+            if not isinstance(transport, Mapping):
+                return False
+            if any(key in entry for key in ("command", "args", "env", "env_vars", "cwd", "url")):
+                return False
+            source = cast(Mapping[str, object], transport)
+        return (
+            source.get("type") in (None, "stdio")
+            and source.get("cwd") is None
+            and source.get("url") is None
+            and isinstance(source.get("command"), str)
+            and entry.get("enabled", True) is True
+        )
+
+    def _desired_command(self) -> tuple[tuple[str, ...], str | None]:
+        proof = installed_launcher()
+        if proof is not None:
+            return (proof[0], *self._serve_command[1:]), proof[1]
+        # Embedded clients retain the historical bare command. An installed CLI with missing
+        # or modified launcher evidence must never quietly fall back to PATH.
+        if invoking_launcher() is not None:
+            raise McpRegistrationError(McpRegistrationReason.HARNESS_UNAVAILABLE, {})
+        return self._serve_command, None
 
     def _classify_get(
         self, output: CommandOutput
@@ -276,7 +324,7 @@ class CodexMcpAdapter:
         self._require_codex(binary)
         expected_root = self._expected_isolated_root()
         state, command, registered_root = self._observe_registration_state(binary)
-        route_profile = None if command is None else _ROUTE_PROFILE_BY_COMMAND.get(command)
+        route_profile = None if command is None else mcp_command_profile(command)
         isolation_binding = None
         if state is McpRegistrationState.YOETZ_OWNED:
             if expected_root is None and registered_root is None:
@@ -292,6 +340,7 @@ class CodexMcpAdapter:
             state,
             route_profile,
             isolation_binding,
+            command,
         )
 
     @staticmethod
@@ -318,13 +367,14 @@ class CodexMcpAdapter:
         current_root: str | None,
     ) -> McpRegistrationPreview:
         expected_root = self._expected_isolated_root()
+        serve_command, launcher_digest = self._desired_command()
         action = (
             McpRegistrationAction.REGISTER
             if state is McpRegistrationState.ABSENT
             else (
                 McpRegistrationAction.REREGISTER
                 if state is McpRegistrationState.YOETZ_OWNED
-                and (current_command != self._serve_command or current_root != expected_root)
+                and (current_command != serve_command or current_root != expected_root)
                 else McpRegistrationAction.NOOP
             )
         )
@@ -336,13 +386,20 @@ class CodexMcpAdapter:
             "executable_path": binary.executable_path,
             "harness": binary.harness_id.value,
             "schema": "yoetz.mcp-registration-preview/1",
-            "serve_command": list(self._serve_command),
+            "serve_command": list(serve_command),
             "server_name": MCP_SERVER_NAME,
             "state_before": state.value,
         }
         if expected_root is not None:
             digest_input["schema"] = "yoetz.mcp-registration-preview/2"
             digest_input["isolated_root"] = expected_root
+        if launcher_digest is not None:
+            digest_input.update(
+                schema="yoetz.mcp-registration-preview/3",
+                launcher_digest=launcher_digest,
+                current_command=current_command,
+                current_root=current_root,
+            )
         digest = canonical_digest(cast(JsonValue, digest_input))
         return McpRegistrationPreview(
             binary.harness_id,
@@ -350,7 +407,7 @@ class CodexMcpAdapter:
             state,
             warnings,
             digest,
-            self._serve_command,
+            serve_command,
             self._route_profile,
             expected_root,
         )
@@ -396,7 +453,7 @@ class CodexMcpAdapter:
                 MCP_SERVER_NAME,
                 *environment_args,
                 "--",
-                *self._serve_command,
+                *preview.serve_command,
             )
         )
         if add_output.exit_code != 0:
@@ -408,7 +465,7 @@ class CodexMcpAdapter:
         state_after, command_after, root_after = self._observe_registration_state(binary)
         if (
             state_after is not McpRegistrationState.YOETZ_OWNED
-            or command_after != self._serve_command
+            or command_after != preview.serve_command
             or root_after != preview.isolated_root
         ):
             raise McpRegistrationError(
@@ -446,10 +503,10 @@ class CodexMcpAdapter:
         if (
             state is McpRegistrationState.YOETZ_OWNED
             and current_command is not None
-            and current_command in _ROUTE_PROFILE_BY_COMMAND
+            and mcp_command_profile(current_command) is not None
         ):
             serve_command = current_command
-            route_profile = _ROUTE_PROFILE_BY_COMMAND[current_command]
+            route_profile = cast(Literal["policy", "strict"], mcp_command_profile(current_command))
         else:
             # Never copy a foreign argv into the preview shape. The digest still
             # binds ``state_before``, so apply refuses the same-name entry.
@@ -467,6 +524,10 @@ class CodexMcpAdapter:
         if current_root is not None:
             digest_input["schema"] = "yoetz.mcp-unregistration-preview/2"
             digest_input["isolated_root"] = current_root
+        if serve_command[0] != "yoetz":
+            proof = installed_launcher()
+            digest_input["schema"] = "yoetz.mcp-unregistration-preview/3"
+            digest_input["launcher_digest"] = None if proof is None else proof[1]
         digest = canonical_digest(cast(JsonValue, digest_input))
         return McpRegistrationPreview(
             binary.harness_id,

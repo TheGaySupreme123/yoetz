@@ -13,7 +13,13 @@ maintainer-directed issue #346 incident repairs #350, #351, and
 #352 (decisions 12–14); 2026-08-18 for maintainer-authored issues #320 and #326 and issue #322
 (delivered frontier-motion high-water); 2026-08-16 for maintainer-approved issue #224; 2026-08-14
 for moderator-approved issue #244 and the reopened issue #216 recurrence; 2026-09-05 for issue #605
-(workspace recovery revalidation and durable lifecycle repair, decision 20).
+(workspace recovery revalidation and durable lifecycle repair, decision 20); 2026-09-05 for issue
+#607 (host/profile pairing contracts, scoped orphan diagnostics, and identity fencing, decision 21).
+**Amended (continued):** 2026-09-06 for issue #616 (bounded host-hook maintenance: lightweight
+ordinary-profile ingress and bounded native-content draining, with cancellation limits kept
+explicit); 2026-09-06 for the native capture handoff and FIFO/check barrier contract; 2026-09-07
+for the source-qualified, profileless Codex hook capture handoff and its independent semantic
+selection fence.
 **Implemented by:** `src/yoetz/application/observation_materialize.py`,
 `src/yoetz/application/observation_coordinator.py`, `src/yoetz/cli/observe_hooks.py`,
 `src/yoetz/adapters/memory/ledger.py`,
@@ -22,7 +28,7 @@ for moderator-approved issue #244 and the reopened issue #216 recurrence; 2026-0
 `src/yoetz/adapters/integrations/observation_local.py`.
 **Relates to:** ADR-009, ADR-010, ADR-020, and
 issues #214, #216, #217, #223, #224, #225, #226, #227, #244, #302, #320, #322, #326, #331,
-#445, #539, #540, #560, and #577.
+#445, #539, #540, #560, #577, and #607.
 
 **Proposed amendment for issue #231:** `provider_not_ready` remains bounded local advice, but the
 observation coordinator does not materialize it as an agent-facing finding. Provider readiness is a
@@ -176,8 +182,14 @@ unsupported claims and unbounded duplicate findings.
 
 12. Paired `PostToolUse` materialization consumes every host-stated outcome fact: `exit_status`
     remains authoritative; without it, explicit `denied`, boolean `success`, and a closed
-    `result_status` spelling table map to `SUCCESS`/`FAILURE`/`PARTIAL`. Only a payload with no
-    outcome fact at all records `UNKNOWN` — a missing outcome is never upgraded to success. Such a
+    `result_status` spelling table map to `SUCCESS`/`FAILURE`/`PARTIAL`. The Claude ordinary
+    `claude-code-hooks-ordinary-v2` mapping additionally treats the host's `PostToolUse` event as an
+    explicit tool-level success fact, because Claude emits that event only after a tool call succeeds;
+    it never turns that fact into a fabricated `exit_status: 0`. Its `PostToolUseFailure` event and
+    explicit denial, interruption, error, invalid/unknown status, partial status, or conflicting fact
+    remain failure/partial/unknown according to the closed parser. A background Bash launch is only
+    partial without completion evidence. Other mappings retain the generic rule: only a payload with
+    no outcome fact at all records `UNKNOWN` — a missing outcome is never upgraded to success. Such a
     record keeps its durable per-call action/result identity but carries the
     `host_outcome_unavailable` known gap on its entry coverage. Because check coverage and receipts
     fold per-record known gaps into one deduplicated code set, any number of outcome-less observed
@@ -212,7 +224,10 @@ unsupported claims and unbounded duplicate findings.
     layer the delivery-selection boundary #250 established (issues #346/#352).
 
 15. A hook `PostToolUse` with no outcome fact may commit `UNKNOWN` before the session stream later
-    supplies an authoritative exit outcome for the same call. The original row is never rewritten.
+    supplies an authoritative exit outcome for the same call when its selected mapping does not make
+    the event itself authoritative. The Claude ordinary v2 mapping is the explicit host-event
+    exception described in decision 12; its event-level success still does not invent an exit status.
+    The original row is never rewritten.
     A replayed canonical operation consults the current projection and appends an idempotent
     `result_correction` linked to the same canonical action when it enriches `UNKNOWN` or exposes a
     contradictory explicit fact. Explicit outcomes are
@@ -284,7 +299,14 @@ unsupported claims and unbounded duplicate findings.
     spelling; a name that merely resembles a Yoetz tool is ordinary. Like decision 10 this is a
     delivery-volume policy, not a coverage limitation, so it records no gap. On the consumer side,
     the service sweeper yields with its partial summary on a budget under the daemon's sweep
-    deadline, so progress made under a backlog is never discarded as a timeout, and the manual
+    deadline, so progress made under a backlog is never discarded as a timeout. Its maintenance
+    gate covers one coordinator ingest at a time rather than the complete pass, so ordinary
+    workflow control remains responsive while the per-workspace lease and routed task fence retain
+    recovery and bundle-rotation exclusion for each row. Legacy hook-spool normalization has one
+    generation-owned worker, advances a durable byte cursor in bounded batches, and retains its
+    claim future across cancellation before another pass may start; generation close stops between
+    batches. Route inspection and fence checks use short-lived read-only snapshots outside the
+    service event loop. The manual
     `observe drain` repeats bounded passes while a pass resolves rows and reports a terminal
     condition (`drained`, `retry_pending`, `service_unavailable`, `pass_limit`) instead of stopping
     at the first retryable lane head. `observe status` reports the receipt time of the oldest
@@ -305,11 +327,14 @@ unsupported claims and unbounded duplicate findings.
     conflicting reuse of the operation identity and fails closed as non-retryable
     `IDEMPOTENCY_CONFLICT` (`ledger_rejected`); a repeat that reuses committed event ids under a
     different logical identity still fails closed as `EVENT_INVALID`. Legacy versions keep their
-    session-bound digests as replay-only upgrade candidates probed under both admitted writers,
-    exactly as before: a pre-upgrade committed row is still replayable from the session that
-    committed it, and only from that session. Hook ordinals, session generations, and host session
-    commitments are keyed on the host session, not the mapping, so they stay monotonic across a
-    reattach.
+    session-bound digests as replay-only upgrade candidates. During route retirement, the lifecycle
+    adapter retains a bounded suffix of predecessor `(session, writer)` bindings in a private,
+    same-task sidecar before replacing the one-slot mapping. A fresh process can therefore probe
+    the retained predecessor routes after restart; a missing sidecar means there are no retained
+    predecessors, a malformed sidecar fails closed, and entries older than the bound are outside
+    the replay guarantee. Clearing a host mapping clears its route history as well. Hook ordinals,
+    session generations, and host session commitments are keyed on the host session, not the
+    mapping, so they stay monotonic across a reattach.
 19. An ended-host-session recovery attach that rotates the task route does not retire still-pending
     observation rows of the predecessor (issue #577). `SESSION_NOT_FOUND` with
     `reason_code: session_superseded` already carries the current task binding; ingest follows that
@@ -339,6 +364,78 @@ rewrites, and pruning; contention or changed state falls back to the ordinary re
     unsupported because the `/9` reader ignores the new field and can erase it on save. The
     retention bound protects pending and quarantined evidence, so protected rows may keep the
     total above the clean-binding cap without being deleted.
+21. Host hook pairing is selected by the closed source/profile contract, never by an arbitrary
+    payload marker. The installed Claude Code and Cursor hook profiles are post-only: Claude's
+    `tool_use_id` may identify a result when present, while Cursor's `generation_id` is metadata
+    only and can never become a tool identity. Codex remains paired, including when a raw payload
+    supplies a conflicting marker; a future paired Claude/Cursor profile must be an exact table
+    entry with a real tool-call identity. Local admission performs deduplication, pairing-state
+    lookup, envelope append, and pre/post consumption under one store lock. A duplicate therefore
+    cannot consume a pre-event, and a concurrent second post records a source/session/generation/
+    identity-scoped `unpaired_event` without resolving an unrelated orphan. Historical false
+    post-only diagnostics may clear their active projection only when retained envelope history is
+    complete; the immutable gap-history record remains. The local state extension is schema `/11`.
+    Materialization mapping `obs-ledger/1.6.0` includes source lane, host session commitment, and
+    source generation in canonical/action/result identities; legacy 1.5/1.4/1.3/1.2 identities
+    remain replayable under their historical semantics.
+
+22. Native Claude Code and Cursor ordinary profiles, and the source-qualified profileless Codex
+    hook arm, use a two-phase encrypted-content handoff. The capture-only request runs in a
+    separate bounded lane while a heavy structural append may be active. After the local service
+    authenticates the request, it secret-scans and encrypts the eligible chunks, durably publishes
+    their objects and manifests, and records a metadata-only capture ticket before the structural
+    FIFO cursor advances. The ticket binds the encrypted object IDs to the exact
+    workspace/task/Yoetz session, host session and source cursor, content profile when applicable,
+    original source generation, content-authority generation, and expected content groups/parts.
+    For Codex, the source-qualified profileless arm additionally fences the exact active consent
+    authority/generation, workspace commitment, `codex_hook` source identity and commitment,
+    tool-call correlation, expected multipart groups/parts, object kinds, and object/content
+    digests. It contains no plaintext and cannot be borrowed by another event.
+
+    A structural retry consumes a ticket only after revalidating the original source and
+    authority generations and proving the complete expected group/part set. A partial, conflicting,
+    unreadable, or orphaned set remains `content_capture_unavailable`; no manifest is upgraded by
+    inference. Once the complete set is accepted, the structural envelope references the durable
+    manifests and the ledger append and ticket cleanup are idempotent. The handoff result
+    `content_capture_pending` means the encrypted staging boundary is durable while the FIFO
+    ledger append is still pending; it is distinct from `operation_pending`, which is generic
+    observation back-pressure and carries no content-retention claim.
+
+    A successor may consume a predecessor ticket only through the existing bounded, validated
+    route history for that mapped task and host session. The ticket's original Yoetz session stays
+    immutable; sharing a task alone does not authorize borrowing another session's content. New
+    checks inspect outstanding tickets across the task, since their frozen projection includes
+    predecessor work. Completed same-request replay remains independent of newer handoffs.
+    When a new CHECK encounters the barrier, READY performs that inspection as a bounded,
+    exact-task preflight before one freeze retry, so a ticket left by a direct capture-only request
+    is reconciled even when no structural outbox row remains. Only current local authority can keep
+    a ticket pending; inactive, revoked, runtime-disabled, profile-unselected, or stale-generation
+    tickets are tombstoned without changing encrypted objects or retained observation history. A
+    completed same-request replay returns before inspecting newer tickets.
+
+    At most 512 `staging` or `pending` tickets are outstanding per workspace. Revoked tickets are
+    excluded from that quota but retained as metadata-only tombstones to prevent reuse after an
+    authority pause, disable, revoke, or re-enable ABA cycle. A new check/frozen-case acquisition
+    observes an outstanding ticket under the same bundle transaction and installs the retryable
+    `OPERATION_PENDING` barrier atomically; the same request can retry after the ticket is
+    consumed without reminting content or ledger identities. A host kill or service failure before
+    authenticated staging completes may leave an honest content gap. There is no plaintext local
+    spool or offline acceptance guarantee. The Codex arm admits only explicitly linked hook tool
+    output, selected changed-file/code bytes, and workspace-diff bytes for captured-content
+    evidence and semantic selection. Its session-stream records remain outside this native ticket
+    lane and are excluded from semantic selection. Tool input and path/locator content are excluded
+    from semantic selection too, although the current Codex hook path may still stage consented
+    input/locator chunks in the bounded encrypted local capture lane pending a follow-up staging
+    filter. Captured-content staging does not authorize egress: semantic-case selection still
+    requires effective repository privacy authority and an independently authorized provider/attempt
+    route. Codex's historical session-stream path otherwise remains unchanged, while the shared
+    generation, operation-replay, and teardown repairs apply to all hosts.
+
+    Acceptance of the Codex arm requires a blocked-FIFO capture with bounded acknowledgement,
+    guarded-store materialization through the semantic packet, and negative coverage for source,
+    correlation, task/session, authority-generation, multipart, cancellation, restart, and retry
+    fences. Metadata-only objects, a successful structural receipt, or a typed MCP result alone do
+    not prove that native Codex bytes became eligible provider input.
 
 ## Security and privacy consequences
 
@@ -346,6 +443,14 @@ The observation writer id is derivable from public task/session identifiers, but
 no publication authority. `publish_work` derives its channel from the closed integration kind; a
 caller cannot request `hook_observed` or `engine_derived`, and a spoofed harness actor therefore does
 not pass the observation predicate.
+
+The Codex native hook arm is source-qualified and profileless. Active local observation consent
+authorizes local encrypted capture for the exact `codex_hook` source; it does not authorize a
+Claude/Cursor content profile, semantic selection, or provider disclosure. Only linked output,
+changed-file/code, and workspace-diff roles can enter a semantic case after the repository privacy
+authority and the individual provider attempt authorize that case. Session-stream, input, and
+locator content remain excluded from semantic selection. Consented input/locator chunks may
+still be locally staged by the current hook path until the staging filter follow-up lands.
 
 ADR-009 includes `other_writer` disclosure provenance. The production privacy enforcer currently
 ships without a provenance resolver. When that resolver is implemented, this harness writer must
@@ -363,8 +468,9 @@ Yoetz's own tool calls are observed without recursively feeding the outbox they 
 from, and
 cooperative writers learn about meaningful observation-authored frontier motion before their next
 state-sensitive operation. Captured objects contribute immutable byte identity without being
-upgraded to validation, reproduction, or disclosure authority. Observation-advice policy `0.1.2`
-applies the condition-scoped identity
-to new materialization (`0.1.1` first introduced it; `0.1.2` rebased the standing
-`provider_not_ready` condition onto per-build structural machine facts for issue #265). Historical duplicate findings remain append-only evidence; this change does
-not erase or rewrite an existing task ledger.
+upgraded to validation, reproduction, or disclosure authority. Observation-advice policy `0.1.3`
+applies the condition-scoped identity to new materialization (`0.1.1` first introduced it;
+`0.1.2` rebased the standing `provider_not_ready` condition onto per-build structural machine facts
+for issue #265; `0.1.3` keeps the full evidence basis while bounding advice projection and requires
+an explicit authored completion claim). Historical duplicate findings remain append-only evidence;
+this change does not erase or rewrite an existing task ledger.

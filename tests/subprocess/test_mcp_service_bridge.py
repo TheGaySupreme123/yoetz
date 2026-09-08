@@ -150,6 +150,7 @@ class _FakeClient:
         self.failure = failure
         self.calls: list[tuple[str, object]] = []
         self.route_profiles: list[tuple[str, str | None]] = []
+        self.host_profiles: list[str | None] = []
         self.deadlines: list[tuple[str, int | None]] = []
         self.closed = False
 
@@ -181,9 +182,11 @@ class _FakeClient:
         *,
         deadline_ms: int | None = None,
         route_profile: str | None = None,
+        host_profile: str | None = None,
     ) -> CheckResult:
         self.deadlines.append(("check", deadline_ms))
         self.route_profiles.append(("check", route_profile))
+        self.host_profiles.append(host_profile)
         return await self._call("check", request, CheckResult)
 
     async def respond(
@@ -474,6 +477,9 @@ async def test_cursor_native_handler_refuses_missing_or_ambiguous_roots_without_
     assert cast(dict[str, object], missing_error["safe_details"])["reason_code"] == (
         "repository_identity_required"
     )
+    message = cast(str, missing_error["message"])
+    for recovery_fact in ("roots/list", "project-mcp", ".cursor/mcp.json", "CLI CWD", "Hook"):
+        assert recovery_fact in message
     assert first.calls == 1
     assert observed_locators == []
 
@@ -665,6 +671,23 @@ async def test_strict_bridge_attaches_private_route_profile_after_public_validat
 
     assert result.isError is True
     assert client.route_profiles == [("check", "strict")]
+    assert client.host_profiles == ["generic"]
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_bridge_attaches_explicit_host_identity_to_check_rpc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient()
+    _install_clients(monkeypatch, [client])
+    runtime = bridge.build_bridge_runtime("strict", host_profile="codex")
+
+    result = await bridge.dispatch_check(_requests()["check"], runtime)
+
+    assert result.isError is True
+    assert client.route_profiles == [("check", "strict")]
+    assert client.host_profiles == ["codex"]
     await bridge.close_bridge_runtime(runtime)
 
 
@@ -672,6 +695,19 @@ async def test_strict_bridge_attaches_private_route_profile_after_public_validat
 async def test_agent_cannot_supply_or_clear_the_private_route_profile() -> None:
     runtime = bridge.build_bridge_runtime("strict")
     arguments = {**_requests()["check"], "route_profile": "policy"}
+
+    result = await bridge.dispatch_check(arguments, runtime)
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    assert result.structuredContent["error"]["code"] == "INVALID_REQUEST"
+    assert runtime._slot.client is None  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.anyio
+async def test_agent_cannot_supply_the_private_serving_host_identity() -> None:
+    runtime = bridge.build_bridge_runtime("strict", host_profile="generic")
+    arguments = {**_requests()["check"], "host_profile": "codex"}
 
     result = await bridge.dispatch_check(arguments, runtime)
 

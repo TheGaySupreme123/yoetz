@@ -14,6 +14,7 @@ import contextlib
 import importlib.util
 import io
 import os
+import shlex
 import sys
 import tempfile
 from collections.abc import Awaitable, Callable, Mapping
@@ -748,7 +749,7 @@ def _emit_registration_preview(
     typer.echo("  3. Register the Yoetz MCP server with Codex")
     typer.echo("  MCP server name: yoetz")
     serve_command = getattr(mcp_preview, "serve_command", ())
-    typer.echo(f"  Command: {' '.join(serve_command)}")
+    typer.echo(f"  Command: {shlex.join(serve_command)}")
     isolated_root = getattr(mcp_preview, "isolated_root", None)
     typer.echo(
         "  MCP isolation root: " + (str(isolated_root) if isolated_root is not None else "ambient")
@@ -838,7 +839,7 @@ def _emit_unregistration_preview(mcp_preview: object) -> None:
     typer.echo(f"  Action: {getattr(mcp_preview, 'action').value}")
     typer.echo(f"  State before: {getattr(mcp_preview, 'state_before').value}")
     serve_command = getattr(mcp_preview, "serve_command", ())
-    typer.echo(f"  Command: {' '.join(serve_command)}")
+    typer.echo(f"  Command: {shlex.join(serve_command)}")
     isolated_root = getattr(mcp_preview, "isolated_root", None)
     typer.echo(
         "  MCP isolation root: " + (str(isolated_root) if isolated_root is not None else "ambient")

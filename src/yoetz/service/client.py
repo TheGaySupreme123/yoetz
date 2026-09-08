@@ -20,7 +20,13 @@ from yoetz.adapters.control.unix_socket import (
     LocalControlTransportError,
     connect_control,
 )
-from yoetz.config.paths import ensure_owner_only_dir, log_dir
+from yoetz.config.paths import (
+    ISOLATED_ROOT_ENV,
+    PathSafetyError,
+    ensure_owner_only_dir,
+    isolated_root,
+    log_dir,
+)
 from yoetz.domain.privacy import (
     AuthorizationScope,
     AuthorizationScopeKind,
@@ -54,6 +60,7 @@ from yoetz.ports.control import (
     ControlError,
     ControlMethod,
     ControlResult,
+    McpHostProfile,
     McpRouteProfile,
     ProjectionRenderMode,
     ServiceStatus,
@@ -176,12 +183,22 @@ def _service_environment() -> dict[str, str]:
     MCP bridge from becoming visible in the service process metadata.
     """
 
-    return {
+    environment = {
         name: value
         for name, value in os.environ.items()
         if not any(marker in name.upper() for marker in _SECRET_ENV_MARKERS)
         and (not name.startswith("YOETZ_") or name in _SERVICE_CONFIG_ENV_NAMES)
     }
+    # A runtime pin resolves the root without the variable (issue #604). The detached service
+    # runs the same interpreter and would resolve the same pin, but forwarding the resolved root
+    # explicitly keeps the chain visible and identical to the environment-selected case.
+    try:
+        root = isolated_root()
+    except PathSafetyError:
+        root = None
+    if root is not None:
+        environment[ISOLATED_ROOT_ENV] = str(root)
+    return environment
 
 
 def _open_service_stderr_log() -> BinaryIO:
@@ -840,6 +857,7 @@ class ServiceClient(ControlClientPort):
         *,
         deadline_ms: int | None = None,
         route_profile: McpRouteProfile | None = None,
+        host_profile: McpHostProfile | None = None,
     ) -> object:
         request = ControlCallRequest(
             kind="call",
@@ -851,6 +869,7 @@ class ServiceClient(ControlClientPort):
             body=body,
             deadline_ms=deadline_ms,
             route_profile=route_profile,
+            host_profile=host_profile,
         )
         result = await self.call(request)
         if result.outcome == "error":
@@ -879,6 +898,7 @@ class ServiceClient(ControlClientPort):
         *,
         deadline_ms: int | None = None,
         route_profile: McpRouteProfile | None = None,
+        host_profile: McpHostProfile | None = None,
     ) -> CheckResult:
         return cast(
             CheckResult,
@@ -887,6 +907,7 @@ class ServiceClient(ControlClientPort):
                 request,
                 deadline_ms=deadline_ms,
                 route_profile=route_profile,
+                host_profile=host_profile,
             ),
         )
 

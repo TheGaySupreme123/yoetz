@@ -24,7 +24,13 @@ from typing import Final, cast
 
 from yoetz.config.paths import PathSafetyError, ensure_owner_only_dir, state_dir
 from yoetz.domain.values import validate_sha256_digest
-from yoetz.ports.harness_mcp import MCP_SERVE_COMMAND, MCP_STRICT_SERVE_COMMAND
+from yoetz.ports.harness_mcp import (
+    MCP_LEGACY_SERVE_COMMAND,
+    MCP_LEGACY_STRICT_SERVE_COMMAND,
+    MCP_SERVE_COMMAND,
+    MCP_STRICT_SERVE_COMMAND,
+    mcp_command_profile,
+)
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 
 __all__ = [
@@ -99,7 +105,10 @@ def _validate_command(value: object, *, allowed: tuple[tuple[str, ...], ...]) ->
         if type(entry) is not str:
             raise ValueError("applied_mcp_route_command_invalid")
         items.append(entry)
-    if tuple(items) not in allowed:
+    command = tuple(items)
+    if mcp_command_profile(command) is None or not any(
+        command[1:] == template[1:] for template in allowed
+    ):
         raise ValueError("applied_mcp_route_command_invalid")
     return items
 
@@ -179,12 +188,19 @@ def _parse_record(raw: object) -> dict[str, object]:
     if row["schema"] != _SCHEMA or row["host"] != _HOST:
         raise ValueError("applied_mcp_route_record_invalid")
     profile = _validate_profile(row["applied_profile"])
-    applied = _validate_command(row["applied_serve_command"], allowed=(_expected_command(profile),))
+    expected = _expected_command(profile)
+    legacy = MCP_LEGACY_STRICT_SERVE_COMMAND if profile == "strict" else MCP_LEGACY_SERVE_COMMAND
+    applied = _validate_command(row["applied_serve_command"], allowed=(expected, legacy))
     if applied is None:
         raise ValueError("applied_mcp_route_record_invalid")
     observed = _validate_command(
         row["observed_serve_command_post_write"],
-        allowed=(MCP_SERVE_COMMAND, MCP_STRICT_SERVE_COMMAND),
+        allowed=(
+            MCP_SERVE_COMMAND,
+            MCP_STRICT_SERVE_COMMAND,
+            MCP_LEGACY_SERVE_COMMAND,
+            MCP_LEGACY_STRICT_SERVE_COMMAND,
+        ),
     )
     preview_digest = _validate_digest(row["preview_digest"])
     observation_digest = _validate_digest(row["observation_digest"])
@@ -288,12 +304,19 @@ def record_applied_route(
     """Atomically record the applied Codex MCP route; later registrations overwrite."""
 
     profile = _validate_profile(applied_profile)
-    applied = _validate_command(serve_command, allowed=(_expected_command(profile),))
+    expected = _expected_command(profile)
+    legacy = MCP_LEGACY_STRICT_SERVE_COMMAND if profile == "strict" else MCP_LEGACY_SERVE_COMMAND
+    applied = _validate_command(serve_command, allowed=(expected, legacy))
     if applied is None:
         raise ValueError("applied_mcp_route_command_invalid")
     observed = _validate_command(
         observed_command,
-        allowed=(MCP_SERVE_COMMAND, MCP_STRICT_SERVE_COMMAND),
+        allowed=(
+            MCP_SERVE_COMMAND,
+            MCP_STRICT_SERVE_COMMAND,
+            MCP_LEGACY_SERVE_COMMAND,
+            MCP_LEGACY_STRICT_SERVE_COMMAND,
+        ),
     )
     digest = _validate_digest(preview_digest)
     observation_digest = canonical_digest(cast(JsonValue, observed))

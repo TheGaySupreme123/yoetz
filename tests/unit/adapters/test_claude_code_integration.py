@@ -217,7 +217,7 @@ def test_native_projection_uses_shared_bytes_and_only_admitted_claude_components
     launcher = managed.yoetz_launcher
     assert len(launcher) == 1 and Path(launcher[0]).is_absolute()
     assert json.loads(managed.members[".mcp.json"])["mcpServers"]["yoetz"] == {
-        "args": ["mcp", "serve", "--semantic", "off"],
+        "args": ["mcp", "serve", "--host", "claude", "--semantic", "off"],
         "command": launcher[0],
         "type": "stdio",
     }
@@ -264,6 +264,23 @@ def test_native_projection_uses_shared_bytes_and_only_admitted_claude_components
     )
 
 
+def test_native_hook_timeouts_leave_room_for_local_capture_and_service_drain() -> None:
+    artifact = render_claude_code_plugin(observation_profile="ordinary")
+    hooks = json.loads(artifact.members["hooks/hooks.json"])["hooks"]
+
+    assert {event: definition[0]["hooks"][0]["timeout"] for event, definition in hooks.items()} == {
+        "PermissionDenied": 5,
+        "PermissionRequest": 5,
+        "PreToolUse": 5,
+        "PostToolUse": 5,
+        "PostToolUseFailure": 5,
+        "SessionEnd": 3,
+        "SessionStart": 10,
+        "Stop": 10,
+        "StopFailure": 5,
+    }
+
+
 def test_launcher_binding_uses_the_invoking_installation_and_marks_the_marker(
     tmp_path: Path,
 ) -> None:
@@ -279,7 +296,7 @@ def test_launcher_binding_uses_the_invoking_installation_and_marks_the_marker(
     assert artifact.yoetz_launcher == (str(interpreter.resolve()), "-m", "yoetz")
     entry = json.loads(artifact.members[".mcp.json"])["mcpServers"]["yoetz"]
     assert entry == {
-        "args": ["-m", "yoetz", "mcp", "serve"],
+        "args": ["-m", "yoetz", "mcp", "serve", "--host", "claude"],
         "command": str(interpreter.resolve()),
         "type": "stdio",
     }

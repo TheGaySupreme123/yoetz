@@ -18,6 +18,7 @@ by the owning service and merely transcribed here.
 
 from __future__ import annotations
 
+import shlex
 import sys
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager
@@ -100,19 +101,6 @@ def _host_admission_detail(provider: ProviderPosture) -> str:
     if all(state == "absent" for _host, state in provider.host_admission):
         return f"{summary}; 'yoetz integrate <host> admission preview' to admit the check"
     return summary
-
-
-def _serve_command_display(route_profile: Literal["policy", "strict"]) -> str:
-    """Render the exact argv this route registers, for the screen that asks for approval.
-
-    A fixed string here would show ``yoetz mcp serve`` while registering the strict command,
-    which is the one line on that screen the human is being asked to approve.
-    """
-
-    # Local import: the ports module stays off the TUI's startup path.
-    from yoetz.ports.harness_mcp import MCP_SERVE_COMMAND, MCP_STRICT_SERVE_COMMAND
-
-    return " ".join(MCP_STRICT_SERVE_COMMAND if route_profile == "strict" else MCP_SERVE_COMMAND)
 
 
 def _mapping(value: object) -> Mapping[str, object]:
@@ -452,7 +440,7 @@ class YoetzRuntime:
             reported_version=option.reported_version,
             project_root=str(root),
             route_profile=route,
-            mcp_command=_serve_command_display(route),
+            mcp_command=shlex.join(mcp_preview.serve_command),
             mcp_server_name=_MCP_SERVER_NAME,
             policy_digest=digest if isinstance(digest, str) else None,
             planned_check_ids=tuple(str(item) for item in checks)

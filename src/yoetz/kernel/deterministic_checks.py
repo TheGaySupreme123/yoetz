@@ -67,9 +67,9 @@ from yoetz.kernel.projections import (
 )
 from yoetz.kernel.reducers import (
     ReplayIndex,
-    empty_replay_index,
-    extend_replay_index,
+    build_replay_index,
     replay,
+    validate_replay_index,
 )
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.coverage import (
@@ -1350,10 +1350,7 @@ def _projection_gap(
 
 
 def _build_replay_index(records: tuple[LedgerRecord, ...]) -> ReplayIndex:
-    index = empty_replay_index()
-    for record in records:
-        index = extend_replay_index(index, record)
-    return index
+    return build_replay_index(records)
 
 
 def _expected_unavailable_events(
@@ -1454,18 +1451,38 @@ def build_deterministic_case(
     projection: ProjectionState,
     records: Iterable[LedgerRecord],
     availability: CaseAvailabilityFacts,
+    *,
+    _projection_validated: bool = False,
+    _replay_index: ReplayIndex | None = None,
 ) -> DeterministicCase:
-    """Freeze one exact accepted prefix into the pure deterministic-policy input."""
+    """Freeze one exact accepted prefix into the pure deterministic-policy input.
+
+    ``_projection_validated`` and ``_replay_index`` are internal append-time seams. The
+    SQLite/memory append path already replayed the same immutable prefix and passes the resulting
+    projection and reverse index here so the capacity check does not replay or rebuild it a second
+    time. Public callers keep the default genesis replay and therefore retain the full standalone
+    validation contract.
+    """
 
     if type(projection) is not ProjectionState or type(availability) is not CaseAvailabilityFacts:
         raise _invalid_case()
     accepted_prefix = tuple(records)
     if any(type(record) not in {AcceptedEvent, UnknownEvent} for record in accepted_prefix):
         raise _invalid_case()
-    rebuilt = replay(accepted_prefix)
-    if rebuilt != projection:
+    if _replay_index is not None and not _projection_validated:
         raise _invalid_case()
-    index = _build_replay_index(accepted_prefix)
+    if not _projection_validated:
+        rebuilt = replay(accepted_prefix)
+        if rebuilt != projection:
+            raise _invalid_case()
+    if _replay_index is None:
+        index = _build_replay_index(accepted_prefix)
+    else:
+        try:
+            validate_replay_index(_replay_index, accepted_prefix)
+        except ValueError as exc:
+            raise _invalid_case() from exc
+        index = _replay_index
     if index.frontier != projection.frontier or index.head_digest != projection.head_digest:
         raise _invalid_case()
     records_by_event = {record.event_id: record for record in accepted_prefix}
@@ -1767,7 +1784,10 @@ def build_deterministic_case(
 
 
 def healthy_storage_availability(
-    projection: ProjectionState, records: Iterable[LedgerRecord]
+    projection: ProjectionState,
+    records: Iterable[LedgerRecord],
+    *,
+    _replay_index: ReplayIndex | None = None,
 ) -> CaseAvailabilityFacts:
     """Return the availability facts this state carries when object storage is healthy.
 
@@ -1781,7 +1801,12 @@ def healthy_storage_availability(
 
     accepted_prefix = tuple(records)
     records_by_event = {record.event_id: record for record in accepted_prefix}
-    index = _build_replay_index(accepted_prefix)
+    if _replay_index is None:
+        index = _build_replay_index(accepted_prefix)
+    else:
+        if type(_replay_index) is not ReplayIndex:
+            raise _invalid_case()
+        index = _replay_index
     redacted: set[EventId] = set()
     for marker in projection.coverage_gaps:
         gap = _projection_gap(marker, index)
@@ -1834,8 +1859,24 @@ def _source_event_for_ref(case: DeterministicCase, ref: FindingBasisRef) -> Even
         return None
     if ref.startswith("evt_"):
         return event_id(ref)
-    logical_sources = _logical_sources(case.projection)
-    return logical_sources.get(ref)
+    # Each logical family already owns an indexed map. Rebuilding all six maps for
+    # each policy reference makes repeated lookups quadratic in the task size.
+    match ref[:4]:
+        case "obl_":
+            record = case.projection.obligations.get(cast(ObligationId, ref))
+        case "act_":
+            record = case.projection.actions.get(cast(ActionId, ref))
+        case "res_":
+            record = case.projection.results.get(cast(ResultId, ref))
+        case "evd_":
+            record = case.projection.evidence.get(cast(EvidenceId, ref))
+        case "clm_":
+            record = case.projection.claims.get(cast(ClaimId, ref))
+        case "fnd_":
+            record = case.projection.findings.get(cast(FindingId, ref))
+        case _:
+            return None
+    return None if record is None else record.source_event_id
 
 
 def policy_public_root(

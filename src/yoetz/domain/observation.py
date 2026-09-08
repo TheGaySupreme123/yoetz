@@ -13,6 +13,11 @@ from enum import Enum
 from types import MappingProxyType, NotImplementedType
 from typing import Final, Literal, cast
 
+from yoetz.domain.observation_profiles import (
+    content_capture_profile_matches_source,
+    is_content_capture_profile,
+    validate_content_capture_profile,
+)
 from yoetz.domain.values import (
     FindingId,
     JsonObject,
@@ -21,11 +26,12 @@ from yoetz.domain.values import (
     finding_id,
     object_id,
     session_id,
+    task_id,
     timestamp_from_string,
     validate_commitment,
     validate_sha256_digest,
 )
-from yoetz.protocol.canonical import canonical_encode
+from yoetz.protocol.canonical import canonical_digest, canonical_encode
 from yoetz.protocol.coverage import Coverage, coverage_from_json, coverage_to_json
 from yoetz.protocol.errors import PROTOCOL_REASON_CODES, ProtocolValueError
 
@@ -33,6 +39,7 @@ __all__ = [
     "AdviceItem",
     "AdviceSnapshot",
     "OBSERVATION_BACKPRESSURE_REASON",
+    "OBSERVATION_CONTENT_CAPTURE_PENDING_REASON",
     "OBSERVATION_HOOK_COMMITMENT_DOMAIN",
     "OBSERVATION_STREAM_LINE_DOMAIN",
     "OBSERVATION_WORKSPACE_DOMAIN",
@@ -40,6 +47,8 @@ __all__ = [
     "ObservationContentChunk",
     "ObservationContentManifest",
     "ObservationContentKind",
+    "ObservationCapturePart",
+    "ObservationCaptureTicket",
     "ObservationCursor",
     "ObservationEnvelope",
     "ObservationGapCode",
@@ -61,6 +70,10 @@ __all__ = [
     "observation_control_command_to_json",
     "observation_content_chunk_from_json",
     "observation_content_chunk_to_json",
+    "observation_capture_ticket_id",
+    "observation_capture_part_descriptors",
+    "observation_content_binding_matches",
+    "observation_source_qualified_content_binding_matches",
     "observation_cursor_from_json",
     "observation_cursor_to_json",
     "observation_earns_hook_observed",
@@ -78,6 +91,8 @@ __all__ = [
     "observation_status_to_json",
     "stream_line_commitment",
     "workspace_commitment_from_path",
+    "is_content_capture_profile",
+    "validate_content_capture_profile",
 ]
 
 _MAX_SAFE_INTEGER: Final = 9_007_199_254_740_991
@@ -108,6 +123,8 @@ _MEDIA_TYPE_RE: Final = re.compile(
     r"^[a-z][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$",
     re.ASCII,
 )
+
+ObservationCapturePart = tuple[str, str, str, int, int]
 
 OBSERVATION_WORKSPACE_DOMAIN: Final = b"yoetz/observation-workspace/v1\x00"
 OBSERVATION_STREAM_LINE_DOMAIN: Final = b"yoetz/observation-stream-line/v1\x00"
@@ -148,9 +165,21 @@ _STRUCTURAL_KEYS: Final = frozenset(
         "cursor_version",
         "model_id",
         "model_effort",
+        "pairing_mode",
+        "correlation_kind",
+        "generation_id",
     }
 )
-_STRUCTURAL_TOKEN_KEYS: Final = frozenset({"cursor_version", "model_id", "model_effort"})
+_STRUCTURAL_TOKEN_KEYS: Final = frozenset(
+    {
+        "cursor_version",
+        "model_id",
+        "model_effort",
+        "pairing_mode",
+        "correlation_kind",
+        "generation_id",
+    }
+)
 
 _PROSE_KEYS: Final = frozenset(
     {
@@ -200,6 +229,13 @@ class ObservationLifecycle(str, Enum):  # noqa: UP042 - exact durable wire enum
 # observation status, advice, coverage, or receipt inputs. The durable outbox
 # simply keeps the row pending and retries after the barrier clears.
 OBSERVATION_BACKPRESSURE_REASON: Final = "operation_pending"
+# A native content capture has crossed the authenticated service boundary and
+# its encrypted manifests plus a retry ticket are durable, but the structural
+# envelope has deliberately not advanced the observation cursor yet.  Hooks
+# may safely leave the row pending under this reason; it is distinct from
+# ``operation_pending`` because the latter says nothing about content
+# retention.
+OBSERVATION_CONTENT_CAPTURE_PENDING_REASON: Final = "content_capture_pending"
 
 
 class ObservationGapCode(str, Enum):  # noqa: UP042 - exact durable wire enum
@@ -222,6 +258,7 @@ class ObservationGapCode(str, Enum):  # noqa: UP042 - exact durable wire enum
     OBSERVATION_STORAGE_CORRUPT = "observation_storage_corrupt"
     QUARANTINE_DETAIL_EVICTED = "quarantine_detail_evicted"
     CONTENT_CAPTURE_UNAVAILABLE = "content_capture_unavailable"
+    CONTENT_CAPTURE_PROFILE_MISMATCH = "content_capture_profile_mismatch"
     CONTENT_UNSELECTED = "content_unselected"
     CONTENT_REDACTED = "content_redacted"
     POLICY_UNTRUSTED = "policy_untrusted"
@@ -240,6 +277,163 @@ class ObservationContentKind(str, Enum):  # noqa: UP042 - exact durable wire enu
     APPROVED_CHECK_OUTPUT = "approved_check_output"
     UNSUPPORTED_VISIBLE_PAYLOAD = "unsupported_visible_payload"
     WORKSPACE_LOCATOR = "workspace_locator"
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationCaptureTicket:
+    """Metadata-only handoff for encrypted native content awaiting ledger ingest.
+
+    The ticket never contains plaintext.  Its source, cursor, phase identity,
+    profile, and local authority generation are all bound to the encrypted
+    manifest object IDs, so a retry cannot borrow content from another event,
+    consent generation, or host session.  Codex hook captures are deliberately
+    profile-less; the ``source`` field is their closed source qualification.
+    """
+
+    workspace_commitment: str
+    task_id: str
+    yoetz_session_id: str
+    session_commitment: str
+    source: ObservationSource
+    source_identity: str
+    cursor: ObservationCursor
+    logical_identity: str
+    content_capture_profile: str | None
+    authority_generation: str
+    object_ids: tuple[str, ...]
+    captured_at: Timestamp
+    state: Literal["staging", "pending", "revoked"] = "staging"
+    expected_parts: tuple[ObservationCapturePart, ...] = ()
+
+    def __post_init__(self) -> None:
+        validate_commitment(self.workspace_commitment)
+        object.__setattr__(self, "task_id", task_id(self.task_id))
+        object.__setattr__(self, "yoetz_session_id", session_id(self.yoetz_session_id))
+        validate_commitment(self.session_commitment)
+        if type(self.source) is not ObservationSource or self.source not in {
+            ObservationSource.CLAUDE_HOOK,
+            ObservationSource.CODEX_HOOK,
+            ObservationSource.CURSOR_HOOK,
+        }:
+            raise _invalid("invalid_event_enum")
+        object.__setattr__(self, "source_identity", _token(self.source_identity))
+        if type(self.cursor) is not ObservationCursor:
+            raise _invalid()
+        object.__setattr__(self, "logical_identity", _token(self.logical_identity))
+        if self.content_capture_profile is None:
+            if self.source is not ObservationSource.CODEX_HOOK:
+                raise _invalid("invalid_event_value_type")
+        elif not content_capture_profile_matches_source(
+            self.source.value, self.content_capture_profile
+        ):
+            raise _invalid("invalid_event_value_type")
+        try:
+            validate_sha256_digest(self.authority_generation)
+        except (ProtocolValueError, TypeError, ValueError) as exc:
+            raise _invalid("invalid_event_value_type") from exc
+        if type(self.object_ids) is not tuple or len(self.object_ids) > 16:
+            raise _invalid()
+        if self.state not in {"staging", "revoked"} and not self.object_ids:
+            raise _invalid()
+        normalized = tuple(sorted({object_id(item) for item in self.object_ids}, key=str.encode))
+        if normalized != self.object_ids:
+            raise _invalid("duplicate_set_member")
+        if type(self.captured_at) is not Timestamp:
+            raise _invalid("invalid_timestamp")
+        if self.state not in {"staging", "pending", "revoked"}:
+            raise _invalid("invalid_event_value_type")
+        if type(self.expected_parts) is not tuple or len(self.expected_parts) > 16:
+            raise _invalid()
+        normalized_parts: list[ObservationCapturePart] = []
+        for raw_part in self.expected_parts:
+            if type(raw_part) is not tuple or len(raw_part) != 5:
+                raise _invalid()
+            raw_kind, raw_correlation, raw_source, raw_index, raw_count = raw_part
+            try:
+                kind = ObservationContentKind(raw_kind)
+                correlation = _token(raw_correlation)
+                source = raw_source
+                validate_commitment(source)
+                index = _nonnegative(raw_index, maximum=15)
+                count = _positive(raw_count, maximum=16)
+            except (ProtocolValueError, TypeError, ValueError) as exc:
+                raise _invalid() from exc
+            if index >= count:
+                raise _invalid()
+            normalized_parts.append((kind.value, correlation, source, index, count))
+        expected_parts = tuple(
+            sorted(
+                normalized_parts,
+                key=lambda item: (
+                    item[0].encode("utf-8"),
+                    item[1].encode("utf-8"),
+                    item[2].encode("utf-8"),
+                    item[3],
+                    item[4],
+                ),
+            )
+        )
+        if len(set(expected_parts)) != len(expected_parts):
+            raise _invalid("duplicate_set_member")
+        if expected_parts != self.expected_parts:
+            raise _invalid("unsorted_set_field")
+        if self.state == "pending" and not expected_parts:
+            raise _invalid()
+        object.__setattr__(self, "expected_parts", expected_parts)
+
+
+def observation_capture_ticket_id(ticket: ObservationCaptureTicket) -> str:
+    """Derive the idempotency identity for one staged native capture."""
+
+    if type(ticket) is not ObservationCaptureTicket:
+        raise _invalid()
+    return canonical_digest(
+        JsonObject(
+            {
+                "workspace_commitment": ticket.workspace_commitment,
+                "task_id": ticket.task_id,
+                "yoetz_session_id": ticket.yoetz_session_id,
+                "session_commitment": ticket.session_commitment,
+                "source": ticket.source.value,
+                "source_identity": ticket.source_identity,
+                "cursor": observation_cursor_to_json(ticket.cursor),
+                "logical_identity": ticket.logical_identity,
+                "content_capture_profile": ticket.content_capture_profile,
+                "authority_generation": ticket.authority_generation,
+            }
+        )
+    )
+
+
+def observation_capture_part_descriptors(
+    chunks: tuple[ObservationContentChunk, ...],
+) -> tuple[ObservationCapturePart, ...]:
+    """Return the exact structural descriptors a native handoff must contain."""
+
+    if type(chunks) is not tuple:
+        raise _invalid()
+    parts = tuple(
+        (
+            chunk.content_kind.value,
+            chunk.correlation_identity,
+            chunk.source_commitment,
+            chunk.part_index,
+            chunk.part_count,
+        )
+        for chunk in chunks
+    )
+    return tuple(
+        sorted(
+            parts,
+            key=lambda item: (
+                item[0].encode("utf-8"),
+                item[1].encode("utf-8"),
+                item[2].encode("utf-8"),
+                item[3],
+                item[4],
+            ),
+        )
+    )
 
 
 class ObservationIngestDisposition(str, Enum):  # noqa: UP042 - exact durable wire enum
@@ -556,6 +750,123 @@ class ObservationContentChunk:
         )
 
     __str__ = __repr__
+
+
+_NATIVE_CONTENT_CORRELATION_KEYS: Final = (
+    "tool_use_id",
+    "tool_call_id",
+    "correlation_id",
+    "parent_tool_call_id",
+)
+_NATIVE_CONTENT_CORRELATION_SUFFIXES: Final = MappingProxyType(
+    {
+        ObservationContentKind.VISIBLE_USER_MESSAGE: frozenset({"user"}),
+        ObservationContentKind.VISIBLE_ASSISTANT_MESSAGE: frozenset({"assistant"}),
+        ObservationContentKind.VISIBLE_SUBAGENT_MESSAGE: frozenset({"subagent"}),
+        ObservationContentKind.TOOL_INPUT: frozenset({"tool-input"}),
+        ObservationContentKind.TOOL_OUTPUT: frozenset({"tool-output"}),
+        ObservationContentKind.CHANGED_FILE: frozenset({"changed-file"}),
+        ObservationContentKind.WORKSPACE_DIFF: frozenset({"diff", "patch"}),
+        ObservationContentKind.UNSUPPORTED_VISIBLE_PAYLOAD: frozenset({"unsupported"}),
+        ObservationContentKind.WORKSPACE_LOCATOR: frozenset({"workspace"}),
+    }
+)
+
+
+def observation_content_binding_matches(
+    envelope: ObservationEnvelope,
+    *,
+    content_kind: ObservationContentKind,
+    correlation_identity: str | None,
+    source_commitment: str | None,
+) -> bool:
+    """Check the historical materialization binding for an observation.
+
+    Codex hook and session-stream observations predate the source-qualified
+    content ticket and keep their replay behavior. Claude/Cursor ordinary
+    content uses the exact native binding introduced for their profile arms.
+    New ticketed capture must call
+    :func:`observation_source_qualified_content_binding_matches` instead.
+    """
+
+    if envelope.source not in {
+        ObservationSource.CLAUDE_HOOK,
+        ObservationSource.CURSOR_HOOK,
+    }:
+        return True
+    return _source_qualified_content_binding_matches(
+        envelope,
+        content_kind=content_kind,
+        correlation_identity=correlation_identity,
+        source_commitment=source_commitment,
+    )
+
+
+def _source_qualified_content_binding_matches(
+    envelope: ObservationEnvelope,
+    *,
+    content_kind: ObservationContentKind,
+    correlation_identity: str | None,
+    source_commitment: str | None,
+) -> bool:
+    if envelope.source not in {
+        ObservationSource.CLAUDE_HOOK,
+        ObservationSource.CODEX_HOOK,
+        ObservationSource.CURSOR_HOOK,
+    }:
+        return False
+    if source_commitment != envelope.cursor.last_source_commitment:
+        return False
+    if type(correlation_identity) is not str or not correlation_identity:
+        return False
+    structural = envelope.structural_payload
+    if correlation_identity in {
+        value
+        for key in _NATIVE_CONTENT_CORRELATION_KEYS
+        for value in (structural.get(key),)
+        if type(value) is str and value
+    }:
+        return True
+    prefix = f"{envelope.source_identity}:"
+    if not correlation_identity.startswith(prefix):
+        return False
+    suffix = correlation_identity[len(prefix) :]
+    if (
+        envelope.source is ObservationSource.CODEX_HOOK
+        and suffix == "captured"
+        and content_kind
+        in {
+            ObservationContentKind.TOOL_INPUT,
+            ObservationContentKind.TOOL_OUTPUT,
+        }
+    ):
+        # Preserve the pre-ticket Codex inline-capture label without widening
+        # the Claude/Cursor binding vocabulary.
+        return True
+    return suffix in _NATIVE_CONTENT_CORRELATION_SUFFIXES.get(content_kind, frozenset())
+
+
+def observation_source_qualified_content_binding_matches(
+    envelope: ObservationEnvelope,
+    *,
+    content_kind: ObservationContentKind,
+    correlation_identity: str | None,
+    source_commitment: str | None,
+) -> bool:
+    """Check the closed source binding for a ticketed native capture.
+
+    The caller cannot opt out of this check.  In particular, profileless
+    Codex content is eligible only when its hook source identity, cursor
+    commitment, and correlation label all match the same envelope.  Session
+    stream content is intentionally outside this capture-only contract.
+    """
+
+    return _source_qualified_content_binding_matches(
+        envelope,
+        content_kind=content_kind,
+        correlation_identity=correlation_identity,
+        source_commitment=source_commitment,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -904,15 +1215,27 @@ class ObservationIngestResult:
 
 @dataclass(frozen=True, slots=True)
 class ObservationIngestRequest:
-    """Redacted local-control ingest body: Codex session routing + envelope only.
+    """Redacted local-control ingest body: session routing, envelope, and bounded chunks.
 
     Callers MUST NOT supply Yoetz task/session/writer IDs. The service coordinator
-    resolves those from the validated lifecycle mapping.
+    resolves those from the validated lifecycle mapping. Native-host chunks also
+    carry the exact user-enabled content profile; profile-less requests preserve
+    the historical structural-only path.
     """
 
     codex_session_id: str
     envelope: ObservationEnvelope
     content_chunks: tuple[ObservationContentChunk, ...] = ()
+    # Native Claude/Cursor content is admitted only with the exact profile
+    # explicitly enabled by the user.  Profile-less Codex hook content is
+    # admitted only by the source-qualified capture-only arm below; the
+    # historical session-stream path remains profile-less and unchanged.
+    content_capture_profile: str | None = None
+    # Internal service handoff: stage authenticated native content and a
+    # durable capture ticket without advancing the observation cursor/ledger.
+    # This is intentionally opt-in and is emitted only by the native hook
+    # drain before FIFO structural delivery.
+    capture_only: bool = False
 
     def __post_init__(self) -> None:
         if type(self.codex_session_id) is not str or not self.codex_session_id:
@@ -928,6 +1251,26 @@ class ObservationIngestRequest:
         if type(self.envelope) is not ObservationEnvelope:
             raise _invalid()
         object.__setattr__(self, "content_chunks", _content_chunks(self.content_chunks))
+        if self.content_capture_profile is not None:
+            try:
+                validate_content_capture_profile(self.content_capture_profile)
+            except ProtocolValueError as exc:
+                raise _invalid() from exc
+        if type(self.capture_only) is not bool:
+            raise _invalid()
+        if self.capture_only:
+            native_capture_sources = {
+                ObservationSource.CLAUDE_HOOK,
+                ObservationSource.CODEX_HOOK,
+                ObservationSource.CURSOR_HOOK,
+            }
+            if self.envelope.source not in native_capture_sources or not self.content_chunks:
+                raise _invalid()
+            if self.envelope.source is ObservationSource.CODEX_HOOK:
+                if self.content_capture_profile is not None:
+                    raise _invalid("invalid_event_value_type")
+            elif self.content_capture_profile is None:
+                raise _invalid("invalid_event_value_type")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1223,6 +1566,10 @@ def observation_ingest_request_to_json(value: ObservationIngestRequest) -> JsonO
         payload["content_chunks"] = tuple(
             observation_content_chunk_to_json(item) for item in value.content_chunks
         )
+    if value.content_capture_profile is not None:
+        payload["content_capture_profile"] = value.content_capture_profile
+    if value.capture_only:
+        payload["capture_only"] = True
     return JsonObject(payload)
 
 
@@ -1234,6 +1581,8 @@ def observation_ingest_request_from_json(value: JsonValue) -> ObservationIngestR
         "codex_session_id",
         "envelope",
         "content_chunks",
+        "content_capture_profile",
+        "capture_only",
     }:
         raise _invalid()
     envelope_raw = source["envelope"]
@@ -1252,6 +1601,12 @@ def observation_ingest_request_from_json(value: JsonValue) -> ObservationIngestR
             observation_content_chunk_from_json(item)
             for item in cast(tuple[JsonValue, ...], chunks_raw)
         ),
+        content_capture_profile=(
+            None
+            if source.get("content_capture_profile") is None
+            else cast(str, source["content_capture_profile"])
+        ),
+        capture_only=cast(bool, source.get("capture_only", False)),
     )
 
 
