@@ -38,6 +38,11 @@ from yoetz.mcp.resources import (
     list_resources,
     read_resource,
 )
+from yoetz.mcp.semantic_destination import (
+    DISCLOSURE_PREFIX,
+    MAX_DISCLOSURE_ENCODED_BYTES,
+    SemanticDestinationDisclosure,
+)
 from yoetz.mcp.summaries import render_safe_compact_summary
 from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.errors import SAFE_DETAIL_KEYS, PublicErrorCode
@@ -390,6 +395,18 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     strict_instructions = server_instructions("strict")
     assert "Route profile: strict." in strict_instructions
     assert "This route will not request external semantic review" in strict_instructions
+    # #479: the bridge appends the startup-read semantic destination disclosure to the policy
+    # tail only; the strict tail is byte-identical with or without one, and the packaged text
+    # never carries the passage on its own.
+    disclosure = SemanticDestinationDisclosure("unknown", DISCLOSURE_PREFIX + "unknown.")
+    assert server_instructions("policy", semantic_destination=disclosure) == (
+        f"{base_instructions.rstrip()}\n\nRoute profile: policy. "
+        "External semantic review follows the configured policy. "
+        f"{disclosure.sentence}\n"
+    )
+    assert server_instructions("strict", semantic_destination=disclosure) == strict_instructions
+    assert DISCLOSURE_PREFIX not in server_instructions()
+    assert DISCLOSURE_PREFIX not in strict_instructions
 
     with pytest.raises(KeyError, match="unregistered_tool_descriptor") as captured:
         descriptor_for("secret-tool")
@@ -803,9 +820,26 @@ def test_advertised_surface_honors_instructions_and_aggregate_budgets() -> None:
     advertised tool, so an unbounded edit here is multiplied, not merely added."""
 
     profiles: tuple[McpRouteProfile, ...] = ("policy", "strict")
+    # #479: the policy route appends a runtime-composed destination disclosure of at most
+    # MAX_DISCLOSURE_ENCODED_BYTES. The packaged text is held to the original bound on its own,
+    # and the longest admissible disclosure is charged against the widened bound.
+    longest = SemanticDestinationDisclosure(
+        "external",
+        DISCLOSURE_PREFIX + "x" * (MAX_DISCLOSURE_ENCODED_BYTES - len(DISCLOSURE_PREFIX)),
+    )
+    assert len(longest.sentence.encode("utf-8")) == MAX_DISCLOSURE_ENCODED_BYTES
     for profile in profiles:
         metrics = advertised_surface_metrics(profile)
         assert metrics["tool_count"] == len(_EXPECTED_TOOL_NAMES)
+        assert (
+            metrics["instructions_encoded_bytes"]
+            <= (SERVER_INSTRUCTIONS_BUDGET["packaged_max_encoded_bytes"])
+        ), f"{profile} packaged initialize instructions exceed their reviewed budget"
+        assert (
+            metrics["replicated_encoded_bytes"]
+            <= (ADVERTISED_SURFACE_BUDGET["packaged_max_encoded_bytes"])
+        ), f"{profile} packaged advertised surface exceeds its reviewed budget"
+        metrics = advertised_surface_metrics(profile, semantic_destination=longest)
         assert (
             metrics["instructions_encoded_bytes"] <= SERVER_INSTRUCTIONS_BUDGET["max_encoded_bytes"]
         ), f"{profile} initialize instructions exceed their reviewed budget"

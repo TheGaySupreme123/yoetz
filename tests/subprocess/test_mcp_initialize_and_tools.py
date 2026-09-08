@@ -11,9 +11,13 @@ from typing import cast
 import pytest
 from mcp import types
 
-from yoetz.mcp.descriptors import INITIALIZE_GUIDANCE_URIS, TOOL_DESCRIPTORS
+from yoetz.mcp.descriptors import INITIALIZE_GUIDANCE_URIS, TOOL_DESCRIPTORS, server_instructions
 from yoetz.mcp.resources import GUIDANCE_RESOURCES
 from yoetz.mcp.resources import read_resource as read_guidance_resource
+from yoetz.mcp.semantic_destination import (
+    DISCLOSURE_PREFIX,
+    read_semantic_destination_disclosure,
+)
 from yoetz.mcp.server import BRIDGE_RUNTIME, list_resources, list_tools
 
 
@@ -152,6 +156,10 @@ async def test_static_inventory_is_exact_and_verified() -> None:
     assert "yoetz://guidance/workflow.md" in BRIDGE_RUNTIME.instructions
     assert "yoetz://guidance/coverage-and-receipts.md" in BRIDGE_RUNTIME.instructions
     assert "Route profile: policy." in BRIDGE_RUNTIME.instructions
+    # #479: the policy bridge names its startup-read semantic destination (or states that it is
+    # unknown or none); the strict route never carries the passage.
+    assert DISCLOSURE_PREFIX in BRIDGE_RUNTIME.instructions
+    assert DISCLOSURE_PREFIX not in server_instructions("strict")
     assert "Do not call `resources/list` or `list_mcp_resources` to find Yoetz guidance" in (
         BRIDGE_RUNTIME.instructions
     )
@@ -171,7 +179,16 @@ def test_raw_initialize_lists_exact_capabilities_tools_and_resources() -> None:
         "resources": {"subscribe": False, "listChanged": False},
         "tools": {"listChanged": False},
     }
-    assert initialize["instructions"] == BRIDGE_RUNTIME.instructions
+    # #479: the child bridge renders its destination disclosure from the configuration visible
+    # in the environment it was spawned with, so the expected string is rendered from that same
+    # environment here rather than taken from the import-time module constant.
+    instructions = cast(str, initialize["instructions"])
+    assert instructions == server_instructions(
+        "policy", semantic_destination=read_semantic_destination_disclosure()
+    )
+    assert instructions.startswith(
+        BRIDGE_RUNTIME.instructions.partition("\n\nRoute profile: policy. ")[0]
+    )
 
     tool_result = cast(dict[str, object], by_id[2]["result"])
     advertised = cast(list[dict[str, object]], tool_result["tools"])

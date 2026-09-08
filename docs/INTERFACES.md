@@ -4754,12 +4754,24 @@ facade and are never MCP tools.
   operations plus read-only `read_guidance`), dispatch, prevalidated fallbacks
   (`LAST_RESORT_INTERNAL_ERROR_RESULT`), the initialize `instructions` string, a read-only
   guidance resource registry, and one `ServiceClient`; it owns no runtime/application/provider/key
-  state. `read_guidance` does not use the service client.
+  state. `read_guidance` does not use the service client. On the policy route
+  `build_bridge_runtime` reads the service configuration once at startup, through the same
+  tolerant loader the logging sink uses, only to render the semantic destination disclosure
+  (issue #479); it keeps no configuration state and the strict route never reads it.
 - `mcp/descriptors.py`: the one owner of every agent-read string on the MCP surface — the six
   workflow tool names, `read_guidance`, descriptions, and annotations, plus the `instructions`
   text. All are loaded from the
   packaged `guidance/` resources and verified against the resource manifest before use; none is
-  composed at runtime from user, task, provider, or environment values. Shared values are
+  composed at runtime from user, task, provider, or environment values, with one typed exception:
+  the policy-route semantic destination disclosure (issue #479, ADR-018 destination-disclosure
+  amendment), which `mcp/semantic_destination.py` renders from validated configuration through a
+  closed catalog (`BUNDLED_ENDPOINT_HOSTS`, `DISCLOSABLE_PROVIDER_IDS`, `DISCLOSURE_PREFIX`,
+  `MAX_DISCLOSURE_ENCODED_BYTES`, `disclose_semantic_destination()`,
+  `read_semantic_destination_disclosure()`) and hands to `server_instructions()` only as a
+  `SemanticDestinationDisclosure`. Absent or invalid configuration renders as unknown, an
+  off-catalog endpoint profile as an unknown host, an unlisted provider id as unlisted, and a
+  configured fallback endpoint beside the primary; strict instructions never carry it. Shared
+  values are
   `ToolDescriptor`, `TOOL_DESCRIPTORS` (frozen `policy|strict` sets, each in the same order
   `tools/list` returns), `TOOL_DESCRIPTOR_DIGESTS`, `TOOL_DESCRIPTOR_SET_DIGEST`,
   `INITIALIZE_GUIDANCE_URIS`, `server_instructions()`, `ORDINARY_MCP_PUBLISH_EVENT_FAMILIES`,
@@ -4770,7 +4782,11 @@ facade and are never MCP tools.
   `instructions` string once per advertised tool — Codex copies it into every tool `description` —
   so `SERVER_INSTRUCTIONS_BUDGET` bounds that string per route profile and
   `ADVERTISED_SURFACE_BUDGET` bounds the aggregate of instructions-per-tool plus every description
-  plus every advertised input schema (issue #300). `ToolDescriptor.input_schema` is the tools/list presentation
+  plus every advertised input schema (issue #300). Each budget carries `packaged_max_encoded_bytes`
+  for the packaged text alone and `max_encoded_bytes`, which adds the disclosure ceiling (once per
+  advertised tool in the aggregate); `advertised_surface_metrics()` accepts the disclosure so the
+  longest admissible passage can be measured. `ToolDescriptor.input_schema` is the tools/list
+  presentation
   projection (inlined common shapes, ordinary publish event families, minimal examples), preserving
   every catalogued schema-version branch for each advertised ordinary event family. Every shipped
   worked example validates against that presentation schema as well as catalog admission;
@@ -4783,7 +4799,8 @@ facade and are never MCP tools.
   tool carries an explicit `idempotentHint=true`. Policy `check` carries `openWorldHint=true`;
   strict `check` carries `openWorldHint=false` and names the external-semantic ceiling. The hint is
   inspectable metadata, not enforcement; the route constraint above is authoritative. Initialize
-  instructions and MCP-originated `status(view=versions)` disclose the active profile. No
+  instructions and MCP-originated `status(view=versions)` disclose the active profile; policy-route
+  initialize instructions additionally disclose the startup-read semantic destination. No
   descriptor carries a
   `destructiveHint`, because no Yoetz operation deletes recorded evidence. Descriptor and
   instruction text is bound by the same honesty lint as the guidance references: it may not say

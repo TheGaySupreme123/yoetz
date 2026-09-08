@@ -178,6 +178,13 @@ whose bundled policy requires authorization for sensitive egress to name payload
 "from trusted user content" — no descriptor wording can satisfy it. `approval_mode = "approve"`
 for one tool means the reviewer is never invoked for it; `prompt` forces it every time.
 
+Codex copies the initialize `instructions` into every tool description, so the guardian reads
+them. Since issue #479 the policy-route instructions name the semantic destination read at bridge
+startup (provider, endpoint profile, and host, or the Codex runtime class) and the payload bound.
+That gives the reviewer a named destination to score instead of nothing; it is still not trusted
+user content, admits nothing, and goes stale until Codex restarts the bridge. Admission remains
+the lever.
+
 Host admission (issue #467) writes the per-tool override into the trusted project's
 `.codex/config.toml`, which Codex loads only when the project is trusted, deep-merges over the
 user-level `[mcp_servers.yoetz]` (`codex-rs/config/src/merge.rs`), and which cannot carry
