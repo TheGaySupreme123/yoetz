@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import heapq
 from asyncio import Future
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -436,22 +437,21 @@ class ObservationOutboxSweeper:
         for workspace in lifecycle_workspaces:
             for row in self.local.list_pending_outbox_rows(workspace):
                 lanes.setdefault((workspace, row.codex_session_id), []).append(row)
-        selected_per_lane = {lane: 0 for lane in lanes}
+        # UTF-8 byte order equals string order for encodable strings. Validate once
+        # so malformed keys still fail, without retaining duplicate encoded keys.
+        for workspace, session in lanes:
+            workspace.encode()
+            session.encode()
+        # Only the selected lane changes priority. Its selection count is also its
+        # FIFO cursor, avoiding list-head shifts and a second per-lane count map.
+        pending = [(rows[0].attempts, 0, lane[0], lane[1], rows) for lane, rows in lanes.items()]
+        del lanes
+        heapq.heapify(pending)
         selected: list[tuple[str, ObservationOutboxRow]] = []
-        while lanes and len(selected) < self.limit:
-            lane = min(
-                lanes,
-                key=lambda item: (
-                    lanes[item][0].attempts,
-                    selected_per_lane[item],
-                    item[0].encode(),
-                    item[1].encode(),
-                ),
-            )
-            workspace, _ = lane
-            queue = lanes[lane]
-            selected.append((workspace, queue.pop(0)))
-            selected_per_lane[lane] += 1
-            if not queue:
-                lanes.pop(lane)
+        while pending and len(selected) < self.limit:
+            _, count, workspace, session, queue = heapq.heappop(pending)
+            selected.append((workspace, queue[count]))
+            count += 1
+            if count < len(queue):
+                heapq.heappush(pending, (queue[count].attempts, count, workspace, session, queue))
         return tuple(selected), lifecycle_workspaces

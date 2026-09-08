@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
-from typing import cast
+from typing import Literal, cast
 
 import pytest
 
@@ -140,14 +140,16 @@ def _application(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("method", ("publish_work", "check", "respond", "status", "receipt"))
+@pytest.mark.parametrize("identity_kind", ("git_common_root", "directory"))
 async def test_task_workflows_reject_cross_repository_context_before_execution(
     method: str,
+    identity_kind: Literal["git_common_root", "directory"],
 ) -> None:
     commitment_a = "hmac-sha256:" + "a" * 64
     commitment_b = "hmac-sha256:" + "b" * 64
     catalog = _Catalog(_route(repository_privacy_commitment=commitment_a))
     app = _application(catalog, enforce_repository_identity=True)
-    context_b = RepositoryPrivacyContext(commitment_b, "git_common_root")
+    context_b = RepositoryPrivacyContext(commitment_b, identity_kind)
     request_type = {
         "publish_work": PublishWorkRequest,
         "check": CheckRequest,
@@ -166,6 +168,9 @@ async def test_task_workflows_reject_cross_repository_context_before_execution(
     assert failure.value.code is PublicErrorCode.SESSION_CONFLICT
     assert failure.value.safe_details == {"reason_code": "repository_identity_mismatch"}
     assert commitment_a not in failure.value.message
+    assert commitment_b not in failure.value.message
+    assert f"current identity kind: {identity_kind}" in failure.value.message
+    assert "original workspace directory" in failure.value.message
     assert catalog.calls == 1
 
 
@@ -191,6 +196,8 @@ async def test_task_workflows_name_a_missing_repository_context_distinctly(metho
     assert failure.value.code is PublicErrorCode.SESSION_CONFLICT
     assert failure.value.retryable is False
     assert failure.value.safe_details == {"reason_code": "repository_identity_required"}
+    assert "no repository context" in failure.value.message
+    assert "original workspace directory" in failure.value.message
     assert catalog.calls == 1
 
 

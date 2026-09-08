@@ -33,10 +33,9 @@ def _ambient_config_environment(  # pyright: ignore[reportUnusedFunction]
     """Resolve the default evaluator home from an empty configuration, not the ambient one.
 
     ``default_codex_home`` reads the process environment through the strict loader, which
-    refuses every unknown ``YOETZ_``-prefixed variable. The CI unit job exports
-    ``YOETZ_DENY_NETWORK=1`` for the whole job and a developer machine carries its own
-    ``config.toml``; neither is configuration resolution under test here, so every case in this
-    module starts from no ``YOETZ_`` variables and a config path that does not exist.
+    refuses every unknown ``YOETZ_``-prefixed variable. A developer machine can carry
+    configuration overrides and its own ``config.toml``; neither is under test here, so every
+    case starts from no ``YOETZ_`` variables and a config path that does not exist.
     """
 
     for name in tuple(os.environ):

@@ -129,7 +129,7 @@ jobs:
 
       - name: Validate schema $id/$ref resolution from the local manifest (network denied)
         env:
-          YOETZ_DENY_NETWORK: "1"
+          YZCI_DENY_NETWORK: "1"
         run: |
           uv run --locked pytest \
             tests/conformance/surfaces \
@@ -301,7 +301,7 @@ jobs:
           echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
           echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
           echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
-          echo "YOETZ_DENY_NETWORK=1" >> "$GITHUB_ENV"
+          echo "YZCI_DENY_NETWORK=1" >> "$GITHUB_ENV"
 
       - name: Unit, property, and conformance (bounded, excludes fault/soak/live)
         run: |
@@ -345,7 +345,7 @@ jobs:
           echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
           echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
           echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
-          echo "YOETZ_DENY_NETWORK=1" >> "$GITHUB_ENV"
+          echo "YZCI_DENY_NETWORK=1" >> "$GITHUB_ENV"
 
       - name: Assert exact locked APSW/SQLite identity before tests
         run: |
@@ -428,7 +428,7 @@ jobs:
           echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
           echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
           echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
-          echo "YOETZ_DENY_NETWORK=1" >> "$GITHUB_ENV"
+          echo "YZCI_DENY_NETWORK=1" >> "$GITHUB_ENV"
           echo "YOETZ_CANDIDATE_PYTHON=${{ runner.temp }}/subprocess-venv/bin/python" >> "$GITHUB_ENV"
 
       - name: Bounded console/module/MCP subprocess cases (excludes full kill matrix)
@@ -498,7 +498,7 @@ jobs:
           echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
           echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
           echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
-          echo "YOETZ_DENY_NETWORK=1" >> "$GITHUB_ENV"
+          echo "YZCI_DENY_NETWORK=1" >> "$GITHUB_ENV"
 
       - name: Run import, help, version --json, and strict-local vertical slice
         run: |

@@ -72,8 +72,9 @@ ripple below. Full map: [`docs/architecture.md`](docs/architecture.md); shared v
    (`AF_UNIX path too long`).
 4. **Edit sources, not mirrors.** `guidance/`, `schemas/`, `migrations/`, `support/`, and
    `skills/codex/` at the repo root are the sources; `src/yoetz/resources/` and the committed
-   `.agents/` trees are generated. `scripts/sync_resource_ripple.py` converges the package mirror
-   but does not re-render `.agents/`; `tests/packaging/test_committed_*_tree.py` gates both.
+   `.agents/` trees are generated. `scripts/sync_resource_ripple.py --write` converges the package
+   mirror plus `.agents/plugins/yoetz` and `.agents/skills/yoetz`; `--check` and the committed-tree
+   packaging tests gate all three. Repository generation never targets an installed host home.
 
 ## Hit every surface
 

@@ -72,7 +72,7 @@ its own authentication in the dedicated home; that is separate from Yoetz config
 binding while preserving the home and installation.
 
 The initial closed cell is Codex npm `0.150.1` on macOS arm64, capability
-`codex-evaluator/0.150.1/v1`. The selected native binary digest, app-server v2 schema digest,
+`codex-evaluator/0.150.1/v2`. The selected native binary digest, app-server v2 schema digest,
 capability-cell identity digest and evidence expiry, strict configuration digest, model, reasoning
 effort, and dedicated owner-private `CODEX_HOME` are bound in nonsecret config and rechecked before
 every attempt. Expired capability evidence fails before a child starts. A shell alias, neighboring

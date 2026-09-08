@@ -779,9 +779,22 @@ class Application:
             # repository than the route" without disclosing either commitment
             # (issue #578): a hook status probe sent without a workspace was
             # otherwise indistinguishable from a replaced session.
+            if repository_privacy_context is None:
+                message = (
+                    "The request has no repository context. Run from the original workspace "
+                    "directory or reconnect the host to that workspace before retrying."
+                )
+            else:
+                message = (
+                    "The request's repository context does not match the task attachment "
+                    f"(current identity kind: {repository_privacy_context.identity_kind}). "
+                    "Run from the original workspace directory or reconnect the host to that "
+                    "workspace before retrying. If the original directory is unavailable, "
+                    "this operation cannot be inspected through the task workflow."
+                )
             raise PublicOperationError(
                 PublicErrorCode.SESSION_CONFLICT,
-                "The requested task attachment conflicts.",
+                message,
                 False,
                 safe_details={
                     "reason_code": (

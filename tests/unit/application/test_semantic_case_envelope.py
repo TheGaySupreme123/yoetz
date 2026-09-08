@@ -8,12 +8,13 @@ run that code, so four PRs shipped over it.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from typing import cast
 
 import pytest
 
 from builders.large_semantic_cases import large_case
+from yoetz.application import semantic_case as semantic_case_module
 from yoetz.application.check import (
     CheckScope,
     allocate_findings,
@@ -39,7 +40,7 @@ from yoetz.domain.privacy import (
 )
 from yoetz.kernel.deterministic_checks import DeterministicCase
 from yoetz.ports.semantic import SemanticCase
-from yoetz.protocol.canonical import JsonValue, strict_json_parse
+from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from yoetz.protocol.ids import IdKind, new_id
 
 _SCOPE = AuthorizationScope(
@@ -87,6 +88,117 @@ def _parsed(envelope: bytes) -> Mapping[str, JsonValue]:
     document = strict_json_parse(envelope)
     assert isinstance(document, Mapping)
     return cast(Mapping[str, JsonValue], document)
+
+
+def _original_reduction_states(case: SemanticCase) -> Iterator[bytes]:
+    """The original greedy row-removal sequence, independent of the search algorithm."""
+    module = semantic_case_module
+    envelope = module._case_envelope_json(case)  # pyright: ignore[reportPrivateUsage]
+    counts = {
+        "assessment_links_stripped_count": 0,
+        "catalog_dropped_count": 0,
+        "change_observations_dropped_count": 0,
+        "deterministic_assessments_dropped_count": 0,
+        "omissions_dropped_count": 0,
+        "targeted_excerpts_dropped_count": 0,
+    }
+
+    def encoded() -> bytes:
+        module._set_selection_accounting(envelope, counts)  # pyright: ignore[reportPrivateUsage]
+        return canonical_encode(envelope)
+
+    yield encoded()
+    counts["assessment_links_stripped_count"] += module._strip_assessment_links(envelope)  # pyright: ignore[reportPrivateUsage]
+    yield encoded()
+    packet = cast(dict[str, JsonValue], envelope["review_packet"])
+    for key in (
+        "change_observations",
+        "targeted_excerpts",
+        "omissions",
+        "deterministic_assessments",
+    ):
+        values = packet.get(key)
+        if type(values) is not list:
+            continue
+        rows = cast(list[JsonValue], values)
+        while rows:
+            rows = rows[:-1]
+            packet[key] = rows
+            counts[f"{key}_dropped_count"] += 1
+            yield encoded()
+    while module._drop_catalog_row(envelope):  # pyright: ignore[reportPrivateUsage]
+        counts["catalog_dropped_count"] += 1
+        yield encoded()
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        ReviewContextProfile.STRUCTURAL,
+        ReviewContextProfile.GOAL_AWARE,
+        ReviewContextProfile.ASSISTED,
+        ReviewContextProfile.EXPANDED,
+    ],
+)
+def test_bounding_matches_original_bytes_at_reduction_boundaries(
+    monkeypatch: pytest.MonkeyPatch, profile: ReviewContextProfile
+) -> None:
+    case = _semantic(profile)
+    states = tuple(_original_reduction_states(case))
+    indices = {
+        0,
+        1,
+        2,
+        9,
+        10,
+        11,
+        len(states) // 3,
+        2 * len(states) // 3,
+        len(states) - 2,
+        len(states) - 1,
+    }
+    bounds = {
+        len(states[index]) + delta
+        for index in indices
+        if index < len(states)
+        for delta in (-1, 0, 1)
+    }
+    for bound in sorted(bounds):
+        monkeypatch.setattr(semantic_case_module, "MAX_EGRESS_ENVELOPE_BYTES", bound)
+        expected = next((state for state in states if len(state) <= bound), None)
+        if expected is None:
+            with pytest.raises(SemanticCaseTooLarge, match="semantic_case_envelope_too_large"):
+                bounded_case_envelope(case)
+        else:
+            assert bounded_case_envelope(case) == expected
+
+
+def test_packet_search_avoids_full_encode_per_removed_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    case = _semantic(ReviewContextProfile.EXPANDED)
+    source = semantic_case_module._case_envelope_json(case)  # pyright: ignore[reportPrivateUsage]
+    packet = cast(dict[str, JsonValue], source["review_packet"])
+    packet["change_observations"] = [{"note": "synthetic" * 100} for _ in range(64)]
+
+    def envelope_for(_case: SemanticCase) -> dict[str, JsonValue]:
+        return source
+
+    monkeypatch.setattr(semantic_case_module, "_case_envelope_json", envelope_for)
+    states = tuple(_original_reduction_states(case))
+    # The independent oracle mutated its private envelope; supply a fresh copy for production.
+    source = cast(dict[str, JsonValue], strict_json_parse(states[0]))
+    bound = len(states[34])
+    expected = next(state for state in states if len(state) <= bound)
+    monkeypatch.setattr(semantic_case_module, "MAX_EGRESS_ENVELOPE_BYTES", bound)
+    calls = 0
+
+    def counting_encode(value: JsonValue) -> bytes:
+        nonlocal calls
+        calls += 1
+        return canonical_encode(value)
+
+    monkeypatch.setattr(semantic_case_module, "canonical_encode", counting_encode)
+    assert bounded_case_envelope(case) == expected
+    assert calls <= 10
 
 
 @pytest.mark.parametrize(
