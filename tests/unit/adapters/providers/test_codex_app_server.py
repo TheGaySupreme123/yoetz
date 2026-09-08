@@ -1123,7 +1123,7 @@ async def test_malformed_jsonl_is_transport_failure_even_after_acknowledgement(
         process=cast(asyncio.subprocess.Process, process),
         workdir=Path("/unused-test-workdir"),
         stderr_task=asyncio.create_task(stderr_drain()),
-        pending_notifications=[],
+        pending_notifications=deque(),
     )
     with pytest.raises(ValueError, match="^codex_app_server_message_invalid$") as error:
         await runtime.read(1)
@@ -1751,7 +1751,7 @@ async def test_buffered_notifications_drain_before_live_events_with_the_same_lim
     runtime = BufferedRuntime(_profile())
     result = await _evaluate(monkeypatch, runtime)
     if buffered_count == 4096:
-        assert type(result) is SemanticResultInvalid
+        assert type(result) is SemanticResultUnavailable
         assert result.provenance.runtime_evidence is not None
         assert result.provenance.runtime_evidence.failure_stage == "event_limit"
         assert runtime.reads == 0
