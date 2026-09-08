@@ -327,15 +327,6 @@ configuration; swapping the primary keeps both bindings and both approvals.
    expiry records `provider_timeout`. If provider-result provenance is unavailable on recovery,
    the public result uses `receipt_persistence_unknown` while retaining the original durable reason.
    Retained provider-result objects are recovered when their status and reason match that row.
-   **Lease/recovery amendment, 2026-09-07 (#616, #620):** live semantic operation and job leases
-   use the authenticated execution snapshot's total expiry plus five seconds for local cleanup,
-   rather than a renewable heartbeat. The current two-endpoint maximum makes that live bound
-   at most 605 seconds; a crash can consequently delay reclaim until that bound. Claim/reclaim
-   retains an existing `started` or `response_durable` attempt and its physical request identity.
-   A saved response is selected and recovered before any new attempt is considered. After the
-   execution bound, an already reclaimed ordinary operation lease may perform bounded local
-   terminal recovery; it cannot renew semantic execution or dispatch after the immutable provider
-   deadline. Provider deadlines and human approval expiry remain separate from lease ownership.
 4. **Every fallback attempt is a fresh physical attempt** under ADR-009: its own privacy
    evaluation against the exact fallback binding, authorization, dispatch identity, credential
    handle or `ExternalRuntimeAuthority`, and privacy receipt. Under `confirm_every_request` it

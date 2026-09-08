@@ -266,7 +266,7 @@ class _DeliveryFacts:
 
 @dataclass(frozen=True, slots=True)
 class _ContentCaptureFacts:
-    """Requested ordinary profiles and their current local configuration fences."""
+    """Requested native profiles and the profiles currently able to capture."""
 
     requested_profiles: tuple[str, ...]
     effective_profiles: tuple[str, ...]
@@ -394,8 +394,6 @@ def observe_status(
             {
                 "workspace_commitment": commitment,
                 "consent": consent_label,
-                "content_capture_scope": "ordinary_profiles",
-                "codex_hook_capture_scope": "observation_consent",
                 "content_capture_profiles": content_profiles,
                 "effective_content_capture_profiles": content_facts.effective_profiles,
                 "content_capture_enabled": content_facts.enabled,
@@ -422,7 +420,6 @@ def observe_status(
     payload: dict[str, JsonValue] = {
         "workspace_commitment": commitment,
         "consent": consent_label,
-        "content_capture_scope": "ordinary profiles; Codex hooks follow observation consent",
         "content_profiles": ",".join(content_profiles) if content_profiles else "none",
         "effective_content_profiles": (
             ",".join(content_facts.effective_profiles)
@@ -786,8 +783,6 @@ def enable_observation_content(
             {
                 "workspace_commitment": commitment,
                 "content_capture_profile": profile,
-                "content_capture_scope": "ordinary_profiles",
-                "codex_hook_capture_scope": "observation_consent",
                 "content_capture_profiles": content_facts.requested_profiles,
                 "effective_content_capture_profiles": content_facts.effective_profiles,
                 "consent_active": content_facts.consent_active,
@@ -825,8 +820,6 @@ def disable_observation_content(
             {
                 "workspace_commitment": commitment,
                 "content_capture_profile": profile,
-                "content_capture_scope": "ordinary_profiles",
-                "codex_hook_capture_scope": "observation_consent",
                 "content_capture_profiles": content_facts.requested_profiles,
                 "effective_content_capture_profiles": content_facts.effective_profiles,
                 "consent_active": content_facts.consent_active,
@@ -853,8 +846,6 @@ def observation_content_status(
     content_facts = _content_capture_facts(store, commitment)
     payload = {
         "workspace_commitment": commitment,
-        "content_capture_scope": "ordinary_profiles",
-        "codex_hook_capture_scope": "observation_consent",
         "content_capture_profiles": content_facts.requested_profiles,
         "effective_content_capture_profiles": content_facts.effective_profiles,
         "consent_active": content_facts.consent_active,
@@ -865,7 +856,7 @@ def observation_content_status(
         _emit(payload, json_output=True)
     else:
         typer.echo(
-            "observation_content_capture_status:scope=ordinary_profiles; "
+            "observation_content_capture_status:"
             + (", ".join(content_facts.effective_profiles) if content_facts.enabled else "disabled")
             + " (configured: "
             + (
@@ -873,8 +864,7 @@ def observation_content_status(
                 if content_facts.requested_profiles
                 else "none"
             )
-            + "); Codex hook capture follows observation consent. "
-            "This status does not prove captured evidence or semantic selection."
+            + ")"
         )
     return 0
 

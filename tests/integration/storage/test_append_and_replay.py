@@ -15,7 +15,6 @@ from pathlib import Path
 import apsw
 import pytest
 
-import yoetz.adapters.memory.ledger as memory_ledger_module
 import yoetz.adapters.sqlite.repository as sqlite_repository
 from builders.ledger_adapters import (
     FixedClock,
@@ -29,18 +28,9 @@ from yoetz.adapters.memory.ledger import MemoryLedgerAdapter, MemoryLedgerState
 from yoetz.adapters.sqlite.migrations import initialize_bundle
 from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.domain.events import EventDraft, LedgerRecord, UnknownEvent, encode_payload
-from yoetz.domain.values import (
-    Actor,
-    ActorType,
-    Frontier,
-    actor_id,
-    event_id,
-    format_rfc3339_millis,
-    object_id,
-    parse_rfc3339_millis,
-)
+from yoetz.domain.values import Frontier, event_id, object_id, parse_rfc3339_millis
 from yoetz.kernel.projections import ProjectionState, projection_digest
-from yoetz.kernel.reducers import ReplayIndex, replay
+from yoetz.kernel.reducers import replay
 from yoetz.ports.ledger import (
     AppendCommand,
     AppendEntry,
@@ -53,7 +43,6 @@ from yoetz.ports.ledger import (
 )
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource
 from yoetz.protocol.canonical import canonical_digest, canonical_encode
-from yoetz.protocol.coverage import AuthorshipAssurance, PublicationChannel, coverage_for_channel
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 
 
@@ -346,157 +335,6 @@ async def test_same_and_equivalent_retry_is_stable() -> None:
     )
 
 
-async def _command_with_captured_artifact(
-    *, media_type: str = "application/vnd.yoetz.approved-check-evidence+json"
-) -> tuple[AppendCommand, MemoryObjects, ObjectRef]:
-    command, objects = command_from_records(replay_records("projection-rebuild")[:1])
-    staged = await objects.stage(
-        ObjectSource(data=b"approved-check-result", declared_size=21),
-        ObjectMetadata(
-            ObjectKind.CAPTURED_CONTENT,
-            media_type,
-            command.task_id,
-            datetime(2026, 7, 19, 12, 0, tzinfo=UTC),
-        ),
-    )
-    artifact = await objects.finalize(staged)
-    entry = replace(
-        command.entries[0],
-        draft=replace(command.entries[0].draft, artifact_refs=(artifact.object_id,)),
-    )
-    return (
-        replace(command, entries=(entry,), artifact_object_refs=(artifact,)),
-        objects,
-        artifact,
-    )
-
-
-@pytest.mark.anyio
-async def test_append_command_rejects_duplicate_artifact_descriptors() -> None:
-    command, _objects, artifact = await _command_with_captured_artifact()
-    with pytest.raises(ValueError, match="invalid_ledger_port_value"):
-        replace(command, artifact_object_refs=(artifact, artifact))
-
-
-@pytest.mark.anyio
-async def test_sqlite_artifact_inventory_is_atomic_on_descriptor_conflict() -> None:
-    command, _objects, artifact = await _command_with_captured_artifact()
-    db = apsw.Connection(":memory:")
-    ledger = sqlite_for(command, _objects, db)
-    db.execute(
-        "INSERT INTO objects(object_id,kind,plaintext_size,commitment,envelope_digest,"
-        "encryption_format,key_slot,state,durable_at) VALUES(?,?,?,?,?,?,?,'present',?)",
-        (
-            artifact.object_id,
-            artifact.metadata.kind.value,
-            artifact.plaintext_size,
-            "hmac-sha256:" + "0" * 64,
-            artifact.envelope_digest,
-            artifact.encryption_format,
-            artifact.key_slot,
-            format_rfc3339_millis(artifact.metadata.created_at),
-        ),
-    )
-    with pytest.raises(PublicOperationError) as failure:
-        await ledger.append_batch(command)
-    assert failure.value.code is PublicErrorCode.STORAGE_CORRUPT
-    assert db.execute("SELECT count(*) FROM events").fetchone() == (0,)
-    assert db.execute("SELECT count(*) FROM operations").fetchone() == (0,)
-    assert db.execute("SELECT count(*) FROM writers").fetchone() == (0,)
-    assert db.execute(
-        "SELECT commitment FROM objects WHERE object_id=?", (artifact.object_id,)
-    ).fetchone() == ("hmac-sha256:" + "0" * 64,)
-    assert artifact.object_id not in ledger._state.object_refs  # pyright: ignore[reportPrivateUsage]
-    db.close()
-
-
-@pytest.mark.anyio
-async def test_sqlite_replay_hydrates_authenticated_captured_media_type(tmp_path: Path) -> None:
-    """Replay must preserve an approved-check MIME from the authenticated object header."""
-
-    command, objects, artifact = await _command_with_captured_artifact()
-    path = tmp_path / "captured-approved-check.sqlite3"
-    ledger, db = file_sqlite_for(command, objects, path)
-    await ledger.append_batch(command)
-    db.close()
-
-    reopened, reopened_db = file_sqlite_for(command, objects, path)
-    try:
-        rows = tuple([row async for row in reopened.load_events(command.session_id)])
-        assert len(rows) == 1
-        hydrated = reopened._state.object_refs[artifact.object_id]  # pyright: ignore[reportPrivateUsage]
-        assert hydrated == artifact
-        assert hydrated.metadata.media_type == "application/vnd.yoetz.approved-check-evidence+json"
-    finally:
-        reopened_db.close()
-
-
-@pytest.mark.anyio
-async def test_sqlite_replay_hydrates_multiple_captured_artifacts(tmp_path: Path) -> None:
-    """Every distinct artifact descriptor survives append and replay in object-id order."""
-
-    command, objects, first = await _command_with_captured_artifact()
-    staged = await objects.stage(
-        ObjectSource(data=b"ordinary", declared_size=8),
-        ObjectMetadata(
-            ObjectKind.CAPTURED_CONTENT,
-            "application/vnd.yoetz.observation-content+json",
-            command.task_id,
-            datetime(2026, 7, 19, 12, 0, tzinfo=UTC),
-        ),
-    )
-    second = await objects.finalize(staged)
-    refs = tuple(sorted((first, second), key=lambda ref: ref.object_id.encode()))
-    entry = replace(
-        command.entries[0],
-        draft=replace(command.entries[0].draft, artifact_refs=tuple(ref.object_id for ref in refs)),
-    )
-    command = replace(command, entries=(entry,), artifact_object_refs=refs)
-    path = tmp_path / "captured-multiple.sqlite3"
-    ledger, db = file_sqlite_for(command, objects, path)
-    await ledger.append_batch(command)
-    db.close()
-
-    reopened, reopened_db = file_sqlite_for(command, objects, path)
-    try:
-        rows = tuple([row async for row in reopened.load_events(command.session_id)])
-        assert len(rows) == 1
-        hydrated = reopened._state.object_refs  # pyright: ignore[reportPrivateUsage]
-        assert tuple(hydrated[ref.object_id] for ref in refs) == refs
-    finally:
-        reopened_db.close()
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("failure", ("missing", "wrong_envelope_digest"))
-async def test_sqlite_replay_keeps_unavailable_optional_artifact_as_gap(
-    tmp_path: Path,
-    failure: str,
-) -> None:
-    """Missing or mismatched artifact envelopes do not make the accepted ledger unreadable."""
-
-    command, objects, artifact = await _command_with_captured_artifact()
-    path = tmp_path / f"captured-{failure}.sqlite3"
-    ledger, db = file_sqlite_for(command, objects, path)
-    await ledger.append_batch(command)
-    if failure == "missing":
-        objects._refs.pop(artifact.object_id, None)  # pyright: ignore[reportPrivateUsage]
-    else:
-        db.execute(
-            "UPDATE objects SET envelope_digest=? WHERE object_id=?",
-            ("sha256:" + "f" * 64, artifact.object_id),
-        )
-    db.close()
-
-    reopened, reopened_db = file_sqlite_for(command, objects, path)
-    try:
-        rows = tuple([row async for row in reopened.load_events(command.session_id)])
-        assert len(rows) == 1
-        assert artifact.object_id not in reopened._state.object_refs  # pyright: ignore[reportPrivateUsage]
-    finally:
-        reopened_db.close()
-
-
 @pytest.mark.anyio
 async def test_reused_request_with_changed_identity_conflicts() -> None:
     command, objects = command_from_records(replay_records("projection-rebuild")[:1])
@@ -669,100 +507,6 @@ async def test_cancelled_recovery_retry_reuses_one_replay(
     assert await retry is not None
     assert replay_calls == 1
     reopened_db.close()
-
-
-@pytest.mark.anyio
-async def test_cancelled_append_joins_offloop_replay_before_releasing_ledger_lock(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    command, objects = command_from_records(replay_records("projection-rebuild")[:1])
-    ledger = memory_for(command, objects)
-    original_replay = memory_ledger_module.replay_with_index
-    started = threading.Event()
-    release = threading.Event()
-    replay_threads: list[int] = []
-    calls = 0
-
-    def blocked_replay(records: tuple[LedgerRecord, ...]) -> tuple[ProjectionState, ReplayIndex]:
-        nonlocal calls
-        calls += 1
-        replay_threads.append(threading.get_ident())
-        if calls == 1:
-            started.set()
-            assert release.wait(timeout=2)
-        return original_replay(records)
-
-    monkeypatch.setattr(memory_ledger_module, "replay_with_index", blocked_replay)
-    event_loop_thread = threading.get_ident()
-    append = asyncio.create_task(ledger.append_batch(command))
-    assert await asyncio.to_thread(started.wait, 1)
-
-    ticks = 0
-    stop_heartbeat = asyncio.Event()
-
-    async def heartbeat() -> None:
-        nonlocal ticks
-        while not stop_heartbeat.is_set():
-            ticks += 1
-            await asyncio.sleep(0)
-
-    heartbeat_task = asyncio.create_task(heartbeat())
-    await asyncio.sleep(0)
-    append.cancel()
-    await asyncio.sleep(0)
-    append.cancel()
-
-    retry = asyncio.create_task(ledger.append_batch(command))
-    await asyncio.sleep(0)
-    assert not retry.done()
-    assert ticks > 0
-    release.set()
-    with pytest.raises(asyncio.CancelledError):
-        await append
-    assert (await retry).outcome == "accepted"
-    stop_heartbeat.set()
-    await heartbeat_task
-    assert replay_threads and all(thread_id != event_loop_thread for thread_id in replay_threads)
-
-
-@pytest.mark.anyio
-async def test_observation_append_extends_trusted_projection_off_loop(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    command, objects = command_from_records(replay_records("projection-rebuild")[:1])
-    observation = replace(
-        command,
-        entries=(
-            replace(
-                command.entries[0],
-                author=Actor(
-                    actor_id("yoetz:observation-coordinator"),
-                    ActorType.HARNESS,
-                    AuthorshipAssurance.HARNESS_OBSERVED,
-                ),
-                publication_channel=PublicationChannel.HOOK_OBSERVED,
-                coverage=coverage_for_channel(PublicationChannel.HOOK_OBSERVED),
-            ),
-        ),
-    )
-    ledger = memory_for(observation, objects)
-    original_extension = memory_ledger_module.replay_extension_with_index
-    loop_thread = threading.get_ident()
-    extension_threads: list[int] = []
-
-    def observed_extension(
-        prior_projection: ProjectionState,
-        prior_records: tuple[LedgerRecord, ...],
-        appended_records: tuple[LedgerRecord, ...],
-    ) -> tuple[ProjectionState, ReplayIndex]:
-        extension_threads.append(threading.get_ident())
-        return original_extension(prior_projection, prior_records, appended_records)
-
-    monkeypatch.setattr(memory_ledger_module, "replay_extension_with_index", observed_extension)
-    result = await ledger.append_batch(observation)
-
-    assert result.outcome == "accepted"
-    assert extension_threads and all(thread_id != loop_thread for thread_id in extension_threads)
 
 
 @pytest.mark.anyio

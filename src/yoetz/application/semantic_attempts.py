@@ -38,7 +38,7 @@ from yoetz.ports.ledger import (
 from yoetz.ports.objects import ObjectRef
 from yoetz.ports.semantic import Deadline
 from yoetz.protocol.canonical import JsonValue
-from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+from yoetz.protocol.errors import PublicOperationError
 from yoetz.protocol.models import VALID_SEMANTIC_REASONS, SemanticReason, SemanticStatus
 
 __all__ = [
@@ -937,8 +937,8 @@ async def run_durable_semantic_attempts(
     equal the primary's budget so the single-endpoint accounting stays the same function.
 
     Crash/replay after a terminal job row already exists recovers from durable state without
-    re-claiming. The check operation lease is renewed before each claim and after each provider
-    result; its bounded expiry is derived by the ledger from the frozen semantic execution.
+    re-claiming. The check operation lease is renewed around each claim/select so a configured
+    ``timeout_seconds`` longer than the 60s lease TTL cannot expire mid-operation.
     """
 
     if fallback is not None:
@@ -974,44 +974,8 @@ async def run_durable_semantic_attempts(
         )
 
     # Always refresh the check lease before recovery or the first claim so a long semantic
-    # deadline is not truncated by the 60-second operation-lease TTL. Once the authenticated
-    # semantic execution bound has passed, a reclaimed operation may still have a short local
-    # lease for closing a started attempt. That lease is cleanup-only: the immutable provider
-    # deadline below remains expired and the dispatch branch refuses to send anything.
-    local_cleanup_only = False
-    try:
-        await _renew()
-    except PublicOperationError as exc:
-        if not (
-            exc.code is PublicErrorCode.OPERATION_PENDING
-            and deadline.expired(now_monotonic())
-            and job.state == "leased"
-            and job.active_attempt_id is not None
-        ):
-            raise
-        current_job = await ledger.load_semantic_job(
-            current_lease.writer_id, current_lease.operation_id
-        )
-        if (
-            current_job is None
-            or current_job.state != "leased"
-            or current_job.active_attempt_id is None
-        ):
-            raise exc
-        current_attempt = next(
-            (
-                row
-                for row in await ledger.list_semantic_attempts(current_job.job_id)
-                if row.attempt_id == current_job.active_attempt_id
-            ),
-            None,
-        )
-        if current_attempt is None or current_attempt.state not in {"started", "response_durable"}:
-            raise exc
-        # The caller's job snapshot may be stale after a concurrent terminalization. Use the
-        # durable row that justified cleanup so a queued replacement cannot be claimed here.
-        job = current_job
-        local_cleanup_only = True
+    # deadline is not truncated by the 60-second operation-lease TTL.
+    await _renew()
 
     # Recover previously terminal jobs (crash after select_attempt / final FAILED before commit).
     if job.state in _TERMINAL_JOB_STATES:
@@ -1066,11 +1030,8 @@ async def run_durable_semantic_attempts(
             await _resolve_disclosure_wait_after_terminal(ledger, current_lease, job.job_id)
             return build_final(status, reason, last, await _accounting())
 
-        # Keep the operation lease alive across provider latency and backoff. A lease that was
-        # reclaimed after the provider deadline is usable only for the one local terminal write;
-        # renewing it would turn cleanup authority into a new provider lifetime.
-        if not local_cleanup_only:
-            await _renew()
+        # Keep the operation lease alive across provider latency and backoff.
+        await _renew()
         handle: SemanticAttemptHandle | None = None
         role: EndpointRole = "primary"
         codes_before: tuple[SemanticReason | None, ...] = ()
@@ -1088,46 +1049,6 @@ async def run_durable_semantic_attempts(
                     await sleep(min(0.05, remaining))
                 continue
             pending_claim_error = None
-            attempts = await ledger.list_semantic_attempts(job.job_id)
-            durable_response = next(
-                (
-                    row
-                    for row in attempts
-                    if row.attempt_id == handle.attempt_id and row.state == "response_durable"
-                ),
-                None,
-            )
-            if durable_response is not None:
-                if durable_response.result_object_ref is None:
-                    raise PublicOperationError(
-                        PublicErrorCode.STORAGE_CORRUPT,
-                        "semantic response durable row is missing its result object.",
-                        False,
-                    )
-                # The provider response was already authenticated and published before the
-                # crash. Select that exact object under the rebound lease and recover its
-                # judgment; no provider dispatch or new request identity is permitted here.
-                await ledger.select_attempt(
-                    current_lease, handle, durable_response.result_object_ref
-                )
-                recovered_job = await ledger.load_semantic_job(
-                    current_lease.writer_id, current_lease.operation_id
-                )
-                if recovered_job is None:
-                    raise PublicOperationError(
-                        PublicErrorCode.STORAGE_CORRUPT,
-                        "semantic job disappeared during response recovery.",
-                        False,
-                    )
-                return await _recover_terminal_job(
-                    ledger=ledger,
-                    lease=current_lease,
-                    job=recovered_job,
-                    max_retries=max_retries,
-                    fallback=fallback,
-                    recover_selected=recover_selected,
-                    build_final=build_final,
-                )
             if fallback is not None:
                 # The endpoint is a function of the rows before this ordinal, so a resumed
                 # ``started`` attempt goes back to the endpoint it was claimed for.
@@ -1173,12 +1094,19 @@ async def run_durable_semantic_attempts(
                 attempt_dispatch = dispatch_fallback
             if remaining <= 0.0:
                 # A resumed started attempt must not be sent after its frozen endpoint cutoff.
-                # A task-local awaiting row may be stale after the independent privacy audit
-                # consumed admission. It cannot prove that a resumed started attempt never
-                # dispatched. Preserve uncertainty without re-entering provider authorization;
-                # only a newly claimed attempt is a known pre-admission timeout here.
-                # Neither outcome licenses a retry or fallback dispatch.
-                uncertain = job.state == "leased" and last is None
+                # Preserve uncertainty for a prior started attempt unless an exact disclosure
+                # wait proves it had not dispatched. A newly claimed attempt is a known timeout.
+                # Neither outcome licenses a fallback dispatch here.
+                wait = await ledger.load_disclosure_wait(
+                    current_lease.writer_id, current_lease.operation_id
+                )
+                known_undispatched = (
+                    wait is not None
+                    and getattr(wait, "job_id", None) == job.job_id
+                    and getattr(wait, "attempt_id", None) == job.active_attempt_id
+                    and getattr(wait, "state", None) == "awaiting"
+                )
+                uncertain = job.state == "leased" and last is None and not known_undispatched
                 terminal_reason = (
                     SemanticReason.OUTCOME_UNKNOWN if uncertain else SemanticReason.PROVIDER_TIMEOUT
                 )

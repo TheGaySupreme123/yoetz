@@ -80,16 +80,11 @@ from yoetz.protocol.coverage import LedgerFreshness
 __all__ = [
     "EvidenceObjectSource",
     "ReplayIndex",
-    "build_replay_index",
     "empty_replay_index",
     "extend_replay_index",
     "invalidates_recorded_check",
     "is_material_event_family",
     "reduce_event",
-    "replay_with_index",
-    "replay_extension",
-    "replay_extension_with_index",
-    "validate_replay_index",
     "supersedes_recorded_check",
     "replay",
 ]
@@ -1236,152 +1231,9 @@ def reduce_event(
 def replay(events: Iterable[LedgerRecord]) -> ProjectionState:
     """Fold an already ledger-ordered iterable from genesis without sorting."""
 
-    projection, _index = replay_with_index(events)
-    return projection
-
-
-def replay_with_index(events: Iterable[LedgerRecord]) -> tuple[ProjectionState, ReplayIndex]:
-    """Fold an accepted prefix and retain the immutable reverse index used by the fold."""
-
     state = empty_projection_state()
     index = empty_replay_index()
     for event in events:
         index = extend_replay_index(index, event)
         state = reduce_event(state, event, index)
-    return state, index
-
-
-def build_replay_index(events: tuple[LedgerRecord, ...]) -> ReplayIndex:
-    """Build an immutable reverse index from one exact accepted prefix in linear time.
-
-    This uses the same chain, payload-owner, evidence-association, and redaction-root checks as
-    ``extend_replay_index`` while mutating local maps once.  The immutable ``ReplayIndex`` is
-    created only after the complete prefix has been checked, so callers can safely retain it
-    across the subsequent deterministic-capacity validation.
-    """
-
-    if type(events) is not tuple:
-        raise _corrupt()
-    frontier = 0
-    head_digest = "genesis"
-    payload_event_by_object: dict[ObjectId, EventId] = {}
-    evidence_sources_by_object: dict[ObjectId, tuple[EvidenceObjectSource, ...]] = {}
-    redaction_root_by_object: dict[ObjectId, EventId] = {}
-    for event in events:
-        _next_record(frontier, head_digest, event)
-        payload_object = event.payload_ref.object_id
-        if payload_object in payload_event_by_object:
-            raise _corrupt()
-        payload_event_by_object[payload_object] = event.event_id
-
-        if type(event) is AcceptedEvent and event.schema.name == "evidence_recorded":
-            logical_key = event.projection_locator.logical_key
-            if logical_key is None or len(event.artifact_refs) > 1:
-                raise _corrupt()
-            try:
-                evidence_key = evidence_id(logical_key)
-            except ValueError as exc:
-                raise _corrupt() from exc
-            if event.payload is not None:
-                payload = cast(EvidenceRecordedPayload, event.payload)
-                expected = (
-                    () if payload.captured_object_id is None else (payload.captured_object_id,)
-                )
-                if event.artifact_refs != expected:
-                    raise _corrupt()
-            for captured_object in event.artifact_refs:
-                association = EvidenceObjectSource(evidence_key, event.event_id)
-                current = evidence_sources_by_object.get(captured_object, ())
-                if association in current:
-                    raise _corrupt()
-                evidence_sources_by_object[captured_object] = tuple(
-                    sorted(
-                        (*current, association),
-                        key=lambda item: (
-                            _ascii_key(item.evidence_id),
-                            _ascii_key(item.source_event_id),
-                        ),
-                    )
-                )
-
-        if type(event) is AcceptedEvent and event.schema.name == "redaction_recorded":
-            targets = event.projection_locator.redaction_target_object_ids
-            if event.artifact_refs != targets or event.payload_ref.object_id in targets:
-                raise _corrupt()
-            if event.payload is not None:
-                payload = cast(RedactionRecordedPayload, event.payload)
-                if (
-                    payload.target_event_ids != event.projection_locator.redaction_target_event_ids
-                    or payload.target_object_ids != targets
-                ):
-                    raise _corrupt()
-            for target in targets:
-                redaction_root_by_object.setdefault(target, event.event_id)
-
-        frontier = event.ledger.ingestion_sequence
-        head_digest = event.entry_digest
-
-    return ReplayIndex(
-        frontier=frontier,
-        head_digest=head_digest,
-        payload_event_by_object=payload_event_by_object,
-        evidence_sources_by_object=evidence_sources_by_object,
-        redaction_root_by_object=redaction_root_by_object,
-    )
-
-
-def validate_replay_index(index: ReplayIndex, events: tuple[LedgerRecord, ...]) -> None:
-    """Validate that an immutable index belongs to one exact accepted prefix."""
-
-    if type(index) is not ReplayIndex or type(events) is not tuple:
-        raise _corrupt()
-    expected = build_replay_index(events)
-    if expected != index:
-        raise _corrupt()
-
-
-def replay_extension_with_index(
-    prior_projection: ProjectionState,
-    prior_records: tuple[LedgerRecord, ...],
-    appended_records: tuple[LedgerRecord, ...],
-) -> tuple[ProjectionState, ReplayIndex]:
-    """Extend a trusted projection and return the final immutable replay index with it."""
-
-    if (
-        type(prior_projection) is not ProjectionState
-        or type(prior_records) is not tuple
-        or type(appended_records) is not tuple
-    ):
-        raise _corrupt()
-    index = build_replay_index(prior_records)
-    if (
-        index.frontier != prior_projection.frontier
-        or index.head_digest != prior_projection.head_digest
-    ):
-        raise _corrupt()
-    state = prior_projection
-    for event in appended_records:
-        index = extend_replay_index(index, event)
-        state = reduce_event(state, event, index)
-    return state, index
-
-
-def replay_extension(
-    prior_projection: ProjectionState,
-    prior_records: tuple[LedgerRecord, ...],
-    appended_records: tuple[LedgerRecord, ...],
-) -> ProjectionState:
-    """Extend a trusted projection by folding only the newly appended records.
-
-    The prior records are still authenticated into a fresh reverse index, but their reducers do
-    not run again. Callers use this only after recovery or a prior append has established that the
-    supplied projection is the exact replay of ``prior_records``. Keeping the trust boundary
-    explicit prevents this helper from becoming a general replacement for genesis replay.
-    """
-
-    state, _index = replay_extension_with_index(
-        prior_projection,
-        prior_records,
-        appended_records,
-    )
     return state

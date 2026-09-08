@@ -980,7 +980,6 @@ async def test_coordinator_replays_content_commit_after_reply_is_lost(
             envelope: ObservationEnvelope,
             batch: MaterializedObservationBatch,
             *,
-            captured_content: tuple[object, ...] = (),
             legacy_session_id: str | None = None,
             legacy_writer_id: str | None = None,
             legacy_writer_routes: tuple[tuple[str, str], ...] = (),
@@ -989,7 +988,6 @@ async def test_coordinator_replays_content_commit_after_reply_is_lost(
             replay_draft_role_sets: tuple[tuple[str, ...], ...] = (),
         ) -> tuple[str, str, None, str, tuple[str, ...]]:
             del (
-                captured_content,
                 legacy_session_id,
                 legacy_writer_id,
                 legacy_writer_routes,

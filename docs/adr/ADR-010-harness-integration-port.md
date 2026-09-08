@@ -235,24 +235,6 @@ from crossing repository authorities. Generic MCP bridges keep their existing pr
 CWD behavior. The server still advertises only tools/resources: roots are a standard client-to-
 server handshake input, not a Yoetz tool or new server capability.
 
-**Amendment (2026-09-07, issue #616): Cursor root compatibility and explicit project selection.**
-The reviewed Cursor implementation emits absolute local filesystem paths in `roots/list.uri`,
-where the MCP SDK expects file URIs, and its shared MCP process can include roots from other open
-projects. The Cursor adapter accepts a strictly absolute local path as that host's compatibility
-shape, alongside local file URIs; every root still passes the same bounded safe canonicalization.
-Other URI schemes, malformed paths, unsafe roots, and invalid response shapes remain refusals.
-
-An owned project MCP registration renders `--project-root ${workspaceFolder}`. This is a startup
-selector, validated against the exact project registration, launcher, route, and directory/config
-identity. It selects one canonical repository from the active client's validated root inventory;
-the selected repository must be present in that inventory. It cannot supply authority when the
-client has no usable roots. Without a validated selector, the one-canonical-repository rule still
-applies. Empty or unsupported responses, request failure or timeout, mismatches, and changed
-registrations fail before the service handshake. Registration and selected-root identity are
-revalidated before each workflow call, and a change retires the bridge's client slot. Public
-workflow fields, hook payloads, environment guesses, and process CWD remain outside this decision.
-This adds no privacy grant or semantic admission: those checks retain their independent scope.
-
 **Amendment (ADR-012, 2026-07-21):** MCP server registration is added as a *sibling* port,
 `HarnessMcpPort` (`ports/harness_mcp.py`), with its own Codex adapters
 (`codex_discovery.py`, `codex_mcp.py`). It deliberately does not extend `IntegrationsPort`:
@@ -374,11 +356,6 @@ private SQL.
 Observation consent is project-level and separate from egress consent. The plaintext local boundary
 records a private workspace commitment, structural outbox/quarantine evidence, and encrypted object
 identities—never raw task content or a raw path in logs/status/SQLite.
-Semantic composition keeps this observation workspace commitment separate from the
-`TaskRoute.repository_privacy_commitment`: it derives the observation key only through the durable
-workspace-to-Yoetz-session route, verifies the route is for the exact runtime task, and repeats that
-check before disclosure. Missing or contradictory route membership is an explicit content gap; the
-privacy commitment is never used as an observation-workspace fallback.
 Hook ingress and every consent/control lifecycle entry point derive that commitment from one shared
 workspace canonicalizer: the nearest safe Git root for a Git subdirectory, or the exact safe
 directory for non-Git workspaces. Authority never searches ancestor commitments. Pre-existing

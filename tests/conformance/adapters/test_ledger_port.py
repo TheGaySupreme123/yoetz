@@ -60,7 +60,6 @@ from yoetz.ports.ledger import (
     ProjectionView,
     SelectedAttempt,
     SemanticAttemptHandle,
-    SemanticJobRecord,
 )
 from yoetz.ports.objects import (
     ObjectKind,
@@ -72,7 +71,7 @@ from yoetz.ports.objects import (
 )
 from yoetz.ports.runtime import OwnershipFence
 from yoetz.ports.semantic import SamplingParams
-from yoetz.protocol.canonical import JsonValue, canonical_encode
+from yoetz.protocol.canonical import canonical_encode
 from yoetz.protocol.coverage import (
     AuthorshipAssurance,
     Coverage,
@@ -860,65 +859,11 @@ async def _object_ref(
     adapter: MemoryLedgerAdapter | SqliteLedger,
     command: AppendCommand,
     kind: ObjectKind,
-    *,
-    semantic_case_digest: str | None = None,
-    semantic_case_primary_expires_at: str = "2026-07-19T12:04:00.000Z",
-    semantic_case_expires_at: str = "2026-07-19T12:05:00.000Z",
-    semantic_case_with_fallback: bool = False,
 ) -> ObjectRef:
     objects = adapter._objects  # pyright: ignore[reportPrivateUsage]
     assert objects is not None
-    payload = b"{}"
-    if kind is ObjectKind.SEMANTIC_CASE:
-        assert semantic_case_digest is not None
-        execution: dict[str, object] = {
-            "provider": {
-                "provider_id": "fake",
-                "model_id": "fake/model",
-                "endpoint_profile_id": "fake",
-                "endpoint_profile_version": "1.0.0",
-                "transport": "external",
-            },
-            "fallback_binding": None,
-            "fallback_plan": None,
-            "max_retries": 0,
-            "primary_expires_at": semantic_case_primary_expires_at,
-            "expires_at": semantic_case_expires_at,
-            "fallback_timeout_seconds": 60,
-        }
-        if semantic_case_with_fallback:
-            execution["fallback_binding"] = {
-                "provider_id": "fallback",
-                "model_id": "fallback/model",
-                "endpoint_profile_id": "fallback",
-                "endpoint_profile_version": "1.0.0",
-                "transport": "external",
-            }
-            execution["fallback_plan"] = {
-                "primary": {
-                    "provider_id": "fake",
-                    "model_id": "fake/model",
-                    "endpoint_profile_id": "fake",
-                    "endpoint_profile_version": "1.0.0",
-                    "max_retries": 0,
-                },
-                "fallback_max_retries": 0,
-                "primary_predispatch_reason": None,
-            }
-        payload = canonical_encode(
-            cast(
-                JsonValue,
-                {
-                    "schema": "yoetz.semantic-case/2",
-                    "case_id": "case_ledger_test",
-                    "case_digest": semantic_case_digest,
-                    "dependency_digest": "sha256:" + "1" * 64,
-                    "execution": execution,
-                },
-            )
-        )
     staged = await objects.stage(
-        ObjectSource(data=payload, declared_size=len(payload)),
+        ObjectSource(data=b"{}", declared_size=2),
         ObjectMetadata(
             kind,
             "application/json",
@@ -1038,12 +983,7 @@ async def test_repository_grant_suspension_rejects_wrong_phase_and_existing_job(
 
         job_id = f"req_00000000-0000-4000-8000-00000000004{offset}"
         lease = await _semantic_wait_lease(adapter, command, job_id)
-        case_ref = await _object_ref(
-            adapter,
-            command,
-            ObjectKind.SEMANTIC_CASE,
-            semantic_case_digest="sha256:" + "9" * 64,
-        )
+        case_ref = await _object_ref(adapter, command, ObjectKind.SEMANTIC_CASE)
         await adapter.enqueue_semantic_job(lease, "sha256:" + "9" * 64, case_ref)
         with pytest.raises(PublicOperationError) as existing_job:
             await adapter.suspend_check_for_repository_grant(lease)
@@ -1579,12 +1519,7 @@ async def test_invalid_semantic_outcome_commits_and_does_not_poison_later_checks
             CheckPhase.LOCAL_READY,
             CheckPhase.SEMANTIC_WAIT,
         )
-        case_ref = await _object_ref(
-            adapter,
-            command,
-            ObjectKind.SEMANTIC_CASE,
-            semantic_case_digest="sha256:" + "7" * 64,
-        )
+        case_ref = await _object_ref(adapter, command, ObjectKind.SEMANTIC_CASE)
         job = await adapter.enqueue_semantic_job(lease, "sha256:" + "7" * 64, case_ref)
         handle = await adapter.claim_semantic_job(lease, job.job_id)
         await adapter.record_attempt_outcome(
@@ -1855,12 +1790,7 @@ async def test_semantic_attempt_selection_contract() -> None:
             CheckPhase.LOCAL_READY,
             CheckPhase.SEMANTIC_WAIT,
         )
-        case_ref = await _object_ref(
-            adapter,
-            command,
-            ObjectKind.SEMANTIC_CASE,
-            semantic_case_digest="sha256:" + "7" * 64,
-        )
+        case_ref = await _object_ref(adapter, command, ObjectKind.SEMANTIC_CASE)
         job = await adapter.enqueue_semantic_job(lease, "sha256:" + "7" * 64, case_ref)
         handle = await adapter.claim_semantic_job(lease, job.job_id)
         response_ref = await _object_ref(adapter, command, ObjectKind.SEMANTIC_RESPONSE)
@@ -1902,327 +1832,13 @@ async def test_semantic_claim_resumes_same_started_attempt_for_owner() -> None:
             CheckPhase.LOCAL_READY,
             CheckPhase.SEMANTIC_WAIT,
         )
-        case_ref = await _object_ref(
-            adapter,
-            command,
-            ObjectKind.SEMANTIC_CASE,
-            semantic_case_digest="sha256:" + "7" * 64,
-        )
+        case_ref = await _object_ref(adapter, command, ObjectKind.SEMANTIC_CASE)
         job = await adapter.enqueue_semantic_job(lease, "sha256:" + "7" * 64, case_ref)
         first = await adapter.claim_semantic_job(lease, job.job_id)
         second = await adapter.claim_semantic_job(lease, job.job_id)
         assert first.attempt_id == second.attempt_id
         assert first.provider_request_id == second.provider_request_id
         assert first.attempt_ordinal == 1
-
-
-@pytest.mark.anyio
-async def test_expired_started_attempt_rebinds_once_in_each_real_ledger() -> None:
-    """A successor lease rebinds one started attempt without creating a duplicate."""
-
-    class _AdvancingClock:
-        def __init__(self) -> None:
-            self.now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
-
-        def now_utc(self) -> datetime:
-            return self.now
-
-        def monotonic_seconds(self) -> float:
-            return (self.now - datetime(2026, 7, 19, 12, 0, tzinfo=UTC)).total_seconds()
-
-    command = ledger_command(request_suffix="9")
-    request_id = "req_00000000-0000-4000-8000-000000000099"
-    request_digest = "sha256:" + "7" * 64
-    for adapter in (memory_ledger(command), sqlite_ledger(command)):
-        await adapter.append_batch(command)
-        lease = await _semantic_wait_lease(adapter, command, request_id)
-        case_ref = await _object_ref(
-            adapter,
-            command,
-            ObjectKind.SEMANTIC_CASE,
-            semantic_case_digest="sha256:" + "7" * 64,
-        )
-        job = await adapter.enqueue_semantic_job(lease, "sha256:" + "7" * 64, case_ref)
-        first = await adapter.claim_semantic_job(lease, job.job_id)
-
-        clock = _AdvancingClock()
-        adapter._clock = clock  # pyright: ignore[reportPrivateUsage]
-        clock.now += timedelta(seconds=61)
-        successor = await adapter.freeze_case(
-            command.session_id,
-            command.writer_id,
-            1,
-            request_id,
-            request_digest,
-        )
-        assert type(successor) is FrozenCase
-        current = await adapter.load_semantic_job(command.writer_id, request_id)
-        assert current is not None
-        second, concurrent = await asyncio.gather(
-            adapter.claim_semantic_job(successor.lease, current.job_id),
-            adapter.claim_semantic_job(successor.lease, current.job_id),
-        )
-        assert second.attempt_id == first.attempt_id
-        assert second.provider_request_id == first.provider_request_id
-        assert second.attempt_ordinal == 1
-        assert concurrent.attempt_id == first.attempt_id
-        assert concurrent.provider_request_id == first.provider_request_id
-
-        rows = await adapter.list_semantic_attempts(current.job_id)
-        assert [row.state for row in rows] == ["started"]
-
-        # Repeating the claim while the successor lease is live resumes it, rather than minting
-        # another provider request or changing the original successor identity.
-        repeated = await adapter.claim_semantic_job(successor.lease, current.job_id)
-        assert repeated.attempt_id == first.attempt_id
-        assert repeated.provider_request_id == second.provider_request_id
-        assert repeated.attempt_ordinal == 1
-        assert len(await adapter.list_semantic_attempts(current.job_id)) == 1
-
-
-@pytest.mark.anyio
-async def test_semantic_lease_uses_persisted_deadline_and_rebinds_after_restart() -> None:
-    """A v2 semantic case extends one operation to its cap and preserves the started attempt."""
-
-    class _AdvancingClock:
-        def __init__(self) -> None:
-            self.now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
-
-        def now_utc(self) -> datetime:
-            return self.now
-
-        def monotonic_seconds(self) -> float:
-            return (self.now - datetime(2026, 7, 19, 12, 0, tzinfo=UTC)).total_seconds()
-
-    command = ledger_command(request_suffix="a")
-    operation_id = "req_00000000-0000-4000-8000-0000000000aa"
-    for adapter in (memory_ledger(command), sqlite_ledger(command)):
-        clock = _AdvancingClock()
-        adapter._clock = clock  # pyright: ignore[reportPrivateUsage]
-        await adapter.append_batch(command)
-        lease = await _semantic_wait_lease(adapter, command, operation_id)
-        case_digest = "sha256:" + "a" * 64
-        case_ref = await _object_ref(
-            adapter,
-            command,
-            ObjectKind.SEMANTIC_CASE,
-            semantic_case_digest=case_digest,
-            semantic_case_with_fallback=True,
-        )
-        job = await adapter.enqueue_semantic_job(lease, case_digest, case_ref)
-
-        # The old operation TTL is 60s; the persisted total execution deadline is 5 minutes,
-        # so the first semantic renewal must take the operation all the way to deadline + 5s.
-        renewed = await adapter.renew_leases(lease)
-        expected_expiry = datetime(2026, 7, 19, 12, 5, 5, tzinfo=UTC)
-        assert renewed.lease_expires_at == expected_expiry
-        queued = await adapter.load_semantic_job(command.writer_id, operation_id)
-        assert queued is not None and queued.lease_expires_at is None
-
-        first, second = await asyncio.gather(
-            adapter.claim_semantic_job(renewed, job.job_id),
-            adapter.claim_semantic_job(renewed, job.job_id),
-        )
-        assert first.attempt_id == second.attempt_id
-        assert first.provider_request_id == second.provider_request_id
-        assert first.lease_expires_at == expected_expiry
-
-        # A provider dispatch may cross the former 60s TTL. Renewal keeps the same bounded
-        # authority and updates the active job atomically rather than minting a new attempt.
-        clock.now += timedelta(seconds=61)
-        renewed_again = await adapter.renew_leases(renewed)
-        assert renewed_again.lease_expires_at == expected_expiry
-        active = await adapter.load_semantic_job(command.writer_id, operation_id)
-        assert active is not None
-        assert active.lease_expires_at == expected_expiry
-        assert active.active_attempt_id == first.attempt_id
-
-        current_adapter: MemoryLedgerAdapter | SqliteLedger = adapter
-        if isinstance(adapter, SqliteLedger):
-            restarted = SqliteLedger(
-                db=adapter._db,  # pyright: ignore[reportPrivateUsage]
-                task_id=command.task_id,
-                ownership_fence=_fence(),
-                clock=clock,
-                ids=adapter._ids,  # pyright: ignore[reportPrivateUsage]
-                objects=adapter._objects,  # pyright: ignore[reportPrivateUsage]
-            )
-            active = await restarted.load_semantic_job(command.writer_id, operation_id)
-            assert active is not None
-            resumed_lease = await restarted.renew_leases(renewed_again)
-            assert resumed_lease.lease_expires_at == expected_expiry
-            rebound = await restarted.claim_semantic_job(resumed_lease, active.job_id)
-            current_adapter = restarted
-        else:
-            resumed_lease = renewed_again
-            rebound = await adapter.claim_semantic_job(resumed_lease, job.job_id)
-        assert rebound.attempt_id == first.attempt_id
-        assert rebound.provider_request_id == first.provider_request_id
-        assert len(await adapter.list_semantic_attempts(job.job_id)) == 1
-
-        # Once the fixed cleanup grace has elapsed, renewal cannot create another lease.
-        clock.now = expected_expiry + timedelta(seconds=1)
-        with pytest.raises(PublicOperationError) as expired:
-            await current_adapter.renew_leases(renewed_again)
-        assert expired.value.code is PublicErrorCode.OPERATION_PENDING
-
-
-@pytest.mark.anyio
-async def test_short_semantic_execution_does_not_get_a_sixty_second_floor() -> None:
-    """A short authenticated execution retains only its fixed cleanup grace."""
-
-    class _AdvancingClock:
-        def __init__(self) -> None:
-            self.now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
-
-        def now_utc(self) -> datetime:
-            return self.now
-
-        def monotonic_seconds(self) -> float:
-            return (self.now - datetime(2026, 7, 19, 12, 0, tzinfo=UTC)).total_seconds()
-
-    command = ledger_command(request_suffix="b")
-    operation_id = "req_00000000-0000-4000-8000-0000000000ab"
-    for adapter in (memory_ledger(command), sqlite_ledger(command)):
-        clock = _AdvancingClock()
-        adapter._clock = clock  # pyright: ignore[reportPrivateUsage]
-        await adapter.append_batch(command)
-        lease = await _semantic_wait_lease(adapter, command, operation_id)
-        case_digest = "sha256:" + "b" * 64
-        case_ref = await _object_ref(
-            adapter,
-            command,
-            ObjectKind.SEMANTIC_CASE,
-            semantic_case_digest=case_digest,
-            semantic_case_primary_expires_at="2026-07-19T12:00:15.000Z",
-            semantic_case_expires_at="2026-07-19T12:00:20.000Z",
-        )
-        job = await adapter.enqueue_semantic_job(lease, case_digest, case_ref)
-        renewed = await adapter.renew_leases(lease)
-        expected_expiry = datetime(2026, 7, 19, 12, 0, 25, tzinfo=UTC)
-        assert renewed.lease_expires_at == expected_expiry
-        handle = await adapter.claim_semantic_job(renewed, job.job_id)
-        assert handle.lease_expires_at == expected_expiry
-
-        clock.now += timedelta(seconds=26)
-        with pytest.raises(PublicOperationError) as expired:
-            await adapter.renew_leases(renewed)
-        assert expired.value.code is PublicErrorCode.OPERATION_PENDING
-
-
-@pytest.mark.anyio
-async def test_real_attempt_loop_crosses_old_lease_without_duplicate_dispatch() -> None:
-    """The shipped attempt loop dispatches once beyond 60s under the frozen semantic cap."""
-
-    from yoetz.application.semantic_attempts import run_durable_semantic_attempts
-    from yoetz.ports.semantic import Deadline
-
-    @dataclass(frozen=True, slots=True)
-    class _Eval:
-        status: SemanticStatus
-        reason: SemanticReason
-        judgment: object | None = None
-        provenance: object | None = None
-
-    class _AdvancingClock:
-        def __init__(self) -> None:
-            self.now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
-
-        def now_utc(self) -> datetime:
-            return self.now
-
-        def monotonic_seconds(self) -> float:
-            return (self.now - datetime(2026, 7, 19, 12, 0, tzinfo=UTC)).total_seconds()
-
-    command = ledger_command(request_suffix="c")
-    operation_id = "req_00000000-0000-4000-8000-0000000000ac"
-    for adapter in (memory_ledger(command), sqlite_ledger(command)):
-        clock = _AdvancingClock()
-        adapter._clock = clock  # pyright: ignore[reportPrivateUsage]
-        await adapter.append_batch(command)
-        lease = await _semantic_wait_lease(adapter, command, operation_id)
-        case_digest = "sha256:" + "c" * 64
-        case_ref = await _object_ref(
-            adapter,
-            command,
-            ObjectKind.SEMANTIC_CASE,
-            semantic_case_digest=case_digest,
-        )
-        job = await adapter.enqueue_semantic_job(lease, case_digest, case_ref)
-        dispatches: list[str] = []
-
-        async def dispatch(handle: SemanticAttemptHandle, deadline: Deadline) -> _Eval:
-            dispatches.append(handle.provider_request_id)
-            assert deadline.monotonic_deadline == 120.0
-            clock.now += timedelta(seconds=90)
-            return _Eval(SemanticStatus.SUCCEEDED, SemanticReason.SEMANTIC_COMPLETED)
-
-        async def publish(_handle: SemanticAttemptHandle, _evaluation: object) -> ObjectRef:
-            return await _object_ref(adapter, command, ObjectKind.SEMANTIC_RESPONSE)
-
-        def build_final(
-            status: SemanticStatus,
-            reason: SemanticReason,
-            _evaluation: object | None,
-            _accounting: object,
-        ) -> object:
-            return status, reason
-
-        result = await run_durable_semantic_attempts(
-            ledger=adapter,
-            lease=lease,
-            job=job,
-            deadline=Deadline(datetime(2026, 7, 19, 12, 2, tzinfo=UTC), 120.0),
-            max_retries=0,
-            now_monotonic=clock.monotonic_seconds,
-            dispatch=dispatch,
-            publish_success_response=publish,
-            build_final=build_final,
-        )
-        assert result == (SemanticStatus.SUCCEEDED, SemanticReason.SEMANTIC_COMPLETED)
-        assert len(dispatches) == 1
-        loaded = await adapter.load_semantic_job(command.writer_id, operation_id)
-        assert loaded is not None
-        assert loaded.state == "succeeded"
-        attempts = await adapter.list_semantic_attempts(loaded.job_id)
-        assert len(attempts) == 1
-        assert attempts[0].state == "selected"
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("fault", ["missing", "wrong_envelope"], ids=["missing", "wrong_envelope"])
-async def test_semantic_lease_rejects_unverifiable_case_without_mutation(fault: str) -> None:
-    """A missing or mismatched case object cannot extend the operation lease."""
-
-    command = ledger_command(request_suffix="d")
-    operation_id = "req_00000000-0000-4000-8000-0000000000ad"
-    case_digest = "sha256:" + "d" * 64
-    for adapter in (memory_ledger(command), sqlite_ledger(command)):
-        await adapter.append_batch(command)
-        lease = await _semantic_wait_lease(adapter, command, operation_id)
-        case_ref = await _object_ref(
-            adapter,
-            command,
-            ObjectKind.SEMANTIC_CASE,
-            semantic_case_digest=case_digest,
-        )
-        job = await adapter.enqueue_semantic_job(lease, case_digest, case_ref)
-        before = await adapter.lookup_operation(command.writer_id, operation_id)
-        assert before is not None
-        objects = adapter._objects  # pyright: ignore[reportPrivateUsage]
-        assert objects is not None
-        if fault == "missing":
-            cast(_Objects, objects)._refs.pop(case_ref.object_id)  # pyright: ignore[reportPrivateUsage]
-        else:
-            adapter._state.jobs[job.job_id] = replace(  # pyright: ignore[reportPrivateUsage]
-                job,
-                case_object_ref=replace(case_ref, envelope_digest="sha256:" + "e" * 64),
-            )
-        with pytest.raises(PublicOperationError) as caught:
-            await adapter.renew_leases(lease)
-        assert caught.value.code is PublicErrorCode.STORAGE_CORRUPT
-        after = await adapter.lookup_operation(command.writer_id, operation_id)
-        assert after == before
 
 
 @pytest.mark.anyio
@@ -2251,12 +1867,7 @@ async def test_semantic_job_can_fail_terminally_without_fabricating_an_attempt()
             CheckPhase.LOCAL_READY,
             CheckPhase.SEMANTIC_WAIT,
         )
-        case_ref = await _object_ref(
-            adapter,
-            command,
-            ObjectKind.SEMANTIC_CASE,
-            semantic_case_digest="sha256:" + "6" * 64,
-        )
+        case_ref = await _object_ref(adapter, command, ObjectKind.SEMANTIC_CASE)
         job = await adapter.enqueue_semantic_job(lease, "sha256:" + "6" * 64, case_ref)
         failed = await adapter.fail_semantic_job(
             lease,
@@ -2335,12 +1946,7 @@ async def test_semantic_lifecycle_timestamps_survive_later_syncs() -> None:
     lease = await adapter.advance_check_phase(
         lease, CheckPhase.LOCAL_READY, CheckPhase.SEMANTIC_WAIT
     )
-    case_ref = await _object_ref(
-        adapter,
-        command,
-        ObjectKind.SEMANTIC_CASE,
-        semantic_case_digest="sha256:" + "d" * 64,
-    )
+    case_ref = await _object_ref(adapter, command, ObjectKind.SEMANTIC_CASE)
     job = await adapter.enqueue_semantic_job(lease, "sha256:" + "d" * 64, case_ref)
     handle = await adapter.claim_semantic_job(lease, job.job_id)
 
@@ -2417,12 +2023,7 @@ async def test_raising_dispatch_strands_nothing_in_either_real_ledger() -> None:
         lease = await adapter.advance_check_phase(
             lease, CheckPhase.LOCAL_READY, CheckPhase.SEMANTIC_WAIT
         )
-        case_ref = await _object_ref(
-            adapter,
-            command,
-            ObjectKind.SEMANTIC_CASE,
-            semantic_case_digest="sha256:" + "f" * 64,
-        )
+        case_ref = await _object_ref(adapter, command, ObjectKind.SEMANTIC_CASE)
         job = await adapter.enqueue_semantic_job(lease, "sha256:" + "f" * 64, case_ref)
 
         async def dispatch(handle: SemanticAttemptHandle, deadline: Deadline) -> _Eval:
@@ -2458,240 +2059,3 @@ async def test_raising_dispatch_strands_nothing_in_either_real_ledger() -> None:
         assert loaded.active_attempt_id is None
         attempts = await adapter.list_semantic_attempts(loaded.job_id)
         assert [row.state for row in attempts] == ["failed"]
-
-
-@pytest.mark.anyio
-async def test_expired_started_attempt_gets_local_cleanup_without_provider_dispatch() -> None:
-    """A reclaimed operation can close stale local state after the provider deadline only."""
-
-    from yoetz.application.semantic_attempts import run_durable_semantic_attempts
-    from yoetz.ports.semantic import Deadline
-
-    class _AdvancingClock:
-        def __init__(self) -> None:
-            self.now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
-
-        def now_utc(self) -> datetime:
-            return self.now
-
-        def monotonic_seconds(self) -> float:
-            return (self.now - datetime(2026, 7, 19, 12, 0, tzinfo=UTC)).total_seconds()
-
-    @dataclass(frozen=True, slots=True)
-    class _Eval:
-        status: SemanticStatus
-        reason: SemanticReason
-        judgment: object | None = None
-        provenance: object | None = None
-
-    command = ledger_command(request_suffix="e")
-    operation_id = "req_00000000-0000-4000-8000-0000000000ae"
-    case_digest = "sha256:" + "e" * 64
-    for adapter in (memory_ledger(command), sqlite_ledger(command)):
-        clock = _AdvancingClock()
-        adapter._clock = clock  # pyright: ignore[reportPrivateUsage]
-        await adapter.append_batch(command)
-        lease = await _semantic_wait_lease(adapter, command, operation_id)
-        case_ref = await _object_ref(
-            adapter, command, ObjectKind.SEMANTIC_CASE, semantic_case_digest=case_digest
-        )
-        job = await adapter.enqueue_semantic_job(lease, case_digest, case_ref)
-        first = await adapter.claim_semantic_job(lease, job.job_id)
-
-        # The v2 case expires at 12:05, with only five seconds of local cleanup grace. Reclaim
-        # the operation after both the provider deadline and that grace have elapsed.
-        clock.now += timedelta(seconds=306)
-        reclaimed = await adapter.freeze_case(
-            command.session_id,
-            command.writer_id,
-            1,
-            operation_id,
-            "sha256:" + "7" * 64,
-        )
-        assert type(reclaimed) is FrozenCase
-        current = await adapter.load_semantic_job(command.writer_id, operation_id)
-        assert current is not None
-
-        dispatches: list[str] = []
-
-        async def dispatch(handle: SemanticAttemptHandle, deadline: Deadline) -> _Eval:
-            dispatches.append(handle.provider_request_id)
-            raise AssertionError("provider_dispatch_after_frozen_deadline")
-
-        async def publish(handle: SemanticAttemptHandle, evaluation: object) -> ObjectRef:
-            raise AssertionError("publish_after_frozen_deadline")
-
-        def build_final(
-            status: SemanticStatus,
-            reason: SemanticReason,
-            evaluation: object | None,
-            accounting: object,
-        ) -> object:
-            return status, reason
-
-        outcome = await run_durable_semantic_attempts(
-            ledger=adapter,
-            lease=reclaimed.lease,
-            job=current,
-            deadline=Deadline(datetime(2026, 7, 19, 12, 5, tzinfo=UTC), 300.0),
-            max_retries=0,
-            now_monotonic=clock.monotonic_seconds,
-            dispatch=dispatch,
-            publish_success_response=publish,
-            build_final=build_final,
-        )
-        assert outcome == (SemanticStatus.UNAVAILABLE, SemanticReason.OUTCOME_UNKNOWN)
-        assert dispatches == []
-        loaded = await adapter.load_semantic_job(command.writer_id, operation_id)
-        assert loaded is not None and loaded.state == "failed"
-        attempts = await adapter.list_semantic_attempts(loaded.job_id)
-        assert len(attempts) == 1
-        assert attempts[0].attempt_id == first.attempt_id
-        assert attempts[0].provider_request_id == first.provider_request_id
-        assert attempts[0].terminal_code is SemanticReason.OUTCOME_UNKNOWN
-
-
-@pytest.mark.anyio
-async def test_response_durable_replay_selects_existing_response_without_new_dispatch() -> None:
-    """A crash after response publication reuses and selects that exact response object."""
-
-    from yoetz.application.semantic_attempts import run_durable_semantic_attempts
-    from yoetz.ports.semantic import Deadline
-
-    class _AdvancingClock:
-        def __init__(self) -> None:
-            self.now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
-
-        def now_utc(self) -> datetime:
-            return self.now
-
-        def monotonic_seconds(self) -> float:
-            return (self.now - datetime(2026, 7, 19, 12, 0, tzinfo=UTC)).total_seconds()
-
-    @dataclass(frozen=True, slots=True)
-    class _Eval:
-        status: SemanticStatus
-        reason: SemanticReason
-        judgment: object | None = None
-        provenance: object | None = None
-
-    command = ledger_command(request_suffix="f")
-    operation_id = "req_00000000-0000-4000-8000-0000000000af"
-    case_digest = "sha256:" + "f" * 64
-    for adapter in (memory_ledger(command), sqlite_ledger(command)):
-        clock = _AdvancingClock()
-        adapter._clock = clock  # pyright: ignore[reportPrivateUsage]
-        await adapter.append_batch(command)
-        lease = await _semantic_wait_lease(adapter, command, operation_id)
-        case_ref = await _object_ref(
-            adapter, command, ObjectKind.SEMANTIC_CASE, semantic_case_digest=case_digest
-        )
-        job = await adapter.enqueue_semantic_job(lease, case_digest, case_ref)
-        first = await adapter.claim_semantic_job(lease, job.job_id)
-        response_ref = await _object_ref(adapter, command, ObjectKind.SEMANTIC_RESPONSE)
-        await adapter.record_attempt_outcome(first, AttemptOutcome.RESPONSE_DURABLE, response_ref)
-
-        # Let the operation lease expire while retaining the response-durable row, then replay
-        # through the normal frozen-case recovery path. This is the crash window before select.
-        clock.now += timedelta(seconds=61)
-        reclaimed = await adapter.freeze_case(
-            command.session_id,
-            command.writer_id,
-            1,
-            operation_id,
-            "sha256:" + "7" * 64,
-        )
-        assert type(reclaimed) is FrozenCase
-        current = await adapter.load_semantic_job(command.writer_id, operation_id)
-        assert current is not None
-        recovered = _Eval(SemanticStatus.SUCCEEDED, SemanticReason.SEMANTIC_COMPLETED)
-        dispatches: list[str] = []
-
-        async def dispatch(handle: SemanticAttemptHandle, deadline: Deadline) -> _Eval:
-            dispatches.append(handle.provider_request_id)
-            raise AssertionError("response_durable_replay_dispatched_provider")
-
-        async def publish(handle: SemanticAttemptHandle, evaluation: object) -> ObjectRef:
-            raise AssertionError("response_durable_replay_published_duplicate")
-
-        async def recover_selected(row: SemanticJobRecord) -> _Eval:
-            assert row.state == "succeeded"
-            assert row.selected_result_object_ref == response_ref
-            return recovered
-
-        def build_final(
-            status: SemanticStatus,
-            reason: SemanticReason,
-            evaluation: object | None,
-            accounting: object,
-        ) -> object:
-            return status, reason, evaluation
-
-        outcome = await run_durable_semantic_attempts(
-            ledger=adapter,
-            lease=reclaimed.lease,
-            job=current,
-            deadline=Deadline(datetime(2026, 7, 19, 12, 5, tzinfo=UTC), 300.0),
-            max_retries=0,
-            now_monotonic=clock.monotonic_seconds,
-            dispatch=dispatch,
-            publish_success_response=publish,
-            build_final=build_final,
-            recover_selected=recover_selected,
-        )
-        assert outcome == (
-            SemanticStatus.SUCCEEDED,
-            SemanticReason.SEMANTIC_COMPLETED,
-            recovered,
-        )
-        assert dispatches == []
-        loaded = await adapter.load_semantic_job(command.writer_id, operation_id)
-        assert loaded is not None
-        assert loaded.state == "succeeded"
-        assert loaded.selected_result_object_ref == response_ref
-        attempts = await adapter.list_semantic_attempts(loaded.job_id)
-        assert len(attempts) == 1
-        assert attempts[0].attempt_id == first.attempt_id
-        assert attempts[0].provider_request_id == first.provider_request_id
-        assert attempts[0].state == "selected"
-
-
-@pytest.mark.anyio
-async def test_sqlite_reclaim_persistence_failure_does_not_adopt_clone() -> None:
-    """A failed SQLite reclaim transaction leaves the shared oracle and DB unchanged."""
-
-    command = ledger_command(request_suffix="0")
-    operation_id = "req_00000000-0000-4000-8000-0000000000b0"
-    adapter = sqlite_ledger(command)
-    await adapter.append_batch(command)
-    await _semantic_wait_lease(adapter, command, operation_id)
-    before = await adapter.lookup_operation(command.writer_id, operation_id)
-    assert before is not None and before.lease_expires_at is not None
-    expiry = before.lease_expires_at
-
-    class _ReclaimClock:
-        def now_utc(self) -> datetime:
-            return expiry + timedelta(seconds=1)
-
-        def monotonic_seconds(self) -> float:
-            return 61.0
-
-    adapter._clock = _ReclaimClock()  # pyright: ignore[reportPrivateUsage]
-    prior_state = adapter._state  # pyright: ignore[reportPrivateUsage]
-    original_persist = adapter._persist_derived_records  # pyright: ignore[reportPrivateUsage]
-
-    def fail_persist(records: tuple[object, ...]) -> None:
-        del records
-        raise RuntimeError("test_reclaim_persist_failure")
-
-    adapter._persist_derived_records = fail_persist  # pyright: ignore[reportPrivateUsage,method-assign]
-    with pytest.raises(RuntimeError, match="test_reclaim_persist_failure"):
-        await adapter.reclaim_operation(
-            command.writer_id,
-            operation_id,
-            "sha256:" + "7" * 64,
-        )
-    adapter._persist_derived_records = original_persist  # pyright: ignore[reportPrivateUsage,method-assign]
-    assert adapter._state is prior_state  # pyright: ignore[reportPrivateUsage]
-    after = await adapter.lookup_operation(command.writer_id, operation_id)
-    assert after == before

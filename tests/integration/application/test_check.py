@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -316,7 +315,6 @@ class _App:
         self.ledger = _Ledger(_case())
         self.crash_semantic = crash_semantic
         self.semantic_calls = 0
-        self.reconcile_observation_capture: Callable[[TaskRuntime], Awaitable[None]] | None = None
         capabilities = {
             RuntimeCapability.WRITE,
             RuntimeCapability.PAYLOAD_READ,
