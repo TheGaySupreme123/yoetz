@@ -42,6 +42,7 @@ from yoetz.domain.observation import (
     ObservationGapCode,
     ObservationInspectionSnapshot,
     ObservationSource,
+    observation_content_binding_matches,
 )
 from yoetz.domain.values import (
     Actor,
@@ -465,6 +466,14 @@ def _eligible_captured_content(
             gaps.add(ObservationGapCode.CONTENT_UNSELECTED.value)
             continue
         if manifest.content_digest is None or manifest.content_bytes is None:
+            gaps.add(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
+            continue
+        if not observation_content_binding_matches(
+            envelope,
+            content_kind=manifest.content_kind,
+            correlation_identity=manifest.correlation_identity,
+            source_commitment=manifest.source_commitment,
+        ):
             gaps.add(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
             continue
         if manifest.redacted:

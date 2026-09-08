@@ -6,6 +6,8 @@ import asyncio
 import contextlib
 import os
 import re
+import stat
+import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -23,6 +25,11 @@ from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
 from pydantic import AnyUrl, BaseModel, ValidationError
 
 from yoetz import __version__
+from yoetz.adapters.integrations.cursor_project_mcp import (
+    CursorProjectMcpError,
+    CursorProjectMcpRegistrationSnapshot,
+    inspect_project_mcp_registration,
+)
 from yoetz.adapters.mcp_stdio import bounded_stdio_server
 from yoetz.adapters.workspace_binding import (
     MAX_WORKSPACE_LOCATOR_BYTES,
@@ -282,6 +289,9 @@ class _ClientSlot:
     # is bound once from the host's MCP roots/list response; generic slots retain the build-time
     # cwd in BridgeRuntime.
     workspace_locator: WorkspaceLocator | None = None
+    workspace_root_identity: tuple[int, int] | None = None
+    cursor_registration_snapshot: CursorProjectMcpRegistrationSnapshot | None = None
+    cursor_registration_invalid: bool = False
     workspace_binding_state: Literal["unresolved", "bound", "failed"] = "unresolved"
     workspace_binding_source: Literal["injected", "mcp_roots"] = "mcp_roots"
     workspace_binding_correlation_id: str | None = None
@@ -307,6 +317,66 @@ class BridgeRuntime:
         compare=False,
     )
     _slot: _ClientSlot = field(default_factory=_ClientSlot, repr=False, compare=False)
+    # A Cursor project registration may pass its expanded ``${workspaceFolder}`` selector.  It
+    # only disambiguates roots returned by that same MCP client; the selector is never an
+    # authority by itself and never participates in generic/Codex/Claude routes.
+    cursor_project_root: str | None = field(default=None, repr=False, compare=False)
+    # Keep the opened Cursor folder separate from the canonical repository selector: its
+    # ``.cursor/mcp.json`` is the registration being fenced, while roots/list supplies the
+    # canonical service authority.
+    cursor_project_directory: str | None = field(default=None, repr=False, compare=False)
+    cursor_launcher: tuple[str, ...] | None = field(default=None, repr=False, compare=False)
+    cursor_isolation_root: str | None = field(default=None, repr=False, compare=False)
+
+
+def _valid_runtime_launcher(value: object) -> bool:
+    if type(value) is not tuple or not value:
+        return False
+    parts = cast(tuple[object, ...], value)
+    for part in parts:
+        if type(part) is not str or not part:
+            return False
+        try:
+            if len(part.encode("utf-8")) > MAX_WORKSPACE_LOCATOR_BYTES:
+                return False
+        except UnicodeEncodeError:
+            return False
+        if any(ord(character) < 32 or ord(character) == 127 for character in part):
+            return False
+    first = parts[0]
+    assert isinstance(first, str)
+    return Path(first).is_absolute()
+
+
+def _runtime_launcher_from_argv() -> tuple[str, ...] | None:
+    """Recover the exact launcher prefix from the process that is serving MCP."""
+
+    argv = tuple(sys.argv)
+    serve_index = next(
+        (
+            index
+            for index, token in enumerate(argv[:-1])
+            if token == "mcp" and argv[index + 1] == "serve"
+        ),
+        None,
+    )
+    if serve_index is None or not argv[:serve_index]:
+        return None
+    prefix = argv[:serve_index]
+    try:
+        package_main = (Path(__file__).resolve().parents[1] / "__main__.py").resolve(strict=True)
+        first = Path(prefix[0]).resolve(strict=True)
+    except OSError:
+        return None
+    if first == package_main:
+        try:
+            executable = str(Path(sys.executable).resolve(strict=True))
+        except OSError:
+            return None
+        prefix = (executable, "-m", "yoetz", *prefix[1:])
+    else:
+        prefix = (str(first), *prefix[1:])
+    return prefix if _valid_runtime_launcher(prefix) else None
 
 
 def build_bridge_runtime(
@@ -315,6 +385,9 @@ def build_bridge_runtime(
     host_profile: McpHostProfile = "generic",
     workspace_locator: WorkspaceLocator | None = None,
     semantic_destination: SemanticDestinationDisclosure | None = None,
+    project_root: Path | None = None,
+    launcher: tuple[str, ...] | None = None,
+    isolation_root: str | None = None,
 ) -> BridgeRuntime:
     """Verify every agent-readable byte and construct an unconnected bridge runtime.
 
@@ -356,6 +429,38 @@ def build_bridge_runtime(
     build_last_resort_internal_error_result()
     if workspace_locator is not None and type(workspace_locator) is not WorkspaceLocator:
         raise TypeError("workspace_locator_invalid")
+    if project_root is not None and host_profile != "cursor":
+        raise ValueError("mcp_project_root_host_invalid")
+    cursor_project_root: str | None = None
+    cursor_project_directory: str | None = None
+    cursor_launcher: tuple[str, ...] | None = None
+    cursor_isolation_root: str | None = None
+    if project_root is not None:
+        if type(project_root) is not type(Path()):
+            raise TypeError("mcp_project_root_invalid")
+        text = os.fspath(project_root)
+        try:
+            encoded = text.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("mcp_project_root_invalid") from None
+        if (
+            not project_root.is_absolute()
+            or ".." in project_root.parts
+            or not encoded
+            or len(encoded) > MAX_WORKSPACE_LOCATOR_BYTES
+            or any(ord(character) < 32 or ord(character) == 127 for character in text)
+        ):
+            raise ValueError("mcp_project_root_invalid")
+        cursor_project_root = canonical_workspace_locator(text)
+        if cursor_project_root is None:
+            raise ValueError("mcp_project_root_invalid")
+        if not _valid_runtime_launcher(launcher):
+            raise ValueError("mcp_project_launcher_invalid")
+        if isolation_root is not None and type(isolation_root) is not str:
+            raise TypeError("mcp_project_isolation_root_invalid")
+        cursor_project_directory = text
+        cursor_launcher = launcher
+        cursor_isolation_root = isolation_root
     if host_profile != "cursor" and workspace_locator is None:
         workspace_locator = WorkspaceLocator(os.fspath(Path.cwd().resolve(strict=True)))
     slot = _ClientSlot()
@@ -371,6 +476,10 @@ def build_bridge_runtime(
         host_profile,
         workspace_locator,
         slot,
+        cursor_project_root,
+        cursor_project_directory,
+        cursor_launcher,
+        cursor_isolation_root,
     )
 
 
@@ -383,19 +492,76 @@ class _RootsSession(Protocol):
     async def list_roots(self) -> types.ListRootsResult: ...
 
 
+class _RawListRootsResult(BaseModel):
+    """Raw roots/list envelope used for Cursor's non-conforming POSIX root representation."""
+
+    # MCP 1.28.1 models ``Root.uri`` as ``FileUrl`` and rejects Cursor's raw ``/absolute/path``
+    # before the bridge can apply its narrow host-specific compatibility rule.  Keep this model
+    # intentionally shallow; root shape and URI safety are checked below without retaining raw
+    # host content.
+    roots: object
+
+
+class _RawRootsSession(Protocol):
+    async def send_request(
+        self, request: object, result_type: type[_RawListRootsResult]
+    ) -> _RawListRootsResult: ...
+
+
+async def _cursor_list_roots(session: _RootsSession) -> object:
+    """Request Cursor roots without letting the SDK's ``FileUrl`` validator discard raw paths."""
+
+    sender = getattr(session, "send_request", None)
+    if callable(sender):
+        raw_session = cast(_RawRootsSession, session)
+        return await raw_session.send_request(
+            types.ServerRequest(types.ListRootsRequest()), _RawListRootsResult
+        )
+    # Small transport fakes and older adapters expose only the typed helper.  They remain valid
+    # test inputs; production ServerSession always takes the raw path above.
+    return await session.list_roots()
+
+
 class _CursorWorkspaceBindingError(Exception):
     """The native Cursor bridge has no trusted project locator for this MCP session."""
 
 
-def _cursor_root_path(root: object) -> str | None:
-    """Decode one MCP file root without accepting hostnames or URI metadata as a path."""
+def _cursor_root_uri(root: object) -> str | None:
+    if isinstance(root, types.Root):
+        return str(root.uri)
+    if isinstance(root, Mapping):
+        uri = cast(Mapping[object, object], root).get("uri")
+        return uri if type(uri) is str else None
+    return None
 
-    if not isinstance(root, types.Root):
+
+def _cursor_root_path(root: object) -> str | None:
+    """Decode one safe Cursor root, including its observed raw POSIX compatibility form."""
+
+    uri = _cursor_root_uri(root)
+    if uri is None:
         return None
     try:
-        uri = str(root.uri)
         if len(uri.encode("utf-8")) > _MAX_CURSOR_ROOT_URI_BYTES:
             return None
+    except UnicodeEncodeError:
+        return None
+
+    # Cursor 3.19 sends ``workspaceFolder.uri.toString()`` as a bare POSIX path.  This branch is
+    # deliberately host-local and strict: a single-root absolute path with no URI metadata is
+    # accepted as path text; authority-bearing, relative, query-bearing, or fragment-bearing
+    # values continue through the rejecting URI branch below.
+    if uri.startswith("/") and not uri.startswith("//"):
+        try:
+            path_bytes = uri.encode("utf-8")
+        except UnicodeEncodeError:
+            return None
+        if len(path_bytes) > MAX_WORKSPACE_LOCATOR_BYTES or "?" in uri or "#" in uri:
+            return None
+        if any(ord(character) < 32 or ord(character) == 127 for character in uri):
+            return None
+        return uri
+    try:
         parsed = urlsplit(uri)
     except TypeError, ValueError:
         return None
@@ -425,21 +591,35 @@ def _cursor_root_path(root: object) -> str | None:
     return path
 
 
-def _cursor_workspace_locator(result: object) -> WorkspaceLocator | None:
+def _cursor_roots_value(result: object) -> object | None:
+    if isinstance(result, types.ListRootsResult):
+        return result.roots
+    if isinstance(result, _RawListRootsResult):
+        return result.roots
+    if isinstance(result, Mapping):
+        return cast(Mapping[object, object], result).get("roots")
+    return None
+
+
+def _cursor_workspace_binding(
+    result: object, selector: str | None = None
+) -> tuple[WorkspaceLocator, str] | None:
     """Convert a host roots/list result to one canonical repository locator.
 
     The roots capability is a host-session input, not a workflow field. Every root must be a
-    local, safe directory and all roots must resolve to one canonical repository. Distinct
-    repositories are ambiguous and fail closed; equivalent roots in one repository are harmless
-    aliases of the same private identity.
+    local, safe directory. Without a project selector, all roots must resolve to one canonical
+    repository. With a selector, it may disambiguate a multi-root response only when that
+    selector's canonical identity is present in the validated roots; it cannot create authority.
     """
 
-    if not isinstance(result, types.ListRootsResult) or type(result.roots) is not list:
+    roots = _cursor_roots_value(result)
+    if type(roots) is not list:
         return None
-    if not result.roots or len(result.roots) > _MAX_CURSOR_ROOTS:
+    root_items = cast(list[object], roots)
+    if not root_items or len(root_items) > _MAX_CURSOR_ROOTS:
         return None
     canonical: list[str] = []
-    for root in result.roots:
+    for root in root_items:
         path = _cursor_root_path(root)
         if path is None:
             return None
@@ -447,12 +627,38 @@ def _cursor_workspace_locator(result: object) -> WorkspaceLocator | None:
         if resolved is None:
             return None
         canonical.append(resolved)
-    if len(set(canonical)) != 1:
+    fingerprints = tuple(sorted(set(canonical), key=str.encode))
+    selected = fingerprints[0] if len(fingerprints) == 1 else None
+    if selector is not None:
+        if selector not in fingerprints:
+            return None
+        selected = selector
+    elif selected is None:
         return None
     try:
-        return WorkspaceLocator(canonical[0])
+        assert selected is not None
+        return WorkspaceLocator(selected), selected
     except ValueError:
         return None
+
+
+def _cursor_workspace_locator(  # pyright: ignore[reportUnusedFunction]
+    result: object, selector: str | None = None
+) -> WorkspaceLocator | None:
+    binding = _cursor_workspace_binding(result, selector)
+    return None if binding is None else binding[0]
+
+
+def _cursor_workspace_identity(path: str) -> tuple[int, int] | None:
+    """Return the selected directory identity without following a replacement symlink."""
+
+    try:
+        facts = os.lstat(path)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(facts.st_mode):
+        return None
+    return facts.st_dev, facts.st_ino
 
 
 async def _close_client(client: ServiceClient) -> None:
@@ -695,17 +901,44 @@ def _cursor_workspace_error(
     runtime: BridgeRuntime,
     request_id: str | None,
     operation: str,
+    *,
+    binding_changed: bool = False,
+    registration_invalid: bool = False,
 ) -> types.CallToolResult:
     """Return one bounded, repeatable error for an unbound native Cursor session."""
 
     slot = runtime._slot  # pyright: ignore[reportPrivateUsage]
+    if binding_changed:
+        message = (
+            "Cursor's registered project or selected repository changed during this MCP "
+            "session. Reconnect the MCP server with that project open, then retry in a fresh "
+            "conversation. Hook workspace data and CLI CWD cannot substitute for roots/list."
+        )
+    elif registration_invalid:
+        message = (
+            "Cursor's project MCP registration is missing or does not match the exact Yoetz "
+            "launcher, route, project selector, or isolated root. Reconnect the MCP server "
+            "with that project open, then retry in a fresh conversation."
+        )
+    elif runtime.cursor_project_root is not None:
+        message = (
+            "Cursor did not provide one safe local project root matching the registered project "
+            "selector through MCP roots/list. Reconnect the MCP server with that project open, "
+            "then retry in a fresh conversation. Hook workspace data and CLI CWD cannot "
+            "substitute for roots/list."
+        )
+    else:
+        message = (
+            "Cursor did not provide one safe local project root through MCP roots/list. "
+            "If a plugin-managed server has no roots, use yoetz integrate cursor project-mcp "
+            "to register one project .cursor/mcp.json entry with an external-registration "
+            "plugin and no duplicate Yoetz MCP sources. Reconnect the MCP server with that "
+            "project open, then retry in a fresh conversation. Hook workspace data and CLI "
+            "CWD cannot substitute for roots/list."
+        )
     result = structured_error_result(
         PublicErrorCode.SESSION_CONFLICT,
-        (
-            "The Cursor MCP session did not provide one safe local project root. Fully quit and "
-            "relaunch Cursor, or create a new MCP process with the project open, then retry this "
-            "operation."
-        ),
+        message,
         request_id=request_id,
         correlation_id=slot.workspace_binding_correlation_id,
         operation=operation,
@@ -744,41 +977,151 @@ async def _ensure_cursor_workspace_binding(
     retire_client = False
     binding_error: types.CallToolResult | None = None
     async with slot.workspace_binding_lock:
-        if slot.workspace_binding_state == "bound" and slot.workspace_binding_source == "injected":
+        if (
+            slot.workspace_binding_state == "bound"
+            and slot.workspace_binding_source == "injected"
+            and runtime.cursor_project_directory is None
+        ):
             return None
         if slot.workspace_binding_state == "failed":
-            return _cursor_workspace_error(runtime, request_id, operation)
-        if session is None:
+            return _cursor_workspace_error(
+                runtime,
+                request_id,
+                operation,
+                registration_invalid=slot.cursor_registration_invalid,
+            )
+        was_bound = slot.workspace_binding_state == "bound"
+        registration: CursorProjectMcpRegistrationSnapshot | None = None
+        registration_invalid = False
+        if runtime.cursor_project_directory is not None:
+            if runtime.cursor_launcher is None:
+                registration_invalid = True
+            else:
+                try:
+                    registration = inspect_project_mcp_registration(
+                        Path(runtime.cursor_project_directory),
+                        launcher=runtime.cursor_launcher,
+                        route_profile=runtime.route_profile,
+                        isolation_root=runtime.cursor_isolation_root,
+                    )
+                except CursorProjectMcpError, OSError, TypeError, ValueError:
+                    registration_invalid = True
+            if registration_invalid:
+                slot.workspace_binding_state = "failed"
+                slot.workspace_locator = None
+                slot.workspace_root_identity = None
+                slot.cursor_registration_snapshot = None
+                slot.cursor_registration_invalid = True
+                binding_error = _cursor_workspace_error(
+                    runtime,
+                    request_id,
+                    operation,
+                    binding_changed=was_bound,
+                    registration_invalid=True,
+                )
+                retire_client = True
+            elif was_bound and slot.cursor_registration_snapshot != registration:
+                slot.workspace_binding_state = "failed"
+                slot.workspace_locator = None
+                slot.workspace_root_identity = None
+                slot.cursor_registration_snapshot = None
+                slot.cursor_registration_invalid = False
+                slot.workspace_binding_correlation_id = None
+                binding_error = _cursor_workspace_error(
+                    runtime,
+                    request_id,
+                    operation,
+                    binding_changed=True,
+                )
+                retire_client = True
+        if binding_error is None and session is None:
             slot.workspace_binding_state = "failed"
             slot.workspace_locator = None
+            slot.workspace_root_identity = None
+            slot.cursor_registration_snapshot = None
+            slot.cursor_registration_invalid = False
             binding_error = _cursor_workspace_error(runtime, request_id, operation)
             retire_client = True
-        else:
+        elif binding_error is None:
             try:
                 async with asyncio.timeout(_CURSOR_ROOTS_REQUEST_TIMEOUT_SECONDS):
-                    roots = await session.list_roots()
+                    assert session is not None
+                    roots = await _cursor_list_roots(session)
             except Exception:
                 slot.workspace_binding_state = "failed"
                 slot.workspace_locator = None
+                slot.workspace_root_identity = None
+                slot.cursor_registration_snapshot = None
+                slot.cursor_registration_invalid = False
                 binding_error = _cursor_workspace_error(runtime, request_id, operation)
                 retire_client = True
             else:
-                locator = _cursor_workspace_locator(roots)
-                if locator is None or (
-                    slot.workspace_binding_state == "bound" and slot.workspace_locator != locator
+                binding = _cursor_workspace_binding(roots, runtime.cursor_project_root)
+                locator = None if binding is None else binding[0]
+                selected_path = None if binding is None else binding[1]
+                selected_identity = (
+                    None if selected_path is None else _cursor_workspace_identity(selected_path)
+                )
+                if (
+                    locator is None
+                    or selected_identity is None
+                    or (was_bound and slot.workspace_locator != locator)
+                    or (was_bound and slot.workspace_root_identity != selected_identity)
                 ):
                     # Cursor 3.19 advertises roots.listChanged=false, so a notification cannot be
                     # relied on to retire a process after the user switches projects. Revalidate
                     # before every workflow call and retire the old client on any change.
                     slot.workspace_binding_state = "failed"
                     slot.workspace_locator = None
+                    slot.workspace_root_identity = None
+                    slot.cursor_registration_snapshot = None
+                    slot.cursor_registration_invalid = False
                     slot.workspace_binding_correlation_id = None
-                    binding_error = _cursor_workspace_error(runtime, request_id, operation)
+                    binding_error = _cursor_workspace_error(
+                        runtime,
+                        request_id,
+                        operation,
+                        binding_changed=was_bound,
+                    )
                     retire_client = True
                 else:
-                    slot.workspace_locator = locator
-                    slot.workspace_binding_state = "bound"
-                    slot.workspace_binding_source = "mcp_roots"
+                    latest_registration = registration
+                    latest_registration_invalid = False
+                    if runtime.cursor_project_directory is not None:
+                        if runtime.cursor_launcher is None:
+                            latest_registration_invalid = True
+                        else:
+                            try:
+                                latest_registration = inspect_project_mcp_registration(
+                                    Path(runtime.cursor_project_directory),
+                                    launcher=runtime.cursor_launcher,
+                                    route_profile=runtime.route_profile,
+                                    isolation_root=runtime.cursor_isolation_root,
+                                )
+                            except CursorProjectMcpError, OSError, TypeError, ValueError:
+                                latest_registration_invalid = True
+                        if latest_registration_invalid or latest_registration != registration:
+                            slot.workspace_binding_state = "failed"
+                            slot.workspace_locator = None
+                            slot.workspace_root_identity = None
+                            slot.cursor_registration_snapshot = None
+                            slot.cursor_registration_invalid = latest_registration_invalid
+                            slot.workspace_binding_correlation_id = None
+                            binding_error = _cursor_workspace_error(
+                                runtime,
+                                request_id,
+                                operation,
+                                binding_changed=was_bound,
+                                registration_invalid=latest_registration_invalid or not was_bound,
+                            )
+                            retire_client = True
+                    if binding_error is None:
+                        slot.workspace_locator = locator
+                        slot.workspace_root_identity = selected_identity
+                        slot.cursor_registration_snapshot = latest_registration
+                        slot.cursor_registration_invalid = False
+                        slot.workspace_binding_state = "bound"
+                        slot.workspace_binding_source = "mcp_roots"
     if retire_client:
         await close_bridge_runtime(runtime)
     if binding_error is not None:
@@ -799,6 +1142,9 @@ async def _invalidate_cursor_workspace_binding(runtime: BridgeRuntime) -> None:
     slot = runtime._slot  # pyright: ignore[reportPrivateUsage]
     async with slot.workspace_binding_lock:
         slot.workspace_locator = None
+        slot.workspace_root_identity = None
+        slot.cursor_registration_snapshot = None
+        slot.cursor_registration_invalid = False
         slot.workspace_binding_state = "failed"
         slot.workspace_binding_correlation_id = None
     await close_bridge_runtime(runtime)
@@ -2307,6 +2653,7 @@ def main(
     *,
     semantic: Literal["on", "off"] = "on",
     host: McpHostProfile = "generic",
+    project_root: Path | None = None,
 ) -> None:
     """Run the MCP bridge on stdio using the SDK-supported latest protocol contract."""
 
@@ -2317,9 +2664,20 @@ def main(
     if types.LATEST_PROTOCOL_VERSION not in SUPPORTED_PROTOCOL_VERSIONS:
         raise RuntimeError("mcp_sdk_protocol_registry_invalid")
     configure_logging(_bridge_logging_config(), LogMode.MCP_STDIO)
+    launcher = (
+        _runtime_launcher_from_argv() if host == "cursor" and project_root is not None else None
+    )
+    registration_isolation_root = (
+        os.environ.get("YOETZ_ISOLATED_ROOT")
+        if host == "cursor" and project_root is not None
+        else None
+    )
     runtime = build_bridge_runtime(
         "strict" if semantic == "off" else "policy",
         host_profile=host,
+        project_root=project_root,
+        launcher=launcher,
+        isolation_root=registration_isolation_root,
     )
     record_startup_route_drift(runtime.route_profile, host_profile=runtime.host_profile)
     anyio.run(

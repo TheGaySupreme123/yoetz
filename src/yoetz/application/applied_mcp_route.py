@@ -29,6 +29,7 @@ from yoetz.ports.harness_mcp import (
     MCP_LEGACY_STRICT_SERVE_COMMAND,
     MCP_SERVE_COMMAND,
     MCP_STRICT_SERVE_COMMAND,
+    mcp_command_profile,
 )
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 
@@ -104,7 +105,10 @@ def _validate_command(value: object, *, allowed: tuple[tuple[str, ...], ...]) ->
         if type(entry) is not str:
             raise ValueError("applied_mcp_route_command_invalid")
         items.append(entry)
-    if tuple(items) not in allowed:
+    command = tuple(items)
+    if mcp_command_profile(command) is None or not any(
+        command[1:] == template[1:] for template in allowed
+    ):
         raise ValueError("applied_mcp_route_command_invalid")
     return items
 

@@ -14,6 +14,7 @@ import pytest
 from yoetz.adapters.integrations.cursor_integration import (
     CURSOR_HARNESS_PROFILE,
     CURSOR_HOOK_EVENTS,
+    CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
     CursorIntegrationError,
     CursorMcpSource,
     CursorPluginTarget,
@@ -941,6 +942,64 @@ def test_isolation_binding_reports_drift_and_unset_reverts_to_ambient(
     assert all(
         "YOETZ_ISOLATED_ROOT=" not in definition[0]["command"] for definition in hooks.values()
     )
+
+
+def test_ordinary_isolation_binding_checks_ordinary_hook_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    isolated_root = tmp_path / "isolated"
+    drifted_root = tmp_path / "drifted"
+    executable = _fake_yoetz(tmp_path / "runtime" / "yoetz")
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.isolated_root",
+        lambda: isolated_root,
+    )
+    artifact = render_cursor_plugin(
+        PluginFormatProfile.CURSOR_PLUGIN_NATIVE,
+        mcp_ownership=McpOwnership.PLUGIN_MANAGED,
+        route_profile="policy",
+        yoetz_launcher=executable,
+        observation_profile="ordinary",
+    )
+    assert artifact.plan.host_extension_profile == CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
+    target = _install_native(tmp_path, artifact)
+    exact = status_cursor_plugin(target, artifact)
+    assert exact.isolation_binding == "isolated_exact"
+
+    destination = tmp_path / ".cursor" / "plugins" / "local" / "yoetz"
+    hooks_path = destination / "hooks" / "hooks.json"
+    hooks = json.loads(hooks_path.read_bytes())
+    ordinary_command = hooks["hooks"]["postToolUse"][0]["command"]
+    hooks["hooks"]["postToolUse"][0]["command"] = ordinary_command.replace(
+        f"YOETZ_ISOLATED_ROOT={shlex.quote(str(isolated_root))}",
+        f"YOETZ_ISOLATED_ROOT={shlex.quote(str(drifted_root))}",
+        1,
+    )
+    hooks_bytes = canonical_encode(cast(JsonValue, hooks))
+    hooks_path.write_bytes(hooks_bytes)
+
+    # Keep the marker self-consistent so status reaches the root-bearing surface comparison
+    # instead of classifying the whole tree as an invalid marker.
+    marker_path = destination / ".yoetz-cursor-plugin-install.json"
+    marker = json.loads(marker_path.read_bytes())
+    for row in marker["managed_files"]:
+        if row["relative_path"] == "hooks/hooks.json":
+            row["size"] = len(hooks_bytes)
+            row["sha256"] = "sha256:" + hashlib.sha256(hooks_bytes).hexdigest()
+            break
+    else:  # pragma: no cover - the installed artifact always owns hooks.json
+        raise AssertionError("marker did not inventory hooks.json")
+    marker["marker_digest"] = canonical_digest(
+        {key: value for key, value in marker.items() if key != "marker_digest"}
+    )
+    marker_path.write_bytes(canonical_encode(cast(JsonValue, marker)))
+
+    drifted = status_cursor_plugin(target, artifact)
+    assert drifted.marker_valid is True
+    assert drifted.state is PluginArtifactState.MODIFIED
+    assert drifted.mcp_observation.ownership_state is McpOwnershipState.PLUGIN
+    assert drifted.launcher.mcp_binding == "exact_launcher"
+    assert drifted.isolation_binding == "different"
 
 
 def test_isolated_legacy_marker_without_root_reports_missing_and_replaces(

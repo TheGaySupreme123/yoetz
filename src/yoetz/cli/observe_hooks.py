@@ -32,7 +32,6 @@ from yoetz.adapters.integrations.hook_spool import HookSpool
 from yoetz.adapters.integrations.observation_local import (
     HOOK_MAPPING_VERSION,
     YOETZ_OWNED_TOOL_NAMES,
-    YOETZ_TOOL_NAMES,
     AdviceDelivery,
     FrontierMotionNotice,
     LocalObservationConsent,
@@ -60,6 +59,7 @@ from yoetz.cli.hook_io import (
     stderr_line as _stderr_line,
 )
 from yoetz.domain.observation import (
+    OBSERVATION_CONTENT_CAPTURE_PENDING_REASON,
     ObservationContentChunk,
     ObservationContentKind,
     ObservationCursor,
@@ -149,10 +149,16 @@ _MAX_CONTENT_CHUNK: Final = 256 * 1024
 # is never silently dropped as if committed.
 _HOOK_DRAIN_BUDGET_SECONDS: Final = 0.20
 _HOOK_DRAIN_ROW_LIMIT: Final = 4
-# Codex hard-clamps SessionEnd hooks to 3 seconds. The default drain budget
-# plus ingest/encode overhead measured within ~0.5s of that ceiling on a
-# realistic store, so SessionEnd drains under a tighter budget: an undrained
-# row is retried on the next session's hooks, a SIGKILLed hook drains nothing.
+# Native Claude/Cursor ordinary-profile content is transient by design: it cannot
+# be copied to the structural outbox. Give every ordinary-profile pass a bounded
+# chance to drain its structural RPC, and give content-bearing passes enough time
+# to deliver the current event after its same-session prefix; bulk work remains
+# the service sweeper's responsibility.
+_NATIVE_CONTENT_DRAIN_BUDGET_SECONDS: Final = 1.0
+_NATIVE_CONTENT_ROW_LIMIT: Final = 16
+# Codex hard-clamps SessionEnd hooks to 3 seconds. Teardown records its local
+# lifecycle/outbox intent and defers service delivery to the next hook or
+# sweeper, so a cold service preflight cannot consume that host window.
 _SESSION_END_DRAIN_BUDGET_SECONDS: Final = 0.15
 # A run of consecutive service_unavailable rejections means the service is
 # struggling now; yield the pass and let a later hook retry rather than
@@ -168,9 +174,10 @@ _HOOK_CONNECT_PREFLIGHT_SECONDS: Final = 1.0
 # demand and may miss a session's opening moments; without a later re-attempt an
 # unmapped session stayed unmapped for its whole life and its outbox retried as
 # mapping_missing forever (#275). Low-frequency, once-per-turn events only --
-# never the PreToolUse/PostToolUse storm -- under a budget that keeps even the
-# Codex 3s SessionEnd clamp honest (attach 1.0 + connect preflight 1.0 + drain).
-_AUTO_ATTACH_RETRY_EVENTS: Final = frozenset({"UserPromptSubmit", "Stop", "SessionEnd"})
+# never the PreToolUse/PostToolUse storm. SessionEnd is teardown-only and has a
+# three-second host clamp, so it records the lifecycle intent and defers pending
+# rows but never spends the extra attach retry budget.
+_AUTO_ATTACH_RETRY_EVENTS: Final = frozenset({"UserPromptSubmit", "Stop"})
 _AUTO_ATTACH_RETRY_BUDGET_SECONDS: Final = 1.0
 _AUTO_ATTACH_START_DEADLINE_MS: Final = 5_000
 # End-to-end observability contract for one hook pass, process start included.
@@ -186,10 +193,10 @@ _HOOK_TOTAL_BUDGET_SECONDS: Final = (
     + _HOOK_LOCAL_STAGE_ALLOWANCE_SECONDS
 )
 _TIMING_REPORT_EVENTS: Final = frozenset({"SessionStart", "Stop", "SessionEnd"})
-# The stages that partition one pass end to end, in order. 'advice' is nested
-# inside 'store' and every 'store_*' accumulator spans the whole pass, so
-# neither belongs in a sum against the total.
-_PASS_PARTITION_STAGES: Final = ("import", "resolve", "store", "drain", "deliver")
+# The stages that partition one pass end to end, in order. Advice refresh is
+# deliberately outside the local capture batch, so it is accounted for as its
+# own stage rather than being hidden in the store duration.
+_PASS_PARTITION_STAGES: Final = ("import", "resolve", "store", "advice", "drain", "deliver")
 _ROUTINE_READ_TOOLS: Final = frozenset(
     {
         "glob",
@@ -859,7 +866,12 @@ def _visible_content_chunks(
             payload.get("message") or payload.get("output") or payload.get("content"),
         )
     elif event_name == "PreToolUse":
-        add(ObservationContentKind.TOOL_INPUT, "tool-input", payload.get("tool_input"))
+        # Codex input bytes have no capture consumer and are excluded from
+        # semantic selection. Keep the structural envelope/correlation, but
+        # avoid encrypting a second copy of command arguments. Ordinary native
+        # profiles retain their explicitly selected capture contract.
+        if envelope.source is not ObservationSource.CODEX_HOOK:
+            add(ObservationContentKind.TOOL_INPUT, "tool-input", payload.get("tool_input"))
     elif event_name == "PostToolUse":
         add(
             ObservationContentKind.TOOL_OUTPUT,
@@ -940,18 +952,21 @@ def _elapsed_ms(started: float, finished: float) -> int:
     return max(0, int((finished - started) * 1000))
 
 
-def _hook_total_budget_seconds(event: str) -> float:
+def _hook_total_budget_seconds(event: str, *, native_content: bool = False) -> float:
     """Return the end-to-end budget for one pass of *event*.
 
     Events that may legitimately retry auto-attach (and SessionStart, the
     primary attach point) carry that enforced budget on top of the base sum;
-    the high-frequency PreToolUse/PostToolUse storm never attaches and keeps
-    the tighter contract (#288).
+    the high-frequency PreToolUse/PostToolUse storm and teardown SessionEnd
+    keep the tighter contract (#288, #616).
     """
 
+    total = _HOOK_TOTAL_BUDGET_SECONDS
+    if native_content:
+        total += _NATIVE_CONTENT_DRAIN_BUDGET_SECONDS - _HOOK_DRAIN_BUDGET_SECONDS
     if event == "SessionStart" or event in _AUTO_ATTACH_RETRY_EVENTS:
-        return _HOOK_TOTAL_BUDGET_SECONDS + _AUTO_ATTACH_RETRY_BUDGET_SECONDS
-    return _HOOK_TOTAL_BUDGET_SECONDS
+        total += _AUTO_ATTACH_RETRY_BUDGET_SECONDS
+    return total
 
 
 def _record_pass_timing(
@@ -961,6 +976,7 @@ def _record_pass_timing(
     stages: Mapping[str, int],
     monotonic: Callable[[], float],
     _state: Path | None,
+    native_content: bool = False,
 ) -> None:
     """Record the end-to-end hook budget.
 
@@ -972,7 +988,9 @@ def _record_pass_timing(
 
     with contextlib.suppress(BaseException):
         total_ms = _elapsed_ms(entry_started, monotonic())
-        over = total_ms > int(_hook_total_budget_seconds(event) * 1000)
+        over = total_ms > int(
+            _hook_total_budget_seconds(event, native_content=native_content) * 1000
+        )
         if not over and event not in _TIMING_REPORT_EVENTS:
             return
         if over:
@@ -1025,6 +1043,7 @@ async def _try_service_ingest(
     *,
     content_chunks: tuple[ObservationContentChunk, ...] = (),
     content_capture_profile: str | None = None,
+    capture_only: bool = False,
     deadline_ms: int,
 ) -> ObservationIngestResult:
     """Attempt one typed ingest through an already-open preflight client."""
@@ -1038,6 +1057,7 @@ async def _try_service_ingest(
                 envelope=envelope,
                 content_chunks=content_chunks,
                 content_capture_profile=content_capture_profile,
+                capture_only=capture_only,
             )
         )
         raw = await client.observation_ingest(body, deadline_ms=deadline_ms)
@@ -1079,8 +1099,10 @@ async def _drain_outbox(
     event_name: str = "drain",
     _state: Path | None = None,
     budget_seconds: float = _HOOK_DRAIN_BUDGET_SECONDS,
+    priority_source_identity: str | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     session_lock_owned: bool = False,
+    drain_lease_owned: bool = False,
 ) -> None:
     """Drain the workspace outbox under a nonblocking per-workspace lease.
 
@@ -1092,6 +1114,23 @@ async def _drain_outbox(
     exactly the diagnostic noise that buried genuine preflight/service faults.
     A crashed holder cannot wedge the lease; flock releases with its process.
     """
+
+    if drain_lease_owned:
+        await _drain_outbox_leased(
+            store,
+            workspace_commitment=workspace_commitment,
+            codex_session_id=codex_session_id,
+            content_by_source_identity=content_by_source_identity,
+            content_capture_profile=content_capture_profile,
+            connect=connect,
+            event_name=event_name,
+            _state=_state,
+            budget_seconds=budget_seconds,
+            priority_source_identity=priority_source_identity,
+            monotonic=monotonic,
+            session_lock_owned=session_lock_owned,
+        )
+        return
 
     with store.drain_lease(workspace_commitment) as owned:
         if not owned:
@@ -1115,6 +1154,7 @@ async def _drain_outbox(
             event_name=event_name,
             _state=_state,
             budget_seconds=budget_seconds,
+            priority_source_identity=priority_source_identity,
             monotonic=monotonic,
             session_lock_owned=session_lock_owned,
         )
@@ -1131,6 +1171,7 @@ async def _drain_outbox_leased(
     event_name: str = "drain",
     _state: Path | None = None,
     budget_seconds: float = _HOOK_DRAIN_BUDGET_SECONDS,
+    priority_source_identity: str | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     session_lock_owned: bool = False,
 ) -> None:
@@ -1181,6 +1222,57 @@ async def _drain_outbox_leased(
     # SessionEnd budget is smaller than the preflight by design).
     started = monotonic()
 
+    # Stage native content through the already-open service connection before
+    # choosing a bounded FIFO prefix. The service returns the distinct pending
+    # reason only after encrypted manifests and the retry ticket are durable;
+    # capture_only never advances the cursor or ledger.
+    staged_content_sources: set[str] = set()
+    if content_by_source_identity:
+        for source_identity, chunks in content_by_source_identity.items():
+            if not chunks:
+                continue
+            source_row = next(
+                (row for row in all_pending if row.envelope.source_identity == source_identity),
+                None,
+            )
+            if source_row is None:
+                continue
+            source = source_row.envelope.source
+            codex_profileless = (
+                source is ObservationSource.CODEX_HOOK and content_capture_profile is None
+            )
+            profiled_native = (
+                source
+                in {
+                    ObservationSource.CLAUDE_HOOK,
+                    ObservationSource.CURSOR_HOOK,
+                }
+                and content_capture_profile is not None
+                and content_capture_profile_matches_source(source.value, content_capture_profile)
+            )
+            if not codex_profileless and not profiled_native:
+                continue
+            remaining = budget_seconds - (monotonic() - started)
+            if remaining <= 0:
+                break
+            try:
+                staged = await asyncio.wait_for(
+                    _try_service_ingest(
+                        client,
+                        source_row.codex_session_id,
+                        source_row.envelope,
+                        content_chunks=chunks,
+                        content_capture_profile=content_capture_profile,
+                        capture_only=True,
+                        deadline_ms=max(1, int(remaining * 1_000)),
+                    ),
+                    timeout=remaining,
+                )
+            except TimeoutError:
+                break
+            if staged.reason == OBSERVATION_CONTENT_CAPTURE_PENDING_REASON:
+                staged_content_sources.add(source_identity)
+
     grouped: dict[str, list[ObservationOutboxRow]] = {}
     for row in all_pending:
         grouped.setdefault(row.codex_session_id, []).append(row)
@@ -1189,7 +1281,46 @@ async def _drain_outbox_leased(
         session_order.remove(codex_session_id)
         session_order.insert(0, codex_session_id)
     pending: list[ObservationOutboxRow] = []
-    while grouped and len(pending) < _HOOK_DRAIN_ROW_LIMIT:
+    pending_limit = _HOOK_DRAIN_ROW_LIMIT
+    if priority_source_identity is not None:
+        # Native content is not replayable, so make the current content row's
+        # same-session prefix the first bounded work package. The prefix keeps
+        # cursor order intact; it never jumps over an older row to deliver
+        # plaintext out of order. A large or permanently blocked backlog is
+        # still reported as a content gap rather than extending the hook
+        # without bound.
+        priority_row = next(
+            (
+                row
+                for row in all_pending
+                if row.envelope.source_identity == priority_source_identity
+            ),
+            None,
+        )
+        if priority_row is not None:
+            priority_queue = grouped.get(priority_row.codex_session_id, [])
+            priority_index = next(
+                (
+                    index
+                    for index, row in enumerate(priority_queue)
+                    if row.envelope.source_identity == priority_source_identity
+                ),
+                None,
+            )
+            if priority_index is not None:
+                prefix_count = min(priority_index + 1, _NATIVE_CONTENT_ROW_LIMIT)
+                pending.extend(priority_queue[:prefix_count])
+                remaining_priority = priority_queue[prefix_count:]
+                if remaining_priority:
+                    grouped[priority_row.codex_session_id] = remaining_priority
+                else:
+                    grouped.pop(priority_row.codex_session_id, None)
+                if priority_row.codex_session_id in session_order:
+                    session_order.remove(priority_row.codex_session_id)
+                if remaining_priority:
+                    session_order.insert(0, priority_row.codex_session_id)
+                pending_limit = _NATIVE_CONTENT_ROW_LIMIT
+    while grouped and len(pending) < pending_limit:
         for session_id in tuple(session_order):
             queue = grouped.get(session_id)
             if not queue:
@@ -1198,7 +1329,7 @@ async def _drain_outbox_leased(
             pending.append(queue.pop(0))
             if not queue:
                 grouped.pop(session_id, None)
-            if len(pending) >= _HOOK_DRAIN_ROW_LIMIT:
+            if len(pending) >= pending_limit:
                 break
     # Retryable rejections split three ways by scope (the reason vocabulary is
     # RETRYABLE_OBSERVATION_REJECTIONS in application/observation_drain.py):
@@ -1217,15 +1348,17 @@ async def _drain_outbox_leased(
     # Re-attempting every row of a permanently-undeliverable backlog burned
     # the whole drain budget per hook forever — the recurrence tax of #211.
     skipped_sessions: set[str] = set()
+    delivered_content: set[str] = set()
     bound_sessions, pending_lifecycle_sessions = store.lifecycle_reconciliation_snapshot(
         workspace_commitment
     )
     consecutive_unavailable = 0
     # The hook owns a bounded slice; the service sweeper owns bulk delivery.
-    # Hitting the slice after moving backlog (acknowledged or quarantined rows)
-    # is a capacity yield, not a failed drain, so budget expiry records a
-    # diagnostic only when the pass made no progress at all (#351).
-    progressed = 0
+    # Hitting the slice after moving backlog or durably staging native content
+    # is a capacity yield, not a failed drain. Staging leaves the structural
+    # row pending, but it is useful progress: its transient bytes survived.
+    # Budget expiry records a diagnostic only when no progress occurred (#351).
+    progressed = len(staged_content_sources)
     try:
         for row in pending:
             if row.codex_session_id in skipped_sessions:
@@ -1251,6 +1384,7 @@ async def _drain_outbox_leased(
             chunks = (
                 ()
                 if content_by_source_identity is None
+                or row.envelope.source_identity in staged_content_sources
                 else content_by_source_identity.get(row.envelope.source_identity, ())
             )
             try:
@@ -1301,6 +1435,8 @@ async def _drain_outbox_leased(
                         progressed += 1
                     elif decision.action is ObservationDrainAction.ACKNOWLEDGE:
                         store.acknowledge_outbox_row(workspace_commitment, attempted)
+                        if chunks:
+                            delivered_content.add(row.envelope.source_identity)
                         progressed += 1
             if attempted is None:
                 if chunks:
@@ -1351,6 +1487,16 @@ async def _drain_outbox_leased(
                 continue
             consecutive_unavailable = 0
     finally:
+        if content_by_source_identity:
+            for source_identity in content_by_source_identity:
+                if source_identity in staged_content_sources:
+                    continue
+                if source_identity not in delivered_content:
+                    with contextlib.suppress(Exception):
+                        store.note_coverage_gap(
+                            workspace_commitment,
+                            ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                        )
         with contextlib.suppress(Exception):
             await client.close()
 
@@ -2116,6 +2262,29 @@ def handle_observe(
 
     entry_started = _monotonic() if _entry_monotonic is None else _entry_monotonic
     stages: dict[str, int] = {}
+
+    # Native content is carried only in this process. Reserve the workspace
+    # drain before entering the local store batch so a background sweeper cannot
+    # consume the newly enqueued structural row while the foreground hook is
+    # still preparing its transient chunks. The lease is deliberately entered
+    # manually: the batch and the later service pass live in separate scopes,
+    # while the outer finally must still release it on every early return or
+    # cancellation.
+    native_drain_lease: contextlib.AbstractContextManager[bool] | None = None
+    native_drain_lease_entered = False
+    native_drain_lease_owned = False
+
+    def _release_native_drain_lease() -> None:
+        nonlocal native_drain_lease, native_drain_lease_entered, native_drain_lease_owned
+        if not native_drain_lease_entered or native_drain_lease is None:
+            return
+        lease = native_drain_lease
+        native_drain_lease = None
+        native_drain_lease_entered = False
+        native_drain_lease_owned = False
+        with contextlib.suppress(BaseException):
+            lease.__exit__(None, None, None)
+
     try:
         store = LocalObservationStore(_state=_state)
         resolve_started = _monotonic()
@@ -2295,6 +2464,40 @@ def handle_observe(
             return 0
 
         assert workspace_commitment is not None
+        native_content_reservation = (
+            not skip_service
+            and capture_authority_known
+            and (
+                (source is ObservationSource.CODEX_HOOK and _content_capture_profile is None)
+                or (
+                    source
+                    in {
+                        ObservationSource.CLAUDE_HOOK,
+                        ObservationSource.CURSOR_HOOK,
+                    }
+                    and _content_capture_profile is not None
+                    and content_capture_profile_matches_source(
+                        source.value, _content_capture_profile
+                    )
+                    and _content_capture_profile in consent.content_capture_profiles
+                )
+            )
+        )
+        if native_content_reservation:
+            try:
+                candidate_lease = store.drain_lease(workspace_commitment)
+                candidate_owned = candidate_lease.__enter__()
+            except Exception:
+                # The reservation is an optimization for transient content;
+                # if its lock file cannot be opened, retain the structural
+                # event and let the normal drain path report any content gap.
+                native_drain_lease = None
+                native_drain_lease_entered = False
+                native_drain_lease_owned = False
+            else:
+                native_drain_lease = candidate_lease
+                native_drain_lease_entered = True
+                native_drain_lease_owned = candidate_owned
         store_started = _monotonic()
         # Payload parse, runtime gate, workspace resolution and the consent
         # probe ran between 'import' and here, unwindowed. Three of those calls
@@ -2410,7 +2613,13 @@ def handle_observe(
                 gap_codes.append(ObservationGapCode.UNSUPPORTED_EVENT.value)
 
             tool_name = _token_or_none(payload.get("tool_name"))
-            skip_advice_loop = tool_name is not None and tool_name in YOETZ_TOOL_NAMES
+            # Every host spelling of a Yoetz-owned call must suppress the shared
+            # advice loop.  The older Codex-only set missed Claude's plugin
+            # scope and Cursor's server-qualified names, so those hosts could
+            # receive frontier advice from the hook observing the same call.
+            # This affects only advice delivery; explicit self-call failures
+            # still follow ``self_observation_deliverable`` and remain queued.
+            skip_advice_loop = tool_name is not None and tool_name in YOETZ_OWNED_TOOL_NAMES
 
             supplied_ordinal = _event_ordinal_from_payload(payload)
             event_ordinal = (
@@ -2429,29 +2638,31 @@ def handle_observe(
                 gap_codes=tuple(sorted(set(gap_codes), key=str.encode)),
                 source=source,
             )
-            # Native host content requires both the explicit profile argument
-            # emitted by the rendered artifact and the matching user consent
-            # arm.  Old/native structural hooks therefore remain contentless;
-            # Codex's historical session-stream path keeps its prior behavior.
+            # Claude/Cursor native content requires the explicit profile emitted
+            # by the rendered artifact and its matching consent arm. Codex hook
+            # content is the profileless arm of the structural observation grant;
+            # Codex session-stream content keeps its historical behavior.
             native_content_source = source in {
                 ObservationSource.CLAUDE_HOOK,
+                ObservationSource.CODEX_HOOK,
                 ObservationSource.CURSOR_HOOK,
             }
             content_authorized = capture_authority_known and not native_content_source
             if native_content_source:
-                content_authorized = (
-                    capture_authority_known
-                    and _content_capture_profile is not None
-                    and content_capture_profile_matches_source(
-                        source.value, _content_capture_profile
+                if source is ObservationSource.CODEX_HOOK:
+                    content_authorized = (
+                        capture_authority_known and _content_capture_profile is None
                     )
-                    and _content_capture_profile in consent.content_capture_profiles
-                )
-                if (
-                    capture_authority_known
-                    and _content_capture_profile is not None
-                    and not content_authorized
-                ):
+                else:
+                    content_authorized = (
+                        capture_authority_known
+                        and _content_capture_profile is not None
+                        and content_capture_profile_matches_source(
+                            source.value, _content_capture_profile
+                        )
+                        and _content_capture_profile in consent.content_capture_profiles
+                    )
+                if capture_authority_known and not content_authorized:
                     gap_codes.append(ObservationGapCode.CONTENT_UNSELECTED.value)
             if not capture_authority_known:
                 gap_codes.append(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
@@ -2481,6 +2692,44 @@ def handle_observe(
                 )
             content_map = {envelope.source_identity: content_chunks} if content_chunks else None
             service_content_profile = _content_capture_profile if content_authorized else None
+            native_content_priority = (
+                next(iter(content_map))
+                if content_map
+                and source
+                in {
+                    ObservationSource.CLAUDE_HOOK,
+                    ObservationSource.CODEX_HOOK,
+                    ObservationSource.CURSOR_HOOK,
+                }
+                else None
+            )
+            # A contentless ordinary-native row has no transient bytes that need a foreground
+            # service handoff. Keep its local envelope/outbox intent and let a later hook or the
+            # sweeper deliver it; opening a fresh service connection here would add latency to
+            # self-observation and structural-only host events. Content-bearing native rows still
+            # use the longer foreground window and priority path.
+            native_profile_drain = native_content_source and (
+                (
+                    source is ObservationSource.CODEX_HOOK
+                    and _content_capture_profile is None
+                    and content_map is not None
+                )
+                or (
+                    source is not ObservationSource.CODEX_HOOK
+                    and _content_capture_profile is not None
+                    and content_capture_profile_matches_source(
+                        source.value, _content_capture_profile
+                    )
+                )
+            )
+            defer_contentless_native_drain = (
+                native_profile_drain and content_map is None and resolved_event != "SessionStart"
+            )
+            native_content_drain_budget = (
+                _NATIVE_CONTENT_DRAIN_BUDGET_SECONDS
+                if native_profile_drain
+                else _HOOK_DRAIN_BUDGET_SECONDS
+            )
 
             # Local durable ingest and pairing admission share one store lock.
             # The returned envelope is authoritative: a paired orphan's gap is
@@ -2559,13 +2808,24 @@ def handle_observe(
                             hook_provided_path=hook_path_token,
                         )
 
-            # Deterministic advice from retained envelopes (works with zero MCP publications).
-            advice_started = _monotonic()
+        stages["store"] = _elapsed_ms(store_started, _monotonic())
+
+        # Refresh deterministic advice only after the capture batch has
+        # closed.  The refresh can build and persist a comparatively large
+        # snapshot; keeping it outside the batch means a host cancellation
+        # cannot roll back the already-durable envelope, pairing, mapping, or
+        # outbox intent (#616).  Advice selection and its delivery lease remain
+        # below the service drain and stdout write, preserving commit-after-
+        # output semantics.
+        advice_started = _monotonic()
+        # Teardown cannot deliver advice to a closing host. Its structural end
+        # intent is already durable and the service refreshes advice when it
+        # drains that intent, so avoid cold advice construction inside the
+        # host's hard three-second SessionEnd window.
+        if resolved_event != "SessionEnd":
             with contextlib.suppress(Exception):
                 store.refresh_advice(workspace_commitment)
-            stages["advice"] = _elapsed_ms(advice_started, _monotonic())
-
-        stages["store"] = _elapsed_ms(store_started, _monotonic())
+        stages["advice"] = _elapsed_ms(advice_started, _monotonic())
 
         # SessionStart: auto-start/attach first, persist mapping, then drain outbox.
         # Every branch below that opens a service connection is gated on
@@ -2720,12 +2980,20 @@ def handle_observe(
                                     connect=cast(HookDrainConnector | None, connect),
                                     event_name=resolved_event,
                                     _state=_state,
+                                    budget_seconds=native_content_drain_budget,
+                                    priority_source_identity=native_content_priority,
                                     monotonic=_monotonic,
                                     session_lock_owned=_session_lock_owned,
+                                    drain_lease_owned=native_drain_lease_owned,
                                 )
 
                             with contextlib.suppress(Exception):
                                 _resolve_runner()(_drain)
+                            _release_native_drain_lease()
+
+            # A clear SessionStart has no service drain; the regular SessionStart
+            # path released its reservation immediately after the drain above.
+            _release_native_drain_lease()
 
         # Issue #537: no applied-vs-serving drift probe runs on this path. A hook process
         # has no serving route of its own, so the only comparison available here is a
@@ -2786,7 +3054,15 @@ def handle_observe(
                                 "auto_attach_retry_failed", resolved_event, _state=_state
                             )
 
-        if not skip_service and resolved_event != "SessionStart":
+        # SessionEnd is teardown-only: its lifecycle and outbox intent are already durable in the
+        # local store, while a cold service preflight can consume the host's entire hard window.
+        # Leave the row pending for the next SessionStart or the service sweeper rather than
+        # risking host cancellation after local capture has committed.
+        if (
+            not skip_service
+            and resolved_event not in {"SessionStart", "SessionEnd"}
+            and not defer_contentless_native_drain
+        ):
             # Every later mapped hook drains the complete session outbox, so the
             # current envelope plus any stream-recovered or previously-pending
             # entries all reconcile. Retryable rejections stay pending and
@@ -2805,14 +3081,17 @@ def handle_observe(
                     budget_seconds=(
                         _SESSION_END_DRAIN_BUDGET_SECONDS
                         if resolved_event == "SessionEnd"
-                        else _HOOK_DRAIN_BUDGET_SECONDS
+                        else native_content_drain_budget
                     ),
+                    priority_source_identity=native_content_priority,
                     monotonic=_monotonic,
                     session_lock_owned=_session_lock_owned,
+                    drain_lease_owned=native_drain_lease_owned,
                 )
 
             with contextlib.suppress(Exception):
                 _resolve_runner()(_drain_all)
+            _release_native_drain_lease()
 
         if content_chunks and skip_service:
             # Content is intentionally ephemeral. Without a ready mapped
@@ -2944,6 +3223,9 @@ def handle_observe(
             stages=stages,
             monotonic=_monotonic,
             _state=_state,
+            native_content=(
+                native_profile_drain and content_map is not None and resolved_event != "SessionEnd"
+            ),
         )
         return 0
     except BaseException:
@@ -2960,6 +3242,8 @@ def handle_observe(
                     "stdout_write_failed", event_name or "observe", _state=_state
                 )
         return 0
+    finally:
+        _release_native_drain_lease()
 
 
 _CLAUDE_SESSION_PREFIX: Final = "claude:"
@@ -2997,6 +3281,27 @@ _NATIVE_OUTCOME_JSON_BYTES: Final = 65_536
 _NATIVE_SUCCESS_STATUSES: Final = frozenset(
     {"complete", "completed", "ok", "passed", "success", "succeeded"}
 )
+_CLAUDE_TOOL_RESPONSE_FACT_KEYS: Final = frozenset(
+    {
+        # Claude's built-in Bash result and documented MCP result boundary.
+        "interrupted",
+        "is_interrupted",
+        "is_interrupt",
+        "isInterrupted",
+        "cancelled",
+        "canceled",
+        "is_cancelled",
+        "isCanceled",
+        "is_error",
+        "isError",
+        "success",
+        "exit_code",
+        "exitCode",
+        "exit_status",
+        "exitStatus",
+    }
+)
+_MCP_RESULT_FACT_KEYS: Final = frozenset({"is_error", "isError"})
 _NATIVE_FAILURE_STATUS_MAP: Final = MappingProxyType(
     {
         "aborted": "aborted",
@@ -3055,13 +3360,34 @@ def _bounded_outcome_mapping(value: object) -> Mapping[str, JsonValue] | None:
 
 def _native_outcome_mappings(
     payload: Mapping[str, JsonValue],
+    *,
+    claude_tool_response_boundary: bool = False,
+    claude_mcp_tool_response_boundary: bool = False,
+    cursor_mcp_result_boundary: bool = False,
 ) -> tuple[Mapping[str, JsonValue], ...]:
-    """Collect top-level and one bounded layer of documented result wrappers."""
+    """Collect bounded host-result mappings without descending into domain output."""
 
     mappings: list[Mapping[str, JsonValue]] = [payload]
     for key in ("tool_response", "tool_output", "result", "result_json"):
         mapping = _bounded_outcome_mapping(payload.get(key))
         if mapping is None:
+            continue
+        if (
+            claude_tool_response_boundary
+            and key == "tool_response"
+            or cursor_mcp_result_boundary
+            and key in {"tool_output", "result_json"}
+        ):
+            # Claude and Cursor pass MCP structured content and arbitrary tool output through
+            # their result carriers. Only the protocol-level ``isError`` bit is a host fact for
+            # MCP; fields such as ``success``, ``exitCode``, ``outcome``, or ``status`` belong
+            # to the tool's domain and must not turn a successful delivery into a host failure.
+            fact_keys = (
+                _MCP_RESULT_FACT_KEYS
+                if claude_mcp_tool_response_boundary or cursor_mcp_result_boundary
+                else _CLAUDE_TOOL_RESPONSE_FACT_KEYS
+            )
+            mappings.append({field: mapping[field] for field in fact_keys if field in mapping})
             continue
         mappings.append(mapping)
         for nested_key in ("structuredContent", "structured_content", "data", "result"):
@@ -3077,13 +3403,19 @@ def _native_outcome_facts(
     force_failure: bool = False,
     force_denied: bool = False,
     require_process_exit: bool = False,
+    host_event_success: bool = False,
+    background_launch: bool = False,
+    claude_tool_response_boundary: bool = False,
+    claude_mcp_tool_response_boundary: bool = False,
+    cursor_mcp_result_boundary: bool = False,
 ) -> _NativeOutcomeFacts:
     """Extract closed native outcome facts without retaining host prose.
 
     Command-like tools require an explicit process exit when
-    ``require_process_exit`` is true. A host-level success flag or an
-    ``isError=false`` wrapper then proves tool delivery only, so the command
-    result stays unknown until an exit/status fact is present.
+    ``require_process_exit`` is true, unless the selected host contract says
+    that the event itself is an authoritative tool-level success signal. The
+    latter still never manufactures an exit status. A background launch is
+    only a partial result until the host supplies completion evidence.
     """
 
     success_true = False
@@ -3099,7 +3431,12 @@ def _native_outcome_facts(
     failure_status: str | None = "failure" if force_failure else None
     success_status = False
 
-    for mapping in _native_outcome_mappings(payload):
+    for mapping in _native_outcome_mappings(
+        payload,
+        claude_tool_response_boundary=claude_tool_response_boundary,
+        claude_mcp_tool_response_boundary=claude_mcp_tool_response_boundary,
+        cursor_mcp_result_boundary=cursor_mcp_result_boundary,
+    ):
         for key in ("denied", "is_denied", "permission_denied"):
             value = mapping.get(key)
             if type(value) is bool and value:
@@ -3201,9 +3538,16 @@ def _native_outcome_facts(
             valid_exits[0],
             "success" if all(value == 0 for value in valid_exits) else "nonzero_exit",
         )
-    if require_process_exit:
-        return _NativeOutcomeFacts(None, denied, None, "unknown")
     if unknown:
+        return _NativeOutcomeFacts(None, denied, None, "unknown")
+    if background_launch:
+        return _NativeOutcomeFacts(None, denied, None, "partial")
+    if host_event_success:
+        # Claude's PostToolUse event is the host's closed success fact. Keep
+        # exit_status absent: an event-level success proves the tool call, not
+        # an invented process-exit integer.
+        return _NativeOutcomeFacts(True, denied, None, "success")
+    if require_process_exit:
         return _NativeOutcomeFacts(None, denied, None, "unknown")
     if success_true or success_status or error_false:
         return _NativeOutcomeFacts(True, denied, None, "success")
@@ -3243,6 +3587,7 @@ def handle_claude_observe(
     run_async: AsyncRunner | None = None,
     skip_service: bool = False,
     observation_profile: str | None = None,
+    _entry_monotonic: float | None = None,
 ) -> int:
     """Normalize one Claude hook into bounded Yoetz observation.
 
@@ -3407,10 +3752,20 @@ def handle_claude_observe(
                 hook_io.stdout_json({}, stdout)
                 return 0
             if ordinary_profile:
+                tool_input = payload.get("tool_input")
+                background_launch = (
+                    isinstance(tool_input, Mapping)
+                    and type(tool_input.get("run_in_background")) is bool
+                    and tool_input.get("run_in_background") is True
+                )
                 outcome = _native_outcome_facts(
                     payload,
                     force_failure=raw_event == "PostToolUseFailure",
                     require_process_exit=(tool_token.lower() in _SHELL_TOOLS),
+                    host_event_success=raw_event == "PostToolUse",
+                    background_launch=background_launch,
+                    claude_tool_response_boundary=True,
+                    claude_mcp_tool_response_boundary=tool_token.lower().startswith("mcp__"),
                 )
                 structural["action"] = (
                     "claude_tool_success"
@@ -3492,6 +3847,7 @@ def handle_claude_observe(
             connect=connect,
             run_async=run_async,
             skip_service=skip_service,
+            _entry_monotonic=_entry_monotonic,
             source=ObservationSource.CLAUDE_HOOK,
             _output_event_name=raw_event,
             _content_capture_profile=(
@@ -3505,6 +3861,78 @@ def handle_claude_observe(
         return 0
 
 
+_CURSOR_START_TOOL_SERVERS: Final = {
+    "mcp__yoetz__start": "yoetz",
+    "mcp__plugin_yoetz_yoetz__start": "plugin-yoetz-yoetz",
+    "yoetz:start": "yoetz",
+    "plugin-yoetz-yoetz:start": "plugin-yoetz-yoetz",
+}
+
+
+def _bind_cursor_start(
+    payload: Mapping[str, JsonValue],
+    *,
+    raw_event: str,
+    session: str,
+    _state: Path | None,
+) -> None:
+    """Bind an owned start transiently; generic ``MCP:start`` has no owner.
+
+    Cursor 3.20.0 supplies the server key only on afterMCPExecution. Its
+    ordinary postToolUse spelling cannot distinguish two servers' start tools.
+    Older scoped spellings remain admissible, but conflicting owner fields do
+    not. The shared binder still owns strict result IDs and lifecycle locking.
+    """
+
+    # A previous owned start may have raced lifecycle recovery. Retry its
+    # structural sidecar before any later event observes the old/no mapping;
+    # Cursor does not run Codex's handle_session_start pending-write drain.
+    with contextlib.suppress(Exception):
+        with acquire_session_lock(f"{_CURSOR_SESSION_PREFIX}{session}", _state=_state) as owned:
+            if owned:
+                apply_pending_mapping(f"{_CURSOR_SESSION_PREFIX}{session}", _state=_state)
+    if raw_event not in {"afterMCPExecution", "postToolUse"}:
+        return
+    tool_name = payload.get("tool_name")
+    if type(tool_name) is not str:
+        return
+    server = payload.get("mcp_server_name")
+    expected_server = _CURSOR_START_TOOL_SERVERS.get(tool_name)
+    if expected_server is not None:
+        if "mcp_server_name" in payload and server != expected_server:
+            return
+    elif not (
+        raw_event == "afterMCPExecution"
+        and tool_name == "start"
+        and type(server) is str
+        and server in {"yoetz", "plugin-yoetz-yoetz"}
+    ):
+        return
+    # A post-hook can carry a transport failure even with success-shaped data.
+    # Never allow that data to replace a valid mapping.
+    if _native_outcome_facts(payload).success is False:
+        return
+    response = payload.get("result_json" if raw_event == "afterMCPExecution" else "tool_output")
+    # Cursor serializes the whole MCP CallToolResult. Decode that outer object
+    # before the shared binder unwraps structuredContent or one JSON text block.
+    parsed = _bounded_outcome_mapping(response)
+    from yoetz.cli.hooks import bind_start_mapping_outcome, record_start_bind_diagnostic
+
+    with contextlib.suppress(Exception):
+        record_start_bind_diagnostic(
+            bind_start_mapping_outcome(
+                {
+                    "session_id": f"{_CURSOR_SESSION_PREFIX}{session}",
+                    "tool_name": "mcp__yoetz__start",
+                    "tool_response": cast(JsonValue, parsed) if parsed is not None else response,
+                },
+                _state=_state,
+            ),
+            "PostToolUse",
+            _state=_state,
+        )
+
+
 def handle_cursor_observe(
     *,
     event_name: str | None,
@@ -3516,6 +3944,7 @@ def handle_cursor_observe(
     run_async: AsyncRunner | None = None,
     skip_service: bool = False,
     observation_profile: str | None = None,
+    _entry_monotonic: float | None = None,
 ) -> int:
     """Normalize one Cursor hook into bounded Yoetz observation.
 
@@ -3543,11 +3972,9 @@ def handle_cursor_observe(
             hook_io.stdout_json({}, stdout)
         return 0
     if ordinary_profile:
-        # Cursor's generic tool events are the authoritative stream.  Shell,
-        # read-file, MCP and edit-specific hooks are deliberately supplemental
-        # and remain unsupported here until their overlap is proven distinct.
+        # Generic tool events own observation. afterMCPExecution is binding-only:
+        # it alone supplies the owner of the ordinary ``MCP:start`` tool name.
         event_map.pop("afterFileEdit")
-        event_map.pop("afterMCPExecution")
         event_map.update(
             {
                 "preToolUse": "PreToolUse",
@@ -3613,6 +4040,10 @@ def handle_cursor_observe(
                     "workspace_unresolvable", event_map[raw_event], _state=_state
                 )
             return 0 if hook_io.stdout_json({}, stdout) else 0
+        _bind_cursor_start(payload, raw_event=raw_event, session=session, _state=_state)
+        if ordinary_profile and raw_event == "afterMCPExecution":
+            # No duplicate structural row, content capture, or advice delivery.
+            return 0 if hook_io.stdout_json({}, stdout) else 0
         cursor_version = _token_or_none(payload.get("cursor_version"))
         capability_profile_id = (
             CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
@@ -3672,12 +4103,12 @@ def handle_cursor_observe(
         if duration is not None:
             structural["duration_ms"] = duration
         if ordinary_profile and raw_event in {"postToolUse", "postToolUseFailure"}:
+            cursor_tool_name = (_token_or_none(payload.get("tool_name")) or "").lower()
             outcome = _native_outcome_facts(
                 payload,
                 force_failure=raw_event == "postToolUseFailure",
-                require_process_exit=(
-                    (_token_or_none(payload.get("tool_name")) or "").lower() in _SHELL_TOOLS
-                ),
+                require_process_exit=(cursor_tool_name in _SHELL_TOOLS),
+                cursor_mcp_result_boundary=cursor_tool_name.startswith(("mcp:", "mcp__")),
             )
             structural["action"] = (
                 "cursor_tool_denied"
@@ -3728,6 +4159,7 @@ def handle_cursor_observe(
             connect=connect,
             run_async=run_async,
             skip_service=skip_service,
+            _entry_monotonic=_entry_monotonic,
             source=ObservationSource.CURSOR_HOOK,
             _output_event_name=raw_event,
             _content_capture_profile=(

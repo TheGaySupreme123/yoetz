@@ -17,6 +17,7 @@ from yoetz.domain.observation import (
     ObservationRevokeCommand,
     ObservationSource,
 )
+from yoetz.domain.observation_profiles import CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
 from yoetz.kernel.policies.observation_advice import ObservationCompositionFact
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 
@@ -556,13 +557,14 @@ def test_claude_failure_advice_preserves_raw_event_and_commits_after_output(
                 {
                     "hook_event_name": "PostToolUseFailure",
                     "session_id": "claude-failure-advice",
-                    "tool_name": "mcp__plugin_yoetz_yoetz__status",
+                    "tool_name": "Bash",
                     "tool_use_id": "tool-failure-advice",
                 }
             ),
             stdout=stdout,
             workspace=str(tmp_path),
             _state=tmp_path,
+            observation_profile=CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
             skip_service=True,
         )
         == 0
@@ -577,6 +579,56 @@ def test_claude_failure_advice_preserves_raw_event_and_commits_after_output(
     envelope = store.list_envelopes(commitment)[0]
     assert envelope.structural_payload["hook_name"] == "PostToolUse"
     assert envelope.structural_payload["success"] is False
+
+
+def test_claude_plugin_tool_does_not_lease_frontier_advice_for_its_own_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude's plugin-scoped spelling participates in the shared self-call guard."""
+
+    store, commitment = _consented_store(tmp_path)
+    session = "claude:plugin-self-advice"
+    store.bind_codex_session(commitment, session)
+    store.note_frontier_motion(
+        commitment,
+        session,
+        from_sequence=1,
+        to_sequence=2,
+        head_digest="sha256:" + "3" * 64,
+        observation_record_count=1,
+        task_id="tsk_claude_self_advice",
+    )
+    lease_calls: list[str] = []
+    original_lease = LocalObservationStore.advice_delivery_lease
+
+    def tracked_lease(self: LocalObservationStore, workspace: str) -> object:
+        lease_calls.append(workspace)
+        return original_lease(self, workspace)
+
+    monkeypatch.setattr(LocalObservationStore, "advice_delivery_lease", tracked_lease)
+    stdout = io.BytesIO()
+    assert (
+        observe_hooks.handle_claude_observe(
+            event_name="PostToolUse",
+            stdin_bytes=canonical_encode(
+                {
+                    "hook_event_name": "PostToolUse",
+                    "session_id": "plugin-self-advice",
+                    "tool_name": "mcp__plugin_yoetz_yoetz__publish_work",
+                    "tool_use_id": "tool-plugin-self-advice",
+                    "tool_response": {},
+                }
+            ),
+            stdout=stdout,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    assert stdout.getvalue() == b"{}\n"
+    assert lease_calls == []
+    assert store.peek_frontier_motion(commitment, session) is not None
 
 
 def test_claude_stop_delivers_advice_as_non_error_feedback_not_a_block(

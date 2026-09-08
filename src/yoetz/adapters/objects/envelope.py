@@ -210,14 +210,16 @@ def encode_object_envelope(
 ) -> bytes:
     header_bytes = canonical_encode(cast(JsonValue, header.to_json()))
     envelope = ObjectEnvelope(header, header_bytes, payload_nonce, ciphertext, tag)
-    return (
-        _MAGIC
-        + bytes((_VERSION,))
-        + len(envelope.header_bytes).to_bytes(4, "big")
-        + envelope.header_bytes
-        + envelope.payload_nonce
-        + envelope.ciphertext
-        + envelope.tag
+    return b"".join(
+        (
+            _MAGIC,
+            bytes((_VERSION,)),
+            len(envelope.header_bytes).to_bytes(4, "big"),
+            envelope.header_bytes,
+            envelope.payload_nonce,
+            envelope.ciphertext,
+            envelope.tag,
+        )
     )
 
 

@@ -190,7 +190,7 @@ jobs:
           echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
           echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
           echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
-          echo "YOETZ_DENY_NETWORK=1" >> "$GITHUB_ENV"
+          echo "YZCI_DENY_NETWORK=1" >> "$GITHUB_ENV"
           uv sync --locked --group dev
           uv venv "${{ runner.temp }}/candidate-venv"
           uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" \
@@ -293,7 +293,7 @@ jobs:
           echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
           echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
           echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
-          echo "YOETZ_DENY_NETWORK=1" >> "$GITHUB_ENV"
+          echo "YZCI_DENY_NETWORK=1" >> "$GITHUB_ENV"
           uv sync --locked --group dev
           uv venv "${{ runner.temp }}/candidate-venv"
           uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" \
@@ -369,7 +369,7 @@ jobs:
           echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
           echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
           echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
-          echo "YOETZ_DENY_NETWORK=1" >> "$GITHUB_ENV"
+          echo "YZCI_DENY_NETWORK=1" >> "$GITHUB_ENV"
           uv sync --locked --all-extras --group dev
           uv venv "${{ runner.temp }}/candidate-venv"
           uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" \

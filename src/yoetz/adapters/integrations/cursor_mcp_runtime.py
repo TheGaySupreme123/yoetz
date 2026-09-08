@@ -32,6 +32,7 @@ __all__ = [
 _MAX_PROCESSES: Final = 64
 _MAX_TOKENS: Final = 12
 _MAX_COMM: Final = 32
+_MAX_PROJECT_SELECTOR: Final = 8_192
 _PS_EXECUTABLE: Final = "/bin/ps"
 _POLICY_SUFFIXES: Final = frozenset(
     {
@@ -169,6 +170,48 @@ def classify_serve_suffix(
     return kind
 
 
+def _valid_project_selector(value: str) -> bool:
+    """Recognize Cursor's expanded workspace selector without retaining its path."""
+
+    if type(value) is not str or not value:
+        return False
+    try:
+        if len(value.encode("utf-8")) > _MAX_PROJECT_SELECTOR:
+            return False
+    except UnicodeEncodeError:
+        return False
+    if not value.startswith("/") or value.startswith("//"):
+        return False
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        return False
+    try:
+        selector = Path(value)
+    except OSError, ValueError:
+        return False
+    # Match the bridge's lexical authority checks without probing the filesystem here.  Runtime
+    # classification identifies the argv shape only; existence, ownership, symlink safety, and
+    # roots/list membership remain separate binding gates.
+    return selector != Path(selector.anchor) and ".." not in selector.parts
+
+
+def _classify_cursor_project_suffix(
+    suffix: tuple[str, ...],
+) -> Literal["strict", "policy"] | None:
+    """Classify the exact project registration suffix with its expanded root argument."""
+
+    prefix = ("mcp", "serve", "--host", "cursor", "--project-root")
+    if len(suffix) < len(prefix) + 1 or suffix[: len(prefix)] != prefix:
+        return None
+    if not _valid_project_selector(suffix[len(prefix)]):
+        return None
+    tail = suffix[len(prefix) + 1 :]
+    if not tail:
+        return "policy"
+    if tail == ("--semantic", "off"):
+        return "strict"
+    return None
+
+
 def _launcher_match(
     tokens: Sequence[str], serve_index: int, expected_launcher: tuple[str, ...]
 ) -> CursorLauncherMatch:
@@ -246,6 +289,9 @@ def classify_serve_argv(
     launcher: CursorLauncherMatch | None = None
     if expected_launcher is not None and expected_launcher:
         launcher = _launcher_match(tokens, serve_index, expected_launcher)
+    project_kind = _classify_cursor_project_suffix(suffix)
+    if project_kind is not None:
+        return project_kind, launcher
     if suffix in _POLICY_SUFFIXES:
         return "policy", launcher
     if suffix in _STRICT_SUFFIXES:

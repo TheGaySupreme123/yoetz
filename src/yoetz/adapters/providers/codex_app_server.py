@@ -16,6 +16,7 @@ import shutil
 import signal
 import stat
 import tempfile
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -94,9 +95,9 @@ CODEX_EVALUATOR_RUNTIME_VERSION: Final = "0.150.1"
 CODEX_APP_SERVER_SCHEMA_SHA256: Final = (
     "sha256:8cdccfc35582696d7141e7f916e0d5a664ab5b5e90b732f104284d2507f369f8"
 )
-CODEX_EVALUATOR_CAPABILITY_PROFILE: Final = "codex-evaluator/0.150.1/v1"
+CODEX_EVALUATOR_CAPABILITY_PROFILE: Final = "codex-evaluator/0.150.1/v2"
 CODEX_EVALUATOR_CAPABILITY_CELL_SHA256: Final = (
-    "sha256:ad3e9a354ce29dd459e7549ac77db4425f6f1a41c4bc8dfd62316103c2897e28"
+    "sha256:c04d2dd111c85d323c3f96c7041bb598f047fff9f73b84f916d38b5321d32cfa"
 )
 CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT: Final = "2026-11-30T00:00:00Z"
 _CAPABILITY_EVIDENCE_EXPIRES_AT: Final = datetime(2026, 11, 30, tzinfo=UTC)
@@ -465,7 +466,7 @@ class _CodexProcess:
     process: asyncio.subprocess.Process
     workdir: Path
     stderr_task: asyncio.Task[bool]
-    pending_notifications: list[Mapping[str, object]]
+    pending_notifications: deque[Mapping[str, object]]
 
     async def send(self, value: Mapping[str, object]) -> None:
         stdin = self.process.stdin
@@ -488,7 +489,11 @@ class _CodexProcess:
             raise ValueError("codex_app_server_message_invalid")
         if self.stderr_task.done() and self.stderr_task.result():
             raise ValueError("codex_app_server_stderr_limit")
-        return _object(strict_json_parse(line[:-1]))
+        try:
+            return _object(strict_json_parse(line[:-1]))
+        except ProtocolValueError, ValueError:
+            # A malformed JSONL envelope is transport failure, not a malformed final answer.
+            raise ValueError("codex_app_server_message_invalid") from None
 
     async def request(
         self,
@@ -581,7 +586,7 @@ async def _launch(profile: CodexAppServerProfile) -> _CodexProcess:
                 process=process,
                 workdir=workdir,
                 stderr_task=asyncio.create_task(_drain_stderr(process.stderr)),
-                pending_notifications=[],
+                pending_notifications=deque(),
             )
             try:
                 await _cleanup_guaranteed(owned)
@@ -594,7 +599,7 @@ async def _launch(profile: CodexAppServerProfile) -> _CodexProcess:
             process=process,
             workdir=workdir,
             stderr_task=asyncio.create_task(_drain_stderr(process.stderr)),
-            pending_notifications=[],
+            pending_notifications=deque(),
         )
     except BaseException:
         # Spawn cancellation above owns and cleans a returned process before it reaches here.
@@ -950,7 +955,7 @@ def _take_account_updated(runtime: _CodexProcess) -> bool:
 
     updated = False
     pending = runtime.pending_notifications
-    runtime.pending_notifications = []
+    runtime.pending_notifications = deque()
     for message in pending:
         notification = _login_notification(message, "")
         if notification == "account_updated":
@@ -1058,7 +1063,7 @@ async def codex_login(
                     break
                 try:
                     message = (
-                        runtime.pending_notifications.pop(0)
+                        runtime.pending_notifications.popleft()
                         if runtime.pending_notifications
                         else await runtime.read(remaining)
                     )
@@ -1089,7 +1094,7 @@ async def codex_login(
                         raise TimeoutError
                     try:
                         message = (
-                            runtime.pending_notifications.pop(0)
+                            runtime.pending_notifications.popleft()
                             if runtime.pending_notifications
                             else await runtime.read(remaining)
                         )
@@ -1218,17 +1223,35 @@ class _CodexRuntimeWarning(Exception):
 
 
 def _discard_rate_limits_notification(message: Mapping[str, object]) -> None:
-    """Validate the exact account-rate shape and retain none of its mutable account state."""
+    """Validate bounded 0.150.1 sparse bookkeeping and retain no account state."""
+
+    def invalid() -> None:
+        raise ValueError("codex_app_server_rate_limits_invalid")
+
+    def bounded_object(
+        value: object, allowed: set[str], required: set[str]
+    ) -> Mapping[str, object]:
+        if type(value) is not dict:
+            invalid()
+        source = cast(dict[str, object], value)
+        if not required <= set(source) <= allowed:
+            invalid()
+        return source
+
+    def nullable_text(value: object, limit: int) -> None:
+        if value is not None and (type(value) is not str or len(value) > limit):
+            invalid()
+
+    def integer(value: object, bits: int) -> None:
+        if type(value) is not int or not -(2 ** (bits - 1)) <= value < 2 ** (bits - 1):
+            invalid()
 
     if set(message) not in ({"method", "params"}, {"method", "params", "emittedAtMs"}):
-        raise ValueError("codex_app_server_rate_limits_invalid")
-    if "emittedAtMs" in message and type(message["emittedAtMs"]) is not int:
-        raise ValueError("codex_app_server_rate_limits_invalid")
-    params = _object(message.get("params"))
-    if set(params) != {"rateLimits"}:
-        raise ValueError("codex_app_server_rate_limits_invalid")
-    rate_limits = _object(params.get("rateLimits"))
-    if set(rate_limits) != {
+        invalid()
+    if "emittedAtMs" in message:
+        integer(message["emittedAtMs"], 64)
+    params = bounded_object(message.get("params"), {"rateLimits"}, {"rateLimits"})
+    allowed = {
         "credits",
         "individualLimit",
         "limitId",
@@ -1238,43 +1261,59 @@ def _discard_rate_limits_notification(message: Mapping[str, object]) -> None:
         "rateLimitReachedType",
         "secondary",
         "spendControlReached",
-    }:
-        raise ValueError("codex_app_server_rate_limits_invalid")
-    if rate_limits.get("limitId") != "codex":
-        raise ValueError("codex_app_server_rate_limits_invalid")
+    }
+    rate_limits = bounded_object(params["rateLimits"], allowed, set())
+    nullable_text(rate_limits.get("limitId"), 128)
+    nullable_text(rate_limits.get("limitName"), 128)
     plan_type = rate_limits.get("planType")
     if plan_type is not None and (type(plan_type) is not str or plan_type not in _SAFE_PLAN_TYPES):
-        raise ValueError("codex_app_server_rate_limits_invalid")
-    if rate_limits.get("individualLimit") is not None:
-        raise ValueError("codex_app_server_rate_limits_invalid")
-    limit_name = rate_limits.get("limitName")
-    if limit_name is not None and (type(limit_name) is not str or len(limit_name) > 128):
-        raise ValueError("codex_app_server_rate_limits_invalid")
+        invalid()
     reached_type = rate_limits.get("rateLimitReachedType")
-    if reached_type is not None and (type(reached_type) is not str or len(reached_type) > 64):
-        raise ValueError("codex_app_server_rate_limits_invalid")
+    if reached_type is not None and (
+        type(reached_type) is not str
+        or reached_type
+        not in {
+            "rate_limit_reached",
+            "workspace_owner_credits_depleted",
+            "workspace_member_credits_depleted",
+            "workspace_owner_usage_limit_reached",
+            "workspace_member_usage_limit_reached",
+        }
+    ):
+        invalid()
     spend_control = rate_limits.get("spendControlReached")
     if spend_control is not None and type(spend_control) is not bool:
-        raise ValueError("codex_app_server_rate_limits_invalid")
+        invalid()
 
     for name in ("primary", "secondary"):
         window = rate_limits.get(name)
         if window is None:
             continue
-        source = _object(window)
-        if set(source) != {"resetsAt", "usedPercent", "windowDurationMins"} or any(
-            type(source.get(key)) not in {int, float}
-            for key in ("resetsAt", "usedPercent", "windowDurationMins")
-        ):
-            raise ValueError("codex_app_server_rate_limits_invalid")
-    credits = _object(rate_limits.get("credits"))
-    if set(credits) != {"balance", "hasCredits", "unlimited"}:
-        raise ValueError("codex_app_server_rate_limits_invalid")
-    if type(credits.get("hasCredits")) is not bool or type(credits.get("unlimited")) is not bool:
-        raise ValueError("codex_app_server_rate_limits_invalid")
-    balance = credits.get("balance")
-    if balance is not None and (type(balance) is not str or len(balance) > 64):
-        raise ValueError("codex_app_server_rate_limits_invalid")
+        source = bounded_object(
+            window, {"resetsAt", "usedPercent", "windowDurationMins"}, {"usedPercent"}
+        )
+        integer(source["usedPercent"], 32)
+        for key in ("resetsAt", "windowDurationMins"):
+            if source.get(key) is not None:
+                integer(source[key], 64)
+    if rate_limits.get("credits") is not None:
+        credits = bounded_object(
+            rate_limits["credits"],
+            {"balance", "hasCredits", "unlimited"},
+            {"hasCredits", "unlimited"},
+        )
+        if type(credits["hasCredits"]) is not bool or type(credits["unlimited"]) is not bool:
+            invalid()
+        nullable_text(credits.get("balance"), 64)
+    if rate_limits.get("individualLimit") is not None:
+        keys = {"limit", "remainingPercent", "resetsAt", "used"}
+        individual = bounded_object(rate_limits["individualLimit"], keys, keys)
+        for key in ("limit", "used"):
+            if type(individual[key]) is not str:
+                invalid()
+            nullable_text(individual[key], 64)
+        integer(individual["remainingPercent"], 32)
+        integer(individual["resetsAt"], 64)
 
 
 def _runtime_warning(message: Mapping[str, object]) -> _CodexRuntimeWarning:
@@ -1438,11 +1477,20 @@ def _classify_runtime_exception(
             else ("timeout", SemanticFailureClass.TIMEOUT)
         )
     if isinstance(error, ValueError) and not isinstance(error, _CodexRuntimeWarning):
-        return (
-            ("invalid", SemanticFailureClass.RESPONSE_SCHEMA)
-            if turn_acknowledged
-            else ("unavailable", SemanticFailureClass.UNSUPPORTED_PROFILE)
-        )
+        stage = _failure_stage(error, turn_acknowledged=turn_acknowledged, launched=True)
+        if turn_acknowledged and (
+            stage.startswith(("output_", "judgment_"))
+            or stage in {"completion_mismatch", "agent_message_count"}
+        ):
+            return "invalid", SemanticFailureClass.RESPONSE_SCHEMA
+        if stage not in {
+            "transport_failed",
+            "request_failed",
+            "event_limit",
+            "runtime_warning",
+            "unclassified",
+        }:
+            return "unavailable", SemanticFailureClass.UNSUPPORTED_PROFILE
     return (
         ("post_ack_unknown", SemanticFailureClass.TRANSPORT)
         if turn_acknowledged
@@ -1567,11 +1615,11 @@ class CodexAppServerEvaluator:
             # the fallback candidate set. Exactly one candidate must remain.
             final_texts: list[str] = []
             untagged_texts: list[str] = []
-            messages = list(runtime.pending_notifications)
-            runtime.pending_notifications.clear()
+            messages = runtime.pending_notifications
+            runtime.pending_notifications = deque()
             for _ in range(_MAX_EVENT_COUNT):
                 message = (
-                    messages.pop(0)
+                    messages.popleft()
                     if messages
                     else await runtime.read(_remaining(deadline, self.clock))
                 )
@@ -1581,7 +1629,13 @@ class CodexAppServerEvaluator:
                 if type(method) is not str or method not in _ALLOWED_NOTIFICATION_METHODS:
                     raise ValueError("codex_app_server_event_forbidden")
                 if method == "account/rateLimits/updated":
-                    _discard_rate_limits_notification(message)
+                    try:
+                        _discard_rate_limits_notification(message)
+                    except ValueError:
+                        # Bookkeeping cannot overrule the eventual answer or authoritative
+                        # native error. Keep only this closed diagnostic; a terminal failure
+                        # below replaces it. Event-count, byte, and deadline bounds still apply.
+                        failure_stage = "rate_limits_invalid"
                     continue
                 if method == "warning":
                     raise _runtime_warning(message)

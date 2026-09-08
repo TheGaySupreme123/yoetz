@@ -216,3 +216,8 @@ budget, `SERVER_INSTRUCTIONS_BUDGET` and `ADVERTISED_SURFACE_BUDGET` now carry t
 the unchanged bound on the packaged text, and that bound plus the disclosure ceiling
 (`MAX_DISCLOSURE_ENCODED_BYTES`, charged once per advertised tool in the aggregate), which the
 longest admissible passage is tested against.
+
+The startup disclosure is a configuration snapshot, not a guarantee about the live service.
+Absent or invalid configuration remains unknown; a policy-route check may still reach an
+external reviewer whose destination the bridge could not determine. Even a valid snapshot
+with no external binding can differ from the independently running service configuration.

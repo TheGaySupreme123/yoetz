@@ -117,7 +117,7 @@ jobs:
           echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
           echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
           echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
-          echo "YOETZ_DENY_NETWORK=1" >> "$GITHUB_ENV"
+          echo "YZCI_DENY_NETWORK=1" >> "$GITHUB_ENV"
           echo "YOETZ_TEST_MARKER=nightly-fault-linux-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_ENV"
           uv sync --locked --group dev
           uv venv "${{ runner.temp }}/candidate-venv"
@@ -220,7 +220,7 @@ jobs:
           echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
           echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
           echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
-          echo "YOETZ_DENY_NETWORK=1" >> "$GITHUB_ENV"
+          echo "YZCI_DENY_NETWORK=1" >> "$GITHUB_ENV"
           echo "YOETZ_TEST_MARKER=nightly-fault-macos-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_ENV"
           uv sync --locked --group dev
           uv venv "${{ runner.temp }}/candidate-venv"
@@ -308,7 +308,7 @@ jobs:
           echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
           echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
           echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
-          echo "YOETZ_DENY_NETWORK=1" >> "$GITHUB_ENV"
+          echo "YZCI_DENY_NETWORK=1" >> "$GITHUB_ENV"
 
       - name: Extended Hypothesis/reference-machine profile (fixed + randomized seed)
         env:
@@ -387,7 +387,7 @@ jobs:
           echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
           echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
           echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
-          echo "YOETZ_DENY_NETWORK=1" >> "$GITHUB_ENV"
+          echo "YZCI_DENY_NETWORK=1" >> "$GITHUB_ENV"
           uv sync --locked --group dev
           uv venv "${{ runner.temp }}/candidate-venv"
           uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" \

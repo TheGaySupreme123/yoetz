@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Final, Literal
 
-from yoetz.config.load import load_config
+from yoetz.config.load import load_config, parse_minimal_safe_config
 from yoetz.config.models import (
     OWNER_DECLARED_ENDPOINT_PROFILE_ID,
     ExternalEndpointConfig,
@@ -105,11 +105,11 @@ _PAYLOAD_BOUND: Final = (
     "privacy policy with no repository handle; every other operation writes only the local "
     "ledger on this machine."
 )
-_LOCAL_ONLY: Final = " Every operation writes only the local ledger on this machine."
+_SNAPSHOT_BOUND: Final = " This configuration snapshot may differ from the live service."
 _UNKNOWN_SENTENCE: Final = (
     DISCLOSURE_PREFIX
-    + "unknown, because the configuration was absent or invalid; treat the external destination "
-    "as unnamed until the owner repairs it." + _LOCAL_ONLY
+    + "unknown, because the configuration was absent or invalid. A policy-route check may reach "
+    "an external reviewer whose destination this bridge could not determine."
 )
 
 
@@ -132,9 +132,7 @@ class SemanticDestinationDisclosure:
 def _none(reason: str) -> SemanticDestinationDisclosure:
     return SemanticDestinationDisclosure(
         "none",
-        DISCLOSURE_PREFIX
-        + f"none; {reason}, so a check request cannot reach an external reviewer from this "
-        "configuration." + _LOCAL_ONLY,
+        DISCLOSURE_PREFIX + f"none in this configuration; {reason}." + _SNAPSHOT_BOUND,
     )
 
 
@@ -212,7 +210,7 @@ def disclose_semantic_destination(
     fallback = fallback_external_endpoint(config)
     if fallback is not None:
         sentence += f" Fallback after primary failure: {_endpoint_phrase(fallback)}."
-    return SemanticDestinationDisclosure("external", sentence + _PAYLOAD_BOUND)
+    return SemanticDestinationDisclosure("external", sentence + _PAYLOAD_BOUND + _SNAPSHOT_BOUND)
 
 
 def read_semantic_destination_disclosure(
@@ -226,7 +224,10 @@ def read_semantic_destination_disclosure(
     """
 
     try:
-        config = load_config({}, os.environ if env is None else env, None)
+        selected_env = os.environ if env is None else env
+        if parse_minimal_safe_config(selected_env, {}).config_path_used is None:
+            return disclose_semantic_destination(None)
+        config = load_config({}, selected_env, None)
     except Exception:
         return disclose_semantic_destination(None)
     return disclose_semantic_destination(config)

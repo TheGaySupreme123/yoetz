@@ -244,7 +244,8 @@ def test_no_external_destination_is_stated_with_its_reason(
     _assert_honest(disclosure)
     assert disclosure.kind == "none"
     assert reason in disclosure.sentence
-    assert "cannot reach an external reviewer" in disclosure.sentence
+    assert "snapshot may differ from the live service" in disclosure.sentence
+    assert "cannot reach" not in disclosure.sentence
     assert "Fallback" not in disclosure.sentence
     assert "Codex" not in disclosure.sentence
 
@@ -254,7 +255,8 @@ def test_missing_configuration_stays_unknown() -> None:
     _assert_honest(disclosure)
     assert disclosure.kind == "unknown"
     assert "absent or invalid" in disclosure.sentence
-    assert "treat the external destination as unnamed" in disclosure.sentence
+    assert "may reach an external reviewer" in disclosure.sentence
+    assert "only the local ledger" not in disclosure.sentence
 
 
 def test_read_from_environment_renders_unknown_for_invalid_and_external_for_valid(
@@ -264,7 +266,7 @@ def test_read_from_environment_renders_unknown_for_invalid_and_external_for_vali
     invalid.write_text('schema_version = "1"\nprofile = "not-a-profile"\n', encoding="utf-8")
     assert read_semantic_destination_disclosure({"YOETZ_CONFIG": str(invalid)}).kind == "unknown"
     absent = tmp_path / "absent.toml"
-    assert read_semantic_destination_disclosure({"YOETZ_CONFIG": str(absent)}).kind == "none"
+    assert read_semantic_destination_disclosure({"YOETZ_CONFIG": str(absent)}).kind == "unknown"
     valid = tmp_path / "valid.toml"
     valid.write_text(
         "\n".join(
@@ -405,3 +407,16 @@ def test_bridge_runtime_carries_the_disclosure_on_the_policy_route_only() -> Non
     assert bridge.BRIDGE_RUNTIME.instructions == default.instructions
     with pytest.raises(TypeError, match="semantic_destination_wrong_type"):
         bridge.build_bridge_runtime("policy", semantic_destination=cast(Any, "provider openai"))
+
+
+@pytest.mark.parametrize("contents", [None, "invalid = [", 'profile = "not-a-profile"'])
+def test_failed_config_read_never_promises_local_only(tmp_path: Path, contents: str | None) -> None:
+    config = tmp_path / "selected.toml"
+    if contents is not None:
+        config.write_text(contents, encoding="utf-8")
+    disclosure = read_semantic_destination_disclosure({"YOETZ_CONFIG": str(config)})
+    assert disclosure.kind == "unknown"
+    assert "may reach an external reviewer" in disclosure.sentence
+    assert "only the local ledger" not in disclosure.sentence
+    assert "cannot reach" not in disclosure.sentence
+    assert str(config) not in disclosure.sentence
