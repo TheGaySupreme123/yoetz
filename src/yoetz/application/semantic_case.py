@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Final, Literal, cast
 
@@ -2413,15 +2413,46 @@ def _drop_catalog_row(envelope: dict[str, JsonValue]) -> bool:
     return True
 
 
-def _drop_packet_row(envelope: dict[str, JsonValue], key: str) -> bool:
+def _fit_packet_section(
+    envelope: dict[str, JsonValue],
+    reductions: dict[str, int],
+    key: str,
+    accounting_key: str,
+) -> bytes | None:
+    """Find the first fitting suffix reduction, or remove this section completely."""
+
     packet_obj = envelope.get("review_packet")
     if not isinstance(packet_obj, dict):
-        return False
+        return None
     rows = packet_obj.get(key)
     if type(rows) is not list or not rows:
-        return False
-    packet_obj[key] = cast(JsonValue, cast(list[object], rows)[:-1])
-    return True
+        return None
+    original_rows = cast(list[JsonValue], rows)
+    total = len(original_rows)
+    prior_count = reductions[accounting_key]
+
+    def encode_after_dropping(count: int) -> bytes:
+        packet_obj[key] = original_rows[: total - count]
+        reductions[accounting_key] = prior_count + count
+        _set_selection_accounting(envelope, reductions)
+        return canonical_encode(cast(JsonValue, envelope))
+
+    best = encode_after_dropping(total)
+    if len(best) > MAX_EGRESS_ENVELOPE_BYTES:
+        return None
+    low, high = 1, total
+    # Removing a row cannot increase encoded size: the row/comma bytes offset
+    # any extra counter digit. Search the same first-fitting point as the old
+    # one-row-at-a-time loop, including its exact selection accounting.
+    while low < high:
+        middle = (low + high) // 2
+        candidate = encode_after_dropping(middle)
+        if len(candidate) <= MAX_EGRESS_ENVELOPE_BYTES:
+            high = middle
+            best = candidate
+        else:
+            low = middle + 1
+    return best
 
 
 def _strip_assessment_links(envelope: dict[str, JsonValue]) -> int:
@@ -2475,10 +2506,10 @@ def bounded_case_envelope(case: SemanticCase) -> bytes:
     catalog to 64 rows — dead code, because a ``SemanticCase`` already admits at most 64 items.
     A real 44 KiB case therefore reduced to 38 KiB and then raised, stranding the whole check.
 
-    This reduces one row at a time in a declared priority order and re-encodes, so it terminates:
-    every step strictly shrinks the document, and the loop ends when the irreducible core is all
-    that remains. Anything the catalog loses is counted in ``selection_accounting`` so the reader
-    of the packet — and the receipt derived from it — sees that the case was minimized.
+    Packet sections keep their declared priority and exact first-fitting suffix, found with a
+    bounded search instead of re-encoding the whole document after every removed row. Catalog
+    fallback still removes one row at a time with its reference cleanup. Anything removed is
+    counted in ``selection_accounting`` so the packet and its receipt disclose minimization.
     """
 
     envelope = _case_envelope_json(case)
@@ -2496,33 +2527,26 @@ def bounded_case_envelope(case: SemanticCase) -> bytes:
         return encoded
 
     reductions["assessment_links_stripped_count"] += _strip_assessment_links(envelope)
-    reducers: tuple[tuple[str, Callable[[dict[str, JsonValue]], bool]], ...] = (
-        (
-            "change_observations_dropped_count",
-            lambda env: _drop_packet_row(env, "change_observations"),
-        ),
-        (
-            "targeted_excerpts_dropped_count",
-            lambda env: _drop_packet_row(env, "targeted_excerpts"),
-        ),
-        ("omissions_dropped_count", lambda env: _drop_packet_row(env, "omissions")),
-        (
-            "deterministic_assessments_dropped_count",
-            lambda env: _drop_packet_row(env, "deterministic_assessments"),
-        ),
-        ("catalog_dropped_count", _drop_catalog_row),
-    )
-    while True:
+    _set_selection_accounting(envelope, reductions)
+    encoded = canonical_encode(cast(JsonValue, envelope))
+    if len(encoded) <= MAX_EGRESS_ENVELOPE_BYTES:
+        return encoded
+    for key, accounting_key in (
+        ("change_observations", "change_observations_dropped_count"),
+        ("targeted_excerpts", "targeted_excerpts_dropped_count"),
+        ("omissions", "omissions_dropped_count"),
+        ("deterministic_assessments", "deterministic_assessments_dropped_count"),
+    ):
+        fitted = _fit_packet_section(envelope, reductions, key, accounting_key)
+        if fitted is not None:
+            return fitted
+    while _drop_catalog_row(envelope):
+        reductions["catalog_dropped_count"] += 1
         _set_selection_accounting(envelope, reductions)
         encoded = canonical_encode(cast(JsonValue, envelope))
         if len(encoded) <= MAX_EGRESS_ENVELOPE_BYTES:
             return encoded
-        for accounting_key, reduce in reducers:
-            if reduce(envelope):
-                reductions[accounting_key] += 1
-                break
-        else:
-            raise SemanticCaseTooLarge("semantic_case_envelope_too_large")
+    raise SemanticCaseTooLarge("semantic_case_envelope_too_large")
 
 
 def semantic_case_to_candidate_context(
