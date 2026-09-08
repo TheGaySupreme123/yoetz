@@ -2462,6 +2462,13 @@ structural sidecar, rejects conflicting/ambiguous request bindings, and distingu
 absence from unavailable or corrupt storage. Admitted recovery preserves the proposal/request
 identity; consumed or completed admission cannot authorize another dispatch. This lookup is not
 an MCP or control-wire method.
+Both audit adapters require an exact string request ID in the `req_` UUID-v4 vocabulary and a
+lowercase `sha256:` digest. Wrong Python types raise `TypeError`; malformed strings raise
+`ValueError`, both with `privacy_disclosure_attempt_lookup_invalid`. The authenticated catalog
+sidecar must contain a valid `prepared_case_digest`: missing or malformed values are
+`privacy_audit_attempt_corrupt`, while a valid different digest is
+`privacy_audit_attempt_case_mismatch`. Only exact absence returns `None`; storage errors propagate
+and never authorize a fresh attempt (issue #626).
 Internal `PrivacyAuditPort.get_receipt`/`list_receipts` queries project bounded structural views
 only through the ordinary CLI/UI control methods `privacy_receipts_get` and
 `privacy_receipts_list`; the port names are not wire aliases and MCP has no access.
