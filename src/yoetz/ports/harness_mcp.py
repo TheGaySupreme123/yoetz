@@ -6,7 +6,8 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Final, Literal, Protocol
+from pathlib import PurePosixPath
+from typing import Final, Literal, Protocol, cast
 
 from yoetz.domain.values import JsonObject, JsonValue, validate_sha256_digest
 from yoetz.ports.integrations import HarnessId
@@ -45,6 +46,31 @@ _TOKEN_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$", re.ASCII
 
 type Compatibility = Literal["supported", "untested"]
 type McpIsolationBinding = Literal["ambient", "isolated_exact", "missing", "different"]
+
+
+def mcp_command_profile(command: tuple[str, ...]) -> Literal["policy", "strict"] | None:
+    """Validate command shape only; executable ownership belongs to the adapter."""
+
+    if type(command) is not tuple or not command or any(type(x) is not str for x in command):
+        return None
+    launcher = command[0]
+    if launcher != "yoetz" and (
+        not launcher.startswith("/")
+        or len(launcher) > _MAX_PATH_CHARS
+        or str(PurePosixPath(launcher)) != launcher
+        or ".." in PurePosixPath(launcher).parts
+        or any(ord(c) < 32 or ord(c) == 127 for c in launcher)
+    ):
+        return None
+    for template, profile in (
+        (MCP_SERVE_COMMAND, "policy"),
+        (MCP_STRICT_SERVE_COMMAND, "strict"),
+        (MCP_LEGACY_SERVE_COMMAND, "policy"),
+        (MCP_LEGACY_STRICT_SERVE_COMMAND, "strict"),
+    ):
+        if command[1:] == template[1:]:
+            return cast(Literal["policy", "strict"], profile)
+    return None
 
 
 def _port_error(reason: str) -> ProtocolValueError:
@@ -144,18 +170,9 @@ class McpRegistrationPreview:
                 raise _port_error("integration_value_invalid")
             previous = warning
         validate_sha256_digest(self.preview_digest)
-        expected_command = (
-            MCP_STRICT_SERVE_COMMAND if self.route_profile == "strict" else MCP_SERVE_COMMAND
-        )
-        legacy_command = (
-            MCP_LEGACY_STRICT_SERVE_COMMAND
-            if self.route_profile == "strict"
-            else MCP_LEGACY_SERVE_COMMAND
-        )
-        if self.route_profile not in {"policy", "strict"} or self.serve_command not in {
-            expected_command,
-            legacy_command,
-        }:
+        if self.route_profile not in {"policy", "strict"} or (
+            mcp_command_profile(self.serve_command) != self.route_profile
+        ):
             raise _port_error("integration_value_invalid")
         if self.isolated_root is not None and (
             type(self.isolated_root) is not str
@@ -180,12 +197,19 @@ class McpRegistrationObservation:
     state: McpRegistrationState
     route_profile: Literal["policy", "strict"] | None
     isolation_binding: McpIsolationBinding | None = None
+    serve_command: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if type(self.harness_id) is not HarnessId:
             raise _port_error("integration_harness_invalid")
         if type(self.state) is not McpRegistrationState:
             raise _port_error("integration_state_invalid")
+        if self.serve_command is not None and (
+            self.state is not McpRegistrationState.YOETZ_OWNED
+            or self.route_profile is None
+            or mcp_command_profile(self.serve_command) != self.route_profile
+        ):
+            raise _port_error("integration_value_invalid")
         if self.route_profile is None:
             if self.isolation_binding is not None:
                 raise _port_error("integration_value_invalid")
