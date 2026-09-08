@@ -570,6 +570,7 @@ async def test_profileless_codex_rejects_unreviewed_mapping_before_object_access
     )
 
     assert resolved.content == ()
+    assert resolved.gaps == ("content_unselected",)
     assert objects.resolve_calls == []
     assert objects.open_calls == 0
 

@@ -1332,8 +1332,10 @@ async def test_exact_rate_limit_update_is_discarded_after_ack(
     assert "discard-balance-canary" not in repr(result)
 
 
+@pytest.mark.parametrize("malformed", [False, True])
 async def test_native_warning_after_ack_is_transport_unknown_without_message_retention(
     monkeypatch: pytest.MonkeyPatch,
+    malformed: bool,
 ) -> None:
     runtime = _Runtime(_profile())
     runtime.events[0] = {
@@ -1344,6 +1346,8 @@ async def test_native_warning_after_ack_is_transport_unknown_without_message_ret
         },
         "emittedAtMs": 1788101617712,
     }
+    if malformed:
+        runtime.events[0]["emittedAtMs"] = "malformed-warning-canary"
 
     result = await _evaluate(monkeypatch, runtime)
 
@@ -1351,7 +1355,22 @@ async def test_native_warning_after_ack_is_transport_unknown_without_message_ret
     assert result.provenance.failure_class is SemanticFailureClass.TRANSPORT
     assert result.provenance.runtime_evidence is not None
     assert result.provenance.runtime_evidence.turn_acknowledged is True
+    assert result.provenance.runtime_evidence.failure_stage == "runtime_warning"
     assert "discard-native-warning-canary" not in repr(result)
+    assert "malformed-warning-canary" not in repr(result)
+
+
+@pytest.mark.parametrize("turn_acknowledged", [False, True])
+def test_malformed_warning_classification_preserves_runtime_ambiguity(
+    turn_acknowledged: bool,
+) -> None:
+    assert module._classify_runtime_exception(  # pyright: ignore[reportPrivateUsage]
+        ValueError("codex_app_server_warning_invalid"),
+        turn_acknowledged=turn_acknowledged,
+    ) == (
+        "post_ack_unknown" if turn_acknowledged else "unavailable",
+        SemanticFailureClass.TRANSPORT,
+    )
 
 
 async def test_unexpected_native_failure_stays_runtime_bounded_before_disclosure(

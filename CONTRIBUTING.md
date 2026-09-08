@@ -94,7 +94,8 @@ After the package digests converge, the same command renders `.agents/plugins/yo
 markers. Their complete file sets participate in the fixed point and in CI's `--check`. Edit
 `guidance/`, `skills/codex/yoetz/`, or the owning integration renderer, then run the command above.
 Agent-only drift reports those canonical owners and the same remediation. Repository generation
-uses only these two checkout-relative destinations. It refuses linked paths and foreign files;
+uses only these two checkout-relative destinations. Preflight refuses linked paths and foreign
+files before any package resources or committed agent trees are written;
 obsolete generated members can be removed only when their previous marker still binds their
 bytes. Normal installers retain their existing modified/foreign-tree protections.
 

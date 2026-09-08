@@ -1483,7 +1483,13 @@ def _classify_runtime_exception(
             or stage in {"completion_mismatch", "agent_message_count"}
         ):
             return "invalid", SemanticFailureClass.RESPONSE_SCHEMA
-        if stage not in {"transport_failed", "request_failed", "event_limit", "unclassified"}:
+        if stage not in {
+            "transport_failed",
+            "request_failed",
+            "event_limit",
+            "runtime_warning",
+            "unclassified",
+        }:
             return "unavailable", SemanticFailureClass.UNSUPPORTED_PROFILE
     return (
         ("post_ack_unknown", SemanticFailureClass.TRANSPORT)
