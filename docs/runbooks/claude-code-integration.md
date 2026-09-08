@@ -7,6 +7,10 @@ remote/web/cloud, synced/managed/user/local scopes, Agent SDK, or headless sessi
 
 ## What Yoetz generates
 
+Claude Code keeps the native carrier's marker-bound launcher identity described below. The
+installed-RECORD proof added for Codex external registration in #654 does not classify Claude
+sources or establish Claude activation; use this host's source-precedence and native-plugin checks.
+
 The managed marketplace source contains:
 
 ```text
