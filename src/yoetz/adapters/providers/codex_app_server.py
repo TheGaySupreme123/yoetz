@@ -16,6 +16,7 @@ import shutil
 import signal
 import stat
 import tempfile
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -465,7 +466,7 @@ class _CodexProcess:
     process: asyncio.subprocess.Process
     workdir: Path
     stderr_task: asyncio.Task[bool]
-    pending_notifications: list[Mapping[str, object]]
+    pending_notifications: deque[Mapping[str, object]]
 
     async def send(self, value: Mapping[str, object]) -> None:
         stdin = self.process.stdin
@@ -581,7 +582,7 @@ async def _launch(profile: CodexAppServerProfile) -> _CodexProcess:
                 process=process,
                 workdir=workdir,
                 stderr_task=asyncio.create_task(_drain_stderr(process.stderr)),
-                pending_notifications=[],
+                pending_notifications=deque(),
             )
             try:
                 await _cleanup_guaranteed(owned)
@@ -594,7 +595,7 @@ async def _launch(profile: CodexAppServerProfile) -> _CodexProcess:
             process=process,
             workdir=workdir,
             stderr_task=asyncio.create_task(_drain_stderr(process.stderr)),
-            pending_notifications=[],
+            pending_notifications=deque(),
         )
     except BaseException:
         # Spawn cancellation above owns and cleans a returned process before it reaches here.
@@ -950,7 +951,7 @@ def _take_account_updated(runtime: _CodexProcess) -> bool:
 
     updated = False
     pending = runtime.pending_notifications
-    runtime.pending_notifications = []
+    runtime.pending_notifications = deque()
     for message in pending:
         notification = _login_notification(message, "")
         if notification == "account_updated":
@@ -1058,7 +1059,7 @@ async def codex_login(
                     break
                 try:
                     message = (
-                        runtime.pending_notifications.pop(0)
+                        runtime.pending_notifications.popleft()
                         if runtime.pending_notifications
                         else await runtime.read(remaining)
                     )
@@ -1089,7 +1090,7 @@ async def codex_login(
                         raise TimeoutError
                     try:
                         message = (
-                            runtime.pending_notifications.pop(0)
+                            runtime.pending_notifications.popleft()
                             if runtime.pending_notifications
                             else await runtime.read(remaining)
                         )
@@ -1567,11 +1568,11 @@ class CodexAppServerEvaluator:
             # the fallback candidate set. Exactly one candidate must remain.
             final_texts: list[str] = []
             untagged_texts: list[str] = []
-            messages = list(runtime.pending_notifications)
-            runtime.pending_notifications.clear()
+            messages = runtime.pending_notifications
+            runtime.pending_notifications = deque()
             for _ in range(_MAX_EVENT_COUNT):
                 message = (
-                    messages.pop(0)
+                    messages.popleft()
                     if messages
                     else await runtime.read(_remaining(deadline, self.clock))
                 )

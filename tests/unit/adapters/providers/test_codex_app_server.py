@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -204,7 +205,7 @@ class _Runtime:
     ) -> None:
         self.profile = profile
         self.workdir = Path("/private/empty-attempt")
-        self.pending_notifications: list[dict[str, object]] = []
+        self.pending_notifications: deque[dict[str, object]] = deque()
         self.model_available = model_available
         self.account = (
             {"type": "chatgpt", "email": "discard@example", "planType": "plus"}
@@ -320,7 +321,7 @@ class _LoginRuntime:
         self.login_notifications = list(login_notifications or [])
         self.cancel_error = cancel_error
         self.block_read = block_read
-        self.pending_notifications: list[dict[str, object]] = []
+        self.pending_notifications: deque[dict[str, object]] = deque()
         self.methods: list[str] = []
         self.timeouts: list[float] = []
         self.read_timeouts: list[float] = []
@@ -502,7 +503,7 @@ async def test_login_demultiplexes_exact_remote_control_notice_before_completion
     assert result.auth_mode == "chatgpt"
     assert result.model_available is True
     assert runtime.methods.count("account/login/cancel") == 0
-    assert runtime.pending_notifications == []
+    assert not runtime.pending_notifications
     assert "discard-installation-canary" not in repr(result)
     assert "discard-server-canary" not in repr(result)
 
@@ -907,7 +908,7 @@ async def test_cleanup_reaps_child_after_process_group_signal_race(
         process=cast(asyncio.subprocess.Process, process),
         workdir=workdir,
         stderr_task=asyncio.create_task(stderr_drain()),
-        pending_notifications=[],
+        pending_notifications=deque(),
     )
     probes = 0
 
@@ -952,7 +953,7 @@ async def test_cleanup_reports_failed_when_process_disappears_without_reap(
         process=cast(asyncio.subprocess.Process, FakeProcess()),
         workdir=workdir,
         stderr_task=asyncio.create_task(stderr_drain()),
-        pending_notifications=[],
+        pending_notifications=deque(),
     )
 
     def absent_group(_pid: int, _sig: int) -> None:
@@ -1556,6 +1557,41 @@ async def test_large_streamed_judgment_fits_the_event_budget(
     result = await _evaluate(monkeypatch, runtime)
 
     assert type(result) is SemanticResultSuccess
+
+
+@pytest.mark.parametrize("buffered_count", [1, 4094, 4096])
+async def test_buffered_notifications_drain_before_live_events_with_the_same_limit(
+    monkeypatch: pytest.MonkeyPatch, buffered_count: int
+) -> None:
+    class BufferedRuntime(_Runtime):
+        reads = 0
+
+        async def request(
+            self, request_id: int, method: str, params: object, timeout: float
+        ) -> dict[str, object]:
+            result = await super().request(request_id, method, params, timeout)
+            if method == "turn/start":
+                self.pending_notifications.extend(
+                    {"method": "item/agentMessage/delta", "params": {"delta": "x"}}
+                    for _ in range(buffered_count)
+                )
+            return result
+
+        async def read(self, timeout: float) -> dict[str, object]:
+            self.reads += 1
+            return await super().read(timeout)
+
+    runtime = BufferedRuntime(_profile())
+    result = await _evaluate(monkeypatch, runtime)
+    if buffered_count == 4096:
+        assert type(result) is SemanticResultInvalid
+        assert result.provenance.runtime_evidence is not None
+        assert result.provenance.runtime_evidence.failure_stage == "event_limit"
+        assert runtime.reads == 0
+    else:
+        assert type(result) is SemanticResultSuccess
+        assert runtime.reads == 2
+    assert not runtime.pending_notifications
 
 
 async def test_tool_event_and_unconfirmed_cleanup_name_their_stages(
