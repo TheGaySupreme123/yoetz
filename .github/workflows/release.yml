@@ -507,12 +507,12 @@ jobs:
             tests/packaging/test_offline_reinstall.py::test_corrupted_wheel_fails_exact_hash_verification_before_any_install \
             tests/packaging/test_offline_reinstall.py::test_correct_hash_matching_the_real_wheel_installs_cleanly \
             -q --timeout=900
-          YOETZ_DENY_NETWORK=1 \
+          YZCI_DENY_NETWORK=1 \
           YOETZ_CANDIDATE_PYTHON="${{ runner.temp }}/verify-venv/bin/python" \
             uv run --locked pytest tests/subprocess \
             -m "not fault and not soak and not live" -q --timeout=900
           # Linux approved-command execution remains a documented fail-closed alpha limitation.
-          YOETZ_DENY_NETWORK=1 \
+          YZCI_DENY_NETWORK=1 \
           YOETZ_CANDIDATE_PYTHON="${{ runner.temp }}/verify-venv/bin/python" \
             uv run --locked pytest tests/integration \
             --deselect tests/integration/observation/test_acceptance_scenarios.py::test_approved_check_stale_when_digest_changes \
@@ -627,11 +627,11 @@ jobs:
             tests/packaging/test_offline_reinstall.py::test_corrupted_wheel_fails_exact_hash_verification_before_any_install \
             tests/packaging/test_offline_reinstall.py::test_correct_hash_matching_the_real_wheel_installs_cleanly \
             -q --timeout=900
-          YOETZ_DENY_NETWORK=1 \
+          YZCI_DENY_NETWORK=1 \
           YOETZ_CANDIDATE_PYTHON="${{ runner.temp }}/verify-venv/bin/python" \
             uv run --locked pytest tests/subprocess \
             -m "not fault and not soak and not live" -q --timeout=900
-          YOETZ_DENY_NETWORK=1 \
+          YZCI_DENY_NETWORK=1 \
           YOETZ_CANDIDATE_PYTHON="${{ runner.temp }}/verify-venv/bin/python" \
             uv run --locked pytest tests/integration \
             -m "not fault and not soak and not live" -q --timeout=900

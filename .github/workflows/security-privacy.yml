@@ -391,7 +391,7 @@ jobs:
           echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
           echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
           echo "XDG_RUNTIME_DIR=$iso/.runtime" >> "$GITHUB_ENV"
-          echo "YOETZ_DENY_NETWORK=1" >> "$GITHUB_ENV"
+          echo "YZCI_DENY_NETWORK=1" >> "$GITHUB_ENV"
           uv venv "${{ runner.temp }}/runtime-venv"
           uv pip install --python "${{ runner.temp }}/runtime-venv/bin/python" \
             --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==0.1.0"
