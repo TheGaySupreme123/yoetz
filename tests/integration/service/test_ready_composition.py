@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import threading
 from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Protocol, cast
 
 import apsw
@@ -49,7 +52,9 @@ from yoetz.ports.privacy import (
     OutboundGatewayPort,
     PrivacyReceiptAudience,
 )
+from yoetz.ports.runtime import BundleProvisionCommand, OwnershipFence, RouteAccess
 from yoetz.ports.secret_memory import HumanAuthorizationProof, SecretPurpose
+from yoetz.ports.start_catalog import TaskRoute, TaskRouteState
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import (
@@ -127,6 +132,25 @@ class _Paths:
         return self._bundle / "state"
 
 
+def _runtime_route() -> TaskRoute:
+    task_id = new_id(IdKind.TASK)
+    session_id = new_id(IdKind.SESSION)
+    return TaskRoute(
+        task_id=task_id,
+        session_id=session_id,
+        bundle_relpath=f"tasks/{task_id}",
+        route_generation=1,
+        state=TaskRouteState.ACTIVE,
+        route_identity_digest=canonical_digest(
+            {"task_id": task_id, "bundle_relpath": f"tasks/{task_id}", "route_generation": 1}
+        ),
+    )
+
+
+async def _wait_thread_event(event: threading.Event) -> None:
+    assert await asyncio.to_thread(event.wait, 5.0)
+
+
 class _Diagnostics:
     def record(self, result: StartupCheckResult) -> None:
         assert type(result) is StartupCheckResult
@@ -175,6 +199,369 @@ def _sqlite_policy(  # pyright: ignore[reportUnusedFunction]
     )
     yield
     installer(None)
+
+
+@pytest.mark.anyio
+async def test_route_inspection_is_off_loop_and_closes_private_catalog_after_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancelled route probe cannot strand the private read-only catalog connection."""
+
+    catalog_started = threading.Event()
+    catalog_release = threading.Event()
+    catalog_closed = threading.Event()
+    inspection_started = threading.Event()
+    inspection_release = threading.Event()
+    inspection_done = threading.Event()
+
+    class _Cursor:
+        def fetchall(self) -> list[tuple[object, ...]]:
+            return []
+
+    class _Catalog:
+        def execute(self, _sql: str, _params: tuple[str, ...]) -> _Cursor:
+            catalog_started.set()
+            assert catalog_release.wait(5.0)
+            return _Cursor()
+
+        def close(self, *, force: bool = False) -> None:
+            assert force
+            catalog_closed.set()
+
+    catalog = _Catalog()
+
+    def fake_open_read_only(_path: Path) -> _Catalog:
+        return catalog
+
+    monkeypatch.setattr(ready_composition_module, "open_read_only", fake_open_read_only)
+
+    def inspect_common(**_kwargs: object) -> object:
+        inspection_started.set()
+        assert inspection_release.wait(5.0)
+        inspection_done.set()
+        return object()
+
+    monkeypatch.setattr(ready_composition_module, "_inspect_common", inspect_common)
+    factories = ready_composition_module.build_runtime_adapter_factories(
+        paths=_Paths(tmp_path),
+        service_instance_id=_INSTANCE_ID,
+        service_generation=1,
+        clock=_Clock(),
+        ids=IdPort(),
+        secret_memory=object(),
+    )
+    route = _runtime_route()
+
+    async def inspect_route_task() -> object:
+        return await factories.inspect_route(route, RouteAccess.WRITE)
+
+    task = asyncio.create_task(inspect_route_task())
+
+    await _wait_thread_event(catalog_started)
+    heartbeat = asyncio.Event()
+    asyncio.get_running_loop().call_soon(heartbeat.set)
+    await asyncio.wait_for(heartbeat.wait(), timeout=1.0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    catalog_release.set()
+    await _wait_thread_event(catalog_closed)
+    inspection_release.set()
+    await _wait_thread_event(inspection_started)
+    await _wait_thread_event(inspection_done)
+
+
+@pytest.mark.anyio
+async def test_provision_inspection_is_off_loop_and_joins_fresh_bundle_worker_on_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancelled fresh start waits for mkdir/schema inspection to finish before returning."""
+
+    started = threading.Event()
+    release = threading.Event()
+    initialized = threading.Event()
+    inspected = threading.Event()
+
+    def initialize(_path: Path, *, command: object, clock: object) -> None:
+        del command, clock
+        started.set()
+        assert release.wait(5.0)
+        initialized.set()
+
+    def inspect_common(**_kwargs: object) -> object:
+        inspected.set()
+        return object()
+
+    monkeypatch.setattr(ready_composition_module, "_initialize_fresh_bundle", initialize)
+    monkeypatch.setattr(ready_composition_module, "_inspect_common", inspect_common)
+    factories = ready_composition_module.build_runtime_adapter_factories(
+        paths=_Paths(tmp_path),
+        service_instance_id=_INSTANCE_ID,
+        service_generation=1,
+        clock=_Clock(),
+        ids=IdPort(),
+        secret_memory=object(),
+    )
+    route = _runtime_route()
+    command = SimpleNamespace(
+        task_id=route.task_id,
+        session_id=route.session_id,
+        writer_id=new_id(IdKind.WRITER),
+        bundle_relpath=route.bundle_relpath,
+        route_generation=route.route_generation,
+        route_identity_digest=route.route_identity_digest,
+    )
+    provision_command = cast(BundleProvisionCommand, command)
+
+    async def inspect_provision_task() -> object:
+        return await factories.inspect_provision(provision_command)
+
+    task = asyncio.create_task(inspect_provision_task())
+
+    await _wait_thread_event(started)
+    heartbeat = asyncio.Event()
+    asyncio.get_running_loop().call_soon(heartbeat.set)
+    await asyncio.wait_for(heartbeat.wait(), timeout=1.0)
+
+    task.cancel()
+    task.cancel()
+    # Cancellation is intentionally held until the side-effecting worker joins.
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert initialized.is_set()
+    assert inspected.is_set()
+
+
+@pytest.mark.anyio
+async def test_fence_verification_is_off_loop_and_cancellation_leaves_no_worker_resource(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fence verification remains cancellable while its read-only worker finishes independently."""
+
+    started = threading.Event()
+    release = threading.Event()
+    done = threading.Event()
+
+    class _Backend:
+        def verify_fence(self, _state: object, _fence: OwnershipFence) -> None:
+            started.set()
+            assert release.wait(5.0)
+            done.set()
+
+    monkeypatch.setattr(recovery_module, "_backend", lambda: _Backend())
+    factories = ready_composition_module.build_runtime_adapter_factories(
+        paths=_Paths(tmp_path),
+        service_instance_id=_INSTANCE_ID,
+        service_generation=1,
+        clock=_Clock(),
+        ids=IdPort(),
+        secret_memory=object(),
+    )
+    route = _runtime_route()
+    inspection = ready_composition_module._BundleInspection(  # pyright: ignore[reportPrivateUsage]
+        route,
+        tmp_path,
+        tmp_path / "ledger.sqlite3",
+        tmp_path / "catalog.sqlite3",
+        frozenset(),
+        False,
+        object(),
+        object(),
+    )
+    fence = OwnershipFence(_INSTANCE_ID, 1, 1, "nonce_value_123456")
+
+    async def validate_fence_task() -> None:
+        await factories.validate_fence(inspection, fence)
+
+    task = asyncio.create_task(validate_fence_task())
+
+    await _wait_thread_event(started)
+    heartbeat = asyncio.Event()
+    asyncio.get_running_loop().call_soon(heartbeat.set)
+    await asyncio.wait_for(heartbeat.wait(), timeout=1.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    release.set()
+    await _wait_thread_event(done)
+
+
+@pytest.mark.anyio
+async def test_legacy_spool_replay_is_off_loop_and_finishes_claim_after_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stalled legacy spool cannot starve control callbacks or strand its claimed file."""
+
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    calls = 0
+
+    class _Spool:
+        def __init__(self, *, _state: Path) -> None:
+            assert _state == tmp_path
+
+        def pending_workspaces(self) -> tuple[str, ...]:
+            nonlocal calls
+            calls += 1
+            started.set()
+            assert release.wait(5.0)
+            finished.set()
+            return ()
+
+    monkeypatch.setattr(ready_composition_module, "HookSpool", _Spool)
+    forwarder = ready_composition_module._LegacyHookSpoolForwarder(  # pyright: ignore[reportPrivateUsage]
+        tmp_path
+    )
+    task = asyncio.create_task(forwarder.replay())
+    await _wait_thread_event(started)
+
+    heartbeat = asyncio.Event()
+    asyncio.get_running_loop().call_soon(heartbeat.set)
+    await asyncio.wait_for(heartbeat.wait(), timeout=1.0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The retained worker owns the in-flight claim after its awaiter is gone.
+    release.set()
+    await _wait_thread_event(finished)
+    assert calls == 1
+    forwarder.close()
+
+
+@pytest.mark.anyio
+async def test_legacy_spool_retries_after_an_observed_worker_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One failed filesystem pass must not poison every later maintenance pass."""
+
+    calls = 0
+
+    def replay(_state: Path, **_kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("test_spool_temporarily_unavailable")
+
+    monkeypatch.setattr(ready_composition_module, "_replay_legacy_hook_spool", replay)
+    forwarder = ready_composition_module._LegacyHookSpoolForwarder(  # pyright: ignore[reportPrivateUsage]
+        tmp_path
+    )
+    try:
+        with pytest.raises(OSError, match="test_spool_temporarily_unavailable"):
+            await forwarder.replay()
+        await forwarder.replay()
+        assert calls == 2
+    finally:
+        forwarder.close()
+
+
+@pytest.mark.anyio
+async def test_legacy_spool_reports_a_late_failure_once_then_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def replay(_state: Path, **_kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            assert release.wait(5.0)
+            raise OSError("test_late_spool_failure")
+
+    monkeypatch.setattr(ready_composition_module, "_replay_legacy_hook_spool", replay)
+    forwarder = ready_composition_module._LegacyHookSpoolForwarder(  # pyright: ignore[reportPrivateUsage]
+        tmp_path
+    )
+    task = asyncio.create_task(forwarder.replay())
+    try:
+        await _wait_thread_event(started)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        # Join the retained worker rather than start a competing replay. Its late failure
+        # remains observable, but consuming that failure permits a subsequent retry.
+        with pytest.raises(OSError, match="test_late_spool_failure"):
+            await forwarder.replay()
+        await forwarder.replay()
+        assert calls == 2
+    finally:
+        release.set()
+        forwarder.close()
+
+
+@pytest.mark.anyio
+async def test_legacy_spool_close_requests_stop_after_the_active_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    stop_seen = threading.Event()
+
+    def replay(_state: Path, *, stop: threading.Event) -> None:
+        started.set()
+        assert release.wait(5.0)
+        if stop.is_set():
+            stop_seen.set()
+
+    monkeypatch.setattr(ready_composition_module, "_replay_legacy_hook_spool", replay)
+    forwarder = ready_composition_module._LegacyHookSpoolForwarder(  # pyright: ignore[reportPrivateUsage]
+        tmp_path
+    )
+    task = asyncio.create_task(forwarder.replay())
+    try:
+        await _wait_thread_event(started)
+        forwarder.close()
+        release.set()
+        await task
+        assert stop_seen.is_set()
+    finally:
+        release.set()
+        forwarder.close()
+
+
+def test_legacy_spool_replay_stops_at_one_bounded_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claimed: list[tuple[str, int]] = []
+    handled = 0
+
+    class _Spool:
+        def __init__(self, *, _state: Path) -> None:
+            assert _state == tmp_path
+
+        def pending_workspaces(self) -> tuple[str, ...]:
+            return tuple(f"hmac-sha256:{index:064x}" for index in range(100))
+
+        @contextmanager
+        def claim(self, workspace: str, *, limit: int):
+            nonlocal handled
+            claimed.append((workspace, limit))
+            handled += 1
+            yield (SimpleNamespace(event_name="PostToolUse", payload={"session_id": "s"}),)
+
+    monkeypatch.setattr(ready_composition_module, "HookSpool", _Spool)
+    import yoetz.cli.observe_hooks as observe_hooks_module
+
+    def handle_observe(**_kwargs: object) -> int:
+        return 0
+
+    monkeypatch.setattr(observe_hooks_module, "handle_observe", handle_observe)
+    ready_composition_module._replay_legacy_hook_spool(tmp_path)  # pyright: ignore[reportPrivateUsage]
+
+    assert handled == ready_composition_module._LEGACY_HOOK_SPOOL_BATCH_LIMIT  # pyright: ignore[reportPrivateUsage]
+    assert claimed[0][1] == ready_composition_module._LEGACY_HOOK_SPOOL_BATCH_LIMIT  # pyright: ignore[reportPrivateUsage]
+    assert claimed[-1][1] == 1
 
 
 def test_open_catalog_writer_allows_unfenced_catalog_initialization(tmp_path: Path) -> None:

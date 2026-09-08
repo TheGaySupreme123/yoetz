@@ -619,6 +619,12 @@ class Application:
     observation_sweep_close: Callable[[], None] | None = field(
         default=None, repr=False, compare=False
     )
+    # One task-local admission hook runs after a new CHECK hits a retryable capture barrier and
+    # before its single freeze retry. It may retire unfinished native-content handoffs whose local
+    # authority has changed; it never touches captured history or the ledger projection.
+    reconcile_observation_capture: Callable[[TaskRuntime], Awaitable[None]] | None = field(
+        default=None, repr=False, compare=False
+    )
     enforce_repository_identity: bool = True
     _close_lock: asyncio.Lock = field(init=False, repr=False, compare=False)
     _close_task: asyncio.Task[None] | None = field(
@@ -643,6 +649,10 @@ class Application:
             raise TypeError("ready_recommendation_refresh_invalid")
         if self.observation_sweep_close is not None and not callable(self.observation_sweep_close):
             raise TypeError("observation_sweep_close_invalid")
+        if self.reconcile_observation_capture is not None and not callable(
+            self.reconcile_observation_capture
+        ):
+            raise TypeError("reconcile_observation_capture_invalid")
         if type(self.enforce_repository_identity) is not bool:
             raise TypeError("repository_identity_enforcement_invalid")
         # Readiness may never outrun the resolved binding. A connected provider that is not the
@@ -1435,6 +1445,9 @@ class ServiceReadyContext:
     observation_sweep_close: Callable[[], None] | None = field(
         default=None, repr=False, compare=False
     )
+    reconcile_observation_capture: Callable[[TaskRuntime], Awaitable[None]] | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if (
@@ -1460,6 +1473,10 @@ class ServiceReadyContext:
             raise TypeError("ready_recommendation_refresh_invalid")
         if self.observation_sweep_close is not None and not callable(self.observation_sweep_close):
             raise TypeError("observation_sweep_close_invalid")
+        if self.reconcile_observation_capture is not None and not callable(
+            self.reconcile_observation_capture
+        ):
+            raise TypeError("reconcile_observation_capture_invalid")
         # Readiness may never outrun the resolved binding. A connected provider that is not the
         # configured one leaves dispatch on the credential-unavailable path, so a readiness flag
         # set without it would report ready while every check reports unavailable.
@@ -1521,6 +1538,7 @@ class ReadyApplicationFactory:
                 observation_sweep=context.observation_sweep,
                 ready_recommendation_refresh=context.ready_recommendation_refresh,
                 observation_sweep_close=context.observation_sweep_close,
+                reconcile_observation_capture=context.reconcile_observation_capture,
                 enforce_repository_identity=True,
             )
             if context.verification_supervisor is not None:

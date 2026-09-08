@@ -26,7 +26,7 @@ __all__ = [
 ]
 
 OBSERVATION_ADVICE_POLICY_ID: Final = "observation-advice"
-OBSERVATION_ADVICE_POLICY_VERSION: Final = "0.1.2"
+OBSERVATION_ADVICE_POLICY_VERSION: Final = "0.1.3"
 
 OBSERVATION_ADVICE_FACT_CODES: Final = frozenset(
     {
@@ -197,6 +197,9 @@ _FIELD_ATTEMPT: Final = "attempt"
 # Read only as correlation keys.
 _FIELD_CORRELATION_ID: Final = "correlation_id"
 _FIELD_TOOL_CALL_ID: Final = "tool_call_id"
+_ORIGINATING_TOOL_ACTIONS: Final = frozenset({"function_call", "custom_tool_call"})
+
+type _ToolCorrelationKey = tuple[str, str, int, str]
 
 
 def _ascii(value: str) -> bytes:
@@ -247,6 +250,60 @@ def _envelope_ref(envelope: ObservationEnvelope) -> str:
     return envelope.source_identity
 
 
+def _tool_correlation_key(envelope: ObservationEnvelope) -> _ToolCorrelationKey | None:
+    """Return a source/session/generation-fenced key for one tool stream."""
+
+    payload = envelope.structural_payload
+    raw_key = (
+        payload.get(_FIELD_CORRELATION_ID)
+        or payload.get(_FIELD_TOOL_CALL_ID)
+        or envelope.source_identity
+    )
+    if type(raw_key) is not str:
+        return None
+    return (
+        envelope.source.value,
+        envelope.session_commitment,
+        envelope.cursor.source_generation,
+        raw_key,
+    )
+
+
+def _tool_resolution(
+    envelopes: Sequence[ObservationEnvelope],
+) -> tuple[dict[_ToolCorrelationKey, str], dict[_ToolCorrelationKey, str]]:
+    """Index originating and fallback tool names without crossing observation boundaries."""
+
+    originating: dict[_ToolCorrelationKey, str] = {}
+    fallback: dict[_ToolCorrelationKey, str] = {}
+    for envelope in envelopes:
+        key = _tool_correlation_key(envelope)
+        tool = _tool(envelope)
+        if key is None or tool is None:
+            continue
+        if envelope.structural_payload.get(_FIELD_ACTION) in _ORIGINATING_TOOL_ACTIONS:
+            originating[key] = tool
+        else:
+            fallback.setdefault(key, tool)
+    return originating, fallback
+
+
+def _resolved_tool(
+    envelope: ObservationEnvelope,
+    originating: Mapping[_ToolCorrelationKey, str],
+    fallback: Mapping[_ToolCorrelationKey, str],
+) -> tuple[str | None, _ToolCorrelationKey | None]:
+    """Resolve a tool name, giving a same-key originating call precedence."""
+
+    key = _tool_correlation_key(envelope)
+    if key is None:
+        return None, None
+    origin = originating.get(key)
+    if origin is not None:
+        return origin, key
+    return _tool(envelope) or fallback.get(key), key
+
+
 def _candidate(
     kind: FindingKind,
     rule_code: str,
@@ -268,18 +325,14 @@ def _candidate(
 
 def _failed_commands(envelopes: Sequence[ObservationEnvelope]) -> list[ObservationAdviceCandidate]:
     results: list[ObservationAdviceCandidate] = []
-    unresolved: dict[str, ObservationEnvelope] = {}
+    unresolved: dict[_ToolCorrelationKey, ObservationEnvelope] = {}
     shell_tools = _CHECK_TOOLS | {"shell", "Bash", "bash"}
+    originating_tools, fallback_tools = _tool_resolution(envelopes)
     for envelope in envelopes:
-        tool = _tool(envelope)
-        if tool is None or tool not in shell_tools:
+        tool, key = _resolved_tool(envelope, originating_tools, fallback_tools)
+        if key is None:
             continue
-        key = (
-            envelope.structural_payload.get(_FIELD_CORRELATION_ID)
-            or envelope.structural_payload.get(_FIELD_TOOL_CALL_ID)
-            or envelope.source_identity
-        )
-        if type(key) is not str:
+        if tool is None or tool not in shell_tools:
             continue
         if envelope.event_kind in {"PreToolUse"}:
             continue
@@ -359,15 +412,23 @@ def _completion_without_verification(
     completion_refs: list[str] = []
     for envelope in envelopes:
         claim = _claim_kind(envelope)
-        result = _result_status(envelope)
-        if claim in {"completion", "done", "finished"} or result in {"completed", "done"}:
+        # ``result_status`` describes the outcome of a host/tool event.  It is
+        # not an authored statement that the agent's work is complete.  Native
+        # Codex completion events commonly carry ``result_status=completed``
+        # while retaining no completion claim at all; treating every such row
+        # as a claim both raised false advice and accumulated unbounded refs.
+        if claim in {"completion", "done", "finished"}:
             completion_refs.append(_envelope_ref(envelope))
     if not completion_refs:
         return []
     has_pass = any(check.status == "passed" and check.is_current for check in checks)
+    originating_tools, fallback_tools = _tool_resolution(envelopes)
     has_obs_pass = any(
         (_exit_status(envelope) == 0 or _success(envelope) is True)
-        and (_tool(envelope) in _CHECK_TOOLS | {"shell", "Bash", "bash"})
+        and (
+            _resolved_tool(envelope, originating_tools, fallback_tools)[0]
+            in _CHECK_TOOLS | {"shell", "Bash", "bash"}
+        )
         for envelope in envelopes
     )
     if has_pass or has_obs_pass:
