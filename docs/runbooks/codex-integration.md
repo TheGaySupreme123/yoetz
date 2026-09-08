@@ -1,5 +1,12 @@
 # Codex integration runbook
 
+Cursor's explicit-start repair (issue #661) leaves Codex's lifecycle binder and hook subscription
+unchanged. [The official hooks reference](https://developers.openai.com/codex/hooks), checked
+2026-09-08, specifies `tool_response` containing the MCP call result on `PostToolUse`, with
+canonical `mcp__server__tool` names. Codex keeps its existing result unwrapping and lifecycle
+locking; Cursor-only response fields and server identities are normalized only in Cursor's
+adapter. The Codex lifecycle and observation regression tests remain the compatibility check.
+
 This runbook guides you through previewing, installing, checking, replacing, and removing the
 canonical Yoetz Codex skill in one explicitly trusted project, while preserving any files you have
 modified. It also separates four facts that are easy to conflate: skill/source installation, Codex
