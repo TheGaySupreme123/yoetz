@@ -125,6 +125,7 @@ CURSOR_HOOK_EVENTS: Final = (
     "stop",
 )
 CURSOR_ORDINARY_HOOK_EVENTS: Final = (
+    "afterMCPExecution",
     "postToolUse",
     "postToolUseFailure",
     "preToolUse",
