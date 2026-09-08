@@ -3314,7 +3314,10 @@ Claude Code and Cursor ordinary native profiles and to the source-qualified prof
 arm. A capture-only control request enters a separate bounded lane, reserves an
 `ObservationCaptureTicket`, secret-scans and encrypts eligible chunks, publishes the objects and
 manifests, and marks the ticket pending before the host's structural envelope advances the FIFO
-cursor. For Codex, active observation consent selects the profileless arm; no Claude/Cursor content
+cursor. For Codex, selection additionally requires the reviewed cursor mapping
+`codex-obs-hook/1.0.0`. Unknown, future, and other-source mappings are rejected before resolving or
+opening a captured object; no legacy mapping is implicitly accepted (issue #621).
+Active observation consent selects the profileless arm; no Claude/Cursor content
 profile is accepted. The structural retry must present the same exact source/session/cursor
 identity, workspace/task binding, tool-call correlation, and original source and authority
 generations, and the service accepts the ticket only when every expected content group and part is
