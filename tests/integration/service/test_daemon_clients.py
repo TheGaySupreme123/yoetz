@@ -5,7 +5,6 @@ from collections.abc import Buffer, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -25,8 +24,6 @@ from yoetz.application.service import (
 )
 from yoetz.config.models import LoggingConfig, YoetzConfig
 from yoetz.domain.observation import (
-    ObservationContentChunk,
-    ObservationContentKind,
     ObservationCursor,
     ObservationEnvelope,
     ObservationIngestDisposition,
@@ -37,7 +34,6 @@ from yoetz.domain.observation import (
     observation_ingest_result_from_json,
     observation_ingest_result_to_json,
 )
-from yoetz.domain.observation_profiles import CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
 from yoetz.domain.privacy import LocalDisclosureSink
 from yoetz.domain.values import Frontier, JsonObject, Timestamp
 from yoetz.observability.diagnostics import lookup_diagnostic_records
@@ -94,7 +90,7 @@ from yoetz.service.control_protocol import (
 )
 from yoetz.service.daemon import ServiceComposition, ServiceDaemon
 from yoetz.service.lifecycle import LifecycleError, ServiceLifecycle
-from yoetz.service.vault import VaultMode, VaultService
+from yoetz.service.vault import VaultMode
 
 _INSTANCE_ID = "svc_00000000-0000-4000-8000-000000000001"
 _UUID = "00000000-0000-4000-8000-000000000002"
@@ -497,13 +493,7 @@ def _receipt_body() -> ReceiptRequest:
     )
 
 
-def _request(
-    daemon: ServiceDaemon,
-    method: ControlMethod,
-    body: object,
-    *,
-    deadline_ms: int | None = None,
-) -> ControlCallRequest:
+def _request(daemon: ServiceDaemon, method: ControlMethod, body: object) -> ControlCallRequest:
     instance = daemon.composition.lifecycle.instance
     return ControlCallRequest(
         kind="call",
@@ -513,43 +503,7 @@ def _request(
         service_generation=str(instance.generation),
         method=method,
         body=body,  # pyright: ignore[reportArgumentType]
-        deadline_ms=deadline_ms,
     )
-
-
-def _capture_gate_body(*, capture_only: bool) -> JsonObject:
-    """Build a fully domain-valid native handoff for the daemon gate tests."""
-
-    commitment = "hmac-sha256:" + "1" * 64
-    source_identity = "hook:capture-gate"
-    envelope = ObservationEnvelope(
-        session_commitment=commitment,
-        event_kind="PostToolUse",
-        source_identity=source_identity,
-        source=ObservationSource.CLAUDE_HOOK,
-        cursor=ObservationCursor(1, 0, 1, commitment, "claude-hooks-1.0"),
-        receipt_time=Timestamp("2026-08-12T12:00:00.000Z"),
-        structural_payload=JsonObject({"tool_name": "Bash"}),
-        content_object_refs=(),
-        gap_codes=(),
-    )
-    chunk = ObservationContentChunk(
-        content_kind=ObservationContentKind.TOOL_INPUT,
-        correlation_identity=f"{source_identity}:tool-input",
-        source_commitment=commitment,
-        media_type="text/plain",
-        part_index=0,
-        part_count=1,
-        content=b"capture-gate-marker",
-    )
-    request = ObservationIngestRequest(
-        codex_session_id="claude:capture-gate",
-        envelope=envelope,
-        content_chunks=(chunk,),
-        content_capture_profile=CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
-        capture_only=capture_only,
-    )
-    return observation_ingest_request_to_json(request)
 
 
 def _privacy_setup_snapshot() -> JsonObject:
@@ -1546,147 +1500,6 @@ async def test_connected_client_observation_ingest_uses_current_domain_wire(
         server_task.cancel()
         await asyncio.gather(server_task, return_exceptions=True)
         await daemon.close()
-
-
-@pytest.mark.anyio
-async def test_capture_only_endpoint_bypasses_queued_sweeper_waiter(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The hook handoff stays live while one sweeper row is blocked.
-
-    This drives the daemon dispatch path, rather than the coordinator directly. A structural
-    observation request must still wait behind the same row gate and report its caller deadline.
-    """
-
-    daemon, application, _vault, _listener = _daemon()
-    await daemon.start()
-    observation_gate = daemon.composition.observation_gate
-    await observation_gate.acquire()
-    structural_waiting = asyncio.Event()
-    original_acquire = daemon_module._acquire_dispatch_gate  # pyright: ignore[reportPrivateUsage]
-
-    async def traced_acquire(gate: asyncio.Lock, deadline_ms: int | None) -> None:
-        if gate is observation_gate:
-            structural_waiting.set()
-        await original_acquire(gate, deadline_ms)
-
-    monkeypatch.setattr(daemon_module, "_acquire_dispatch_gate", traced_acquire)
-    structural_task = asyncio.create_task(
-        daemon.dispatch(
-            ControlClientKind.CLI,
-            _request(
-                daemon,
-                ControlMethod.OBSERVATION_INGEST,
-                _capture_gate_body(capture_only=False),
-            ),
-        )
-    )
-    try:
-        await asyncio.wait_for(structural_waiting.wait(), timeout=1.0)
-        capture_body = _capture_gate_body(capture_only=True)
-        capture = await asyncio.wait_for(
-            daemon.dispatch(
-                ControlClientKind.CLI,
-                _request(daemon, ControlMethod.OBSERVATION_INGEST, capture_body),
-            ),
-            timeout=1.0,
-        )
-        assert capture.outcome == "ok", capture.body
-        assert application.observation_requests == [capture_body]
-        assert not structural_task.done()
-    finally:
-        observation_gate.release()
-        structural = await asyncio.wait_for(structural_task, timeout=1.0)
-        assert structural.outcome == "ok", structural.body
-        assert len(application.observation_requests) == 2
-        assert not daemon.composition.maintenance_gate.locked()
-        await daemon.close()
-
-
-@pytest.mark.anyio
-async def test_recovery_holds_both_dispatch_gates_and_releases_for_capture() -> None:
-    daemon, application, _vault, _listener = _daemon()
-    await daemon.start()
-    composition = daemon.composition
-    effects = daemon_module._LockedHumanEffects(  # pyright: ignore[reportPrivateUsage]
-        cast(ServiceLifecycle, SimpleNamespace()),
-        cast(VaultService, SimpleNamespace()),
-        daemon_module._PrivacyPolicyAppRelay(),  # pyright: ignore[reportPrivateUsage]
-        maintenance_gate=composition.maintenance_gate,
-        observation_gate=composition.observation_gate,
-    )
-    await effects._acquire_recovery_maintenance("recovery-gate")  # pyright: ignore[reportPrivateUsage]
-    try:
-        assert composition.maintenance_gate.locked()
-        assert composition.observation_gate.locked()
-        blocked = await asyncio.wait_for(
-            daemon.dispatch(
-                ControlClientKind.CLI,
-                _request(
-                    daemon,
-                    ControlMethod.OBSERVATION_INGEST,
-                    _capture_gate_body(capture_only=True),
-                    deadline_ms=50,
-                ),
-            ),
-            timeout=1.0,
-        )
-        assert blocked.outcome == "error"
-        assert isinstance(blocked.body, ControlError)
-        assert blocked.body.reason == "request_timeout"
-    finally:
-        effects._release_recovery_maintenance("recovery-gate")  # pyright: ignore[reportPrivateUsage]
-
-    recovered = await daemon.dispatch(
-        ControlClientKind.CLI,
-        _request(daemon, ControlMethod.OBSERVATION_INGEST, _capture_gate_body(capture_only=True)),
-    )
-    assert recovered.outcome == "ok", recovered.body
-    assert len(application.observation_requests) == 1
-    assert not composition.maintenance_gate.locked()
-    assert not composition.observation_gate.locked()
-    await daemon.close()
-
-
-@pytest.mark.anyio
-async def test_cancelled_structural_endpoint_releases_observation_when_maintenance_waits(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    daemon, _application, _vault, _listener = _daemon()
-    await daemon.start()
-    composition = daemon.composition
-    observation_gate = composition.observation_gate
-    maintenance_gate = composition.maintenance_gate
-    await maintenance_gate.acquire()
-    observation_acquired = asyncio.Event()
-    original_acquire = daemon_module._acquire_dispatch_gate  # pyright: ignore[reportPrivateUsage]
-
-    async def traced_acquire(gate: asyncio.Lock, deadline_ms: int | None) -> None:
-        await original_acquire(gate, deadline_ms)
-        if gate is observation_gate:
-            observation_acquired.set()
-
-    monkeypatch.setattr(daemon_module, "_acquire_dispatch_gate", traced_acquire)
-    task = asyncio.create_task(
-        daemon.dispatch(
-            ControlClientKind.CLI,
-            _request(
-                daemon,
-                ControlMethod.OBSERVATION_INGEST,
-                _capture_gate_body(capture_only=False),
-            ),
-        )
-    )
-    await asyncio.wait_for(observation_acquired.wait(), timeout=1.0)
-    task.cancel()
-    cancelled = await task
-    assert cancelled.outcome == "error"
-    assert isinstance(cancelled.body, ControlError)
-    assert cancelled.body.reason == "request_cancelled"
-    assert maintenance_gate.locked()
-    assert not observation_gate.locked()
-    maintenance_gate.release()
-    await daemon.close()
 
 
 @pytest.mark.anyio

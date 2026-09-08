@@ -11,7 +11,6 @@ import pytest
 from builders.privacy_policies import minimal_external_policy
 from yoetz.application.egress import (
     PrivacyCoordinator,
-    SemanticEgressAttemptUnknown,
     SemanticEgressAwaitingHuman,
     SemanticEgressBlocked,
 )
@@ -148,12 +147,6 @@ class _Audit:
         )
         return PrivacyAuditState(reservation, self.status)
 
-    async def load_disclosure_attempt(
-        self, request_id: str, case_digest: str
-    ) -> PrivacyAuditState | None:
-        assert (request_id, case_digest) == (_REQUEST, _CASE_DIGEST)
-        return await self.load(request_id, _CASE_DIGEST)
-
     async def load_disclosure_proposal(self, proposal_id: str) -> DisclosureProposal | None:
         assert proposal_id == _PROPOSAL
         return self.proposal
@@ -212,15 +205,11 @@ def _coordinator(
     expires_at: datetime,
     granted: bool = True,
     clock: _Clock | None = None,
-    proposal: DisclosureProposal | None = None,
 ) -> PrivacyCoordinator:
     return PrivacyCoordinator(
         cast(PrivacyPolicyStorePort, _Policies(granted=granted)),
         cast(PrivacyClassifierPort, object()),
-        cast(
-            PrivacyAuditPort,
-            _Audit(status, proposal or _proposal(expires_at=expires_at)),
-        ),
+        cast(PrivacyAuditPort, _Audit(status, _proposal(expires_at=expires_at))),
         cast(OutboundGatewayPort, _Gateway()),
         cast(ClockPort, clock or _Clock()),
         cast(IdPort, _Ids()),
@@ -263,36 +252,6 @@ async def test_expired_wait_terminalizes_without_dispatch() -> None:
     assert isinstance(result, SemanticEgressBlocked)
     assert result.outcome is PrivacyOutcome.APPROVAL_EXPIRED
     assert result.reason is PrivacyReason.AUTHORIZATION_EXPIRED
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize(
-    "proposal",
-    [
-        replace(
-            _proposal(expires_at=_NOW + timedelta(minutes=5)),
-            request_id="req_54000000-0000-4000-8000-000000000005",
-        ),
-        replace(
-            _proposal(expires_at=_NOW + timedelta(minutes=5)),
-            privacy_proposal_id="ppr_54000000-0000-4000-8000-000000000006",
-        ),
-    ],
-)
-async def test_resume_rejects_proposal_identity_mismatch(
-    proposal: DisclosureProposal,
-) -> None:
-    coordinator = _coordinator(
-        "reserved",
-        expires_at=_NOW + timedelta(minutes=5),
-        proposal=proposal,
-    )
-
-    result = await coordinator.resume(_REQUEST, _CASE_DIGEST, _deadline())
-
-    assert isinstance(result, SemanticEgressBlocked)
-    assert result.outcome is PrivacyOutcome.AUDIT_FAILED
-    assert result.reason is PrivacyReason.AUDIT_FAILED
 
 
 @pytest.mark.anyio
@@ -345,17 +304,3 @@ async def test_approved_resume_preserves_per_request_human_consent(
 
     assert result is not None
     assert captured == [ConsentSource.PER_REQUEST_LOCAL_HUMAN]
-
-
-@pytest.mark.anyio
-async def test_consumed_attempt_recovery_is_terminal_unknown_without_dispatch() -> None:
-    coordinator = _coordinator(
-        "receipt_pending",
-        expires_at=_NOW + timedelta(minutes=5),
-    )
-
-    result = await coordinator.recover_started_attempt(_REQUEST, _CASE_DIGEST, _deadline())
-
-    assert isinstance(result, SemanticEgressAttemptUnknown)
-    assert result.request_id == _REQUEST
-    assert result.privacy_proposal_id == _PROPOSAL

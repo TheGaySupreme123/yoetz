@@ -676,14 +676,7 @@ def _hooks_json(
     command = f'{launcher} hooks claude-observe --workspace "${{CLAUDE_PROJECT_DIR}}"'
 
     def hook(event: str) -> dict[str, JsonValue]:
-        # The hook entrypoint has a small import path, but a fresh process can
-        # still spend time on local state hydration and one bounded service
-        # drain. Keep ordinary events above that base budget while giving
-        # lifecycle attach/advice events enough room for their documented
-        # service work. SessionEnd is intentionally local-first and remains
-        # within Claude's three-second teardown window (#616).
-        timeout = 3 if event == "SessionEnd" else 10 if event in {"SessionStart", "Stop"} else 5
-        return {"command": f"{command} --event {event}", "timeout": timeout, "type": "command"}
+        return {"command": f"{command} --event {event}", "timeout": 3, "type": "command"}
 
     if observation_profile == "ordinary":
         command = (

@@ -8,19 +8,16 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-import apsw
 import pytest
 
 from yoetz.adapters.integrations.codex_lifecycle import LifecycleMapping
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
-from yoetz.adapters.sqlite import connection as connection_module
-from yoetz.adapters.sqlite.migrations import initialize_bundle as initialize_schema
+from yoetz.adapters.sqlite.migrations import initialize_bundle
 from yoetz.adapters.sqlite.observation import SqliteObservationStore
 from yoetz.application.observation_control import build_observation_support_handlers
 from yoetz.application.observation_coordinator import ObservationCoordinator
@@ -61,13 +58,6 @@ from yoetz.ports.runtime import TaskRuntime
 from yoetz.protocol.canonical import canonical_digest, canonical_encode
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
-
-
-def initialize_bundle(db: apsw.Connection, seed: Mapping[str, str]) -> None:
-    """Stage a fixture schema, then enforce the production writer SQL policy (#616)."""
-
-    initialize_schema(db, seed)
-    db.set_authorizer(connection_module._writer_authorizer)  # pyright: ignore[reportPrivateUsage]
 
 
 def _task_id() -> str:
@@ -2170,11 +2160,6 @@ async def test_ledger_event_invalid_is_terminal_not_service_unavailable(tmp_path
     local, _workspace, session, mapping = _mapped_local(tmp_path, "ledger-event-invalid")
 
     class _Store:
-        def load_capture_ticket(self, *, workspace: str, logical_identity: str) -> None:
-            # This structural-only fixture has no staged native capture to recover.
-            del workspace, logical_identity
-            return None
-
         def grant_consent(self, *args: object, **kwargs: object) -> None:
             del args, kwargs
 
@@ -2314,9 +2299,7 @@ async def test_storage_corrupt_blocks_session_for_coordinator_generation(tmp_pat
 
 
 @pytest.mark.anyio
-async def test_coordinator_rejects_disabled_stream_before_mapping_or_runtime(
-    tmp_path: Path,
-) -> None:
+async def test_coordinator_rejects_disabled_before_mapping_or_runtime(tmp_path: Path) -> None:
     class _NoRuntime:
         async def route(self, command: object) -> object:
             raise AssertionError("disabled observation must not route")
@@ -2347,9 +2330,7 @@ async def test_coordinator_rejects_disabled_stream_before_mapping_or_runtime(
     result = await coordinator.ingest_request(
         ObservationIngestRequest(
             codex_session_id="disabled-sess",
-            envelope=replace(
-                _envelope(session=session), source=ObservationSource.CODEX_SESSION_STREAM
-            ),
+            envelope=_envelope(session=session),
         )
     )
     assert result.disposition is ObservationIngestDisposition.REJECTED
@@ -3264,11 +3245,6 @@ async def test_duplicate_ingest_reconciles_ledger_instead_of_early_return(tmp_pa
     calls = {"append": 0, "advice": 0}
 
     class _DuplicateStore:
-        def load_capture_ticket(self, *, workspace: str, logical_identity: str) -> None:
-            # This structural-only fixture has no staged native capture to recover.
-            del workspace, logical_identity
-            return None
-
         def grant_consent(self, *args: object) -> None:
             return None
 
@@ -3387,11 +3363,6 @@ async def test_check_barrier_deferral_is_designed_backpressure(
     local, _workspace, session, mapping = _mapped_local(tmp_path, f"barrier-{code.value.lower()}")
 
     class _BarrierStore:
-        def load_capture_ticket(self, *, workspace: str, logical_identity: str) -> None:
-            # This structural-only fixture has no staged native capture to recover.
-            del workspace, logical_identity
-            return None
-
         def grant_consent(self, *args: object, **kwargs: object) -> None:
             del args, kwargs
 
@@ -3751,15 +3722,11 @@ async def test_native_content_requires_matching_local_and_task_profile_grants(
         async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
             del args, kwargs
 
-    class _Clock:
-        def now_utc(self) -> datetime:
-            return datetime(2026, 1, 1, tzinfo=UTC)
-
     runtime_port = _RuntimePort()
     coordinator = _Coordinator(
         runtime=runtime_port,  # type: ignore[arg-type]
         local=local,
-        clock=_Clock(),  # type: ignore[arg-type]
+        clock=object(),  # type: ignore[arg-type]
         ids=object(),  # type: ignore[arg-type]
         state_root=tmp_path,
         mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
@@ -3786,7 +3753,6 @@ async def test_native_content_requires_matching_local_and_task_profile_grants(
                 identity=identity,
                 ordinal=len(captured) + 1,
                 source=ObservationSource.CLAUDE_HOOK,
-                corr=identity,
             ),
             content_chunks=(chunk,),
             content_capture_profile=profile,
@@ -4125,9 +4091,6 @@ async def test_post_only_replay_includes_historical_unpaired_role_set(tmp_path: 
     replay_sets: list[tuple[tuple[str, ...], ...]] = []
 
     class _Store:
-        def load_capture_ticket(self, **kwargs: object) -> None:
-            del kwargs
-
         def grant_consent(self, *args: object, **kwargs: object) -> None:
             del args, kwargs
 
@@ -4558,11 +4521,6 @@ async def test_identity_claim_conflict_rejects_one_envelope_without_latching(
     ingested: list[str] = []
 
     class _ConflictStore:
-        def load_capture_ticket(self, *, workspace: str, logical_identity: str) -> None:
-            # This structural-only fixture has no staged native capture to recover.
-            del workspace, logical_identity
-            return None
-
         def grant_consent(self, *args: object, **kwargs: object) -> None:
             del args, kwargs
 
@@ -4822,6 +4780,8 @@ async def test_host_hook_row_refused_by_ledger_schema_quarantines_then_delivers_
     projected as retryable service_unavailable, so the FIFO head was retried forever while
     the service reported ready. After the bundle migrates, the identical envelope delivers.
     """
+
+    import apsw
 
     from yoetz.adapters.sqlite.migrations import BUNDLE_MIGRATIONS, run_migrations
 

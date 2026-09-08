@@ -45,56 +45,10 @@ class _AcceptingReview:
 def test_serve_suffix_classifies_exact_policy_and_strict_argv() -> None:
     assert classify_serve_suffix(("/opt/yoetz/bin/yoetz", "mcp", "serve")) == "policy"
     assert classify_serve_suffix(("yoetz", "mcp", "serve", "--host", "cursor")) == "policy"
-    assert (
-        classify_serve_suffix(
-            (
-                "yoetz",
-                "mcp",
-                "serve",
-                "--host",
-                "cursor",
-                "--project-root",
-                "/srv/projects/example",
-            )
-        )
-        == "policy"
-    )
     assert classify_serve_suffix(("yoetz", "mcp", "serve", "--semantic", "off")) == "strict"
     assert (
         classify_serve_suffix(("yoetz", "mcp", "serve", "--host", "cursor", "--semantic", "off"))
         == "strict"
-    )
-    assert (
-        classify_serve_suffix(
-            (
-                "yoetz",
-                "mcp",
-                "serve",
-                "--host",
-                "cursor",
-                "--project-root",
-                "/srv/projects/example",
-                "--semantic",
-                "off",
-            )
-        )
-        == "strict"
-    )
-    assert (
-        classify_serve_suffix(
-            ("yoetz", "mcp", "serve", "--host", "cursor", "--project-root", "relative")
-        )
-        == "foreign"
-    )
-    assert (
-        classify_serve_suffix(("yoetz", "mcp", "serve", "--host", "cursor", "--project-root", "/"))
-        == "foreign"
-    )
-    assert (
-        classify_serve_suffix(
-            ("yoetz", "mcp", "serve", "--host", "cursor", "--project-root", "/srv/../project")
-        )
-        == "foreign"
     )
     assert classify_serve_suffix(("/secret/yoetz", "mcp", "serve", "--extra")) == "foreign"
     assert classify_serve_suffix(("/secret/not-yoetz", "mcp", "serve")) is None

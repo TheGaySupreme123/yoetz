@@ -19,22 +19,7 @@ ROOT = Path(__file__).parents[3]
 def test_root_and_installed_migration_resources_are_byte_identical() -> None:
     for family, versions in (
         ("catalog", ("0001", "0002", "0003")),
-        (
-            "bundle",
-            (
-                "0001",
-                "0002",
-                "0003",
-                "0004",
-                "0005",
-                "0006",
-                "0007",
-                "0008",
-                "0009",
-                "0010",
-                "0011",
-            ),
-        ),
+        ("bundle", ("0001", "0002", "0003")),
     ):
         for version in versions:
             root = ROOT / "migrations" / family / f"{version}.sql"
@@ -110,7 +95,6 @@ def test_bundle_run_migrations_applies_0002_from_schema_version_one() -> None:
         "0008",
         "0009",
         "0010",
-        "0011",
     )
     assert bundle.execute("PRAGMA user_version").fetchone() == (
         current_schema_version(BUNDLE_MIGRATIONS),

@@ -40,15 +40,10 @@ from yoetz.kernel.projections import projection_digest
 from yoetz.kernel.reducers import (
     EvidenceObjectSource,
     ReplayIndex,
-    build_replay_index,
     empty_replay_index,
     extend_replay_index,
     reduce_event,
     replay,
-    replay_extension,
-    replay_extension_with_index,
-    replay_with_index,
-    validate_replay_index,
 )
 from yoetz.protocol.canonical import JsonValue as CanonicalJsonValue
 from yoetz.protocol.canonical import entry_digest
@@ -322,80 +317,6 @@ def test_each_transition_uses_exact_prefix_replay_index() -> None:
     future_index = index
     with pytest.raises(ValueError, match="projection_corrupt"):
         reduce_event(replay(records[:1]), records[1], future_index)
-
-
-@pytest.mark.parametrize(
-    "fixture_name",
-    ("all-event-families", "supersession-redaction", "unknown-schema"),
-)
-def test_replay_extension_matches_genesis_replay_for_mixed_prefixes(fixture_name: str) -> None:
-    records = _records(fixture_name)
-    expected = replay(records)
-    for split in sorted({0, len(records) // 2, len(records)}):
-        prior_records = records[:split]
-        extended = replay_extension(replay(prior_records), prior_records, records[split:])
-        assert extended == expected
-
-
-@pytest.mark.parametrize(
-    "fixture_name",
-    ("all-event-families", "supersession-redaction", "unknown-schema"),
-)
-def test_replay_index_can_be_reused_after_full_or_extension_replay(fixture_name: str) -> None:
-    records = _records(fixture_name)
-    expected_projection, expected_index = replay_with_index(records)
-    sequential_index = empty_replay_index()
-    for record in records:
-        sequential_index = extend_replay_index(sequential_index, record)
-    assert build_replay_index(records) == sequential_index
-    validate_replay_index(expected_index, records)
-    assert expected_projection == replay(records)
-
-    split = len(records) // 2
-    extended_projection, extended_index = replay_extension_with_index(
-        replay(records[:split]),
-        records[:split],
-        records[split:],
-    )
-    assert extended_projection == expected_projection
-    assert extended_index == expected_index
-
-
-@pytest.mark.parametrize("mismatch", ("payload", "evidence", "redaction"))
-def test_replay_index_validation_rejects_same_frontier_with_wrong_maps(mismatch: str) -> None:
-    records = _records("all-event-families")
-    _projection, index = replay_with_index(records)
-    payloads = dict(index.payload_event_by_object)
-    evidence = dict(index.evidence_sources_by_object)
-    roots = dict(index.redaction_root_by_object)
-    if mismatch == "payload":
-        objects = tuple(payloads)
-        payloads[objects[0]], payloads[objects[1]] = payloads[objects[1]], payloads[objects[0]]
-    elif mismatch == "evidence":
-        object_key = next(iter(evidence))
-        evidence[object_key] = ()
-    else:
-        object_key = next(iter(roots))
-        roots[object_key] = next(
-            event.event_id for event in records if event.event_id != roots[object_key]
-        )
-    corrupt = ReplayIndex(
-        frontier=index.frontier,
-        head_digest=index.head_digest,
-        payload_event_by_object=payloads,
-        evidence_sources_by_object=evidence,
-        redaction_root_by_object=roots,
-    )
-    with pytest.raises(ValueError, match="projection_corrupt"):
-        validate_replay_index(corrupt, records)
-
-
-@pytest.mark.parametrize("bad_prefix", ("duplicate", "missing_genesis"))
-def test_linear_replay_index_builder_rejects_malformed_chain(bad_prefix: str) -> None:
-    records = _records("all-event-families")
-    malformed = (records[0], records[0]) if bad_prefix == "duplicate" else records[1:]
-    with pytest.raises(ValueError, match="projection_corrupt"):
-        build_replay_index(malformed)
 
 
 def test_object_only_redaction_resolves_both_envelope_associations() -> None:

@@ -41,9 +41,9 @@ from yoetz.domain.observation import (
     ObservationEnvelope,
     ObservationGapCode,
     ObservationSource,
-    observation_source_qualified_content_binding_matches,
 )
 from yoetz.domain.observation_profiles import (
+    CLAUDE_CODE_ORDINARY_HOOK_MAPPING_VERSION,
     CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
     CURSOR_ORDINARY_HOOK_MAPPING_VERSION,
     CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
@@ -66,27 +66,8 @@ _CAPTURED_CONTENT_INNER_MEDIA_TYPE: Final = "text/plain"
 _MAX_WRAPPER_BYTES: Final = 1_048_576
 _CLAUDE_ORDINARY_PROFILE: Final = CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
 _CURSOR_ORDINARY_PROFILE: Final = CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
-# Codex's original observation grant predates the opt-in Claude/Cursor content
-# profile selector. This source token is an internal semantic scope label for
-# that historical, profileless grant; it is never accepted as a local consent
-# profile or as a capture-only request profile.
-_CODEX_HISTORICAL_CAPTURE_SCOPE: Final = ObservationSource.CODEX_HOOK.value
-# Only the reviewed native hook vocabulary can authorize selection. A shared
-# source token does not make future or session-stream mappings compatible.
-_CODEX_REVIEWED_HOOK_MAPPINGS: Final = frozenset({"codex-obs-hook/1.0.0"})
-# These are the only Claude ordinary hook mappings whose captured-content wire
-# contract has been reviewed. Keep the historical v1 literal so upgrading the
-# ingress mapping does not make already-authenticated v1 envelopes unreadable;
-# future or malformed hints must still fail closed until reviewed explicitly.
-_CLAUDE_ORDINARY_REVIEWED_MAPPINGS: Final = frozenset(
-    {
-        "claude-code-hooks-ordinary-v1",
-        "claude-code-hooks-ordinary-v2",
-    }
-)
-_ORDINARY_CAPTURE_PROFILES: Final = frozenset({_CLAUDE_ORDINARY_PROFILE, _CURSOR_ORDINARY_PROFILE})
 _AUTHORIZED_CAPTURE_PROFILES: Final = frozenset(
-    {*_ORDINARY_CAPTURE_PROFILES, _CODEX_HISTORICAL_CAPTURE_SCOPE}
+    {_CLAUDE_ORDINARY_PROFILE, _CURSOR_ORDINARY_PROFILE}
 )
 _MAX_CAPTURED_SEMANTIC_PARTS: Final = 64
 _MAX_CAPTURED_SEMANTIC_INPUT_BYTES: Final = 2 * MAX_CAPTURED_SEMANTIC_CONTENT_BYTES
@@ -161,7 +142,7 @@ def _local_capture_fence(
         return None, {ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value}, True
     profile_values = tuple(cast(str, profile) for profile in profiles)
     if (
-        any(profile not in _ORDINARY_CAPTURE_PROFILES for profile in profile_values)
+        any(profile not in _AUTHORIZED_CAPTURE_PROFILES for profile in profile_values)
         or tuple(sorted(set(profile_values), key=str.encode)) != profile_values
     ):
         return None, {ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value}, True
@@ -264,7 +245,7 @@ class CapturedContentResolution:
             type(self.local_fence_profiles) is not tuple
             or len(self.local_fence_profiles) > 2
             or any(
-                profile not in _ORDINARY_CAPTURE_PROFILES for profile in self.local_fence_profiles
+                profile not in _AUTHORIZED_CAPTURE_PROFILES for profile in self.local_fence_profiles
             )
             or tuple(sorted(set(self.local_fence_profiles), key=str.encode))
             != self.local_fence_profiles
@@ -279,30 +260,16 @@ def _profile_for_envelope(envelope: ObservationEnvelope) -> str | None:
 
     Source enum alone is insufficient: legacy/native hook envelopes use the same
     source while carrying different structural vocabularies and must never gain
-    the ordinary captured-content arm by inference. Codex's historical structural
-    grant is represented by the existing source token, but only on the hook lane;
-    the session-stream lane remains structural-only.
+    the ordinary captured-content arm by inference.
     """
 
     structural = envelope.structural_payload
     profile = structural.get("capability_profile_id")
     mapping_hint = structural.get("mapping_hint")
-    if envelope.source is ObservationSource.CODEX_HOOK:
-        # A Codex hook has no native content-profile selector. If a caller stamps
-        # a foreign profile/mapping into its structural payload, leave it
-        # unselected rather than letting the source-only historical arm hide that
-        # contradiction. The hook mapper itself does not stamp either field for
-        # Codex.
-        if (
-            profile is None
-            and mapping_hint is None
-            and envelope.cursor.mapping_version in _CODEX_REVIEWED_HOOK_MAPPINGS
-        ):
-            return _CODEX_HISTORICAL_CAPTURE_SCOPE
-    elif envelope.source is ObservationSource.CLAUDE_HOOK:
+    if envelope.source is ObservationSource.CLAUDE_HOOK:
         if (
             profile == _CLAUDE_ORDINARY_PROFILE
-            and mapping_hint in _CLAUDE_ORDINARY_REVIEWED_MAPPINGS
+            and mapping_hint == CLAUDE_CODE_ORDINARY_HOOK_MAPPING_VERSION
         ):
             return _CLAUDE_ORDINARY_PROFILE
     elif envelope.source is ObservationSource.CURSOR_HOOK:
@@ -339,7 +306,7 @@ def _consent_profiles(observation: object, workspace: str) -> tuple[tuple[str, .
         profile_values = tuple(cast(str, profile) for profile in profiles)
         if (
             len(profile_values) > 2
-            or any(profile not in _ORDINARY_CAPTURE_PROFILES for profile in profile_values)
+            or any(profile not in _AUTHORIZED_CAPTURE_PROFILES for profile in profile_values)
             or tuple(sorted(set(profile_values), key=str.encode)) != profile_values
         ):
             return (), {ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value}
@@ -372,7 +339,7 @@ def _consent_profiles(observation: object, workspace: str) -> tuple[tuple[str, .
     profile_values = tuple(cast(str, profile) for profile in profiles)
     if (
         len(profile_values) > 2
-        or any(profile not in _ORDINARY_CAPTURE_PROFILES for profile in profile_values)
+        or any(profile not in _AUTHORIZED_CAPTURE_PROFILES for profile in profile_values)
         or tuple(sorted(set(profile_values), key=str.encode)) != profile_values
     ):
         return (), {ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value}
@@ -677,14 +644,12 @@ async def resolve_captured_semantic_content(
     max_parts: int = _MAX_CAPTURED_SEMANTIC_PARTS,
     max_total_bytes: int = _MAX_CAPTURED_SEMANTIC_INPUT_BYTES,
 ) -> CapturedContentResolution:
-    """Resolve current-consent native content for one frozen task.
+    """Resolve only current-consent Claude/Cursor content for one frozen task.
 
     Every returned part is authenticated twice: the object store verifies the encrypted envelope,
     then this seam verifies the canonical observation wrapper and its digest/byte binding. Content
     is selected only from envelopes in the exact observation workspace and is later rechecked by
-    ``build_semantic_case`` against the frozen evidence projection. The historical profileless
-    Codex arm is activated only after an active local structural grant and a linked Codex hook
-    envelope are both present; Codex session-stream envelopes never activate it.
+    ``build_semantic_case`` against the frozen evidence projection.
     """
 
     if type(runtime) is not TaskRuntime or type(frozen) is not FrozenCase:
@@ -711,7 +676,10 @@ async def resolve_captured_semantic_content(
     profiles, gaps = _consent_profiles(observation, workspace_commitment)
     gaps.update(local_gaps)
     if local_fence_provided and (
-        local_fence is None or not local_fence.active or not local_fence.runtime_enabled
+        local_fence is None
+        or not local_fence.active
+        or not local_fence.runtime_enabled
+        or not local_fence.profiles
     ):
         if local_fence is not None and local_fence.revoked:
             gaps.add(ObservationGapCode.CONSENT_REVOKED.value)
@@ -732,15 +700,6 @@ async def resolve_captured_semantic_content(
         profiles = tuple(profile for profile in profiles if profile in local_fence.profiles)
         if not profiles:
             gaps.add(ObservationGapCode.CONTENT_UNSELECTED.value)
-    # The historical Codex grant is profileless and is admitted only after the
-    # exact session route yields a CODEX_HOOK envelope with linked content. Keep
-    # this as a candidate gate until then; an active local fence by itself must
-    # never create a semantic disclosure scope.
-    codex_historical_candidate = (
-        local_fence_provided
-        and local_fence is not None
-        and ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value not in gaps
-    )
     scope = (
         None
         if not profiles
@@ -751,7 +710,7 @@ async def resolve_captured_semantic_content(
             authorized_profiles=profiles,
         )
     )
-    if scope is None and not codex_historical_candidate:
+    if scope is None:
         return CapturedContentResolution(
             None,
             (),
@@ -798,41 +757,6 @@ async def resolve_captured_semantic_content(
         task_id=runtime.task_id,
         gaps=gaps,
     )
-    if codex_historical_candidate:
-        # Only this exact source/session route can activate the profileless
-        # historical arm. Structural Codex envelopes without linked content do
-        # not establish a disclosure scope. This arm is independent of the
-        # ordinary Claude/Cursor profile intersection: enabling one of those
-        # profiles must not disable an otherwise authorized Codex hook.
-        codex_content_present = any(
-            envelope.source is ObservationSource.CODEX_HOOK
-            and _profile_for_envelope(envelope) == _CODEX_HISTORICAL_CAPTURE_SCOPE
-            and envelope.content_object_refs
-            for envelope in envelopes
-        )
-        if codex_content_present:
-            scope = CapturedContentScope(
-                task_id=runtime.task_id,
-                session_id=runtime.session_id,
-                workspace_commitment=workspace_commitment,
-                authorized_profiles=tuple(
-                    sorted(
-                        {*profiles, _CODEX_HISTORICAL_CAPTURE_SCOPE},
-                        key=str.encode,
-                    )
-                ),
-            )
-            gaps.discard(ObservationGapCode.CONTENT_UNSELECTED.value)
-        elif scope is None:
-            return CapturedContentResolution(
-                None,
-                (),
-                _sort_gaps(gaps),
-                None if local_fence is None else local_fence.generation,
-                () if local_fence is None else local_fence.profiles,
-                False,
-            )
-    assert scope is not None
     pending: list[_PendingRow] = []
     pending_keys: set[tuple[str, str]] = set()
     selected_set = frozenset(selected_objects)
@@ -930,12 +854,6 @@ async def resolve_captured_semantic_content(
                     ObservationContentKind.WORKSPACE_DIFF,
                 }
                 or loaded.correlation_identity is None
-                or not observation_source_qualified_content_binding_matches(
-                    envelope,
-                    content_kind=loaded.content_kind,
-                    correlation_identity=loaded.correlation_identity,
-                    source_commitment=loaded.source_commitment,
-                )
                 or not _correlation_matches(envelope, loaded, correlations)
                 or loaded.source_commitment != envelope.cursor.last_source_commitment
                 or content_bytes > MAX_CAPTURED_SEMANTIC_CONTENT_BYTES
