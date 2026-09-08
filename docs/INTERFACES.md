@@ -100,7 +100,11 @@ keys. `SESSION_NOT_FOUND` with
 repository_identity_required` (the control handshake carried no workspace locator) or
 `repository_identity_mismatch` (the locator resolved to a different repository than the route, or
 the route holds no repository binding); neither discloses a commitment, and a hook uses the reason
-to keep a live mapping out of the `mapping_stale` class (issue #578). The separate
+to keep a live mapping out of the `mapping_stale` class (issue #578). The
+repository-fence message names missing context or the current closed identity kind
+(`git_common_root` or `directory`) and directs the operator to the original workspace. It exposes
+no path or commitment. Read-only operation status retains the same fence: when that workspace is
+unavailable, the task workflow cannot inspect the operation (issue #444). The separate
 `workspace_task_exists` conflict deliberately carries no task selector or count: possession of a
 workspace reference alone is not authority to discover or attach another task. A host hook may
 recover from that exact conflict only with a validated selector it already holds in the private
@@ -2458,6 +2462,13 @@ structural sidecar, rejects conflicting/ambiguous request bindings, and distingu
 absence from unavailable or corrupt storage. Admitted recovery preserves the proposal/request
 identity; consumed or completed admission cannot authorize another dispatch. This lookup is not
 an MCP or control-wire method.
+Both audit adapters require an exact string request ID in the `req_` UUID-v4 vocabulary and a
+lowercase `sha256:` digest. Wrong Python types raise `TypeError`; malformed strings raise
+`ValueError`, both with `privacy_disclosure_attempt_lookup_invalid`. The authenticated catalog
+sidecar must contain a valid `prepared_case_digest`: missing or malformed values are
+`privacy_audit_attempt_corrupt`, while a valid different digest is
+`privacy_audit_attempt_case_mismatch`. Only exact absence returns `None`; storage errors propagate
+and never authorize a fresh attempt (issue #626).
 Internal `PrivacyAuditPort.get_receipt`/`list_receipts` queries project bounded structural views
 only through the ordinary CLI/UI control methods `privacy_receipts_get` and
 `privacy_receipts_list`; the port names are not wire aliases and MCP has no access.
@@ -2687,7 +2698,10 @@ endpoint bindings, initial readiness, retry budgets, and cutoffs. `endpoint_role
 the endpoint from this frozen plan and durable prior rows, so changed configuration cannot relabel
 an attempt on replay. Legacy terminal cases recover their stored result; a legacy pending case
 without frozen execution authority terminates without dispatch: `coordinator_failure` before
-dispatch or during a disclosure wait. An uncertain started attempt retains `outcome_unknown`
+dispatch or during a disclosure wait. A task-local `awaiting` row can lag the independent privacy
+audit and does not prove an expired started attempt was never admitted. Deadline recovery keeps
+that attempt `outcome_unknown` without re-entering authorization, retry, or fallback; a new,
+unattempted job still reports `provider_timeout` (issue #625). An uncertain started attempt retains `outcome_unknown`
 in its durable row; without reconstructable provider provenance its public gap is
 `receipt_persistence_unknown`. Each
 fallback attempt is a fresh physical attempt with its own authorization, dispatch id, credential
@@ -3230,9 +3244,9 @@ Independent verification support (local control, not MCP):
   bytes, and workspace-diff bytes become `observation_captured` immutable evidence. For the
   source-qualified profileless Codex hook arm, those bytes must be explicitly linked to the hook
   event. Session-stream records are a separate source and are excluded from semantic selection;
-  tool input and path/locator content are also excluded from semantic selection. The current
-  Codex hook path may still stage consented input/locator chunks in the bounded encrypted local
-  capture lane pending a follow-up staging filter. Visible messages, unsupported visible payloads,
+  tool input and path/locator content are also excluded from semantic selection. The Codex hook
+  extractor omits raw tool-input bytes but keeps the encrypted workspace locator needed by local
+  inspection and verification; existing structural evidence remains intact (issue #623). Visible messages, unsupported visible payloads,
   and approved-check output do not enter this capture path. The repository privacy authority and
   each provider attempt authorize semantic selection independently of local encrypted capture.
   Inspection fact/excerpt objects materialize through their own idempotent evidence operation.
@@ -3264,7 +3278,14 @@ retains its structural contract, while its eligible hook content uses the fenced
 below.
 
 `yoetz observe content-enable`, `content-disable`, and `content-status` operate on the same canonical
-workspace as observation consent. The local content fence combines a durable per-workspace epoch
+workspace as observation consent. Their JSON responses and `observe status` identify
+`content_capture_scope: ordinary_profiles` and `codex_hook_capture_scope: observation_consent`.
+The profile list, effective profile list, and `enabled`/`content_capture_enabled` describe only the
+Claude Code and Cursor ordinary profiles. An empty list does not disable profileless Codex hooks,
+whose local authority follows observation consent and the runtime gate. Text status names the same
+scope. These are configuration facts, not proof of actual capture, successful execution, or
+semantic selection; those require evidence and the check/receipt (issue #622).
+The local content fence combines a durable per-workspace epoch
 with a persisted runtime-gate nonce; every real consent or runtime transition advances it, including
 pause/resume and off/on ABA cycles, and legacy state receives a fresh epoch before authority is
 accepted. Pause, disable, and revoke must fence retained native content reads and subsequent
@@ -3308,9 +3329,17 @@ infer success.
 Native service-side staging and FIFO handoff (ADR-003 and ADR-022 decision 22) applies to the
 Claude Code and Cursor ordinary native profiles and to the source-qualified profileless `codex_hook`
 arm. A capture-only control request enters a separate bounded lane, reserves an
+`ObservationCaptureTicket`. Global observation disable retires matching unfinished tickets for
+Codex, Claude Code, and Cursor through the authenticated session/workspace cleanup path. Repeated
+cleanup is idempotent; a later consent generation cannot revive a revoked ticket. Session-stream
+requests do not enter this cleanup lane, and ticket retirement does not delete historical content
+(issue #624). The enabled capture lane reserves an
 `ObservationCaptureTicket`, secret-scans and encrypts eligible chunks, publishes the objects and
 manifests, and marks the ticket pending before the host's structural envelope advances the FIFO
-cursor. For Codex, active observation consent selects the profileless arm; no Claude/Cursor content
+cursor. For Codex, selection additionally requires the reviewed cursor mapping
+`codex-obs-hook/1.0.0`. Unknown, future, and other-source mappings are rejected before resolving or
+opening a captured object; no legacy mapping is implicitly accepted (issue #621).
+Active observation consent selects the profileless arm; no Claude/Cursor content
 profile is accepted. The structural retry must present the same exact source/session/cursor
 identity, workspace/task binding, tool-call correlation, and original source and authority
 generations, and the service accepts the ticket only when every expected content group and part is
@@ -3322,9 +3351,12 @@ admitted host correlation or native source/label identity before they can become
 For `codex_hook`, only explicitly linked tool output, selected changed-file/code bytes, and
 workspace-diff bytes are eligible for semantic selection. Session-stream records remain outside
 this native handoff and are excluded from semantic selection. Tool input and path/locator content
-are excluded from semantic selection too, although the current Codex hook path may still stage
-consented input/locator chunks in the bounded encrypted local capture lane pending a follow-up
-staging filter. Missing or conflicting native binding metadata retains
+are excluded from semantic selection too. The Codex hook extractor omits raw `TOOL_INPUT` bytes
+while retaining structural tool identity and correlation. It keeps the encrypted
+`WORKSPACE_LOCATOR` from SessionStart because the local inspection and verification scheduler
+opens that locator to resolve the workspace and its approved-check policy. Removing it would
+break a supported local consumer. Neither kind becomes semantic content; ordinary Claude/Cursor
+profile contracts remain unchanged (issue #623). Missing or conflicting native binding metadata retains
 `content_capture_unavailable`, including when materialization is called independently of semantic
 review. A terminal structural rejection retires only its exact admitted capture ticket so it
 cannot permanently block later checks; retryable coordination retains that ticket for the next

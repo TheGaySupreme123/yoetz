@@ -1173,19 +1173,12 @@ async def run_durable_semantic_attempts(
                 attempt_dispatch = dispatch_fallback
             if remaining <= 0.0:
                 # A resumed started attempt must not be sent after its frozen endpoint cutoff.
-                # Preserve uncertainty for a prior started attempt unless an exact disclosure
-                # wait proves it had not dispatched. A newly claimed attempt is a known timeout.
-                # Neither outcome licenses a fallback dispatch here.
-                wait = await ledger.load_disclosure_wait(
-                    current_lease.writer_id, current_lease.operation_id
-                )
-                known_undispatched = (
-                    wait is not None
-                    and getattr(wait, "job_id", None) == job.job_id
-                    and getattr(wait, "attempt_id", None) == job.active_attempt_id
-                    and getattr(wait, "state", None) == "awaiting"
-                )
-                uncertain = job.state == "leased" and last is None and not known_undispatched
+                # A task-local awaiting row may be stale after the independent privacy audit
+                # consumed admission. It cannot prove that a resumed started attempt never
+                # dispatched. Preserve uncertainty without re-entering provider authorization;
+                # only a newly claimed attempt is a known pre-admission timeout here.
+                # Neither outcome licenses a retry or fallback dispatch.
+                uncertain = job.state == "leased" and last is None
                 terminal_reason = (
                     SemanticReason.OUTCOME_UNKNOWN if uncertain else SemanticReason.PROVIDER_TIMEOUT
                 )

@@ -315,6 +315,7 @@ def _codex_profileless_fixture() -> tuple[FrozenCase, TaskRuntime, _Objects, _Ob
         envelope,
         source=ObservationSource.CODEX_HOOK,
         source_identity="codex-phase-1",
+        cursor=replace(envelope.cursor, mapping_version="codex-obs-hook/1.0.0"),
         structural_payload=JsonObject(
             {
                 "tool_name": "Bash",
@@ -537,6 +538,41 @@ async def test_profileless_codex_hook_content_reaches_guarded_semantic_packet(
         {item.item_id for item in semantic.items},
     )
     assert b"planted-defect-marker: missing validation" in prepared
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "mapping_version",
+    (
+        "codex-obs-hook/9.9.9",
+        "codex-obs-session/1.0.0",
+        "claude-code-hooks-ordinary-v2",
+        "cursor-hooks-ordinary-v1",
+    ),
+)
+async def test_profileless_codex_rejects_unreviewed_mapping_before_object_access(
+    tmp_path: Path,
+    mapping_version: str,
+) -> None:
+    frozen, runtime, objects, observation = _codex_profileless_fixture()
+    observation.envelope = replace(
+        observation.envelope,
+        cursor=replace(observation.envelope.cursor, mapping_version=mapping_version),
+    )
+    local = LocalObservationStore(_state=tmp_path / "local-state")
+    local.grant_consent(_WORKSPACE, timestamp_from_string("2026-07-01T00:00:00.000Z"))
+
+    resolved = await resolve_captured_semantic_content(
+        runtime=runtime,
+        frozen=frozen,
+        workspace_commitment=_WORKSPACE,
+        local_observation=local,
+    )
+
+    assert resolved.content == ()
+    assert resolved.gaps == ("content_unselected",)
+    assert objects.resolve_calls == []
+    assert objects.open_calls == 0
 
 
 @pytest.mark.anyio

@@ -241,9 +241,9 @@ def test_platform_verifiers_split_suites_and_bound_linux_alpha_claims() -> None:
         assert verifier.count("test_correct_hash_matching_the_real_wheel_installs_cleanly") == 2
         assert "pytest tests/subprocess \\" in verifier
         assert "pytest tests/integration \\" in verifier
-        assert "export YOETZ_DENY_NETWORK" not in verifier
+        assert "export YZCI_DENY_NETWORK" not in verifier
         assert "export YOETZ_CANDIDATE_PYTHON" not in verifier
-        assert verifier.count("YOETZ_DENY_NETWORK=1 \\") == 2
+        assert verifier.count("YZCI_DENY_NETWORK=1 \\") == 2
         assert (
             verifier.count('YOETZ_CANDIDATE_PYTHON="${{ runner.temp }}/verify-venv/bin/python" \\')
             == 2

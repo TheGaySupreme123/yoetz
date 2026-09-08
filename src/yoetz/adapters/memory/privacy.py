@@ -28,6 +28,7 @@ from yoetz.domain.privacy import (
     PrivacyAuditSubject,
     PrivacyPolicy,
 )
+from yoetz.domain.values import validate_sha256_digest
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.keys import MacKeyHandle
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource, ObjectStorePort
@@ -59,6 +60,7 @@ from yoetz.ports.privacy import (
     RepositoryPrivacyAuthority,
 )
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
+from yoetz.protocol.ids import IdKind, validate_id
 
 __all__ = [
     "MemoryPrivacyAudit",
@@ -715,6 +717,11 @@ class MemoryPrivacyAudit:
 
         if type(request_id) is not str or type(case_digest) is not str:
             raise TypeError("privacy_disclosure_attempt_lookup_invalid")
+        try:
+            validate_id(IdKind.REQUEST, request_id)
+            validate_sha256_digest(case_digest)
+        except ValueError as exc:
+            raise ValueError("privacy_disclosure_attempt_lookup_invalid") from exc
         async with self._lock:
             disclosure_rows = tuple(
                 row
