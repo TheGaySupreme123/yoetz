@@ -2,8 +2,8 @@
 
 Resource inventory changes cross four generated layers: the package resource manifest, the
 version-manifest schema, the schema inventory/runtime-support digests, and the packaged copies of
-those files. This command owns that order and repeats it to a byte-identical fixed point instead
-of requiring maintainers to remember a multi-pass sequence.
+those files, followed by the committed Codex plugin and skill trees. This command owns that order
+and repeats it to a byte-identical fixed point instead of requiring a multi-pass manual sequence.
 """
 
 from __future__ import annotations
@@ -22,7 +22,12 @@ _DEFAULT_REPO_ROOT = _SCRIPT_ROOT.parent
 
 _MAX_PASSES: Final = 5
 _VERSION_MANIFEST_SCHEMA: Final = "version/version-manifest-2.2.0.schema.json"
-_OWNED_ROOTS: Final = ("schemas", "src/yoetz/resources")
+_OWNED_ROOTS: Final = (
+    "schemas",
+    "src/yoetz/resources",
+    ".agents/plugins/yoetz",
+    ".agents/skills/yoetz",
+)
 _OWNED_FILES: Final = (
     "skills/codex/yoetz/manifest.json",
     "support/runtime-support.json",
@@ -116,7 +121,7 @@ def _preflight(repo_root: Path) -> bool:
         print("sync_resource_ripple: FAIL (preflight_output_invalid)", file=sys.stderr)
         return False
     if actual_count == reviewed_count:
-        return True
+        return _run(repo_root, "sync_committed_agent_trees.py", "--preflight")
     print(
         "sync_resource_ripple: FAIL (reviewed_resource_count_mismatch)\n"
         f"  inventory entries: {actual_count}\n"
@@ -158,6 +163,7 @@ def _check(repo_root: Path) -> bool:
         _run(repo_root, "generate_schemas.py", "--check")
         and _run(repo_root, "verify_resource_manifest.py", "--check")
         and _installed_manifest_agrees_with_schema(repo_root)
+        and _run(repo_root, "sync_committed_agent_trees.py", "--check")
     )
 
 
@@ -206,6 +212,12 @@ def _write_to_fixed_point(repo_root: Path) -> bool:
             return False
         current = _owned_digest(repo_root)
         if current == previous:
+            # Render only after package digests converge: the skill ownership marker binds
+            # the complete installed resource set. Include its bytes in the same fixed point.
+            if not _run(repo_root, "sync_committed_agent_trees.py", "--write"):
+                return False
+            current = _owned_digest(repo_root)
+        if current == previous:
             if not _check(repo_root):
                 print("sync_resource_ripple: FAIL (post_convergence_check)", file=sys.stderr)
                 return False
@@ -222,7 +234,7 @@ def _write_to_fixed_point(repo_root: Path) -> bool:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sync_resource_ripple.py",
-        description="Converge or verify generated schemas and packaged resource artifacts.",
+        description="Converge or verify generated schemas, packaged resources, and agent trees.",
     )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true", help="Read-only fixed-point verification.")
