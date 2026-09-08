@@ -539,6 +539,145 @@ _LOGIN_COMPLETED: dict[str, object] = {
 }
 
 
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        {},
+        {"limitId": "premium", "primary": None, "secondary": None},
+        {"limitId": None, "credits": None, "individualLimit": None},
+        {"limitId": "other-bucket", "primary": {"usedPercent": 100}},
+        {"secondary": {"usedPercent": 0, "resetsAt": None, "windowDurationMins": None}},
+        {"credits": {"hasCredits": True, "unlimited": False}},
+        {
+            "individualLimit": {
+                "limit": "10.0",
+                "remainingPercent": 0,
+                "resetsAt": 1,
+                "used": "10.0",
+            }
+        },
+    ],
+)
+async def test_sparse_rate_limit_snapshots_do_not_prevent_a_valid_answer(
+    monkeypatch: pytest.MonkeyPatch, snapshot: dict[str, object]
+) -> None:
+    runtime = _Runtime(_profile())
+    notice: dict[str, object] = {
+        "method": "account/rateLimits/updated",
+        "params": {"rateLimits": snapshot},
+    }
+    # Exercise the strict pre-disclosure validator too; post-ack fallback must not mask
+    # accidental rejection of a supported 0.150.1 sparse shape.
+    module._discard_rate_limits_notification(notice)  # pyright: ignore[reportPrivateUsage]
+    runtime.events.insert(0, notice)
+    result = await _evaluate(monkeypatch, runtime)
+    assert type(result) is SemanticResultSuccess
+    assert result.provenance.runtime_evidence is not None
+    assert result.provenance.runtime_evidence.failure_stage is None
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        {"limitId": "premium", "primary": None, "secondary": None},
+        {"limitId": 42, "limitName": "private-account-canary"},
+    ],
+)
+@pytest.mark.parametrize(
+    ("native_error", "failure_class"),
+    [
+        ("usageLimitExceeded", SemanticFailureClass.QUOTA_EXHAUSTED),
+        ({"httpConnectionFailed": {"httpStatusCode": 429}}, SemanticFailureClass.RATE_LIMITED),
+    ],
+)
+async def test_rate_limit_bookkeeping_cannot_mask_authoritative_quota_or_rate_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot: dict[str, object],
+    native_error: object,
+    failure_class: SemanticFailureClass,
+) -> None:
+    runtime = _Runtime(_profile())
+    runtime.events[:0] = [
+        {"method": "account/rateLimits/updated", "params": {"rateLimits": snapshot}},
+        {
+            "method": "error",
+            "params": {
+                "error": {"codexErrorInfo": native_error, "message": "private-account-canary"}
+            },
+        },
+    ]
+    result = await _evaluate(monkeypatch, runtime)
+    assert type(result) is SemanticResultUnavailable
+    assert result.provenance.failure_class is failure_class
+    assert result.provenance.runtime_evidence is not None
+    assert result.provenance.runtime_evidence.failure_stage == "turn_failed"
+    assert result.provenance.runtime_evidence.turn_acknowledged is True
+    assert result.provenance.runtime_evidence.process_cleanup == "terminated"
+    assert "private-account-canary" not in repr(result)
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        None,
+        [],
+        {"unexpected": "private-account-canary"},
+        {"limitId": 42},
+        {"limitName": "x" * 129},
+        {"planType": []},
+        {"spendControlReached": 1},
+        {"rateLimitReachedType": "unknown-canary"},
+        {"primary": {}},
+        {"primary": {"usedPercent": True}},
+        {"primary": {"usedPercent": 1.5}},
+        {"primary": {"usedPercent": 2**31}},
+        {"secondary": {"usedPercent": 1, "resetsAt": 2**63}},
+        {"secondary": {"usedPercent": 1, "windowDurationMins": "1"}},
+        {"credits": {"hasCredits": 1, "unlimited": False}},
+        {"credits": {"hasCredits": True, "unlimited": False, "balance": "x" * 65}},
+        {"individualLimit": {"limit": None, "remainingPercent": 1, "resetsAt": 1, "used": "1"}},
+    ],
+)
+async def test_malformed_rate_limit_snapshot_records_only_nonterminal_diagnostic(
+    monkeypatch: pytest.MonkeyPatch, snapshot: object
+) -> None:
+    notice: dict[str, object] = {
+        "method": "account/rateLimits/updated",
+        "params": {"rateLimits": snapshot},
+    }
+    with pytest.raises(ValueError, match="^codex_app_server_rate_limits_invalid$"):
+        module._discard_rate_limits_notification(notice)  # pyright: ignore[reportPrivateUsage]
+    runtime = _Runtime(_profile())
+    runtime.events.insert(0, notice)
+    result = await _evaluate(monkeypatch, runtime)
+    assert type(result) is SemanticResultSuccess
+    assert result.provenance.failure_class is None
+    assert result.provenance.runtime_evidence is not None
+    assert result.provenance.runtime_evidence.failure_stage == "rate_limits_invalid"
+    assert "canary" not in repr(result)
+
+
+@pytest.mark.parametrize(
+    "notice",
+    [
+        {"method": "unreviewed/method", "params": {}},
+        {"method": "account/rateLimits/updated", "id": 99, "params": {}},
+        {"method": "item/started", "params": {"item": {"type": "commandExecution"}}},
+    ],
+)
+async def test_post_ack_isolation_failures_remain_terminal_without_answer_blame(
+    monkeypatch: pytest.MonkeyPatch, notice: dict[str, object]
+) -> None:
+    runtime = _Runtime(_profile())
+    runtime.events.insert(0, notice)
+    result = await _evaluate(monkeypatch, runtime)
+    assert type(result) is SemanticResultUnavailable
+    assert result.provenance.failure_class is SemanticFailureClass.UNSUPPORTED_PROFILE
+    assert result.provenance.runtime_evidence is not None
+    assert result.provenance.runtime_evidence.final_output_sha256 is None
+    assert result.provenance.runtime_evidence.process_cleanup == "terminated"
+
+
 async def test_login_demultiplexes_every_reviewed_predisclosure_notice_in_the_stream(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -595,7 +734,7 @@ async def test_login_tolerates_predisclosure_notices_around_the_account_projecti
         },
         {"method": "thread/name/updated", "params": {"threadId": "t", "threadName": "canary"}},
         {"method": "item/completed", "params": {"item": {"type": "commandExecution"}}},
-        {"method": "account/rateLimits/updated", "params": {"rateLimits": {"limitId": "x"}}},
+        {"method": "account/rateLimits/updated", "params": {"rateLimits": {"limitId": 42}}},
     ],
 )
 async def test_login_still_fails_closed_on_unallowlisted_or_malformed_notices(
@@ -967,6 +1106,34 @@ async def test_cleanup_reports_failed_when_process_disappears_without_reap(
     assert not workdir.exists()
 
 
+@pytest.mark.parametrize("line", [b"private-transport-canary\n", b"[]\n"])
+async def test_malformed_jsonl_is_transport_failure_even_after_acknowledgement(
+    line: bytes,
+) -> None:
+    class FakeProcess:
+        stdout = asyncio.StreamReader()
+
+    async def stderr_drain() -> bool:
+        return False
+
+    process = FakeProcess()
+    process.stdout.feed_data(line)
+    runtime = module._CodexProcess(  # pyright: ignore[reportPrivateUsage]
+        profile=_profile(),
+        process=cast(asyncio.subprocess.Process, process),
+        workdir=Path("/unused-test-workdir"),
+        stderr_task=asyncio.create_task(stderr_drain()),
+        pending_notifications=[],
+    )
+    with pytest.raises(ValueError, match="^codex_app_server_message_invalid$") as error:
+        await runtime.read(1)
+    await runtime.stderr_task
+    assert module._classify_runtime_exception(  # pyright: ignore[reportPrivateUsage]
+        error.value, turn_acknowledged=True
+    ) == ("post_ack_unknown", SemanticFailureClass.TRANSPORT)
+    assert "canary" not in repr(error.value)
+
+
 async def test_success_records_weaker_runtime_boundary_without_identity_or_transcript(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1119,7 +1286,7 @@ async def test_tool_event_is_rejected_after_ack_with_honest_cleanup(
 
     result = await _evaluate(monkeypatch, runtime)
 
-    assert type(result) is SemanticResultInvalid
+    assert type(result) is SemanticResultUnavailable
     assert result.provenance.runtime_evidence is not None
     assert result.provenance.runtime_evidence.turn_acknowledged is True
     assert result.provenance.runtime_evidence.process_cleanup == "terminated"
@@ -1402,7 +1569,7 @@ async def test_unknown_message_phase_is_a_forbidden_event(
 
     result = await _evaluate(monkeypatch, runtime)
 
-    assert type(result) is SemanticResultInvalid
+    assert type(result) is SemanticResultUnavailable
     assert result.provenance.runtime_evidence is not None
     assert result.provenance.runtime_evidence.failure_stage == "event_forbidden"
 
@@ -1542,7 +1709,7 @@ async def test_delta_storm_is_bounded_by_the_event_limit_stage(
 
     result = await _evaluate(monkeypatch, runtime)
 
-    assert type(result) is SemanticResultInvalid
+    assert type(result) is SemanticResultUnavailable
     assert result.provenance.runtime_evidence is not None
     assert result.provenance.runtime_evidence.failure_stage == "event_limit"
 
@@ -1603,7 +1770,7 @@ async def test_tool_event_and_unconfirmed_cleanup_name_their_stages(
         "params": {"item": {"type": "commandExecution", "text": "never-retained"}},
     }
     tool = await _evaluate(monkeypatch, tool_runtime)
-    assert type(tool) is SemanticResultInvalid
+    assert type(tool) is SemanticResultUnavailable
     assert tool.provenance.runtime_evidence is not None
     assert tool.provenance.runtime_evidence.failure_stage == "tool_event_forbidden"
 
