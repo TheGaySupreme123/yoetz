@@ -21,6 +21,7 @@ from yoetz.domain.observation import (
     ObservationSource,
     observation_ingest_result_to_json,
 )
+from yoetz.domain.values import JsonObject
 
 
 @pytest.mark.anyio
@@ -118,5 +119,65 @@ async def test_codex_content_is_staged_before_a_blocked_fifo_row(tmp_path: Path)
     finally:
         release_head.set()
         await asyncio.wait_for(drain, timeout=1.0)
-
     assert store.list_pending_outbox_rows(workspace) == ()
+
+
+@pytest.mark.parametrize(
+    "source",
+    (ObservationSource.CODEX_HOOK, ObservationSource.CLAUDE_HOOK, ObservationSource.CURSOR_HOOK),
+)
+def test_codex_omits_raw_input_but_preserves_structural_identity_and_other_hosts(
+    tmp_path: Path,
+    source: ObservationSource,
+) -> None:
+    local = LocalObservationStore(_state=tmp_path)
+    payload = JsonObject(
+        {
+            "tool_name": "shell",
+            "tool_call_id": "read-call",
+            "tool_input": {"command": "cat example.py"},
+        }
+    )
+    envelope = map_hook_payload_to_envelope(
+        "PreToolUse",
+        payload,
+        session_commitment=local.session_commitment("input-retention"),
+        event_ordinal=1,
+        key_material=local.key_material(),
+        source=source,
+    )
+    chunks, truncated = observe_hooks_module._visible_content_chunks(  # pyright: ignore[reportPrivateUsage]
+        "PreToolUse",
+        payload,
+        envelope=envelope,
+        workspace_locator=None,
+    )
+    assert not truncated
+    assert envelope.structural_payload["tool_call_id"] == "read-call"
+    assert envelope.structural_payload["tool_name"] == "shell"
+    if source is ObservationSource.CODEX_HOOK:
+        assert chunks == ()
+    else:
+        assert len(chunks) == 1 and chunks[0].content_kind is ObservationContentKind.TOOL_INPUT
+
+
+def test_codex_keeps_the_locator_needed_by_local_inspection(tmp_path: Path) -> None:
+    local = LocalObservationStore(_state=tmp_path)
+    envelope = map_hook_payload_to_envelope(
+        "SessionStart",
+        {},
+        session_commitment=local.session_commitment("locator-retention"),
+        event_ordinal=1,
+        key_material=local.key_material(),
+        source=ObservationSource.CODEX_HOOK,
+    )
+    chunks, truncated = observe_hooks_module._visible_content_chunks(  # pyright: ignore[reportPrivateUsage]
+        "SessionStart",
+        {},
+        envelope=envelope,
+        workspace_locator=str(tmp_path),
+    )
+    assert not truncated
+    assert len(chunks) == 1
+    assert chunks[0].content_kind is ObservationContentKind.WORKSPACE_LOCATOR
+    assert chunks[0].content == str(tmp_path).encode()

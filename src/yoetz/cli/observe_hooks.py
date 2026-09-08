@@ -866,7 +866,12 @@ def _visible_content_chunks(
             payload.get("message") or payload.get("output") or payload.get("content"),
         )
     elif event_name == "PreToolUse":
-        add(ObservationContentKind.TOOL_INPUT, "tool-input", payload.get("tool_input"))
+        # Codex input bytes have no capture consumer and are excluded from
+        # semantic selection. Keep the structural envelope/correlation, but
+        # avoid encrypting a second copy of command arguments. Ordinary native
+        # profiles retain their explicitly selected capture contract.
+        if envelope.source is not ObservationSource.CODEX_HOOK:
+            add(ObservationContentKind.TOOL_INPUT, "tool-input", payload.get("tool_input"))
     elif event_name == "PostToolUse":
         add(
             ObservationContentKind.TOOL_OUTPUT,
