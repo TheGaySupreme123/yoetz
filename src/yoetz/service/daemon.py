@@ -72,11 +72,17 @@ from yoetz.config.paths import (
     unlock_throttle_path,
     verify_private_local_bundle,
 )
+from yoetz.domain.observation import (
+    ObservationIngestRequest,
+    observation_ingest_request_from_json,
+)
+from yoetz.domain.observation_profiles import content_capture_profile_matches_source
 from yoetz.domain.privacy import (
     AuthorizationScopeKind,
     EgressChannel,
     LocalDisclosureSink,
 )
+from yoetz.domain.values import JsonValue as DomainJsonValue
 from yoetz.domain.values import frontier_from_json
 from yoetz.observability.logging import (
     LogMode,
@@ -112,7 +118,7 @@ from yoetz.protocol.canonical import (
     canonical_encode,
     strict_json_parse,
 )
-from yoetz.protocol.errors import PublicOperationError, SafeDetailValue
+from yoetz.protocol.errors import ProtocolValueError, PublicOperationError, SafeDetailValue
 from yoetz.protocol.ids import IdKind, new_id, validate_id
 from yoetz.protocol.models import (
     CheckResult,
@@ -295,6 +301,51 @@ _WORKFLOW_RESULT_MODELS: Final[Mapping[ControlMethod, type[BaseModel]]] = {
     ControlMethod.STATUS: StatusResult,
     ControlMethod.RECEIPT: ReceiptResult,
 }
+
+
+async def _acquire_dispatch_gate(gate: asyncio.Lock, deadline_ms: int | None) -> None:
+    """Acquire one dispatch gate with the caller's bounded wait, if any."""
+
+    if deadline_ms is None:
+        await gate.acquire()
+        return
+    try:
+        await asyncio.wait_for(gate.acquire(), deadline_ms / 1_000)
+    except TimeoutError as exc:
+        raise ControlError("request_timeout", retryable=True) from exc
+
+
+def _is_valid_capture_only_observation(request: ControlCallRequest) -> bool:
+    """Recognize only a fully parsed native observation capture handoff.
+
+    The observation-gate exemption is deliberately decided from the domain parser rather than a
+    body mapping or a caller-supplied ``capture_only`` attribute. Malformed, structural, and
+    ordinary observation requests therefore retain the full maintenance/observation exclusion.
+    """
+
+    if request.method is not ControlMethod.OBSERVATION_INGEST:
+        return False
+    try:
+        parsed = observation_ingest_request_from_json(cast(DomainJsonValue, request.body))
+    except KeyError, ProtocolValueError, TypeError, ValueError:
+        return False
+    return (
+        type(parsed) is ObservationIngestRequest
+        and parsed.capture_only is True
+        and (
+            (
+                parsed.envelope.source.value == "codex_hook"
+                and parsed.content_capture_profile is None
+            )
+            or (
+                parsed.content_capture_profile is not None
+                and content_capture_profile_matches_source(
+                    parsed.envelope.source.value,
+                    parsed.content_capture_profile,
+                )
+            )
+        )
+    )
 
 
 def _accepted_state(internal: object) -> Mapping[str, SafeDetailValue] | None:
@@ -547,6 +598,11 @@ class ServiceComposition:
     auto_unlock_reason: str = "none"
     auto_unlock_bundle: Path | None = None
     maintenance_gate: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    # Observation sweeps serialize one row at a time on this gate.  Keep it separate from the
+    # installation-wide maintenance lease so a native capture can stage a content ticket while a
+    # sweeper is blocked on a different row; structural calls take both in observation-then-
+    # maintenance order.
+    observation_gate: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
     def __repr__(self) -> str:
         return "ServiceComposition(<redacted>)"
@@ -986,22 +1042,35 @@ class ServiceDaemon:
         # A recovery ceremony holds this same lock across an unbounded human wait, so an
         # unbounded acquire would hang every ordinary call for as long as someone stares at a
         # confirmation prompt. The caller's own deadline decides how long it is willing to wait.
-        gate = self._composition.maintenance_gate
-        if request.deadline_ms is None:
-            await gate.acquire()
-        else:
-            try:
-                await asyncio.wait_for(gate.acquire(), request.deadline_ms / 1_000)
-            except TimeoutError as exc:
-                raise ControlError("request_timeout", retryable=True) from exc
+        maintenance_gate = self._composition.maintenance_gate
+        # Real compositions always provide a distinct observation gate. The optional lookup
+        # keeps the narrow gate unit tests' intentionally minimal composition doubles valid.
+        observation_gate = getattr(self._composition, "observation_gate", None)
+        capture_only = _is_valid_capture_only_observation(request)
+        observation_acquired = False
+        maintenance_acquired = False
+        if not capture_only and isinstance(observation_gate, asyncio.Lock):
+            # Do not let a structural waiter hold maintenance while a sweeper owns the row gate:
+            # a following native capture must still be able to stage its ticket.
+            await _acquire_dispatch_gate(observation_gate, request.deadline_ms)
+            observation_acquired = True
         try:
+            await _acquire_dispatch_gate(maintenance_gate, request.deadline_ms)
+            maintenance_acquired = True
+            # Native capture-only handoffs have already been fully parsed and authenticated by the
+            # control protocol and only stage a ticket/content blob. They may proceed while a
+            # sweeper owns the per-row gate. Every other ordinary call takes both gates in the
+            # same observation-then-maintenance order as recovery and maintenance holders.
             return await self._dispatch_ready_under_maintenance_gate(
                 projection_context,
                 request,
                 repository_privacy_context,
             )
         finally:
-            gate.release()
+            if maintenance_acquired:
+                maintenance_gate.release()
+            if observation_acquired and isinstance(observation_gate, asyncio.Lock):
+                observation_gate.release()
 
     async def _dispatch_ready_under_maintenance_gate(
         self,
@@ -1587,11 +1656,20 @@ class ServiceDaemon:
                 await self._note_sweep_liveness(summary)
             if recommendation_refresh is not None:
                 try:
-                    async with self._composition.maintenance_gate:
-                        await asyncio.wait_for(
-                            recommendation_refresh(),
-                            timeout=_READY_RECOMMENDATION_REFRESH_DEADLINE_SECONDS,
-                        )
+                    observation_gate = getattr(self._composition, "observation_gate", None)
+                    if isinstance(observation_gate, asyncio.Lock):
+                        async with observation_gate:
+                            async with self._composition.maintenance_gate:
+                                await asyncio.wait_for(
+                                    recommendation_refresh(),
+                                    timeout=_READY_RECOMMENDATION_REFRESH_DEADLINE_SECONDS,
+                                )
+                    else:
+                        async with self._composition.maintenance_gate:
+                            await asyncio.wait_for(
+                                recommendation_refresh(),
+                                timeout=_READY_RECOMMENDATION_REFRESH_DEADLINE_SECONDS,
+                            )
                 except Exception:
                     # Recommendations are advisory and must never unpublish READY.
                     pass
@@ -1637,8 +1715,21 @@ class ServiceDaemon:
     async def _bounded_observation_sweep(
         self, observation_sweep: Callable[[], Awaitable[ObservationDrainSummary]]
     ) -> ObservationDrainSummary | None:
-        """Run one deadline-bounded sweep, naming why it produced no summary."""
+        """Run one deadline-bounded sweep, naming why it produced no summary.
 
+        The production sweep owns the observation gate around each coordinator ingest. Keep the
+        daemon from taking either gate around that whole pass, otherwise a backlog turns one
+        bounded row loop into a workflow-wide critical section. Small test compositions that do
+        not provide the row guard retain whole-pass observation-then-maintenance exclusion.
+        """
+
+        if getattr(observation_sweep, "row_gate_bound", False) is True:
+            return await self._bounded_observation_sweep_under_gate(observation_sweep)
+        observation_gate = getattr(self._composition, "observation_gate", None)
+        if isinstance(observation_gate, asyncio.Lock):
+            async with observation_gate:
+                async with self._composition.maintenance_gate:
+                    return await self._bounded_observation_sweep_under_gate(observation_sweep)
         async with self._composition.maintenance_gate:
             return await self._bounded_observation_sweep_under_gate(observation_sweep)
 
@@ -2648,6 +2739,7 @@ class _LockedHumanEffects:
         recovery_sets: InstallationRecoverySetStore | None = None,
         unlock: UnlockCoordinator | None = None,
         maintenance_gate: asyncio.Lock | None = None,
+        observation_gate: asyncio.Lock | None = None,
     ) -> None:
         self._lifecycle = lifecycle
         self._vault = vault
@@ -2655,6 +2747,7 @@ class _LockedHumanEffects:
         self._recovery_sets = recovery_sets
         self._unlock = unlock
         self._maintenance_gate = maintenance_gate or asyncio.Lock()
+        self._observation_gate = observation_gate or asyncio.Lock()
         self._maintenance_request_id: str | None = None
         self._prepared_recovery_snapshots: dict[str, PreparedInstallationSnapshot] = {}
         self._prepared_root_rotations: dict[str, Path] = {}
@@ -2663,7 +2756,14 @@ class _LockedHumanEffects:
     async def _acquire_recovery_maintenance(self, request_id: str) -> None:
         if self._maintenance_request_id is not None:
             raise HumanControlError("state_forbidden")
-        await self._maintenance_gate.acquire()
+        await self._observation_gate.acquire()
+        try:
+            # Recovery excludes the sweeper as well as ordinary calls. Keep the order identical
+            # to daemon dispatch so no maintenance/recovery path can form a lock inversion.
+            await self._maintenance_gate.acquire()
+        except BaseException:
+            self._observation_gate.release()
+            raise
         self._maintenance_request_id = request_id
 
     def _release_recovery_maintenance(self, request_id: str) -> None:
@@ -2671,6 +2771,7 @@ class _LockedHumanEffects:
             return
         self._maintenance_request_id = None
         self._maintenance_gate.release()
+        self._observation_gate.release()
 
     def _privacy_app(self) -> object:
         coordinator = self._privacy_relay.get()
@@ -3810,6 +3911,8 @@ async def _production_composition(
         relay = _ReadyActivationRelay()
         secret_ingress = SecretIngressService(clock, secret_memory, listener=listeners.secret)
         diagnostics = _NullDiagnostics()
+        maintenance_gate = asyncio.Lock()
+        observation_gate = asyncio.Lock()
         ready_application_factory = (
             _ready_application_factory
             if _ready_application_factory is not None
@@ -3823,6 +3926,7 @@ async def _production_composition(
                     clock=clock,
                     secret_memory=secret_memory,
                     diagnostics=diagnostics,
+                    observation_gate=observation_gate,
                 ),
             )
         )
@@ -3834,7 +3938,6 @@ async def _production_composition(
             activate_ready=relay,
         )
         privacy_relay = _PrivacyPolicyAppRelay()
-        maintenance_gate = asyncio.Lock()
         human = HumanControlService(
             clock=clock,
             lifecycle=lifecycle,
@@ -3848,6 +3951,7 @@ async def _production_composition(
                 recovery_sets,
                 unlock,
                 maintenance_gate,
+                observation_gate,
             ),
             user_presence=None,
         )
@@ -3871,6 +3975,7 @@ async def _production_composition(
             privacy_policy_app_relay=privacy_relay,
             auto_unlock_reason=auto_unlock_reason,
             auto_unlock_bundle=paths.bundle,
+            observation_gate=observation_gate,
         )
     except BaseException:
         await listeners.close()

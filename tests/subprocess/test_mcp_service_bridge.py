@@ -477,6 +477,9 @@ async def test_cursor_native_handler_refuses_missing_or_ambiguous_roots_without_
     assert cast(dict[str, object], missing_error["safe_details"])["reason_code"] == (
         "repository_identity_required"
     )
+    message = cast(str, missing_error["message"])
+    for recovery_fact in ("roots/list", "project-mcp", ".cursor/mcp.json", "CLI CWD", "Hook"):
+        assert recovery_fact in message
     assert first.calls == 1
     assert observed_locators == []
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast
@@ -506,6 +506,11 @@ class Application(Protocol):
 
     @property
     def verification_policy(self) -> _VerificationPolicy: ...
+
+    @property
+    def reconcile_observation_capture(
+        self,
+    ) -> Callable[[TaskRuntime], Awaitable[None]] | None: ...
 
     async def evaluate_semantic_check(
         self,
@@ -1380,13 +1385,33 @@ async def execute_check_commit(
                 False,
             )
         digest = _request_digest(request, scope, packs, route_profile=route_profile)
-        frozen_or_replay = await runtime.ledger.freeze_case(
-            request.session_id,
-            request.writer_id,
-            int(request.expected_frontier.sequence),
-            request.request_id,
-            digest,
-        )
+        try:
+            frozen_or_replay = await runtime.ledger.freeze_case(
+                request.session_id,
+                request.writer_id,
+                int(request.expected_frontier.sequence),
+                request.request_id,
+                digest,
+            )
+        except PublicOperationError as exc:
+            # A completed same-request replay must return before consulting newer capture state:
+            # a corrupt or unrelated ticket cannot turn an idempotent result into STORAGE_CORRUPT.
+            # A new CHECK that hit the capture barrier gets one task-local authority reconciliation
+            # and one retry; active tickets remain pending and every other error keeps its original
+            # disposition.
+            if exc.code is not PublicErrorCode.OPERATION_PENDING or not exc.retryable:
+                raise
+            reconcile_capture = getattr(app, "reconcile_observation_capture", None)
+            if not callable(reconcile_capture):
+                raise
+            await cast(Callable[[TaskRuntime], Awaitable[None]], reconcile_capture)(runtime)
+            frozen_or_replay = await runtime.ledger.freeze_case(
+                request.session_id,
+                request.writer_id,
+                int(request.expected_frontier.sequence),
+                request.request_id,
+                digest,
+            )
         if isinstance(frozen_or_replay, CheckCommitResult):
             return frozen_or_replay
         frozen = frozen_or_replay
