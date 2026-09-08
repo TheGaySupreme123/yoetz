@@ -212,6 +212,7 @@ async def _pipeline(
     *,
     codex_session_id: str,
     profile: str | None,
+    install_mapping: bool = True,
 ) -> tuple[
     Path,
     str,
@@ -981,7 +982,8 @@ async def test_ordinary_native_hook_content_reaches_prepared_semantic_packet(
         # native mapping. Only its owned MCP start result may supply the route.
         assert load_mapping(codex_session_id, _state=tmp_path / "state") is None
         assert await asyncio.to_thread(run_hook, pre_event_name, pre_payload) == 0
-        assert len(client.requests) == 1
+        # Contentless native hooks defer service drain until the content-bearing post event.
+        assert client.requests == []
         assert local.pending_outbox_count(workspace) == 1
         assert task_observation.list_envelopes_for_session(workspace, session_commitment) == ()
         start_payload = {
@@ -1012,7 +1014,7 @@ async def test_ordinary_native_hook_content_reaches_prepared_semantic_packet(
         assert mapping is not None and mapping.yoetz_task_id == runtime.task_id
         assert mapping.yoetz_session_id == runtime.session_id
         assert mapping.yoetz_writer_id == runtime.writer_id
-        assert len(client.requests) == 1  # Binding neither ingests nor captures another event.
+        assert client.requests == []  # Binding neither ingests nor captures another event.
     else:
         assert await asyncio.to_thread(run_hook, pre_event_name, pre_payload) == 0
 
