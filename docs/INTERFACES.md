@@ -3312,6 +3312,11 @@ infer success.
 Native service-side staging and FIFO handoff (ADR-003 and ADR-022 decision 22) applies to the
 Claude Code and Cursor ordinary native profiles and to the source-qualified profileless `codex_hook`
 arm. A capture-only control request enters a separate bounded lane, reserves an
+`ObservationCaptureTicket`. Global observation disable retires matching unfinished tickets for
+Codex, Claude Code, and Cursor through the authenticated session/workspace cleanup path. Repeated
+cleanup is idempotent; a later consent generation cannot revive a revoked ticket. Session-stream
+requests do not enter this cleanup lane, and ticket retirement does not delete historical content
+(issue #624). The enabled capture lane reserves an
 `ObservationCaptureTicket`, secret-scans and encrypts eligible chunks, publishes the objects and
 manifests, and marks the ticket pending before the host's structural envelope advances the FIFO
 cursor. For Codex, selection additionally requires the reviewed cursor mapping

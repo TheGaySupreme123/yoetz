@@ -1022,12 +1022,12 @@ class ObservationCoordinator:
             if type(request) is not ObservationIngestRequest:
                 return _reject("observation_disabled")
             if request.envelope.source not in {
+                ObservationSource.CODEX_HOOK,
                 ObservationSource.CLAUDE_HOOK,
                 ObservationSource.CURSOR_HOOK,
             }:
-                # Keep the global admission switch inert for the historical
-                # structural/session-stream path.  Only native envelopes can
-                # carry the capture handoff that needs retirement below.
+                # Session-stream envelopes cannot carry capture tickets. Keep
+                # their disabled path inert before resolving any task route.
                 return _reject("observation_disabled")
         if type(request) is not ObservationIngestRequest:
             return _reject(ObservationGapCode.CONSENT_MISSING.value)
@@ -1064,6 +1064,7 @@ class ObservationCoordinator:
             # structurally valid non-native request cannot revoke unrelated
             # native tickets merely by sharing the session commitment.
             if request.envelope.source in {
+                ObservationSource.CODEX_HOOK,
                 ObservationSource.CLAUDE_HOOK,
                 ObservationSource.CURSOR_HOOK,
             }:
