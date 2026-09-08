@@ -105,6 +105,10 @@ separate proof facets; a clean cell must verify which plugin directory Cursor ac
 
 ## MCP ownership and source precedence
 
+Cursor keeps its native carrier and installed-marker launcher identity. The installed-RECORD
+proof added for Codex external registration in #654 does not classify Cursor sources or establish
+Cursor activation; use the source-precedence and runtime facets below.
+
 Ownership mode is exactly `external_registration` or `plugin_managed`. Observed state is exactly
 `absent|external|plugin|dual|foreign|ambiguous`. Configuration source is plugin, project, user,
 inline-create, or inline-send. Preserve duplicate and foreign same-name entries.

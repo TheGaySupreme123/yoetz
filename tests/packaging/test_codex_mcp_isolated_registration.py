@@ -139,6 +139,11 @@ def test_installed_codex_child_receives_only_the_reviewed_isolated_root(
         monkeypatch.setenv("CODEX_HOME", str(codex_home))
         monkeypatch.setenv("CODEX_TESTING_HOME", str(codex_home))
         monkeypatch.setenv(ISOLATED_ROOT_ENV, str(isolated_root))
+        # This existing compatibility cell intentionally exercises the legacy PATH registration
+        # with a synthetic child; issue #654's test below exercises a proven installed launcher.
+        monkeypatch.setattr(
+            "yoetz.adapters.integrations.codex_mcp.installed_launcher", lambda: None
+        )
 
         binary = HarnessBinary(HarnessId.CODEX, str(codex), "0.150.1", "supported")
         service = HarnessMcpService(CodexMcpAdapter(route_profile="strict"))
@@ -215,3 +220,183 @@ def test_installed_codex_child_receives_only_the_reviewed_isolated_root(
             root.parent.rmdir()
         except OSError:
             pass
+
+
+_PACKAGED_DRIVER: Final = r"""
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import anyio
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+from yoetz.adapters.integrations.codex_mcp import CodexMcpAdapter
+from yoetz.application.harness_mcp import HarnessMcpService, McpRegistrationConfirmation
+from yoetz.application.applied_mcp_route import read_applied_route
+from yoetz.cli.provider_status import mcp_route_observation
+from yoetz.config.paths import isolated_root
+from yoetz.ports.harness_mcp import HarnessBinary
+from yoetz.ports.integrations import HarnessId
+
+async def main():
+    codex, stage = sys.argv[1:]
+    binary = HarnessBinary(HarnessId.CODEX, codex, "0.150.1", "supported")
+    service = HarnessMcpService(CodexMcpAdapter(route_profile="strict" if stage == "strict" else "policy"))
+    if stage == "probe":
+        registration = subprocess.run([codex, "mcp", "get", "yoetz", "--json"], capture_output=True, check=True)
+        entry = json.loads(registration.stdout)["transport"]
+        child_env = {**os.environ, **entry["env"]}
+        isolated = subprocess.run([entry["command"], "service", "isolation", "--json"], env=child_env, capture_output=True, check=True)
+        identity = json.loads(isolated.stdout)
+        assert identity["mode"] == "isolated"
+        assert identity["binding"] == "environment_and_pin"
+        dropped = subprocess.run([entry["command"], "service", "isolation", "--json"], env=os.environ, capture_output=True, check=True)
+        pinned = json.loads(dropped.stdout)
+        assert pinned["binding"] == "runtime_pin"
+        assert pinned["identity"] == identity["identity"]
+        params = StdioServerParameters(command=entry["command"], args=entry["args"], env={**os.environ, **entry["env"]})
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as client:
+                await client.initialize()
+                tools = await client.list_tools()
+                assert len(tools.tools) == 7
+                result = await client.call_tool("read_guidance", {"uri":"yoetz://guidance/workflow.md"})
+                assert not result.isError
+                assert any("workflow" in getattr(item, "text", "") for item in result.content)
+        print(json.dumps({"tools": len(tools.tools), "guidance": "success"}))
+        return
+    if stage == "status":
+        observation = await service.observe(binary)
+        route = await mcp_route_observation(Path.cwd())
+        print(json.dumps({"state": observation.state.value, "binding": observation.isolation_binding,
+                          "profile": observation.route_profile, "route": route}))
+        return
+    removing = stage == "remove"
+    preview = await (service.preview_unregistration(binary) if removing else service.preview(binary))
+    confirm = McpRegistrationConfirmation(preview.preview_digest, True, "noninteractive_flag")
+    result = await (service.unregister(binary, confirm) if removing else service.register(binary, confirm))
+    print(json.dumps({"action": result.action.value, "after": result.state_after.value,
+                      "command": preview.serve_command, "root": str(isolated_root()),
+                      "record": read_applied_route()}))
+
+anyio.run(main)
+"""
+
+
+def test_packaged_absolute_launcher_with_real_codex() -> None:
+    """A runtime-pinned wheel is owned and usable through Codex without ambient inheritance."""
+
+    codex = _installed_codex_01501()
+    root = _short_private_root()
+    script = _REPO_ROOT / "scripts" / "provision_test_instance.py"
+    base = root / "instances"
+    base.mkdir(mode=0o700)
+    env = {name: value for name, value in os.environ.items() if not name.startswith("YOETZ_")}
+    codex_home = root / "codex"
+    codex_home.mkdir(mode=0o700)
+    env.update(CODEX_HOME=str(codex_home), CODEX_TESTING_HOME=str(codex_home))
+    try:
+        created = subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "create",
+                "--base",
+                str(base),
+                "--tag",
+                "a",
+                "--lifecycle",
+                "disposable",
+                "--allow-dirty",
+                "--json",
+            ],
+            env=env,
+            capture_output=True,
+            timeout=300,
+            check=False,
+        )
+        assert created.returncode == 0, created.stderr.decode(errors="replace")
+        launcher = Path(json.loads(created.stdout)["launcher"])
+        driver = root / "driver.py"
+        driver.write_text(_PACKAGED_DRIVER, encoding="utf-8")
+
+        def run(stage: str) -> dict[str, object]:
+            result = subprocess.run(
+                [str(launcher.parent / "python"), str(driver), str(codex), stage],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+            assert result.returncode == 0, result.stderr.decode(errors="replace")
+            return cast(dict[str, object], json.loads(result.stdout))
+
+        registered = run("install")
+        assert registered["action"] == "register"
+        assert registered["after"] == "yoetz_owned"
+        assert cast(list[str], registered["command"])[0] == str(launcher)
+        assert (
+            cast(dict[str, object], registered["record"])["applied_serve_command"]
+            == registered["command"]
+        )
+        assert run("install")["action"] == "noop"
+        status = run("status")
+        assert status["state"] == "yoetz_owned"
+        assert status["binding"] == "isolated_exact"
+        route = cast(dict[str, object], status["route"])
+        assert route["ownership_state"] == "external"
+        assert route["registered_profile"] == "policy"
+        assert run("probe") == {"tools": 7, "guidance": "success"}
+
+        # Codex itself starts the registered wheel, with no parent isolation variable. Its
+        # inventory must expose the real seven-tool server, not the synthetic compatibility stub.
+        capture = root / "inventory.json"
+        captured = subprocess.run(
+            [
+                sys.executable,
+                str(_REPO_ROOT / "scripts" / "capture_codex_mcp_surface.py"),
+                "--codex-binary",
+                str(codex),
+                "--codex-testing-home",
+                str(codex_home),
+                "--output",
+                str(capture),
+            ],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+        assert captured.returncode == 0, captured.stderr.decode(errors="replace")
+        entries = json.loads(capture.read_bytes())["inventory"]["result"]["data"]
+        assert len(entries) == 1
+        assert len(entries[0]["tools"]) == 7
+        assert entries[0]["serverInfo"]["name"] == "yoetz"
+        assert run("strict")["action"] == "reregister"
+        assert run("status")["profile"] == "strict"
+        assert run("remove")["after"] == "absent"
+        assert run("remove")["action"] == "noop"
+    finally:
+        if (base / "a").exists():
+            disposed = subprocess.run(
+                [
+                    sys.executable,
+                    str(script),
+                    "dispose",
+                    "--base",
+                    str(base),
+                    "--tag",
+                    "a",
+                    "--json",
+                ],
+                env=env,
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+            assert disposed.returncode == 0, disposed.stderr.decode(errors="replace")
+        shutil.rmtree(root, ignore_errors=True)

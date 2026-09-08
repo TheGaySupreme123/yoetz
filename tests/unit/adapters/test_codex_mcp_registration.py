@@ -39,6 +39,7 @@ def scripted_registration_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     # Isolated-registration cases explicitly override this adapter lookup;
     # keep the process-wide isolation guard intact for all other test effects.
     monkeypatch.setattr("yoetz.adapters.integrations.codex_mcp.isolated_root", lambda: None)
+    monkeypatch.setattr("yoetz.adapters.integrations.codex_mcp.installed_launcher", lambda: None)
 
 
 def _yoetz_entry(
