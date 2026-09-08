@@ -7,6 +7,10 @@ remote/web/cloud, synced/managed/user/local scopes, Agent SDK, or headless sessi
 
 ## What Yoetz generates
 
+Claude Code keeps the native carrier's marker-bound launcher identity described below. The
+installed-RECORD proof added for Codex external registration in #654 does not classify Claude
+sources or establish Claude activation; use this host's source-precedence and native-plugin checks.
+
 The managed marketplace source contains:
 
 ```text
@@ -285,6 +289,14 @@ remain separate requirements.
 Claude Code has no `codex exec --json` import surface. Issue #301's bounded import authorization
 therefore makes no Claude adapter change; Claude evidence continues through cooperative MCP and
 the native hook/observation paths below.
+
+Cursor's explicit-start repair (issue #661) leaves Claude's binder and hook subscription unchanged.
+[Claude's hooks reference](https://code.claude.com/docs/en/hooks#posttooluse), checked 2026-09-08,
+specifies `tool_response` for successful `PostToolUse`. Claude continues to pass that field from
+its exact Yoetz-scoped tool to the shared binder; Cursor's `result_json` / `tool_output` and
+server-key normalization are confined to the Cursor adapter. Cross-host regression checks cover
+Claude's structured result, single JSON text block, live-characterized JSON string, and failed
+start rejection.
 
 The native hook profile emits only `SessionStart`, scoped-Yoetz `PostToolUse`, scoped-Yoetz
 `PostToolUseFailure`, `Stop`, and `SessionEnd`. A bare MCP matcher is a negative control. Hooks call

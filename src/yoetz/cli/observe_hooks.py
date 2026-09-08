@@ -3861,6 +3861,78 @@ def handle_claude_observe(
         return 0
 
 
+_CURSOR_START_TOOL_SERVERS: Final = {
+    "mcp__yoetz__start": "yoetz",
+    "mcp__plugin_yoetz_yoetz__start": "plugin-yoetz-yoetz",
+    "yoetz:start": "yoetz",
+    "plugin-yoetz-yoetz:start": "plugin-yoetz-yoetz",
+}
+
+
+def _bind_cursor_start(
+    payload: Mapping[str, JsonValue],
+    *,
+    raw_event: str,
+    session: str,
+    _state: Path | None,
+) -> None:
+    """Bind an owned start transiently; generic ``MCP:start`` has no owner.
+
+    Cursor 3.20.0 supplies the server key only on afterMCPExecution. Its
+    ordinary postToolUse spelling cannot distinguish two servers' start tools.
+    Older scoped spellings remain admissible, but conflicting owner fields do
+    not. The shared binder still owns strict result IDs and lifecycle locking.
+    """
+
+    # A previous owned start may have raced lifecycle recovery. Retry its
+    # structural sidecar before any later event observes the old/no mapping;
+    # Cursor does not run Codex's handle_session_start pending-write drain.
+    with contextlib.suppress(Exception):
+        with acquire_session_lock(f"{_CURSOR_SESSION_PREFIX}{session}", _state=_state) as owned:
+            if owned:
+                apply_pending_mapping(f"{_CURSOR_SESSION_PREFIX}{session}", _state=_state)
+    if raw_event not in {"afterMCPExecution", "postToolUse"}:
+        return
+    tool_name = payload.get("tool_name")
+    if type(tool_name) is not str:
+        return
+    server = payload.get("mcp_server_name")
+    expected_server = _CURSOR_START_TOOL_SERVERS.get(tool_name)
+    if expected_server is not None:
+        if "mcp_server_name" in payload and server != expected_server:
+            return
+    elif not (
+        raw_event == "afterMCPExecution"
+        and tool_name == "start"
+        and type(server) is str
+        and server in {"yoetz", "plugin-yoetz-yoetz"}
+    ):
+        return
+    # A post-hook can carry a transport failure even with success-shaped data.
+    # Never allow that data to replace a valid mapping.
+    if _native_outcome_facts(payload).success is False:
+        return
+    response = payload.get("result_json" if raw_event == "afterMCPExecution" else "tool_output")
+    # Cursor serializes the whole MCP CallToolResult. Decode that outer object
+    # before the shared binder unwraps structuredContent or one JSON text block.
+    parsed = _bounded_outcome_mapping(response)
+    from yoetz.cli.hooks import bind_start_mapping_outcome, record_start_bind_diagnostic
+
+    with contextlib.suppress(Exception):
+        record_start_bind_diagnostic(
+            bind_start_mapping_outcome(
+                {
+                    "session_id": f"{_CURSOR_SESSION_PREFIX}{session}",
+                    "tool_name": "mcp__yoetz__start",
+                    "tool_response": cast(JsonValue, parsed) if parsed is not None else response,
+                },
+                _state=_state,
+            ),
+            "PostToolUse",
+            _state=_state,
+        )
+
+
 def handle_cursor_observe(
     *,
     event_name: str | None,
@@ -3900,11 +3972,9 @@ def handle_cursor_observe(
             hook_io.stdout_json({}, stdout)
         return 0
     if ordinary_profile:
-        # Cursor's generic tool events are the authoritative stream.  Shell,
-        # read-file, MCP and edit-specific hooks are deliberately supplemental
-        # and remain unsupported here until their overlap is proven distinct.
+        # Generic tool events own observation. afterMCPExecution is binding-only:
+        # it alone supplies the owner of the ordinary ``MCP:start`` tool name.
         event_map.pop("afterFileEdit")
-        event_map.pop("afterMCPExecution")
         event_map.update(
             {
                 "preToolUse": "PreToolUse",
@@ -3969,6 +4039,10 @@ def handle_cursor_observe(
                 record_hook_diagnostic(
                     "workspace_unresolvable", event_map[raw_event], _state=_state
                 )
+            return 0 if hook_io.stdout_json({}, stdout) else 0
+        _bind_cursor_start(payload, raw_event=raw_event, session=session, _state=_state)
+        if ordinary_profile and raw_event == "afterMCPExecution":
+            # No duplicate structural row, content capture, or advice delivery.
             return 0 if hook_io.stdout_json({}, stdout) else 0
         cursor_version = _token_or_none(payload.get("cursor_version"))
         capability_profile_id = (

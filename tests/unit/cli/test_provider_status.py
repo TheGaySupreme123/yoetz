@@ -895,6 +895,55 @@ def _stub_live_route(
     monkeypatch.setattr(cli_setup, "configured_mcp_route_profile", lambda: "policy")
 
 
+@pytest.mark.parametrize("dual", [False, True])
+async def test_proven_absolute_adapter_feeds_provider_readiness(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dual: bool
+) -> None:
+    from yoetz.adapters.integrations.codex_mcp import CommandOutput
+    from yoetz.adapters.integrations.portable_plugin import PluginManagedMcpObservation
+    from yoetz.ports.harness_mcp import HarnessBinary
+    from yoetz.ports.integrations import HarnessId
+    from yoetz.ports.plugin_artifacts import McpOwnershipState
+
+    _install(monkeypatch, tmp_path, provider=_provider())
+    monkeypatch.setattr(module, "mcp_route_observation", _REAL_ROUTE_OBSERVATION)
+    binary = HarnessBinary(HarnessId.CODEX, "/test/codex", "0.150.1", "supported")
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.codex_discovery.discover_codex_binaries", lambda: (binary,)
+    )
+    monkeypatch.setattr("yoetz.adapters.integrations.codex_mcp.isolated_root", lambda: None)
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.codex_mcp.installed_launcher",
+        lambda: ("/test/runtime/bin/yoetz", "sha256:" + "a" * 64),
+    )
+
+    def entry(_argv: tuple[str, ...]) -> CommandOutput:
+        return CommandOutput(
+            0,
+            json.dumps(
+                {"command": "/test/runtime/bin/yoetz", "args": ["mcp", "serve", "--host", "codex"]}
+            ).encode(),
+        )
+
+    def plugin(_root: object) -> PluginManagedMcpObservation:
+        return PluginManagedMcpObservation(
+            McpOwnershipState.PLUGIN if dual else McpOwnershipState.ABSENT,
+            "policy" if dual else None,
+            True,
+        )
+
+    monkeypatch.setattr("yoetz.adapters.integrations.codex_mcp._default_runner", entry)
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.portable_plugin.observe_plugin_managed_mcp", plugin
+    )
+    report = await module.provider_status_report(workspace_locator=tmp_path)
+    assert report["semantic_ready"] is True
+    assert report["agent_route_semantic_ready"] is (not dual)
+    route = cast(dict[str, object], report["mcp_route"])
+    assert route["external_registration_state"] == "yoetz_owned"
+    assert route["ownership_state"] == ("dual" if dual else "external")
+
+
 async def test_applied_route_drift_true_when_serving_differs(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

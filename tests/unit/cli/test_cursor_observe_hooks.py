@@ -91,6 +91,7 @@ def test_cursor_hook_ingress_drops_every_content_and_identity_denylist_field(
             event_name="afterMCPExecution",
             stdin_bytes=canonical_encode(payload),
             workspace=str(tmp_path),
+            _state=tmp_path,
         )
         == 0
     )
@@ -167,6 +168,7 @@ def test_cursor_raw_vendor_fields_reach_structural_observation(
             stdin_bytes=json.dumps(payload, separators=(",", ":")).encode(),
             stdout=io.BytesIO(),
             workspace=str(tmp_path),
+            _state=tmp_path,
         )
         == 0
     )
@@ -209,6 +211,7 @@ def test_cursor_model_id_takes_precedence_over_vendor_model_alias(
             stdin_bytes=payload,
             stdout=io.BytesIO(),
             workspace=str(tmp_path),
+            _state=tmp_path,
         )
         == 0
     )
@@ -332,6 +335,7 @@ def test_cursor_file_edit_uses_keyed_path_commitment_and_drops_outcomes(
 
 def test_cursor_session_prefix_reserves_space_inside_token_bound(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     captured: list[Mapping[str, JsonValue]] = []
 
@@ -354,6 +358,7 @@ def test_cursor_session_prefix_reserves_space_inside_token_bound(
                 stdin_bytes=canonical_encode(payload),
                 stdout=io.BytesIO(),
                 workspace=".",
+                _state=tmp_path,
             )
             == 0
         )

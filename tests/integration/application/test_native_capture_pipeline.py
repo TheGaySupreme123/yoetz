@@ -238,17 +238,18 @@ async def _pipeline(
     task_id = _ids(IdKind.TASK, 1)
     yoetz_session_id = _ids(IdKind.SESSION, 2)
     writer_id = _ids(IdKind.WRITER, 3)
-    store_mapping(
-        LifecycleMapping(
-            mapping_version=1,
-            codex_session_id=codex_session_id,
-            yoetz_task_id=task_id,
-            yoetz_session_id=yoetz_session_id,
-            yoetz_writer_id=writer_id,
-            last_frontier=None,
-        ),
-        _state=state,
-    )
+    if install_mapping:
+        store_mapping(
+            LifecycleMapping(
+                mapping_version=1,
+                codex_session_id=codex_session_id,
+                yoetz_task_id=task_id,
+                yoetz_session_id=yoetz_session_id,
+                yoetz_writer_id=writer_id,
+                last_frontier=None,
+            ),
+            _state=state,
+        )
 
     bundle_root = tmp_path / "bundle"
     bundle_root.mkdir(mode=0o700)
@@ -944,6 +945,7 @@ async def test_ordinary_native_hook_content_reaches_prepared_semantic_packet(
         tmp_path,
         codex_session_id=codex_session_id,
         profile=profile,
+        install_mapping=host != "cursor",
     )
 
     def run_async(factory: Callable[[], Awaitable[object]]) -> object:
@@ -974,7 +976,46 @@ async def test_ordinary_native_hook_content_reaches_prepared_semantic_packet(
             observation_profile=profile,
         )
 
-    assert await asyncio.to_thread(run_hook, pre_event_name, pre_payload) == 0
+    if host == "cursor":
+        # #661: the cooperative task exists but this Cursor conversation has no
+        # native mapping. Only its owned MCP start result may supply the route.
+        assert load_mapping(codex_session_id, _state=tmp_path / "state") is None
+        assert await asyncio.to_thread(run_hook, pre_event_name, pre_payload) == 0
+        assert len(client.requests) == 1
+        assert local.pending_outbox_count(workspace) == 1
+        assert task_observation.list_envelopes_for_session(workspace, session_commitment) == ()
+        start_payload = {
+            "conversation_id": pre_payload["conversation_id"],
+            "tool_name": "start",
+            "mcp_server_name": "yoetz",
+            "result_json": canonical_encode(
+                {
+                    "isError": False,
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": canonical_encode(
+                                {
+                                    "ok": True,
+                                    "task_id": runtime.task_id,
+                                    "session_id": runtime.session_id,
+                                    "writer_id": runtime.writer_id,
+                                }
+                            ).decode(),
+                        }
+                    ],
+                }
+            ).decode(),
+        }
+        assert await asyncio.to_thread(run_hook, "afterMCPExecution", start_payload) == 0
+        mapping = load_mapping(codex_session_id, _state=tmp_path / "state")
+        assert mapping is not None and mapping.yoetz_task_id == runtime.task_id
+        assert mapping.yoetz_session_id == runtime.session_id
+        assert mapping.yoetz_writer_id == runtime.writer_id
+        assert len(client.requests) == 1  # Binding neither ingests nor captures another event.
+    else:
+        assert await asyncio.to_thread(run_hook, pre_event_name, pre_payload) == 0
+
     assert await asyncio.to_thread(run_hook, post_event_name, post_payload) == 0
     pre_request, _capture_request, structural_request = _assert_native_handoff_requests(
         tuple(client.requests),

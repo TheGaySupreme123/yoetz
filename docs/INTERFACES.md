@@ -3887,7 +3887,8 @@ harness_unavailable|parse_failed|timeout|registration_failed|foreign_entry_prese
 `McpRegistrationResult`, and
 `McpRegistrationError`. `McpRegistrationObservation` carries `harness_id`, `state`,
 `route_profile` (`policy|strict|null`), and `isolation_binding`
-(`ambient|isolated_exact|missing|different|null`); route and binding are non-null only when the
+(`ambient|isolated_exact|missing|different|null`), plus optional internal `serve_command` carrying
+the exact observed owned argv for the applied-route record; route and binding are non-null only when the
 state is `yoetz_owned`, because a foreign or absent entry has no Yoetz route to describe.
 `observe_registration` reads exactly what `status_registration` reads, mutates nothing, and shares
 its `status` diagnostic phase. Each observation starts with `codex mcp get yoetz --json`; because a
@@ -3916,7 +3917,8 @@ success. The interactive approval surface prints the exact command, route, isola
 and preview digest. The preview binds the exact command, `policy|strict` route profile, and exact
 ADR-026 isolated root when present. Ambient external registrations carry no environment. Isolated
 external Codex registrations carry exactly one native `--env` pair,
-`YOETZ_ISOLATED_ROOT=<validated-root>`; a missing or different known root is re-registration drift,
+`YOETZ_ISOLATED_ROOT=<validated-root>`; a missing root is re-registration drift, as is a different
+known root on a legacy bare registration,
 while any arbitrary key, inherited-variable declaration, or malformed root makes the same-name
 entry foreign and preserves it. The route profile is
 explicit input:
@@ -3930,12 +3932,39 @@ is surfaced before mutation: the wizard preview and report carry `route_profile_
 ordinary digest-bound re-registration.
 The setup-wizard
 schema tokens are `yoetz.setup-wizard-marker/1`, `yoetz.setup-wizard-report/1`,
-`yoetz.setup-status/1`, `yoetz.mcp-registration-preview/1` (ambient) / `2` (isolated), and
-`yoetz.mcp-unregistration-preview/1` (ambient) / `2` (isolated); the marker lives at
+`yoetz.setup-status/1`, `yoetz.mcp-registration-preview/1` (ambient) / `2` (isolated) / `3`
+(installed absolute launcher), and `yoetz.mcp-unregistration-preview/1` (ambient) / `2`
+(isolated) / `3` (installed absolute launcher); the marker lives at
 `state_dir()/setup-wizard.json` via
 `config.paths.setup_marker_path`. The CLI surfaces are
 `yoetz setup run|status` and
 `yoetz integrate <harness> mcp status|preview|preview-remove|install|remove` (ADR-012).
+
+For issue #654, `mcp_command_profile` validates the shape of a bare or absolute console-script
+command with the exact current or legacy Codex serving suffix; it establishes no ownership.
+`adapters/integrations/codex_launcher.installed_launcher` supplies the adapter's ownership proof:
+the console script in the current interpreter's scripts directory must match exactly one SHA-256
+and size entry in that runtime's installed Yoetz RECORD. The executable and its ancestors must be
+non-symlink, owned by the current user or root, and not writable by group/others. For a pinned
+runtime, the validated root, instance identity, pin, lifetime, package version, and runtime prefix
+must agree. An absolute registration is owned only when its exact launcher matches that proof,
+its serving suffix is recognized, its transport is unambiguous and enabled, and its environment
+contains no unreviewed binding. A different root on an absolute registration is foreign, not a
+repair target. No candidate from host configuration is executed to establish this proof.
+
+New previews prefer that proven absolute console script. An installed CLI without valid proof
+refuses registration instead of falling back to PATH; embedded callers without an invoking
+launcher retain bare-command compatibility. Existing bare and legacy registrations remain
+recognizable for removal or an explicit migration to the absolute current command. Absolute
+preview digests bind the launcher bytes and proposed command/root; registration also binds the
+observed command/root so drift invalidates approval. Applied-route records preserve the exact
+observed argv, including its absolute launcher; their command validator checks shape, never
+confers ownership. Older records remain readable, and an older reader that cannot parse an
+absolute record retains its existing fail-soft missing-record behavior. CLI and terminal previews
+display that exact argv; provider status and preflight consume the shared ownership observation.
+This changes no workflow request/result schema, hook contract, or receipt format. The proof is
+installation-local integrity, not authentication against a machine owner who can rewrite both
+the installed script and RECORD.
 Standalone `yoetz provider endpoint` retains its explicit credential next command. When endpoint
 binding is embedded in the composed setup wizard, that standalone handoff is suppressed because
 the wizard still owns privacy consent and confidential ingress. Every visible yes/no prompt near

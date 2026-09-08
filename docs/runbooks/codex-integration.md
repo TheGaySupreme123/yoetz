@@ -1,5 +1,12 @@
 # Codex integration runbook
 
+Cursor's explicit-start repair (issue #661) leaves Codex's lifecycle binder and hook subscription
+unchanged. [The official hooks reference](https://developers.openai.com/codex/hooks), checked
+2026-09-08, specifies `tool_response` containing the MCP call result on `PostToolUse`, with
+canonical `mcp__server__tool` names. Codex keeps its existing result unwrapping and lifecycle
+locking; Cursor-only response fields and server identities are normalized only in Cursor's
+adapter. The Codex lifecycle and observation regression tests remain the compatibility check.
+
 This runbook guides you through previewing, installing, checking, replacing, and removing the
 canonical Yoetz Codex skill in one explicitly trusted project, while preserving any files you have
 modified. It also separates four facts that are easy to conflate: skill/source installation, Codex
@@ -674,7 +681,7 @@ For the Yoetz-owned external registration, issue #561 makes this propagation a s
 contract: an isolated preview displays and digest-binds the exact root, apply uses Codex's native
 `--env YOETZ_ISOLATED_ROOT=<exact-root>`, and status must report
 `isolation_binding=isolated_exact`. Ambient registration stores no environment. A missing or
-different known root requires re-registration; arbitrary environment keys, inherited-variable
+different known root on a bare registration requires re-registration; arbitrary environment keys, inherited-variable
 declarations, and malformed roots classify the same-name entry as foreign and are never replaced.
 Before a dogfood model task, use the app-server capture in the parity runbook to launch the real
 registered child and satisfy `mcp_child_isolation`; registration status alone is not child-start
@@ -690,6 +697,26 @@ name the everyday launcher by absolute path: a bare `command = "yoetz"` resolves
 and a test runtime earlier on `PATH` then reaches the everyday endpoint, answers
 `service_incompatible`, and its `yoetz service restart` advice supersedes the everyday service —
 the failure recorded on issue #604. See [`test-instances.md`](test-instances.md).
+
+Absolute external launchers are managed by the same preview/install/status/remove flow (#654).
+Run that flow from the installation you intend Codex to use. Preview selects its console script
+from that interpreter's scripts directory and verifies its bytes against the installed Yoetz
+RECORD; status recognizes only that exact absolute script, with recognized serving arguments
+and the reviewed root. A pinned instance must also have a matching pin and instance identity,
+current runtime provenance, and an unexpired lifetime. A basename, an executable bit, a different
+installation's matching version, or a path supplied by the host is insufficient.
+
+Review the command and root printed by `integrate codex mcp preview` before applying. An unchanged
+absolute registration is a no-op; explicit route changes preserve the launcher; removal previews
+name the current absolute command. Drift in the command, launcher evidence, or root invalidates
+the preview. Missing or modified launcher evidence, symlink/unsafe paths, conflicting transports,
+unexpected environment/arguments, and an absolute command bound to another root remain protected.
+If the installed CLI cannot prove its console script, repair that installation before registering.
+Symlink aliases and wrapper/module commands are not owned absolute console-script registrations;
+use the direct script printed by the installation's preview. Bare/legacy registrations remain
+recognizable for removal and explicit migration, without granting ownership to unrelated absolute
+binaries. Plugin/external dual ownership remains a blocker. Claude Code and Cursor keep their
+existing native-carrier identity rules; this repair changes only Codex external registration.
 
 ## Subscription evaluator is a separate Codex role
 

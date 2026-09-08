@@ -78,9 +78,11 @@ class _ScriptedRunner:
 
 def _yoetz_entry(
     route_profile: Literal["policy", "strict"] = "strict",
+    *,
+    launcher: str = "yoetz",
 ) -> CommandOutput:
     command = MCP_STRICT_SERVE_COMMAND if route_profile == "strict" else MCP_SERVE_COMMAND
-    return CommandOutput(0, json.dumps({"command": command[0], "args": list(command[1:])}).encode())
+    return CommandOutput(0, json.dumps({"command": launcher, "args": list(command[1:])}).encode())
 
 
 def _absent_mcp() -> list[CommandOutput]:
@@ -92,6 +94,11 @@ def _absent_mcp() -> list[CommandOutput]:
 @pytest.fixture
 def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, object]:
     """Fake discovery, adapter subprocesses, service client, and marker path."""
+
+    # These scripted entries model the legacy embedded/bare-launcher cell, not whichever
+    # wheel happens to host pytest. Absolute installation proof is supplied explicitly in
+    # the absolute CLI regression below and exercised for real by the packaged Codex test.
+    monkeypatch.setattr("yoetz.adapters.integrations.codex_mcp.installed_launcher", lambda: None)
 
     state: dict[str, object] = {
         "binaries": (_binary(),),
@@ -1699,6 +1706,48 @@ def test_integrate_mcp_explicit_route_profile_reregisters(
     body = json.loads(result.stdout)
     assert body["action"] == "reregister"
     assert body["state_after"] == "yoetz_owned"
+
+
+def test_absolute_mcp_cli_preserves_launcher_and_route(
+    wizard_env: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launcher = "/test/Yoetz Runtime/bin/yoetz"
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.codex_mcp.installed_launcher",
+        lambda: (launcher, "sha256:" + "e" * 64),
+    )
+    monkeypatch.setattr("yoetz.adapters.integrations.codex_mcp.isolated_root", lambda: None)
+    wizard_env["outputs"] = _absent_mcp()
+    preview = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "preview", "--json"])
+    assert preview.exit_code == 0, (preview.output, preview.exception)
+    assert json.loads(preview.stdout)["serve_command"][0] == launcher
+    wizard_env["outputs"] = [
+        *_absent_mcp(),
+        *_absent_mcp(),
+        CommandOutput(0, b""),
+        _yoetz_entry(launcher=launcher),
+        _yoetz_entry(launcher=launcher),
+    ]
+    installed = _RUNNER.invoke(
+        cli.app, ["integrate", "codex", "mcp", "install", "--accept", "--json"]
+    )
+    assert installed.exit_code == 0, (installed.output, installed.exception)
+    assert json.loads(installed.stdout)["state_after"] == "yoetz_owned"
+    calls = [
+        call for group in cast(list[list[tuple[str, ...]]], wizard_env["calls"]) for call in group
+    ]
+    additions = [call for call in calls if call[1:3] == ("mcp", "add")]
+    assert additions[0][additions[0].index("--") + 1] == launcher
+
+    # No explicit route input must retain the existing policy route, even though setup's
+    # configured default in this fixture is strict.
+    wizard_env["outputs"] = [
+        _yoetz_entry("policy", launcher=launcher),
+        _yoetz_entry("policy", launcher=launcher),
+    ]
+    noop = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "install", "--accept", "--json"])
+    assert noop.exit_code == 0, (noop.output, noop.exception)
+    assert json.loads(noop.stdout)["action"] == "noop"
 
 
 def test_setup_surfaces_no_secret_shaped_option() -> None:

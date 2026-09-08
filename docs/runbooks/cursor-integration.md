@@ -365,8 +365,9 @@ expansion; the default structural profile retains the boundary above.
 
 The default structural artifact remains unchanged. An explicitly rendered ordinary-work artifact
 uses `cursor-ordinary-observation-v1` and subscribes to Cursor's generic `preToolUse`,
-`postToolUse`, and `postToolUseFailure` events plus lifecycle signals. It leaves
-`beforeShellExecution`, `afterFileEdit`, and `afterMCPExecution` out of that subscription until a
+`postToolUse`, and `postToolUseFailure` events plus lifecycle signals. `afterMCPExecution` is
+subscribed only to bind an exact Yoetz-owned successful `start`; it emits no observation,
+content, or advice in this profile. It leaves `beforeShellExecution` and `afterFileEdit` out until a
 deduplication contract proves they are distinct from the generic stream. The hook command carries
 the exact profile id with `--observation-profile`; the id records the normalization contract and
 does not certify the installed Cursor build.
@@ -543,10 +544,32 @@ root as its repository locator, so a live mapping answers `active` and the `addi
 names the task, frontier, mapped `session_id` and `writer_id`, and the `start mode=attach`
 continuation by that session id (issues #578, #580). A daemon fence refusal records
 `status_workspace_unbound` / `status_workspace_mismatch` and keeps the mapping; only a replaced
-session records `mapping_stale`. Cursor does not re-bind the mapping from the agent's own scoped
-`start`: `afterMCPExecution` is normalized to structural fields and its result is not inspected,
-so an agent that starts a separate task keeps hook rows routed to the auto-attached task. Continue
-the auto-attached task by its named `session_id` instead of a new ref pair.
+session records `mapping_stale`.
+
+A successful explicit Yoetz `start` now binds the canonical Cursor session before normal
+observation handling (issue #661). The adapter transiently decodes `result_json` on
+`afterMCPExecution`, or `tool_output` on an exactly server-scoped `postToolUse`, then passes the
+result to the existing lifecycle binder. Only validated task/session/writer IDs and an optional
+frontier token enter mapping storage. Task switching and same-task session replacement use those
+returned IDs; the workspace ambiguity guard is unchanged and never guesses a task.
+
+[Cursor's hooks reference](https://cursor.com/docs/hooks), checked 2026-09-08, documents
+`mcp_server_name` on `afterMCPExecution`. That hook admits bare `start` only for exact `yoetz` or
+`plugin-yoetz-yoetz` server keys. The adapter also accepts the existing fully scoped
+`mcp__yoetz__start`, `mcp__plugin_yoetz_yoetz__start`, `yoetz:start`, and
+`plugin-yoetz-yoetz:start` forms, rejecting a conflicting server field. Generic `MCP:start` alone
+does not identify an owner and cannot bind. The ordinary profile therefore uses the MCP-specific
+hook only for binding and keeps the generic hook as its sole tool-observation stream. Failed
+results, foreign tools, malformed IDs, and contradictory session aliases cannot replace a map.
+Unparsed or invalid admitted results and failed/deferred writes report the existing closed
+`start_bind_unparsed`, `start_bind_invalid_ids`, `start_bind_write_failed`, or
+`start_bind_deferred` diagnostics. Deferred writes follow the same lifecycle lock as recovery.
+
+After upgrading, preview and apply the ordinary native plugin update so the binding-only hook is
+installed, reconnect the MCP server with the intended project open, and call `start mode=attach`
+using the known session ID. Check `observe status` for mapping and delivery separately: successful
+MCP attachment alone is not observation recovery. Binding permits subsequent consented content
+handoff; it cannot reconstruct content that an earlier unmapped call never delivered.
 
 Cursor's hooks reference (re-read 2026-09-03) calls local `sessionStart` fire-and-forget: the hook
 process can complete this mapping and drain, but the agent loop does not wait for it. Therefore a

@@ -89,6 +89,14 @@ launcher (never a bare `yoetz`) and, for Codex external registration and Cursor 
 the root binding those hosts already carry. The everyday install keeps its own registrations
 untouched.
 
+For Codex external registration, run `integrate codex mcp preview|install|status|preview-remove|remove`
+through that snapshot's own absolute launcher and the explicitly selected testing Codex home.
+The preview now emits the snapshot's direct console script, verified against its installed RECORD
+and runtime pin (#654). Status should report `yoetz_owned` and `isolated_exact`; repeat install is
+a no-op, and an explicit route change keeps the same executable. A different instance's launcher
+or root, a symlink alias, or modified script is protected as foreign. Use the direct command in
+the preview, and still obtain real registered-child evidence before passing the parity gate.
+
 Ordinary source tests do not need an instance: `uv run pytest <path>` from the checkout uses the
 checkout's `.venv`, which is unpinned. Provision an instance when a test or dogfood must exercise
 an installed launcher, a real service, a host registration, or the upgrade path.
