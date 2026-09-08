@@ -100,7 +100,11 @@ keys. `SESSION_NOT_FOUND` with
 repository_identity_required` (the control handshake carried no workspace locator) or
 `repository_identity_mismatch` (the locator resolved to a different repository than the route, or
 the route holds no repository binding); neither discloses a commitment, and a hook uses the reason
-to keep a live mapping out of the `mapping_stale` class (issue #578). The separate
+to keep a live mapping out of the `mapping_stale` class (issue #578). The
+repository-fence message names missing context or the current closed identity kind
+(`git_common_root` or `directory`) and directs the operator to the original workspace. It exposes
+no path or commitment. Read-only operation status retains the same fence: when that workspace is
+unavailable, the task workflow cannot inspect the operation (issue #444). The separate
 `workspace_task_exists` conflict deliberately carries no task selector or count: possession of a
 workspace reference alone is not authority to discover or attach another task. A host hook may
 recover from that exact conflict only with a validated selector it already holds in the private
