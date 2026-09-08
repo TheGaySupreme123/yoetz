@@ -1440,7 +1440,18 @@ five seconds ahead of acceptance and `ahead_of_forward_skew_allowance` beyond it
 outside clock. Ordering remains ingestion sequence and caller time is never a sort or filter key.
 New check cases carry both clocks and this classification in their bounded frozen timelines;
 versions is one verified runtime manifest; compact uses exact structural counters and bounded
-summaries. The compact singleton's `freshness` follows the same weaker-of-two rule as the evidence
+summaries. The versions slice reuses `version.py` (`build_status_version_slice_facts`): live
+Python/APSW/SQLite/source-id values are the same probes as `version --json`, and a missing or
+unrepresentable probe serializes as the token `unavailable` rather than a historical constant.
+Protocol, engine, projection (`yoetz/0.1.0`), object format, policy-pack ids, and
+`storage_schema` (`1`, the slice's static storage identity — not catalog/bundle counters and not
+SQLite `user_version`) are package contract facts. `provider_profiles` is the packaged
+`support/runtime-support.json` inventory, not a live semantic-evaluator census; an empty catalog
+in `development_unverified` support does not prove an evaluator is absent. MCP and CLI
+`status view=versions` share this producer; `route_profile` remains an application overlay of the
+serving process. Kernel evaluation does not read this live environment. Historical check/receipt
+engine identities stay the recorded event values and are not rewritten by this diagnostic.
+The compact singleton's `freshness` follows the same weaker-of-two rule as the evidence
 view: it is the weaker of the projection scalar and the `ledger_freshness` of the applicable-check
 coverage reported in the same item, so the summary line an agent reads can never claim the ledger
 is cleaner than the coverage vector beside it. `StatusCompactItemModel` rejects the inverse
@@ -4717,7 +4728,9 @@ SQLite `application_id`: `0x594F4554` ("YOET", ADR-003).
 
 `version --json` returns the resource-manifest digest and counts by default; explicit
 `--resources` returns the bounded full per-resource identity list. Optional unavailable components
-serialize as `{status:"absent"}`, not overloaded `null`. `release-probe` is CI-only via explicit
+serialize as `{status:"absent"}`, not overloaded `null`. MCP and CLI `status view=versions` reuse
+the same live APSW/SQLite/Python/source-id probes via `build_status_version_slice_facts`; that
+slice cannot represent `{status:"absent"}` so it uses the token `unavailable`. `release-probe` is CI-only via explicit
 service-start environment/override authority and is invalid in user configuration files.
 
 ## 15. Registry ownership rule
