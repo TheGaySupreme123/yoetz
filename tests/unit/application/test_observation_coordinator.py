@@ -2170,6 +2170,11 @@ async def test_ledger_event_invalid_is_terminal_not_service_unavailable(tmp_path
     local, _workspace, session, mapping = _mapped_local(tmp_path, "ledger-event-invalid")
 
     class _Store:
+        def load_capture_ticket(self, *, workspace: str, logical_identity: str) -> None:
+            # This structural-only fixture has no staged native capture to recover.
+            del workspace, logical_identity
+            return None
+
         def grant_consent(self, *args: object, **kwargs: object) -> None:
             del args, kwargs
 
@@ -3259,6 +3264,11 @@ async def test_duplicate_ingest_reconciles_ledger_instead_of_early_return(tmp_pa
     calls = {"append": 0, "advice": 0}
 
     class _DuplicateStore:
+        def load_capture_ticket(self, *, workspace: str, logical_identity: str) -> None:
+            # This structural-only fixture has no staged native capture to recover.
+            del workspace, logical_identity
+            return None
+
         def grant_consent(self, *args: object) -> None:
             return None
 
@@ -3377,6 +3387,11 @@ async def test_check_barrier_deferral_is_designed_backpressure(
     local, _workspace, session, mapping = _mapped_local(tmp_path, f"barrier-{code.value.lower()}")
 
     class _BarrierStore:
+        def load_capture_ticket(self, *, workspace: str, logical_identity: str) -> None:
+            # This structural-only fixture has no staged native capture to recover.
+            del workspace, logical_identity
+            return None
+
         def grant_consent(self, *args: object, **kwargs: object) -> None:
             del args, kwargs
 
@@ -4543,6 +4558,11 @@ async def test_identity_claim_conflict_rejects_one_envelope_without_latching(
     ingested: list[str] = []
 
     class _ConflictStore:
+        def load_capture_ticket(self, *, workspace: str, logical_identity: str) -> None:
+            # This structural-only fixture has no staged native capture to recover.
+            del workspace, logical_identity
+            return None
+
         def grant_consent(self, *args: object, **kwargs: object) -> None:
             del args, kwargs
 
