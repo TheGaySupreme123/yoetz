@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import platform
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -189,6 +188,7 @@ from yoetz.protocol.models import (
     StatusStructuralSubjectStateModel,
     StatusVersionSliceModel,
 )
+from yoetz.version import build_status_version_slice_facts
 
 __all__ = ["MemoryLedgerAdapter", "MemoryLedgerState", "compact_status_coverage"]
 
@@ -1227,19 +1227,22 @@ def _projection_items(
             ),
         )
     if view is ProjectionView.VERSIONS:
+        facts = build_status_version_slice_facts()
         return (
-            StatusVersionSliceModel(
-                protocol_version="0.1",
-                engine_version="0.1.0",
-                projection_version="0.1.0",
-                object_format="yoetz-object/1",
-                storage_schema="1",
-                python_version=platform.python_version(),
-                apsw_version="3.51.0.0",
-                sqlite_version="3.51.0",
-                sqlite_source_id="runtime-verified-by-connection-gate",
-                policy_packs=("research-evidence/0.1.0", "work-integrity/0.1.0"),
-                provider_profiles=(),
+            StatusVersionSliceModel.model_validate(
+                {
+                    "protocol_version": facts.protocol_version,
+                    "engine_version": facts.engine_version,
+                    "projection_version": facts.projection_version,
+                    "object_format": facts.object_format,
+                    "storage_schema": facts.storage_schema,
+                    "python_version": facts.python_version,
+                    "apsw_version": facts.apsw_version,
+                    "sqlite_version": facts.sqlite_version,
+                    "sqlite_source_id": facts.sqlite_source_id,
+                    "policy_packs": list(facts.policy_packs),
+                    "provider_profiles": list(facts.provider_profiles),
+                }
             ),
         )
     raise _error(PublicErrorCode.INVALID_REQUEST)
