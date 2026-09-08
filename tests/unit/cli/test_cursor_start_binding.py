@@ -313,12 +313,32 @@ def test_mapping_write_failure_has_bounded_diagnostic(
 
     monkeypatch.setattr(hooks, "queue_mapping_store" if deferred else "store_mapping", fail)
     if deferred:
-        with acquire_session_lock(_SESSION, _state=tmp_path):
+        with acquire_session_lock(_SESSION, _state=tmp_path) as owned:
+            assert owned
             _run(tmp_path, _payload())
     else:
         _run(tmp_path, _payload())
     assert load_mapping(_SESSION, _state=tmp_path) is None
     assert _diagnostics(tmp_path) == ["start_bind_write_failed"]
+
+
+@pytest.mark.parametrize("boundary", ["bind_start_mapping_outcome", "record_start_bind_diagnostic"])
+def test_unexpected_binding_fault_does_not_drop_the_ordinary_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("PRIVATE_BIND_FAULT")
+
+    seen: list[object] = []
+
+    def observe(**kwargs: object) -> int:
+        seen.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(hooks, boundary, fail)
+    monkeypatch.setattr(observe_hooks, "handle_observe", observe)
+    _run(tmp_path, _payload("postToolUse"))
+    assert len(seen) == 1
 
 
 def test_ordinary_renderer_installs_the_owner_bearing_binding_hook(tmp_path: Path) -> None:

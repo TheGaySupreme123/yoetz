@@ -3562,18 +3562,19 @@ def _bind_cursor_start(
     parsed = _bounded_outcome_mapping(response)
     from yoetz.cli.hooks import bind_start_mapping_outcome, record_start_bind_diagnostic
 
-    record_start_bind_diagnostic(
-        bind_start_mapping_outcome(
-            {
-                "session_id": f"{_CURSOR_SESSION_PREFIX}{session}",
-                "tool_name": "mcp__yoetz__start",
-                "tool_response": cast(JsonValue, parsed) if parsed is not None else response,
-            },
+    with contextlib.suppress(Exception):
+        record_start_bind_diagnostic(
+            bind_start_mapping_outcome(
+                {
+                    "session_id": f"{_CURSOR_SESSION_PREFIX}{session}",
+                    "tool_name": "mcp__yoetz__start",
+                    "tool_response": cast(JsonValue, parsed) if parsed is not None else response,
+                },
+                _state=_state,
+            ),
+            "PostToolUse",
             _state=_state,
-        ),
-        "PostToolUse",
-        _state=_state,
-    )
+        )
 
 
 def handle_cursor_observe(
