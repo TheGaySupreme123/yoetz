@@ -72,8 +72,8 @@ GUIDANCE_RESOURCES: Final = (
         name="workflow.md",
         title="Yoetz cooperative workflow",
         description=(
-            "Read before the first start call. The ten steps, the per-operation cadence, when to "
-            "stop retrying, resume and handoff behavior, and how to state what the run changed."
+            "Read before the first start call. Task identity, material-work cadence, resume and "
+            "handoff behavior, and pointers to conditional review, setup, and recovery guidance."
         ),
         annotations=GuidanceResourceAnnotations(audience=("assistant",), priority=0.9),
     ),
@@ -105,7 +105,8 @@ GUIDANCE_RESOURCES: Final = (
         name="request-templates.md",
         title="Yoetz request templates",
         description=(
-            "Read when a host drops schema metadata or after an invalid request. Complete "
+            "Read when a host drops schema metadata or after an invalid request, and before setup, "
+            "consent, credential/vault operations, import, or recommendation decisions. Complete "
             "copy-ready bodies for all six operations and all nine ordinary publication "
             "families, with explicit placeholder replacement rules."
         ),

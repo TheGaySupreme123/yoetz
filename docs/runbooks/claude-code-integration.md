@@ -1,5 +1,22 @@
 # Claude Code native integration
 
+## Conditional agent guidance
+
+The skill keeps its activation boundary, core workflow, and safety floor in the entrypoint.
+Read workflow guidance before `start`, publication policy before `publish_work`, and coverage
+and receipts before `check`. Setup/consent, vault/credential operations, transcript import, and
+recommendation decisions route to the corresponding sections of request templates only when
+needed. Already-read guidance need not be fetched again while present in context.
+
+Ordinary material claims use `semantic_if_configured`; `semantic_required` follows an explicit
+user requirement, effective policy, or named acceptance criterion requiring independent semantic
+judgment. Preserve required review and all host/disclosure approval boundaries. Installed guidance
+bytes alone prove neither activation nor semantic dispatch.
+
+The portable skill's Cursor restart procedure applies only to Cursor. Claude Code agents follow
+Claude Code's own reported continuation and never quit or configure Cursor for a Claude outage.
+
+
 This runbook covers exactly one cell: Claude Code CLI `2.1.241` as a local process, project scope,
 native marketplace-installed plugin, and an explicit private directory marketplace. It does not
 claim that Claude Code consumes Agent Plugins. It also does not transfer proof to Claude Desktop,

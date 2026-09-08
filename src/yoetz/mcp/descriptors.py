@@ -1507,8 +1507,9 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "max_findings findings plus a suppressed count, and status with view=findings reads the "
         "rest. A no_issue_detected verdict does not mean the work is correct. Choose mode "
         "deliberately: semantic_if_configured for most material implementation or review claims; "
-        "semantic_required when the claim depends on qualitative correctness, design conformance, "
-        "security or privacy reasoning, interoperability, or whether the code satisfies the ask; "
+        "semantic_required when explicitly required by the user, effective verification policy, or "
+        "a named acceptance criterion requiring independent semantic judgment. Qualitative work "
+        "alone does not make optional review mandatory; "
         "deterministic_only only for explicitly local or structural checks, a semantic-disabled "
         "policy, or a deliberate no-egress choice, and then disclose that limitation. Omitting "
         "mode resolves through the configured verification policy. This call cannot widen privacy "
@@ -1537,7 +1538,8 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "awaiting_human is the one nonterminal result: its typed continuation identifies standing "
         "repository setup or a one-use decision and carries the exact command to run. Show that "
         "command, do not create a new "
-        "check request, do not inspect Yoetz storage or source, and replay this same request with "
+        "check request, do not inspect live Yoetz storage or reconstruct consumer calls from source, "
+        "and replay this same request with "
         "the same request_id after the decision. If Yoetz explicitly reports that the current "
         "repository grant is missing, direct the owner to run yoetz --privacy and complete the "
         "trusted local review there; assent in agent chat never authorizes that standing grant. "
@@ -1684,7 +1686,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
             {
                 "start": "sha256:ac5c4ac0bd12f67e08437f3aea4b7bc328c060f08809ef6f20e86b879d683a29",
                 "publish_work": "sha256:4e90f9bdb94adb0a0de05bd5ec046f54fcab4c89f93d4c4b7191c12e19e229de",
-                "check": "sha256:3175800b79a9ea035fabde6c64227ff8a0c9783a4f5d13a29a7a9b80e91c41a2",
+                "check": "sha256:a13e23ddfd2a073047f0b005821237603816c04016d83cb913fff1941ba14e82",
                 "respond": "sha256:6003245eb4b02e6a81fa4f1083bfa00da675ec247398e302bcfbd2b82219664c",
                 "status": "sha256:e4798c4fedc7cb6bc7dda204b52ec2734b9dc319c27ca3834bdbaadd5c2613e4",
                 "receipt": "sha256:cf4b426af9764747848d3334d0671d0d0961ab5c86173d70c067222e9feb5ee2",
@@ -1695,7 +1697,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
             {
                 "start": "sha256:ac5c4ac0bd12f67e08437f3aea4b7bc328c060f08809ef6f20e86b879d683a29",
                 "publish_work": "sha256:4e90f9bdb94adb0a0de05bd5ec046f54fcab4c89f93d4c4b7191c12e19e229de",
-                "check": "sha256:b1cf1b1554d437b315f10f38080590b919c355b38f678bdcc458cd78620e1d60",
+                "check": "sha256:992959c904f2c54d60dab9789b39fdbb8e014660ec737e291c9d3a2915d9273f",
                 "respond": "sha256:6003245eb4b02e6a81fa4f1083bfa00da675ec247398e302bcfbd2b82219664c",
                 "status": "sha256:e4798c4fedc7cb6bc7dda204b52ec2734b9dc319c27ca3834bdbaadd5c2613e4",
                 "receipt": "sha256:cf4b426af9764747848d3334d0671d0d0961ab5c86173d70c067222e9feb5ee2",
@@ -1706,8 +1708,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:de1d9f9bd2f821bbf0cdf2ff64616213b2def4ad9d6952fbd1a485508700706c",
-        "strict": "sha256:1910d370ae257ff094984bf98ec5390added1cce159d5f045f10a7eafe44dcce",
+        "policy": "sha256:ad0ca4799e3e65dd066f4f2d2fc09914837f0b355e1026497c4795661a2e3897",
+        "strict": "sha256:55036b770bde8e664f409c84fbc37704345c3fa0fdfefc9f49d33fe9a4fe4cd3",
     }
 )
 

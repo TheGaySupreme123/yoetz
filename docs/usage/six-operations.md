@@ -78,12 +78,17 @@ coverage vector. `mode` selects how much:
 | Mode | Use it when |
 |---|---|
 | `semantic_if_configured` | Most material implementation or review claims. Runs semantic review if it is available; degrades honestly if not. |
-| `semantic_required` | Completion depends on qualitative correctness, design conformance, security or privacy reasoning, interoperability, or whether the code satisfies the ask. |
+| `semantic_required` | The user, effective verification policy, or a named acceptance criterion requires independent semantic review. Qualitative work alone does not make optional review mandatory. |
 | `deterministic_only` | Explicitly local or structural checks, semantic-disabled policy, or a deliberate no-egress choice — and the limitation gets disclosed. |
 
 `semantic_required` never erases deterministic truth. If the provider is absent, denied by policy,
 refuses, times out, or returns stale or invalid output, you get the deterministic findings back with
 verdict `incomplete_check`, an explicit reason, and no semantic findings.
+
+An unavailable required review remains an unmet requirement. Report completed implementation and
+tests separately; do not silently replace required semantic review with deterministic coverage.
+Optional terminal review gaps may be disclosed while continuing the task. Pending approvals must
+follow their exact continuation.
 
 #### Approved workspace checks
 
