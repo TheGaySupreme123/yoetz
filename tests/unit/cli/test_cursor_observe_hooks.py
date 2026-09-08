@@ -21,6 +21,18 @@ from yoetz.kernel.policies.observation_advice import ObservationCompositionFact
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 
 
+@pytest.fixture(autouse=True)
+def _isolated_cursor_hook_state(  # pyright: ignore[reportUnusedFunction]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Even normalizer-only tests now run the lifecycle binder before their
+    # mocked observe boundary. An omitted _state must never reach the live
+    # installation's mapping locks or diagnostic stream.
+    isolated = tmp_path / "inherited-state"
+    isolated.mkdir(mode=0o700)
+    monkeypatch.setenv("YOETZ_ISOLATED_ROOT", str(isolated))
+
+
 def _consented_store(tmp_path: Path) -> tuple[LocalObservationStore, str]:
     store = LocalObservationStore(_state=tmp_path)
     commitment = store.workspace_commitment(str(tmp_path.resolve()))
