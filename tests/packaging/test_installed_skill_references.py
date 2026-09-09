@@ -17,8 +17,12 @@ from typing import Final
 
 import pytest
 
+from yoetz.adapters.integrations.claude_code_integration import render_claude_code_plugin
 from yoetz.adapters.integrations.codex_skill import load_packaged_skill_members
+from yoetz.adapters.integrations.cursor_integration import render_cursor_plugin
+from yoetz.adapters.integrations.portable_plugin import build_portable_plugin_plan
 from yoetz.mcp.resources import GUIDANCE_RESOURCES, read_resource
+from yoetz.ports.plugin_artifacts import PluginFormatProfile
 
 _PACKAGED_ROOT: Final = Path(__file__).resolve().parents[2] / "src" / "yoetz" / "resources"
 _PACKAGED_SKILL: Final = _PACKAGED_ROOT / "skills" / "codex" / "yoetz" / "SKILL.md"
@@ -86,15 +90,31 @@ def test_every_yoetz_uri_the_skill_names_is_a_registered_readable_resource() -> 
         assert read_resource(uri), f"registered but unreadable: {uri}"
 
 
-def test_installed_guidance_links_and_explicit_anchors_resolve() -> None:
-    members = load_packaged_skill_members()
-    # Portable hosts install this skill with the same canonical references.
+@pytest.mark.parametrize("host", ["codex", "portable", "claude-code", "cursor", "cursor-portable"])
+def test_installed_guidance_links_and_explicit_anchors_resolve(host: str, tmp_path: Path) -> None:
+    # Render the actual installed artifact. Checking only source links misses a renderer that
+    # selects another host's skill or forgets to ship one of its relative references.
+    launcher = tmp_path / "yoetz"
+    launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    launcher.chmod(0o700)
+    if host == "codex":
+        members = load_packaged_skill_members()
+    elif host == "portable":
+        members = dict(build_portable_plugin_plan().members)
+    elif host == "claude-code":
+        members = dict(render_claude_code_plugin(yoetz_launcher=launcher).members)
+    else:
+        members = dict(
+            render_cursor_plugin(
+                PluginFormatProfile.AGENT_PLUGINS_1
+                if host == "cursor-portable"
+                else PluginFormatProfile.CURSOR_PLUGIN_NATIVE,
+                yoetz_launcher=launcher,
+            ).members
+        )
     documents = {
         name: data.decode("utf-8") for name, data in members.items() if name.endswith(".md")
     }
-    documents["portable-SKILL.md"] = (_PACKAGED_ROOT / "skills/portable/yoetz/SKILL.md").read_text(
-        encoding="utf-8"
-    )
     for name, text in documents.items():
         for target in _MARKDOWN_LINK.findall(text):
             if target.startswith(("http://", "https://", "yoetz://", "mailto:")):

@@ -184,7 +184,7 @@ class _ClaudeFixture:
         return ClaudeCodeCommandResult(1, b"", b"unexpected")
 
 
-def test_native_projection_uses_shared_bytes_and_only_admitted_claude_components() -> None:
+def test_native_projection_uses_claude_skill_and_shared_guidance_components() -> None:
     external = render_claude_code_plugin()
     managed = render_claude_code_plugin(
         mcp_ownership=McpOwnership.PLUGIN_MANAGED,
@@ -211,6 +211,19 @@ def test_native_projection_uses_shared_bytes_and_only_admitted_claude_components
     assert fixture["observation_evidence"] == "not_observed"
     assert managed.plan.format_profile is PluginFormatProfile.CLAUDE_CODE_PLUGIN_NATIVE
     assert external.members["skills/yoetz/SKILL.md"] == managed.members["skills/yoetz/SKILL.md"]
+    assert external.members["skills/yoetz/SKILL.md"] == read_verified_resource(
+        "skills/claude-code/yoetz/SKILL.md"
+    )
+    for name in (
+        "agent-instructions.md",
+        "coverage-and-receipts.md",
+        "publication-policy.md",
+        "request-templates.md",
+        "workflow.md",
+    ):
+        assert external.members[f"skills/yoetz/references/{name}"] == read_verified_resource(
+            f"guidance/{name}"
+        )
     assert ".mcp.json" not in external.members
     # The plugin-owned MCP entry and every hook launch the exact bound installation, never a
     # bare PATH lookup: the 2026-08-27 dogfood's bridge/service split-brain came from PATH.

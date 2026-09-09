@@ -180,11 +180,23 @@ that identity.
 
 Keep recovery requests tied to the operation that produced them. `start` has no `writer_id`; use the
 returned `session_id` and `writer_id` on later calls. A `publish_work` preview uses `dry_run: true`
-and the same `request_id` for the real append. A timeout or unknown write outcome uses
-`status view=operation` with `filter.operation_request_id` set to the write's request ID:
+and the same `request_id` for the real append. A timeout or unknown write outcome uses the exact
+start replay branch below when it is a `start` response without route ids; otherwise use `status
+view=operation` with `filter.operation_request_id` set to the exact write request ID:
 `absent` permits one replay of the exact original body and request ID, `complete` uses the stored
-outcome, and `pending`, `quarantined`, or an unknown state is retained and reported rather than
-guessed.
+outcome without replay, and `pending` permits replay only after an exact typed continuation and
+its required approval complete. A pending operation without a continuation, `quarantined`, or an
+unknown state is retained and reported rather than guessed.
+
+The operation view requires both `session_id` and `writer_id`. If a `start` response is lost before
+those ids are returned, do not invent them or issue a fabricated status query: replay the exact
+original `start` body once with its same `request_id`; the start idempotency path returns the stored
+result or a typed boundary. Once the required route ids are known, use the exact operation filter
+above.
+
+The same start exception applies to a typed `OPERATION_PENDING` start result that has no returned
+session or writer: replay that exact start request once rather than fabricating ids for an operation
+query.
 
 Pagination is a read operation: a retry may use a new read request ID, but a cursor continuation
 preserves the original view, filter, frontier, and `limit`. Changing `limit` starts a new query with
@@ -269,7 +281,11 @@ Bind change-sensitive evidence to the exact subject state or frontier it concern
 
 ## Batching, sequencing, and retry
 
-Batch facts that belong to one material transition. Preserve writer sequence and expected frontier. On timeout, reuse the same request and operation IDs; never manufacture a replacement event merely because the response was lost.
+Batch facts that belong to one material transition. Preserve writer sequence and expected frontier.
+For a write timeout, use the operation-specific recovery above: query the exact operation filter,
+replay once only for `absent`, use the stored `complete` outcome, and follow an exact typed
+continuation before replaying a `pending` request. A read timeout gets a new read request ID with
+the same intent. Never manufacture a replacement event merely because a response was lost.
 
 Before a material publish over MCP, read `status view=obligations` and inspect the exact `unattempted_items` values before resolving an obligation. Then set `dry_run: true` to validate the batch and preview accepted event ids and coverage without appending. The dry-run result is not evidential and must not be cited as a check, publication, or coverage source. When the preview is acceptable, publish with the same `request_id` and `dry_run` omitted or false.
 

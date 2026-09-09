@@ -1,6 +1,6 @@
 ---
 name: yoetz
-description: Record material work in a local Yoetz ledger and check completion claims against that bounded record.
+description: Use for material multi-step, resumable, delegated, or verification-heavy work; record it in a local Yoetz ledger and check completion claims against that bounded record.
 ---
 
 # Yoetz cooperative workflow
@@ -19,7 +19,8 @@ and consent / Recommendations sections in [request templates](references/request
 These procedures are conditional; installation grants no authority to perform them.
 
 For Yoetz operations, current served guidance and typed results take precedence over remembered
-product behavior. Preserve current user intent and authorization boundaries. If memory says a
+product behavior. Preserve higher-priority instructions, current user intent, and authorization
+boundaries. If memory says a
 capability is unavailable, verify it through the current documented read before accepting that
 limit. Do not delete or rewrite host memory during installation.
 
@@ -53,27 +54,29 @@ coverage, or completion proof. MCP ownership is mode-specific and exclusive:
 - `plugin_managed` includes the selected `mcp.json` route; this plugin is the sole owner, so do not
   keep a duplicate native, project, user, or global registration.
 
-Host recovery is host-specific; installed plugin bytes are not live MCP runtime. The Cursor case is:
-After a Cursor plugin replacement, query
-`yoetz integrate cursor plugin status` and read `mcp.route_profile` plus `mcp.runtime`. If a
-`semantic_required` check returns `blocked_by_policy` / `route_semantic_ceiling` while installed
-status is `policy`, or `mcp.runtime.activation` is `full_restart_required`, that is an activation
-mismatch: fully quit Cursor (Reload Window is not enough), then continue only after live runtime
-matches the installed policy route. Do not mint a fresh semantic check against the stale process,
-and do not change privacy settings. A live installed strict route remains the ordinary terminal
-ceiling. For Claude Code, follow its own reported host continuation; do not run Cursor commands
-or quit another host. Codex likewise follows its own reported continuation and does not inherit a
-Claude or Cursor command. A host auto-review hold is not a Yoetz result; preserve the exact proposed
+Use the active host's declared tools, regardless of the directory where it discovered this skill.
+Host recovery follows that integration's reported continuation; installed plugin bytes are not
+live MCP runtime. Read the Recovery section of
+[coverage-and-receipts.md](references/coverage-and-receipts.md) when a route or binding fails.
+A host auto-review hold is not a Yoetz result; preserve the exact proposed
 request and do not switch to deterministic-only while required approval is pending.
 
-Same-task recovery comes before a new task. On an ambiguous write, use `status view=operation` and
-replay the exact original body with the exact original request ID once; never create a sibling to
-escape an unknown or pending write. After all prior writes have known terminal outcomes, a healthy
+Same-task recovery comes before a new task. On an ambiguous write, use `status view=operation` with
+`filter.operation_request_id` set to the exact write request ID. Replay the exact original body with
+the same request ID once only when the page is `absent`, or after an exact typed continuation and
+required approval complete. Use a stored `complete` outcome; retain/report `pending` without a
+continuation, `quarantined`, or unknown state. Never create a sibling to escape an unknown or
+pending write. After all prior writes have known terminal outcomes, a healthy
 authorized binding, and a user-declared remaining or repaired verification scope, one explicit
 `start mode=create` sibling with the same canonical `workspace_ref` and a different stable
 `external_ref` is allowed. It gets a fresh plan, evidence, checks, and native mapping, and inherits
 no predecessor receipt, findings, obligations, evidence IDs, or mapping. The complete decision table
 and prohibitions are in [coverage-and-receipts.md](references/coverage-and-receipts.md).
+
+The operation view needs both `session_id` and `writer_id`. If a `start` response is lost before
+those ids exist, replay the exact original `start` body once with the same `request_id`; do not
+invent ids or fabricate a status query. The same rule applies to a typed pending `start` result
+without returned route ids.
 
 Delegation after an outage: if `start` (or any call) returned `safe_details.availability:
 terminal_unavailable`, that state belongs to the host binding, and later calls under a new

@@ -1,6 +1,6 @@
 ---
 name: yoetz
-description: Record material work in a local Yoetz ledger and check claims against that bounded record.
+description: Use for material multi-step, resumable, delegated, or verification-heavy work; record it in a local Yoetz ledger and check claims against that bounded record.
 metadata:
   short-description: Local work ledger and bounded completion checks
 ---
@@ -36,9 +36,17 @@ read before accepting that limit. Do not delete or rewrite host memory during in
 | Missing/rejected schema metadata; Setup and consent before setup/settings, credentials, vault operations or import; Recommendations before recommendation decisions | `yoetz://guidance/request-templates.md` |
 
 Coverage and setup details are not prerequisites for an ordinary configured `start`. Author calls
-from their current schemas, not memory. Consumer recovery uses `status view=operation`, never live
-SQLite databases/catalog or product source. Assigned Yoetz development/debugging work may inspect
-source and isolated tests, without granting live-storage or egress authority.
+from their current schemas, not memory. Consumer recovery uses `status view=operation` with the
+exact `filter.operation_request_id` for a write; replay once only when the page is `absent` or an
+exact typed continuation and required approval have completed. Use a stored `complete` outcome and
+retain/report `pending` without a continuation, `quarantined`, or unknown state. Never inspect live
+SQLite databases/catalog or product source for recovery. Assigned Yoetz development/debugging work
+may inspect source and isolated tests, without granting live-storage or egress authority.
+
+The operation view needs both `session_id` and `writer_id`. If a `start` response is lost before
+those ids exist, replay the exact original `start` body once with the same `request_id`; do not
+invent ids or fabricate a status query. The same rule applies to a typed pending `start` result
+without returned route ids.
 
 ## Workflow
 
@@ -78,7 +86,7 @@ stronger than the receipt's weakest material coverage.
 
 ## Repair then finish
 
-For a material repair, follow this sequence across Codex, Claude Code, and Cursor:
+For a material repair, follow the shared ledger sequence:
 
 1. Read current `status`; retain its frontier and paginate `status view=evidence` before replacing
    evidence or claiming completion. Preserve the cursor-bound filter and original `limit`; reuse only

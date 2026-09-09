@@ -54,6 +54,46 @@ def test_workflow_recovery_table_preserves_the_0_2_boundaries() -> None:
     assert "invent lineage" in text
 
 
+def test_canonical_recovery_branches_on_the_stored_operation_state() -> None:
+    for relative in (
+        "guidance/workflow.md",
+        "guidance/coverage-and-receipts.md",
+        "guidance/publication-policy.md",
+    ):
+        text = _collapsed(relative)
+        for phrase in (
+            "filter.operation_request_id",
+            "`absent`",
+            "`complete`",
+            "`pending`",
+            "`quarantined`",
+            "exact typed continuation",
+            "required approval",
+        ):
+            assert phrase in text, (relative, phrase)
+        assert "stored outcome" in text, relative
+        assert "replay" in text, relative
+
+
+def test_start_recovery_does_not_fabricate_operation_identity() -> None:
+    for relative in (
+        "guidance/workflow.md",
+        "guidance/coverage-and-receipts.md",
+        "guidance/publication-policy.md",
+    ):
+        text = _collapsed(relative)
+        for phrase in (
+            "operation view requires both",
+            "`session_id` and `writer_id`",
+            "`start` response is lost",
+            "exact original `start` body",
+            "same `request_id`",
+            "do not invent",
+            "fabricated status query",
+        ):
+            assert phrase in text, (relative, phrase)
+
+
 def test_each_native_host_runbook_has_bounded_recovery_examples() -> None:
     for relative in _HOST_RUNBOOKS:
         text = _collapsed(relative)

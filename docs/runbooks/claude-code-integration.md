@@ -14,8 +14,27 @@ effective policy, or named acceptance criterion requiring independent semantic j
 required review and all host/disclosure approval boundaries. Installed guidance bytes alone prove
 neither activation nor semantic dispatch.
 
-The portable skill's Cursor restart procedure applies only to Cursor. Claude Code agents follow
-Claude Code's own reported continuation and never quit or configure Cursor for a Claude outage.
+The native plugin selects `skills/claude-code/yoetz/SKILL.md`. Its entrypoint names
+`/yoetz:yoetz`, uses the declared MCP namespace, reads installed references on demand, and refreshes
+Yoetz status after Claude resume or compaction. `SessionStart` additional context is a bounded cue;
+replayed session context does not establish the current ledger frontier. Plugin replacement uses
+Claude's documented `/reload-plugins` or a new session, followed by loaded-root and digest checks.
+
+Design basis, checked 2026-09-09: Claude's [skills guidance](https://code.claude.com/docs/en/skills)
+recommends a use-case-first description and concise instructions with supporting references.
+Yoetz keeps this workflow in the conversation because a forked skill lacks that conversation's
+history. The [plugin guide](https://code.claude.com/docs/en/plugins) supplies the namespaced
+invocation; [hooks](https://code.claude.com/docs/en/hooks) and
+[sessions](https://code.claude.com/docs/en/sessions) explain the reload/resume context. Yoetz does
+not add `allowed-tools`, an automatic fork, or a new hook to personalize prose. The five shared
+references still own evidence, consent, and receipt semantics. These sources justify instruction
+design, not a new tested Claude version or native behavioral acceptance result.
+
+Anthropic's own [example skill](https://github.com/anthropics/claude-plugins-official/blob/main/plugins/example-plugin/skills/example-skill/SKILL.md)
+and [skill-development skill](https://github.com/anthropics/claude-code/blob/main/plugins/plugin-dev/skills/skill-development/SKILL.md)
+use focused activation descriptions, imperative procedures, and links to supporting files. The
+Claude Yoetz entrypoint follows those patterns and addresses Claude directly; it does not ask the
+agent to identify which host is reading it or carry another host's restart instructions.
 
 
 This runbook covers exactly one cell: Claude Code CLI `2.1.241` as a local process, project scope,
@@ -46,8 +65,9 @@ not redefine plugin components. The plugin manifest is authoritative and sets
 `defaultEnabled:false`. Every hook command and the plugin-owned `.mcp.json` entry launch the exact
 `yoetz` that rendered the plugin (absolute executable, or `<interpreter> -m yoetz`), recorded in the
 source marker; a bare PATH `yoetz` is never written, so the bridge, hooks, and service cannot come
-from different installations. Re-render (`update`) after moving or reinstalling Yoetz. Shared skill/reference bytes come from the same packaged sources as the
-portable and Codex/Cursor projections. Yoetz writes no credentials, endpoints, user config, ledger,
+from different installations. Re-render (`update`) after moving or reinstalling Yoetz. The native
+entrypoint and five shared references come from their canonical packaged sources; the references
+are byte-identical across host projections. Yoetz writes no credentials, endpoints, user config, ledger,
 vault, receipt, or provider state into the plugin, `${CLAUDE_PLUGIN_ROOT}`, or
 `${CLAUDE_PLUGIN_DATA}`.
 
@@ -630,10 +650,12 @@ them from memory, `CLAUDE.md`, or the live store.
 - **Read retry.** If a `status`, diagnostics, or `status view=operation` read times out, repeat the
   same read intent with a new read `request_id`. Preserve its view, operation filter, cursor, and
   limit. An unreadable read is not evidence that the task or operation is absent.
-- **Ambiguous write.** If `start`, `publish_work`, `check`, `respond`, or `receipt` loses its
-  response, first call `status view=operation` for the original write `request_id`, then replay the
-  exact original body once with that same request ID. If it remains unknown or
-  `OPERATION_PENDING`, preserve and disclose the operation; do not create a new task to escape it.
+- **Ambiguous write.** If a `start` response is lost before session/writer IDs are returned,
+  replay the exact original `start` body once with the same request ID. Otherwise read
+  `status view=operation` with `filter.operation_request_id` set to the original write ID:
+  replay only `absent`; use stored `complete`; follow an exact typed continuation and required
+  approval before replaying `pending`. Retain and report pending without a continuation,
+  `quarantined`, or unknown. Never invent session/writer IDs or create a task to escape a write.
 - **Exact-session attach.** When the `SessionStart` context provides a held `session_id`, use that
   exact value as the `mode=attach` selector. `${CLAUDE_PROJECT_DIR}` is the canonical workspace
   fence supplied by the host context; if the request carries identity refs, include the canonical

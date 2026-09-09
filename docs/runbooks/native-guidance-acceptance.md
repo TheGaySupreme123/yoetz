@@ -62,6 +62,14 @@ declarations as well as source text: the intake cue is capped at 512 UTF-8 bytes
 hook context renderers cap advice at 2,000 characters. Presence in a source file is a separate fact
 from delivery to the model. Keep the exact URI route readable under truncation.
 
+For the personalization variant, record the loaded skill source and heading as well: the native
+Claude entrypoint is `Yoetz for Claude Code`, both Cursor formats select `Yoetz for Cursor Agent`,
+and the generic portable export remains neutral. Confirm that all five referenced documents resolve
+inside the artifact. A project/global skill discovered through a compatibility directory is a
+separate source and must not accidentally satisfy native plugin acceptance. Observe whether the
+agent uses its own declared tools, respects its current mode, and follows its own reload/resume
+continuation; a Claude or Cursor run must not claim Codex chat-attestation authority.
+
 ## One task, multiple rounds
 
 Use a small synthetic work product with independently inspectable behavior, such as a local page

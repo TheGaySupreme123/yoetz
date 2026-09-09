@@ -221,7 +221,8 @@ later material when needed, without chasing an indefinitely advancing observatio
 
 Two different permissions are in play, and confusing them is what strands a check.
 
-**Your host's authorization** is Codex deciding whether you may call the `check` tool at all. **A
+**The active agent host's authorization** is the active agent host deciding whether you may call
+the `check` tool at all. **A
 Yoetz disclosure decision** is the machine owner deciding whether one exact prepared case may leave
 the machine. Getting the first never grants the second, and needing the second does not mean the
 first was wrong.
@@ -326,10 +327,13 @@ quit instructions apply only to Cursor; use the current host's own continuation 
 
 <a id="recovery"></a>
 
-`awaiting_human` is nonterminal: neither a gap to disclose nor a retry to spend. Follow the
-continuation above before applying terminal recovery rules. On `OPERATION_PENDING`, read
-`status` with `view=operation` once and replay the same `request_id` once. If still pending,
-report that fact; a separate deterministic-only check is permissible only when no required
+`awaiting_human` is nonterminal: neither a gap to disclose nor a retry to spend. Follow the exact
+continuation above, including its required user-approval path, before applying terminal recovery
+rules. On a generic `OPERATION_PENDING`, read `status` once with the exact
+`filter.operation_request_id`; replay the same `request_id` only when the typed result or status
+page supplies that exact continuation and its approval has completed. A pending operation without
+such a continuation, or a quarantined/unknown operation, is retained and reported; a complete page
+uses its stored outcome. A separate deterministic-only check is permissible only when no required
 semantic review or pending approval would be bypassed.
 
 ### Bounded recovery and fresh verification
@@ -338,11 +342,21 @@ Use this decision table after the typed result and any operation-specific contin
 the 0.2 wire contract: a sibling is an explicit `start mode=create` choice, not an automatic
 lineage or admission mechanism.
 
+The operation view requires both `session_id` and `writer_id`. If a `start` response is lost before
+those ids are returned, do not invent them or issue a fabricated status query: replay the exact
+original `start` body once with its same `request_id`; the start idempotency path returns the stored
+result or a typed boundary. Once the required route ids are known, use the exact operation filter
+in the table below.
+
+The same start exception applies to a typed `OPERATION_PENDING` start result that has no returned
+session or writer: replay that exact start request once rather than fabricating ids for an operation
+query.
+
 | Situation | Required action | Prohibited action |
 | --- | --- | --- |
 | A retryable read timeout or reconnect (`status`, diagnostics, or an operation recovery read) | Retry the same read intent with a new read `request_id`, following the typed result. Preserve the cursor-bound view, filter, frontier, and original `limit`. | Reusing a timed-out read ID as a write, changing page size under a cursor, or treating a missing read as evidence of absence. |
-| Any write has an unknown outcome (`start`, `publish_work`, `check`, `respond`, or `receipt`) | Read `status view=operation` with `filter.operation_request_id` set to the write's `request_id` when available. If it is `absent`, replay the exact original body with the exact original `request_id` once; if it is `complete`, use the stored outcome; if it is `pending`, `quarantined`, or still unknown, retain and report that boundary. | A fresh request ID, guessed result, new task, or sibling created to escape ambiguity. |
-| A typed `OPERATION_PENDING` result | Read operation status once and perform the allowed same-ID continuation. If still pending, stop the write path and preserve the pending state. | Repeated probes, a new task, or a clean completion claim. |
+| Any write has an unknown outcome (`start`, `publish_work`, `check`, `respond`, or `receipt`) | For `start` without returned session/writer ids, use the exact-start branch above. Otherwise read `status view=operation` with `filter.operation_request_id` set to the exact write `request_id`. If it is `absent`, replay the exact original body with that exact `request_id` once; if it is `complete`, use the stored outcome and do not replay; if it is `pending` with an exact typed continuation, follow that continuation and its required approval, then replay the same request once; if it is `pending` without a continuation, `quarantined`, or still unknown, retain and report that boundary. | A fresh request ID, guessed result, new task, sibling created to escape ambiguity, fabricated start identity, or replay without the exact continuation. |
+| A typed `OPERATION_PENDING` result | For a `start` result without returned session/writer ids, use the exact-start branch above. Otherwise read operation status once with the exact operation filter. Perform the same-ID replay only after the typed continuation and required approval complete; if no continuation is supplied or the page remains pending, quarantined, or unknown, stop the write path and preserve/report it. | Blind replay, fabricated start identity, repeated probes, a new task, or a clean completion claim. |
 | An exact held `session_id` is available after session rotation or host handoff | Use `mode=attach` with that `session_id` as the selector; preserve the host's canonical working root for its binding, but do not add a guessed `workspace_ref`/`external_ref` pair. Use the returned successor session/writer and inspect status before continuing. | A bare `task_id`, workspace membership as resume authority, or a guessed sibling. |
 | A fresh host conversation has the same work but no held session | Use `mode=create_or_attach` with the exact canonical `workspace_ref` + `external_ref` pair. | A remote URL as workspace identity, an invented task ID, or an implicit second task. |
 | Same-task pair/session recovery is exhausted, every prior write has a known terminal outcome, and the user declares a remaining or repaired verification scope | On one healthy, authorized binding, start one intentional sibling with `mode=create`, the same canonical workspace, and a different stable `external_ref`. Give it a fresh plan naming only that scope and establish its native host mapping from the returned session/task. | Silently replacing the task, inheriting old findings/obligations/evidence, reusing cross-task evidence IDs without a contract, or inventing lineage fields. |

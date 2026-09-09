@@ -29,11 +29,16 @@ Use this table after a reconnect, timeout, session rotation, host handoff, or a 
 same-task boundary. It uses the existing `start`, `status`, and workflow operations; it does not
 add a task-lineage field or change the wire contract.
 
+The operation view requires both `session_id` and `writer_id`. If a `start` response is lost before
+those ids are returned, do not invent them or issue a fabricated status query: replay the exact
+original `start` body once with its same `request_id`; the start idempotency path returns the stored
+result or a typed boundary.
+
 | Situation | Required action | Do not do |
 | --- | --- | --- |
 | A read-only timeout or reconnect permits a retry (`status`, diagnostics, or an operation-recovery read) | Repeat the same read intent with a new read `request_id`; preserve its view, filter, cursor, and limit. A missing read is not proof that the record is absent. | Reuse a timed-out read ID as if it were a write, or infer absence from an unreadable response. |
-| Any write has an unknown outcome (`start`, `publish_work`, `check`, `respond`, `receipt`, or equivalent) | Use `status view=operation` when available, then replay the exact original body once with the exact original write `request_id`. If it remains unknown or pending, retain that operation and report the unresolved boundary. | Mint a fresh request ID, fresh task, or sibling to escape an ambiguous write; guess the result. |
-| A typed `OPERATION_PENDING` result is returned | Read operation status once and perform the allowed same-ID continuation once. If it is still pending, stop the write path, preserve the pending state, and disclose it. | Repeat probes, create a new task, or claim a clean completion. |
+| Any write has an unknown outcome (`start`, `publish_work`, `check`, `respond`, `receipt`, or equivalent) | For `start` without returned session/writer ids, use the exact-start branch above. Otherwise read `status view=operation` with `filter.operation_request_id` set to the exact original write `request_id`. If `state=absent`, replay the exact original body once with that same request ID. If `state=complete`, use the stored outcome and do not replay. If `state=pending` includes an exact typed continuation, follow that continuation and its required user-approval path, then replay the original request once; without a continuation, retain and report pending. If `state=quarantined` or unknown, retain and report that boundary. | Mint a fresh request ID, fresh task, or sibling to escape an ambiguous write; replay a complete, quarantined, or pending operation without its exact continuation; fabricate start identity; guess the result. |
+| A typed `OPERATION_PENDING` result is returned | If it is a `start` result without returned session/writer ids, use the exact-start branch above. Otherwise read operation status once with the exact `filter.operation_request_id`. Replay the original request only when the typed result or status page supplies an exact continuation and its required approval has completed; otherwise retain and report `pending`, `quarantined`, or unknown. | Blindly replay a pending request, fabricate start identity, repeat probes, create a new task, or claim a clean completion. |
 | An exact held `session_id` is available after rotation or handoff | Use that exact `session_id` as the `mode=attach` selector. The host binding or CLI repository context supplies the canonical workspace fence; if the request carries identity refs, send the canonical `workspace_ref` + `external_ref` pair together. Use the returned successor session/writer and inspect `status` before continuing. | Add an unpaired `workspace_ref`, use a bare `task_id` or workspace membership as resume authority, or guess a sibling. |
 | The same work resumes in a fresh host conversation with no held session | Call `start mode=create_or_attach` with the exact canonical `workspace_ref` + `external_ref` pair and no `session_id`. A fresh conversation is not automatically a new task. | Use a remote URL as `workspace_ref`, invent a task ID, or create an implicit second task. |
 | The same-task pair/session cannot be recovered, every prior write has a known terminal outcome, and the user declares a bounded remaining or repaired verification scope | Start one intentional sibling with `mode=create`, the same canonical workspace, and a different stable `external_ref`. Give it a fresh plan, evidence, checks, and native binding; begin with a bounded handoff note that the predecessor receipt remains separate and unresolved. | Silently replace the task, inherit findings/obligations/evidence, reuse cross-task IDs without an existing contract, or invent lineage. |
@@ -119,10 +124,13 @@ completion. Describe local ledger writes separately from product-file changes.
 ## Errors and continuations
 
 Read the typed result before acting. For a retryable read timeout or reconnect, issue a new read
-`request_id` with the same intent. For any write with an unknown outcome, use `status
-view=operation` and then replay the exact original body once with the original write `request_id`;
-a timeout does not authorize a fresh task. A `retryable: false` error is terminal except for its
-exact typed continuation: do not probe with new requests or other operations. Read
+`request_id` with the same intent. For any write with an unknown outcome, query `status
+view=operation` using `filter.operation_request_id` for the exact original write `request_id` and
+follow the state branches in the recovery table: replay once only for `absent`, use the stored
+outcome for `complete`, and replay after an exact typed continuation and required approval only for
+`pending`; retain and report `quarantined` or unknown state. A timeout does not authorize a fresh
+task. A `retryable: false` error is terminal except for its exact typed continuation: do not probe
+with new requests or other operations. Read
 [Recovery](coverage-and-receipts.md#recovery) only when an error, outage, or inherited
 unavailability requires it. Delegates inheriting `terminal_unavailable` make no Yoetz calls; only
 the coordinator performs a named repair.

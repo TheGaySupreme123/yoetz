@@ -18,6 +18,20 @@ The Codex skill routes to the existing five MCP guidance URIs with installed ref
 The server initializes only the safety floor. Consumer source-inspection restrictions do not
 prohibit developing or debugging Yoetz itself against isolated test state.
 
+The Codex entrypoint is written directly for Codex and selected by its installer. The other native
+installers select their own skills. Keep installed-source evidence separate from compatibility
+directory discovery; a project skill discovered elsewhere is not proof of this integration.
+
+Design basis, checked 2026-09-09: OpenAI's
+[Skill Creator](https://github.com/openai/codex/blob/main/codex-rs/skills/src/assets/samples/skill-creator/SKILL.md)
+assumes Codex is capable and recommends task-specific constraints, precise discovery metadata,
+and conditional references. Its
+[PR comment skill](https://github.com/openai/skills/blob/main/skills/.curated/gh-address-comments/SKILL.md)
+uses a short operational sequence and a helper for repetitive mechanics. Yoetz keeps its exact
+MCP read fallback and bounded closure composer because those address demonstrated authoring
+failures; generic host-identification instructions are unnecessary. The five protocol references
+retain one canonical owner and are copied into each installed skill.
+
 Cursor's explicit-start repair (issue #661) leaves Codex's lifecycle binder and hook subscription
 unchanged. [The official hooks reference](https://developers.openai.com/codex/hooks), checked
 2026-09-08, specifies `tool_response` containing the MCP call result on `PostToolUse`, with
@@ -805,11 +819,12 @@ them from memory or from the live store.
 - **Read retry.** If a `status`, diagnostics, or `status view=operation` read times out, send the
   same read intent with a new read `request_id`. Keep its view, operation filter, cursor, and limit
   unchanged. An unreadable read does not establish that an operation or task is absent.
-- **Ambiguous write.** If `start`, `publish_work`, `check`, `respond`, or `receipt` loses its
-  response, first call `status view=operation` for the original write `request_id`, then replay the
-  exact original body once with that same request ID. If the result remains unknown or
-  `OPERATION_PENDING`, preserve the operation and report the boundary; never create a task to
-  escape it.
+- **Ambiguous write.** If a `start` response is lost before session/writer IDs are returned,
+  replay the exact original `start` body once with the same request ID. Otherwise read
+  `status view=operation` with `filter.operation_request_id` set to the original write ID:
+  replay only `absent`; use stored `complete`; follow an exact typed continuation and required
+  approval before replaying `pending`. Retain and report pending without a continuation,
+  `quarantined`, or unknown. Never invent session/writer IDs or create a task to escape a write.
 - **Exact-session attach.** When `SessionStart` or recovery context provides a held
   `session_id`, use that exact value as the `mode=attach` selector. Codex's canonical repository
   context supplies the workspace fence; if the request carries identity refs, include the
