@@ -829,6 +829,50 @@ def test_human_status_renders_operation_continuation_and_exact_trusted_command()
     assert f"Replay request ID: {operation_request_id}" in rendered
 
 
+@pytest.mark.parametrize("attempt_count", [0, 3, 64])
+def test_human_status_bounds_command_attempts_without_truncating_json(attempt_count: int) -> None:
+    from yoetz.cli.render import render_human_status
+
+    models = _models_module()
+    result = _status_result_wire()
+    result["view"] = "obligations"
+    result["page"] = {
+        "items": [
+            {
+                "obligation_id": _test_id("obl_"),
+                "status": "open",
+                "description": "Synthetic command obligation",
+                "evidence_expectation": "Observed attempts",
+                "source_refs": [],
+                "assigned_actor_ids": [],
+                "evidence_refs": [],
+                "revision_event_id": None,
+                "command_attempts": [
+                    {
+                        "requested_item_index": str(index),
+                        "relation": "unknown",
+                        "asserted_action_ids": [],
+                        "observed_event_ids": [],
+                    }
+                    for index in range(attempt_count)
+                ],
+            }
+        ],
+        "next_cursor": None,
+    }
+    parsed = models.StatusResultModel.model_validate(result)
+    assert type(parsed.root) is models.StatusSuccessModel
+    rendered = render_human_status(parsed.root)
+    assert rendered.count(" command item ") == min(attempt_count, 3)
+    if attempt_count > 3:
+        assert f"{attempt_count - 3} more command attempts" in rendered
+        assert "use JSON status for all items" in rendered
+    else:
+        assert "more command attempts" not in rendered
+    page = parsed.model_dump(mode="json")["page"]
+    assert len(page["items"][0]["command_attempts"]) == attempt_count
+
+
 def test_human_status_reports_unknown_readiness_counts_as_unavailable() -> None:
     """An unreadable compact singleton must not render as ``None`` or as a clean zero."""
 

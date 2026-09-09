@@ -132,9 +132,14 @@ def render_human_status(result: StatusSuccessModel) -> str:
             )
     if isinstance(result.page, StatusObligationsPageModel):
         for obligation in result.page.items:
-            for attempt in obligation.command_attempts:
+            for attempt in obligation.command_attempts[:3]:
                 lines.append(
                     f"{obligation.obligation_id} command item {attempt.requested_item_index}: {attempt.relation} (attempt only, not success)"
+                )
+            remaining = len(obligation.command_attempts) - 3
+            if remaining > 0:
+                lines.append(
+                    f"{obligation.obligation_id}: {remaining} more command attempts; use JSON status for all items"
                 )
     gaps = tuple(result.gaps) + tuple(result.coverage.known_gaps)
     lines.append("Gaps: " + (", ".join(dict.fromkeys(gaps)) if gaps else "none"))

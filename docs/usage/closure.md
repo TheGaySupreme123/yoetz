@@ -30,3 +30,8 @@ must be excluded, and one clipped or unavailable item does not mean every excerp
 Command reconciliation distinguishes an observed attempt, a mismatch and unknown observation;
 it never proves command success. A substituted command needs a recorded obligation revision with
 rationale. An acknowledged finding can remain unresolved until a qualifying check proves absence.
+
+Preparation errors name a bounded reason and its next step. Remove already-resolved obligations
+from a resolution selection; account for actual attempts before resolving an open obligation.
+Human status shows up to three command attempts per obligation and the remaining count; use
+JSON status to read every attempt on the page.

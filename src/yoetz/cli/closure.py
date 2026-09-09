@@ -36,6 +36,7 @@ PREPARATION_REMEDIATIONS = {
     "closure_source_unknown": "Use a returned history event ID; do not invent observation provenance.",
     "closure_response_decision_required": "Select a finding and explicitly provide its disposition and reason. A receipt has different fields.",
     "closure_resolution_decision_required": "Select the obligations you assessed and their actual evidence or results.",
+    "closure_obligation_not_open": "Remove the non-open obligation from the resolution selection.",
     "closure_unattempted_items": "Account for genuine attempts or revise the obligation; do not copy unchecked requested items.",
     "closure_obligation_content_unavailable": "The obligation's meaning fields are withheld; do not recreate them to resolve it.",
     "closure_claim_decision_required": "Supply the bounded completion assertion and explicitly select its obligations and support.",
@@ -245,7 +246,9 @@ async def prepare_closure(
             raise ValueError("closure_resolution_decision_required")
         for key in selection.obligation_ids:
             row = obligations[key]
-            if row["status"] != "open" or row["unattempted_items"]:
+            if row["status"] != "open":
+                raise ValueError("closure_obligation_not_open")
+            if row["unattempted_items"]:
                 raise ValueError("closure_unattempted_items")
             if any(
                 item["relation"] == "asserted_observed_mismatch"

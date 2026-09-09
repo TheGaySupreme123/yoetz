@@ -149,6 +149,17 @@ async def test_composer_paginates_and_requires_explicit_attempt_and_resolution()
                 description="Do not copy command into edit",
             ),
         )
+    with pytest.raises(ValueError, match="^closure_unattempted_items$"):
+        await prepare_closure(
+            status,
+            started.session_id,
+            started.writer_id,
+            Selection(
+                phase="resolve",
+                obligation_ids=(obligation,),
+                evidence_refs=(protocol_id("evd_", 9100),),
+            ),
+        )
     attempt = await prepare_closure(
         status,
         started.session_id,
@@ -182,6 +193,17 @@ async def test_composer_paginates_and_requires_explicit_attempt_and_resolution()
     await app.publish_work(resolved_request)
     resolved_result = await app.publish_work(resolved_request.model_copy(update={"dry_run": False}))
     frontier = resolved_result.result_frontier
+    with pytest.raises(ValueError, match="^closure_obligation_not_open$"):
+        await prepare_closure(
+            status,
+            started.session_id,
+            started.writer_id,
+            Selection(
+                phase="resolve",
+                obligation_ids=(obligation,),
+                evidence_refs=(protocol_id("evd_", 9100),),
+            ),
+        )
     # A selected partial result becomes a limitation, never supporting evidence.
     claim = await prepare_closure(
         status,

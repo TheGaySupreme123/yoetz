@@ -1155,7 +1155,7 @@ def closure_prepare_command(
 ) -> None:
     """Read closure inventory or prepare one explicitly selected phase; never publish."""
 
-    from yoetz.cli.closure import Selection, prepare_closure
+    from yoetz.cli.closure import PREPARATION_REMEDIATIONS, Selection, prepare_closure
 
     async def prepare() -> None:
         selection = (
@@ -1172,11 +1172,18 @@ def closure_prepare_command(
 
     try:
         run_async(prepare)
-    except OSError, ProtocolValueError, ValidationError, ValueError:
+    except OSError, ProtocolValueError, ValidationError:
         _finish(_usage_failure())
+    except ValueError as error:
+        reason = str(error)
+        remediation = PREPARATION_REMEDIATIONS.get(reason)
+        if remediation is None:
+            _finish(_usage_failure())
+        else:
+            _stderr(f"{reason}: {remediation}")
+            _finish(2)
     except ControlError as error:
-        _stderr(error.reason)
-        _finish(1)
+        _finish(_control_failure(error))
 
 
 @app.command("closure-schema")
