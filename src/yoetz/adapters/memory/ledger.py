@@ -343,6 +343,12 @@ class MemoryLedgerState:
     # Transient freeze-acquisition holds: never persisted; a crash mid-freeze must drop them.
     check_reservations: dict[tuple[str, str], _CheckReservation] = field(default_factory=lambda: {})
 
+    # Transient, bounded exact-snapshot row indexes; never persisted or shared across clones.
+    query_records: tuple[LedgerRecord, ...] = ()
+    query_cache: dict[
+        tuple[Frontier, str, str], tuple[ProjectionState, tuple[ProjectionItem, ...]]
+    ] = field(default_factory=lambda: {})
+
     def restore_writer(
         self,
         writer: str,
@@ -1833,8 +1839,44 @@ class MemoryLedgerAdapter:
 
     async def query_projection(self, query: ProjectionQuery) -> ProjectionPage:
         async with self._lock:
-            head = Frontier(self._state.projection.frontier, self._state.projection.head_digest)
-            records = self._state.records
+            state = self._state
+            projection = state.projection
+            head = Frontier(projection.frontier, projection.head_digest)
+            records = state.records
+            if state.query_records is not records:
+                state.query_cache.clear()
+                state.query_records = records
+            key = (query.requested_frontier, query.view, query.session_id)
+            cached = state.query_cache.get(key)
+            if cached is None:
+                projection = next(
+                    (
+                        value[0]
+                        for cached_key, value in state.query_cache.items()
+                        if cached_key[0] == query.requested_frontier
+                    ),
+                    projection,
+                )
+        # Only immutable snapshots cross the thread boundary; no SQLite handle or mutable
+        # ledger state enters the worker. Cancellation joins it before this read returns.
+        page, effective, items = await _run_blocking_joined(
+            lambda: self._query_snapshot(query, head, records, projection, cached)
+        )
+        async with self._lock:
+            if state.records is records and state.query_records is records:
+                if key not in state.query_cache and len(state.query_cache) >= 8:
+                    del state.query_cache[next(iter(state.query_cache))]
+                state.query_cache[key] = (effective, items)
+        return page
+
+    def _query_snapshot(
+        self,
+        query: ProjectionQuery,
+        head: Frontier,
+        records: tuple[LedgerRecord, ...],
+        projection: ProjectionState,
+        cached: tuple[ProjectionState, tuple[ProjectionItem, ...]] | None,
+    ) -> tuple[ProjectionPage, ProjectionState, tuple[ProjectionItem, ...]]:
         if not any(row.session_id == query.session_id for row in records):
             raise _error(PublicErrorCode.SESSION_NOT_FOUND)
         if query.requested_frontier > head or (
@@ -1847,17 +1889,27 @@ class MemoryLedgerAdapter:
             for row in records
             if row.ledger.ingestion_sequence <= query.requested_frontier.sequence
         )
-        effective_projection = replay(prefix)
+        effective_projection = (
+            cached[0]
+            if cached is not None
+            else projection
+            if query.requested_frontier == Frontier(projection.frontier, projection.head_digest)
+            else replay(prefix)
+        )
         effective = Frontier(effective_projection.frontier, effective_projection.head_digest)
         if effective != query.requested_frontier:
             raise _error(PublicErrorCode.INVALID_REQUEST)
         view = ProjectionView(query.view)
-        all_items = _projection_items(
-            view,
-            effective_projection,
-            prefix,
-            task=self._task_id,
-            session=query.session_id,
+        all_items = (
+            cached[1]
+            if cached is not None
+            else _projection_items(
+                view,
+                effective_projection,
+                prefix,
+                task=self._task_id,
+                session=query.session_id,
+            )
         )
         filtered_items: list[ProjectionItem] = []
         for item in all_items:
@@ -1931,6 +1983,8 @@ class MemoryLedgerAdapter:
                 ) > _finding_position_key(query.position)
             if keep:
                 filtered_items.append(item)
+                if len(filtered_items) > query.limit:
+                    break
         selected = tuple(filtered_items[: query.limit])
         next_position = None
         if selected and len(filtered_items) > len(selected):
@@ -1951,7 +2005,7 @@ class MemoryLedgerAdapter:
                 next_position = IdProjectionPosition(last.result_id)
         status_gaps = _status_gap_codes(effective_projection.coverage_gaps)
         coverage = replace(prefix[-1].coverage, known_gaps=status_gaps)
-        return ProjectionPage(
+        page = ProjectionPage(
             query.view,
             selected,
             query.requested_frontier,
@@ -1964,6 +2018,8 @@ class MemoryLedgerAdapter:
             status_gaps,
             next_position,
         )
+
+        return page, effective_projection, all_items
 
     async def lookup_operation(self, writer_id: str, operation_id: str) -> OperationRecord | None:
         async with self._lock:

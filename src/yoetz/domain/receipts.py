@@ -156,6 +156,8 @@ def semantic_coverage_gap_code(status: SemanticStatus, reason: SemanticReason) -
     """
 
     validate_semantic_outcome(status, reason)
+    if reason is SemanticReason.CASE_CAPACITY_EXCEEDED:
+        return "semantic_case_capacity_exceeded"
     if status is SemanticStatus.SUCCEEDED:
         return None
     if status is SemanticStatus.NOT_REQUESTED:

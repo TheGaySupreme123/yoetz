@@ -19,6 +19,7 @@ from typing import cast
 import pytest
 from mcp import ClientSession, types
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from tests.capability.child_environment import child_environment
 from tests.capability.evidence import (
     CapabilityCase,
     EvidenceOutcome,
@@ -52,19 +53,7 @@ _REJECTION_CODES = frozenset({PublicErrorCode.INVALID_REQUEST.value})
 
 def _serve_parameters(tmp_path: Path) -> StdioServerParameters:
     candidate_python = os.environ.get("YOETZ_CANDIDATE_PYTHON", "").strip()
-    home = tmp_path / "mcp-home"
-    home.mkdir(mode=0o700, exist_ok=True)
-    for directory in ("cache", "config", "data", "runtime", "state"):
-        (home / directory).mkdir(mode=0o700, exist_ok=True)
-    environment = {
-        **os.environ,
-        "HOME": str(home),
-        "XDG_CACHE_HOME": str(home / "cache"),
-        "XDG_CONFIG_HOME": str(home / "config"),
-        "XDG_DATA_HOME": str(home / "data"),
-        "XDG_RUNTIME_DIR": str(home / "runtime"),
-        "XDG_STATE_HOME": str(home / "state"),
-    }
+    environment = child_environment(tmp_path)
     if candidate_python:
         return StdioServerParameters(
             command=candidate_python,

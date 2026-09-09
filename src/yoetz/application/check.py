@@ -382,6 +382,7 @@ class FinalSemanticEvaluation:
     # prose bound had already accepted. The reviewer judged a fragment; coverage must say so
     # rather than let the shortening pass as material the author chose not to send.
     case_content_over_item_limit: bool = False
+    case_reference_scope_reduced: bool = False
     # Set only on the nonterminal awaiting_human branch: what the caller must do to resume this
     # exact request. Every terminal outcome leaves it None. A one-use disclosure wait keeps its
     # job and attempt open; a missing standing repository grant stops before either exists.
@@ -422,6 +423,7 @@ class FinalSemanticEvaluation:
 # record) or a strict reinstall on a later deterministic-only successor (issue #537).
 _SEMANTIC_ATTEMPT_GAPS: Final = frozenset(
     {
+        "semantic_case_capacity_exceeded",
         OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
         SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
         SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
@@ -1328,6 +1330,7 @@ def _judgment_rejected_evaluation(
         withheld_review_categories=result.withheld_review_categories,
         # The rejection restates the outcome, not the case: a truncated case stays truncated.
         case_content_over_item_limit=result.case_content_over_item_limit,
+        case_reference_scope_reduced=result.case_reference_scope_reduced,
     )
 
 
@@ -1589,6 +1592,8 @@ async def execute_check_commit(
         # the author has no other signal that the text they published never arrived (issue #177).
         if semantic_result.case_content_over_item_limit:
             declared_gaps.add(SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP)
+        if semantic_result.case_reference_scope_reduced:
+            declared_gaps.add("semantic_reference_scope_reduced")
         new_gaps = declared_gaps - set(coverage.known_gaps)
         if new_gaps:
             gaps = set(coverage.known_gaps) | new_gaps

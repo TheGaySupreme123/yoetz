@@ -1175,3 +1175,26 @@ async def test_partial_rejection_keeps_accepted_challenges_and_declares_the_gap(
     )
     assert "Invented ref" not in raw
     assert "Accepted challenge" not in raw
+
+
+@pytest.mark.anyio
+async def test_capacity_failure_preserves_deterministic_result_and_precise_receipt_gap() -> None:
+    from yoetz.domain.receipts import semantic_coverage_gap_code
+
+    app = _App(semantic=True)
+    app.semantic_result = FinalSemanticEvaluation(
+        SemanticStatus.FAILED,
+        SemanticReason.CASE_CAPACITY_EXCEEDED,
+        case_reference_scope_reduced=True,
+    )
+    result = await execute_check_commit(app, _request("semantic_required"))
+    assert result.semantic_reason is SemanticReason.CASE_CAPACITY_EXCEEDED
+    assert result.semantic_provenance is None
+    assert "semantic_case_capacity_exceeded" in result.coverage.known_gaps
+    assert "semantic_reference_scope_reduced" in result.coverage.known_gaps
+    assert (
+        semantic_coverage_gap_code(result.semantic_status, result.semantic_reason)
+        == "semantic_case_capacity_exceeded"
+    )
+    assert result.verdict.value == "incomplete_check"
+    assert result.findings

@@ -784,6 +784,21 @@ API provider serves a given attempt is a service-side dispatch decision recorded
 applies to dispatch authority regardless of which endpoint serves.
 
 
+### Large tasks and semantic failure recovery (#674–#676)
+
+This host uses the shared service status snapshot cache and bounded semantic reference selection.
+A reduced reference scope reports `semantic_reference_scope_reduced`; it is not full-task semantic
+coverage. `failed/case_capacity_exceeded` and `semantic_case_capacity_exceeded` mean the required
+packet could not fit before any provider attempt. Select a smaller claim/obligation scope for a new
+check. Shorter prose alone need not fix structural capacity.
+
+For `coordinator_failure`, use the check's original request ID with
+`yoetz service diagnostics --request-id req_…` to read bounded failure stages. Dispatch entry can
+have an unknown outcome, even with null provenance. A missing record is a diagnostic coverage gap,
+not proof of non-dispatch. Preserve the original request/attempt identity and existing retry rules.
+These shared-path regressions do not certify a fresh installed native-host session.
+
+
 ### Evidence-first closure
 
 The shared guidance instructs this host to paginate `status view=evidence` before publishing

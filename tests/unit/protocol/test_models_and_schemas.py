@@ -160,7 +160,7 @@ _EXPECTED_SEMANTIC_STATUS_REASONS = {
     },
     "late": {"deadline_authority_lost", "lease_authority_lost"},
     "stale": {"frontier_changed", "dependency_changed"},
-    "failed": {"coordinator_failure"},
+    "failed": {"coordinator_failure", "case_capacity_exceeded"},
 }
 _REQUIRED_SEMANTIC_PROVENANCE_PAIRS = frozenset(
     (status, reason)
@@ -3135,3 +3135,18 @@ def test_schema_instance_validation_is_closed_and_bounded(
         _assert_reason(exc_info, "float_forbidden")
     finally:
         schemas_module._load_catalog_state.cache_clear()  # pyright: ignore[reportPrivateUsage]
+
+
+def test_capacity_failure_forbids_attempt_provenance() -> None:
+    models = _models_module()
+    value = _check_result_wire()
+    value["semantic_status"] = "failed"
+    value["semantic_reason"] = "case_capacity_exceeded"
+    value["semantic_provenance"] = None
+    models.CheckResultModel.model_validate(value)
+    validate_schema_instance("check-result", "1.0.0", value)
+    value["semantic_provenance"] = _semantic_provenance_for("failed", "case_capacity_exceeded")
+    with pytest.raises(ValueError):
+        models.CheckResultModel.model_validate(value)
+    with pytest.raises(ProtocolValueError):
+        validate_schema_instance("check-result", "1.0.0", value)

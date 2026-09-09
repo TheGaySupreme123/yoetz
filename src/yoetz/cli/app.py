@@ -1652,12 +1652,16 @@ def instance_dispose(
 @service_app.command("diagnostics")
 def service_diagnostics(
     correlation_id: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--correlation-id",
             help="Exact err_… correlation id from a public error or reduced accept envelope.",
         ),
-    ],
+    ] = None,
+    request_id: Annotated[
+        str | None,
+        typer.Option("--request-id", help="Exact check request ID for joined failure stages."),
+    ] = None,
     json_output: _JSON = False,
 ) -> None:
     """Resolve one durable owner-only diagnostic record by correlation id."""
@@ -1666,12 +1670,14 @@ def service_diagnostics(
         from yoetz.observability.diagnostics import lookup_diagnostic_records
         from yoetz.protocol.ids import IdKind, validate_id
 
-        validate_id(IdKind.CORRELATION, correlation_id)
-        records = lookup_diagnostic_records(correlation_id)
+        if correlation_id is not None:
+            validate_id(IdKind.CORRELATION, correlation_id)
+        records = lookup_diagnostic_records(correlation_id, request_id=request_id)
         output = cast(
             JsonValue,
             {
                 "correlation_id": correlation_id,
+                **({"request_id": request_id} if request_id is not None else {}),
                 "count": len(records),
                 "records": [dict(item) for item in records],
             },

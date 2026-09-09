@@ -269,6 +269,7 @@ class SemanticReason(str, Enum):  # noqa: UP042 - exact public wire enum base
     LEASE_AUTHORITY_LOST = "lease_authority_lost"
     FRONTIER_CHANGED = "frontier_changed"
     DEPENDENCY_CHANGED = "dependency_changed"
+    CASE_CAPACITY_EXCEEDED = "case_capacity_exceeded"
     COORDINATOR_FAILURE = "coordinator_failure"
 
 
@@ -330,7 +331,9 @@ VALID_SEMANTIC_REASONS: Final[Mapping[SemanticStatus, frozenset[SemanticReason]]
             SemanticStatus.STALE: frozenset(
                 {SemanticReason.FRONTIER_CHANGED, SemanticReason.DEPENDENCY_CHANGED}
             ),
-            SemanticStatus.FAILED: frozenset({SemanticReason.COORDINATOR_FAILURE}),
+            SemanticStatus.FAILED: frozenset(
+                {SemanticReason.COORDINATOR_FAILURE, SemanticReason.CASE_CAPACITY_EXCEEDED}
+            ),
         }
     )
 )
@@ -406,7 +409,7 @@ def validate_semantic_provenance_binding(
     if provenance_present and (provenance_status is not status or provenance_reason is not reason):
         raise ProtocolValueError("invalid_semantic_provenance")
 
-    if status in _PREDISPATCH_SEMANTIC_STATUSES:
+    if status in _PREDISPATCH_SEMANTIC_STATUSES or reason is SemanticReason.CASE_CAPACITY_EXCEEDED:
         provenance_required = False
     elif status in _REQUIRED_SEMANTIC_PROVENANCE_STATUSES:
         provenance_required = True

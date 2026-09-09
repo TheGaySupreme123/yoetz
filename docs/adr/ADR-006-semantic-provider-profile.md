@@ -365,3 +365,21 @@ upstream no-training claim. A fallback whose factory cannot be built or whose
 credential is absent is reported unavailable on its own row without fencing the primary. No live
 interoperability of a paired dispatch is claimed until authorized evidence records the exact
 request, response, route, and receipt for the endpoint that served.
+
+
+## Amendment: bounded reference scope and exceptional exits (#675, #676)
+
+The semantic packet selects a deterministic dependency closure from the frozen allowlist. Retained
+packet relations, canonical payload dependencies, recorded findings and source-event identities
+remain connected. Unrelated frontier IDs are counted as omitted, bound into the case digest, and
+reported through partial `semantic_reference_scope_reduced` coverage. The deterministic case is
+not reduced. The existing envelope byte limit and independent disclosure policy remain in force.
+Irreducible required structure fails before job/attempt creation with `case_capacity_exceeded` and
+`semantic_case_capacity_exceeded` coverage. Narrowing scope creates new work; it does not replay a
+terminal check or imply that the reduced packet reviewed the whole task.
+
+Exceptional attempts retain a request-joined stage/category before cleanup. Dispatch entry is an
+uncertain execution boundary; null provenance and missing diagnostics are not non-dispatch proof.
+Provider-return, mapping and persistence faults remain distinct. Diagnostics cannot change retry
+eligibility, durable-response recovery, cancellation or lease fencing. See `docs/INTERFACES.md` for
+the public reason, coverage and owner diagnostic lookup contracts.
