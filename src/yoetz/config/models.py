@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from yoetz.domain.privacy import ProviderDataUseProfile
-from yoetz.protocol.models import MAX_FINDINGS_DEFAULT, MAX_FINDINGS_LIMIT
+from yoetz.protocol.models import MAX_FINDINGS_LIMIT
 
 __all__ = [
     "CODEX_SUBSCRIPTION_ENDPOINT_PROFILE_ID",
@@ -304,8 +304,8 @@ class StorageConfig(StrictConfigModel):
 
 
 class VerificationConfig(StrictConfigModel):
-    semantic: Literal["disabled", "optional", "required"] = "optional"
-    max_findings: int = MAX_FINDINGS_DEFAULT
+    semantic: Literal["disabled", "optional", "required"] = "required"
+    max_findings: int = 10
 
     @model_validator(mode="before")
     @classmethod

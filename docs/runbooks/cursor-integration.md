@@ -797,3 +797,15 @@ For `coordinator_failure`, use the check's original request ID with
 have an unknown outcome, even with null provenance. A missing record is a diagnostic coverage gap,
 not proof of non-dispatch. Preserve the original request/attempt identity and existing retry rules.
 These shared-path regressions do not certify a fresh installed native-host session.
+
+
+### Evidence-first closure
+
+The shared guidance instructs this host to paginate `status view=evidence` before publishing
+replacement evidence, match state and source identity, and reuse only suitable observed IDs.
+Digest-only, unavailable, unselected and clipped items remain separate limits. Evidence discovery
+and reuse do not prove native capture coverage or command success. Read `command_attempts` on
+obligation rows: this profile may omit command text, in which case reconciliation is `unknown`.
+Only service-stamped, explicitly linked observations can support a match or mismatch. The optional
+CLI closure composer uses the same projected status inputs; it does not grant capture or egress.
+These shared regressions are synthetic contract evidence, not live-host certification.

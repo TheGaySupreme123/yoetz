@@ -94,3 +94,23 @@ To operate Yoetz, use schemas, guidance, and `status`; do not inspect its live S
 catalog, or product source to reconstruct a request or recover a pending decision. An assigned
 Yoetz development/debugging task may inspect source and isolated tests. That exception grants no
 access to live mutable storage and no setup, credential, or egress authority.
+
+## Evidence-first closure
+
+Before a material evidence publication or completion claim, paginate `status view=evidence` at
+one frontier, preserving the cursor-bound filter and limit. Reuse only matching observed IDs;
+do not author duplicate digest-only placeholders. Read per-item availability and subject state:
+a digest-only or clipped item does not make other native excerpts absent. The full procedure and
+mixed example are in `yoetz://guidance/publication-policy.md`.
+
+`status view=obligations` separates asserted `unattempted_items` accounting from `command_attempts`:
+matching observation supports an attempt only; mismatch requires correcting the assertion or a
+supported obligation revision with rationale; unknown does not mean the command never ran.
+Do not copy a command onto an edit action just to close the accounting gap. Do not normalize shell
+wrappers or changed test targets into an exact-command claim.
+
+The optional CLI `yoetz closure-prepare --session-id <returned-session> --writer-id <returned-writer>`
+reads the complete closure inventory without publishing. `yoetz closure-schema` describes explicit
+selection inputs; `--input <selection.json>` prepares one operation with fresh lowercase UUID-v4
+IDs, a dry-run publication where applicable, and a same-request recovery query. Review and submit
+explicitly. It never invents attempts, evidence, finding dispositions, or obligation satisfaction.

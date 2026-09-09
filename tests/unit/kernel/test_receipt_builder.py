@@ -510,6 +510,7 @@ def test_check_current_as_of_earlier_frontier_names_observation_suffix() -> None
     assert "only responses to the findings it returned" not in limitations
     assert "Its verdict is current as of subject frontier 1, not frontier 2." in limitations
     assert "routine observation can advance the ledger again" in limitations
+    assert "Ingestion order does not establish when observed work occurred." in limitations
 
 
 def test_check_current_as_of_earlier_frontier_names_mixed_suffix() -> None:

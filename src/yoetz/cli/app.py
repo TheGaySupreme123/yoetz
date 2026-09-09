@@ -1151,6 +1151,54 @@ app.command("status")(_workflow_command("status", StatusRequest))
 app.command("receipt")(_workflow_command("receipt", ReceiptRequest))
 
 
+@app.command("closure-prepare")
+def closure_prepare_command(
+    session_id: Annotated[str, typer.Option("--session-id")],
+    writer_id: Annotated[str, typer.Option("--writer-id")],
+    input_path: _INPUT = None,
+) -> None:
+    """Read closure inventory or prepare one explicitly selected phase; never publish."""
+
+    from yoetz.cli.closure import PREPARATION_REMEDIATIONS, Selection, prepare_closure
+
+    async def prepare() -> None:
+        selection = (
+            Selection()
+            if input_path is None
+            else cast(Selection, _request_model(Selection, input_path, None))
+        )
+        client = await build_service_client()
+        try:
+            result = await prepare_closure(client.status, session_id, writer_id, selection)
+        finally:
+            await client.close()
+        _stdout_json(result)
+
+    try:
+        run_async(prepare)
+    except OSError, ProtocolValueError, ValidationError:
+        _finish(_usage_failure())
+    except ValueError as error:
+        reason = str(error)
+        remediation = PREPARATION_REMEDIATIONS.get(reason)
+        if remediation is None:
+            _finish(_usage_failure())
+        else:
+            _stderr(f"{reason}: {remediation}")
+            _finish(2)
+    except ControlError as error:
+        _finish(_control_failure(error))
+
+
+@app.command("closure-schema")
+def closure_schema_command() -> None:
+    """Print the closed selection-input schema for closure-prepare."""
+
+    from yoetz.cli.closure import Selection
+
+    _stdout_json(cast(JsonValue, Selection.model_json_schema()))
+
+
 @cache
 def support_methods_carrying_schema_version() -> frozenset[str]:
     """Support methods whose frozen request body declares the const ``schema_version`` field.

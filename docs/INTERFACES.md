@@ -5033,3 +5033,55 @@ absence can mean that the sink was unavailable, and never licenses a retry.
 returned by check/operation status. `--correlation-id err_…` remains supported; exactly one selector
 is required. Both use the same bounded, payload-free record projection and require no ledger
 inspection. No new retry, lease, cancellation, network or credential authority is introduced.
+
+
+### Evidence-aware closure preparation (issues #569, #618, #657, #660, #666)
+
+`yoetz closure-prepare` is a read-only CLI support command, not a seventh workflow operation.
+It reads privacy-projected `status` pages at one pinned frontier, preserving cursor query identity.
+It exposes inventory and composes one explicit selection into an existing `publish_work`, `respond`,
+or `receipt` request. `yoetz closure-schema` exposes the closed selection-input schema. IDs it
+creates are lowercase UUID v4. Publication drafts use `dry_run=true`; preparation is non-evidential.
+No selection defaults to attempted, acknowledged, resolved, or complete. Failed, partial and unknown
+selected results belong to claim limitations. The existing append validator remains authoritative
+for relevance, revisions, evidence admissibility and frontier conflicts. A timeout uses the emitted
+operation query and the same original request identity, never a newly composed write.
+
+The obligations status row adds optional `command_attempts` (at most 64 rows). Each row contains
+`requested_item_index` (canonical string 0–63), `relation`, `asserted_action_ids`, and
+`observed_event_ids` (each at most 64 unique IDs). Indexes refer to the current obligation's exact
+`requested_items`; no raw command or path enters structural fields. Existing `unattempted_items`
+continues to describe caller-asserted accounting. Relations are:
+
+- `matching_observed_attempt`: one distinct readable command equals the requested UTF-8 text;
+- `asserted_observed_mismatch`: an assertion names the requested command, but explicitly linked
+  readable observation describes a different command;
+- `unknown`: observation is absent, omitted, redacted, ambiguous, or exceeds the displayed bound.
+
+Only service-stamped observation authorship is eligible. Explicit correlation is an action's
+causal parent naming an observed action, or an obligation's resolution result naming that action.
+Temporal proximity, string similarity and an observation-shaped caller payload are insufficient.
+Wrappers, environment changes, whitespace changes and changed test targets are not normalized;
+exact bytes are the reviewed rule, not shell equivalence. Several different linked commands are
+ambiguous, even if one matches. An observed attempt never proves success. A supported obligation
+revision records a replacement and rationale without retrospectively asserting the original ran.
+The relation is derived at read time, so memory, SQLite, replay, CLI/MCP and receipt use one rule.
+Current native profiles often omit command text: that limitation stays unknown.
+
+Finding status `detail` appends a bounded explanation of the latest recorded check's actual failed
+resolution requirements. Receipt findings/dispositions use the same explanation. Original finding
+payloads, proof qualification, `resolved`, blockers and historical identity are unchanged. A
+non-repeated finding with suppressed results, wrong policy/scope, weak freshness, unavailable proof,
+failed semantic review or disqualifying gaps is not described as repaired. Deterministic exceptions
+do not extend to semantic findings. Explanation text is under existing finding-content projection.
+
+Earlier-check receipt wording uses the recorded suffix classification: responses, finding-free
+observations, or a mixture. An unavailable classification stays neutral. It names the tested
+frontier without inventing finding responses. Later ingestion is not later occurrence; asynchronous
+observation can advance a frontier while the old check remains attributable. A new check evaluates
+later material and does not promise to remove every gap.
+
+At completion or resolved-obligation frontiers, asserted command relations contribute
+`command_attempt_mismatch` or `command_attempt_uncorroborated` to the existing deterministic
+case/receipt gap vector. This prevents uncorroborated accounting from becoming execution proof.
+The latter means unknown observation, not non-execution. Receipt capacity computes the same union.
