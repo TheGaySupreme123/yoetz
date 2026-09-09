@@ -540,3 +540,30 @@ never applies to semantic findings.
   "client": {"kind": "cooperative_agent", "version": "0.1.0", "integration": "cooperative_mcp"}
 }
 ```
+
+## Guided closure and recovery
+
+Run `yoetz closure-prepare --session-id <returned-session> --writer-id <returned-writer>` to inspect
+all pages of obligations, results, evidence, findings and history at one pinned frontier.
+`yoetz closure-schema` emits the selection schema. Supply a selection file with `--input` to
+prepare one phase: `attempt`, `respond`, `resolve`, `claim`, or `receipt`. The inventory is not an
+assertion that work occurred. Only explicitly selected requested-item indexes become attempts.
+Choose `action_kind=command` and the actual exact command for command items. A substitution needs
+a supported plan/obligation revision, rather than pretending the original command ran.
+
+Resolve only obligations whose acceptance you have actually assessed. Claim selections put known
+successful results in support and selected partial, failure or unknown results in limitations;
+include every relevant limitation, even if a later result succeeded. Evidence IDs are reusable,
+not automatically relevant or strong. A workflow run's GitHub API `id` is not its `run_number`.
+
+Each output contains at most one request: a publication batch, one finding response, or a receipt.
+Review it, submit it, then prepare the next phase at the new frontier. Responses and receipts have
+separate templates: never copy disposition/finding fields into a receipt. A publication first uses
+`dry_run=true`; after successful preview replay its exact request ID with `dry_run=false`.
+After a timeout, use the emitted `recovery_request`: `absent` permits same-request replay,
+`pending` preserves the same identity, and `committed` means use the stored outcome. Do not rerun
+the composer to mint a new identity for an operation that may already have committed.
+
+Pagination recovery keeps the original limit with the cursor. A request with a different limit
+must start at a null cursor. The composer performs this preservation automatically and refuses an
+incomplete or drifting snapshot rather than authoring from a partial inventory.

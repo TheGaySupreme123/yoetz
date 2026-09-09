@@ -1477,6 +1477,10 @@ def build_deterministic_case(
     missing_sources: set[EventId] = set()
     unknown_events: set[EventId] = set()
     gaps: dict[str, CaseGap] = {}
+    from yoetz.kernel.command_attempts import closure_command_gaps
+
+    for obligation_ref, code in closure_command_gaps(projection, accepted_prefix):
+        _add_gap(gaps, f"{code}:{obligation_ref}", code, (obligation_ref,))
     for marker in projection.coverage_gaps:
         gap = _projection_gap(marker, index)
         _add_gap(gaps, gap.marker, gap.code, gap.subject_refs)

@@ -75,6 +75,7 @@ from yoetz.domain.values import (
     timestamp_from_datetime,
     writer_id,
 )
+from yoetz.kernel.command_attempts import command_attempts
 from yoetz.kernel.deterministic_checks import (
     CaseAvailabilityFacts,
     DeterministicCase,
@@ -83,7 +84,11 @@ from yoetz.kernel.deterministic_checks import (
     deterministic_case_from_json,
     deterministic_case_to_json,
 )
-from yoetz.kernel.finding_resolution import finding_is_resolved
+from yoetz.kernel.finding_resolution import (
+    append_resolution_explanation,
+    finding_is_resolved,
+    finding_resolution_explanation,
+)
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import (
     PROJECTION_VERSION,
@@ -937,6 +942,8 @@ def _projection_items(
                 record,
                 tuple(sorted(actors.get(obligation, ()), key=str.encode)),
                 attempted_items,
+            ).model_copy(
+                update={"command_attempts": command_attempts(projection, records, obligation)}
             )
             for obligation, record in sorted(
                 projection.obligations.items(), key=lambda item: item[0].encode()
@@ -1017,7 +1024,10 @@ def _projection_items(
                     origin=finding.origin.value,
                     priority=finding.priority,
                     summary=finding.summary,
-                    detail=finding.detail,
+                    detail=append_resolution_explanation(
+                        finding.detail,
+                        finding_resolution_explanation(projection, finding.finding_id, records),
+                    ),
                     subject_refs=finding.subject_refs,
                     policy_id=cast(
                         Literal["research-evidence", "work-integrity"], finding.policy_id
@@ -1081,7 +1091,10 @@ def _projection_items(
                 kind=finding.kind.value,
                 priority=finding.priority,
                 summary=finding.summary,
-                detail=finding.detail,
+                detail=append_resolution_explanation(
+                    finding.detail,
+                    finding_resolution_explanation(projection, finding.finding_id, records),
+                ),
             )
             for finding in sorted(
                 (

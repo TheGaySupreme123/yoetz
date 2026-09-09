@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Final
 
-from yoetz.domain.events import CheckRecordedPayload
+from yoetz.domain.events import CheckRecordedPayload, LedgerRecord
 from yoetz.domain.findings import Finding, FindingOrigin, ResponseDisposition
 from yoetz.domain.receipts import (
     OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
@@ -196,32 +196,110 @@ def qualifying_check_resolves(
         raise ValueError("finding_resolution_invalid")
     if type(finding_source_frontier) is not int or finding_source_frontier < 1:
         raise ValueError("finding_resolution_invalid")
+    return not resolution_blockers(finding, finding_source_frontier, check, returned_issue_keys)
+
+
+def resolution_blockers(
+    finding: Finding,
+    finding_source_frontier: int,
+    check: CheckRecordedPayload,
+    returned_issue_keys: frozenset[IssueKey],
+) -> tuple[str, ...]:
+    """Explain the exact qualification predicate without weakening its proof requirements."""
+
+    reasons: list[str] = []
     if check.subject_frontier.sequence < finding_source_frontier:
-        return False
+        reasons.append("finding_not_in_checked_frontier")
     if issue_key(finding) in returned_issue_keys:
-        return False
+        reasons.append("issue_returned_again")
     if check.suppressed_count != 0:
-        return False
+        reasons.append("findings_suppressed")
     if not _policy_completed(check, finding):
-        return False
+        reasons.append("matching_policy_not_completed")
     if not _scope_covers(check, finding):
-        return False
-    coverage = check.coverage
-    gaps = frozenset(coverage.known_gaps)
+        reasons.append("subject_outside_checked_scope")
+    gaps = frozenset(check.coverage.known_gaps)
     if finding.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED:
-        # The semantic review is the proof: it must have completed, and nothing may have
-        # weakened what it reviewed.
+        tolerated = _SEMANTIC_PROOF_TOLERATED_GAPS
+        if check.coverage.ledger_freshness in _UNPROVEN_FRESHNESS:
+            reasons.append("freshness_unproven")
         if (
-            coverage.ledger_freshness in _UNPROVEN_FRESHNESS
-            or not gaps <= _SEMANTIC_PROOF_TOLERATED_GAPS
-            or check.semantic_status is not SemanticStatus.SUCCEEDED
+            check.semantic_status is not SemanticStatus.SUCCEEDED
             or check.semantic_reason is not SemanticReason.SEMANTIC_COMPLETED
         ):
-            return False
-        return True
-    return gaps <= _DETERMINISTIC_PROOF_TOLERATED_GAPS and _deterministic_freshness_proven(
-        finding, check, gaps
+            reasons.append("semantic_review_not_completed")
+    else:
+        tolerated = _DETERMINISTIC_PROOF_TOLERATED_GAPS
+        if not _deterministic_freshness_proven(finding, check, gaps):
+            reasons.append("freshness_or_original_proof_unreadable")
+    reasons.extend("coverage:" + gap for gap in sorted(gaps - tolerated))
+    return tuple(reasons)
+
+
+def finding_resolution_explanation(
+    state: ProjectionState, finding_id: FindingId, records: tuple[LedgerRecord, ...]
+) -> str:
+    """A bounded presentation derived from the latest recorded candidate, never response prose."""
+
+    finding_record = state.findings.get(finding_id)
+    if finding_record is None or finding_record.payload is None:
+        return "Resolution explanation unavailable: original finding is unreadable."
+    if finding_is_resolved(state, finding_id):
+        return f"Resolved by qualifying check {finding_record.resolved_by_check_event_id}; retained as history."
+    candidate = next(
+        (
+            row
+            for row in reversed(records)
+            if row.schema.name == "check_recorded"
+            and finding_record.source_frontier < row.ledger.ingestion_sequence <= state.frontier
+        ),
+        None,
     )
+    if candidate is None:
+        return "Unresolved: no later recorded check is available for an absence proof."
+    check = candidate.payload
+    if (
+        not isinstance(check, CheckRecordedPayload)
+        or f"redacted_event:{candidate.event_id}" in state.coverage_gaps
+    ):
+        return f"Unresolved: check {candidate.event_id} is unreadable; absence is unproven."
+    returned = [state.findings.get(key) for key in check.returned_finding_ids]
+    if any(row is None or row.payload is None for row in returned):
+        return f"Unresolved: returned findings of check {candidate.event_id} are unreadable."
+    keys = frozenset(
+        issue_key(row.payload) for row in returned if row is not None and row.payload is not None
+    )
+    reasons = resolution_blockers(
+        finding_record.payload, finding_record.source_frontier, check, keys
+    )
+    returned_again = "issue_returned_again" in reasons
+    relation = "Returned again" if returned_again else "Not returned; absence remains unproven"
+    if not reasons:
+        # An unavailable or provenance-disputed response can retain the public resolved=false pin.
+        reasons = ("response_unavailable_or_provenance_disputed",)
+    detail = ", ".join(reasons)
+    if len(detail.encode("utf-8")) > 5000:
+        detail = (
+            detail.encode("utf-8")[:4900].decode("utf-8", errors="ignore")
+            + "... (additional requirements omitted; inspect recorded check coverage)"
+        )
+    return (
+        f"{relation} in check {candidate.event_id} of subject frontier "
+        f"{check.subject_frontier.sequence}. Resolution requirements not met: {detail}. "
+        "Acknowledgement is not repair evidence; an unchanged recheck cannot remove durable proof limits."
+    )
+
+
+def append_resolution_explanation(detail: str, explanation: str) -> str:
+    """Keep the existing content field's UTF-8 bound and visibly mark any shortened original."""
+
+    suffix = "\n\nResolution: " + explanation
+    budget = 8192 - len(suffix.encode("utf-8"))
+    if len(detail.encode("utf-8")) > budget:
+        detail = (
+            detail.encode("utf-8")[: max(0, budget - 3)].decode("utf-8", errors="ignore") + "..."
+        )
+    return detail + suffix
 
 
 def apply_check_resolution(

@@ -11,6 +11,7 @@ from yoetz.domain.events import (
     CheckRecordedPayload,
     ClaimKind,
     ClaimRecordedPayloadV1_1,
+    LedgerRecord,
     NoObligationsReason,
     ObligationChangeKind,
     ObligationStatus,
@@ -59,7 +60,9 @@ from yoetz.domain.values import (
     finding_id,
 )
 from yoetz.kernel.claims import effective_claim_items
+from yoetz.kernel.command_attempts import command_attempts
 from yoetz.kernel.deterministic_checks import CaseAvailabilityFacts, CaseGap
+from yoetz.kernel.finding_resolution import finding_resolution_explanation
 from yoetz.kernel.plan_scope import CurrentPlanScope, current_plan_scope
 from yoetz.kernel.projections import ObligationProjectionRecord, ProjectionRecord, ProjectionState
 from yoetz.protocol.coverage import LEDGER_FRESHNESS_ORDER, Coverage, weakest
@@ -264,6 +267,7 @@ class ReceiptBuildContext:
     gaps: tuple[CaseGap, ...]
     finding_states: tuple[ReceiptFindingState, ...]
     applicable_check: CheckRecordedPayload | None
+    records: tuple[LedgerRecord, ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -757,9 +761,11 @@ def _check_coverage_sentence(
             else f"subject frontier {tested_subject_sequence}"
         )
         return (
-            f"A check is recorded at {tested} and still contributes here: only responses to the "
-            f"findings it returned were published after it. Its verdict is current as of {tested}, "
-            f"not frontier {frontier.sequence}. Re-run check at this frontier to close the gap."
+            f"A check is recorded at {tested} and remains attributable. Later records through "
+            f"frontier {frontier.sequence} were not evaluated by that check. Its verdict covers "
+            f"{tested}. Run a new check to evaluate later material; asynchronous observation can "
+            "advance the ledger again without invalidating the attributable check. Ingestion "
+            "order does not establish when observed work occurred."
         )
     if "check_not_applicable" in gap_codes:
         tested = (
@@ -827,6 +833,8 @@ def _sections(
     tested_subject_sequence: str | None = None,
     resolved_finding_ids: tuple[FindingId, ...] = (),
     semantic_endpoint_sentence: str = "",
+    resolution_explanations: tuple[str, ...] = (),
+    attempt_explanations: tuple[str, ...] = (),
 ) -> tuple[ReceiptSection, ...]:
     gap_codes = coverage.known_gaps
     bodies: dict[ReceiptSectionKey, str] = {}
@@ -934,6 +942,15 @@ def _sections(
         bodies[ReceiptSectionKey.FINDINGS_AND_DISPOSITIONS] = (
             f"{actionable_count} actionable findings remain unresolved." + resolved_sentence
         )
+    if resolution_explanations:
+        for explanation in resolution_explanations:
+            current = bodies[ReceiptSectionKey.FINDINGS_AND_DISPOSITIONS]
+            if len((current + explanation).encode("utf-8")) > 30000:
+                bodies[ReceiptSectionKey.FINDINGS_AND_DISPOSITIONS] += (
+                    " Additional explanations omitted; inspect status view=findings."
+                )
+                break
+            bodies[ReceiptSectionKey.FINDINGS_AND_DISPOSITIONS] += " " + explanation
     items[ReceiptSectionKey.FINDINGS_AND_DISPOSITIONS] = tuple(
         finding_id_value
         for finding_id_value in unresolved_actionable_ids
@@ -946,6 +963,9 @@ def _sections(
         f"The receipt retains {claim_phrase} and {evidence_phrase}."
     )
     items[ReceiptSectionKey.EVIDENCE_AND_CLAIM_BASIS] = (*claim_refs, *evidence_refs)
+
+    if attempt_explanations:
+        bodies[ReceiptSectionKey.EVIDENCE_AND_CLAIM_BASIS] += " " + " ".join(attempt_explanations)
 
     if gap_codes:
         not_requested = SEMANTIC_REVIEW_NOT_REQUESTED_GAP in gap_codes
@@ -1105,6 +1125,25 @@ def build_receipt(
         ),
         resolved_finding_ids=resolved_finding_ids,
         semantic_endpoint_sentence=_semantic_endpoint_sentence(context.applicable_check),
+        attempt_explanations=tuple(
+            f"{obligation.obligation_id} command item {attempt.requested_item_index}: {attempt.relation}. "
+            "This relation concerns the attempt only, not command success."
+            for obligation in retained_obligations[:10]
+            for attempt in command_attempts(
+                context.projection, context.records, obligation.obligation_id
+            )[:10]
+        )
+        if context.records
+        else (),
+        resolution_explanations=tuple(
+            f"{finding.finding_id}: "
+            + finding_resolution_explanation(
+                context.projection, finding.finding_id, context.records
+            )
+            for finding in retained_findings[:10]
+        )
+        if context.records
+        else (),
     )
     suppressed_count = (
         0 if context.applicable_check is None else context.applicable_check.suppressed_count

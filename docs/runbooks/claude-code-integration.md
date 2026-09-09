@@ -515,3 +515,15 @@ Fallback endpoint pairing (issue #582) is host-independent: whether the evaluato
 API provider serves a given attempt is a service-side dispatch decision recorded in provenance
 (`fallback_from`), with no Claude-Code-specific behaviour, plugin, or route input — the route
 ceiling applies to dispatch authority regardless of which endpoint serves.
+
+
+### Evidence-first closure
+
+The shared guidance instructs this host to paginate `status view=evidence` before publishing
+replacement evidence, match state and source identity, and reuse only suitable observed IDs.
+Digest-only, unavailable, unselected and clipped items remain separate limits. Evidence discovery
+and reuse do not prove native capture coverage or command success. Read `command_attempts` on
+obligation rows: this profile may omit command text, in which case reconciliation is `unknown`.
+Only service-stamped, explicitly linked observations can support a match or mismatch. The optional
+CLI closure composer uses the same projected status inputs; it does not grant capture or egress.
+These shared regressions are synthetic contract evidence, not live-host certification.

@@ -1681,6 +1681,41 @@ def _extend_status_result_v11(document: dict[str, JsonValue]) -> None:
     }
     obligation_properties["requested_items"] = requested_item_list
     obligation_properties["unattempted_items"] = requested_item_list
+    obligation_properties["command_attempts"] = {
+        "type": "array",
+        "maxItems": 64,
+        "items": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "requested_item_index",
+                "relation",
+                "asserted_action_ids",
+                "observed_event_ids",
+            ],
+            "properties": {
+                "requested_item_index": {
+                    "type": "string",
+                    "pattern": "^(?:[0-9]|[1-5][0-9]|6[0-3])$",
+                },
+                "relation": {
+                    "enum": ["matching_observed_attempt", "asserted_observed_mismatch", "unknown"]
+                },
+                "asserted_action_ids": {
+                    "type": "array",
+                    "maxItems": 64,
+                    "uniqueItems": True,
+                    "items": {"$ref": "#/$defs/action_id"},
+                },
+                "observed_event_ids": {
+                    "type": "array",
+                    "maxItems": 64,
+                    "uniqueItems": True,
+                    "items": {"$ref": "#/$defs/event_id"},
+                },
+            },
+        },
+    }
     definitions["result_item"] = {
         "additionalProperties": False,
         "properties": {

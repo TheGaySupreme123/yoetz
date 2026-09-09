@@ -1150,13 +1150,14 @@ async def test_receipt_build_context_is_complete() -> None:
         if cast(str, section["key"]) == "limitations_and_coverage"
     )
     tested = checked.subject_frontier.sequence
-    assert f"A check is recorded at subject frontier {tested} and still contributes here" in (
+    assert f"A check is recorded at subject frontier {tested} and remains attributable" in (
         limitations
     )
-    assert "only responses to the findings it returned were published after it" in limitations
-    assert f"Its verdict is current as of subject frontier {tested}" in limitations
-    assert f"not frontier {receipt.subject_frontier.sequence}" in limitations
-    assert "Re-run check at this frontier to close the gap." in limitations
+    assert "only responses" not in limitations
+    assert f"Its verdict covers subject frontier {tested}" in limitations
+    assert f"Later records through frontier {receipt.subject_frontier.sequence}" in limitations
+    assert "Run a new check to evaluate later material" in limitations
+    assert "asynchronous observation" in limitations
 
     text_wire: dict[str, JsonValue] = {
         **receipt_wire,

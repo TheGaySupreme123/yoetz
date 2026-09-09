@@ -1055,3 +1055,69 @@ def test_payload_replaced_by_the_bounded_marker_names_the_size_drop() -> None:
     assert marker["schema"] == "yoetz.bounded-content-omission/1"
     assert marker["reason"] == OVER_CASE_ITEM_LIMIT_REASON
     assert SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP in semantic.packet.coverage.known_gaps
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        "claude-code-ordinary-observation-v1",
+        "cursor-ordinary-observation-v1",
+    ],
+)
+def test_reused_native_evidence_survives_mixed_digest_and_item_limits(profile: str) -> None:
+    """Issue #618: linking native evidence must not turn a union of item gaps into no content."""
+    case, captured, scope = _captured_case_values(b"synthetic matching native evidence")
+    native = case.projection.evidence[evd(1)].payload
+    assert native is not None and native.digest_binding is not None
+    digest_only = replace(
+        native,
+        evidence_id=evd(2),
+        captured_object_id=None,
+        strength=EvidenceImmutability.CONTENT_DIGEST,
+        description="Digest-only synthetic item",
+        digest_binding=replace(
+            native.digest_binding,
+            content_availability=EvidenceContentAvailability.DIGEST_ONLY,
+            provenance=EvidenceDigestProvenance.CALLER_ASSERTED,
+        ),
+    )
+    oversized = replace(digest_only, evidence_id=evd(3), description="x" * 5000)
+    claims = {
+        key: record(
+            replace(row.payload, supporting_refs=(evd(1), evd(2), evd(3))), row.source_frontier
+        )
+        for key, row in case.projection.claims.items()
+        if row.payload is not None
+    }
+    mixed = make_case(
+        plans=case.projection.plans,
+        obligations=case.projection.obligations,
+        claims=claims,
+        evidence={
+            evd(1): case.projection.evidence[evd(1)],
+            evd(2): evidence_record(digest_only, 5),
+            evd(3): evidence_record(oversized, 6),
+        },
+        extra_refs=(clm(1), obl(1), evd(1), evd(2), evd(3)),
+    )
+    semantic = build_semantic_case(
+        case_id="cas_10000000-0000-4000-8000-000000000001",
+        frozen_case=mixed,
+        dependency_digest="sha256:" + "b" * 64,
+        findings=_findings_for(mixed),
+        review_context_profile=ReviewContextProfile.ASSISTED,
+        review_selection=ReviewSelectionPolicy.for_profile(ReviewContextProfile.ASSISTED),
+        policy_id="pvy_10000000-0000-4000-8000-000000000001",
+        policy_version="1",
+        captured_content=(replace(captured, capture_profile=profile),),
+        captured_content_scope=replace(scope, authorized_profiles=(profile,)),
+    )
+    native_excerpt = next(item for item in semantic.items if item.item_id == f"excerpt-{evd(1)}")
+    assert native_excerpt.content == captured.content
+    large_excerpt = next(item for item in semantic.items if item.item_id == f"excerpt-{evd(3)}")
+    assert large_excerpt.content_bytes == MAX_REVIEW_TEXT_BYTES
+    assert SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP in semantic.packet.coverage.known_gaps
+    prepared = semantic_case_to_prepared_payload(
+        semantic, {item.item_id for item in semantic.items}
+    )
+    assert b"synthetic matching native evidence" in prepared

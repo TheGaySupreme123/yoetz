@@ -554,6 +554,7 @@ def _context(
         ordered_gaps,
         finding_states,
         applicable,
+        records,
     )
 
 

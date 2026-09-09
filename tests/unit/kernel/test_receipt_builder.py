@@ -481,9 +481,11 @@ def test_check_current_as_of_earlier_frontier_names_the_tested_frontier() -> Non
         for section in receipt.sections
         if section.key is ReceiptSectionKey.LIMITATIONS_AND_COVERAGE
     )
-    assert "A check is recorded at subject frontier 1 and still contributes here" in limitations
-    assert "only responses to the findings it returned were published after it" in limitations
-    assert "Its verdict is current as of subject frontier 1, not frontier 2." in limitations
+    assert "A check is recorded at subject frontier 1 and remains attributable" in limitations
+    assert "only responses" not in limitations
+    assert "asynchronous observation" in limitations
+    assert "Its verdict covers subject frontier 1." in limitations
+    assert "frontier 2 were not evaluated" in limitations
 
 
 def test_check_current_as_of_earlier_frontier_without_a_check_is_rejected() -> None:

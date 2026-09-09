@@ -176,6 +176,10 @@ def _write_pass(repo_root: Path) -> bool:
             "privacy/privacy-policy-1.0.0.schema.json",
             "--only",
             "privacy/privacy-policy-1.1.0.schema.json",
+            "--only",
+            "operations/status-result-1.1.0.schema.json",
+            "--only",
+            "operations/status-result-1.2.0.schema.json",
         ),
         ("sync_repository_authority_schemas.py", "--write"),
         # Mirror the reviewed sources into the package tree and recompute the resource-set digest.
