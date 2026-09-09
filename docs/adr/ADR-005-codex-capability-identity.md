@@ -87,3 +87,44 @@ reattach without duplicates; `--json` JSONL import with unknown-event quarantine
 ingest/status/pause/resume/revoke, `hook_observed` only from real observation evidence, and
 AdviceSnapshot via hooks plus ordinary `status`; cancellation/timeout ambiguous-write retry; stdout purity
 under all of the above.
+
+### Structural admission amendment (2026-09-08, issue #656)
+
+Decision 1 is amended for the session-stream reconciler. Exact profiles remain certification:
+`SUPPORTED_ROLLOUT_PROFILES`, `CODEX_ROLLOUT_PARSER_PROOFS`, the dogfood parity gate's
+`ROLLOUT_PARSER_PROVEN_VERSIONS`, and `rollout_parser_proof()` still name exactly `0.148.0` and
+`0.150.1`, and only those may advertise the `session_stream` facet or carry a parser proof. What
+changes is admission:
+
+- The session header's `cli_version` is diagnostic provenance, not the parsing gate. An exactly
+  proven version selects its certified profile with provenance `exact`. Any other ASCII version
+  selects the structural compatibility profile `codex-rollout-jsonl/compatible/v1` (cli_version
+  token `compatible`, vocabulary = the union of the exact profiles) with provenance `structural`.
+  Routine compatible upgrades therefore keep observation working without a Yoetz release.
+- Refusal is structural. A header is refused (`unsupported_codex_profile` →
+  `unsupported_format`, durable for the source generation, cursor kept) only when it is not
+  `session_meta`, its payload is not an object, `cli_version` is not an ASCII string, or
+  `history_mode` is outside `legacy`/`paginated`. IMP-013 now proves that case (unknown
+  `history_mode` under a `0.152.1` label); it no longer proves refusal-by-version.
+- Unknown structure degrades to bounded per-line gaps under an admitted profile: an unknown
+  wrapper or nested item is `unsupported_event` (`unknown_wrapper_type` / `unknown_item_type`), a
+  known wrapper with an incompatible payload shape is `wrapper_shape_unsupported`, and neither
+  mints an action, result, or pairing identity. Independent known lines keep mapping. Additive
+  fields never enter observation envelopes.
+- The reader reports a closed admission state per pass beside the persisted profile id:
+  `structurally_supported` (exact profile, every line understood), `partially_understood`
+  (compatible profile, or any unknown/incompatible line, with the affected reason tokens),
+  `incompatible` (refused header or unreadable surface), or `unadmitted`. None of these is host
+  support, and none widens receipt or native-host support labels.
+- Cursor mapping is `codex-obs-stream/1.4.0`: a cursor durably refused under the exact-version
+  policy replays from its header under a fresh generation, reading the refused range once with
+  no duplicate publication.
+- IMP-014 (`rollout-compatible-0.153.4`) is the differential matrix: the `0.150.1` structure
+  relabeled `0.153.4`, additive fields, an unknown independent event, incompatible known wrappers,
+  and a truncated tail. Every variant is constructed from the `0.150.1` grammar. **No real
+  `0.153.4` transcript was available when this amendment was written**, so the matrix proves the
+  admission policy, not the actual `0.153.4` event families; those still need their own fixtures
+  before `0.153.4` can become an exact profile or advertise `session_stream`.
+
+Parser compatibility grants no capture consent, no egress authority, and no semantic-evaluator
+authority.

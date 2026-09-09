@@ -102,6 +102,15 @@ _REASONS: Final = frozenset(
         # may be reported as `mapping_stale`.
         "status_workspace_unbound",
         "status_workspace_mismatch",
+        # Where a refused status probe got its repository locator (issue #659):
+        # the rendered `--workspace`, the host payload's session cwd, the hook's
+        # own cwd, no context at all, or a supplied context that could not be
+        # canonicalized. Recorded only beside a fence refusal.
+        "locator_source_explicit",
+        "locator_source_host_payload",
+        "locator_source_cwd",
+        "locator_absent",
+        "locator_unresolvable",
         # A scoped successful `start` post-hook that produced no mapping
         # (issue #581): the host result was not in an admitted shape, its ids
         # failed validation, or the mapping write failed. Before these the

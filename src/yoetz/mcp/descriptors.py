@@ -12,6 +12,10 @@ from types import MappingProxyType
 from typing import Final, Literal, cast
 
 from yoetz.mcp.resources import read_resource
+from yoetz.mcp.semantic_destination import (
+    MAX_DISCLOSURE_ENCODED_BYTES,
+    SemanticDestinationDisclosure,
+)
 from yoetz.ports.integrations import YOETZ_WORKFLOW_TOOL_NAMES
 from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.schemas import (
@@ -29,6 +33,7 @@ __all__ = [
     "PRESENTATION_INPUT_SCHEMA_BUDGETS",
     "SERVER_INSTRUCTIONS_BUDGET",
     "McpRouteProfile",
+    "SemanticDestinationDisclosure",
     "TOOL_DESCRIPTOR_DIGESTS",
     "TOOL_DESCRIPTOR_SET_DIGEST",
     "TOOL_DESCRIPTORS",
@@ -199,8 +204,14 @@ PRESENTATION_INPUT_SCHEMA_BUDGETS: Final[Mapping[str, Mapping[str, int]]] = Mapp
 # charged once per tool on every turn of every session. Nothing bounded it before, and it grew to
 # 41 KB (three inlined guidance documents) before a dogfood session noticed. The advertised input
 # schemas have been bounded since #128; this is the same guardrail for the adjacent text.
+# `packaged_max_encoded_bytes` bounds the packaged text alone (the #300 guard, unchanged).
+# `max_encoded_bytes` adds the ceiling of the policy-route destination disclosure (#479), the one
+# runtime-composed passage on this surface, so a budget review sees both numbers together.
 SERVER_INSTRUCTIONS_BUDGET: Final[Mapping[str, int]] = MappingProxyType(
-    {"max_encoded_bytes": 20_000}
+    {
+        "packaged_max_encoded_bytes": 20_000,
+        "max_encoded_bytes": 20_000 + MAX_DISCLOSURE_ENCODED_BYTES,
+    }
 )
 
 # Reviewed budget for everything one host renders into the model's context to advertise Yoetz:
@@ -209,22 +220,37 @@ SERVER_INSTRUCTIONS_BUDGET: Final[Mapping[str, int]] = MappingProxyType(
 # the total still doubles. `instructions_copies_per_tool` is descriptive, not a knob: it records the
 # worst observed host behavior, one full copy of the instructions block charged to each of the
 # seven advertised tools, which is what the total is computed against.
+# The aggregate likewise carries the packaged bound plus one disclosure allowance per advertised
+# tool, because the host that inlines the instructions inlines the disclosure with them.
 ADVERTISED_SURFACE_BUDGET: Final[Mapping[str, int]] = MappingProxyType(
-    {"instructions_copies_per_tool": 1, "max_encoded_bytes": 205_000}
+    {
+        "instructions_copies_per_tool": 1,
+        "packaged_max_encoded_bytes": 205_000,
+        "max_encoded_bytes": 205_000
+        + len(YOETZ_WORKFLOW_TOOL_NAMES) * MAX_DISCLOSURE_ENCODED_BYTES,
+    }
 )
 
 
-def advertised_surface_metrics(profile: McpRouteProfile = "policy") -> dict[str, int]:
+def advertised_surface_metrics(
+    profile: McpRouteProfile = "policy",
+    *,
+    semantic_destination: SemanticDestinationDisclosure | None = None,
+) -> dict[str, int]:
     """Return the byte cost of one route profile's complete advertised MCP surface.
 
     ``replicated_encoded_bytes`` charges the instructions block once per advertised tool, which is
     what a host that inlines `instructions` into each tool description actually spends.
+    ``semantic_destination`` is the policy-route disclosure the bridge appends (#479); pass the
+    longest one to measure the worst case.
     """
 
     if profile not in TOOL_DESCRIPTORS:
         raise ValueError("mcp_route_profile_invalid")
     descriptors = TOOL_DESCRIPTORS[profile]
-    instructions_bytes = len(server_instructions(profile).encode("utf-8"))
+    instructions_bytes = len(
+        server_instructions(profile, semantic_destination=semantic_destination).encode("utf-8")
+    )
     description_bytes = sum(len(item.description.encode("utf-8")) for item in descriptors)
     schema_bytes = sum(
         presentation_schema_metrics(item.input_schema)["encoded_bytes"] for item in descriptors
@@ -1507,8 +1533,9 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "max_findings findings plus a suppressed count, and status with view=findings reads the "
         "rest. A no_issue_detected verdict does not mean the work is correct. Choose mode "
         "deliberately: semantic_if_configured for most material implementation or review claims; "
-        "semantic_required when the claim depends on qualitative correctness, design conformance, "
-        "security or privacy reasoning, interoperability, or whether the code satisfies the ask; "
+        "semantic_required when explicitly required by the user, effective verification policy, or "
+        "a named acceptance criterion requiring independent semantic judgment. Qualitative work "
+        "alone does not make optional review mandatory; "
         "deterministic_only only for explicitly local or structural checks, a semantic-disabled "
         "policy, or a deliberate no-egress choice, and then disclose that limitation. Omitting "
         "mode resolves through the configured verification policy. This call cannot widen privacy "
@@ -1537,7 +1564,8 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "awaiting_human is the one nonterminal result: its typed continuation identifies standing "
         "repository setup or a one-use decision and carries the exact command to run. Show that "
         "command, do not create a new "
-        "check request, do not inspect Yoetz storage or source, and replay this same request with "
+        "check request, do not inspect live Yoetz storage or reconstruct consumer calls from source, "
+        "and replay this same request with "
         "the same request_id after the decision. If Yoetz explicitly reports that the current "
         "repository grant is missing, direct the owner to run yoetz --privacy and complete the "
         "trusted local review there; assent in agent chat never authorizes that standing grant. "
@@ -1676,7 +1704,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
             {
                 "start": "sha256:ac5c4ac0bd12f67e08437f3aea4b7bc328c060f08809ef6f20e86b879d683a29",
                 "publish_work": "sha256:4e90f9bdb94adb0a0de05bd5ec046f54fcab4c89f93d4c4b7191c12e19e229de",
-                "check": "sha256:3175800b79a9ea035fabde6c64227ff8a0c9783a4f5d13a29a7a9b80e91c41a2",
+                "check": "sha256:a13e23ddfd2a073047f0b005821237603816c04016d83cb913fff1941ba14e82",
                 "respond": "sha256:6003245eb4b02e6a81fa4f1083bfa00da675ec247398e302bcfbd2b82219664c",
                 "status": "sha256:50b201557bb97061cc2c2ba817e7e1b3cdf7c7cbc0dd546baf46705e8cc6c40f",
                 "receipt": "sha256:cf4b426af9764747848d3334d0671d0d0961ab5c86173d70c067222e9feb5ee2",
@@ -1687,7 +1715,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
             {
                 "start": "sha256:ac5c4ac0bd12f67e08437f3aea4b7bc328c060f08809ef6f20e86b879d683a29",
                 "publish_work": "sha256:4e90f9bdb94adb0a0de05bd5ec046f54fcab4c89f93d4c4b7191c12e19e229de",
-                "check": "sha256:b1cf1b1554d437b315f10f38080590b919c355b38f678bdcc458cd78620e1d60",
+                "check": "sha256:992959c904f2c54d60dab9789b39fdbb8e014660ec737e291c9d3a2915d9273f",
                 "respond": "sha256:6003245eb4b02e6a81fa4f1083bfa00da675ec247398e302bcfbd2b82219664c",
                 "status": "sha256:50b201557bb97061cc2c2ba817e7e1b3cdf7c7cbc0dd546baf46705e8cc6c40f",
                 "receipt": "sha256:cf4b426af9764747848d3334d0671d0d0961ab5c86173d70c067222e9feb5ee2",
@@ -1698,8 +1726,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:e89d6469d0e5bffd42e518791282a09630d01a5ea020a9630e7d2b772ccee25f",
-        "strict": "sha256:d12eb5beb174615a37c572e019ea52a74ce98861f1711ac6859fcc46445663ac",
+        "policy": "sha256:eaf8e22bb4111adb005e3922a1652e9a6ec03a6d7d4aee3a2e48b47f57f208f8",
+        "strict": "sha256:970ac9695ea53eee84656b6d144495bcd8ece6258004fdaf32469d1a078635fc",
     }
 )
 
@@ -1775,24 +1803,39 @@ def descriptor_for(name: str, profile: McpRouteProfile = "policy") -> ToolDescri
         raise KeyError("unregistered_tool_descriptor") from None
 
 
-def server_instructions(profile: McpRouteProfile = "policy") -> str:
-    """Return the manifest-verified initialize instructions as strict UTF-8 text."""
+def server_instructions(
+    profile: McpRouteProfile = "policy",
+    *,
+    semantic_destination: SemanticDestinationDisclosure | None = None,
+) -> str:
+    """Return the manifest-verified initialize instructions as strict UTF-8 text.
+
+    ``semantic_destination`` is the one runtime-composed addition to this surface (issue #479):
+    the bridge renders it from validated configuration through the closed catalog in
+    ``mcp/semantic_destination.py`` and passes it here for the policy route only. It is typed,
+    never a caller-authored string, and the strict route ignores it so strict instructions stay
+    byte-identical whatever the configuration says.
+    """
 
     if profile not in TOOL_DESCRIPTORS:
         raise ValueError("mcp_route_profile_invalid")
+    if semantic_destination is not None and (
+        type(semantic_destination) is not SemanticDestinationDisclosure
+    ):
+        raise TypeError("semantic_destination_wrong_type")
     base = "\n\n".join(
         read_resource(uri).decode("utf-8", errors="strict").rstrip()
         for uri in INITIALIZE_GUIDANCE_URIS
     )
-    return (
-        f"{base}\n\nRoute profile: {profile}. "
-        + (
-            "External semantic review follows the configured policy."
-            if profile == "policy"
-            else "This route will not request external semantic review for this process lifetime."
+    if profile != "policy":
+        return (
+            f"{base}\n\nRoute profile: {profile}. "
+            "This route will not request external semantic review for this process lifetime.\n"
         )
-        + "\n"
-    )
+    tail = "External semantic review follows the configured policy."
+    if semantic_destination is not None:
+        tail += " " + semantic_destination.sentence
+    return f"{base}\n\nRoute profile: {profile}. {tail}\n"
 
 
 _lint_descriptor_sets()

@@ -69,6 +69,7 @@ from yoetz.kernel.projections import (
     empty_projection_state,
 )
 from yoetz.kernel.receipt_builder import (
+    CheckSuffixClass,
     ReceiptBuildContext,
     ReceiptFindingState,
     build_receipt,
@@ -464,28 +465,83 @@ def test_applicable_check_at_earlier_subject_frontier_builds() -> None:
     assert receipt.suppressed_finding_count == 0
 
 
-def test_check_current_as_of_earlier_frontier_names_the_tested_frontier() -> None:
-    """The attributed-check gap must read as a qualification, never as a clean re-check: it names
-    the frontier the verdict is current as of and still blocks the strong conclusion."""
-
+def _earlier_frontier_limitations(check_suffix: CheckSuffixClass | None) -> tuple[str, str]:
     code = CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP
     coverage = _coverage(gaps=(code,))
     check = replace(
         _check(CheckVerdict.NO_ISSUE_DETECTED, coverage),
         subject_frontier=Frontier(1, _DIGEST),
     )
-    receipt = _build(_context(coverage=coverage, gaps=(CaseGap(code, code, ()),), check=check))
+    context = replace(
+        _context(coverage=coverage, gaps=(CaseGap(code, code, ()),), check=check),
+        check_suffix=check_suffix,
+    )
+    receipt = _build(context)
     assert receipt.conclusion is ReceiptConclusion.INSUFFICIENT_COVERAGE
     limitations = next(
         section.body
         for section in receipt.sections
         if section.key is ReceiptSectionKey.LIMITATIONS_AND_COVERAGE
     )
-    assert "A check is recorded at subject frontier 1 and remains attributable" in limitations
+    return limitations, receipt.conclusion.value
+
+
+def test_check_current_as_of_earlier_frontier_names_the_tested_frontier() -> None:
+    """The attributed-check gap must read as a qualification, never as a clean re-check: it names
+    the frontier the verdict is current as of and still blocks the strong conclusion. With a
+    response-only suffix it may say so (issue #657)."""
+
+    limitations, _ = _earlier_frontier_limitations(CheckSuffixClass.RESPONSES_ONLY)
+    assert "A check is recorded at subject frontier 1 and still contributes here" in limitations
+    assert "only responses to the findings it returned were published after it" in limitations
+    assert "Its verdict is current as of subject frontier 1, not frontier 2." in limitations
+    assert "host observations" not in limitations
+
+
+def test_check_current_as_of_earlier_frontier_names_observation_suffix() -> None:
+    """Issue #657: finding-free host observations keep the check attributable through the same
+    gap, and the explanation must say observations, never invent finding responses."""
+
+    limitations, _ = _earlier_frontier_limitations(CheckSuffixClass.OBSERVATIONS_ONLY)
+    assert "A check is recorded at subject frontier 1 and still contributes here" in limitations
+    assert "finding-free host observations" in limitations
+    assert "through frontier 2" in limitations
+    assert "not evaluated by that check" in limitations
+    assert "only responses to the findings it returned" not in limitations
+    assert "Its verdict is current as of subject frontier 1, not frontier 2." in limitations
+    assert "routine observation can advance the ledger again" in limitations
+    assert "Ingestion order does not establish when observed work occurred." in limitations
+
+
+def test_check_current_as_of_earlier_frontier_names_mixed_suffix() -> None:
+    limitations, _ = _earlier_frontier_limitations(CheckSuffixClass.MIXED)
+    assert "responses to the findings it returned and finding-free host observations" in (
+        limitations
+    )
     assert "only responses" not in limitations
-    assert "asynchronous observation" in limitations
-    assert "Its verdict covers subject frontier 1." in limitations
-    assert "frontier 2 were not evaluated" in limitations
+    assert "Its verdict is current as of subject frontier 1, not frontier 2." in limitations
+
+
+def test_check_current_as_of_earlier_frontier_without_suffix_class_stays_neutral() -> None:
+    """An unclassified suffix gets neutral wording rather than a guessed event class."""
+
+    limitations, _ = _earlier_frontier_limitations(None)
+    assert "no cooperative material work superseded it through frontier 2" in limitations
+    assert "only responses" not in limitations
+    assert "host observations" not in limitations
+    assert "Its verdict is current as of subject frontier 1, not frontier 2." in limitations
+
+
+def test_check_suffix_class_requires_an_attributable_earlier_check() -> None:
+    """The class describes what followed an attributable check; without the gap and check it
+    describes nothing and the context is rejected."""
+
+    coverage = _coverage()
+    check = _check(CheckVerdict.NO_ISSUE_DETECTED, coverage)
+    with pytest.raises(ValueError, match="receipt_build_context_invalid"):
+        replace(_context(coverage=coverage, check=check), check_suffix=CheckSuffixClass.MIXED)
+    with pytest.raises(ValueError, match="receipt_build_context_invalid"):
+        replace(_context(), check_suffix=CheckSuffixClass.OBSERVATIONS_ONLY)
 
 
 def test_check_current_as_of_earlier_frontier_without_a_check_is_rejected() -> None:

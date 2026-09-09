@@ -88,15 +88,19 @@ __all__ = [
     "export_claude_code_plugin",
     "observe_claude_code_mcp",
     "observe_claude_code_session_init",
+    "claude_code_version_provenance",
     "preview_claude_code_plugin",
     "render_claude_code_plugin",
     "status_claude_code_plugin",
 ]
 
-# Hooks/plugin surfaces this integration relies on exist from 2.1.233, but
-# admission is gated on the exactly proven versions in
-# CLAUDE_CODE_HARNESS_PROFILE.supported_versions, never on this floor alone.
+# Hooks/plugin surfaces this integration relies on exist from 2.1.233. Plugin
+# preview/apply admits any parseable version at or above this floor (issue #656);
+# the exactly proven versions in CLAUDE_CODE_HARNESS_PROFILE.supported_versions
+# are certification provenance (``tested``), never the admission gate. A version
+# at or above the floor that was not proven is admitted as ``untested``.
 CLAUDE_CODE_MINIMUM_VERSION: Final = "2.1.233"
+type ClaudeCodeVersionProvenance = Literal["tested", "untested"]
 CLAUDE_CODE_NATIVE_PROFILE_ID: Final = "claude-code-cli-local-project-2.1.241"
 CLAUDE_CODE_HOOK_MAPPING_VERSION: Final = "claude-code-hooks-2.1.241-v1"
 CLAUDE_CODE_HOOK_EVENTS: Final = (
@@ -357,12 +361,17 @@ class ClaudeCodePluginStatus:
     mcp_observation: ClaudeCodeMcpObservation
     proof: tuple[PluginProofStatus, ...]
     notes: tuple[str, ...]
+    # Whether the target host version is an exactly proven cell (``tested``) or a compatible
+    # release admitted on the floor alone (``untested``); ``None`` when below the floor (#656).
+    version_provenance: ClaudeCodeVersionProvenance | None = None
 
     def __post_init__(self) -> None:
         if (
             type(self.state) is not PluginArtifactState
             or type(self.operation_state) is not PluginOperationState
         ):
+            raise ValueError("claude_code_status_invalid")
+        if self.version_provenance not in {None, "tested", "untested"}:
             raise ValueError("claude_code_status_invalid")
         for value in (self.artifact_digest, self.marketplace_digest, self.host_state_digest):
             _validate_digest(value)
@@ -407,6 +416,9 @@ class ClaudeCodePluginPreview:
     mcp_ownership_state: McpOwnershipState
     mcp_route_profile: Literal["strict", "policy"] | None
     warnings: tuple[str, ...]
+    # Admission provenance of the previewed host version (#656). A preview never exists for a
+    # version below the floor, so this is never ``None`` on a constructed preview.
+    version_provenance: ClaudeCodeVersionProvenance = "untested"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "request_id", validate_request_id(self.request_id))
@@ -414,6 +426,8 @@ class ClaudeCodePluginPreview:
             type(self.action) is not ClaudeCodePluginAction
             or type(self.state_before) is not PluginArtifactState
         ):
+            raise ValueError("claude_code_preview_invalid")
+        if self.version_provenance not in {"tested", "untested"}:
             raise ValueError("claude_code_preview_invalid")
         for value in (
             self.target_identity,
@@ -597,6 +611,26 @@ def _version_tuple(value: object) -> tuple[int, int, int]:
     return int(major), int(minor), int(patch)
 
 
+def claude_code_version_provenance(version: str) -> ClaudeCodeVersionProvenance | None:
+    """Classify a host version for plugin admission (issue #656).
+
+    ``tested`` names an exactly proven cell in ``CLAUDE_CODE_HARNESS_PROFILE.supported_versions``;
+    ``untested`` is a parseable version at or above ``CLAUDE_CODE_MINIMUM_VERSION`` whose native
+    contract was never proven — admitted because the surfaces it relies on exist, but never
+    promoted to a proven cell; ``None`` is below the floor or unparseable and is refused.
+    """
+
+    try:
+        parsed = _version_tuple(version)
+    except ValueError:
+        return None
+    if parsed < _version_tuple(CLAUDE_CODE_MINIMUM_VERSION):
+        return None
+    if version in CLAUDE_CODE_HARNESS_PROFILE.supported_versions:
+        return "tested"
+    return "untested"
+
+
 def _digest_file(path: Path) -> str:
     if path.is_symlink():
         path = path.resolve(strict=True)
@@ -676,7 +710,14 @@ def _hooks_json(
     command = f'{launcher} hooks claude-observe --workspace "${{CLAUDE_PROJECT_DIR}}"'
 
     def hook(event: str) -> dict[str, JsonValue]:
-        return {"command": f"{command} --event {event}", "timeout": 3, "type": "command"}
+        # The hook entrypoint has a small import path, but a fresh process can
+        # still spend time on local state hydration and one bounded service
+        # drain. Keep ordinary events above that base budget while giving
+        # lifecycle attach/advice events enough room for their documented
+        # service work. SessionEnd is intentionally local-first and remains
+        # within Claude's three-second teardown window (#616).
+        timeout = 3 if event == "SessionEnd" else 10 if event in {"SessionStart", "Stop"} else 5
+        return {"command": f"{command} --event {event}", "timeout": timeout, "type": "command"}
 
     if observation_profile == "ordinary":
         command = (
@@ -1528,6 +1569,7 @@ def status_claude_code_plugin(
             session=session_observation,
         ),
         notes,
+        claude_code_version_provenance(target.identity.version),
     )
 
 
@@ -1631,13 +1673,17 @@ def preview_claude_code_plugin(
         # The development carrier exists only for ``claude --plugin-dir`` runs; it never
         # enters the marketplace lane or consumes review authority.
         raise _error(PluginArtifactReason.SOURCE_INVALID, {"development_carrier": True})
-    if target.identity.version not in CLAUDE_CODE_HARNESS_PROFILE.supported_versions:
-        # Only versions whose native contract was actually proven are admitted.
-        # A neighboring version must stay explicitly untested rather than run
-        # under (and emit evidence for) the 2.1.241 profile it never earned.
+    version_provenance = claude_code_version_provenance(target.identity.version)
+    if version_provenance is None:
+        # Below the compatibility floor the plugin/hook surfaces do not exist.
+        # At or above it a version is admitted; whether it is an exactly proven
+        # cell is reported as provenance, never inferred from proximity (#656).
         raise _error(
             PluginArtifactReason.FORMAT_UNSUPPORTED,
-            {"version_untested": target.identity.version},
+            {
+                "version_unsupported": target.identity.version,
+                "minimum_version": CLAUDE_CODE_MINIMUM_VERSION,
+            },
         )
     target_identity = _validate_target(target)
     status = status_claude_code_plugin(
@@ -1741,6 +1787,7 @@ def preview_claude_code_plugin(
         status.mcp_observation.ownership_state,
         artifact.plan.mcp_route_profile,
         warnings,
+        version_provenance,
     )
 
 

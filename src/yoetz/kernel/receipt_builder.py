@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
+from enum import Enum
 from typing import Final, cast
 
 from yoetz.domain.events import (
@@ -69,6 +70,7 @@ from yoetz.protocol.coverage import LEDGER_FRESHNESS_ORDER, Coverage, weakest
 from yoetz.protocol.models import ReceiptInclude, ReceiptRedactionProfile
 
 __all__ = [
+    "CheckSuffixClass",
     "ReceiptBuildContext",
     "ReceiptFindingState",
     "build_receipt",
@@ -258,6 +260,20 @@ def _validate_applicable_check(context: ReceiptBuildContext) -> None:
         raise ValueError(_CONTEXT_INVALID)
 
 
+class CheckSuffixClass(Enum):
+    """Bounded classification of the material records accepted after an attributable check.
+
+    The application derives this from the same authorship-aware rule that keeps the check
+    applicable (issue #361), so the receipt explanation can name what actually followed the check
+    instead of assuming a response-only suffix (issue #657). It is render context only: it is not a
+    wire field, not a gap code, and never changes the applicability decision.
+    """
+
+    RESPONSES_ONLY = "responses_only"
+    OBSERVATIONS_ONLY = "observations_only"
+    MIXED = "mixed"
+
+
 @dataclass(frozen=True, slots=True)
 class ReceiptBuildContext:
     projection: ProjectionState
@@ -267,6 +283,7 @@ class ReceiptBuildContext:
     gaps: tuple[CaseGap, ...]
     finding_states: tuple[ReceiptFindingState, ...]
     applicable_check: CheckRecordedPayload | None
+    check_suffix: CheckSuffixClass | None = None
     records: tuple[LedgerRecord, ...] = ()
 
     def __post_init__(self) -> None:
@@ -283,6 +300,14 @@ class ReceiptBuildContext:
                 self.applicable_check is not None
                 and type(self.applicable_check) is not CheckRecordedPayload
             )
+            or (self.check_suffix is not None and type(self.check_suffix) is not CheckSuffixClass)
+        ):
+            raise ValueError(_CONTEXT_INVALID)
+        # A suffix class describes records that followed an attributable check; without that
+        # check and its earlier-frontier gap there is nothing for the class to describe.
+        if self.check_suffix is not None and (
+            self.applicable_check is None
+            or CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP not in self.coverage.known_gaps
         ):
             raise ValueError(_CONTEXT_INVALID)
         expected_frontier = Frontier(self.projection.frontier, self.projection.head_digest)
@@ -751,6 +776,7 @@ def _check_coverage_sentence(
     gap_codes: tuple[str, ...],
     frontier: Frontier,
     tested_subject_sequence: str | None,
+    check_suffix: CheckSuffixClass | None = None,
 ) -> str:
     """State what the recorded check does or does not cover here, in the reader's terms."""
 
@@ -760,12 +786,32 @@ def _check_coverage_sentence(
             if tested_subject_sequence is None
             else f"subject frontier {tested_subject_sequence}"
         )
+        # The gap means "an attributable earlier check", not "a response-only suffix": the
+        # authorship-aware applicability rule also keeps a check across finding-free host
+        # observations (issue #657). Name the suffix class the application established, and fall
+        # back to neutral wording rather than inventing an event class it did not establish.
+        if check_suffix is CheckSuffixClass.RESPONSES_ONLY:
+            later = "only responses to the findings it returned were published after it"
+        elif check_suffix is CheckSuffixClass.OBSERVATIONS_ONLY:
+            later = (
+                f"the records accepted after it through frontier {frontier.sequence} are "
+                "finding-free host observations, retained here but not evaluated by that check"
+            )
+        elif check_suffix is CheckSuffixClass.MIXED:
+            later = (
+                f"the records accepted after it through frontier {frontier.sequence} are "
+                "responses to the findings it returned and finding-free host observations, "
+                "retained here but not evaluated by that check"
+            )
+        else:
+            later = (
+                f"no cooperative material work superseded it through frontier {frontier.sequence}"
+            )
         return (
-            f"A check is recorded at {tested} and remains attributable. Later records through "
-            f"frontier {frontier.sequence} were not evaluated by that check. Its verdict covers "
-            f"{tested}. Run a new check to evaluate later material; asynchronous observation can "
-            "advance the ledger again without invalidating the attributable check. Ingestion "
-            "order does not establish when observed work occurred."
+            f"A check is recorded at {tested} and still contributes here: {later}. Its verdict "
+            f"is current as of {tested}, not frontier {frontier.sequence}. Re-run check to "
+            "evaluate the later material; routine observation can advance the ledger again. "
+            "Ingestion order does not establish when observed work occurred."
         )
     if "check_not_applicable" in gap_codes:
         tested = (
@@ -835,6 +881,7 @@ def _sections(
     semantic_endpoint_sentence: str = "",
     resolution_explanations: tuple[str, ...] = (),
     attempt_explanations: tuple[str, ...] = (),
+    check_suffix: CheckSuffixClass | None = None,
 ) -> tuple[ReceiptSection, ...]:
     gap_codes = coverage.known_gaps
     bodies: dict[ReceiptSectionKey, str] = {}
@@ -976,7 +1023,9 @@ def _sections(
         # A check that ran and succeeded still contributes nothing once material work lands
         # after it. Saying only `check_not_applicable` next to a fresh successful check reads as
         # a contradiction; the 2026-07-27 dogfood could not tell which of four readings was meant.
-        check_sentence = _check_coverage_sentence(gap_codes, frontier, tested_subject_sequence)
+        check_sentence = _check_coverage_sentence(
+            gap_codes, frontier, tested_subject_sequence, check_suffix
+        )
         if check_sentence:
             gap_body = f"{check_sentence} Coverage is limited by: {', '.join(gap_codes)}."
         elif not_requested:
@@ -1144,6 +1193,7 @@ def build_receipt(
         )
         if context.records
         else (),
+        check_suffix=context.check_suffix,
     )
     suppressed_count = (
         0 if context.applicable_check is None else context.applicable_check.suppressed_count

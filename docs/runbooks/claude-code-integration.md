@@ -1,5 +1,22 @@
 # Claude Code native integration
 
+## Conditional agent guidance
+
+The skill keeps its activation boundary, core workflow, and safety floor in the entrypoint.
+Read workflow guidance before `start`, publication policy before `publish_work`, and coverage
+and receipts before `check`. Setup/consent, vault/credential operations, transcript import, and
+recommendation decisions route to the corresponding sections of request templates only when
+needed. Already-read guidance need not be fetched again while present in context.
+
+Ordinary material claims use `semantic_if_configured`; `semantic_required` follows an explicit
+user requirement, effective policy, or named acceptance criterion requiring independent semantic
+judgment. Preserve required review and all host/disclosure approval boundaries. Installed guidance
+bytes alone prove neither activation nor semantic dispatch.
+
+The portable skill's Cursor restart procedure applies only to Cursor. Claude Code agents follow
+Claude Code's own reported continuation and never quit or configure Cursor for a Claude outage.
+
+
 This runbook covers exactly one cell: Claude Code CLI `2.1.241` as a local process, project scope,
 native marketplace-installed plugin, and an explicit private directory marketplace. It does not
 claim that Claude Code consumes Agent Plugins. It also does not transfer proof to Claude Desktop,
@@ -71,8 +88,13 @@ yoetz integrate claude plugin preview \
 Prepare the returned exact digest through the trusted review lane, then replay the returned request
 ID and digest with `plugin install --accept`. `--accept` is not authority by itself; the mutation
 also consumes a matching `plugin_artifact_apply` pending and fresh OS-authenticated user presence.
-Install admits only exactly proven Claude versions (currently `2.1.241`); a neighboring version stays
-explicitly untested. It also refuses foreign/dual/ambiguous MCP ownership, unsafe roots, modified
+Install admits any Claude version at or above `2.1.233`, where the plugin and hook surfaces exist,
+and reports `host.version_provenance` on the preview (`host_version_provenance` on status):
+`tested` for the exactly proven `2.1.241` cell, `untested` for any other admitted version
+(issue #656). An `untested` host runs the same artifact but earns no proven cell; a version below
+the floor is refused as `format_unsupported`. Hook ingress keeps the same distinction: an unknown
+`claude_code_version` is admitted as `untested` under the conservative paired contract, never as
+the proven profile. It also refuses foreign/dual/ambiguous MCP ownership, unsafe roots, modified
 sources, leftover stage/rollback recovery material, or stale previews.
 
 After install, `status` must show `native_managed`, `marketplace_registered:true`,
@@ -219,9 +241,17 @@ requests separate from tool execution. `PermissionRequest` has no tool-call iden
 retains an uncorrelated permission event without inventing a tool action. `PermissionDenied`
 reports auto-mode refusals; it does not cover manual dialog denial, deny rules, or a pre-tool hook
 blocking execution. `StopFailure` records an API-failed turn without ending the observed session,
-and emits no advice output. Cancellation and process outcomes are retained only when explicit
-native fields supply them; a successful shell tool call without an exit fact leaves command/test
-outcome unknown. These decisions do not add filesystem or batch observation.
+and emits no advice output. The ordinary Claude mapping is
+`claude-code-hooks-ordinary-v2`: Claude's `PostToolUse` event is an explicit host-tool success
+fact, so a successful `Read`, `Bash`, or other tool result is recorded as success even when the
+native result has no exit field. Yoetz never fabricates `exit_status: 0`; an exit status is retained
+only when Claude supplies one. `PostToolUseFailure`, denial, interruption, error, invalid or
+unknown host status, and conflicting host fields override that event-level success. MCP result
+content is domain data: only its outer `isError`/`is_error` signal is an execution outcome; nested
+`status`, `outcome`, `success`, and exit-like fields cannot override Claude's host event.
+A background Bash launch
+is recorded as partial until the host supplies completion evidence. These decisions do not add
+filesystem or batch observation.
 
 Select these hooks with `--observation-profile ordinary` on the existing Claude plugin
 preview/install/update/status commands, or on `yoetz integrate claude plugin export` for a
@@ -246,9 +276,37 @@ yoetz observe content-disable --workspace /exact/project \
 The service accepts Claude chunks only when that exact profile is active in local consent and in
 the mapped task grant. A missing or mismatched profile drops plaintext chunks and records
 `content_capture_unavailable`; chunks are never retained in the structural outbox for later
-replay. The current installed Claude `2.1.261` probe is a candidate host fact only; it does not
-certify this ordinary profile without an exact isolated fixture and a receipt that separately
-proves native hook delivery, accepted content, semantic selection, and any resulting influence.
+replay. An authorized native hook reserves the workspace drain before enqueueing its structural
+row, keeping a background sweep from consuming that row before the foreground content attempt.
+The reservation is nonblocking and is released on cancellation or after the bounded drain; a busy
+owner can still leave an explicit content gap. The hook commits its structural envelope, pairing,
+mapping, and outbox intent locally
+before attempting the bounded service drain. Teardown `SessionEnd` has no service drain:
+its local lifecycle and outbox intent are durable before the
+hook returns, and a later hook or the service sweeper retries delivery. With no later hook, a
+ready service's idle sweep interval is 60 seconds. Content-bearing
+ordinary-profile events retain a one-second drain window; contentless structural rows defer
+service delivery. When chunks exist, the pass prioritizes the current row after its same-session
+FIFO prefix, within that one-second drain
+and sixteen-row bound. Teardown keeps its host-clamped three-second hook and skips local advice
+construction because the closing host cannot receive it. A healthy accepted drain forwards the
+transient chunks and exact profile to the service; a bounded service failure or completed
+cancellation path leaves the
+structural record plus an explicit content gap.
+A hard process kill or service failure before authenticated service-side staging completes may
+lose transient content without a durable gap marker; there is no plaintext local spool or offline
+acceptance guarantee. For this ordinary Claude profile, the capture-only service request can commit
+encrypted objects, manifests, and a metadata-only capture ticket before the structural FIFO ingest.
+After that boundary, a retry revalidates the original host/source and content-authority generations,
+requires the complete expected group/part set, and reuses the ticket rather than reminting content.
+The bounded staging handoff can therefore survive a service restart, while a revoked or incomplete
+ticket remains an honest content gap. The current installed Claude `2.1.261` probe is a candidate
+host fact only; it does not certify this ordinary profile without an exact isolated fixture and a
+receipt that separately proves native hook delivery, accepted content, semantic selection, and any
+resulting influence.
+Native semantic selection uses the accepted tool event's durable session route and does not
+require an approved-check policy. Local capture consent and repository disclosure permission
+remain separate requirements.
 
 Claude Code has no `codex exec --json` import surface. Issue #301's bounded import authorization
 therefore makes no Claude adapter change; Claude evidence continues through cooperative MCP and
@@ -264,7 +322,11 @@ start rejection.
 
 The native hook profile emits only `SessionStart`, scoped-Yoetz `PostToolUse`, scoped-Yoetz
 `PostToolUseFailure`, `Stop`, and `SessionEnd`. A bare MCP matcher is a negative control. Hooks call
-`yoetz hooks claude-observe` and are best-effort; timeouts/nonzero exits never authorize or block
+`yoetz hooks claude-observe` through a lightweight entrypoint that avoids loading the full CLI
+application graph. The renderer gives ordinary events a five-second budget, `SessionStart` and
+`Stop` ten seconds, and teardown `SessionEnd` three seconds. Structural capture and pairing close
+before service drain; advice-bearing events remain synchronous so Claude receives
+`additionalContext` in the same hook response. Timeouts/nonzero exits never authorize or block
 Claude work. The renderer knows Claude's documented `SubagentStart` / `SubagentStop` stdout shapes,
 but this profile does not advertise those events; adding them is a separate profile expansion.
 
@@ -310,9 +372,11 @@ payload-free `hook_diagnostics` reason
 (`auto_attach_workspace_unbound`, `auto_attach_request_invalid`, `auto_attach_conflict`,
 `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
 `privacy_authority_required`, `service_unavailable`, `vault_locked`, `timeout`, `storage_unsafe`,
-or `storage_corrupt`) and the session keeps an observation-only binding; turn-boundary events retry
-under the bounded budget. An explicit cooperative MCP `start` bound from its exact `PostToolUse`
-result remains the recovery path, not a substitute proof that natural auto-attach works. For
+or `storage_corrupt`) and the session keeps an observation-only binding; `UserPromptSubmit` and
+`Stop` retry under the bounded budget, while teardown `SessionEnd` records its lifecycle intent and
+defers service delivery without spending an auto-attach retry. An explicit cooperative MCP `start`
+bound from its exact `PostToolUse` result remains the recovery path, not a substitute proof that
+natural auto-attach works. For
 `vault_locked` on a never-initialized install, that explicit `start` returns the typed
 `vault_initialization_required` continuation (see the proof checklist) rather than a dead end.
 
@@ -361,7 +425,9 @@ or `_respond` enqueues one row; every `PostToolUseFailure` enqueues one row. Cla
 `PreToolUse` on this profile, so its reviewed pairing contract is post-only and there is no
 pre-event to hold back. Its `tool_use_id`, when present, identifies the observed result; no
 missing-pre gap is created for a legacy post-only hook. The `PostToolUse` advice
-channel is unchanged by this policy; only outbox delivery is governed. The manual
+guard recognizes Claude's plugin spelling together with the other host spellings, so a self-owned
+hook does not lease pending frontier or recommendation context for the call being observed.
+Explicit self-call failures remain retained and enqueued. The manual
 `yoetz observe drain --json` reports `terminal: drained` once nothing is pending.
 
 Grant observation separately for the exact project. Exercise every advertised event and inspect
@@ -390,7 +456,12 @@ session id (a bare `task_id` is not a selector the guidance accepts, issue #580)
 `compact` status probe connects with `--workspace "${CLAUDE_PROJECT_DIR}"` as its repository
 locator, so a live mapping answers `active` with a refreshed frontier; a daemon fence refusal
 records `status_workspace_unbound` or `status_workspace_mismatch` and keeps the mapping, and only a
-genuinely replaced session records `mapping_stale` (issue #578).
+genuinely replaced session records `mapping_stale` (issue #578). Claude Code does not use the
+Codex-only `hooks session-start` command, so the issue #659 host-cwd fallback applies to it only
+through the shared mapped-session lane: an explicit `${CLAUDE_PROJECT_DIR}` remains authoritative,
+an empty or unset value stays the typed `workspace_unresolvable` failure with no ingest and no
+probe, and a fence refusal records a companion `locator_source_explicit` row. No live Claude
+compaction failure was observed for #659; the shared resolver is covered by unit tests only.
 
 ## Auto mode and host admission
 
@@ -446,6 +517,12 @@ absent) or `host_permission_rule_denied` (`permission_rule` / `hook`) — so `ob
 can show a held check as host authorization, never as a semantic status. Yoetz deliberately
 ships no `PermissionRequest` hook returning `decision: allow`, which would make the plugin the
 authority over the host's own review.
+
+Claude Code surfaces MCP initialize `instructions` as server instructions in the model's context.
+Whether the auto-mode classifier reads them is not documented, so the policy-route destination
+disclosure (issue #479: provider, endpoint profile, and host, or the Codex runtime class, plus the
+payload bound, read once at bridge startup) is informational on this host; it is not relied on for
+admission, which stays with `permissions.allow`.
 
 ## Update
 

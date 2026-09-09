@@ -31,12 +31,19 @@ def _flat(path: Path) -> str:
     return " ".join(path.read_text(encoding="utf-8").split()).lower()
 
 
+def _review_guidance(entrypoint: Path) -> str:
+    # Procedures are conditional, but each entrypoint must make their owner reachable.
+    text = _flat(entrypoint)
+    assert "yoetz://guidance/coverage-and-receipts.md" in text
+    return text + " " + _flat(_REPO_ROOT / "guidance/coverage-and-receipts.md")
+
+
 def _skill() -> str:
-    return _flat(_SKILL)
+    return _review_guidance(_SKILL)
 
 
 def _instructions() -> str:
-    return _flat(_AGENT_INSTRUCTIONS)
+    return _review_guidance(_AGENT_INSTRUCTIONS)
 
 
 @pytest.mark.parametrize("source", (_skill, _instructions))

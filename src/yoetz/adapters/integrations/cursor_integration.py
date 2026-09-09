@@ -1864,7 +1864,12 @@ def _root_binding_surfaces_match(artifact: CursorPluginArtifact, inspection: _In
         if artifact.isolation_root is None
         else f"{ISOLATED_ROOT_ENV}={shlex.quote(artifact.isolation_root)} "
     )
-    for event in CURSOR_HOOK_EVENTS:
+    hook_events = (
+        CURSOR_ORDINARY_HOOK_EVENTS
+        if artifact.plan.host_extension_profile == CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
+        else CURSOR_HOOK_EVENTS
+    )
+    for event in hook_events:
         expected_definition = expected_hook_map.get(event)
         current_definition = current_hook_map.get(event)
         if not isinstance(expected_definition, list) or not expected_definition:

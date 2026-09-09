@@ -1150,14 +1150,13 @@ async def test_receipt_build_context_is_complete() -> None:
         if cast(str, section["key"]) == "limitations_and_coverage"
     )
     tested = checked.subject_frontier.sequence
-    assert f"A check is recorded at subject frontier {tested} and remains attributable" in (
+    assert f"A check is recorded at subject frontier {tested} and still contributes here" in (
         limitations
     )
-    assert "only responses" not in limitations
-    assert f"Its verdict covers subject frontier {tested}" in limitations
-    assert f"Later records through frontier {receipt.subject_frontier.sequence}" in limitations
-    assert "Run a new check to evaluate later material" in limitations
-    assert "asynchronous observation" in limitations
+    assert "only responses to the findings it returned were published after it" in limitations
+    assert f"Its verdict is current as of subject frontier {tested}" in limitations
+    assert f"not frontier {receipt.subject_frontier.sequence}" in limitations
+    assert "Re-run check to evaluate the later material" in limitations
 
     text_wire: dict[str, JsonValue] = {
         **receipt_wire,
@@ -2481,6 +2480,95 @@ async def test_finding_free_observation_work_keeps_check_applicable(
     assert "check_not_applicable" not in receipt.coverage.known_gaps
     assert "check_current_as_of_earlier_frontier" in receipt.coverage.known_gaps
     assert CheckType.DETERMINISTIC in receipt.coverage.check_types
+    # Issue #657: the suffix here is a check-answering response followed by finding-free host
+    # observations, so the explanation must disclose the mixture rather than claim responses only.
+    assert receipt.document is not None
+    limitations = _limitations_body(receipt.document)
+    assert "responses to the findings it returned and finding-free host observations" in (
+        limitations
+    )
+    assert "only responses to the findings it returned" not in limitations
+    assert f"not frontier {receipt.subject_frontier.sequence}" in limitations
+
+
+def _limitations_body(document: object) -> str:
+    sections = cast(
+        tuple[Mapping[str, JsonValue], ...],
+        cast(Mapping[str, JsonValue], document)["sections"],
+    )
+    return next(
+        cast(str, section["body"])
+        for section in sections
+        if cast(str, section["key"]) == "limitations_and_coverage"
+    )
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_observation_only_suffix_is_named_as_observations(
+    ledger_backend: Literal["memory", "sqlite"],
+) -> None:
+    """Issue #657: a check followed only by finding-free host observations stays attributable,
+    and the receipt must say observations were retained but not evaluated. It must not claim
+    that finding responses were published, and it must keep the tested boundary explicit."""
+
+    app, runtime, _ = _build_app(seed_offset=29, ledger_backend=ledger_backend)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=3800)
+    observed = await _drain_observation_work_sequence(
+        app,
+        runtime,
+        started,
+        seed=3820,
+        expected_frontier=checked.result_frontier.sequence,
+    )
+
+    receipt = await app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 3850)),
+                "task_id": started.task_id,
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(observed.result_frontier),
+                "format": "json",
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+    assert "check_not_applicable" not in receipt.coverage.known_gaps
+    assert "check_current_as_of_earlier_frontier" in receipt.coverage.known_gaps
+    assert CheckType.DETERMINISTIC in receipt.coverage.check_types
+    assert receipt.document is not None
+    limitations = _limitations_body(receipt.document)
+    tested = checked.subject_frontier.sequence
+    assert f"A check is recorded at subject frontier {tested} and still contributes here" in (
+        limitations
+    )
+    assert "finding-free host observations" in limitations
+    assert "not evaluated by that check" in limitations
+    assert "responses to the findings it returned" not in limitations
+    assert f"Its verdict is current as of subject frontier {tested}" in limitations
+    assert f"not frontier {receipt.subject_frontier.sequence}" in limitations
+    assert "Re-run check to evaluate the later material" in limitations
+
+    # The same sentence reaches every delivery rendering (markdown/text project the sections).
+    text_receipt = await app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 3851)),
+                "task_id": started.task_id,
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(receipt.result_frontier),
+                "format": "text",
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+    assert text_receipt.human_text is not None
+    assert "finding-free host observations" in text_receipt.human_text
+    assert "responses to the findings it returned" not in text_receipt.human_text
 
 
 @pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))

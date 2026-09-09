@@ -710,6 +710,16 @@ def test_cursor_advice_delivery_stays_pending_until_session_start(
             {"tool_name": "MCP:fixture_echo", "result_json": "fixture result"},
             False,
         ),
+        (
+            "postToolUse",
+            {"tool_name": "yoetz:publish_work", "tool_output": "{}"},
+            False,
+        ),
+        (
+            "postToolUse",
+            {"tool_name": "plugin-yoetz-yoetz:publish_work", "tool_output": "{}"},
+            False,
+        ),
     ],
 )
 def test_cursor_ordinary_advice_delivery_matches_native_output_channels(
@@ -947,3 +957,25 @@ def test_cursor_mcp_executions_of_yoetz_tools_follow_the_self_observation_policy
     ]
     assert all(row.envelope.structural_payload["action"] == "cursor_mcp" for row in rows)
     assert len(store.list_envelopes(commitment)) == 5
+
+
+def test_cursor_version_mapping_distinguishes_ide_cli_unknown_and_omitted() -> None:
+    """Issue #656: Cursor keeps its exact table. The IDE cell is proven; the Agent CLI build and
+    any unknown version are ``untested`` on the conservative paired contract; an omitted version
+    takes the legacy post-only carrier. Compatible events ingest in every branch (see the
+    parametrized ingress test above); none is promoted to the proven profile."""
+
+    from yoetz.ports.integrations import observation_pairing_contract
+
+    mapper = observe_hooks._cursor_capability_profile_id  # pyright: ignore[reportPrivateUsage]
+    assert mapper("3.17.8") == "cursor-ide-3.17.8"
+    assert observation_pairing_contract("cursor", "cursor-ide-3.17.8") == (
+        "post_only",
+        "generation_id",
+    )
+    for version in ("2026.07.09-a3815c0", "3.17.9", "3.18.0", "1.0.24"):
+        assert mapper(version) == "untested", version
+        assert observation_pairing_contract("cursor", "untested") == ("paired", "tool_call_id")
+    assert mapper(None) is None
+    assert mapper("") is None
+    assert observation_pairing_contract("cursor", None) == ("post_only", "generation_id")

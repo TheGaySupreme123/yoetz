@@ -23,6 +23,7 @@ from builders.codex_rollout import (  # noqa: E402
     session_meta,
 )
 from yoetz.adapters.importers.codex_rollout_jsonl import (  # noqa: E402
+    CODEX_ROLLOUT_COMPATIBLE_PROFILE_ID,
     SUPPORTED_ROLLOUT_PROFILES,
 )
 from yoetz.adapters.integrations.codex_capability_cells import (  # noqa: E402
@@ -202,8 +203,11 @@ def _paginated() -> bytes:
     )
 
 
-def _current_0_150_1() -> bytes:
+def _current_0_150_1(cli_version: str = "0.150.1") -> bytes:
     """Constructed paginated (current-mode) 0.150.1 rollout covering every admitted shape.
+
+    ``cli_version`` relabels only the session header: the differential compatibility fixture
+    (IMP-014) reuses this exact event structure under an unproven release label (issue #656).
 
     Wrapper and item key sets mirror the observed 0.150.1 grammar; every value is a canary.
     Hidden reasoning (``encrypted_content``, ``raw_content``), the system prompt
@@ -220,7 +224,7 @@ def _current_0_150_1() -> bytes:
 
     return encode_lines(
         session_meta(
-            cli_version="0.150.1",
+            cli_version=cli_version,
             history_mode="paginated",
             ordinal=next_ordinal(),
             cwd="/canary/cwd/CANARY_0150_CWD",
@@ -498,10 +502,15 @@ def _current_0_150_1() -> bytes:
 
 
 def _unsupported_0_152_1() -> bytes:
-    """A newer release's header plus one wrapper the supported grammars do not name."""
+    """A header whose ``history_mode`` names no known structure: refused structurally.
+
+    Before issue #656 this case proved that an unlisted release was refused by version alone.
+    The version is now diagnostic provenance, so the refused proof is a genuinely incompatible
+    header shape (an unknown ``history_mode``) under the same release label.
+    """
 
     return encode_lines(
-        session_meta(cli_version="0.152.1", history_mode="paginated", ordinal=1),
+        session_meta(cli_version="0.152.1", history_mode="streamed", ordinal=1),
         {
             "ordinal": 2,
             "payload": {"tokens": 1},
@@ -509,6 +518,92 @@ def _unsupported_0_152_1() -> bytes:
             "type": "token_usage_record",
         },
         function_call(name="shell", call_id="call_future_1", ordinal=3),
+    )
+
+
+_COMPATIBLE_VERSION = "0.153.4"
+
+
+def _relabeled_0_153_4() -> bytes:
+    """The full 0.150.1 paginated structure with only the header version changed."""
+
+    return _current_0_150_1(cli_version=_COMPATIBLE_VERSION)
+
+
+def _additive_0_153_4() -> bytes:
+    """The relabeled stream with harmless additive fields on every wrapper and payload."""
+
+    rows: list[dict[str, Any]] = []
+    for line in _relabeled_0_153_4().split(b"\n"):
+        if not line:
+            continue
+        row: dict[str, Any] = json.loads(line)
+        row["x_future_wrapper_field"] = {"canary": "CANARY_0153_ADDITIVE_WRAPPER"}
+        payload: Any = row.get("payload")
+        if isinstance(payload, dict):
+            payload_dict: dict[str, Any] = payload
+            payload_dict["x_future_payload_field"] = "CANARY_0153_ADDITIVE_PAYLOAD"
+            item: Any = payload_dict.get("item")
+            if isinstance(item, dict):
+                item_dict: dict[str, Any] = item
+                item_dict["x_future_item_field"] = "CANARY_0153_ADDITIVE_ITEM"
+        rows.append(row)
+    return encode_lines(*rows)
+
+
+def _unknown_event_0_153_4() -> bytes:
+    """Relabeled header, one unknown wrapper, one unknown nested item, then a known call."""
+
+    return encode_lines(
+        session_meta(cli_version=_COMPATIBLE_VERSION, history_mode="paginated", ordinal=1),
+        {
+            "ordinal": 2,
+            "payload": {"tokens": 1, "text": "CANARY_0153_UNKNOWN_WRAPPER"},
+            "timestamp": _TS,
+            "type": "token_usage_record",
+        },
+        item_completed(
+            {"id": "item_future", "type": "FutureItem", "text": "CANARY_0153_UNKNOWN_ITEM"},
+            ordinal=3,
+        ),
+        function_call(name="shell", call_id="call_0153_after", ordinal=4),
+        function_call_output(call_id="call_0153_after", output="ok", ordinal=5),
+    )
+
+
+def _incompatible_known_0_153_4() -> bytes:
+    """Known wrappers whose payload shape is incompatible: bounded per-line refusal, no outcome."""
+
+    return encode_lines(
+        session_meta(cli_version=_COMPATIBLE_VERSION, history_mode="paginated", ordinal=1),
+        # Known ``response_item`` wrapper with a string payload instead of an object.
+        {
+            "ordinal": 2,
+            "payload": "CANARY_0153_STRING_PAYLOAD",
+            "timestamp": _TS,
+            "type": "response_item",
+        },
+        # Known ``event_msg`` wrapper with a non-integer ordinal.
+        {
+            "ordinal": "three",
+            "payload": {"type": "task_started", "turn_id": "turn_1"},
+            "timestamp": _TS,
+            "type": "event_msg",
+        },
+        function_call(name="shell", call_id="call_0153_ok", ordinal=4),
+    )
+
+
+def _truncated_0_153_4() -> bytes:
+    """Relabeled header plus an unterminated live-append tail."""
+
+    return encode_lines(
+        session_meta(cli_version=_COMPATIBLE_VERSION, history_mode="paginated", ordinal=1),
+        function_call(name="shell", call_id="call_0153_done", ordinal=2),
+        terminated=True,
+    ) + encode_lines(
+        item_completed({"id": "item_partial", "type": "AgentMessage"}, ordinal=3),
+        terminated=False,
     )
 
 
@@ -533,6 +628,7 @@ def _refresh_manifest() -> None:
         ("IMP-011", "imports/codex/rollout-paginated-0.150.1.case.json"),
         ("IMP-012", "imports/codex/rollout-truncated-0.150.1.case.json"),
         ("IMP-013", "imports/codex/rollout-unsupported-0.152.1.case.json"),
+        ("IMP-014", "imports/codex/rollout-compatible-0.153.4.case.json"),
     ]
     by_path = {item["path"]: item for item in members}
     for fixture_id, rel in extra:
@@ -666,9 +762,10 @@ def main() -> None:
             cli_version="0.152.1",
             profile_id="unsupported",
             purpose=(
-                "A release with no exact profile is refused at the session header as "
-                "unsupported_codex_profile; no line maps under a neighbouring profile and the "
-                "stream reader keeps a durable refused cursor instead of losing position."
+                "A session header whose history_mode names no known structure is refused as "
+                "unsupported_codex_profile regardless of its release label; no line maps and "
+                "the stream reader keeps a durable refused cursor instead of losing position. "
+                "Refusal is structural, never a version lookup (issue #656)."
             ),
             variants={"future": _unsupported_0_152_1()},
             expected={
@@ -679,8 +776,74 @@ def main() -> None:
                 }
             },
             requirements=(
-                "ADR-005/exact-profile-admission",
-                "ISSUE-568/unsupported-release-bounded-gap",
+                "ADR-005/structural-admission",
+                "ISSUE-656/incompatible-header-refused",
+            ),
+        ),
+    )
+    _write_case(
+        "rollout-compatible-0.153.4.case.json",
+        _case(
+            fixture_id="IMP-014",
+            cli_version=_COMPATIBLE_VERSION,
+            profile_id=CODEX_ROLLOUT_COMPATIBLE_PROFILE_ID,
+            purpose=(
+                "Differential compatibility matrix for an unproven release label (0.153.4): the "
+                "supported 0.150.1 structure relabeled, harmless additive fields, an unknown "
+                "independent event, known wrappers with incompatible payload shapes, and a "
+                "truncated tail. Every variant is constructed from the 0.150.1 grammar with "
+                "canary values; no real 0.153.4 transcript was available, so this proves the "
+                "admission policy, not the actual 0.153.4 event families (issue #656)."
+            ),
+            variants={
+                "relabeled": _relabeled_0_153_4(),
+                "additive": _additive_0_153_4(),
+                "unknown_event": _unknown_event_0_153_4(),
+                "incompatible_known": _incompatible_known_0_153_4(),
+                "truncated": _truncated_0_153_4(),
+            },
+            expected={
+                "relabeled": {
+                    "admitted": True,
+                    "provenance": "structural",
+                    "stream_gaps": [],
+                    "unknown_count": 0,
+                    "unsupported_count": 0,
+                },
+                "additive": {
+                    "admitted": True,
+                    "provenance": "structural",
+                    "stream_gaps": [],
+                    "unknown_count": 0,
+                    "unsupported_count": 0,
+                },
+                "unknown_event": {
+                    "admitted": True,
+                    "provenance": "structural",
+                    "reason_codes": ["unknown_item_type", "unknown_wrapper_type"],
+                    "stream_gaps": [],
+                    "unknown_count": 2,
+                    "unsupported_count": 0,
+                },
+                "incompatible_known": {
+                    "admitted": True,
+                    "provenance": "structural",
+                    "reason_codes": ["wrapper_shape_unsupported"],
+                    "stream_gaps": [],
+                    "unknown_count": 0,
+                    "unsupported_count": 2,
+                },
+                "truncated": {
+                    "admitted": True,
+                    "provenance": "structural",
+                    "stream_gaps": ["final_newline_absent"],
+                    "unknown_count": 0,
+                    "unsupported_count": 0,
+                },
+            },
+            requirements=(
+                "ADR-005/structural-admission",
+                "ISSUE-656/compatible-release-admitted",
             ),
         ),
     )

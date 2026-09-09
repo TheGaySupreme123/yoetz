@@ -206,6 +206,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         "application/json",
         True,
     ),
+    (
+        "fixtures/canonical/control-native-capture-2.5.case.json",
+        "canonical_vector",
+        "application/json",
+        True,
+    ),
     ("fixtures/canonical/identifiers.case.json", "canonical_vector", "application/json", True),
     ("fixtures/canonical/object-envelope.case.json", "canonical_vector", "application/json", True),
     (
@@ -265,6 +271,8 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ("migrations/bundle/0008.sql", "migration", "application/sql", True),
     ("migrations/bundle/0009.sql", "migration", "application/sql", True),
     ("migrations/bundle/0010.sql", "migration", "application/sql", True),
+    ("migrations/bundle/0011.sql", "migration", "application/sql", True),
+    ("migrations/bundle/0012.sql", "migration", "application/sql", True),
     ("migrations/catalog/0001.sql", "migration", "application/sql", True),
     ("migrations/catalog/0002.sql", "migration", "application/sql", True),
     ("migrations/catalog/0003.sql", "migration", "application/sql", True),
@@ -977,6 +985,30 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/service/control-result-2.4.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/service/control-hello-2.5.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/service/control-hello-result-2.5.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/service/control-request-2.5.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/service/control-result-2.5.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,

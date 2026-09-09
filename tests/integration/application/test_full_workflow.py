@@ -67,6 +67,7 @@ from yoetz.protocol.models import (
     StatusRequest,
     StatusVersionsPageModel,
 )
+from yoetz.version import build_status_version_slice_facts
 
 pytestmark = pytest.mark.anyio
 
@@ -411,6 +412,15 @@ async def test_full_workflow_uses_one_final_client_projection(
     assert status.view == "versions"
     assert type(status.page) is StatusVersionsPageModel
     assert status.page.items[0].route_profile == "strict"
+    versions = status.page.items[0]
+    facts = build_status_version_slice_facts()
+    assert versions.apsw_version == facts.apsw_version
+    assert versions.sqlite_version == facts.sqlite_version
+    assert versions.sqlite_source_id == facts.sqlite_source_id
+    assert versions.projection_version == facts.projection_version
+    assert versions.apsw_version != "3.51.0.0"
+    assert versions.sqlite_version != "3.51.0"
+    assert versions.sqlite_source_id != "runtime-verified-by-connection-gate"
 
     receipt_wire = {
         **_request_base(protocol_id("req_", 817)),
