@@ -40,16 +40,17 @@ def test_capability_request_preserves_outer_holder(monkeypatch: pytest.MonkeyPat
         child_launcher = Path(cast(str, child["launcher"]))
         services.append(_start_service(outer_launcher, env))
         services.append(_start_service(child_launcher, env))
-        before = _identity_snapshot(outer_base / "o" / "state")
+        outer_root = outer_base / "o" / "state"
+        before = (_identity_snapshot(outer_root), _identity_snapshot(outer_root / "state"))
         outer_status = _json(outer_launcher, ["service", "status"], env)
-        log_root = outer_base / "o" / "logs"
+        log_root = outer_root / "log"
         logs_before = {p.name: p.read_bytes() for p in log_root.glob("*") if p.is_file()}
-        monkeypatch.setenv("YOETZ_ISOLATED_ROOT", str(outer_base / "o"))
+        monkeypatch.setenv("YOETZ_ISOLATED_ROOT", str(outer_root))
 
         async def request() -> None:
             parameters = _serve_parameters(cell)
             assert parameters.env is not None
-            assert parameters.env["YOETZ_ISOLATED_ROOT"] == str(child_base / "yoetz")
+            assert parameters.env["YOETZ_ISOLATED_ROOT"] == str(child_base / "yoetz" / "state")
             async with stdio_client(parameters) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
@@ -79,7 +80,10 @@ def test_capability_request_preserves_outer_holder(monkeypatch: pytest.MonkeyPat
             monkeypatch.setenv("YOETZ_CANDIDATE_PYTHON", candidate)
             asyncio.run(request())
             assert services[0].poll() is None
-            assert _identity_snapshot(outer_base / "o" / "state") == before
+            assert (
+                _identity_snapshot(outer_root),
+                _identity_snapshot(outer_root / "state"),
+            ) == before
             assert (
                 _json(outer_launcher, ["service", "status"], env)["service_instance_id"]
                 == outer_status["service_instance_id"]
