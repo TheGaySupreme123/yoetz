@@ -133,6 +133,72 @@ disjoint or absent declared scope, a success/unknown/unrelated limitation, a non
 `disputes_refs` or `decision_recorded.supersedes_event_id` as claim supersession; those fields keep
 their existing contradiction and decision-history meanings.
 
+## Repair then finish
+
+Use this bounded sequence for a material repair or closure. It applies to the six existing
+operations and does not add a composer or a new protocol field:
+
+1. Read current `status` and retain its returned frontier. Before replacing evidence or a claim,
+   paginate `status view=evidence` at one frontier, preserving its filter and original `limit` with
+   every cursor. Reuse only matching observed IDs; a missing MCP capture call, one digest-only item,
+   or one clipped item does not establish that all native evidence is unavailable.
+2. Publish the actual repair results, corrected evidence or claim, and any required plan revision.
+   Do not fabricate success or infer completion scope from the prompt. A feedback obligation is in
+   effective scope only after a supported `plan_revised` event or an exact next-version
+   `plan_published` restatement includes it; a stored or resolved obligation alone is insufficient.
+3. Disposition older outstanding findings before the final check. Use each finding's recorded
+   `finding_frontier` and the current expected frontier; a response is a disposition, not proof of
+   repair. The response frontier is the result frontier of the check that returned that finding.
+4. Run the final check deliberately. Select `semantic_required` when the user, effective policy, or
+   named acceptance criterion requires semantic review. If relying on the configured default, omit
+   `mode`; use `semantic_if_configured` only when review is known to be optional. Reserve
+   `deterministic_only` for explicitly local/structural work or a deliberate no-egress choice, and
+   disclose an unmet required review.
+5. Respond to findings returned by that check using its result frontier, then read
+   `status view=findings` with `filter.include_resolved: true` and actual `resolved` state. “Not
+   returned” is not “resolved”: call a
+   finding resolved only when a later qualifying check recorded it. If a response to an older finding
+   or any other material record follows the check, run another check before requesting a receipt.
+6. Request `receipt` last. Read `closure_readiness.unanswered_finding_count` and
+   `closure_readiness.receipt_blocking_finding_count`, then report those actual counts alongside the
+   receipt's checked frontier, semantic status/reason, and material coverage limits. After one
+   current-state recheck still fails to qualify, stop repeating an unchanged check, continue any
+   distinct authorized repair, and disclose the remaining blocker.
+
+The optional `yoetz closure-prepare --session-id <returned-session> --writer-id <returned-writer>`
+command is read-only preparation. It may inventory obligations, results, evidence, findings, and
+history and draft one explicit phase, but it never invents attempts, evidence, finding responses,
+obligation satisfaction, or completion. Review and submit each draft at the new frontier.
+
+When a requested item is not observed as attempted, do not copy its unchecked value into
+`attempted_items` merely to make the draft validate. Correct the assertion or use a supported
+obligation revision with rationale. When recording GitHub Actions evidence, the workflow run API
+`id` is the run identity; `run_number` is a separate display counter and must not be substituted for
+that identity.
+
+## Operation-specific recovery and templates
+
+Keep recovery requests tied to the operation that produced them. `start` has no `writer_id`; use the
+returned `session_id` and `writer_id` on later calls. A `publish_work` preview uses `dry_run: true`
+and the same `request_id` for the real append. A timeout or unknown write outcome uses
+`status view=operation` with `filter.operation_request_id` set to the write's request ID:
+`absent` permits one replay of the exact original body and request ID, `complete` uses the stored
+outcome, and `pending`, `quarantined`, or an unknown state is retained and reported rather than
+guessed.
+
+Pagination is a read operation: a retry may use a new read request ID, but a cursor continuation
+preserves the original view, filter, frontier, and `limit`. Changing `limit` starts a new query with
+no cursor. A `respond` request carries `finding_id`, `finding_frontier`, `disposition`, and `reason`;
+a `receipt` request carries its own receipt fields. Never copy response fields into a receipt, and
+never invent a finding disposition when a host reports that the wrong operation template was used.
+The complete operation bodies remain in `yoetz://guidance/request-templates.md`.
+
+Newly minted caller IDs (`request_id`, event/object payload IDs, and claim IDs) use the required
+prefix plus a fresh lowercase UUID v4. Existing returned evidence, obligation, claim, and finding
+references remain exactly as returned; retries reuse the original request/body identity. Use the
+exact closed enums and field-owning event family from the current schemas; do not handcraft,
+uppercase, or derive an ID from a sequence, run number, digest, or timestamp.
+
 ## Declare completion scope in the plan
 
 The effective current plan must distinguish obligations from an intentional empty scope. Normally,

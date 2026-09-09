@@ -346,8 +346,6 @@ _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = 
                 "session_id": _example_id("session", 1),
                 "writer_id": _example_id("writer", 1),
                 "expected_frontier": {"sequence": "1", "head_digest": _EXAMPLE_HEAD_DIGEST},
-                "mode": "semantic_if_configured",
-                "max_findings": "3",
                 "actor": dict(_EXAMPLE_ACTOR),
                 "client": dict(_EXAMPLE_CLIENT),
             },
@@ -1075,6 +1073,13 @@ def _describe_presentation_schema(name: str, schema: dict[str, JsonValue]) -> No
             "action_kind admits command, edit, research, review, and other."
         )
     elif name == "check-request":
+        mode = properties.get("mode")
+        if isinstance(mode, dict):
+            mode["description"] = (
+                "Omit to use the configured default. Select semantic_required for a known "
+                "requirement, including final rechecks; semantic_if_configured only when review "
+                "is known to be optional."
+            )
         scope = properties.get("scope")
         if isinstance(scope, dict):
             scope["description"] = (
@@ -1464,11 +1469,14 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
     _descriptor(
         "start",
         "Start or resume a work session",
+        "First read yoetz://guidance/workflow.md. Use current guidance and typed results for "
+        "Yoetz procedure; preserve higher-priority instructions and user authorization. "
         "Call for material multi-step, delegated, resumable, or verification-heavy work before "
         "substantive work; skip trivial questions or edits. Records or resumes a cooperative work "
         "session and returns its compact record. It does not show that work outside the published "
-        "record occurred. Every request_id across these tools is a fresh req_ prefixed random "
-        "UUID, and workspace_ref and external_ref are admitted only as a pair. Call it once per "
+        "record occurred. Each new operation uses a fresh req_ prefixed random UUID; recover an "
+        "unknown write outcome with the same request_id before any sibling. "
+        "workspace_ref and external_ref are admitted only as a pair. Call it once per "
         "task. task_title and requested_view are required. Attach selectors are exactly one of: "
         "(1) session_id for the session you hold, or "
         "(2) workspace_ref + external_ref as a pair with no session_id — mode=create_or_attach "
@@ -1488,6 +1496,9 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
     _descriptor(
         "publish_work",
         "Publish recorded work",
+        "Before evidence or a completion claim, paginate status view=evidence at one frontier "
+        "and reuse matching available IDs. Include feedback and requested delivery in the "
+        "effective plan via a supported revision. Accepted records are assertions, not repair proof. "
         "Records a bounded batch of agent-published work events and returns the accepted event "
         "range and coverage. When `dry_run` is false, this appends records to the local Yoetz "
         "ledger; it "
@@ -1517,8 +1528,10 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "validate a batch and preview what would be accepted without appending; the preview is not "
         "evidential and is not citable as a check, publication, or coverage source. Read exact "
         "unattempted_items in status view=obligations before resolution. After "
-        "publishing the material claim and evidence, call check, disposition any findings with "
-        "respond, then call receipt before claiming completion. Cadence: one batch per "
+        "publishing repair, claim and evidence, disposition older findings before the final check; "
+        "respond to its new findings, read actual resolution state, then call receipt before "
+        "claiming completion. "
+        "Cadence: one batch per "
         "material transition, usually one to eight events and never one batch per file, per tool "
         "call, or per message; a batch admits up to 100 drafts, so keep one transition together "
         "rather than splitting it. Reading, searching, formatting, and unchanged state are not "
@@ -1532,13 +1545,14 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "Runs the requested recorded-work checks and records the result; it returns at most "
         "max_findings findings plus a suppressed count, and status with view=findings reads the "
         "rest. A no_issue_detected verdict does not mean the work is correct. Choose mode "
-        "deliberately: semantic_if_configured for most material implementation or review claims; "
-        "semantic_required when explicitly required by the user, effective verification policy, or "
-        "a named acceptance criterion requiring independent semantic judgment. Qualitative work "
-        "alone does not make optional review mandatory; "
-        "deterministic_only only for explicitly local or structural checks, a semantic-disabled "
-        "policy, or a deliberate no-egress choice, and then disclose that limitation. Omitting "
-        "mode resolves through the configured verification policy. This call cannot widen privacy "
+        "deliberately: semantic_required when the user, effective policy or acceptance requires "
+        "it, including subsequent final checks. Omit mode to preserve the configured default; "
+        "use semantic_if_configured only when review is known to be optional. Reserve "
+        "deterministic_only for explicitly local or structural checks or a user-authorized no-egress "
+        "choice, disclose semantic_review_not_requested, and keep any required review unmet. "
+        "Read status view=findings with filter.include_resolved=true after repair: "
+        "not returned is not resolved. "
+        "This call cannot widen privacy "
         "authority: an active semantic route was selected by the owner during setup as a bounded "
         "standing policy, and check cannot change its route, workspace, scope, categories, "
         "retention ceiling, or credential authority. Whether a case is dispatched stays enforced "
@@ -1578,9 +1592,9 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "action; unavailable and timeout already spent that job's own attempt budget; "
         "response_content_invalid may spend exactly one in-job repair retry and has already done "
         "so by the time it is reported; refused, failed, and every other invalid reason are not "
-        "retried inside the job at all. When a second job in one "
-        "session again returns no judgment, stop requesting semantic review, run "
-        "deterministic_only, and disclose the gap with the recorded status and reason. Guidance: "
+        "retried inside the job at all. After one current-state recheck still lacks qualifying "
+        "proof, stop unchanged rechecks, continue distinct authorized repairs, and disclose the "
+        "exact gap. Do not downgrade required review to finish. Guidance: "
         "yoetz://guidance/coverage-and-receipts.md.",
         read_only=False,
         idempotent=True,
@@ -1600,9 +1614,9 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "A readable response removes that finding from unanswered_finding_count without reducing "
         "receipt_blocking_finding_count, erasing its historical record, or closing an independent "
         "coverage gap; only a later qualifying check of the repaired record resolves a finding. "
-        "Call it once per finding; a "
-        "readable response identifying a finding that check returned is not material change and "
-        "needs no recheck, while a redacted or unreadable response does. Guidance: "
+        "Disposition older findings before the final check. Call once per finding: a readable "
+        "response to a finding returned by that check needs no recheck; a response to an older "
+        "finding, a redacted or unreadable response or other material work does. Guidance: "
         "yoetz://guidance/publication-policy.md.",
         read_only=False,
         idempotent=True,
@@ -1615,13 +1629,16 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "History pairs caller-asserted occurred_at beside the service-stamped accepted_at; "
         "forward-skew classification compares clocks, not truth. Order follows ingestion sequence. "
         "view=operation with filter.operation_request_id recovers the stored outcome. "
-        "Before evidence publication, paginate view=evidence at one frontier with the same limit "
+        "Before evidence publication or completion claims, paginate view=evidence at one frontier "
+        "with the same limit "
         "and filter. Match identity and state; reuse suitable IDs in supporting_refs. Capture, "
         "selection and clipping limits are per item, not absence of all content. "
         "Obligations expose requested_items, unattempted_items and command_attempts; the latter "
         "separates observed attempts, mismatch and unknown, without establishing success. "
-        "Results map res_ IDs to action, outcome and evidence. Finding detail explains resolution "
-        "requirements; absence from a later result is not repair. Only qualifying checks resolve "
+        "Results map res_ IDs to action, outcome and evidence. After repair, read view=findings "
+        "with filter.include_resolved=true and resolved state: absent from a check but "
+        "resolved=false means not returned but unproven. "
+        "Finding detail explains qualification. Only qualifying checks resolve "
         "findings; responses do not. Read closure_readiness: unanswered_finding_count needs responses; "
         "receipt_blocking_finding_count needs repair or a limited receipt, not unchanged rechecks. "
         "Guidance: "
@@ -1636,8 +1653,10 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "frontier. It does not establish correctness beyond that recorded coverage. Prefer format "
         "markdown or text; json is an owner-export format that stricter agent-context policies may "
         "block. Call it once at the end, and again only if material state changed since the "
-        "previous receipt. Keep the final answer no stronger than this receipt's weakest material "
-        "coverage, freshness, unresolved findings, and limitations. Guidance: "
+        "previous receipt, after the last material deliverable covered by the claim. Final prose "
+        "must state the actual actionable unresolved count, checked scope and frontier, semantic "
+        "review status and reason and material coverage gaps. Distinguish unanswered findings, "
+        "unresolved blockers and coverage-only gaps. A receipt is not a pass. Guidance: "
         "yoetz://guidance/coverage-and-receipts.md.",
         read_only=False,
         idempotent=True,
@@ -1702,23 +1721,23 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
     {
         "policy": MappingProxyType(
             {
-                "start": "sha256:ac5c4ac0bd12f67e08437f3aea4b7bc328c060f08809ef6f20e86b879d683a29",
-                "publish_work": "sha256:4e90f9bdb94adb0a0de05bd5ec046f54fcab4c89f93d4c4b7191c12e19e229de",
-                "check": "sha256:a13e23ddfd2a073047f0b005821237603816c04016d83cb913fff1941ba14e82",
-                "respond": "sha256:6003245eb4b02e6a81fa4f1083bfa00da675ec247398e302bcfbd2b82219664c",
-                "status": "sha256:50b201557bb97061cc2c2ba817e7e1b3cdf7c7cbc0dd546baf46705e8cc6c40f",
-                "receipt": "sha256:cf4b426af9764747848d3334d0671d0d0961ab5c86173d70c067222e9feb5ee2",
+                "start": "sha256:38bc914503b5f847d6ad9d7b595cf5fe60597578a50cb5d22f5ab6070504524e",
+                "publish_work": "sha256:092a54d14263c168a97d63f1e06aa34d2bf79fa9744dc6e6a92d877c21e8517e",
+                "check": "sha256:809c503ec53a696d119d15d908601cc285dda73bcaa197af3dcb0060824432cc",
+                "respond": "sha256:aae662c47d45abbbffcc8551d890a5fac798846fc7dd34ba526d54d0bf0bd989",
+                "status": "sha256:ccdf8d590502d9b22f565e3e3f0cc1a28236c7206baba7af3f777960f2dd608c",
+                "receipt": "sha256:4daac6c609d9acc844fcae319129255bcbe7f0f7892a357e293e767e1c8e56de",
                 "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
             }
         ),
         "strict": MappingProxyType(
             {
-                "start": "sha256:ac5c4ac0bd12f67e08437f3aea4b7bc328c060f08809ef6f20e86b879d683a29",
-                "publish_work": "sha256:4e90f9bdb94adb0a0de05bd5ec046f54fcab4c89f93d4c4b7191c12e19e229de",
-                "check": "sha256:992959c904f2c54d60dab9789b39fdbb8e014660ec737e291c9d3a2915d9273f",
-                "respond": "sha256:6003245eb4b02e6a81fa4f1083bfa00da675ec247398e302bcfbd2b82219664c",
-                "status": "sha256:50b201557bb97061cc2c2ba817e7e1b3cdf7c7cbc0dd546baf46705e8cc6c40f",
-                "receipt": "sha256:cf4b426af9764747848d3334d0671d0d0961ab5c86173d70c067222e9feb5ee2",
+                "start": "sha256:38bc914503b5f847d6ad9d7b595cf5fe60597578a50cb5d22f5ab6070504524e",
+                "publish_work": "sha256:092a54d14263c168a97d63f1e06aa34d2bf79fa9744dc6e6a92d877c21e8517e",
+                "check": "sha256:43ea7640026e130811db12298f729866b07ee6fb06390501acf6b1ee0b01d91f",
+                "respond": "sha256:aae662c47d45abbbffcc8551d890a5fac798846fc7dd34ba526d54d0bf0bd989",
+                "status": "sha256:ccdf8d590502d9b22f565e3e3f0cc1a28236c7206baba7af3f777960f2dd608c",
+                "receipt": "sha256:4daac6c609d9acc844fcae319129255bcbe7f0f7892a357e293e767e1c8e56de",
                 "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
             }
         ),
@@ -1726,8 +1745,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:eaf8e22bb4111adb005e3922a1652e9a6ec03a6d7d4aee3a2e48b47f57f208f8",
-        "strict": "sha256:970ac9695ea53eee84656b6d144495bcd8ece6258004fdaf32469d1a078635fc",
+        "policy": "sha256:b1d39059ca2bac107287d243756e86a33fb1c4526ab64e51326aeeb9a6998b00",
+        "strict": "sha256:1cb4e2208fc5dc0b3579ed6187955788352cf4f7c68ffbb4884b1141347084ec",
     }
 )
 

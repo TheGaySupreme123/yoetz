@@ -77,9 +77,15 @@ coverage vector. `mode` selects how much:
 
 | Mode | Use it when |
 |---|---|
-| `semantic_if_configured` | Most material implementation or review claims. Runs semantic review if it is available; degrades honestly if not. |
-| `semantic_required` | The user, effective verification policy, or a named acceptance criterion requires independent semantic review. Qualitative work alone does not make optional review mandatory. |
-| `deterministic_only` | Explicitly local or structural checks, semantic-disabled policy, or a deliberate no-egress choice — and the limitation gets disclosed. |
+| Omitted | You intend to use the configured verification default. |
+| `semantic_if_configured` | Review is known to be optional. Runs semantic review if it is available; degrades honestly if not. |
+| `semantic_required` | The user, effective verification policy, or a named acceptance criterion requires independent semantic review. Preserve this choice for subsequent final checks. |
+| `deterministic_only` | Explicitly local or structural checks, or a user-authorized deliberate no-egress choice. Disclose `semantic_review_not_requested` and any unmet required review. |
+
+The configured `verification.semantic` default applies only when `mode` is omitted. An explicit
+mode is honored by the runtime; the default is not a persistent task-level enforcement rule.
+Do not choose a weaker mode to shorten a repair check. Qualitative work alone does not make
+optional review mandatory, and none of these modes widens durable privacy authority.
 
 `semantic_required` never erases deterministic truth. If the provider is absent, denied by policy,
 refuses, times out, or returns stale or invalid output, you get the deterministic findings back with

@@ -58,6 +58,31 @@ Any other material event after the check — published work, a new finding (incl
 
 `status` applies the same rule, so a compact status view and a receipt taken at the same frontier never disagree about what was checked.
 
+## Repair then finish
+
+For a material repair, use one bounded status → repair → check → read → receipt sequence:
+
+1. Read current `status`, retain its frontier, and paginate `view=evidence` at that frontier before
+   authoring replacement evidence or a completion claim. Keep the cursor-bound filter and original
+   `limit`; reuse only matching permitted native IDs.
+2. Publish the real repair results, corrected claim/evidence, and any required plan revision. Do not
+   fabricate success or infer scope from the user's prompt. A feedback obligation is complete only
+   when it is included in an effective plan revision or exact next-version restatement.
+3. Respond to older outstanding findings before the final check, using each recorded finding
+   frontier and a current expected frontier. A response is a disposition, not repair proof.
+4. Choose the final check mode deliberately: `semantic_required` for an explicit user, policy, or
+   acceptance requirement; omitted `mode` when relying on the configured default; and
+   `deterministic_only` only for explicitly local/structural work or a deliberate no-egress choice.
+5. Respond to findings returned by that check at its result frontier, then read
+   `status view=findings` with `filter.include_resolved: true` and `resolved`. If an older response
+   or other material record follows the
+   check, recheck before receipt. “Not returned” is not “resolved.”
+6. Request `receipt` last. Read `closure_readiness.unanswered_finding_count` and
+   `closure_readiness.receipt_blocking_finding_count`, then report those actual counts alongside the
+   receipt's checked frontier, semantic status/reason, and coverage limits. If one current-state
+   recheck still cannot qualify, stop repeating unchanged state and disclose the blocker while
+   continuing any distinct authorized work.
+
 ## State examples
 
 - Same state: evidence may remain current when its exact state binding still matches.
@@ -85,14 +110,15 @@ conservatively task-wide.
 
 ## Check mode and semantic coverage
 
-Use `semantic_if_configured` for ordinary material implementation and review claims. Select
-`semantic_required` when the user explicitly requires semantic review, the effective verification
-policy requires it, or a named acceptance criterion requires an independent semantic judgment.
-Name that requirement before checking. Qualitative work alone does not make optional review
-mandatory. Use `deterministic_only` for explicitly local/structural work, semantic-disabled policy,
-or a deliberate no-egress choice, with the coverage limitation disclosed. Omitting `mode` follows
-the configured default. Explicit modes are honored by the runtime; when review is required,
-select `semantic_required` and preserve that requirement in subsequent calls.
+Select `semantic_required` when the user explicitly requires semantic review, the effective
+verification policy requires it, or a named acceptance criterion requires an independent semantic
+judgment. Name that requirement before checking. Qualitative work alone does not make optional
+review mandatory. Omit `mode` when relying on the configured default. Use `semantic_if_configured`
+only when review is known to be optional. Use `deterministic_only` for explicitly local/structural
+work, semantic-disabled policy, or a deliberate no-egress choice, with the coverage limitation
+disclosed; do not choose it merely because a change is small or a follow-up is slow. Explicit modes
+are honored by the runtime; when review is required, select `semantic_required` and preserve that
+requirement in subsequent calls.
 
 If required semantic review is unavailable, report independently completed implementation and
 verification separately from the unmet review requirement. Do not claim overall completion or
@@ -101,7 +127,7 @@ continuing the authorized task; it is not clean semantic coverage. Pending human
 is different: follow the exact continuation below, not the terminal fallback rules.
 
 
-A clean deterministic-only check is not an implementation review. When `mode=deterministic_only` (or semantic status is `not_requested`), the receipt/check coverage includes `semantic_review_not_requested` and completeness is coverage-incomplete even if the verdict is `no_issue_detected`. Prefer `semantic_if_configured` for material claims; reserve `deterministic_only` for structural checks and disclose the limitation.
+A clean deterministic-only check is not an implementation review. When `mode=deterministic_only` (or semantic status is `not_requested`), the receipt/check coverage includes `semantic_review_not_requested` and completeness is coverage-incomplete even if the verdict is `no_issue_detected`. Omit `mode` to follow the configured default; use `semantic_if_configured` only for known-optional review, and disclose the limitation when deterministic-only is deliberate.
 
 A non-succeeding `semantic_status` is a coverage gap, not a failure to retry away.
 
@@ -173,6 +199,18 @@ original finding. `Not returned; absence remains unproven` is not a repair concl
 policy, scope, suppression, freshness, unreadable proof, semantic outcome and disqualifying gap
 requirements come from the same rule that controls resolution. Correct those inputs when possible;
 do not repeat an unchanged check merely because the provider succeeded. Resolved history remains.
+
+Read the finding in one of three states: **re-fired**, when the same issue key is returned by the
+later check; **not returned but unproven**, when it is absent but `resolved: false` because one or
+more qualification requirements or readable proof inputs failed; or **resolved**, only when the
+later qualifying check records resolution provenance. Acknowledgement lowers response work but
+does not change these states. Keep `closure_readiness.unanswered_finding_count` (response work)
+and `closure_readiness.receipt_blocking_finding_count` (repair/recheck blockers) separate from
+coverage-only gaps in the final explanation; `findings_unanswered` and
+`receipt_findings_unresolved` are readiness-condition labels, not counts. Name the actual failed
+condition and candidate check frontier; do not attribute an unresolved semantic finding to provider
+failure when it was not returned, and do not treat provider success alone as qualifying semantic
+absence.
 
 A check can remain attributable while responses or finding-free service observations arrive.
 Its verdict covers its tested frontier; later ingestion does not prove later occurrence. Evaluate
@@ -293,6 +331,33 @@ continuation above before applying terminal recovery rules. On `OPERATION_PENDIN
 `status` with `view=operation` once and replay the same `request_id` once. If still pending,
 report that fact; a separate deterministic-only check is permissible only when no required
 semantic review or pending approval would be bypassed.
+
+### Bounded recovery and fresh verification
+
+Use this decision table after the typed result and any operation-specific continuation. It preserves
+the 0.2 wire contract: a sibling is an explicit `start mode=create` choice, not an automatic
+lineage or admission mechanism.
+
+| Situation | Required action | Prohibited action |
+| --- | --- | --- |
+| A retryable read timeout or reconnect (`status`, diagnostics, or an operation recovery read) | Retry the same read intent with a new read `request_id`, following the typed result. Preserve the cursor-bound view, filter, frontier, and original `limit`. | Reusing a timed-out read ID as a write, changing page size under a cursor, or treating a missing read as evidence of absence. |
+| Any write has an unknown outcome (`start`, `publish_work`, `check`, `respond`, or `receipt`) | Read `status view=operation` with `filter.operation_request_id` set to the write's `request_id` when available. If it is `absent`, replay the exact original body with the exact original `request_id` once; if it is `complete`, use the stored outcome; if it is `pending`, `quarantined`, or still unknown, retain and report that boundary. | A fresh request ID, guessed result, new task, or sibling created to escape ambiguity. |
+| A typed `OPERATION_PENDING` result | Read operation status once and perform the allowed same-ID continuation. If still pending, stop the write path and preserve the pending state. | Repeated probes, a new task, or a clean completion claim. |
+| An exact held `session_id` is available after session rotation or host handoff | Use `mode=attach` with that `session_id` as the selector; preserve the host's canonical working root for its binding, but do not add a guessed `workspace_ref`/`external_ref` pair. Use the returned successor session/writer and inspect status before continuing. | A bare `task_id`, workspace membership as resume authority, or a guessed sibling. |
+| A fresh host conversation has the same work but no held session | Use `mode=create_or_attach` with the exact canonical `workspace_ref` + `external_ref` pair. | A remote URL as workspace identity, an invented task ID, or an implicit second task. |
+| Same-task pair/session recovery is exhausted, every prior write has a known terminal outcome, and the user declares a remaining or repaired verification scope | On one healthy, authorized binding, start one intentional sibling with `mode=create`, the same canonical workspace, and a different stable `external_ref`. Give it a fresh plan naming only that scope and establish its native host mapping from the returned session/task. | Silently replacing the task, inheriting old findings/obligations/evidence, reusing cross-task evidence IDs without a contract, or inventing lineage fields. |
+| Recovery is exhausted but no new scope is declared, or a sibling would only make the old receipt look clean | Keep the old receipt, findings, obligations, and limitations; report the bounded failure and wait for a supported continuation decision. | Creating an unbounded task sequence or presenting a sibling as whole-work closure. |
+| The current ledger has immutable proof limits and a fresh review of repaired/current state is wanted | Use one explicitly scoped verification sibling only after known outcomes and on a healthy authorized binding. Publish its current-state plan, new evidence, and checks; disclose the predecessor receipt's unresolved limits. | Repeating work only to obtain a smaller count, dropping acceptance criteria, or claiming the sibling resolved the predecessor. |
+| Yoetz remains unavailable after the documented one-time repair/retry, or returns a non-retryable error | Continue ordinary authorized work and disclose the work lacking Yoetz proof. Use the sibling row only later, once service and binding are healthy and a tracked continuation is still wanted. | Claiming a live task, finding, verdict, or receipt, or resetting old findings by switching tasks. |
+
+An explicit sibling is a new ledger boundary. Its receipt covers only its newly declared scope and
+newly observed work. The predecessor's receipt, actionable findings, feedback obligations, evidence,
+and unresolved status remain separate history and must be disclosed. A sibling never resets an old
+finding count or qualifies a clean whole-work claim, and it does not inherit the predecessor's native
+mapping, session, evidence IDs, or receipt authority. If the predecessor identity is unknown, say so
+without guessing or exposing a task ID. If an old write may have committed, operation recovery always
+wins over the sibling path. “Not give up” means one bounded, explicit handoff after a known terminal
+boundary, not repeated task creation until a receipt looks clean.
 
 ## Degraded and unavailable behavior
 

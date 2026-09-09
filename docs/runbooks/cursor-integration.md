@@ -8,10 +8,11 @@ and receipts before `check`. Setup/consent, vault/credential operations, transcr
 recommendation decisions route to the corresponding sections of request templates only when
 needed. Already-read guidance need not be fetched again while present in context.
 
-Ordinary material claims use `semantic_if_configured`; `semantic_required` follows an explicit
-user requirement, effective policy, or named acceptance criterion requiring independent semantic
-judgment. Preserve required review and all host/disclosure approval boundaries. Installed guidance
-bytes alone prove neither activation nor semantic dispatch.
+Use `semantic_if_configured` only when semantic review is known to be optional; omit `mode` when
+relying on the configured default. Select `semantic_required` for an explicit user requirement,
+effective policy, or named acceptance criterion requiring independent semantic judgment. Preserve
+required review and all host/disclosure approval boundaries. Installed guidance bytes alone prove
+neither activation nor semantic dispatch.
 
 The portable skill labels Cursor-specific plugin status and full-restart recovery explicitly;
 apply that branch only for a Cursor activation mismatch, without changing privacy authority.
@@ -809,3 +810,37 @@ obligation rows: this profile may omit command text, in which case reconciliatio
 Only service-stamped, explicitly linked observations can support a match or mismatch. The optional
 CLI closure composer uses the same projected status inputs; it does not grant capture or egress.
 These shared regressions are synthetic contract evidence, not live-host certification.
+
+### Bounded workflow recovery examples (#613)
+
+These examples use the existing MCP operations on the pinned local Cursor IDE or Agent CLI cell.
+Replace placeholders with values returned by the current call or `sessionStart` context; do not
+reconstruct them from memory, a remote URL, or the live store.
+
+- **Read retry.** If a `status`, diagnostics, or `status view=operation` read times out, repeat the
+  same read intent with a new read `request_id`. Preserve its view, operation filter, cursor, and
+  limit. An unreadable read does not establish that an operation or task is absent.
+- **Ambiguous write.** If `start`, `publish_work`, `check`, `respond`, or `receipt` loses its
+  response, first call `status view=operation` for the original write `request_id`, then replay the
+  exact original body once with that same request ID. If it remains unknown or
+  `OPERATION_PENDING`, preserve and disclose the operation; do not create a task to escape it.
+- **Exact-session attach.** When `sessionStart` or recovery context provides a held `session_id`,
+  use that exact value as the `mode=attach` selector. Cursor's canonical workspace fence comes
+  from `workspace_roots`/`CURSOR_PROJECT_DIR`, not the plugin directory in `$PWD`; if the request
+  carries identity refs, include the canonical `workspace_ref` + `external_ref` pair together,
+  never `workspace_ref` alone. Use the returned successor `session_id` and `writer_id`, read
+  `status`, and continue only from that binding. A bare `task_id` is not an attach selector.
+- **Same-pair fresh conversation.** With no held session, call `start mode=create_or_attach` using
+  the exact canonical project root as `workspace_ref` and the same stable `external_ref` pair, with
+  no `session_id`. A remote URL is not a workspace identity, and a fresh Cursor conversation is
+  not an implicit second task.
+- **Explicit sibling handoff.** Use `start mode=create` only after same-task pair/session recovery
+  is exhausted, every earlier write has a known terminal outcome, the Cursor binding is healthy and
+  authorized, and the user has declared one bounded remaining or repaired verification scope. Keep
+  the canonical project root as `workspace_ref`, choose a different stable `external_ref` such as
+  `<work-item>-recovery-v1`, and bind the native mapping from the exact returned `start` result via
+  `afterMCPExecution`/`postToolUse`. Verify `mapping_present` and the returned task/session/writer,
+  then publish fresh plan, evidence, checks, and receipt for that scope. State that the predecessor
+  receipt, findings, obligations, evidence IDs, and unresolved status remain separate; the sibling
+  cannot make the predecessor look resolved. If no new scope exists, keep the old receipt and stop
+  instead of creating another sibling.

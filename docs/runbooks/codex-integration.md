@@ -8,10 +8,11 @@ and receipts before `check`. Setup/consent, vault/credential operations, transcr
 recommendation decisions route to the corresponding sections of request templates only when
 needed. Already-read guidance need not be fetched again while present in context.
 
-Ordinary material claims use `semantic_if_configured`; `semantic_required` follows an explicit
-user requirement, effective policy, or named acceptance criterion requiring independent semantic
-judgment. Preserve required review and all host/disclosure approval boundaries. Installed guidance
-bytes alone prove neither activation nor semantic dispatch.
+Use `semantic_if_configured` only when semantic review is known to be optional; omit `mode` when
+relying on the configured default. Select `semantic_required` for an explicit user requirement,
+effective policy, or named acceptance criterion requiring independent semantic judgment. Preserve
+required review and all host/disclosure approval boundaries. Installed guidance bytes alone prove
+neither activation nor semantic dispatch.
 
 The Codex skill routes to the existing five MCP guidance URIs with installed reference fallbacks.
 The server initializes only the safety floor. Consumer source-inspection restrictions do not
@@ -794,3 +795,37 @@ obligation rows: this profile may omit command text, in which case reconciliatio
 Only service-stamped, explicitly linked observations can support a match or mismatch. The optional
 CLI closure composer uses the same projected status inputs; it does not grant capture or egress.
 These shared regressions are synthetic contract evidence, not live-host certification.
+
+### Bounded workflow recovery examples (#613)
+
+These examples use the existing MCP operations and selectors on the local Codex cell. Replace
+placeholders with values returned by the current call or session-start context; do not reconstruct
+them from memory or from the live store.
+
+- **Read retry.** If a `status`, diagnostics, or `status view=operation` read times out, send the
+  same read intent with a new read `request_id`. Keep its view, operation filter, cursor, and limit
+  unchanged. An unreadable read does not establish that an operation or task is absent.
+- **Ambiguous write.** If `start`, `publish_work`, `check`, `respond`, or `receipt` loses its
+  response, first call `status view=operation` for the original write `request_id`, then replay the
+  exact original body once with that same request ID. If the result remains unknown or
+  `OPERATION_PENDING`, preserve the operation and report the boundary; never create a task to
+  escape it.
+- **Exact-session attach.** When `SessionStart` or recovery context provides a held
+  `session_id`, use that exact value as the `mode=attach` selector. Codex's canonical repository
+  context supplies the workspace fence; if the request carries identity refs, include the
+  canonical `workspace_ref` + `external_ref` pair together, never `workspace_ref` alone. Use the
+  returned successor `session_id` and `writer_id`, then read `status` before continuing. A bare
+  `task_id` is not an attach selector.
+- **Same-pair fresh conversation.** With no held session, call `start mode=create_or_attach` using
+  the same exact canonical `workspace_ref` and stable `external_ref` pair, with no `session_id`.
+  A remote URL is not the workspace identity, and a fresh Codex conversation is not an implicit
+  second task.
+- **Explicit sibling handoff.** Use `start mode=create` only after same-task pair/session recovery
+  is exhausted, every earlier write has a known terminal outcome, the binding is healthy and
+  authorized, and the user has declared one bounded remaining or repaired verification scope. Keep
+  the same canonical `workspace_ref`, choose one different stable `external_ref` such as
+  `<work-item>-recovery-v1`, and establish the Codex mapping from the returned task/session/writer.
+  Publish a fresh plan, evidence, checks, and receipt for that scope. The handoff must say that the
+  predecessor receipt, findings, obligations, evidence IDs, and unresolved status remain separate;
+  the sibling cannot make the predecessor look resolved. If no new scope exists, keep the old
+  receipt and stop instead of creating another sibling.

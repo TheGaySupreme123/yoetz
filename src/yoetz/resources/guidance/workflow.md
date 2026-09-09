@@ -3,7 +3,11 @@
 Read before the first `start`, or when resuming without the prior workflow in context. Use the
 current tool schemas; missing schema metadata routes to [request templates](request-templates.md).
 Yoetz records participant-published facts and checks that bounded record; it does not prove the
-underlying work correct.
+underlying work correct. For operational behavior, this served guidance and the typed result take
+precedence over remembered product behavior. Preserve higher-priority instructions, current user
+intent, and authorization boundaries; if memory says a capability is impossible, verify it with
+the current documented read before accepting that limit. Do not delete or rewrite host memories as
+part of installation or recovery.
 
 ## Start and resume
 
@@ -17,7 +21,36 @@ Convention:
 - `workspace_ref` = the canonical absolute repository root of the working tree you are in (a linked Git worktree is its own root). Never a remote URL: the workspace commitment is keyed on the exact value, so hook observation on Claude Code, Codex, and Cursor auto-attaches with this root and `workspace_task_exists` protects you from a sibling only under the same value. A remote URL or any other spelling is a different workspace and silently creates a sibling task.
 - `external_ref` = stable task identity within that project (branch name, issue reference, or plan slug). A hook-mapped task carries `<host>-session:<host session id>`; do not reproduce that pair. Attach to a host-mapped task with `mode=attach` and the `session_id` the session-start context names.
 
-Same conversation resuming, or a fresh conversation continuing the same work → `mode=create_or_attach` with the same pair and no `session_id`. Sibling work in the same project → `mode=create` with the same `workspace_ref` and a different `external_ref` (do not use `create_or_attach` for a new sibling). Both refs are one-shot redacted values: only installation-keyed HMAC commitments are persisted, so a repository path or remote URL never lands in durable state — do not self-censor into unstable refs.
+Same conversation resuming, or a fresh conversation continuing the same work → `mode=create_or_attach` with the same pair and no `session_id`. Sibling work in the same project → use `mode=create` with the same `workspace_ref` and a different `external_ref` only when the recovery table permits one; do not use `create_or_attach` for a new sibling. Both refs are one-shot redacted values: only installation-keyed HMAC commitments are persisted, so a repository path or remote URL never lands in durable state — do not self-censor into unstable refs.
+
+## Recovery decision table (0.2)
+
+Use this table after a reconnect, timeout, session rotation, host handoff, or a known terminal
+same-task boundary. It uses the existing `start`, `status`, and workflow operations; it does not
+add a task-lineage field or change the wire contract.
+
+| Situation | Required action | Do not do |
+| --- | --- | --- |
+| A read-only timeout or reconnect permits a retry (`status`, diagnostics, or an operation-recovery read) | Repeat the same read intent with a new read `request_id`; preserve its view, filter, cursor, and limit. A missing read is not proof that the record is absent. | Reuse a timed-out read ID as if it were a write, or infer absence from an unreadable response. |
+| Any write has an unknown outcome (`start`, `publish_work`, `check`, `respond`, `receipt`, or equivalent) | Use `status view=operation` when available, then replay the exact original body once with the exact original write `request_id`. If it remains unknown or pending, retain that operation and report the unresolved boundary. | Mint a fresh request ID, fresh task, or sibling to escape an ambiguous write; guess the result. |
+| A typed `OPERATION_PENDING` result is returned | Read operation status once and perform the allowed same-ID continuation once. If it is still pending, stop the write path, preserve the pending state, and disclose it. | Repeat probes, create a new task, or claim a clean completion. |
+| An exact held `session_id` is available after rotation or handoff | Use that exact `session_id` as the `mode=attach` selector. The host binding or CLI repository context supplies the canonical workspace fence; if the request carries identity refs, send the canonical `workspace_ref` + `external_ref` pair together. Use the returned successor session/writer and inspect `status` before continuing. | Add an unpaired `workspace_ref`, use a bare `task_id` or workspace membership as resume authority, or guess a sibling. |
+| The same work resumes in a fresh host conversation with no held session | Call `start mode=create_or_attach` with the exact canonical `workspace_ref` + `external_ref` pair and no `session_id`. A fresh conversation is not automatically a new task. | Use a remote URL as `workspace_ref`, invent a task ID, or create an implicit second task. |
+| The same-task pair/session cannot be recovered, every prior write has a known terminal outcome, and the user declares a bounded remaining or repaired verification scope | Start one intentional sibling with `mode=create`, the same canonical workspace, and a different stable `external_ref`. Give it a fresh plan, evidence, checks, and native binding; begin with a bounded handoff note that the predecessor receipt remains separate and unresolved. | Silently replace the task, inherit findings/obligations/evidence, reuse cross-task IDs without an existing contract, or invent lineage. |
+| Recovery is exhausted but no new scope is declared, or a sibling would only make the old receipt look clean | Keep the old receipt and limitations, report the bounded failure, and wait for a supported continuation decision. | Loop through new siblings, move unresolved findings out of view, or present the latest sibling as whole-work closure. |
+| The ledger has immutable proof limits, writes are terminal, and a fresh review of the repaired/current state is wanted | Use one explicitly scoped verification sibling on a healthy authorized binding. Publish its current-state plan and obligations, collect new admissible evidence/checks, verify native mapping, and disclose the old receipt's limits. | Repeat work only to obtain a smaller finding count, drop outstanding acceptance criteria, or present the sibling as proof that the old task was resolved. |
+| Yoetz remains unavailable after its named one-time repair/retry, or returns a non-retryable error | Continue ordinary work only when the user/host permits it and disclose which subsequent work lacks Yoetz proof. Once healthy, use the sibling row only when a tracked continuation is still wanted and no write is ambiguous. | Claim a live task, finding, verdict, or receipt, or reset old findings by switching tasks. |
+
+An explicit sibling is a new ledger boundary. Its receipt covers only its newly declared scope and
+newly observed work. The predecessor's receipt, actionable findings, feedback obligations, and
+unresolved status remain intact and must be disclosed when the sibling is used for a repaired or
+remaining verification. A sibling does not inherit the predecessor's mapping, session, evidence
+IDs, or receipt authority unless a current contract explicitly permits that exact reuse. If the old
+task identity is unknown, say so rather than guessing or exposing a task ID. If an operation may
+have committed, its operation-recovery row always wins over the sibling row.
+
+“Not give up” means using this one bounded, explicit verification handoff after the known terminal
+boundary. It does not mean creating tasks until a receipt looks clean.
 
 Tell the user that Yoetz is being used, and claim activation only after `start` returns. If the
 optional service is unavailable, continue the task unless the user or host requires it; disclose
@@ -41,7 +74,7 @@ assignment, never a transcript. A delegate's summary is a claim, not proof.
 | `start` | Once per task, before substantive work. On resume (same or fresh conversation), `mode=create_or_attach` with the same `workspace_ref` + `external_ref` pair and no `session_id`; attach selectors are `session_id` or the ref pair, never bare `task_id`. When the host's session-start context names a task already mapped to this session, continue it with `mode=attach` and the `session_id` that context names instead of a new pair. |
 | `publish_work` | One batch per material transition, usually one to eight events; a batch admits up to 100, so keep one transition in one batch rather than splitting it. A normal session is a handful of batches, never one per file, tool call, or message. Every set-valued reference list must already be unique and in ascending ASCII order; a one-element dry-run subset cannot demonstrate that kernel rule. |
 | `status` | After resume, compaction, or delegate handoff, and before any completion claim. Not between routine tool calls. |
-| `check` | After publishing the completion claim and its evidence, and again after any material edit or new evidence. A readable response identifying a finding that check returned is not material change; a redacted or unreadable response requires a recheck. Also consider a check when you move between subtasks or phases — after publishing that transition's batch — not only at the completion claim. Choose the mode deliberately: `deterministic_only` is local and fast and catches record-hygiene gaps (stale ledger, digest-only evidence, open obligations) early; reserve semantic review for the claim unless the transition itself warrants it. A check with no new events since the last one adds nothing. |
+| `check` | After publishing the completion claim and its evidence, and again after any material edit or new evidence. A readable response identifying a finding that check returned is not material change; a redacted or unreadable response requires a recheck. Also consider a check when you move between subtasks or phases — after publishing that transition's batch — not only at the completion claim. Use `semantic_if_configured` only when review is known to be optional; select `semantic_required` when the user, effective policy, or named acceptance criterion requires independent semantic judgment; omit `mode` when relying on the configured default. Reserve `deterministic_only` for explicitly local/structural work or a deliberate no-egress choice and disclose `semantic_review_not_requested`; classify required review as unmet and preserve that requirement in later final checks. A check with no new events since the last one adds nothing. |
 | `respond` | Once per finding, at the result frontier of the check that returned it — not the finding's `subject_frontier`, which precedes the finding's own record. |
 | `receipt` | Once at the end, and again only if material state changed after the previous receipt. |
 
@@ -70,18 +103,29 @@ finding disposition, pending decisions, and coverage-bounded wording. `respond` 
 finding: only a later qualifying check of the repaired record may resolve it. Recheck after material
 changes or new evidence, not unchanged state. Request `receipt` last, then report what it supports.
 
+Before claiming feedback complete, put its obligation in a supported plan revision or exact
+next-version restatement; a stored or resolved obligation alone does not update effective scope.
+Include each material delivery outcome the user requested in the effective obligations, or state the
+narrower scope of the claim and receipt. Place the final receipt after the last material outcome it
+covers, and distinguish check input, check result, response-only records, and later observation
+appends using the returned facts.
+
 Continue authorized implementation and focused verification through completion. Distinguish
 completed work from an unmet required review; never silently substitute deterministic coverage
-for required semantic review. Describe local ledger writes separately from product-file changes.
+for required semantic review. If required review is unavailable or fails, report completed
+implementation/structural checks separately from the unmet requirement and do not claim overall
+completion. Describe local ledger writes separately from product-file changes.
 
 ## Errors and continuations
 
-Read the typed result before acting. Reuse the original `request_id` after timeout or reconnect;
-a timeout has unknown outcome. Use `status view=operation` to recover an operation rather than
-reading live storage. A `retryable: false` error is terminal except for its exact typed continuation:
-do not probe with new requests or other operations. Read [Recovery](coverage-and-receipts.md#recovery)
-only when an error, outage, or inherited unavailability requires it. Delegates inheriting
-`terminal_unavailable` make no Yoetz calls; only the coordinator performs a named repair.
+Read the typed result before acting. For a retryable read timeout or reconnect, issue a new read
+`request_id` with the same intent. For any write with an unknown outcome, use `status
+view=operation` and then replay the exact original body once with the original write `request_id`;
+a timeout does not authorize a fresh task. A `retryable: false` error is terminal except for its
+exact typed continuation: do not probe with new requests or other operations. Read
+[Recovery](coverage-and-receipts.md#recovery) only when an error, outage, or inherited
+unavailability requires it. Delegates inheriting `terminal_unavailable` make no Yoetz calls; only
+the coordinator performs a named repair.
 
 For `vault_initialization_required`, setup/settings changes, credential or vault operations,
 import, or a recommendation, read [Setup and consent](request-templates.md#setup-and-consent)

@@ -155,6 +155,25 @@ def test_check_descriptor_states_the_bounded_standing_policy() -> None:
     assert "installed route binding and privacy policy" in description
 
 
+def test_check_mode_cue_preserves_the_configured_default_and_final_requirement() -> None:
+    description = descriptor_for("check").description
+    assert "Omit mode to preserve the configured default" in description
+    assert "semantic_if_configured only when review is known to be optional" in description
+    assert "including subsequent final checks" in description
+    assert "Do not downgrade required review to finish" in description
+
+
+def test_closure_descriptors_require_the_recorded_resolution_and_receipt_counts() -> None:
+    assert "not returned is not resolved" in descriptor_for("check").description
+    for name in ("check", "status"):
+        assert "filter.include_resolved=true" in descriptor_for(name).description
+    assert "resolved=false means not returned but unproven" in descriptor_for("status").description
+    assert "actual actionable unresolved count" in descriptor_for("receipt").description
+    assert (
+        "Disposition older findings before the final check" in descriptor_for("respond").description
+    )
+
+
 def test_check_descriptor_gives_the_continuation_procedure() -> None:
     description = descriptor_for("check").description
 
