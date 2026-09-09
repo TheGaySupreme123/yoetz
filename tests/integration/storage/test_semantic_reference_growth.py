@@ -10,23 +10,28 @@ import pytest
 from builders.replay import replay_records
 from integration.storage.test_append_and_replay import command_from_records, memory_for, uuid_id
 from yoetz.application.semantic_case import bounded_case_envelope, build_semantic_case
-from yoetz.domain.events import ActionRecordedPayload, encode_payload
+from yoetz.domain.events import (
+    OBSERVATION_COORDINATOR_ACTOR_ID,
+    ActionRecordedPayload,
+    encode_payload,
+    is_observation_authored,
+)
 from yoetz.domain.privacy import (
     MAX_EGRESS_ENVELOPE_BYTES,
     ReviewContextProfile,
     ReviewSelectionPolicy,
 )
-from yoetz.domain.values import action_id, event_id, object_id
+from yoetz.domain.values import Actor, ActorType, action_id, actor_id, event_id, object_id
 from yoetz.kernel.deterministic_checks import CaseAvailabilityFacts, build_deterministic_case
-from yoetz.kernel.reducers import replay
-from yoetz.ports.ledger import AppendEntry
+from yoetz.kernel.projections import ProjectionState
+from yoetz.ports.ledger import AppendEntry, ProjectionView
 from yoetz.protocol.canonical import (
     JsonValue,
     canonical_digest,
     canonical_encode,
     strict_json_parse,
 )
-from yoetz.protocol.coverage import PublicationChannel, coverage_for_channel
+from yoetz.protocol.coverage import AuthorshipAssurance, PublicationChannel, coverage_for_channel
 
 
 @pytest.fixture
@@ -66,6 +71,11 @@ async def test_observation_history_no_longer_forces_full_reference_inventory() -
                         causal_parents=(),
                         payload=payload,
                     ),
+                    author=Actor(
+                        actor_id(OBSERVATION_COORDINATOR_ACTOR_ID),
+                        ActorType.HARNESS,
+                        AuthorshipAssurance.HARNESS_OBSERVED,
+                    ),
                     payload_object=ref,
                     plaintext_size=len(data),
                     publication_channel=PublicationChannel.HOOK_OBSERVED,
@@ -82,8 +92,12 @@ async def test_observation_history_no_longer_forces_full_reference_inventory() -
         )
         await ledger.append_batch(command)
     records = tuple([row async for row in ledger.load_events(base.session_id)])
-    projection = replay(records)
-    frozen = build_deterministic_case(projection, records, CaseAvailabilityFacts())
+    assert all(is_observation_authored(row) for row in records[4:])
+    snapshot = await ledger.load_projection(base.session_id, ProjectionView.CANDIDATE_FINDINGS)
+    assert snapshot is not None and type(snapshot.state) is ProjectionState
+    # Freeze through the public builder, retaining its full independent chain/projection replay.
+    # The append-built projection is already available; replaying it first would duplicate that.
+    frozen = build_deterministic_case(snapshot.state, records, CaseAvailabilityFacts())
     # The old irreducible reference array alone exceeded the unchanged whole-packet bound.
     assert (
         len(canonical_encode(cast(JsonValue, sorted(frozen.allowed_ids))))
