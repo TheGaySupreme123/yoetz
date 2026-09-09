@@ -56,6 +56,16 @@ becomes host-derived.
    complete managed-file inventory with sizes and SHA-256 digests. Agent Plugin JSON is never the
    input for a Claude, Cursor, or Codex native manifest; projections share only the plan.
 
+   Host-targeted skill entrypoints may differ to describe that host's invocation, context delivery,
+   and recovery, independently of carrier format. They are canonical packaged sources selected by
+   the owning renderer and included
+   in its source refs and digest-bound inventory. The five shared `guidance/` references remain
+   byte-identical across projections and own ledger, evidence, consent, and receipt semantics;
+   entrypoints must not fork those contracts. A generic portable export retains a neutral skill;
+   a Cursor-targeted portable artifact carries the Cursor skill. The neutral portable skill contains
+   no host-specific restart procedure. This clarification follows the maintainer's scoped personalization request
+   recorded on [#613](https://github.com/TheGaySupreme123/yoetz/issues/613#issuecomment-5608159518).
+
 3. **The upstream revision is pinned for vendoring.** The portable projection targets Agent Plugins
    specification 1.0.0 exactly. Its two canonical schemas are pinned for vendoring by URL and
    digest:

@@ -153,7 +153,7 @@ _MARKER_SCHEMA: Final = "yoetz.claude-code-marketplace-install/2"
 _LEGACY_MARKER_SCHEMAS: Final = frozenset({"yoetz.claude-code-marketplace-install/1"})
 _EXPORT_MARKER_NAME: Final = ".yoetz-claude-plugin-export.json"
 _EXPORT_MARKER_SCHEMA: Final = "yoetz.claude-code-plugin-export/1"
-_RENDERER_VERSION: Final = "claude-code-plugin/0.3.0"
+_RENDERER_VERSION: Final = "claude-code-plugin/0.4.0"
 _STAGE_PREFIX: Final = ".yoetz-claude-marketplace-stage-"
 _ROLLBACK_NAME: Final = ".yoetz-claude-marketplace-rollback"
 _MAX_FILE_BYTES: Final = 262_144
@@ -171,6 +171,7 @@ _GUIDANCE_NAMES: Final = (
     "request-templates.md",
     "workflow.md",
 )
+_SKILL_PATH: Final = "skills/claude-code/yoetz/SKILL.md"
 _YOETZ_SCOPED_TOOL_MATCHER: Final = (
     "^mcp__plugin_yoetz_yoetz__(" + "|".join(YOETZ_WORKFLOW_TOOL_NAMES) + ")$"
 )
@@ -806,7 +807,7 @@ def render_claude_code_plugin(
     members: dict[str, bytes] = {
         ".claude-plugin/plugin.json": canonical_encode(manifest),
         "hooks/hooks.json": _hooks_json(resolved_launcher, observation_profile=observation_profile),
-        "skills/yoetz/SKILL.md": resources.read_bytes("skills/portable/yoetz/SKILL.md"),
+        "skills/yoetz/SKILL.md": resources.read_bytes(_SKILL_PATH),
     }
     for name in _GUIDANCE_NAMES:
         members[f"skills/yoetz/references/{name}"] = resources.read_bytes(f"guidance/{name}")
@@ -835,7 +836,7 @@ def render_claude_code_plugin(
                     "guidance/publication-policy.md",
                     "guidance/request-templates.md",
                     "guidance/workflow.md",
-                    "skills/portable/yoetz/SKILL.md",
+                    _SKILL_PATH,
                 },
                 key=str.encode,
             )

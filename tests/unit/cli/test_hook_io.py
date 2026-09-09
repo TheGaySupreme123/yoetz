@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from pathlib import Path
 
 import pytest
 
@@ -139,6 +140,39 @@ def test_claude_context_is_bounded_by_the_shared_context_limit() -> None:
     assert claude_context_output("Stop", "x" * 2_001) == {
         "hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": "x" * 2_000}
     }
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "cursor"))
+def test_truncated_bootstrap_keeps_the_current_procedure_route(host: str) -> None:
+    """Exercise delivered hook payloads; full source presence misses the truncation bug."""
+    root = Path(__file__).resolve().parents[3]
+    instructions = (root / "guidance/agent-instructions.md").read_text(encoding="utf-8")
+    if host == "cursor":
+        rendered = cursor_context_output("sessionStart", instructions)
+        delivered = rendered["additional_context"]
+    else:
+        render = claude_context_output if host == "claude" else context_output
+        rendered = render("SessionStart", instructions)
+        specific = rendered["hookSpecificOutput"]
+        assert isinstance(specific, dict)
+        delivered = specific["additionalContext"]
+    assert isinstance(delivered, str)
+    assert len(delivered) <= 2_000
+    assert len(delivered) < len(instructions)
+    assert "yoetz://guidance/workflow.md" in delivered
+    assert "current" in delivered.lower()
+    assert "memory" in delivered.lower()
+
+
+def test_intake_cue_keeps_a_complete_workflow_uri_before_the_byte_limit() -> None:
+    from yoetz.cli.hooks import intake_cue_text
+
+    root = Path(__file__).resolve().parents[3]
+    cue = intake_cue_text(resource_root=root)
+    assert len(cue.encode("utf-8")) <= 512
+    assert "yoetz://guidance/workflow.md" in cue
+    assert "start" in cue
+    assert "material" in cue
 
 
 @pytest.mark.parametrize(

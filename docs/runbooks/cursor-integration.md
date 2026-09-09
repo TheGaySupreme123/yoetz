@@ -8,13 +8,33 @@ and receipts before `check`. Setup/consent, vault/credential operations, transcr
 recommendation decisions route to the corresponding sections of request templates only when
 needed. Already-read guidance need not be fetched again while present in context.
 
-Ordinary material claims use `semantic_if_configured`; `semantic_required` follows an explicit
-user requirement, effective policy, or named acceptance criterion requiring independent semantic
-judgment. Preserve required review and all host/disclosure approval boundaries. Installed guidance
-bytes alone prove neither activation nor semantic dispatch.
+Use `semantic_if_configured` only when semantic review is known to be optional; omit `mode` when
+relying on the configured default. Select `semantic_required` for an explicit user requirement,
+effective policy, or named acceptance criterion requiring independent semantic judgment. Preserve
+required review and all host/disclosure approval boundaries. Installed guidance bytes alone prove
+neither activation nor semantic dispatch.
 
-The portable skill labels Cursor-specific plugin status and full-restart recovery explicitly;
-apply that branch only for a Cursor activation mismatch, without changing privacy authority.
+Both Cursor renderers select `skills/cursor/yoetz/SKILL.md`; the standalone generic portable export
+retains its neutral entrypoint. Cursor's entrypoint respects the active Plan/Ask/Agent mode, separates
+a Cursor plan from a published Yoetz plan, and names distinct IDE and CLI tool-discovery surfaces.
+Full application restart remains conditional on the documented activation mismatch, without
+changing privacy authority.
+
+Design basis, checked 2026-09-09: Cursor's [skills guidance](https://cursor.com/docs/skills)
+uses descriptions for relevance and loads references progressively. Yoetz therefore keeps the
+material-work trigger in metadata and the long procedures in shared references. Cursor's
+[customization guidance](https://cursor.com/docs/customize-cursor) distinguishes skills for
+specialized workflows from persistent rules; no always-on rule or new plan-approval step is added.
+The [CLI mode guidance](https://cursor.com/docs/cli/using) informs the active-mode boundary;
+the [MCP guide](https://cursor.com/docs/mcp) informs tool discovery and host approval. These design
+choices do not promote an untested IDE/CLI version or establish native behavioral acceptance.
+
+Cursor's own [create-learning-path skill](https://github.com/cursor/plugins/blob/main/teaching/skills/create-learning-path/SKILL.md)
+and [compatibility skill](https://github.com/cursor/plugins/blob/main/agent-compatibility/skills/check-agent-compatibility/SKILL.md)
+in its official plugin repository use direct triggers, short workflows, relevant guardrails, and
+an explicit output contract. The Cursor Yoetz skill follows that structure. It keeps automatic
+selection enabled; examples of explicitly invoked orchestration skills do not justify making
+ordinary Yoetz activation manual-only.
 
 
 This runbook covers the current local Cursor IDE and Agent CLI implementation rows from issue #153. Operational
@@ -123,8 +143,10 @@ Cursor configuration root. File install is not live MCP runtime. `Developer: Rel
 leave a shared `mcp-process` helper on the previous route; fully quit that exact Cursor app, verify
 its processes exited, and relaunch with the same isolated profile. `yoetz integrate cursor plugin
 status` reports `mcp.runtime.activation` as `matched` or `full_restart_required` when a live scan
-is available. That is activation work, not installation proof. For CLI use the exact installed tree with `--plugin-dir`. Do not copy
-the skill to `.cursor/skills`, add a rule, or rely on `.agents/skills` as fallback evidence.
+is available. That is activation work, not installation proof. For CLI use the exact installed tree
+with `--plugin-dir`. Cursor also supports `.cursor/skills`, `.agents/skills`, and compatible host
+skill directories. Those are separate delivery paths: a copy or a project rule cannot serve as
+evidence that this plugin was discovered. Record the actual loaded source before claiming delivery.
 
 The current Cursor desktop host can still discover a user-local plugin under the regular shared
 `~/.cursor/plugins/local/yoetz` when launched with another user-data directory. Treat that as a
@@ -809,3 +831,39 @@ obligation rows: this profile may omit command text, in which case reconciliatio
 Only service-stamped, explicitly linked observations can support a match or mismatch. The optional
 CLI closure composer uses the same projected status inputs; it does not grant capture or egress.
 These shared regressions are synthetic contract evidence, not live-host certification.
+
+### Bounded workflow recovery examples (#613)
+
+These examples use the existing MCP operations on the pinned local Cursor IDE or Agent CLI cell.
+Replace placeholders with values returned by the current call or `sessionStart` context; do not
+reconstruct them from memory, a remote URL, or the live store.
+
+- **Read retry.** If a `status`, diagnostics, or `status view=operation` read times out, repeat the
+  same read intent with a new read `request_id`. Preserve its view, operation filter, cursor, and
+  limit. An unreadable read does not establish that an operation or task is absent.
+- **Ambiguous write.** If a `start` response is lost before session/writer IDs are returned,
+  replay the exact original `start` body once with the same request ID. Otherwise read
+  `status view=operation` with `filter.operation_request_id` set to the original write ID:
+  replay only `absent`; use stored `complete`; follow an exact typed continuation and required
+  approval before replaying `pending`. Retain and report pending without a continuation,
+  `quarantined`, or unknown. Never invent session/writer IDs or create a task to escape a write.
+- **Exact-session attach.** When `sessionStart` or recovery context provides a held `session_id`,
+  use that exact value as the `mode=attach` selector. Cursor's canonical workspace fence comes
+  from `workspace_roots`/`CURSOR_PROJECT_DIR`, not the plugin directory in `$PWD`; if the request
+  carries identity refs, include the canonical `workspace_ref` + `external_ref` pair together,
+  never `workspace_ref` alone. Use the returned successor `session_id` and `writer_id`, read
+  `status`, and continue only from that binding. A bare `task_id` is not an attach selector.
+- **Same-pair fresh conversation.** With no held session, call `start mode=create_or_attach` using
+  the exact canonical project root as `workspace_ref` and the same stable `external_ref` pair, with
+  no `session_id`. A remote URL is not a workspace identity, and a fresh Cursor conversation is
+  not an implicit second task.
+- **Explicit sibling handoff.** Use `start mode=create` only after same-task pair/session recovery
+  is exhausted, every earlier write has a known terminal outcome, the Cursor binding is healthy and
+  authorized, and the user has declared one bounded remaining or repaired verification scope. Keep
+  the canonical project root as `workspace_ref`, choose a different stable `external_ref` such as
+  `<work-item>-recovery-v1`, and bind the native mapping from the exact returned `start` result via
+  `afterMCPExecution`/`postToolUse`. Verify `mapping_present` and the returned task/session/writer,
+  then publish fresh plan, evidence, checks, and receipt for that scope. State that the predecessor
+  receipt, findings, obligations, evidence IDs, and unresolved status remain separate; the sibling
+  cannot make the predecessor look resolved. If no new scope exists, keep the old receipt and stop
+  instead of creating another sibling.

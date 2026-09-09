@@ -8,13 +8,33 @@ and receipts before `check`. Setup/consent, vault/credential operations, transcr
 recommendation decisions route to the corresponding sections of request templates only when
 needed. Already-read guidance need not be fetched again while present in context.
 
-Ordinary material claims use `semantic_if_configured`; `semantic_required` follows an explicit
-user requirement, effective policy, or named acceptance criterion requiring independent semantic
-judgment. Preserve required review and all host/disclosure approval boundaries. Installed guidance
-bytes alone prove neither activation nor semantic dispatch.
+Use `semantic_if_configured` only when semantic review is known to be optional; omit `mode` when
+relying on the configured default. Select `semantic_required` for an explicit user requirement,
+effective policy, or named acceptance criterion requiring independent semantic judgment. Preserve
+required review and all host/disclosure approval boundaries. Installed guidance bytes alone prove
+neither activation nor semantic dispatch.
 
-The portable skill's Cursor restart procedure applies only to Cursor. Claude Code agents follow
-Claude Code's own reported continuation and never quit or configure Cursor for a Claude outage.
+The native plugin selects `skills/claude-code/yoetz/SKILL.md`. Its entrypoint names
+`/yoetz:yoetz`, uses the declared MCP namespace, reads installed references on demand, and refreshes
+Yoetz status after Claude resume or compaction. `SessionStart` additional context is a bounded cue;
+replayed session context does not establish the current ledger frontier. Plugin replacement uses
+Claude's documented `/reload-plugins` or a new session, followed by loaded-root and digest checks.
+
+Design basis, checked 2026-09-09: Claude's [skills guidance](https://code.claude.com/docs/en/skills)
+recommends a use-case-first description and concise instructions with supporting references.
+Yoetz keeps this workflow in the conversation because a forked skill lacks that conversation's
+history. The [plugin guide](https://code.claude.com/docs/en/plugins) supplies the namespaced
+invocation; [hooks](https://code.claude.com/docs/en/hooks) and
+[sessions](https://code.claude.com/docs/en/sessions) explain the reload/resume context. Yoetz does
+not add `allowed-tools`, an automatic fork, or a new hook to personalize prose. The five shared
+references still own evidence, consent, and receipt semantics. These sources justify instruction
+design, not a new tested Claude version or native behavioral acceptance result.
+
+Anthropic's own [example skill](https://github.com/anthropics/claude-plugins-official/blob/main/plugins/example-plugin/skills/example-skill/SKILL.md)
+and [skill-development skill](https://github.com/anthropics/claude-code/blob/main/plugins/plugin-dev/skills/skill-development/SKILL.md)
+use focused activation descriptions, imperative procedures, and links to supporting files. The
+Claude Yoetz entrypoint follows those patterns and addresses Claude directly; it does not ask the
+agent to identify which host is reading it or carry another host's restart instructions.
 
 
 This runbook covers exactly one cell: Claude Code CLI `2.1.241` as a local process, project scope,
@@ -45,8 +65,9 @@ not redefine plugin components. The plugin manifest is authoritative and sets
 `defaultEnabled:false`. Every hook command and the plugin-owned `.mcp.json` entry launch the exact
 `yoetz` that rendered the plugin (absolute executable, or `<interpreter> -m yoetz`), recorded in the
 source marker; a bare PATH `yoetz` is never written, so the bridge, hooks, and service cannot come
-from different installations. Re-render (`update`) after moving or reinstalling Yoetz. Shared skill/reference bytes come from the same packaged sources as the
-portable and Codex/Cursor projections. Yoetz writes no credentials, endpoints, user config, ledger,
+from different installations. Re-render (`update`) after moving or reinstalling Yoetz. The native
+entrypoint and five shared references come from their canonical packaged sources; the references
+are byte-identical across host projections. Yoetz writes no credentials, endpoints, user config, ledger,
 vault, receipt, or provider state into the plugin, `${CLAUDE_PLUGIN_ROOT}`, or
 `${CLAUDE_PLUGIN_DATA}`.
 
@@ -619,3 +640,39 @@ obligation rows: this profile may omit command text, in which case reconciliatio
 Only service-stamped, explicitly linked observations can support a match or mismatch. The optional
 CLI closure composer uses the same projected status inputs; it does not grant capture or egress.
 These shared regressions are synthetic contract evidence, not live-host certification.
+
+### Bounded workflow recovery examples (#613)
+
+These examples use the existing MCP operations on the pinned local Claude Code cell. Replace
+placeholders with values returned by the current call or `SessionStart` context; do not reconstruct
+them from memory, `CLAUDE.md`, or the live store.
+
+- **Read retry.** If a `status`, diagnostics, or `status view=operation` read times out, repeat the
+  same read intent with a new read `request_id`. Preserve its view, operation filter, cursor, and
+  limit. An unreadable read is not evidence that the task or operation is absent.
+- **Ambiguous write.** If a `start` response is lost before session/writer IDs are returned,
+  replay the exact original `start` body once with the same request ID. Otherwise read
+  `status view=operation` with `filter.operation_request_id` set to the original write ID:
+  replay only `absent`; use stored `complete`; follow an exact typed continuation and required
+  approval before replaying `pending`. Retain and report pending without a continuation,
+  `quarantined`, or unknown. Never invent session/writer IDs or create a task to escape a write.
+- **Exact-session attach.** When the `SessionStart` context provides a held `session_id`, use that
+  exact value as the `mode=attach` selector. `${CLAUDE_PROJECT_DIR}` is the canonical workspace
+  fence supplied by the host context; if the request carries identity refs, include the canonical
+  `workspace_ref` + `external_ref` pair together, never `workspace_ref` alone. Use the returned
+  successor `session_id` and `writer_id`, read `status`, and continue only from that binding. A
+  bare `task_id` is not an attach selector.
+- **Same-pair fresh conversation.** With no held session, call `start mode=create_or_attach` using
+  the exact canonical `${CLAUDE_PROJECT_DIR}` value and the same stable `external_ref` pair, with no
+  `session_id`. A remote URL is not a workspace identity, and a fresh Claude conversation does not
+  authorize an implicit second task.
+- **Explicit sibling handoff.** Use `start mode=create` only after same-task pair/session recovery
+  is exhausted, every earlier write has a known terminal outcome, the Claude binding is healthy and
+  authorized, and the user has declared one bounded remaining or repaired verification scope. Keep
+  `${CLAUDE_PROJECT_DIR}` as `workspace_ref`, choose a different stable `external_ref` such as
+  `<work-item>-recovery-v1`, and let the exact returned `start` result pass through Claude's
+  `PostToolUse` binder. Verify the sibling's `mapping_present` and returned task/session/writer,
+  then publish fresh plan, evidence, checks, and receipt for that scope. State that the predecessor
+  receipt, findings, obligations, evidence IDs, and unresolved status remain separate; the sibling
+  cannot make the predecessor look resolved. If no new scope exists, keep the old receipt and stop
+  instead of creating another sibling.

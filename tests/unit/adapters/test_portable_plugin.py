@@ -231,6 +231,22 @@ def test_portable_tree_is_skills_only_and_guidance_is_byte_identical() -> None:
         assert tree[f"skills/yoetz/references/{name}"] == read_verified_resource(f"guidance/{name}")
 
 
+def test_portable_builder_defaults_to_the_neutral_skill() -> None:
+    default = build_portable_plugin_plan()
+    explicit = build_portable_plugin_plan(skill_host="portable")
+
+    assert default.members == explicit.members
+    assert default.plan.source_refs == explicit.plan.source_refs
+    assert default.artifact_digest == explicit.artifact_digest
+
+
+@pytest.mark.parametrize("skill_host", ["claude", "codex", "", None, 1])
+def test_portable_builder_rejects_unknown_skill_host(skill_host: object) -> None:
+    with pytest.raises(PluginArtifactError) as caught:
+        build_portable_plugin_plan(skill_host=cast(Any, skill_host))
+    assert caught.value.reason is PluginArtifactReason.SOURCE_INVALID
+
+
 @pytest.mark.parametrize(
     ("route_profile", "expected_args"),
     [

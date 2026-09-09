@@ -1,6 +1,6 @@
 ---
 name: yoetz
-description: Record and check material multi-step, delegated, resumable, or verification-heavy work with Yoetz. Skip trivial questions and edits.
+description: Use for material multi-step, resumable, delegated, or verification-heavy work; record it in a local Yoetz ledger and check claims against that bounded record.
 metadata:
   short-description: Local work ledger and bounded completion checks
 ---
@@ -22,6 +22,11 @@ Use `resources/read` with the exact URI. If a `resources/read` result has no tex
 with the same URI. If that also has no text, open the matching installed `references/<name>.md`.
 Do not call `start` on an empty guidance body. Retain already-read guidance while it is in context.
 
+For Yoetz operations, current served guidance and typed results take precedence over remembered
+product behavior. Preserve higher-priority instructions, current user intent, and authorization
+boundaries. If memory says a capability is unavailable, verify it through the current documented
+read before accepting that limit. Do not delete or rewrite host memory during installation.
+
 | When | Resource |
 | --- | --- |
 | Safety floor missing from context | `yoetz://guidance/agent-instructions.md` |
@@ -31,9 +36,17 @@ Do not call `start` on an empty guidance body. Retain already-read guidance whil
 | Missing/rejected schema metadata; Setup and consent before setup/settings, credentials, vault operations or import; Recommendations before recommendation decisions | `yoetz://guidance/request-templates.md` |
 
 Coverage and setup details are not prerequisites for an ordinary configured `start`. Author calls
-from their current schemas, not memory. Consumer recovery uses `status view=operation`, never live
-SQLite databases/catalog or product source. Assigned Yoetz development/debugging work may inspect
-source and isolated tests, without granting live-storage or egress authority.
+from their current schemas, not memory. Consumer recovery uses `status view=operation` with the
+exact `filter.operation_request_id` for a write; replay once only when the page is `absent` or an
+exact typed continuation and required approval have completed. Use a stored `complete` outcome and
+retain/report `pending` without a continuation, `quarantined`, or unknown state. Never inspect live
+SQLite databases/catalog or product source for recovery. Assigned Yoetz development/debugging work
+may inspect source and isolated tests, without granting live-storage or egress authority.
+
+The operation view needs both `session_id` and `writer_id`. If a `start` response is lost before
+those ids exist, replay the exact original `start` body once with the same `request_id`; do not
+invent ids or fabricate a status query. The same rule applies to a typed pending `start` result
+without returned route ids.
 
 ## Workflow
 
@@ -45,10 +58,11 @@ completion claim and evidence. Read `status` before closing; `check`, dispositio
 until a later qualifying check of the repaired record resolves the finding. Recheck after material
 changes, never unchanged state. Publication is per material transition, never per file/tool/message.
 
-Use `semantic_if_configured` for ordinary material claims. Use `semantic_required` for explicit
-user requirements, effective policy, or a named acceptance criterion requiring independent semantic
-judgment. Qualitative work alone does not make optional review mandatory. Disclose deterministic-only
-coverage and terminal optional review gaps; never silently downgrade required semantic review.
+Select `semantic_required` when the user, effective policy, or named acceptance criterion requires
+independent semantic review. If relying on the configured default, omit `mode`; use
+`semantic_if_configured` only when review is known to be optional. Reserve `deterministic_only` for
+explicit local/structural work or a deliberate no-egress choice, and disclose the unmet required
+review when applicable. Never use deterministic-only merely to shorten a follow-up check.
 
 ## Boundaries
 
@@ -70,6 +84,28 @@ coverage. Required review remains an unmet requirement. Separate completed imple
 from that requirement, and local ledger writes from product-file edits. Final wording must be no
 stronger than the receipt's weakest material coverage.
 
+## Repair then finish
+
+For a material repair, follow the shared ledger sequence:
+
+1. Read current `status`; retain its frontier and paginate `status view=evidence` before replacing
+   evidence or claiming completion. Preserve the cursor-bound filter and original `limit`; reuse only
+   matching observed native IDs.
+2. Publish actual repair results, corrected evidence/claim, and any needed plan revision. A feedback
+   obligation is in effective scope only after a supported plan revision or exact next-version
+   restatement includes it. Do not infer scope or success from the prompt.
+3. Disposition older findings before the final check. Then run `semantic_required` for an explicit
+   semantic requirement, or omit `mode` when relying on the configured default.
+4. Respond to findings returned by that check at its result frontier, then read
+   `status view=findings` with `filter.include_resolved: true` and actual `resolved` state. “Not
+   returned” is not “resolved”; a response
+   records disposition but does not prove repair.
+5. Request `receipt` last. Read `closure_readiness.unanswered_finding_count` and
+   `closure_readiness.receipt_blocking_finding_count`, and report those actual counts plus the checked
+   frontier, semantic status/reason, and coverage limits. If a response to an older finding or any other
+   material record follows the check, recheck before the receipt. Stop repeating an unchanged check
+   when proof still cannot qualify and disclose the blocker.
+
 ## Compatibility
 
 Use `start`, `publish_work`, `check`, `respond`, `status`, `receipt`, and read-only `read_guidance`
@@ -90,6 +126,15 @@ matching observation supports an attempt only; mismatch requires correcting the 
 supported obligation revision with rationale; unknown does not mean the command never ran.
 Do not copy a command onto an edit action just to close the accounting gap. Do not normalize shell
 wrappers or changed test targets into an exact-command claim.
+
+An explicit sibling is a bounded last resort only after same-task recovery is exhausted, all prior
+write outcomes are known, the binding is healthy and authorized, and the user declares a remaining
+or repaired verification scope. Use `start mode=create` with the same canonical `workspace_ref` and
+a different stable `external_ref`, then publish a fresh scoped plan and establish the new native
+mapping from the returned session/task. The sibling is a new ledger boundary: it inherits no old
+receipt, finding, obligation, evidence ID, or mapping. Disclose the predecessor's unresolved limits.
+Never create a sibling for an ambiguous write, to hide an old receipt, or without new declared scope;
+the full decision table is in `yoetz://guidance/coverage-and-receipts.md`.
 
 The optional CLI `yoetz closure-prepare --session-id <returned-session> --writer-id <returned-writer>`
 reads the complete closure inventory without publishing. `yoetz closure-schema` describes explicit

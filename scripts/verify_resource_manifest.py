@@ -1043,8 +1043,10 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         "application/schema+json",
         True,
     ),
+    ("skills/claude-code/yoetz/SKILL.md", "skill", "text/markdown", True),
     ("skills/codex/yoetz/SKILL.md", "skill", "text/markdown", True),
     ("skills/codex/yoetz/manifest.json", "compatibility_manifest", "application/json", True),
+    ("skills/cursor/yoetz/SKILL.md", "skill", "text/markdown", True),
     ("skills/portable/yoetz/SKILL.md", "skill", "text/markdown", True),
     (
         "support/agent-plugins/1.0.0/mcp.schema.json",

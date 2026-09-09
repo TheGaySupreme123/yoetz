@@ -289,8 +289,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:eaf8e22bb4111adb005e3922a1652e9a6ec03a6d7d4aee3a2e48b47f57f208f8",
-        "strict": "sha256:970ac9695ea53eee84656b6d144495bcd8ece6258004fdaf32469d1a078635fc",
+        "policy": "sha256:b1d39059ca2bac107287d243756e86a33fb1c4526ab64e51326aeeb9a6998b00",
+        "strict": "sha256:1cb4e2208fc5dc0b3579ed6187955788352cf4f7c68ffbb4884b1141347084ec",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -299,12 +299,11 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
         assert "yoetz://guidance/" in descriptor_for(name).description
     # The check descriptor carries the full mode decision rule, including semantic_required.
     check_description = descriptor_for("check").description
-    assert "semantic_if_configured for most material implementation" in check_description
-    assert (
-        "semantic_required when explicitly required by the user, effective verification policy"
-        in (check_description)
+    assert "semantic_if_configured only when review is known to be optional" in check_description
+    assert "semantic_required when the user, effective policy or acceptance requires it" in (
+        check_description
     )
-    assert "Omitting mode resolves through the configured verification policy" in check_description
+    assert "Omit mode to preserve the configured default" in check_description
     respond_description = descriptor_for("respond").description
     assert "result frontier of the check that returned it" in respond_description
     assert "not its subject_frontier" in respond_description
@@ -313,7 +312,7 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
         assert "does not publish to GitHub" in local_description
         assert "run a semantic evaluation" in local_description
     assert descriptor_for("start").description.startswith(
-        "Call for material multi-step, delegated, resumable, or verification-heavy work"
+        "First read yoetz://guidance/workflow.md."
     )
     # The two argument conventions a first-time caller cannot infer from prose alone. Both cost a
     # rejected start call in the 2026-07-30 dogfood before the descriptor named them.

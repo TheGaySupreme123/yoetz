@@ -1,8 +1,6 @@
 # When to use Yoetz
 
-Use Yoetz for material multi-step, delegated, resumable, or verification-heavy work. Call `start` before substantive work. Skip Yoetz for trivial questions or edits where the ceremony exceeds the integrity benefit.
-
-Cadence: `start` once, `publish_work` once per material transition, `check` after the completion claim, `receipt` last. Read `status` after a resume, compaction, or handoff before working again from memory. Never claim Yoetz is active until `start` returns.
+Use Yoetz for material multi-step, delegated, resumable, or verification-heavy work. Call `start` before substantive work. Skip Yoetz for trivial questions or edits where the ceremony exceeds the integrity benefit. Current served guidance and typed results outrank memory; verify `yoetz://guidance/workflow.md` before trusting memory again. Cadence: `start` once, `publish_work` once per material transition; `receipt` last. Never claim Yoetz is active until `start` returns.
 
 # What Yoetz is
 
@@ -15,6 +13,11 @@ Yoetz is not an enforcement system, observer, authorship proof, transcript recor
 # Guidance catalog
 
 Do not call `resources/list` or `list_mcp_resources` to find Yoetz guidance. The five `yoetz://guidance/` URIs under Read more are the complete catalog. A list failure is not a missing server and is not a reason to read product source. Read the named URI. If that body is empty, call `read_guidance` with the same URI. Only if that result is also empty, open the matching installed `references/<name>.md` copy.
+
+For Yoetz operations, current served guidance and typed results take precedence over remembered
+product behavior. Preserve higher-priority instructions, current user intent, and authorization
+boundaries. If memory says a capability is unavailable, verify it through the current documented
+read before accepting that limit. Do not delete or rewrite host memory during installation.
 
 # Essential boundaries
 
@@ -30,6 +33,12 @@ already-configured route. A host auto-review refusal is not a Yoetz result: Yoet
 `awaiting_human` is nonterminal. Preserve the exact request, show its continuation, and do not
 claim completion, request a receipt, or downgrade required review while approval is pending.
 Read coverage guidance before checking or handling either boundary.
+
+Select `semantic_required` when the user, effective policy, or named acceptance criterion requires
+independent semantic review. If relying on the configured default, omit `mode`; use
+`semantic_if_configured` only when review is known to be optional. Reserve `deterministic_only` for
+explicit local/structural work or a deliberate no-egress choice and disclose the unmet required
+review when applicable. Never use deterministic-only merely to shorten a follow-up check.
 
 Setup, imports, credential/vault operations, and recommendations require their exact authority
 procedure in request templates before acting. Recommendations are advisory. Generic task approval,
@@ -48,6 +57,12 @@ one permitted coordinator repair. Never run service lifecycle commands for `INTE
 result that did not name that command. If optional Yoetz is unavailable, continue authorized work
 and disclose missing ledger/check/receipt coverage; invent no state.
 
+Before material evidence or a completion claim, read `status` and paginate
+`view=evidence` at one frontier. Preserve the filter and original `limit` with every cursor; reuse
+only matching observed IDs. No MCP capture operation does not mean no native evidence exists, and
+one digest-only or clipped item does not make every item unavailable. A feedback obligation counts
+as complete only after a supported plan revision or exact next-version restatement includes it.
+
 # Read more
 
 Load only the resource needed for the current operation; retain it across calls while in context.
@@ -63,3 +78,16 @@ Load only the resource needed for the current operation; retain it across calls 
   Recommendations. These procedures are not prerequisites for ordinary configured workflow calls.
 
 Before evidence publication, paginate `status view=evidence`; reuse matching IDs with per-item limits.
+
+# Repair then finish
+
+Read current status and evidence first. Publish the real repair results, corrected claim/evidence,
+and any required plan revision. Resolve older finding responses before the final check. Choose
+`semantic_required` for an explicit requirement, otherwise omit `mode` when relying on the configured
+default. After the check, read `status view=findings` with `filter.include_resolved: true` and
+actual `resolved` state; “not returned” is
+not “resolved.” If a response to an older finding or other material record follows the check,
+check again before the
+receipt. Request `receipt` last and report its actual actionable unresolved count, checked frontier,
+semantic status/reason, and coverage limits. Stop repeating an unchanged check when proof still
+cannot qualify, and disclose the blocker.

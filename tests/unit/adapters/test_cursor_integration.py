@@ -100,7 +100,7 @@ def test_cursor_profile_exposes_only_supported_ide_and_cli_cells() -> None:
             assert fixture["proof_limits"] == ["metadata_only", "not_a_support_claim"]
 
 
-def test_portable_and_native_reuse_exact_skill_bytes_but_keep_manifests_disjoint(
+def test_portable_and_native_use_distinct_skill_entries_and_shared_guidance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # This fixture models a legacy ambient install. Keep the process isolated
@@ -122,7 +122,24 @@ def test_portable_and_native_reuse_exact_skill_bytes_but_keep_manifests_disjoint
     portable = render_cursor_plugin(PluginFormatProfile.AGENT_PLUGINS_1)
     native = render_cursor_plugin(PluginFormatProfile.CURSOR_PLUGIN_NATIVE)
 
-    assert portable.members["skills/yoetz/SKILL.md"] == native.members["skills/yoetz/SKILL.md"]
+    assert portable.members["skills/yoetz/SKILL.md"] == read_verified_resource(
+        "skills/cursor/yoetz/SKILL.md"
+    )
+    assert native.members["skills/yoetz/SKILL.md"] == read_verified_resource(
+        "skills/cursor/yoetz/SKILL.md"
+    )
+    for name in (
+        "agent-instructions.md",
+        "coverage-and-receipts.md",
+        "publication-policy.md",
+        "request-templates.md",
+        "workflow.md",
+    ):
+        assert (
+            portable.members[f"skills/yoetz/references/{name}"]
+            == native.members[f"skills/yoetz/references/{name}"]
+            == read_verified_resource(f"guidance/{name}")
+        )
     assert "plugin.json" in portable.members
     assert "hooks/hooks.json" not in portable.members
     assert ".cursor-plugin/plugin.json" not in portable.members
@@ -766,7 +783,7 @@ def test_safe_cursor_lifecycle_is_preview_bound_atomic_and_reversible(
     assert marker["yoetz_launcher"] == list(artifact.yoetz_launcher)
     assert marker["schema"] == "yoetz.cursor-plugin-install/3"
     assert marker["isolation_root"] is None
-    assert marker["renderer_version"] == "cursor-plugin/0.2.0"
+    assert marker["renderer_version"] == "cursor-plugin/0.3.0"
 
     status = status_cursor_plugin(target, artifact)
     assert status.state is PluginArtifactState.NATIVE_MANAGED

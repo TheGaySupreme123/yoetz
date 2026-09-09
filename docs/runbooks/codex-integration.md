@@ -8,14 +8,29 @@ and receipts before `check`. Setup/consent, vault/credential operations, transcr
 recommendation decisions route to the corresponding sections of request templates only when
 needed. Already-read guidance need not be fetched again while present in context.
 
-Ordinary material claims use `semantic_if_configured`; `semantic_required` follows an explicit
-user requirement, effective policy, or named acceptance criterion requiring independent semantic
-judgment. Preserve required review and all host/disclosure approval boundaries. Installed guidance
-bytes alone prove neither activation nor semantic dispatch.
+Use `semantic_if_configured` only when semantic review is known to be optional; omit `mode` when
+relying on the configured default. Select `semantic_required` for an explicit user requirement,
+effective policy, or named acceptance criterion requiring independent semantic judgment. Preserve
+required review and all host/disclosure approval boundaries. Installed guidance bytes alone prove
+neither activation nor semantic dispatch.
 
 The Codex skill routes to the existing five MCP guidance URIs with installed reference fallbacks.
 The server initializes only the safety floor. Consumer source-inspection restrictions do not
 prohibit developing or debugging Yoetz itself against isolated test state.
+
+The Codex entrypoint is written directly for Codex and selected by its installer. The other native
+installers select their own skills. Keep installed-source evidence separate from compatibility
+directory discovery; a project skill discovered elsewhere is not proof of this integration.
+
+Design basis, checked 2026-09-09: OpenAI's
+[Skill Creator](https://github.com/openai/codex/blob/main/codex-rs/skills/src/assets/samples/skill-creator/SKILL.md)
+assumes Codex is capable and recommends task-specific constraints, precise discovery metadata,
+and conditional references. Its
+[PR comment skill](https://github.com/openai/skills/blob/main/skills/.curated/gh-address-comments/SKILL.md)
+uses a short operational sequence and a helper for repetitive mechanics. Yoetz keeps its exact
+MCP read fallback and bounded closure composer because those address demonstrated authoring
+failures; generic host-identification instructions are unnecessary. The five protocol references
+retain one canonical owner and are copied into each installed skill.
 
 Cursor's explicit-start repair (issue #661) leaves Codex's lifecycle binder and hook subscription
 unchanged. [The official hooks reference](https://developers.openai.com/codex/hooks), checked
@@ -794,3 +809,38 @@ obligation rows: this profile may omit command text, in which case reconciliatio
 Only service-stamped, explicitly linked observations can support a match or mismatch. The optional
 CLI closure composer uses the same projected status inputs; it does not grant capture or egress.
 These shared regressions are synthetic contract evidence, not live-host certification.
+
+### Bounded workflow recovery examples (#613)
+
+These examples use the existing MCP operations and selectors on the local Codex cell. Replace
+placeholders with values returned by the current call or session-start context; do not reconstruct
+them from memory or from the live store.
+
+- **Read retry.** If a `status`, diagnostics, or `status view=operation` read times out, send the
+  same read intent with a new read `request_id`. Keep its view, operation filter, cursor, and limit
+  unchanged. An unreadable read does not establish that an operation or task is absent.
+- **Ambiguous write.** If a `start` response is lost before session/writer IDs are returned,
+  replay the exact original `start` body once with the same request ID. Otherwise read
+  `status view=operation` with `filter.operation_request_id` set to the original write ID:
+  replay only `absent`; use stored `complete`; follow an exact typed continuation and required
+  approval before replaying `pending`. Retain and report pending without a continuation,
+  `quarantined`, or unknown. Never invent session/writer IDs or create a task to escape a write.
+- **Exact-session attach.** When `SessionStart` or recovery context provides a held
+  `session_id`, use that exact value as the `mode=attach` selector. Codex's canonical repository
+  context supplies the workspace fence; if the request carries identity refs, include the
+  canonical `workspace_ref` + `external_ref` pair together, never `workspace_ref` alone. Use the
+  returned successor `session_id` and `writer_id`, then read `status` before continuing. A bare
+  `task_id` is not an attach selector.
+- **Same-pair fresh conversation.** With no held session, call `start mode=create_or_attach` using
+  the same exact canonical `workspace_ref` and stable `external_ref` pair, with no `session_id`.
+  A remote URL is not the workspace identity, and a fresh Codex conversation is not an implicit
+  second task.
+- **Explicit sibling handoff.** Use `start mode=create` only after same-task pair/session recovery
+  is exhausted, every earlier write has a known terminal outcome, the binding is healthy and
+  authorized, and the user has declared one bounded remaining or repaired verification scope. Keep
+  the same canonical `workspace_ref`, choose one different stable `external_ref` such as
+  `<work-item>-recovery-v1`, and establish the Codex mapping from the returned task/session/writer.
+  Publish a fresh plan, evidence, checks, and receipt for that scope. The handoff must say that the
+  predecessor receipt, findings, obligations, evidence IDs, and unresolved status remain separate;
+  the sibling cannot make the predecessor look resolved. If no new scope exists, keep the old
+  receipt and stop instead of creating another sibling.
