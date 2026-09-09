@@ -602,9 +602,9 @@ async def test_expired_resumed_attempt_preserves_dispatch_uncertainty(
     assert getattr(privacy, "calls") == calls
     job = await adapter.load_semantic_job(frozen.lease.writer_id, frozen.lease.operation_id)
     assert job is not None and job.state == "failed"
-    assert job.terminal_code is (
-        SemanticReason.OUTCOME_UNKNOWN if uncertain else SemanticReason.PROVIDER_TIMEOUT
-    )
+    # A task-local wait row cannot prove that admission was never consumed.
+    # Both resumed states preserve uncertainty without authorizing another dispatch.
+    assert job.terminal_code is SemanticReason.OUTCOME_UNKNOWN
     assert result.operation_lease is not None
     recovered = await evaluator(FrozenCase(frozen.case, result.operation_lease), (), runtime)
     assert recovered.reason is SemanticReason.RECEIPT_PERSISTENCE_UNKNOWN

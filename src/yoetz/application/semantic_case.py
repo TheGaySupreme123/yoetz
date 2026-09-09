@@ -1845,6 +1845,78 @@ def build_semantic_case(
         omissions=tuple(omissions),
     )
 
+    # The deterministic case owns the complete frontier. The reviewer needs the dependency
+    # closure of its selected packet, not every unrelated logical/source ID in that frontier.
+    required_refs: set[str] = set(local_check_refs) | {
+        str(ref) for ref in projection.findings if str(ref) in allowed
+    }
+
+    def retain(value: JsonValue) -> None:
+        if isinstance(value, str):
+            if value in allowed:
+                required_refs.add(value)
+        elif isinstance(value, dict):
+            for child in value.values():
+                retain(child)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                retain(child)
+
+    retain(_packet_to_json(packet))
+    retain(cast(JsonValue, _item_catalog_json(items)))
+    for item in items:
+        if item.section == "excerpt":
+            continue
+        # Canonical payload/structural items carry typed dependencies beyond their short
+        # linked_subject_refs catalog. Prose and captured byte excerpts are not parsed as IDs.
+        try:
+            content = strict_json_parse(item.content)
+        except ValueError:
+            continue
+        retain(content)
+    # Follow typed recorded payload dependencies to a fixed point. This keeps support,
+    # limitations, availability and provenance connected without emitting unselected prose.
+    records_by_ref = {
+        str(ref): record
+        for family in (
+            projection.obligations,
+            projection.actions,
+            projection.results,
+            projection.evidence,
+            projection.claims,
+            projection.findings,
+        )
+        for ref, record in family.items()
+    }
+    visited: set[str] = set()
+    while pending := required_refs - visited:
+        for ref in sorted(pending):
+            visited.add(ref)
+            record = records_by_ref.get(ref)
+            if record is None:
+                continue
+            if str(record.source_event_id) in allowed:
+                required_refs.add(str(record.source_event_id))
+            if record.payload is not None and not record.redacted:
+                retain(cast(JsonValue, encode_payload(record.payload)))
+    selected_frontier_refs = frozenset(required_refs & frontier_refs)
+    omitted_reference_count = len(frontier_refs - selected_frontier_refs)
+    frontier_refs = selected_frontier_refs
+    if omitted_reference_count:
+        packet = replace(
+            packet,
+            coverage=replace(
+                packet.coverage,
+                ledger_freshness=LedgerFreshness.PARTIAL,
+                known_gaps=tuple(
+                    sorted(
+                        {*packet.coverage.known_gaps, "semantic_reference_scope_reduced"},
+                        key=str.encode,
+                    )
+                ),
+            ),
+        )
+
     selection_digest = review_selection_digest(selection)
     # Bind assessments/omissions/packet lists into the digest so provenance covers the full case.
     case_digest = canonical_digest(
@@ -1853,6 +1925,7 @@ def build_semantic_case(
             {
                 "dependency_digest": dependency_digest,
                 "frontier_refs": sorted(frontier_refs),
+                "omitted_reference_count": omitted_reference_count,
                 "items": [
                     {
                         "content_digest": item.content_digest,
@@ -1924,6 +1997,7 @@ def build_semantic_case(
         items=tuple(items),
         question_set=_QUESTION_SET,
         case_digest=case_digest,
+        omitted_reference_count=omitted_reference_count,
     )
 
 
@@ -2064,6 +2138,7 @@ def _case_envelope_json(case: SemanticCase) -> dict[str, JsonValue]:
             "case_id": case.case_id,
             "dependency_digest": case.dependency_digest,
             "frontier_refs": sorted(case.frontier_refs),
+            "omitted_reference_count": str(case.omitted_reference_count),
             "item_catalog": _item_catalog_json(case.items),
             "local_check_refs": sorted(case.local_check_refs),
             "policy_id": case.policy_id,
@@ -2306,6 +2381,7 @@ def assemble_filtered_review_packet(
             # are not citable at all. Naming the accept set explicitly is what lets a reviewer cite
             # correctly instead of guessing and having the challenge dropped.
             "citable_refs": sorted(frontier_refs | local_check_refs),
+            "omitted_reference_count": envelope.get("omitted_reference_count", "0"),
             "selection_accounting": cast(JsonValue, accounting),
             "dependency_digest": envelope.get("dependency_digest", ""),
             "frontier_refs": sorted(frontier_refs),

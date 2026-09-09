@@ -1961,3 +1961,85 @@ async def test_repair_shares_the_physical_budget_with_transient_retries() -> Non
     assert (status, reason) == (SemanticStatus.SUCCEEDED, SemanticReason.SEMANTIC_COMPLETED)
     assert accounting.selected_attempt_id == _ATT3
     assert accounting.attempted_count == 3
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "stage", ["claim", "dispatch_entered", "response_persistence", "result_commit"]
+)
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_exception_stage_survives_cleanup_and_is_request_joined(
+    stage: str, cleanup_fails: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yoetz.observability.diagnostics import lookup_diagnostic_records
+
+    lease = _lease()
+    job = SemanticJobRecord(
+        _JOB,
+        _WRITER,
+        _OP,
+        _CASE,
+        _case_ref(),
+        "queued",
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    ledger = _FakeLedger(job, lease)
+    dispatch_count = 0
+
+    async def fail(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("PRIVATE_SENTINEL_payload_must_never_be_logged")
+
+    if stage == "claim":
+        monkeypatch.setattr(ledger, "claim_semantic_job", fail)
+    if stage == "result_commit":
+        monkeypatch.setattr(ledger, "select_attempt", fail)
+    if cleanup_fails:
+        monkeypatch.setattr(ledger, "fail_semantic_job", fail)
+        if stage == "dispatch_entered":
+            monkeypatch.setattr(ledger, "record_attempt_outcome", fail)
+
+    async def dispatch(handle: SemanticAttemptHandle, deadline: Deadline) -> _Eval:
+        nonlocal dispatch_count
+        dispatch_count += 1
+        if stage == "dispatch_entered":
+            raise ValueError("PRIVATE_SENTINEL_provider_outcome_uncertain")
+        return _Eval(SemanticStatus.SUCCEEDED, SemanticReason.SEMANTIC_COMPLETED)
+
+    async def publish(handle: SemanticAttemptHandle, evaluation: object) -> ObjectRef:
+        if stage == "response_persistence":
+            raise RuntimeError("PRIVATE_SENTINEL_response")
+        return _response_ref()
+
+    async def run() -> object:
+        return await run_durable_semantic_attempts(
+            ledger=ledger,
+            lease=lease,
+            job=job,
+            deadline=Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1000.0),
+            max_retries=2,
+            now_monotonic=lambda: 0.0,
+            dispatch=dispatch,
+            publish_success_response=publish,
+            build_final=lambda status, reason, evaluation, accounting: (status, reason),
+        )
+
+    if stage in {"response_persistence", "result_commit"}:
+        with pytest.raises(RuntimeError):
+            await run()
+    else:
+        assert await run() == (SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE)
+    records = lookup_diagnostic_records(request_id=_OP)
+    assert any(row["operation"] == f"semantic_attempt_{stage}_failed" for row in records)
+    assert all(row["request_id"] == _OP for row in records)
+    assert "PRIVATE_SENTINEL" not in repr(records)
+    assert dispatch_count == (0 if stage == "claim" else 1)
+    if cleanup_fails and stage in {"claim", "dispatch_entered"}:
+        assert len(records) >= 2

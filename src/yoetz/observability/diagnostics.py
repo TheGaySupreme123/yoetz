@@ -106,13 +106,19 @@ def append_diagnostic_record(
 
 
 def lookup_diagnostic_records(
-    correlation_id: str,
+    correlation_id: str | None = None,
     *,
+    request_id: str | None = None,
     root: Path | None = None,
 ) -> tuple[Mapping[str, object], ...]:
     """Return every durable record matching one correlation id, oldest first."""
 
-    validate_id(IdKind.CORRELATION, correlation_id)
+    if (correlation_id is None) == (request_id is None):
+        raise ValueError("diagnostic_selector_invalid")
+    if correlation_id is not None:
+        validate_id(IdKind.CORRELATION, correlation_id)
+    if request_id is not None:
+        validate_id(IdKind.REQUEST, request_id)
     path = diagnostic_log_path(root=root)
     if not path.is_file() or path.is_symlink():
         return ()
@@ -129,7 +135,9 @@ def lookup_diagnostic_records(
             if type(parsed) is not dict:
                 continue
             source = cast(dict[str, object], parsed)
-            if source.get("correlation_id") != correlation_id:
+            if correlation_id is not None and source.get("correlation_id") != correlation_id:
+                continue
+            if request_id is not None and source.get("request_id") != request_id:
                 continue
             matches.append(_public_view(source))
     return tuple(matches)

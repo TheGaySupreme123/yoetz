@@ -1223,3 +1223,87 @@ async def test_only_explicit_trusted_missing_authority_advertises_repository_set
     assert result.continuation is None
     assert provider_resolutions == 0
     assert privacy.calls == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "adapter_factory", (memory_adapter, sqlite_adapter), ids=("memory", "sqlite")
+)
+async def test_required_packet_capacity_refuses_before_job_and_provider(
+    adapter_factory: Callable[[object], MemoryLedgerAdapter | SqliteLedger],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.application.semantic_case as semantic_case_module
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    monkeypatch.setattr(semantic_case_module, "MAX_EGRESS_ENVELOPE_BYTES", 1)
+    adapter = adapter_factory(append_command())
+    frozen, runtime = await _durable_semantic_case(adapter)
+    privacy = _Privacy(task_id=runtime.task_id)
+    evaluator = cast(
+        _DurableSemanticEvaluator,
+        _evaluator(
+            privacy,
+            lambda: _PROVIDER,
+            _route_for(runtime.task_id, runtime.session_id),
+        ),
+    )
+    result = await evaluator(frozen, (), runtime)
+    assert (result.status, result.reason) == (
+        SemanticStatus.FAILED,
+        SemanticReason.CASE_CAPACITY_EXCEEDED,
+    )
+    assert result.provenance is None
+    assert result.attempt_accounting is None
+    assert privacy.calls == privacy.resume_calls == 0
+    assert await adapter.load_semantic_job(runtime.writer_id or "", _REQUEST) is None
+    _assert_record(
+        tmp_path,
+        "semantic_not_dispatched_case_envelope_unbounded",
+        SemanticReason.CASE_CAPACITY_EXCEEDED,
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stage", ["privacy_dispatch_entered", "response_mapping"])
+async def test_dispatch_and_mapping_failures_keep_original_check_join(
+    stage: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yoetz.observability.semantic_context import semantic_check_request
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    adapter = memory_adapter(append_command())
+    frozen, runtime = await _durable_semantic_case(adapter)
+    privacy = _Privacy(task_id=runtime.task_id)
+
+    async def failed_dispatch(candidate: object, deadline: object) -> object:
+        assert semantic_check_request.get() == _REQUEST
+        raise RuntimeError("PRIVATE_SENTINEL_case_contents")
+
+    def failed_mapping(*args: object, **kwargs: object) -> object:
+        raise ValueError("PRIVATE_SENTINEL_provider_response")
+
+    if stage == "privacy_dispatch_entered":
+        monkeypatch.setattr(privacy, "evaluate_semantic", failed_dispatch)
+    else:
+        monkeypatch.setattr(ready_composition_module, "_map_egress_to_final", failed_mapping)
+    evaluator = cast(
+        _DurableSemanticEvaluator,
+        _evaluator(
+            privacy,
+            lambda: _PROVIDER,
+            _route_for(runtime.task_id, runtime.session_id),
+        ),
+    )
+    result = await evaluator(frozen, (), runtime)
+    assert (result.status, result.reason) == (
+        SemanticStatus.FAILED,
+        SemanticReason.COORDINATOR_FAILURE,
+    )
+    assert result.provenance is None
+    rows = _records(tmp_path)
+    assert any(row["operation"] == f"semantic_attempt_{stage}_failed" for row in rows)
+    assert all(row["request_id"] == _REQUEST for row in rows)
+    assert "PRIVATE_SENTINEL" not in repr(rows)
+    assert semantic_check_request.get() is None

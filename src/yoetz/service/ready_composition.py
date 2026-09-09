@@ -168,6 +168,7 @@ from yoetz.observability.logging import (
     record_bounded_event_without_raising,
     record_unexpected_exception_without_raising,
 )
+from yoetz.observability.semantic_context import semantic_check_request
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.control import ControlError, ControlMethod
 from yoetz.ports.diagnostics import DiagnosticsPort, RuntimeCapability, StartupCheckResult
@@ -2525,6 +2526,7 @@ def _privacy_gated_semantic_evaluator(
         # an unbound name there would turn a reportable failure into a second one.
         withheld: tuple[str, ...] = ()
         over_item_limit = False
+        reference_scope_reduced = False
 
         def _on_lease_renewed(renewed: object) -> None:
             assert type(renewed) is _OpLease
@@ -2789,6 +2791,7 @@ def _privacy_gated_semantic_evaluator(
                 )
             # The builder folds the gap into the packet coverage the reviewer sees; the check
             # result is a separate coverage fold, so carry the fact rather than re-deriving it.
+            reference_scope_reduced = semantic_case.omitted_reference_count > 0
             over_item_limit = (
                 SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP
                 in semantic_case.packet.coverage.known_gaps
@@ -2839,6 +2842,7 @@ def _privacy_gated_semantic_evaluator(
                 return replace(
                     _map_egress_to_final(result, ids),
                     case_content_over_item_limit=over_item_limit,
+                    case_reference_scope_reduced=reference_scope_reduced,
                 )
 
             # Build the packet before anything durable exists. A packet that cannot be built is a
@@ -2856,15 +2860,16 @@ def _privacy_gated_semantic_evaluator(
                 record_bounded_event_without_raising(
                     component="semantic_composition",
                     operation="semantic_not_dispatched_case_envelope_unbounded",
-                    reason=SemanticReason.COORDINATOR_FAILURE.value,
+                    reason=SemanticReason.CASE_CAPACITY_EXCEEDED.value,
                     request_id=frozen.lease.operation_id,
                 )
                 return FinalSemanticEvaluation(
                     SemanticStatus.FAILED,
-                    SemanticReason.COORDINATOR_FAILURE,
+                    SemanticReason.CASE_CAPACITY_EXCEEDED,
                     operation_lease=current_lease[0],
                     withheld_review_categories=withheld,
                     case_content_over_item_limit=over_item_limit,
+                    case_reference_scope_reduced=reference_scope_reduced,
                 )
 
             # One durable semantic job per check: create/recover after freeze, before dispatch.
@@ -2956,69 +2961,85 @@ def _privacy_gated_semantic_evaluator(
                     from yoetz.ports.ledger import SemanticAttemptHandle as _Handle
 
                     assert type(handle) is _Handle
-                    # The local observation store is the authority for retained
-                    # content. Its generation must still be current after all
-                    # object resolution and before candidate bytes can enter the
-                    # privacy coordinator's evaluate/resume path.
-                    if not await _captured_content_fence_current():
-                        return FinalSemanticEvaluation(
-                            SemanticStatus.BLOCKED_BY_POLICY,
-                            SemanticReason.SCOPE_NOT_AUTHORIZED,
-                        )
-                    # A newly claimed attempt gets a fresh request identity. A reclaimed started
-                    # attempt deliberately keeps its original identity so the privacy audit can
-                    # prove whether it was pre-admission or already consumed before replay.
-                    candidate = semantic_case_to_candidate_context(
-                        semantic_case,
-                        request_id=handle.provider_request_id,
-                        scope=scope,
-                        provider_binding=binding,
-                    )
-                    wait = await runtime.ledger.load_disclosure_wait(
-                        handle.writer_id, handle.operation_id
-                    )
-                    if not await _captured_content_fence_current():
-                        return FinalSemanticEvaluation(
-                            SemanticStatus.BLOCKED_BY_POLICY,
-                            SemanticReason.SCOPE_NOT_AUTHORIZED,
-                        )
-                    if type(privacy) is PrivacyCoordinator:
-                        recovered = await privacy.recover_started_attempt(
-                            handle.provider_request_id,
-                            semantic_case.case_digest,
-                            attempt_deadline,
-                            dispatch_guard=_captured_content_fence_current,
-                        )
-                        if recovered is not None:
-                            return _map_egress_to_final(
-                                recovered,
-                                ids,
-                                attempt_id=handle.attempt_id,
-                                operation_request_id=frozen.lease.operation_id,
+                    diagnostic_token = semantic_check_request.set(frozen.lease.operation_id)
+                    stage = "privacy_admission"
+                    try:
+                        # The local observation store is the authority for retained
+                        # content. Its generation must still be current after all
+                        # object resolution and before candidate bytes can enter the
+                        # privacy coordinator's evaluate/resume path.
+                        if not await _captured_content_fence_current():
+                            return FinalSemanticEvaluation(
+                                SemanticStatus.BLOCKED_BY_POLICY,
+                                SemanticReason.SCOPE_NOT_AUTHORIZED,
                             )
-                    if (
-                        wait is not None
-                        and wait.job_id == handle.job_id
-                        and wait.attempt_id == handle.attempt_id
-                        and wait.state == "awaiting"
-                    ):
-                        # Exact replay after a trusted local decision resumes the
-                        # already-prepared proposal. Starting the semantic pipeline again would
-                        # mint a replacement proposal and could never observe the decision
-                        # bound to this attempt.
-                        result = await _resume_with_fence(
-                            handle.provider_request_id,
-                            semantic_case.case_digest,
-                            attempt_deadline,
+                        # A newly claimed attempt gets a fresh request identity. A reclaimed started
+                        # attempt deliberately keeps its original identity so the privacy audit can
+                        # prove whether it was pre-admission or already consumed before replay.
+                        candidate = semantic_case_to_candidate_context(
+                            semantic_case,
+                            request_id=handle.provider_request_id,
+                            scope=scope,
+                            provider_binding=binding,
                         )
-                    else:
-                        result = await _evaluate_with_fence(candidate, attempt_deadline)
-                    return _map_egress_to_final(
-                        result,
-                        ids,
-                        attempt_id=handle.attempt_id,
-                        operation_request_id=frozen.lease.operation_id,
-                    )
+                        wait = await runtime.ledger.load_disclosure_wait(
+                            handle.writer_id, handle.operation_id
+                        )
+                        if not await _captured_content_fence_current():
+                            return FinalSemanticEvaluation(
+                                SemanticStatus.BLOCKED_BY_POLICY,
+                                SemanticReason.SCOPE_NOT_AUTHORIZED,
+                            )
+                        stage = "privacy_dispatch_entered"
+                        if type(privacy) is PrivacyCoordinator:
+                            recovered = await privacy.recover_started_attempt(
+                                handle.provider_request_id,
+                                semantic_case.case_digest,
+                                attempt_deadline,
+                                dispatch_guard=_captured_content_fence_current,
+                            )
+                            if recovered is not None:
+                                stage = "response_mapping"
+                                return _map_egress_to_final(
+                                    recovered,
+                                    ids,
+                                    attempt_id=handle.attempt_id,
+                                    operation_request_id=frozen.lease.operation_id,
+                                )
+                        if (
+                            wait is not None
+                            and wait.job_id == handle.job_id
+                            and wait.attempt_id == handle.attempt_id
+                            and wait.state == "awaiting"
+                        ):
+                            # Exact replay after a trusted local decision resumes the
+                            # already-prepared proposal. Starting the semantic pipeline again would
+                            # mint a replacement proposal and could never observe the decision
+                            # bound to this attempt.
+                            result = await _resume_with_fence(
+                                handle.provider_request_id,
+                                semantic_case.case_digest,
+                                attempt_deadline,
+                            )
+                        else:
+                            result = await _evaluate_with_fence(candidate, attempt_deadline)
+                        stage = "response_mapping"
+                        return _map_egress_to_final(
+                            result,
+                            ids,
+                            attempt_id=handle.attempt_id,
+                            operation_request_id=frozen.lease.operation_id,
+                        )
+                    except BaseException as exc:
+                        record_unexpected_exception_without_raising(
+                            exc,
+                            component="semantic_composition",
+                            operation=f"semantic_attempt_{stage}_failed",
+                            request_id=frozen.lease.operation_id,
+                        )
+                        raise
+                    finally:
+                        semantic_check_request.reset(diagnostic_token)
 
                 return _dispatch
 
@@ -3113,6 +3134,7 @@ def _privacy_gated_semantic_evaluator(
                         operation_lease=current_lease[0],
                         withheld_review_categories=withheld,
                         case_content_over_item_limit=over_item_limit,
+                        case_reference_scope_reduced=reference_scope_reduced,
                     )
                 return FinalSemanticEvaluation(
                     status,
@@ -3123,6 +3145,7 @@ def _privacy_gated_semantic_evaluator(
                     operation_lease=current_lease[0],
                     withheld_review_categories=withheld,
                     case_content_over_item_limit=over_item_limit,
+                    case_reference_scope_reduced=reference_scope_reduced,
                     continuation=continuation,
                 )
 
@@ -3166,6 +3189,7 @@ def _privacy_gated_semantic_evaluator(
                 operation_lease=current_lease[0],
                 withheld_review_categories=withheld,
                 case_content_over_item_limit=over_item_limit,
+                case_reference_scope_reduced=reference_scope_reduced,
             )
 
     return _evaluate

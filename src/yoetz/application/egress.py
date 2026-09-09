@@ -48,6 +48,7 @@ from yoetz.domain.privacy import (
     ReceiptTransformations,
 )
 from yoetz.observability.logging import record_unexpected_exception_without_raising
+from yoetz.observability.semantic_context import semantic_check_request
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.privacy import (
@@ -1339,7 +1340,13 @@ class PrivacyCoordinator:
                 )
             try:
                 result = await self._gateway.dispatch_local_semantic(local_case, deadline)
-            except Exception:
+            except Exception as exc:
+                record_unexpected_exception_without_raising(
+                    exc,
+                    component="semantic_provider",
+                    operation="semantic_provider_invocation_failed",
+                    request_id=semantic_check_request.get() or candidate.request_id,
+                )
                 return SemanticEgressBlocked(
                     candidate.request_id,
                     PrivacyOutcome.TRANSPORT_FAILED,
@@ -1430,7 +1437,13 @@ class PrivacyCoordinator:
             )
         try:
             result = await self._gateway.dispatch_external_semantic(case, authorization, deadline)
-        except Exception:
+        except Exception as exc:
+            record_unexpected_exception_without_raising(
+                exc,
+                component="semantic_provider",
+                operation="semantic_provider_invocation_failed",
+                request_id=semantic_check_request.get() or candidate.request_id,
+            )
             return SemanticEgressBlocked(
                 candidate.request_id,
                 PrivacyOutcome.TRANSPORT_FAILED,

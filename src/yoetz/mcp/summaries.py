@@ -412,6 +412,10 @@ def summary_for_check(envelope: object) -> str:
             f"Check verdict: {verdict}; findings returned: {findings}; suppressed: {suppressed}; "
         )
     suffix = f"semantic status/reason: {status}/{reason}; {_frontier_clause(source)}."
+    if reason == "case_capacity_exceeded":
+        suffix += " No provider attempt; narrow claim/obligation scope for a new check."
+    elif reason == "coordinator_failure":
+        suffix += " Inspect service diagnostics by this check request ID; provider outcome may be unknown."
     clause = _finding_identity_clause(
         source,
         byte_budget=_MAX_SUMMARY_BYTES - len((prefix + suffix).encode("ascii")),

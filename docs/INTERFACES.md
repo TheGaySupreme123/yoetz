@@ -665,7 +665,7 @@ Every status is paired with one required closed `SemanticReason`, never prose or
 `provider_rate_limited`, `provider_quota_exhausted`, `retry_budget_exhausted`,
 `audit_reservation_unavailable`, `receipt_persistence_unknown`, `deadline_authority_lost`,
 `lease_authority_lost`, `frontier_changed`, `dependency_changed`, `route_semantic_ceiling`,
-`coordinator_failure`. `route_semantic_ceiling` is paired with `blocked_by_policy` when a strict
+`case_capacity_exceeded`, `coordinator_failure`. `route_semantic_ceiling` is paired with `blocked_by_policy` when a strict
 MCP process receives a semantic check request; it is a route-local ceiling, not a durable-policy
 decision.
 `protocol/models.py` owns both enum objects, the immutable exhaustive status/reason relation, and
@@ -2756,7 +2756,22 @@ events. `structural` emits only event identity/order/digest/visibility as
 scanned, authorized, and receipted; the frozen slice grants no egress authority.
 Its reference allowlist is the union of `frontier_refs` (IDs present at frozen frontier F) and
 `local_check_refs` (new deterministic finding IDs already pinned in this check's durable local
-result); both sets and their union are case-digest inputs.
+result); both sets and their union are case-digest inputs. The semantic `frontier_refs` set is the
+dependency closure of retained packet metadata, canonical payload items, recorded findings, and
+their typed recorded dependencies/source-event identities. It may be smaller than the deterministic
+case's complete allowlist. `omitted_reference_count` counts the excluded frontier IDs, is bound into
+the case digest, and travels as a canonical integer string in the envelope and assembled packet.
+`semantic_reference_scope_reduced` marks the packet, check, status and receipt coverage as partial;
+selection grants no additional content/disclosure authority. Captured prose is not scanned to
+invent structural dependencies. The complete deterministic case and its integrity checks remain
+unchanged.
+
+If the retained required structure still exceeds 131,072 bytes, semantic composition returns
+`failed/case_capacity_exceeded` before creating a semantic job or invoking a provider. Deterministic
+findings remain recorded; no provider attempt is consumed and provenance stays null. The shared
+check/receipt gap is `semantic_case_capacity_exceeded`. A narrower claim/obligation scope is a new
+check, not a replay of the terminal request. Changing a text length or finding limit alone does not
+guarantee enough capacity.
 
 `TargetedExcerptRef` identifies a bounded excerpt already captured or agent-published inside the
 frozen case and links it mechanically to a claim, obligation, finding, action, result, or evidence
@@ -4993,3 +5008,28 @@ algorithm without copying every local class/function here. If a nominal type app
 modules, if memory and SQLite must both implement it, or if a value is serialized, it belongs in
 this registry first. This scope keeps one source of truth without turning the registry into an
 index of private implementation details.
+
+
+### Status projection snapshots and semantic diagnostics (issues #674–#676)
+
+Status row queries reuse the already validated immutable current projection. Historical queries
+replay immutable prefixes off the event loop and retain at most eight frontier/view/session row
+indexes per ledger snapshot. The exact frontier digest and projection version are checked before
+reuse. A replacement record tuple invalidates the cache, including content/redaction reloads;
+SQLite clones do not inherit it. The cache is transient and stores no independently authoritative
+state. Workers never receive SQLite handles. Cancellation joins the worker, and filtering/cursor
+selection stops after the requested limit plus one matching row. First access to a view still
+builds its row index; large-query CPU cost and append/receipt cost are separate from responsiveness.
+
+Every exceptional semantic attempt diagnostic uses the original check request ID, an allowlisted
+exception category and a structural stage. Stages distinguish claim/recovery, privacy admission,
+dispatch entered (outcome uncertain), response mapping, response persistence and result commit.
+Provider invocation catches preserve their existing unknown-outcome semantics. Primary exception
+evidence is emitted before cleanup; cleanup records carry the same request join. Neither missing
+diagnostics nor null provenance proves that no provider executed. Diagnostics are best-effort;
+absence can mean that the sink was unavailable, and never licenses a retry.
+
+`yoetz service diagnostics --request-id req_…` reads matching owner-only records for the request
+returned by check/operation status. `--correlation-id err_…` remains supported; exactly one selector
+is required. Both use the same bounded, payload-free record projection and require no ledger
+inspection. No new retry, lease, cancellation, network or credential authority is introduced.

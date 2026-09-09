@@ -782,3 +782,18 @@ Fallback endpoint pairing (issue #582) is host-independent: whether the evaluato
 API provider serves a given attempt is a service-side dispatch decision recorded in provenance
 (`fallback_from`), with no Cursor-specific behaviour, plugin, or route input — the route ceiling
 applies to dispatch authority regardless of which endpoint serves.
+
+
+### Large tasks and semantic failure recovery (#674–#676)
+
+This host uses the shared service status snapshot cache and bounded semantic reference selection.
+A reduced reference scope reports `semantic_reference_scope_reduced`; it is not full-task semantic
+coverage. `failed/case_capacity_exceeded` and `semantic_case_capacity_exceeded` mean the required
+packet could not fit before any provider attempt. Select a smaller claim/obligation scope for a new
+check. Shorter prose alone need not fix structural capacity.
+
+For `coordinator_failure`, use the check's original request ID with
+`yoetz service diagnostics --request-id req_…` to read bounded failure stages. Dispatch entry can
+have an unknown outcome, even with null provenance. A missing record is a diagnostic coverage gap,
+not proof of non-dispatch. Preserve the original request/attempt identity and existing retry rules.
+These shared-path regressions do not certify a fresh installed native-host session.

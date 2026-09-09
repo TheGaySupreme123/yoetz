@@ -79,6 +79,13 @@ def render_human_check(result: CheckSuccessModel) -> str:
         f"Semantic review: {_token(result.semantic_status)} ({_token(result.semantic_reason)})",
         render_human_findings(result.findings),
     ]
+    if _token(result.semantic_reason) == "case_capacity_exceeded":
+        lines.append("No provider attempt was made. Narrow claim/obligation scope for a new check.")
+    elif _token(result.semantic_reason) == "coordinator_failure":
+        lines.append(
+            f"Inspect yoetz service diagnostics --request-id {result.request_id}. "
+            "Null provenance does not prove that no provider call occurred."
+        )
     suppressed = int(result.suppressed_count)
     if suppressed:
         lines.append(f"Suppressed findings: {suppressed}")
