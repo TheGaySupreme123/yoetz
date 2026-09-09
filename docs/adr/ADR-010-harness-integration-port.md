@@ -505,3 +505,26 @@ Required semantic review follows an explicit user requirement, effective verific
 or a named acceptance criterion requiring independent semantic judgment. Qualitative work alone
 does not turn an optional review into a requirement. A required review cannot be silently
 replaced with deterministic coverage, and every host and Yoetz approval boundary still applies.
+
+## Compatible host upgrade amendment (2026-09-08, issue #656)
+
+Decision 3 is clarified: "support is never inferred across neighboring host versions" governs
+*certification*, not the decision to perform an already-understood operation.
+
+- **Claude Code plugin admission** uses a compatibility floor instead of a one-element exact list.
+  Any parseable version at or above `CLAUDE_CODE_MINIMUM_VERSION` (`2.1.233`, where the plugin and
+  hook surfaces exist) previews and applies. The preview and status carry
+  `version_provenance`: `tested` for an exactly proven cell in
+  `CLAUDE_CODE_HARNESS_PROFILE.supported_versions` (currently `2.1.241`), `untested` otherwise.
+  A version below the floor or unparseable is refused as `format_unsupported` with
+  `version_unsupported` and `minimum_version`. `supported_versions`, the capability profile, and
+  the hook cell are unchanged: an admitted `untested` host earns no proven cell.
+- **Hook version mapping** (Claude and Cursor) keeps its exact tables. A supplied unknown version
+  maps to the `untested` profile token and ingests compatible events under the conservative
+  paired contract; an omitted version takes the legacy post-only carrier for that host. No
+  unknown version is aliased to a proven profile. For Cursor, the Agent CLI build resolves to
+  `untested` because only the IDE cell owns the reviewed hook set.
+- **Codex** session-stream admission follows the ADR-005 structural admission amendment.
+
+Exact evidence remains required before a version, cell, or arm is promoted; this amendment only
+stops a routine compatible host release from disabling capabilities Yoetz already understands.

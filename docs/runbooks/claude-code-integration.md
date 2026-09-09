@@ -88,8 +88,13 @@ yoetz integrate claude plugin preview \
 Prepare the returned exact digest through the trusted review lane, then replay the returned request
 ID and digest with `plugin install --accept`. `--accept` is not authority by itself; the mutation
 also consumes a matching `plugin_artifact_apply` pending and fresh OS-authenticated user presence.
-Install admits only exactly proven Claude versions (currently `2.1.241`); a neighboring version stays
-explicitly untested. It also refuses foreign/dual/ambiguous MCP ownership, unsafe roots, modified
+Install admits any Claude version at or above `2.1.233`, where the plugin and hook surfaces exist,
+and reports `host.version_provenance` on the preview (`host_version_provenance` on status):
+`tested` for the exactly proven `2.1.241` cell, `untested` for any other admitted version
+(issue #656). An `untested` host runs the same artifact but earns no proven cell; a version below
+the floor is refused as `format_unsupported`. Hook ingress keeps the same distinction: an unknown
+`claude_code_version` is admitted as `untested` under the conservative paired contract, never as
+the proven profile. It also refuses foreign/dual/ambiguous MCP ownership, unsafe roots, modified
 sources, leftover stage/rollback recovery material, or stale previews.
 
 After install, `status` must show `native_managed`, `marketplace_registered:true`,
@@ -451,7 +456,12 @@ session id (a bare `task_id` is not a selector the guidance accepts, issue #580)
 `compact` status probe connects with `--workspace "${CLAUDE_PROJECT_DIR}"` as its repository
 locator, so a live mapping answers `active` with a refreshed frontier; a daemon fence refusal
 records `status_workspace_unbound` or `status_workspace_mismatch` and keeps the mapping, and only a
-genuinely replaced session records `mapping_stale` (issue #578).
+genuinely replaced session records `mapping_stale` (issue #578). Claude Code does not use the
+Codex-only `hooks session-start` command, so the issue #659 host-cwd fallback applies to it only
+through the shared mapped-session lane: an explicit `${CLAUDE_PROJECT_DIR}` remains authoritative,
+an empty or unset value stays the typed `workspace_unresolvable` failure with no ingest and no
+probe, and a fence refusal records a companion `locator_source_explicit` row. No live Claude
+compaction failure was observed for #659; the shared resolver is covered by unit tests only.
 
 ## Auto mode and host admission
 

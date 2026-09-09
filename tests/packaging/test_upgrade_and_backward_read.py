@@ -163,9 +163,10 @@ def test_each_migration_family_has_contiguous_versions(installed: _Installed) ->
         "0009",
         "0010",
         "0011",
+        "0012",
     ]
     assert payload["catalog_current"] == 3
-    assert payload["bundle_current"] == 11
+    assert payload["bundle_current"] == 12
 
 
 def test_migration_ddl_contains_only_reviewed_table_rebuilds(installed: _Installed) -> None:
@@ -185,6 +186,7 @@ def test_migration_ddl_contains_only_reviewed_table_rebuilds(installed: _Install
                 "0009",
                 "0010",
                 "0011",
+                "0012",
             ),
         ),
     ):

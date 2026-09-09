@@ -949,8 +949,12 @@ publishing new cooperative work on the participant's behalf. An observation-auth
 `finding_recorded` still invalidates the older check. `check_current_as_of_earlier_frontier` is the
 qualified attribution in this family: when only check-answering responses and/or finding-free
 observation records follow the check, its coverage still contributes while the receipt names the
-subject frontier its verdict is current as of. `kernel/reducers.invalidates_recorded_check` is the
-single predicate deciding between the two, shared by the receipt and by compact status coverage.
+subject frontier its verdict is current as of. The application also classifies that suffix
+(`kernel/receipt_builder.CheckSuffixClass`: responses only, observations only, or mixed) so the
+limitations sentence names what actually followed the check instead of assuming responses; the
+class is render context, not a wire field or gap code (#657). `kernel/reducers.invalidates_recorded_check`
+is the single predicate deciding between the two, shared by the receipt and by compact status
+coverage.
 
 ## 9. Kernel (`kernel/`)
 
@@ -3112,9 +3116,11 @@ Shared closed types:
   digest and byte count. Durable redaction/truncation flags preserve weakening without reopening
   the object.
 - `ObservationCursor` — source generation, byte/event position, last source commitment, and
-  mapping version. Codex session-stream cursors use `codex-obs-stream/1.3.0` (rollout JSONL
-  grammar, paired with the exact profile id the generation's header admitted; a `1.2.0` or older
-  cursor is mapping-reset and replays from its header rather than inheriting a default profile).
+  mapping version. Codex session-stream cursors use `codex-obs-stream/1.4.0` (rollout JSONL
+  grammar, paired with the profile id the generation's header admitted — an exact certified
+  profile or `codex-rollout-jsonl/compatible/v1`; a `1.3.0` or older cursor is mapping-reset and
+  replays from its header, so a stream durably refused under the exact-version policy is read
+  once under the structural policy with no duplicate publication, issue #656).
   Cursors are crash-stable and generation-fenced. A private HMAC of the source
   device/inode detects same-or-larger file replacement across reconcile processes; ordinary safe
   integers retain their numeric encoding and larger filesystem values use a bounded hexadecimal
@@ -3128,11 +3134,19 @@ Shared closed types:
 - `ObservationGapCode` — closed coverage tokens. `session_superseded` is a mapped host session
   whose Yoetz route was retired and whose successor binding could not be followed; it is never
   `ledger_rejected` and never `mapping_missing` (issue #577). `unsupported_event` is an admitted profile with
-  an unrecognized wrapper or item; `unsupported_format` is a wrong surface (exec JSONL, a
-  `cli_version` without an exact profile in `SUPPORTED_ROLLOUT_PROFILES` — currently `0.148.0`
-  and `0.150.1`, never a semver neighbour — an absent/unknown `history_mode`, or compressed
-  `rollout-*.jsonl.zst` that the hook pass does not decompress). A refused header holds for the
-  whole source generation: bytes are consumed, no event is admitted, and the cursor is kept. When exact-session `.jsonl` and `.jsonl.zst` siblings both
+  an unrecognized wrapper or nested item, or a known wrapper with an incompatible payload shape
+  (`wrapper_shape_unsupported`); `unsupported_format` is a structurally refused surface (exec
+  JSONL, a header that is not `session_meta`, a non-object payload, a non-string `cli_version`,
+  an absent/unknown `history_mode`, or compressed `rollout-*.jsonl.zst` that the hook pass does
+  not decompress). The `cli_version` itself is diagnostic provenance, never a refusal (issue
+  #656): an exactly proven release (`SUPPORTED_ROLLOUT_PROFILES`, currently `0.148.0` and
+  `0.150.1`) admits under its certified profile with provenance `exact`; any other release admits
+  under the structural compatibility profile `codex-rollout-jsonl/compatible/v1` (union
+  vocabulary) with provenance `structural`. The reconcile result names a closed `admission` state
+  (`structurally_supported`, `partially_understood`, `incompatible`, `unadmitted`), its
+  `admission_provenance`, and the bounded `admission_reasons` tokens; none of these is host
+  support. A refused header holds for the whole source generation: bytes are consumed, no event
+  is admitted, and the cursor is kept. When exact-session `.jsonl` and `.jsonl.zst` siblings both
   exist, the admitted uncompressed file wins; compressed-only remains explicitly unsupported.
   Every string semantic type present at `payload.type` and nested `payload.item.type` must belong
   to the admitted profile before a nested item is selected; one known field cannot mask an unknown
@@ -3216,6 +3230,21 @@ Shared closed types:
   semantic summaries/details carry `advice_semantic_text_truncated` so the clipping is explicit. A
   host/tool `result_status=completed` outcome is not an authored completion claim; completion advice
   requires an explicit `claim_kind` value such as `completion`, `done`, or `finished`.
+  Observation semantic advice is asynchronous (issue #619): the advice build never calls a
+  provider. `application/observation_advice_semantic.ObservationAdviceSemanticScheduler` looks up
+  or enqueues one durable attempt row in `observation_advice_semantic_attempts` (migration 0012),
+  keyed by (workspace commitment, Yoetz session, pre-semantic evidence basis), storing the exact
+  scoped observation gap tuple and the minimized packet that carries it. Repeated identical builds
+  coalesce onto that row; a newer basis for the same session supersedes that session's
+  unattempted pending rows (`cancelled` / `superseded`) and keeps every completed row's receipt. At
+  most 16 rows may be pending or running per task bundle; the next schedule is recorded
+  `unavailable` / `queue_full` with no attempt. A row that is `pending` or `running` adds the
+  coverage gap `advice_semantic_pending`; a `failed`, `unavailable`, or `cancelled` row adds
+  `advice_semantic_unavailable` with its closed reason (`authorization_missing`,
+  `provider_unavailable`, `provider_failed`, `output_invalid`, `queue_full`, `superseded`,
+  `cancelled`, `interrupted`). Only a `succeeded` row with validated finding ids adds
+  `semantic_model_derived`; a succeeded attempt that returned no challenges is an honest receipt
+  and no finding.
 
 Independent verification support (local control, not MCP):
 
@@ -3268,7 +3297,17 @@ Independent verification support (local control, not MCP):
 - `ObservationVerificationSupervisor` — ready-lifecycle background owner that wakes on enqueue,
   discovers pending work at startup, drains one serialized check per workspace through the
   enforcing sandbox, reclaims expired leases, and stops before vault/runtime closure. Hook ingest
-  never executes approved checks inside the hook RPC budget. Pure-ingress hook handlers declare
+  never executes approved checks inside the hook RPC budget.
+- `ObservationAdviceSemanticSupervisor` / `ObservationAdviceSemanticWorker` — the same shape for
+  observation semantic advice (issue #619). The coordinator registers a per-workspace drain when
+  an advice build leaves `advice_semantic_pending`, and rediscovers pending rows after service
+  start. The worker claims one row at a time under a generation-fenced two-minute lease, resolves
+  the task route, repository authority, and provider binding at dispatch time (never from the
+  READY snapshot), runs the privacy-gated attempt with a 60-second deadline, records the closed
+  outcome, and re-runs advice for that workspace. A lease held by a previous service generation
+  or past its expiry is reclaimed as `pending` and re-attempted; a row reclaimed three times
+  terminates as `failed` / `interrupted`. An interrupted, cancelled, or unattempted row is never
+  a semantic success. Pure-ingress hook handlers declare
   `"async": true` only when the exact probed Codex version supports registration; older or unknown
   hosts run them synchronously with the declared 10-second budget so no event is dropped. Handlers
   that return `additionalContext` or a Stop `decision: block` stay synchronous with the same bound,
@@ -3540,7 +3579,13 @@ the hook preserves the mapping, tells the agent to continue with the named ids o
 authority for replacement ids. A `SESSION_CONFLICT` carrying `repository_identity_required` or
 `repository_identity_mismatch` is a live mapping the daemon could not bind to a repository: it
 records `status_workspace_unbound` / `status_workspace_mismatch`, keeps the mapping, and its
-advisory says not to re-attach. The active-mapping context names the task, frontier, `session_id`,
+advisory says not to re-attach. `cli/hooks.resolve_session_workspace` selects the probe's locator
+in a fixed order — explicit project path (not the bare `.`), host payload `cwd`, hook cwd — and
+returns a closed `SessionWorkspace.source`; beside a fence refusal the hook records the companion
+row `locator_source_explicit` / `locator_source_host_payload` / `locator_source_cwd` /
+`locator_absent` / `locator_unresolvable` (issue #659). An explicit path that fails
+canonicalization never falls through, and the daemon's fence still decides admission, so a derived
+locator can produce a typed mismatch but never access to another repository. The active-mapping context names the task, frontier, `session_id`,
 and `writer_id`, and says to continue the task with `start mode=attach` by that session id rather
 than a new ref pair (issue #580). The scoped `start` post-hook binder admits three host shapes —
 an object carrying `structuredContent` (Codex), a single-text-block content list whose text is the
@@ -4466,9 +4511,12 @@ synced, managed/user/local scope, Agent SDK, or headless support.
 resolved executable paths; exact `ClaudeCodeCapabilityIdentity(version, executable_digest,
 os_name, architecture)`; scope exactly `project`; and marketplace name exactly `yoetz-local`.
 Representations redact every path. The cache root must equal `<claude_config_root>/plugins/cache`.
-Preview admits only exactly proven Claude versions (`CLAUDE_CODE_HARNESS_PROFILE.supported_versions`,
-currently `2.1.241`); a neighboring version stays explicitly untested rather than running under an
-unearned profile. Preview also re-hashes the executable to detect stale identity, and refuses with
+Preview admits any parseable Claude version at or above `CLAUDE_CODE_MINIMUM_VERSION` (`2.1.233`)
+and reports `version_provenance`: `tested` for an exactly proven cell
+(`CLAUDE_CODE_HARNESS_PROFILE.supported_versions`, currently `2.1.241`), `untested` otherwise
+(issue #656); a version below the floor is refused as `format_unsupported` with
+`version_unsupported`/`minimum_version`. An `untested` host is admitted but never promoted to a
+proven cell. Preview also re-hashes the executable to detect stale identity, and refuses with
 `recovery_required` while interrupted stage/rollback material remains beside the marketplace source,
 before any mutation.
 

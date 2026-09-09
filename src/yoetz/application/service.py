@@ -12,6 +12,7 @@ from typing import Literal, Protocol, cast
 from pydantic import BaseModel
 
 from yoetz.application.egress import PrivacyCoordinator
+from yoetz.application.observation_advice_semantic import ObservationAdviceSemanticSupervisor
 from yoetz.application.observation_verification import ObservationVerificationSupervisor
 from yoetz.application.unit_of_work import run_publish_response_commit
 from yoetz.domain.events import RuntimeProfile
@@ -612,6 +613,11 @@ class Application:
         default=None, repr=False, compare=False
     )
     ready_recommendation_refresh: Callable[[], Awaitable[object]] | None = field(
+        default=None, repr=False, compare=False
+    )
+    # Off-hook observation-advice semantic attempts (#619); stopped with the verification
+    # supervisor so no provider attempt outlives this generation's privacy coordinator.
+    advice_semantic_supervisor: ObservationAdviceSemanticSupervisor | None = field(
         default=None, repr=False, compare=False
     )
     # The sweeper owns a worker pool of its own; this generation's close is the only place that
@@ -1386,6 +1392,12 @@ class Application:
             if failure is None:
                 failure = exc
         try:
+            if self.advice_semantic_supervisor is not None:
+                await self.advice_semantic_supervisor.stop()
+        except BaseException as exc:
+            if failure is None:
+                failure = exc
+        try:
             await self.privacy.close()
         except BaseException as exc:
             if failure is None:
@@ -1431,6 +1443,8 @@ class ServiceReadyContext:
     )
     verification_supervisor: ObservationVerificationSupervisor | None = None
     rediscover_pending_verification: Callable[[], Awaitable[None]] | None = None
+    advice_semantic_supervisor: ObservationAdviceSemanticSupervisor | None = None
+    rediscover_pending_advice_semantic: Callable[[], Awaitable[None]] | None = None
     connected_provider_ids: tuple[str, ...] = ()
     provider_credential_connected: bool = False
     # Structural presence of the declared fallback endpoint's credential (#582); never readiness.
@@ -1540,11 +1554,16 @@ class ReadyApplicationFactory:
                 observation_sweep_close=context.observation_sweep_close,
                 reconcile_observation_capture=context.reconcile_observation_capture,
                 enforce_repository_identity=True,
+                advice_semantic_supervisor=context.advice_semantic_supervisor,
             )
             if context.verification_supervisor is not None:
                 await context.verification_supervisor.start()
             if context.rediscover_pending_verification is not None:
                 await context.rediscover_pending_verification()
+            if context.advice_semantic_supervisor is not None:
+                await context.advice_semantic_supervisor.start()
+            if context.rediscover_pending_advice_semantic is not None:
+                await context.rediscover_pending_advice_semantic()
             return application
         except BaseException:
             await _close_ready_context(context)
@@ -1563,6 +1582,12 @@ async def _close_ready_context(context: object) -> None:
     try:
         if context.verification_supervisor is not None:
             await context.verification_supervisor.stop()
+    except BaseException as exc:
+        if failure is None:
+            failure = exc
+    try:
+        if context.advice_semantic_supervisor is not None:
+            await context.advice_semantic_supervisor.stop()
     except BaseException as exc:
         if failure is None:
             failure = exc

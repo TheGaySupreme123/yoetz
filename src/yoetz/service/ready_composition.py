@@ -69,9 +69,13 @@ from yoetz.application.egress import (
 )
 from yoetz.application.observation_advice import (
     ObservationAdviceContextBuilder,
-    ObservationAdviceSemanticAddon,
-    minimized_semantic_evidence_packet,
     stable_advice_finding_id,
+)
+from yoetz.application.observation_advice_semantic import (
+    ObservationAdviceSemanticAttempt,
+    ObservationAdviceSemanticOutcome,
+    ObservationAdviceSemanticScheduler,
+    ObservationAdviceSemanticSupervisor,
 )
 from yoetz.application.observation_control import build_observation_support_handlers
 from yoetz.application.observation_coordinator import ObservationCoordinator
@@ -153,15 +157,13 @@ from yoetz.domain.values import (
     format_rfc3339_millis,
     parse_rfc3339_millis,
     repository_grant_continuation,
+    timestamp_from_datetime,
     validate_commitment,
 )
 from yoetz.domain.values import (
     JsonValue as DomainJsonValue,
 )
-from yoetz.kernel.policies.observation_advice import (
-    ObservationAdviceCandidate,
-    ObservationCompositionFact,
-)
+from yoetz.kernel.policies.observation_advice import ObservationCompositionFact
 from yoetz.observability.logging import (
     record_bounded_event_without_raising,
     record_unexpected_exception_without_raising,
@@ -3315,7 +3317,6 @@ async def provide_service_ready_context(
     # Repository authority is session-specific, so ready-time composition cannot activate a
     # provider binding or claim semantic readiness. Exact configured-credential presence is a
     # separate structural vault fact: it neither decrypts the record nor grants dispatch authority.
-    provider_binding: ProviderBinding | None = None
     provider_credential_connected = await configured_provider_credential_present()
     fallback_credential_connected = await configured_fallback_credential_present()
     semantic_ready = False
@@ -3460,108 +3461,109 @@ async def provide_service_ready_context(
             local_observation=local_observation,
         )
 
-    async def _semantic_review(
-        candidates: tuple[ObservationAdviceCandidate, ...],
-        basis: str,
-        gaps: tuple[str, ...],
-        yoetz_session_id: str | None,
-    ) -> ObservationAdviceSemanticAddon | None:
-        # Privacy-gated observation semantic path: authorize/dispatch through the coordinator.
-        # Provider failure or no-discrepancy leaves deterministic advice intact (no upgrade).
-        del gaps
-        if not semantic_ready or provider_binding is None or yoetz_session_id is None:
-            return None
-        packet = minimized_semantic_evidence_packet(
-            candidates,
-            basis,
-            coverage_gaps=(),
-            finding_summaries=tuple(str(item.rule_code) for item in candidates),
+    async def _dispatch_observation_advice_semantic(
+        attempt: ObservationAdviceSemanticAttempt,
+    ) -> ObservationAdviceSemanticOutcome:
+        """Privacy-gated provider attempt for one durable advice row, off the hook path (#619).
+
+        Repository authority and the provider binding are resolved here, at dispatch time,
+        never from the READY snapshot. The stored packet already carries the exact scoped
+        observation gaps; nothing is rebuilt from live state. Every non-success leaves a closed
+        failure reason and no finding, so the advice can only ever claim what a validated
+        provider answer supports.
+        """
+
+        route = await catalog.resolve_route(attempt.yoetz_session_id)
+        if (
+            route is None
+            or route.state is not TaskRouteState.ACTIVE
+            or route.repository_privacy_commitment is None
+        ):
+            return ObservationAdviceSemanticOutcome(
+                status="unavailable", failure_reason="authorization_missing"
+            )
+        repository_scope = AuthorizationScope(
+            AuthorizationScopeKind.TASK,
+            installation_id,
+            route.repository_privacy_commitment,
+            route.task_id,
         )
-        try:
-            payload = canonical_encode(cast(CanonicalJsonValue, dict(packet)))
-            subject = (
-                basis
-                if basis.startswith("sha256:")
-                else canonical_digest(cast(CanonicalJsonValue, {"basis": basis}))
+        if not await cast(PrivacyCoordinator, privacy).activate_repository(repository_scope):
+            return ObservationAdviceSemanticOutcome(
+                status="unavailable", failure_reason="authorization_missing"
             )
-            route = await catalog.resolve_route(yoetz_session_id)
-            if (
-                route is None
-                or route.state is not TaskRouteState.ACTIVE
-                or route.repository_privacy_commitment is None
-            ):
-                return None
-            repository_scope = AuthorizationScope(
-                AuthorizationScopeKind.TASK,
-                installation_id,
-                route.repository_privacy_commitment,
-                route.task_id,
+        binding = await resolve_provider_binding()
+        if binding is None:
+            return ObservationAdviceSemanticOutcome(
+                status="unavailable", failure_reason="provider_unavailable"
             )
-            if not await cast(PrivacyCoordinator, privacy).activate_repository(repository_scope):
-                return None
-            candidate = CandidateContext(
-                request_id=ids.new(IdKind.REQUEST),
-                channel=EgressChannel.LLM_INFERENCE,
-                local_sink=None,
-                purpose="semantic-review",
-                scope=repository_scope,
-                subject_digest=subject,
-                provider_binding=provider_binding,
-                items=(
-                    CandidateContextItem(
-                        "observation-advice-packet",
-                        DataCategory.BOUNDED_STRUCTURAL_METADATA,
-                        repository_scope,
-                        "/observation-advice",
-                        payload,
-                    ),
+        candidate = CandidateContext(
+            request_id=ids.new(IdKind.REQUEST),
+            channel=EgressChannel.LLM_INFERENCE,
+            local_sink=None,
+            purpose="semantic-review",
+            scope=repository_scope,
+            subject_digest=attempt.subject_digest,
+            provider_binding=binding,
+            items=(
+                CandidateContextItem(
+                    "observation-advice-packet",
+                    DataCategory.BOUNDED_STRUCTURAL_METADATA,
+                    repository_scope,
+                    "/observation-advice",
+                    attempt.packet_json,
                 ),
-            )
-            deadline = Deadline(clock.now_utc(), clock.monotonic_seconds() + 60.0)
-            result = await cast(PrivacyCoordinator, privacy).evaluate_semantic(candidate, deadline)
-        except Exception:
-            return None
+            ),
+        )
+        deadline = Deadline(clock.now_utc(), clock.monotonic_seconds() + 60.0)
+        result = await cast(PrivacyCoordinator, privacy).evaluate_semantic(candidate, deadline)
         if type(result) is not SemanticEgressSuccess:
-            return None
+            return ObservationAdviceSemanticOutcome(
+                status="failed",
+                failure_reason="provider_failed",
+                provider_identity=binding.provider_id,
+            )
+        receipt = result.privacy_receipt_id or result.authorization_id
         judgment = result.result.judgment
         if judgment.conclusion != "challenges_returned" or not judgment.challenges:
             # Honest attempt receipt without inventing additive findings.
-            return ObservationAdviceSemanticAddon(
-                finding_ids=(),
-                evidence_digest=basis,
-                next_action=None,
-                summaries=(),
-                details=(),
-                provider_identity=provider_binding.provider_id,
-                attempt_receipt=result.privacy_receipt_id or result.authorization_id,
-                failure_reason=None,
+            return ObservationAdviceSemanticOutcome(
+                status="succeeded",
+                attempt_receipt=receipt,
+                provider_identity=binding.provider_id,
+                evidence_digest=attempt.subject_digest,
             )
-        # Additive note only when the provider returned post-validated challenges.
         detail = f"challenges:{len(judgment.challenges)}"
         digest = canonical_digest(
             cast(
                 CanonicalJsonValue,
                 {
-                    "basis": basis,
+                    "basis": attempt.basis_digest,
                     "authorization_id": result.authorization_id,
                     "challenges": len(judgment.challenges),
                 },
             )
         )
         finding = stable_advice_finding_id("semantic_additive_review", detail, digest)
-        return ObservationAdviceSemanticAddon(
+        return ObservationAdviceSemanticOutcome(
+            status="succeeded",
+            attempt_receipt=receipt,
+            provider_identity=binding.provider_id,
             finding_ids=(finding,),
             evidence_digest=digest,
-            next_action=None,
             summaries=("Privacy-gated semantic observation review",),
             details=(
                 "Additive semantic note recorded after authorized provider attempt; "
                 "deterministic findings unchanged.",
             ),
-            provider_identity=provider_binding.provider_id,
-            attempt_receipt=result.privacy_receipt_id or result.authorization_id,
-            failure_reason=None,
         )
+
+    advice_semantic_supervisor = ObservationAdviceSemanticSupervisor(
+        service_generation=service_generation
+    )
+    advice_semantic_scheduler = ObservationAdviceSemanticScheduler(
+        now=lambda: timestamp_from_datetime(clock.now_utc()).wire
+    )
 
     verification_supervisor = ObservationVerificationSupervisor(
         service_generation=service_generation
@@ -3573,9 +3575,11 @@ async def provide_service_ready_context(
         ids=ids,
         advice_context_builder=ObservationAdviceContextBuilder(
             composition=observation_composition_fact,
-            semantic_review=_semantic_review if semantic_configured else None,
+            semantic_scheduler=advice_semantic_scheduler if semantic_configured else None,
         ),
         verification_supervisor=verification_supervisor,
+        advice_semantic_supervisor=advice_semantic_supervisor,
+        advice_semantic_dispatch=_dispatch_observation_advice_semantic,
         observation_enabled=config.observation.enabled,
     )
     observation_sweeper = ObservationOutboxSweeper(
@@ -3649,6 +3653,10 @@ async def provide_service_ready_context(
         support_handlers=support_handlers,
         verification_supervisor=verification_supervisor,
         rediscover_pending_verification=observation_coordinator.rediscover_pending_verification,
+        advice_semantic_supervisor=advice_semantic_supervisor,
+        rediscover_pending_advice_semantic=(
+            observation_coordinator.rediscover_pending_advice_semantic
+        ),
         connected_provider_ids=connected_provider_ids,
         provider_credential_connected=provider_credential_connected,
         fallback_credential_connected=fallback_credential_connected,

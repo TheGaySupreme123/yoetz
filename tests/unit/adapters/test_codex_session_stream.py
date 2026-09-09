@@ -110,8 +110,14 @@ def test_incremental_partial_line_then_complete(tmp_path: Path) -> None:
 def test_incremental_partial_header_still_requires_exact_profile_admission(
     tmp_path: Path,
 ) -> None:
+    """A partial header admits nothing; a structurally refused header stays refused (#656)."""
+
     path = tmp_path / "session.jsonl"
-    first = encode_lines(session_meta(cli_version="0.149.1"), terminated=False)
+    # An unknown ``history_mode`` is the structural refusal; the release label alone no longer
+    # refuses a header.
+    first = encode_lines(
+        session_meta(cli_version="0.149.1", history_mode="streamed"), terminated=False
+    )
     path.write_bytes(first)
     session = "hmac-sha256:" + ("f" * 64)
     reader = _reader(session)
@@ -1700,3 +1706,255 @@ def test_reconcile_of_unsupported_release_records_no_profile(tmp_path: Path) -> 
     assert cursor is not None
     assert cursor.byte_position == target.stat().st_size
     assert cursor.event_position == 0
+
+
+# --- structural admission (#656) --------------------------------------------------------------
+
+_COMPATIBLE_0153 = "imports/codex/rollout-compatible-0.153.4.case.json"
+_COMPATIBLE_PROFILE_ID = "codex-rollout-jsonl/compatible/v1"
+
+
+def test_unproven_release_is_admitted_under_the_compatible_profile(tmp_path: Path) -> None:
+    """The header version is provenance only: a 0.153.4 label parses the 0.150.1 structure under
+    the structural profile, maps every known line, and keeps every canary out of envelopes."""
+
+    raw = _fixture_bytes(_COMPATIBLE_0153, "relabeled")
+    exact_raw = _fixture_bytes(_PAGINATED_0150, "paginated")
+    path = tmp_path / "session.jsonl"
+    path.write_bytes(raw)
+    session = "hmac-sha256:" + ("a" * 64)
+    reader = _header_selected_reader(session)
+
+    advance = reader.advance(path)
+
+    assert reader.profile is not None
+    assert reader.profile.profile_id == _COMPATIBLE_PROFILE_ID
+    assert stream_profile_from_id(_COMPATIBLE_PROFILE_ID) is reader.profile
+    assert ObservationGapCode.UNSUPPORTED_FORMAT.value not in advance.gaps
+    assert ObservationGapCode.UNSUPPORTED_EVENT.value not in advance.gaps
+    assert advance.reason_codes == ()
+    assert advance.cursor.byte_position == len(raw)
+    assert advance.cursor.event_position == exact_raw.count(b"\n")
+    assert len(advance.envelopes) == exact_raw.count(b"\n")
+    dumped = json.dumps(
+        [dict(envelope.structural_payload) for envelope in advance.envelopes], default=str
+    )
+    assert _CANARY_0150 not in dumped
+    assert "0.153.4" not in dumped
+    # Structural admission is reported apart from certification.
+    assert (
+        stream_module.stream_admission(reader.profile, advance.gaps, advance.reason_codes)
+        == "partially_understood"
+    )
+
+
+def test_additive_fields_never_reach_observation_envelopes(tmp_path: Path) -> None:
+    raw = _fixture_bytes(_COMPATIBLE_0153, "additive")
+    assert b"CANARY_0153_ADDITIVE" in raw
+    path = tmp_path / "session.jsonl"
+    path.write_bytes(raw)
+    reader = _header_selected_reader("hmac-sha256:" + ("b" * 64))
+
+    advance = reader.advance(path)
+
+    assert ObservationGapCode.UNSUPPORTED_EVENT.value not in advance.gaps
+    assert len(advance.envelopes) == raw.count(b"\n")
+    dumped = json.dumps(
+        [
+            {
+                "structural_payload": dict(envelope.structural_payload),
+                "content_object_refs": list(envelope.content_object_refs),
+                "gap_codes": list(envelope.gap_codes),
+            }
+            for envelope in advance.envelopes
+        ],
+        default=str,
+    )
+    assert "CANARY_0153_ADDITIVE" not in dumped
+    assert "x_future" not in dumped
+
+
+def test_unknown_and_incompatible_lines_stay_bounded_under_compatible_profile(
+    tmp_path: Path,
+) -> None:
+    session = "hmac-sha256:" + ("c" * 64)
+    path = tmp_path / "session.jsonl"
+
+    path.write_bytes(_fixture_bytes(_COMPATIBLE_0153, "unknown_event"))
+    unknown = _header_selected_reader(session).advance(path)
+    assert ObservationGapCode.UNSUPPORTED_FORMAT.value not in unknown.gaps
+    assert ObservationGapCode.UNSUPPORTED_EVENT.value in unknown.gaps
+    assert unknown.reason_codes == ("unknown_item_type", "unknown_wrapper_type")
+    assert unknown.cursor.event_position == 5
+    opaque = [
+        e for e in unknown.envelopes if ObservationGapCode.UNSUPPORTED_EVENT.value in e.gap_codes
+    ]
+    assert len(opaque) == 2
+    dumped = json.dumps([dict(e.structural_payload) for e in unknown.envelopes], default=str)
+    assert "CANARY_0153" not in dumped and "FutureItem" not in dumped
+    # The independent known call/output after the unknown lines still map and pair.
+    assert unknown.envelopes[-2].structural_payload["tool_name"] == "shell"
+    assert unknown.envelopes[-1].structural_payload.get("result_status") is not None
+
+    path.write_bytes(_fixture_bytes(_COMPATIBLE_0153, "incompatible_known"))
+    incompatible = _header_selected_reader(session).advance(path)
+    assert ObservationGapCode.UNSUPPORTED_FORMAT.value not in incompatible.gaps
+    assert ObservationGapCode.UNSUPPORTED_EVENT.value in incompatible.gaps
+    assert incompatible.reason_codes == ("wrapper_shape_unsupported",)
+    assert incompatible.cursor.event_position == 4
+    bounded = [
+        e
+        for e in incompatible.envelopes
+        if ObservationGapCode.UNSUPPORTED_EVENT.value in e.gap_codes
+    ]
+    assert len(bounded) == 2
+    # A malformed known wrapper mints no action, result, or pairing identity.
+    assert all(
+        "action" not in e.structural_payload and "tool_call_id" not in e.structural_payload
+        for e in bounded
+    )
+    assert "CANARY_0153_STRING_PAYLOAD" not in json.dumps(
+        [dict(e.structural_payload) for e in incompatible.envelopes], default=str
+    )
+    assert incompatible.envelopes[-1].structural_payload["tool_name"] == "shell"
+
+    path.write_bytes(_fixture_bytes(_COMPATIBLE_0153, "truncated"))
+    truncated = _header_selected_reader(session).advance(path)
+    assert ObservationGapCode.UNSUPPORTED_FORMAT.value not in truncated.gaps
+    assert ObservationGapCode.TRUNCATED_PAYLOAD.value in truncated.gaps
+    assert truncated.cursor.event_position == 2
+    assert truncated.partial_line.startswith(b"{")
+
+
+def test_stream_admission_classification_is_closed_and_honest() -> None:
+    exact = stream_profile_from_id("codex-rollout-jsonl/0.150.1/v1")
+    compatible = stream_profile_from_id(_COMPATIBLE_PROFILE_ID)
+    assert exact is not None and compatible is not None
+    admission = stream_module.stream_admission
+    assert admission(exact, (), ()) == "structurally_supported"
+    assert admission(
+        exact, (ObservationGapCode.UNSUPPORTED_EVENT.value,), ("unknown_item_type",)
+    ) == ("partially_understood")
+    assert admission(compatible, (), ()) == "partially_understood"
+    assert admission(None, (ObservationGapCode.UNSUPPORTED_FORMAT.value,), ()) == "incompatible"
+    assert admission(exact, (ObservationGapCode.UNSUPPORTED_FORMAT.value,), ()) == "incompatible"
+    assert admission(None, (), ()) == "unadmitted"
+    assert set(stream_module.STREAM_ADMISSION_STATES) == {
+        "incompatible",
+        "partially_understood",
+        "structurally_supported",
+        "unadmitted",
+    }
+
+
+def test_mapping_upgrade_readmits_a_release_refused_under_the_exact_policy(
+    tmp_path: Path,
+) -> None:
+    """A cursor durably refused under ``codex-obs-stream/1.3.0`` (exact-version policy) replays
+    from the header under a fresh generation on upgrade: the previously refused bytes are read
+    once, nothing is duplicated, and the compatible profile is persisted (issue #656)."""
+
+    home = tmp_path / "codex-home"
+    sessions = home / "sessions" / "2026" / "09" / "08"
+    sessions.mkdir(parents=True)
+    session_id = "019f8b27-b98e-7061-bbb5-d0b897594de6"
+    target = sessions / f"rollout-2026-09-08T12-00-00-{session_id}.jsonl"
+    raw = _fixture_bytes(_COMPATIBLE_0153, "relabeled")
+    target.write_bytes(raw)
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment(session_id)
+    store.bind_session(workspace, session)
+    # The durable refused state the old policy left behind: consumed bytes, zero events.
+    store.set_stream_reconcile_state(
+        workspace,
+        session,
+        cursor=ObservationCursor(
+            source_generation=1,
+            byte_position=len(raw),
+            event_position=0,
+            last_source_commitment=_EMPTY,
+            mapping_version="codex-obs-stream/1.3.0",
+        ),
+        partial=b"",
+        call_tools={},
+        source_identity=None,
+        profile_id=None,
+    )
+
+    result = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=CodexSessionStreamLocator(home),
+    )
+
+    assert result["resolved"] is True
+    assert result["generation"] == 2
+    assert result["profile_id"] == _COMPATIBLE_PROFILE_ID
+    assert result["admission"] == "partially_understood"
+    assert result["admission_provenance"] == "structural"
+    assert result["admission_reasons"] == ()
+    assert result["accepted"] == raw.count(b"\n")
+    assert result["duplicates"] == 0
+    assert result["byte_position"] == len(raw)
+    assert result["event_position"] == raw.count(b"\n")
+    gaps = result["gaps"]
+    assert isinstance(gaps, tuple)
+    assert ObservationGapCode.UNSUPPORTED_FORMAT.value not in gaps
+    cursor = store.get_stream_cursor(workspace, session)
+    assert cursor is not None and cursor.mapping_version == STREAM_MAPPING_VERSION
+
+    # A second pass under the persisted compatible profile reads nothing twice.
+    again = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=CodexSessionStreamLocator(home),
+    )
+    assert again["accepted"] == 0 and again["duplicates"] == 0
+    assert again["profile_id"] == _COMPATIBLE_PROFILE_ID
+    assert again["admission"] == "partially_understood"
+    assert store.stream_profile_for_session(workspace, session) == _COMPATIBLE_PROFILE_ID
+
+
+def test_reconcile_reports_exact_admission_and_incompatible_header(tmp_path: Path) -> None:
+    home = tmp_path / "codex-home"
+    sessions = home / "sessions" / "2026" / "09" / "08"
+    sessions.mkdir(parents=True)
+    session_id = "019f8b27-b98e-7061-bbb5-d0b897594de6"
+    target = sessions / f"rollout-2026-09-08T12-00-00-{session_id}.jsonl"
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment(session_id)
+    store.bind_session(workspace, session)
+
+    target.write_bytes(_fixture_bytes(_PAGINATED_0150, "paginated"))
+    exact = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=CodexSessionStreamLocator(home),
+    )
+    assert exact["admission"] == "structurally_supported"
+    assert exact["admission_provenance"] == "exact"
+    assert exact["profile_id"] == "codex-rollout-jsonl/0.150.1/v1"
+
+    # Rewrite in place with a structurally refused header: incompatible, no profile.
+    target.write_bytes(_fixture_bytes(_UNSUPPORTED_0152, "future"))
+    refused = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=CodexSessionStreamLocator(home),
+    )
+    assert refused["admission"] == "incompatible"
+    assert refused["admission_provenance"] is None
+    assert refused["profile_id"] is None
+    assert refused["accepted"] == 0

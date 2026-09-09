@@ -91,7 +91,7 @@ __all__ = [
 HOOK_MAPPING_VERSION: Final = "codex-obs-hook/1.0.0"
 # 1.3.0: a stream cursor is paired with the exact rollout profile its generation's header
 # admitted; cursors persisted under 1.2.0 carry no profile and replay from the header (#568).
-STREAM_MAPPING_VERSION: Final = "codex-obs-stream/1.3.0"
+STREAM_MAPPING_VERSION: Final = "codex-obs-stream/1.4.0"
 _KEY_BYTES: Final = 32
 _MAX_STATE_BYTES: Final = 1_048_576
 _MAX_LEGACY_STATE_BYTES: Final = 36 * 1_048_576

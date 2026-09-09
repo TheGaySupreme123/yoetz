@@ -34,8 +34,16 @@ from yoetz.adapters.integrations.observation_local import (
 )
 from yoetz.adapters.workspace_inspect import LocalWorkspaceInspectAdapter
 from yoetz.application.observation_advice import (
+    ADVICE_SEMANTIC_PENDING_GAP,
     ObservationAdviceContextBuilder,
     scoped_session_envelopes,
+)
+from yoetz.application.observation_advice_semantic import (
+    AdviceSemanticDispatch,
+    AdviceSemanticDrainHandle,
+    ObservationAdviceSemanticRepository,
+    ObservationAdviceSemanticSupervisor,
+    ObservationAdviceSemanticWorker,
 )
 from yoetz.application.observation_check_policy import load_observation_check_policy
 from yoetz.application.observation_materialize import (
@@ -565,6 +573,10 @@ class ObservationCoordinator:
         default_factory=ObservationAdviceContextBuilder
     )
     verification_supervisor: ObservationVerificationSupervisor | None = None
+    # Off-hook semantic advice (#619): the build only enqueues a durable row; this supervisor
+    # drains it through ``advice_semantic_dispatch`` and re-runs advice when it finishes.
+    advice_semantic_supervisor: ObservationAdviceSemanticSupervisor | None = None
+    advice_semantic_dispatch: AdviceSemanticDispatch | None = None
     observation_enabled: bool = True
     _advice_event_ref_cache: dict[tuple[str, str], tuple[str, ...]] = field(
         default_factory=_empty_advice_event_ref_cache, init=False, repr=False
@@ -3762,6 +3774,16 @@ class ObservationCoordinator:
                         snapshot=snapshot,
                     )
                 )
+            if (
+                ADVICE_SEMANTIC_PENDING_GAP in snapshot.confidence_coverage.known_gaps
+                and not isinstance(runtime, str)
+            ):
+                await self._register_advice_semantic_drain(
+                    workspace,
+                    runtime,
+                    legacy_writer_id=legacy_writer_id,
+                    session_commitment=session_commitment,
+                )
         if self.advice_hook is not None:
             result = self.advice_hook(
                 workspace_commitment=workspace,
@@ -3772,6 +3794,153 @@ class ObservationCoordinator:
             )
             if asyncio.iscoroutine(result) or isinstance(result, Awaitable):
                 await cast(Awaitable[None], result)
+
+    async def rediscover_pending_advice_semantic(self) -> None:
+        """Re-register drains for workspaces whose semantic advice rows are still pending.
+
+        Runs once after the ready-lifecycle supervisor starts. A row left ``running`` by a
+        previous service generation is reclaimed by ``claim_next`` and re-attempted; it is never
+        reported as a success (#619).
+        """
+
+        supervisor = self.advice_semantic_supervisor
+        if supervisor is None or self.advice_semantic_dispatch is None:
+            return
+        for workspace in await self._local(self.local.list_consented_workspaces):
+            await self._rediscover_workspace_pending_advice_semantic(supervisor, workspace)
+        supervisor.notify()
+
+    async def _rediscover_workspace_pending_advice_semantic(
+        self,
+        supervisor: ObservationAdviceSemanticSupervisor,
+        workspace: str,
+    ) -> None:
+        if supervisor.closed or supervisor.has_handle(workspace):
+            return
+        consent = await self._local(partial(self.local.consent_for, workspace))
+        if consent is None or not consent.active:
+            return
+        sessions = await self._local(partial(self.local.codex_sessions_for_workspace, workspace))
+        for codex_session_id in sessions:
+            if supervisor.closed or supervisor.has_handle(workspace):
+                return
+            mapping = self.mapping_loader(codex_session_id, _state=self.state_root)
+            if mapping is None:
+                continue
+            predecessor_writer_id = mapping.yoetz_writer_id
+            runtime: TaskRuntime | None = None
+            try:
+                runtime, mapping = await self._route_observation_mapping(mapping)
+                store = self._observation_store(runtime)
+                repository = self._advice_semantic_repository(store)
+                if repository is None or workspace not in repository.list_pending_workspaces():
+                    continue
+                if await self._register_advice_semantic_drain(
+                    workspace,
+                    runtime,
+                    legacy_writer_id=predecessor_writer_id,
+                    deferred_runtime=runtime,
+                ):
+                    runtime = None
+                return
+            except Exception:
+                continue
+            finally:
+                if runtime is not None:
+                    release = getattr(self.runtime, "release", None)
+                    if release is not None:
+                        await release(runtime)
+
+    def _advice_semantic_repository(
+        self, store: object
+    ) -> ObservationAdviceSemanticRepository | None:
+        factory = getattr(store, "advice_semantic_repository", None)
+        if not callable(factory):
+            return None
+        repository = factory()
+        return None if repository is None else cast(ObservationAdviceSemanticRepository, repository)
+
+    async def _register_advice_semantic_drain(
+        self,
+        workspace: str,
+        runtime: TaskRuntime,
+        *,
+        legacy_writer_id: str | None = None,
+        session_commitment: str | None = None,
+        deferred_runtime: TaskRuntime | None = None,
+    ) -> bool:
+        """Register (or wake) the workspace's semantic advice drain; never dispatch inline.
+
+        Returns True when a new handle now owns ``deferred_runtime`` (or a freshly routed one)
+        and will release it on idle. Without a supervisor or dispatch the pending row simply
+        stays pending and its coverage gap remains visible.
+        """
+
+        supervisor = self.advice_semantic_supervisor
+        dispatch = self.advice_semantic_dispatch
+        if supervisor is None or dispatch is None or supervisor.closed:
+            return False
+        if supervisor.has_handle(workspace):
+            supervisor.notify(workspace)
+            return False
+        owned = deferred_runtime
+        if owned is None:
+            owned = await self._route_observation_runtime(runtime.task_id, runtime.session_id)
+        try:
+            owned_store = self._observation_store(owned)
+            repository = self._advice_semantic_repository(owned_store)
+            if repository is None:
+                if deferred_runtime is None:
+                    await self.runtime.release(owned)
+                return False
+
+            def now_wire() -> str:
+                return timestamp_from_datetime(self.clock.now_utc()).wire
+
+            def lease_expiry() -> str:
+                return timestamp_from_datetime(self.clock.now_utc() + timedelta(minutes=2)).wire
+
+            worker = ObservationAdviceSemanticWorker(
+                repository=repository,
+                dispatch=dispatch,
+                service_generation=owned.fence.service_generation,
+                lease_owner=owned.fence.service_instance_id,
+                now=now_wire,
+                lease_expires_at=lease_expiry,
+            )
+            bound_runtime = owned
+
+            async def _after() -> None:
+                await self._run_advice(
+                    workspace,
+                    bound_runtime,
+                    owned_store,
+                    legacy_writer_id=legacy_writer_id,
+                    session_commitment=session_commitment,
+                )
+
+            async def _release() -> None:
+                await self.runtime.release(bound_runtime)
+
+            registered = supervisor.register(
+                AdviceSemanticDrainHandle(
+                    workspace_commitment=workspace,
+                    worker=worker,
+                    after_complete=_after,
+                    on_idle=_release,
+                )
+            )
+            if not registered:
+                if deferred_runtime is None:
+                    await self.runtime.release(owned)
+                supervisor.notify(workspace)
+                return False
+        except BaseException:
+            if deferred_runtime is None:
+                await self.runtime.release(owned)
+            raise
+        supervisor.notify(workspace)
+        return True
 
     def _materialized_event_refs(
         self,

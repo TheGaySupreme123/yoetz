@@ -1800,6 +1800,87 @@ def test_session_start_status_read_carries_the_consented_locator(
     assert not diagnostics_path.exists() or "mapping_stale" not in diagnostics_path.read_text()
 
 
+def test_legacy_bound_session_probe_carries_the_host_payload_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #659: the shared mapped SessionStart without an explicit workspace recovers its
+    commitment from the legacy session binding, and the status probe now carries a locator derived
+    from the host payload's cwd instead of connecting bare."""
+
+    from yoetz.adapters.integrations.codex_lifecycle import (
+        load_mapping,
+        mapping_from_start_ids,
+        store_mapping,
+    )
+    from yoetz.ports.control import WorkspaceLocator
+    from yoetz.protocol.ids import IdKind, new_id
+
+    project = tmp_path / "project"
+    project.mkdir()
+    project.chmod(0o700)
+    (project / ".git").mkdir()
+    (project / "src").mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    elsewhere.chmod(0o700)
+    monkeypatch.chdir(elsewhere)
+    state = tmp_path / "state"
+    store = LocalObservationStore(_state=state)
+    locator = str(project)
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "codex:legacy-compact-1")
+    task_id, session_id, writer_id = (
+        new_id(IdKind.TASK),
+        new_id(IdKind.SESSION),
+        new_id(IdKind.WRITER),
+    )
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id="codex:legacy-compact-1",
+            yoetz_task_id=task_id,
+            yoetz_session_id=session_id,
+            yoetz_writer_id=writer_id,
+            last_frontier="0:genesis",
+        ),
+        _state=state,
+    )
+    captured: list[WorkspaceLocator | None] = []
+    client = _status_active_client(task_id, session_id, writer_id)
+
+    async def connect(_kind: object, *, workspace_locator: WorkspaceLocator | None = None):
+        captured.append(workspace_locator)
+        return client
+
+    monkeypatch.setattr(observe_hooks_module, "connect_service", connect, raising=False)
+
+    out = io.BytesIO()
+    code = handle_observe(
+        event_name="SessionStart",
+        stdin_bytes=json.dumps(
+            {
+                "session_id": "codex:legacy-compact-1",
+                "hook_event_name": "SessionStart",
+                "source": "compact",
+                "cwd": str(project / "src"),
+            }
+        ).encode(),
+        stdout=out,
+        workspace=None,
+        _state=state,
+    )
+    assert code == 0
+    # The subdirectory cwd resolved to the repository root the mapping was consented under.
+    assert captured and captured[0] == WorkspaceLocator(locator)
+    context = json.loads(out.getvalue().decode())["hookSpecificOutput"]["additionalContext"]
+    assert f"session_id {session_id} and writer_id {writer_id}" in context
+    refreshed = load_mapping("codex:legacy-compact-1", _state=state)
+    assert refreshed is not None
+    assert (refreshed.yoetz_session_id, refreshed.yoetz_writer_id) == (session_id, writer_id)
+    diagnostics_path = state / "observation" / "hook-diagnostics.jsonl"
+    assert not diagnostics_path.exists() or "status_workspace" not in (diagnostics_path.read_text())
+
+
 @pytest.mark.parametrize(
     ("reason_code", "kind"),
     [
@@ -1894,6 +1975,9 @@ def test_session_start_repository_fence_refusal_is_a_distinct_diagnostic(
     assert load_mapping(f"fence-{kind}", _state=tmp_path) is not None
     diagnostics = (tmp_path / "observation" / "hook-diagnostics.jsonl").read_text()
     assert f'"reason":"status_{kind}"' in diagnostics
+    # The companion row names the probe's locator source (#659): this hook passed an explicit
+    # consented workspace, so the refusal is the daemon's, not a missing locator.
+    assert '"reason":"locator_source_explicit"' in diagnostics
     assert "mapping_stale" not in diagnostics
 
 

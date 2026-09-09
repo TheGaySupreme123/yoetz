@@ -47,6 +47,9 @@ from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 
 __all__ = [
+    "ADVICE_SEMANTIC_PENDING_GAP",
+    "ADVICE_SEMANTIC_UNAVAILABLE_GAP",
+    "SemanticAdviceScheduler",
     "STANDING_MACHINE_ACTIONS",
     "ObservationAdviceBuildInput",
     "ObservationAdviceContextBuilder",
@@ -75,6 +78,11 @@ _ADVICE_RANKED_FINDINGS_TRUNCATED_GAP: Final = "advice_ranked_findings_truncated
 _ADVICE_SEMANTIC_OUTPUT_INVALID_GAP: Final = "advice_semantic_output_invalid"
 _ADVICE_SEMANTIC_TEXT_TRUNCATED_GAP: Final = "advice_semantic_text_truncated"
 _ADVICE_COVERAGE_GAPS_TRUNCATED_GAP: Final = "advice_coverage_gaps_truncated"
+# Asynchronous semantic advice (#619): a durable attempt exists but has not reached a terminal
+# state, or it terminated without validated output. Neither ever adds semantic coverage.
+ADVICE_SEMANTIC_PENDING_GAP: Final = "advice_semantic_pending"
+ADVICE_SEMANTIC_UNAVAILABLE_GAP: Final = "advice_semantic_unavailable"
+_ADVICE_SEMANTIC_PENDING_REASON: Final = "pending"
 _SEMANTIC_SUMMARY_FALLBACK: Final = "Model-derived observation note"
 _SEMANTIC_DETAIL_FALLBACK: Final = "Additive semantic advice over minimized evidence"
 _VALID_ADVICE_NEXT_ACTIONS: Final[frozenset[str]] = frozenset(
@@ -209,6 +217,21 @@ type CallableComposition = Callable[
 ]
 
 
+class SemanticAdviceScheduler(Protocol):
+    """Durable, store-aware semantic review that never dispatches on the hook path (#619)."""
+
+    async def review(
+        self,
+        *,
+        store: object,
+        workspace: str,
+        candidates: Sequence[ObservationAdviceCandidate],
+        basis: str,
+        gaps: Sequence[str],
+        yoetz_session_id: str | None,
+    ) -> ObservationAdviceSemanticAddon | None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ObservationAdviceBuildInput:
     envelopes: tuple[ObservationEnvelope, ...]
@@ -241,6 +264,9 @@ class ObservationAdviceContextBuilder:
     plan_path_digests: CallablePlans | None = None
     semantic_addon: CallableSemantic | None = None
     semantic_review: CallableSemanticReview | None = None
+    # Preferred over ``semantic_review`` when present: it receives the store so the durable
+    # attempt row can be looked up or enqueued without any provider call in this build.
+    semantic_scheduler: SemanticAdviceScheduler | None = None
 
     async def _resolve_composition(self) -> ObservationCompositionFact | None:
         if not callable(self.composition):
@@ -279,7 +305,7 @@ class ObservationAdviceContextBuilder:
         inspect_fact = None if self.inspect_fact is None else self.inspect_fact(workspace)
         plans = () if self.plan_path_digests is None else self.plan_path_digests(workspace)
         semantic: ObservationAdviceSemanticAddon | None = None
-        if self.semantic_review is not None:
+        if self.semantic_review is not None or self.semantic_scheduler is not None:
             context = ObservationAdviceContext(
                 envelopes=envelopes,
                 lifecycle=status.lifecycle,
@@ -299,11 +325,23 @@ class ObservationAdviceContextBuilder:
                     "coverage_gaps": _sorted_coverage_gaps(status.gaps),
                 },
             )
-            reviewed = self.semantic_review(candidates, basis, status.gaps, yoetz_session_id)
-            if inspect.isawaitable(reviewed):
-                semantic = await reviewed
-            else:
-                semantic = reviewed
+            if self.semantic_scheduler is not None:
+                # Durable, off-hook semantic advice (#619): look up or enqueue only. The scoped
+                # status gaps travel with the row so the provider packet keeps them exactly.
+                semantic = await self.semantic_scheduler.review(
+                    store=store,
+                    workspace=workspace,
+                    candidates=candidates,
+                    basis=basis,
+                    gaps=status.gaps,
+                    yoetz_session_id=yoetz_session_id,
+                )
+            elif self.semantic_review is not None:
+                reviewed = self.semantic_review(candidates, basis, status.gaps, yoetz_session_id)
+                if inspect.isawaitable(reviewed):
+                    semantic = await reviewed
+                else:
+                    semantic = reviewed
         elif self.semantic_addon is not None:
             semantic = self.semantic_addon(workspace)
         prior: AdviceSnapshot | None = None
@@ -688,6 +726,17 @@ def build_observation_advice_snapshot(
     semantic_summaries: tuple[object, ...] = ()
     semantic_details: tuple[object, ...] = ()
     semantic_evidence_digest: str | None = None
+    # A durable attempt that has not finished, or finished without validated output, is a
+    # coverage gap and never a semantic check type (#619). The addon carries no finding ids in
+    # either case, so the structural validation below cannot mistake it for provider output.
+    semantic_pending = (
+        semantic is not None and semantic.failure_reason == _ADVICE_SEMANTIC_PENDING_REASON
+    )
+    semantic_unavailable = (
+        semantic is not None
+        and semantic.failure_reason is not None
+        and semantic.failure_reason != _ADVICE_SEMANTIC_PENDING_REASON
+    )
     if semantic is not None:
         if semantic.next_action is not None and (
             type(semantic.next_action) is not str
@@ -779,6 +828,14 @@ def build_observation_advice_snapshot(
             (
                 _ADVICE_SEMANTIC_TEXT_TRUNCATED_GAP,
                 semantic_text_truncated,
+            ),
+            (
+                ADVICE_SEMANTIC_PENDING_GAP,
+                semantic_pending,
+            ),
+            (
+                ADVICE_SEMANTIC_UNAVAILABLE_GAP,
+                semantic_unavailable,
             ),
             (
                 "observation_qualified_partial",

@@ -147,13 +147,13 @@ def test_schema_ten_upgrade_preserves_rows_and_installs_capture_ticket_shape() -
 
     report = run_migrations(db, BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
     assert report.from_version == 10
-    assert report.to_version == 11
-    assert report.applied_versions == ("0011",)
-    assert db.execute("PRAGMA user_version").fetchone() == (11,)
+    assert report.to_version == 12
+    assert report.applied_versions == ("0011", "0012")
+    assert db.execute("PRAGMA user_version").fetchone() == (12,)
     assert verify_schema_identity(db).state == "current"
     assert db.execute(
         "SELECT value FROM bundle_meta WHERE key='storage_schema_version'"
-    ).fetchone() == ("11",)
+    ).fetchone() == ("12",)
     assert db.execute("PRAGMA foreign_key_check").fetchall() == []
 
     assert (
@@ -252,7 +252,7 @@ def test_schema_ten_upgrade_preserves_rows_and_installs_capture_ticket_shape() -
     ).fetchone() == ("staging", b"[]")
 
     rerun = run_migrations(db, BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
-    assert rerun.from_version == 11
-    assert rerun.to_version == 11
+    assert rerun.from_version == 12
+    assert rerun.to_version == 12
     assert rerun.applied_versions == ()
     assert db.execute("SELECT count(*) FROM observation_capture_tickets").fetchone() == (1,)

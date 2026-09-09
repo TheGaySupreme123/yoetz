@@ -52,11 +52,12 @@ def test_guarded_legacy_bundle_keeps_structural_consent_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        # Drop 0010 (native consent) and 0011 (durable native handoff) so this
-        # fixture remains a genuinely pre-native-content bundle.
+        # Drop 0010 (native consent), 0011 (durable native handoff), and 0012
+        # (semantic advice attempts) so this fixture remains a genuinely
+        # pre-native-content bundle.
         migrations_module,
         "BUNDLE_MIGRATIONS",
-        migrations_module.BUNDLE_MIGRATIONS[:-2],
+        migrations_module.BUNDLE_MIGRATIONS[:-3],
     )
     store = _store()
     store.grant_consent(_WORKSPACE, _TIME)

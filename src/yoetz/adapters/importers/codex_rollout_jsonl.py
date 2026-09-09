@@ -11,7 +11,7 @@ import json
 import math
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Final, NoReturn, cast
+from typing import Final, Literal, NoReturn, cast
 
 from yoetz.adapters.importers.codex_jsonl import (
     CodexCapabilityProfile,
@@ -27,13 +27,18 @@ from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.errors import ProtocolValueError
 
 __all__ = [
+    "CODEX_ROLLOUT_COMPATIBLE_PROFILE_ID",
     "CODEX_ROLLOUT_MAPPING_VERSION",
+    "COMPATIBLE_ROLLOUT_PROFILE",
     "ROLLOUT_MAX_LINE_BYTES",
     "SUPPORTED_ROLLOUT_PROFILES",
+    "RolloutAdmissionProvenance",
+    "admission_profile_for_rollout_version",
     "parse_codex_rollout_jsonl",
     "parse_codex_rollout_jsonl_from_offset",
     "profile_for_rollout_id",
     "profile_for_rollout_version",
+    "rollout_admission_provenance",
     "split_codex_rollout_jsonl_chunk",
 ]
 
@@ -47,8 +52,11 @@ _MAX_JSON_DEPTH: Final = 64
 ROLLOUT_MAX_LINE_BYTES: Final = _MAX_LINE_BYTES
 
 # One vocabulary per exact Codex release, each locked by its own constructed fixtures
-# (``fixtures/imports/codex/rollout-*-<cli_version>.case.json``). Adding a release means adding
-# a fixture set and a profile below; no release is ever admitted by version proximity.
+# (``fixtures/imports/codex/rollout-*-<cli_version>.case.json``). An exact profile is
+# certification evidence. A header naming any other release is admitted under the structural
+# ``compatible`` profile below (issue #656): the host version is diagnostic provenance, the
+# wrapper/item vocabulary is what decides whether a line is understood, and a shape outside that
+# vocabulary stays a bounded per-line gap instead of disabling the whole stream.
 _WRAPPER_TYPES_0_148_0: Final = (
     "compacted",
     "event_msg",
@@ -152,15 +160,86 @@ def _exact_profile(
 
 _BASELINE_PROFILE = _exact_profile("0.148.0", _WRAPPER_TYPES_0_148_0, _ITEM_TYPES_0_148_0)
 _PROFILE_0_150_1 = _exact_profile("0.150.1", _WRAPPER_TYPES_0_150_1, _ITEM_TYPES_0_150_1)
+# Exact, fixture-proven profiles keyed by ``cli_version``. This mapping is certification: the
+# dogfood parity gate and ``CODEX_ROLLOUT_PARSER_PROOFS`` mirror exactly these keys.
 SUPPORTED_ROLLOUT_PROFILES: Final[Mapping[str, CodexCapabilityProfile]] = MappingProxyType(
     {
         _BASELINE_PROFILE.cli_version: _BASELINE_PROFILE,
         _PROFILE_0_150_1.cli_version: _PROFILE_0_150_1,
     }
 )
-_PROFILES_BY_ID: Final[Mapping[str, CodexCapabilityProfile]] = MappingProxyType(
-    {profile.profile_id: profile for profile in SUPPORTED_ROLLOUT_PROFILES.values()}
+# The structural compatibility profile (issue #656). Its ``cli_version`` is the literal token
+# ``compatible`` — it never names a release — and its vocabulary is the union of every exact
+# profile, so a header naming an unproven release parses the wrappers and items Yoetz already
+# understands while everything else stays a bounded ``unsupported_event`` gap.
+CODEX_ROLLOUT_COMPATIBLE_VERSION_TOKEN: Final = "compatible"
+CODEX_ROLLOUT_COMPATIBLE_PROFILE_ID: Final = "codex-rollout-jsonl/compatible/v1"
+_COMPATIBLE_WRAPPER_TYPES: Final = tuple(
+    sorted(
+        {
+            wrapper
+            for profile in SUPPORTED_ROLLOUT_PROFILES.values()
+            for wrapper in profile.wrapper_types
+        },
+        key=str.encode,
+    )
 )
+_COMPATIBLE_ITEM_TYPES: Final = tuple(
+    sorted(
+        {item for profile in SUPPORTED_ROLLOUT_PROFILES.values() for item in profile.item_types},
+        key=str.encode,
+    )
+)
+COMPATIBLE_ROLLOUT_PROFILE: Final = CodexCapabilityProfile(
+    CODEX_ROLLOUT_COMPATIBLE_VERSION_TOKEN,
+    CODEX_ROLLOUT_COMPATIBLE_PROFILE_ID,
+    _profile_digest(
+        CODEX_ROLLOUT_COMPATIBLE_VERSION_TOKEN,
+        CODEX_ROLLOUT_COMPATIBLE_PROFILE_ID,
+        _COMPATIBLE_WRAPPER_TYPES,
+        _COMPATIBLE_ITEM_TYPES,
+    ),
+    _COMPATIBLE_WRAPPER_TYPES,
+    _COMPATIBLE_ITEM_TYPES,
+)
+_PROFILES_BY_ID: Final[Mapping[str, CodexCapabilityProfile]] = MappingProxyType(
+    {
+        **{profile.profile_id: profile for profile in SUPPORTED_ROLLOUT_PROFILES.values()},
+        COMPATIBLE_ROLLOUT_PROFILE.profile_id: COMPATIBLE_ROLLOUT_PROFILE,
+    }
+)
+_ADMISSIBLE_PROFILES: Final = frozenset(_PROFILES_BY_ID.values())
+
+type RolloutAdmissionProvenance = Literal["exact", "structural"]
+
+
+def admission_profile_for_rollout_version(
+    version: str,
+) -> tuple[CodexCapabilityProfile, RolloutAdmissionProvenance]:
+    """Select the profile a session header admits under, with its provenance.
+
+    An exactly proven ``cli_version`` selects its certified profile (``exact``). Any other ASCII
+    version selects the structural compatibility profile (``structural``): the release is not
+    certified, the version is recorded only as diagnostic provenance, and lines are understood
+    or refused by their shape alone.
+    """
+
+    if type(version) is not str or not version.isascii():
+        raise ValueError("unsupported_codex_profile")
+    exact = SUPPORTED_ROLLOUT_PROFILES.get(version)
+    if exact is not None:
+        return exact, "exact"
+    return COMPATIBLE_ROLLOUT_PROFILE, "structural"
+
+
+def rollout_admission_provenance(
+    profile: CodexCapabilityProfile,
+) -> RolloutAdmissionProvenance:
+    """Name whether *profile* is an exact certification or the structural compatibility profile."""
+
+    if type(profile) is not CodexCapabilityProfile or profile not in _ADMISSIBLE_PROFILES:
+        raise ValueError("unsupported_codex_profile")
+    return "structural" if profile == COMPATIBLE_ROLLOUT_PROFILE else "exact"
 
 
 def profile_for_rollout_version(version: str) -> CodexCapabilityProfile:
@@ -175,7 +254,7 @@ def profile_for_rollout_version(version: str) -> CodexCapabilityProfile:
 
 
 def profile_for_rollout_id(profile_id: str) -> CodexCapabilityProfile:
-    """Return the exact profile a persisted ``profile_id`` names, or fail closed."""
+    """Return the profile a persisted ``profile_id`` names (exact or compatible), or fail closed."""
 
     if type(profile_id) is not str or not profile_id.isascii():
         raise ValueError("unsupported_codex_profile")
@@ -188,10 +267,7 @@ def profile_for_rollout_id(profile_id: str) -> CodexCapabilityProfile:
 def _check_profile(profile: CodexCapabilityProfile | None) -> None:
     if profile is None:
         return
-    if (
-        type(profile) is not CodexCapabilityProfile
-        or SUPPORTED_ROLLOUT_PROFILES.get(profile.cli_version) != profile
-    ):
+    if type(profile) is not CodexCapabilityProfile or profile not in _ADMISSIBLE_PROFILES:
         raise ValueError("unsupported_codex_profile")
 
 
@@ -258,10 +334,13 @@ def parse_codex_rollout_jsonl_from_offset(
 ) -> CodexParseResult:
     """Parse a rollout JSONL chunk. Unterminated tails are retained by callers.
 
-    With an explicit ``profile`` the session header must name exactly that release. With
-    ``profile=None`` (only valid when admission is required) the header's exact ``cli_version``
-    selects one supported profile by key lookup; the result's ``profile`` is the admitted one and
-    stays ``None`` when the chunk admitted nothing.
+    With an explicit ``profile`` the session header must select exactly that profile. With
+    ``profile=None`` (only valid when admission is required) the header selects the profile: an
+    exactly proven ``cli_version`` selects its certified profile, any other version selects the
+    structural compatibility profile. The result's ``profile`` is the admitted one and stays
+    ``None`` when the chunk admitted nothing, which now means a structurally unsupported header
+    (not ``session_meta``, a non-object payload, a non-string version, or an unknown
+    ``history_mode``) rather than an unlisted release.
     """
 
     _check_profile(profile)
@@ -433,10 +512,13 @@ def _redact_json_tree(value: dict[str, object]) -> dict[str, object]:
 def _admit_session_meta(
     value: dict[str, object], profile: CodexCapabilityProfile | None
 ) -> tuple[CodexCapabilityProfile | None, str]:
-    """Select the exact profile the header names, or refuse.
+    """Select the profile the header admits under, or refuse structurally.
 
-    The lookup is an exact ``cli_version`` key match: a release one patch away from a supported
-    one is refused, and an explicit ``profile`` refuses every header that names another release.
+    The structural constraints are the gate: a ``session_meta`` wrapper, an object payload, a
+    string ASCII ``cli_version``, and a known ``history_mode``. The version then only chooses
+    between an exact certified profile and the structural compatibility profile; it is never a
+    reason to refuse (issue #656). An explicit ``profile`` refuses a header that selects a
+    different profile, so a caller pinned to one exact release still cannot parse another.
     """
 
     if value.get("type") != "session_meta":
@@ -447,8 +529,8 @@ def _admit_session_meta(
     cli_version = cast(dict[str, object], payload).get("cli_version")
     if type(cli_version) is not str or not cli_version.isascii():
         return None, "unsupported_codex_profile"
-    admitted = SUPPORTED_ROLLOUT_PROFILES.get(cli_version)
-    if admitted is None or (profile is not None and admitted != profile):
+    admitted, _provenance = admission_profile_for_rollout_version(cli_version)
+    if profile is not None and admitted != profile:
         return None, "unsupported_codex_profile"
     history_mode = cast(dict[str, object], payload).get("history_mode")
     if type(history_mode) is not str or history_mode not in CODEX_ROLLOUT_HISTORY_MODES:
