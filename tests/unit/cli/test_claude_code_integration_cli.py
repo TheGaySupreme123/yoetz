@@ -189,3 +189,23 @@ def test_a_strict_re_render_preview_discloses_the_host_admission_it_would_revoke
     )
     assert policy.exit_code == 0, policy.output
     assert json.loads(policy.stdout)["admission_cleanup"] is None
+
+
+def test_claude_cli_preview_and_status_report_host_version_provenance(tmp_path: Path) -> None:
+    runner = CliRunner()
+    status = runner.invoke(app, _args(tmp_path, "status"))
+    assert status.exit_code == 0, status.output
+    assert json.loads(status.stdout)["host_version_provenance"] == "tested"
+    preview = runner.invoke(
+        app,
+        _args(
+            tmp_path,
+            "preview",
+            "--action",
+            "install",
+            "--request-id",
+            "req_10000000-0000-4000-8000-000000000041",
+        ),
+    )
+    assert preview.exit_code == 0, preview.output
+    assert json.loads(preview.stdout)["host"]["version_provenance"] == "tested"

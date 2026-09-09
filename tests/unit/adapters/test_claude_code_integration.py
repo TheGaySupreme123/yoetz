@@ -1056,3 +1056,76 @@ def test_completed_host_command_with_missed_readback_is_outcome_unknown(
     # state is outcome_unknown, never a safe pre-mutation refusal.
     assert result.operation_state is PluginOperationState.OUTCOME_UNKNOWN
     assert result.enabled is False
+
+
+# --- compatibility floor admission (#656) -----------------------------------------------------
+
+
+def test_version_provenance_separates_certification_from_admission() -> None:
+    from yoetz.adapters.integrations.claude_code_integration import (
+        CLAUDE_CODE_MINIMUM_VERSION,
+        claude_code_version_provenance,
+    )
+
+    assert CLAUDE_CODE_MINIMUM_VERSION == "2.1.233"
+    assert claude_code_version_provenance("2.1.241") == "tested"
+    # Neighbours and later releases are admitted but never promoted to a proven cell.
+    for version in ("2.1.233", "2.1.240", "2.1.242", "2.2.0", "3.0.0"):
+        assert claude_code_version_provenance(version) == "untested", version
+    for version in ("2.1.232", "2.1.211", "1.9.9", "2.1", "2.1.241-beta", "", "x"):
+        assert claude_code_version_provenance(version) is None, version
+
+
+def test_compatible_untested_version_is_admitted_with_provenance(tmp_path: Path) -> None:
+    """A release above the floor previews and applies; the preview and status carry
+    ``untested`` provenance instead of an unearned proven cell. Below the floor stays refused."""
+
+    target = _target(tmp_path)
+    artifact = render_claude_code_plugin()
+    commands = _ClaudeFixture(artifact)
+
+    def _with_version(version: str) -> ClaudeCodePluginTarget:
+        return ClaudeCodePluginTarget(
+            target.project_root,
+            target.claude_config_root,
+            target.cache_root,
+            target.marketplace_root,
+            target.executable,
+            ClaudeCodeCapabilityIdentity(
+                version, target.identity.executable_digest, "darwin", "arm64"
+            ),
+        )
+
+    tested = preview_claude_code_plugin(
+        _REQUEST, target, ClaudeCodePluginAction.INSTALL, artifact, commands=commands
+    )
+    assert tested.version_provenance == "tested"
+    assert (
+        status_claude_code_plugin(target, artifact, commands=commands).version_provenance
+        == "tested"
+    )
+
+    newer = _with_version("2.1.250")
+    untested = preview_claude_code_plugin(
+        _REQUEST, newer, ClaudeCodePluginAction.INSTALL, artifact, commands=commands
+    )
+    assert untested.version_provenance == "untested"
+    assert untested.action is ClaudeCodePluginAction.INSTALL
+    assert (
+        status_claude_code_plugin(newer, artifact, commands=commands).version_provenance
+        == "untested"
+    )
+    # Provenance is not a second admission gate: the digest is bound to the exact host version.
+    assert untested.preview_digest != tested.preview_digest
+
+    below = _with_version("2.1.232")
+    with pytest.raises(ClaudeCodeIntegrationError) as refused:
+        preview_claude_code_plugin(
+            _REQUEST, below, ClaudeCodePluginAction.INSTALL, artifact, commands=commands
+        )
+    assert refused.value.reason is PluginArtifactReason.FORMAT_UNSUPPORTED
+    assert refused.value.safe_details == {
+        "minimum_version": "2.1.233",
+        "version_unsupported": "2.1.232",
+    }
+    assert status_claude_code_plugin(below, artifact, commands=commands).version_provenance is None

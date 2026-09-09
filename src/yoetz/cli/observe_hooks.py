@@ -2849,11 +2849,13 @@ def handle_observe(
                     _UNAVAILABLE_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _WORKSPACE_MISMATCH_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _WORKSPACE_UNBOUND_CONTEXT,  # pyright: ignore[reportPrivateUsage]
+                    SessionWorkspace,
                     StatusOutcome,
                     _active_context,  # pyright: ignore[reportPrivateUsage]
                     _read_status,  # pyright: ignore[reportPrivateUsage]
                     _stale_mapping_context,  # pyright: ignore[reportPrivateUsage]
                     bound_connector,
+                    resolve_session_workspace,
                 )
 
                 session_lifecycle_lock = (
@@ -2897,7 +2899,20 @@ def handle_observe(
                                 additional = _active_context(mapping, mapping.last_frontier)
                         elif mapping is not None and not skip_service:
                             active_mapping = mapping
-                            status_locator = workspace_locator
+                            # The consented locator when this hook named one. The legacy
+                            # bound-session lane recovers a commitment by session id and
+                            # leaves the locator unset, which probed the daemon bare and
+                            # was refused as `repository_identity_required` (issue #659);
+                            # derive the probe's locator from the host payload's cwd or the
+                            # hook cwd instead. The daemon still fences it against the
+                            # mapped task's route, so a wrong guess is a typed mismatch,
+                            # never access to another repository.
+                            selection = (
+                                SessionWorkspace(workspace_locator, "explicit")
+                                if workspace_locator is not None
+                                else resolve_session_workspace(None, payload)
+                            )
+                            status_locator = selection.locator
 
                             async def _status() -> StatusOutcome:
                                 # The read carries the consented locator exactly as the
@@ -2948,6 +2963,9 @@ def handle_observe(
                                 with contextlib.suppress(Exception):
                                     record_hook_diagnostic(
                                         f"status_{kind}", resolved_event, _state=_state
+                                    )
+                                    record_hook_diagnostic(
+                                        selection.diagnostic_reason, resolved_event, _state=_state
                                     )
                             elif kind == "locked":
                                 additional = _LOCKED_CONTEXT

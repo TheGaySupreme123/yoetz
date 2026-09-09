@@ -19,6 +19,7 @@ from yoetz.domain.events import (
     LedgerRecord,
     ReceiptRecordedPayload,
     encode_payload,
+    is_observation_authored,
     media_type_for,
 )
 from yoetz.domain.receipts import (
@@ -45,6 +46,7 @@ from yoetz.domain.values import (
 from yoetz.kernel.deterministic_checks import CaseGap, build_deterministic_case, case_coverage
 from yoetz.kernel.finding_resolution import finding_is_resolved
 from yoetz.kernel.receipt_builder import (
+    CheckSuffixClass,
     ReceiptBuildContext,
     ReceiptFindingState,
     build_receipt,
@@ -447,6 +449,7 @@ def _context(
     assert type(projection) is ProjectionState
     assert type(case) is DeterministicCase
     applicable: CheckRecordedPayload | None = None
+    check_suffix: CheckSuffixClass | None = None
     finding_states = _finding_states(projection)
     gaps = list(case.gaps)
     latest = projection.latest_tested_state
@@ -472,11 +475,13 @@ def _context(
         gaps.append(CaseGap("check_not_applicable", "check_not_applicable", ()))
     elif check_record is not None and type(check_record.payload) is CheckRecordedPayload:
         applicable = check_record.payload
-        if any(
-            is_material_event_family(record.schema.name)
-            and record.ledger.ingestion_sequence > check_record.ledger.ingestion_sequence
+        later_material = tuple(
+            record
             for record in records
-        ):
+            if is_material_event_family(record.schema.name)
+            and record.ledger.ingestion_sequence > check_record.ledger.ingestion_sequence
+        )
+        if later_material:
             # Check-answering responses and finding-free observation-authored records can reach
             # here. The verdict still covers the frontier it tested rather than this one, so the
             # receipt names that frontier instead of reading as though the work were re-checked.
@@ -487,6 +492,17 @@ def _context(
                     (),
                 )
             )
+            # Classify that suffix for the explanation (issue #657). The applicability rule above
+            # already proved every later material record is one of the two attributable kinds, so
+            # the class is exact here; it is render context, never a wire field or a gap code.
+            observed = any(is_observation_authored(record) for record in later_material)
+            responded = any(not is_observation_authored(record) for record in later_material)
+            if observed and responded:
+                check_suffix = CheckSuffixClass.MIXED
+            elif observed:
+                check_suffix = CheckSuffixClass.OBSERVATIONS_ONLY
+            else:
+                check_suffix = CheckSuffixClass.RESPONSES_ONLY
     else:
         gaps.append(
             CaseGap(
@@ -554,6 +570,7 @@ def _context(
         ordered_gaps,
         finding_states,
         applicable,
+        check_suffix,
     )
 
 

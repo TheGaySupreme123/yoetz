@@ -33,6 +33,7 @@ def test_root_and_installed_migration_resources_are_byte_identical() -> None:
                 "0009",
                 "0010",
                 "0011",
+                "0012",
             ),
         ),
     ):
@@ -111,6 +112,7 @@ def test_bundle_run_migrations_applies_0002_from_schema_version_one() -> None:
         "0009",
         "0010",
         "0011",
+        "0012",
     )
     assert bundle.execute("PRAGMA user_version").fetchone() == (
         current_schema_version(BUNDLE_MIGRATIONS),

@@ -936,3 +936,24 @@ def test_claude_scoped_yoetz_calls_follow_the_self_observation_policy(tmp_path: 
     ]
     # Every call remains in the bounded local store as structural-only evidence.
     assert len(store.list_envelopes(commitment)) == 6
+
+
+def test_claude_unknown_version_keeps_untested_token_and_paired_contract() -> None:
+    """Issue #656: hook version mapping stays fail-closed. An unproven version is admitted for
+    ingest under the conservative paired contract as ``untested``; it is never aliased to the
+    proven 2.1.241 profile, and an omitted version takes the legacy post-only path."""
+
+    from yoetz.ports.integrations import observation_pairing_contract
+
+    mapper = observe_hooks._claude_capability_profile_id  # pyright: ignore[reportPrivateUsage]
+    assert mapper("2.1.241") == "claude-code-cli-local-project-2.1.241"
+    for version in ("2.1.240", "2.1.242", "2.2.0", "3.0.0"):
+        assert mapper(version) == "untested", version
+        assert observation_pairing_contract("claude", "untested") == ("paired", "tool_call_id")
+    assert mapper(None) is None
+    assert mapper("") is None
+    assert observation_pairing_contract("claude", None) == ("post_only", "tool_call_id")
+    assert observation_pairing_contract("claude", "claude-code-cli-local-project-2.1.241") == (
+        "post_only",
+        "tool_call_id",
+    )

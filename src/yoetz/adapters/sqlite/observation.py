@@ -1551,6 +1551,13 @@ class SqliteObservationStore:
 
         return SqliteObservationVerificationRepository(self._db)
 
+    def advice_semantic_repository(self):
+        from yoetz.adapters.sqlite.observation_advice_semantic import (
+            SqliteObservationAdviceSemanticRepository,
+        )
+
+        return SqliteObservationAdviceSemanticRepository(self._db)
+
     def record_logical_identity_claim(
         self,
         *,

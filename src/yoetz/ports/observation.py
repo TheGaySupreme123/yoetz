@@ -251,6 +251,8 @@ class TaskObservationPort(Protocol):
 
     def verification_repository(self) -> object: ...
 
+    def advice_semantic_repository(self) -> object: ...
+
     def record_logical_identity_claim(
         self,
         *,

@@ -643,18 +643,89 @@ def bound_connector(
     return connect
 
 
-def session_workspace_locator(workspace: str | None) -> str | None:
-    """Canonical locator for a hook that names its workspace, else the hook's own cwd.
+type LocatorSource = Literal["explicit", "host_payload", "cwd", "absent", "unresolvable"]
 
-    Ordinary CLI work is repository-bound from the process cwd; a host runs its
-    lifecycle hooks in the session's working directory, so the same default
-    applies when the rendered hook command carries no `--workspace`.
-    """
+# Closed diagnostic tokens naming where a mapped-session status probe got its repository
+# locator (issue #659). Recorded only beside a fence refusal so the retained diagnostic window
+# is not spent on every healthy SessionStart; never a path, never a host payload.
+_LOCATOR_SOURCE_REASONS: Final[Mapping[LocatorSource, str]] = MappingProxyType(
+    {
+        "explicit": "locator_source_explicit",
+        "host_payload": "locator_source_host_payload",
+        "cwd": "locator_source_cwd",
+        "absent": "locator_absent",
+        "unresolvable": "locator_unresolvable",
+    }
+)
 
+
+@dataclass(frozen=True, slots=True)
+class SessionWorkspace:
+    """One bounded locator selection for a mapped-session status probe."""
+
+    locator: str | None
+    source: LocatorSource
+
+    @property
+    def diagnostic_reason(self) -> str:
+        return _LOCATOR_SOURCE_REASONS[self.source]
+
+
+def _canonical_or_none(candidate: str) -> str | None:
     try:
-        return canonical_workspace_locator("." if workspace is None else workspace)
+        return canonical_workspace_locator(candidate)
     except Exception:
         return None
+
+
+def host_payload_cwd(payload: Mapping[str, JsonValue] | None) -> str | None:
+    """The host's own session working directory from the hook payload, if it names one."""
+
+    if payload is None:
+        return None
+    value = payload.get("cwd")
+    return value if type(value) is str and value else None
+
+
+def resolve_session_workspace(
+    workspace: str | None,
+    payload: Mapping[str, JsonValue] | None = None,
+) -> SessionWorkspace:
+    """Select the repository locator a mapped-session status probe carries (issue #659).
+
+    Order: an explicit project path from the rendered command (anything but the bare ``.``),
+    then the host payload's session ``cwd``, then the hook's own working directory. The bare
+    ``.`` is the hook cwd, not host evidence, so a host-supplied cwd outranks it: Codex and
+    Cursor hook working directories are not stable across surfaces, and a hook launched outside
+    the project must still bind the project the host named. An explicit project path that fails
+    canonicalization is terminal — it never falls through to a different repository — and a
+    fully absent context stays absent rather than inheriting a broader fallback. Only the closed
+    source token is ever recorded; the path never is.
+    """
+
+    if workspace is not None and workspace not in {"", "."}:
+        locator = _canonical_or_none(workspace)
+        return SessionWorkspace(locator, "explicit" if locator is not None else "unresolvable")
+    cwd = host_payload_cwd(payload)
+    if cwd is not None:
+        locator = _canonical_or_none(cwd)
+        if locator is not None:
+            return SessionWorkspace(locator, "host_payload")
+    if workspace is None and cwd is None:
+        # No rendered locator and no host cwd: the hook's own cwd is the ordinary
+        # repository-bound CLI default, exactly as before this resolver existed.
+        locator = _canonical_or_none(".")
+        return SessionWorkspace(locator, "cwd" if locator is not None else "absent")
+    locator = _canonical_or_none(".")
+    if locator is not None:
+        return SessionWorkspace(locator, "cwd")
+    return SessionWorkspace(None, "unresolvable")
+
+
+def session_workspace_locator(workspace: str | None) -> str | None:
+    """Canonical locator for a hook that names its workspace, else the hook's own cwd."""
+
+    return resolve_session_workspace(workspace).locator
 
 
 async def _read_status(
@@ -877,11 +948,13 @@ def handle_session_start(
                 _stdout_json(_context_output("SessionStart", INACTIVE_CONTEXT), stdout)
                 return 0
 
+            selection = resolve_session_workspace(workspace, payload)
+
             async def _run() -> StatusOutcome:
                 return await _read_status(
                     mapping,
                     connect=connect,
-                    workspace_locator=session_workspace_locator(workspace),
+                    workspace_locator=selection.locator,
                 )
 
             outcome = cast(StatusOutcome, runner(_run))
@@ -927,8 +1000,14 @@ def handle_session_start(
 
                 # The daemon refused to bind this read to a repository; the mapping
                 # is kept untouched and is deliberately not reported as stale (#578).
+                # The companion row names where the probe's locator came from, so an
+                # absent locator, a supplied one that failed to canonicalize, and a
+                # resolved one the daemon still refused are distinguishable (#659).
                 with contextlib.suppress(Exception):
                     record_hook_diagnostic(f"status_{kind}", "SessionStart", _state=_state)
+                    record_hook_diagnostic(
+                        selection.diagnostic_reason, "SessionStart", _state=_state
+                    )
                 _stdout_json(
                     _context_output(
                         "SessionStart",

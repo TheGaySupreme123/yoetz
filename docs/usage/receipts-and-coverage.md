@@ -162,6 +162,9 @@ finding-free suffix made entirely of service-stamped observation records. The re
 check's coverage, including `semantic_model_derived`, and carries the gap
 `check_current_as_of_earlier_frontier` naming the subject frontier that was tested. The verdict is
 current as of that earlier frontier, not the receipt's, so the receipt is still coverage-incomplete.
+The limitations text says which kind of record followed the check: responses to its findings,
+finding-free host observations, or both. Observation records are retained but were not evaluated by
+that check; a re-check evaluates them, and routine observation can move the ledger again afterwards.
 
 Any other material event after the check — published work, a new finding (including an
 observation-authored finding), a response to a finding the check did not return, or a response whose

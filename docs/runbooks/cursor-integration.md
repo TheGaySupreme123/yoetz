@@ -40,6 +40,14 @@ metadata-only fixture pins for future design work; they are not supported compat
 Cursor's Python package deliberately has no `1.0.23` release; it aligned with the shared SDK
 release line at `1.0.24`. Nearby versions are untested, not implicitly compatible.
 
+Untested is not disabled (issue #656). Hook ingress maps only the IDE cell `3.17.8` to its
+reviewed profile; a supplied unknown version — including the Agent CLI build — is admitted as
+`untested` and its compatible events ingest under the conservative paired contract, while an
+omitted version takes the legacy post-only carrier. Neither branch is promoted to the reviewed
+profile, and neither loses ordinary hook observation. This decision was recorded without a new
+live Cursor upgrade run; distinguishing the IDE from the Agent CLI capability scope in a
+disposable instance remains the acceptance evidence for a promotion.
+
 A pinned test instance (ADR-028, issue #604) adds a second guard beneath the artifact binding:
 when the native MCP entry and hook commands name the absolute launcher of a runtime created with
 `yoetz instance create --bind-runtime`, that launcher resolves its own root even if Cursor drops the
@@ -563,7 +571,11 @@ root as its repository locator, so a live mapping answers `active` and the `addi
 names the task, frontier, mapped `session_id` and `writer_id`, and the `start mode=attach`
 continuation by that session id (issues #578, #580). A daemon fence refusal records
 `status_workspace_unbound` / `status_workspace_mismatch` and keeps the mapping; only a replaced
-session records `mapping_stale`.
+session records `mapping_stale`. Cursor resolves its root from the host payload's
+`workspace_roots` before the rendered `--workspace .`, so the Codex-specific issue #659 failure
+(a probe with no usable repository context) does not reproduce here; an unresolvable root is the
+typed `workspace_unresolvable` failure before any probe, and a fence refusal records the companion
+`locator_source_explicit` diagnostic row.
 
 A successful explicit Yoetz `start` now binds the canonical Cursor session before normal
 observation handling (issue #661). The adapter transiently decodes `result_json` on

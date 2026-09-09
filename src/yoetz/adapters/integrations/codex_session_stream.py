@@ -22,6 +22,7 @@ from yoetz.adapters.importers.codex_rollout_jsonl import (
     parse_codex_rollout_jsonl_from_offset,
     profile_for_rollout_id,
     profile_for_rollout_version,
+    rollout_admission_provenance,
 )
 from yoetz.adapters.integrations.observation_local import (
     STREAM_MAPPING_VERSION,
@@ -41,6 +42,7 @@ from yoetz.ports.importer import ImportLineStatus
 from yoetz.protocol.canonical import canonical_digest, canonical_encode
 
 __all__ = [
+    "STREAM_ADMISSION_STATES",
     "CodexSessionStreamLocator",
     "PERIODIC_RECONCILE_SECONDS",
     "SessionStreamAdvance",
@@ -50,9 +52,37 @@ __all__ = [
     "reconcile_session_stream",
     "resolve_codex_home",
     "should_trigger_stream_reconcile",
+    "stream_admission",
     "stream_profile_from_id",
     "structural_from_stream_record",
 ]
+
+# Closed stream-admission states (issue #656). ``structurally_supported`` is an exact certified
+# profile with every read line understood; ``partially_understood`` is the compatibility profile
+# or any admitted profile with unknown/incompatible lines; ``incompatible`` is a refused header
+# or a surface the hook pass cannot read; ``unadmitted`` is a stream whose header has not been
+# read yet. None of these is host support: parser admission certifies nothing about hooks or MCP.
+STREAM_ADMISSION_STATES: Final = (
+    "incompatible",
+    "partially_understood",
+    "structurally_supported",
+    "unadmitted",
+)
+# Closed per-line reason tokens the reader surfaces beside the admission state so a partial
+# stream names the affected family (wrapper vs. nested item vs. shape) without echoing the
+# unknown type text itself.
+_ADMISSION_REASON_TOKENS: Final = frozenset(
+    {
+        "json_profile_unsupported",
+        "line_oversized",
+        "malformed_line",
+        "truncated_final_line",
+        "unknown_item_type",
+        "unknown_wrapper_type",
+        "unsupported_codex_profile",
+        "wrapper_shape_unsupported",
+    }
+)
 
 _MAX_READ_CHUNK: Final = 262_144
 _EMPTY_COMMITMENT: Final = "hmac-sha256:" + ("0" * 64)
@@ -205,7 +235,7 @@ def default_stream_profile() -> CodexCapabilityProfile:
 
 
 def stream_profile_from_id(profile_id: str | None) -> CodexCapabilityProfile | None:
-    """Resolve a persisted profile id to its exact profile; unknown ids resolve to ``None``."""
+    """Resolve a persisted profile id (exact or compatible); unknown ids resolve to ``None``."""
 
     if profile_id is None:
         return None
@@ -576,6 +606,29 @@ class SessionStreamAdvance:
     restarted: bool
     truncated: bool
     rotated: bool
+    # Closed parser reason tokens for the terminated lines this advance did not map (sorted,
+    # unique). Never the offending type text: a partial stream names its affected family only.
+    reason_codes: tuple[str, ...] = ()
+
+
+def stream_admission(
+    profile: CodexCapabilityProfile | None,
+    gaps: tuple[str, ...],
+    reason_codes: tuple[str, ...],
+) -> str:
+    """Classify one stream's admission from its profile and bounded gaps (issue #656)."""
+
+    if ObservationGapCode.UNSUPPORTED_FORMAT.value in gaps:
+        return "incompatible"
+    if profile is None:
+        return "unadmitted"
+    if (
+        rollout_admission_provenance(profile) == "structural"
+        or ObservationGapCode.UNSUPPORTED_EVENT.value in gaps
+        or any(token in _ADMISSION_REASON_TOKENS for token in reason_codes)
+    ):
+        return "partially_understood"
+    return "structurally_supported"
 
 
 @dataclass
@@ -908,6 +961,7 @@ class SessionStreamReader:
             self.profile = parsed.profile
         consumed = 0
         envelopes: list[ObservationEnvelope] = []
+        reason_codes: set[str] = set()
         hold = b""
         for index, line in enumerate(parsed.lines):
             if not line.terminated:
@@ -924,6 +978,8 @@ class SessionStreamReader:
             if record is None:
                 reason = parsed.reason_codes[index] if index < len(parsed.reason_codes) else None
                 status = parsed.statuses[index] if index < len(parsed.statuses) else None
+                if reason in _ADMISSION_REASON_TOKENS:
+                    reason_codes.add(reason)
                 if reason == "unsupported_codex_profile" or (
                     require_admission
                     and index == 0
@@ -1005,6 +1061,7 @@ class SessionStreamReader:
             restarted,
             truncated,
             rotated,
+            tuple(sorted(reason_codes, key=str.encode)),
         )
 
 
@@ -1125,6 +1182,9 @@ def reconcile_session_stream_path(
             "byte_position": 0,
             "event_position": 0,
             "generation": 1,
+            "admission": "incompatible",
+            "admission_provenance": None,
+            "admission_reasons": (),
             "rotated": False,
             "truncated": False,
             "resolved": True,
@@ -1257,6 +1317,7 @@ def reconcile_session_stream_path(
             store.note_coverage_gap(workspace_commitment, durable_gap)
     if overflow and ObservationGapCode.OUTBOX_OVERFLOW.value not in gaps:
         gaps = (*gaps, ObservationGapCode.OUTBOX_OVERFLOW.value)
+    admitted_profile = stream_profile_from_id(persisted_profile_id)
     return {
         "accepted": accepted,
         "duplicates": duplicates,
@@ -1265,6 +1326,12 @@ def reconcile_session_stream_path(
         "event_position": committed_cursor.event_position,
         "generation": committed_cursor.source_generation,
         "profile_id": persisted_profile_id,
+        # Structural admission is a parser fact about this pass, never host support (#656).
+        "admission": stream_admission(admitted_profile, gaps, advance.reason_codes),
+        "admission_provenance": (
+            None if admitted_profile is None else rollout_admission_provenance(admitted_profile)
+        ),
+        "admission_reasons": advance.reason_codes,
         "rotated": advance.rotated,
         "truncated": advance.truncated,
         "resolved": True,
