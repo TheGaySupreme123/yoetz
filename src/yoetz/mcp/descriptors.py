@@ -1582,36 +1582,21 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
     _descriptor(
         "status",
         "Read recorded status",
-        "Reads one bounded, paginated view: advice, assignment, candidate_findings, compact, "
-        "evidence, findings, history, obligations, operation, results, or versions. Advice items carry a "
-        "recommended_next_action. Call it when uncertain what you already did or committed to, "
-        "rather than reconstructing from memory. view=history returns each event's caller-asserted "
-        "occurred_at beside the service-stamped accepted_at plus a closed forward-skew "
-        "classification; order follows ingestion sequence and the classification does not verify "
-        "caller time. "
-        "view=operation takes filter.operation_request_id and returns that operation's stored "
-        "result for recovery without resending the body. view=findings reads recorded findings; "
-        "view=candidate_findings returns unrecorded deterministic candidates without verdicts or "
-        "IDs. view=obligations exposes requested_items and the exact unattempted_items subset "
-        "under obligation-text projection policy. view=results resolves res_ ids to bounded "
-        "source-event, payload-availability, outcome, action, and evidence facts without result "
-        "prose. Before publishing evidence, paginate view=evidence at one frontier, keeping the "
-        "original limit/filter with the cursor. Match bounded identity and state, reuse suitable "
-        "native evidence IDs in supporting_refs, and interpret capture/selection/clipping gaps per "
-        "item; one limited item never proves all native content absent. command_attempts in "
-        "obligations separates assertions from explicitly linked observed attempts, mismatch, or "
-        "unknown; it never proves command success. Finding detail explains failed resolution "
-        "requirements without changing resolved. The optional CLI closure-prepare composes explicit "
-        "closure selections without publishing. Read closure_readiness before a check or receipt: "
-        "unanswered_finding_count names response work, while receipt_blocking_finding_count names "
-        "current actionable findings; only a later qualifying check of the repaired record "
-        "resolves one, never a response, and a resolved finding stays visible as history with "
-        "resolved=true under filter.include_resolved. findings_unanswered should be answered; "
-        "receipt_findings_unresolved should be repaired and rechecked once, never answered again. "
-        "If that check does not re-fire the issue but resolved remains false, stop rechecking "
-        "unchanged state and disclose the limiting coverage in the receipt. Call it "
-        "after a resume, a compaction, or a delegate handoff, and before a "
-        "completion claim, rather than between routine tool calls. Guidance: "
+        "Reads bounded, paginated state when uncertain what you already did or committed to, "
+        "with advice naming recommended_next_action. "
+        "History pairs caller-asserted occurred_at beside the service-stamped accepted_at; "
+        "forward-skew classification compares clocks, not truth. Order follows ingestion sequence. "
+        "view=operation with filter.operation_request_id recovers the stored outcome. "
+        "Before evidence publication, paginate view=evidence at one frontier with the same limit "
+        "and filter. Match identity and state; reuse suitable IDs in supporting_refs. Capture, "
+        "selection and clipping limits are per item, not absence of all content. "
+        "Obligations expose requested_items, unattempted_items and command_attempts; the latter "
+        "separates observed attempts, mismatch and unknown, without establishing success. "
+        "Results map res_ IDs to action, outcome and evidence. Finding detail explains resolution "
+        "requirements; absence from a later result is not repair. Only qualifying checks resolve "
+        "findings; responses do not. Read closure_readiness: unanswered_finding_count needs responses; "
+        "receipt_blocking_finding_count needs repair or a limited receipt, not unchanged rechecks. "
+        "Guidance: "
         "yoetz://guidance/workflow.md.",
         read_only=True,
         idempotent=True,
@@ -1693,7 +1678,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "publish_work": "sha256:4e90f9bdb94adb0a0de05bd5ec046f54fcab4c89f93d4c4b7191c12e19e229de",
                 "check": "sha256:3175800b79a9ea035fabde6c64227ff8a0c9783a4f5d13a29a7a9b80e91c41a2",
                 "respond": "sha256:6003245eb4b02e6a81fa4f1083bfa00da675ec247398e302bcfbd2b82219664c",
-                "status": "sha256:e4798c4fedc7cb6bc7dda204b52ec2734b9dc319c27ca3834bdbaadd5c2613e4",
+                "status": "sha256:50b201557bb97061cc2c2ba817e7e1b3cdf7c7cbc0dd546baf46705e8cc6c40f",
                 "receipt": "sha256:cf4b426af9764747848d3334d0671d0d0961ab5c86173d70c067222e9feb5ee2",
                 "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
             }
@@ -1704,7 +1689,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "publish_work": "sha256:4e90f9bdb94adb0a0de05bd5ec046f54fcab4c89f93d4c4b7191c12e19e229de",
                 "check": "sha256:b1cf1b1554d437b315f10f38080590b919c355b38f678bdcc458cd78620e1d60",
                 "respond": "sha256:6003245eb4b02e6a81fa4f1083bfa00da675ec247398e302bcfbd2b82219664c",
-                "status": "sha256:e4798c4fedc7cb6bc7dda204b52ec2734b9dc319c27ca3834bdbaadd5c2613e4",
+                "status": "sha256:50b201557bb97061cc2c2ba817e7e1b3cdf7c7cbc0dd546baf46705e8cc6c40f",
                 "receipt": "sha256:cf4b426af9764747848d3334d0671d0d0961ab5c86173d70c067222e9feb5ee2",
                 "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
             }
@@ -1713,8 +1698,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:de1d9f9bd2f821bbf0cdf2ff64616213b2def4ad9d6952fbd1a485508700706c",
-        "strict": "sha256:1910d370ae257ff094984bf98ec5390added1cce159d5f045f10a7eafe44dcce",
+        "policy": "sha256:e89d6469d0e5bffd42e518791282a09630d01a5ea020a9630e7d2b772ccee25f",
+        "strict": "sha256:d12eb5beb174615a37c572e019ea52a74ce98861f1711ac6859fcc46445663ac",
     }
 )
 
