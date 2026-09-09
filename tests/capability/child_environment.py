@@ -19,7 +19,7 @@ def child_environment(tmp_path: Path) -> dict[str, str]:
     for directory in ("cache", "config", "data", "runtime", "state", "yoetz"):
         ensure_owner_only_dir(home / directory)
     return {
-        **os.environ,
+        **{name: value for name, value in os.environ.items() if not name.startswith("YOETZ_")},
         "HOME": str(home),
         "XDG_CACHE_HOME": str(home / "cache"),
         "XDG_CONFIG_HOME": str(home / "config"),

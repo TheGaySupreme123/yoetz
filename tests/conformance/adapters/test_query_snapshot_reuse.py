@@ -115,3 +115,38 @@ async def test_historical_query_yields_and_joins_cancelled_worker(
         release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+async def test_append_invalidates_rows_without_changing_historical_page(backend: str) -> None:
+    records = replay_records("all-event-families")
+    command, objects = command_from_records(records[:4], expected_frontier=0)
+    db = None
+    if backend == "memory":
+        ledger = memory_for(command, objects)
+    else:
+        db = apsw.Connection(":memory:")
+        ledger = sqlite_for(command, objects, db)
+    try:
+        accepted = await ledger.append_batch(command)
+        query = ProjectionQuery(
+            command.session_id, "history", None, accepted.result_frontier, 100, None, None
+        )
+        before = await ledger.query_projection(query)
+        next_command, _ = command_from_records(
+            records[4:5], expected_frontier=4, request_number=100, objects=objects
+        )
+        appended = await ledger.append_batch(next_command)
+        after = await ledger.query_projection(
+            replace(query, requested_frontier=appended.result_frontier)
+        )
+        assert len(before.items) == 4
+        assert len(after.items) == 5
+        historical = await ledger.query_projection(query)
+        assert historical.items == before.items
+        assert historical.effective_frontier == before.effective_frontier
+        assert historical.head_frontier == appended.result_frontier
+    finally:
+        if db is not None:
+            db.close()
