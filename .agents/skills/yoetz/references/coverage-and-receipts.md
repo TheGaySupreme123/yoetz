@@ -141,6 +141,43 @@ Forbidden: “Yoetz proved the implementation is complete and correct.”
 
 Installing a harness integration or firing a trigger-only hook does not strengthen coverage. A proven trigger may prompt a bounded status re-grounding; it observes nothing and changes no coverage. Only a capability-proven, consented observation arm with real observation evidence may earn `hook_observed`; an absent, empty, paused, or degraded observation status does not.
 
+## Discover evidence before authoring replacements
+
+Before publishing evidence for a material claim, read every page of `status view=evidence` at
+one frontier. Preserve the view, filter, frontier and original `limit` with each cursor; changing
+page size starts a fresh query with no cursor. Match task, observed action/result, subject-state
+digests, byte digest and bounded description. A captured object ID alone is not a typed provenance
+label or evidence of relevance. Read the matching history/source identity when available; if that
+cannot establish the relation, leave it unknown.
+
+Reuse suitable existing native evidence IDs directly in the claim's `supporting_refs` and relevant
+result evidence references. Do not replace matching observed bytes with a duplicate
+`caller_asserted` digest-only placeholder. Publish only genuinely missing bounded assertions;
+ordinary publication cannot mint `observation_captured` provenance.
+
+Interpret limitations per item: `content_unselected` means a retained kind was not selected;
+`evidence_content_digest_only` retains identity without content; `content_capture_unavailable`
+means capture is unavailable for the affected input; `semantic_case_content_over_item_limit`
+bounds or clips that item. An aggregate union of those gaps does not mean no native content
+reached review. A selectable excerpt proves what was observed, not command success or correctness.
+
+For example, a synthetic inventory may span two pages: a matching source snapshot, an unrelated
+stale snapshot, matching test output, a digest-only documentation item and an oversized diff.
+Reuse the matching source and test IDs; exclude the stale item; disclose the documentation limit
+and the diff's clipping independently. Check the selected review input and final receipt before
+claiming that all needed content was reviewed. Acknowledging an evidence finding does not repair
+its basis: supply admissible evidence or retain an explicitly limited receipt.
+
+A finding's status detail explains the latest recorded candidate check separately from the
+original finding. `Not returned; absence remains unproven` is not a repair conclusion. The named
+policy, scope, suppression, freshness, unreadable proof, semantic outcome and disqualifying gap
+requirements come from the same rule that controls resolution. Correct those inputs when possible;
+do not repeat an unchanged check merely because the provider succeeded. Resolved history remains.
+
+A check can remain attributable while responses or finding-free service observations arrive.
+Its verdict covers its tested frontier; later ingestion does not prove later occurrence. Evaluate
+later material when needed, without chasing an indefinitely advancing observation frontier.
+
 
 ## Semantic review authority: who already decided what
 

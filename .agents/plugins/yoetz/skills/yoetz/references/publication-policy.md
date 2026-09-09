@@ -46,6 +46,34 @@ An obligation names what must be satisfied. Evidence is a bounded, provenance-la
 
 ### Digest subjects and provenance
 
+
+## Discover evidence before authoring replacements
+
+Before publishing evidence for a material claim, read every page of `status view=evidence` at
+one frontier. Preserve the view, filter, frontier and original `limit` with each cursor; changing
+page size starts a fresh query with no cursor. Match task, observed action/result, subject-state
+digests, byte digest and bounded description. A captured object ID alone is not a typed provenance
+label or evidence of relevance. Read the matching history/source identity when available; if that
+cannot establish the relation, leave it unknown.
+
+Reuse suitable existing native evidence IDs directly in the claim's `supporting_refs` and relevant
+result evidence references. Do not replace matching observed bytes with a duplicate
+`caller_asserted` digest-only placeholder. Publish only genuinely missing bounded assertions;
+ordinary publication cannot mint `observation_captured` provenance.
+
+Interpret limitations per item: `content_unselected` means a retained kind was not selected;
+`evidence_content_digest_only` retains identity without content; `content_capture_unavailable`
+means capture is unavailable for the affected input; `semantic_case_content_over_item_limit`
+bounds or clips that item. An aggregate union of those gaps does not mean no native content
+reached review. A selectable excerpt proves what was observed, not command success or correctness.
+
+For example, a synthetic inventory may span two pages: a matching source snapshot, an unrelated
+stale snapshot, matching test output, a digest-only documentation item and an oversized diff.
+Reuse the matching source and test IDs; exclude the stale item; disclose the documentation limit
+and the diff's clipping independently. Check the selected review input and final receipt before
+claiming that all needed content was reviewed. Acknowledging an evidence finding does not repair
+its basis: supply admissible evidence or retain an explicitly limited receipt.
+
 Every newly published `evidence_recorded/1.1.0` payload that includes `content_digest` must also
 include a closed `digest_binding` object:
 

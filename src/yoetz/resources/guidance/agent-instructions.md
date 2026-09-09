@@ -61,3 +61,5 @@ Load only the resource needed for the current operation; retain it across calls 
 - `yoetz://guidance/request-templates.md` - missing/rejected schema metadata; before setup, settings,
   credentials, vault operations, import, or recommendation decisions, read Setup and consent /
   Recommendations. These procedures are not prerequisites for ordinary configured workflow calls.
+
+Before evidence publication, paginate `status view=evidence`; reuse matching IDs with per-item limits.

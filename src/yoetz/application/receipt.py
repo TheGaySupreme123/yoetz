@@ -570,7 +570,8 @@ def _context(
         ordered_gaps,
         finding_states,
         applicable,
-        check_suffix,
+        check_suffix=check_suffix,
+        records=records,
     )
 
 

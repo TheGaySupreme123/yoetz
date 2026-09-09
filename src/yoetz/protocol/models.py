@@ -2809,6 +2809,19 @@ class StatusRequestedItemModel(_ClosedModel):
         return self
 
 
+class StatusCommandAttemptModel(_ClosedModel):
+    requested_item_index: Annotated[str, Field(pattern=r"^(?:[0-9]|[1-5][0-9]|6[0-3])$")]
+    relation: Literal["matching_observed_attempt", "asserted_observed_mismatch", "unknown"]
+    asserted_action_ids: tuple[ActionIdWire, ...]
+    observed_event_ids: tuple[EventIdWire, ...]
+
+    @model_validator(mode="after")
+    def _validate_refs(self) -> StatusCommandAttemptModel:
+        _require_unique(self.asserted_action_ids, limit=64)
+        _require_unique(self.observed_event_ids, limit=64)
+        return self
+
+
 class StatusObligationItemModel(_ClosedModel):
     optional_non_null_fields = frozenset({"acceptance_criteria"})
 
@@ -2822,6 +2835,7 @@ class StatusObligationItemModel(_ClosedModel):
     revision_event_id: EventIdWire | None
     requested_items: tuple[StatusRequestedItemModel, ...] = ()
     unattempted_items: tuple[StatusRequestedItemModel, ...] = ()
+    command_attempts: tuple[StatusCommandAttemptModel, ...] = ()
     acceptance_criteria: String1To8192 | OmittedContentModel | None = None
 
     @model_validator(mode="after")
@@ -2830,6 +2844,8 @@ class StatusObligationItemModel(_ClosedModel):
             _require_unique(values, limit=64)
         if len(self.requested_items) > 64 or len(self.unattempted_items) > 64:
             raise ValueError("obligation_requested_item_limit")
+        if len(self.command_attempts) > 64:
+            raise ValueError("obligation_command_attempt_limit")
         requested = tuple((item.item_kind, item.value) for item in self.requested_items)
         unattempted = tuple((item.item_kind, item.value) for item in self.unattempted_items)
         if any(item not in requested for item in unattempted):
@@ -3831,6 +3847,10 @@ _STATUS_OBLIGATIONS_STRUCTURAL_POINTERS: Final = (
             "source_refs/*",
             "status",
             "unattempted_items/*/item_kind",
+            "command_attempts/*/requested_item_index",
+            "command_attempts/*/relation",
+            "command_attempts/*/asserted_action_ids/*",
+            "command_attempts/*/observed_event_ids/*",
         ),
     )
     + _prefix_leaf_patterns("/page/items/*/acceptance_criteria", _OMITTED_CONTENT_LEAVES)
@@ -4172,7 +4192,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 923:
+    if len(result) != 927:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 
