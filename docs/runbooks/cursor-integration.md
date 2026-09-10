@@ -20,6 +20,13 @@ a Cursor plan from a published Yoetz plan, and names distinct IDE and CLI tool-d
 Full application restart remains conditional on the documented activation mismatch, without
 changing privacy authority.
 
+A new Cursor session's first Yoetz operation is MCP `start` before research, commands, edits, or
+delegation. SessionStart additional context and hook auto-attachment are cues, not a substitute
+for that call. If `start` fails without an exact typed continuation, the agent must ask the user
+for intro and guidance rather than inventing a workflow. Cursor has no demonstrated equivalent of
+Claude's PreToolUse deny gate in this integration; the start-first rule is instruction delivery,
+not enforcement (#692).
+
 Design basis, checked 2026-09-09: Cursor's [skills guidance](https://cursor.com/docs/skills)
 uses descriptions for relevance and loads references progressively. Yoetz therefore keeps the
 material-work trigger in metadata and the long procedures in shared references. Cursor's

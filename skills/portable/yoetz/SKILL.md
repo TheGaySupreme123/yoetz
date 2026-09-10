@@ -1,11 +1,15 @@
 ---
 name: yoetz
-description: Use for material multi-step, resumable, delegated, or verification-heavy work; record it in a local Yoetz ledger and check completion claims against that bounded record.
+description: Use for material multi-step, resumable, delegated, or verification-heavy work. In a new session call start before research, commands, edits, or delegation; if start fails, ask for intro and guidance.
 ---
 
 # Yoetz cooperative workflow
 
-Use Yoetz for material multi-step, resumable, delegated, or verification-heavy work. It is a
+Use Yoetz for material multi-step, resumable, delegated, or verification-heavy work. A new
+session's first Yoetz operation is `start` (create or attach) before research, commands, edits,
+or delegation. If `start` fails without an exact typed continuation, ask the user for intro and
+guidance to get Yoetz working; do not invent a substitute workflow, skip Yoetz, or continue that
+material session without a ledger task. It is a
 local work ledger and deterministic checker: it records only what participants publish and does
 not observe the workspace, enforce a process, authenticate authorship, or prove correctness.
 

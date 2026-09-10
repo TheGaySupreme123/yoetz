@@ -1,6 +1,6 @@
 ---
 name: yoetz
-description: Use for material multi-step, resumable, delegated, or verification-heavy work in Cursor Agent; record participant-published facts in a local Yoetz ledger and check closure claims against that bounded record.
+description: Use for material multi-step, resumable, delegated, or verification-heavy work in Cursor Agent. In a new session call start before research, commands, edits, or delegation; if start fails, ask for intro and guidance.
 ---
 
 # Yoetz for Cursor Agent
@@ -8,7 +8,11 @@ description: Use for material multi-step, resumable, delegated, or verification-
 ## Trigger
 
 Use this skill when the request has multiple material steps, delegates work, resumes an earlier
-conversation, repairs evidence, or asks whether a result is complete. Yoetz records facts that
+conversation, repairs evidence, or asks whether a result is complete. A new chat's first Yoetz
+operation is `start` (create or attach) before research, commands, edits, or delegation. If
+`start` fails without an exact typed continuation, ask the user for intro and guidance to get
+Yoetz working; do not invent a substitute workflow, skip Yoetz, or continue that material
+session without a ledger task. Yoetz records facts that
 participants publish; it does not observe the workspace, authenticate authorship, or prove that
 the underlying work is correct.
 

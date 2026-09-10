@@ -1,12 +1,16 @@
 ---
 name: yoetz
-description: Use for material multi-step, resumable, delegated, or verification-heavy Claude Code work; record it in Yoetz's local ledger and close it with bounded evidence.
+description: Use for material multi-step, resumable, delegated, or verification-heavy Claude Code work. In a new session call start before research, commands, edits, or delegation; if start fails, ask for intro and guidance.
 ---
 
 # Yoetz for Claude Code
 
 Use this skill when the Claude Code task is material, multi-step, resumable, delegated, or
-verification-heavy. Yoetz records participant-published facts in a local ledger and checks claims
+verification-heavy. A new session's first Yoetz operation is `start` (create or attach) before
+research, shell commands, edits, or delegation. If `start` fails without an exact typed
+continuation, ask the user for intro and guidance to get Yoetz working; do not invent a
+substitute workflow, skip Yoetz, or continue that material session without a ledger task.
+Yoetz records participant-published facts in a local ledger and checks claims
 against that record. It does not observe the workspace, enforce a process, authenticate authorship,
 or prove correctness. A clean receipt is bounded by its recorded evidence and coverage.
 

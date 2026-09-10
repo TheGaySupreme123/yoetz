@@ -18,6 +18,13 @@ The Codex skill routes to the existing five MCP guidance URIs with installed ref
 The server initializes only the safety floor. Consumer source-inspection restrictions do not
 prohibit developing or debugging Yoetz itself against isolated test state.
 
+A new Codex session's first Yoetz operation is MCP `start` before research, commands, edits, or
+delegation. SessionStart additional context and hook auto-attachment are cues, not a substitute
+for that call. If `start` fails without an exact typed continuation, the agent must ask the user
+for intro and guidance rather than inventing a workflow. This host has no demonstrated
+PreToolUse deny gate: wording and SessionStart context are instruction delivery, not enforcement
+(#692 instruction slice; native deny-mode remains unimplemented here).
+
 The Codex entrypoint is written directly for Codex and selected by its installer. The other native
 installers select their own skills. Keep installed-source evidence separate from compatibility
 directory discovery; a project skill discovered elsewhere is not proof of this integration.

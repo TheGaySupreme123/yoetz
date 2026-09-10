@@ -24,6 +24,10 @@ _MATERIAL_TRIGGER = (
     b"Use Yoetz for material multi-step, delegated, resumable, or verification-heavy work."
 )
 _START_CUE = b"Call `start` before substantive work."
+_NEW_SESSION_CUE = b"New session: `start` first."
+_START_FAIL_CUE = (
+    b"If `start` fails, ask for intro and guidance; do not invent workflow or continue without a task."
+)
 _TRIVIAL_EXCLUSION = (
     b"Skip Yoetz for trivial questions or edits where the ceremony exceeds the integrity benefit."
 )
@@ -32,6 +36,8 @@ _NO_FALSE_ACTIVATION = b"Never claim Yoetz is active until `start` returns."
 _CUE_SENTENCES: Final = (
     _MATERIAL_TRIGGER,
     _START_CUE,
+    _NEW_SESSION_CUE,
+    _START_FAIL_CUE,
     _TRIVIAL_EXCLUSION,
     _CADENCE_CUE,
     _NO_FALSE_ACTIVATION,

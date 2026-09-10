@@ -111,7 +111,9 @@ YOETZ_START_TOOL_NAMES: Final = frozenset(
     {"start", "mcp__yoetz__start", "mcp__plugin_yoetz_yoetz__start"}
 )
 INACTIVE_CONTEXT: Final = (
-    "No Yoetz task is mapped to this session; call start before substantive material work."
+    "No Yoetz task is mapped to this session; call start before substantive material work. "
+    "If start fails, ask the user for intro and guidance; do not invent a workflow or continue "
+    "without a ledger task."
 )
 _UNAVAILABLE_CONTEXT: Final = (
     "Yoetz service is unavailable for this mapped session; no live receipt can be promised."

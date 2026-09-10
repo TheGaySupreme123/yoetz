@@ -6,6 +6,16 @@ reverse-chronological released versions.
 
 ## Unreleased
 
+### Changed
+
+- New Codex, Claude Code, and Cursor sessions are instructed to call Yoetz `start` before
+  research, commands, edits, or delegation. If that call fails without an exact typed
+  continuation, they must ask the user for intro and guidance rather than inventing a workflow
+  or continuing without a ledger task. The rule is in the 512-byte intake cue, MCP initialize
+  instructions, each host skill catalog description and body, SessionStart inactive context, and
+  the `start` tool description. It is instruction delivery, not a PreToolUse deny gate (issue
+  #692 instruction slice).
+
 ### Added
 
 - Independent permanent installs and test snapshots (ADR-028, issue #604). An isolated root can now

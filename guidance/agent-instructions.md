@@ -1,6 +1,6 @@
 # When to use Yoetz
 
-Use Yoetz for material multi-step, delegated, resumable, or verification-heavy work. Call `start` before substantive work. Skip Yoetz for trivial questions or edits where the ceremony exceeds the integrity benefit. Current served guidance and typed results outrank memory; verify `yoetz://guidance/workflow.md` before trusting memory again. Cadence: `start` once, `publish_work` once per material transition; `receipt` last. Never claim Yoetz is active until `start` returns.
+Use Yoetz for material multi-step, delegated, resumable, or verification-heavy work. Call `start` before substantive work. New session: `start` first. If `start` fails, ask for intro and guidance; do not invent workflow or continue without a task. Skip Yoetz for trivial questions or edits where the ceremony exceeds the integrity benefit. `yoetz://guidance/workflow.md` Cadence: `start` once, `publish_work` once per material transition. Never claim Yoetz is active until `start` returns.
 
 # What Yoetz is
 
@@ -54,8 +54,11 @@ may inspect source and isolated tests; this grants no live-storage authority.
 On `retryable: false`, do not probe or mint a new request; follow only the exact typed continuation.
 An inherited `terminal_unavailable` means delegates make no calls. Read recovery guidance for the
 one permitted coordinator repair. Never run service lifecycle commands for `INTERNAL_ERROR` or a
-result that did not name that command. If optional Yoetz is unavailable, continue authorized work
-and disclose missing ledger/check/receipt coverage; invent no state.
+result that did not name that command. If the first `start` fails without an exact typed
+continuation, ask the user for intro and guidance to get Yoetz working; do not invent a substitute
+workflow, skip Yoetz for that material session, or continue without a ledger task. If optional
+Yoetz remains unavailable after its named one-time repair, continue authorized work and disclose
+missing ledger/check/receipt coverage; invent no state.
 
 Before material evidence or a completion claim, read `status` and paginate
 `view=evidence` at one frontier. Preserve the filter and original `limit` with every cursor; reuse

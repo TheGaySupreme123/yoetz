@@ -1,6 +1,6 @@
 ---
 name: yoetz
-description: Use for material multi-step, resumable, delegated, or verification-heavy work; record it in a local Yoetz ledger and check claims against that bounded record.
+description: Use for material multi-step, resumable, delegated, or verification-heavy work. In a new session call start before research, commands, edits, or delegation; if start fails, ask for intro and guidance.
 metadata:
   short-description: Local work ledger and bounded completion checks
 ---
@@ -10,6 +10,11 @@ metadata:
 Yoetz is a local work ledger and deterministic checker of participant-published facts. It is not an
 enforcement system, observer, authorship proof, transcript recorder, or orchestrator. A clean
 check does not prove the underlying work correct.
+
+A new session's first Yoetz operation is `start` (create or attach) before research, commands,
+edits, or delegation. If `start` fails without an exact typed continuation, ask the user for
+intro and guidance to get Yoetz working; do not invent a substitute workflow, skip Yoetz, or
+continue that material session without a ledger task.
 
 ## Load guidance for the current operation
 
@@ -79,8 +84,11 @@ transcripts, credentials, whole files/repositories, or unrelated source. Use onl
 material, state-bound excerpt. Follow terminal errors and typed continuations rather than probing;
 inherited `terminal_unavailable` means delegates make no calls.
 
-If optional Yoetz is unavailable, continue authorized work and disclose missing ledger or receipt
-coverage. Required review remains an unmet requirement. Separate completed implementation/tests
+If the first `start` fails without an exact typed continuation, ask the user for intro and
+guidance to get Yoetz working; do not invent a substitute workflow or continue without a
+ledger task. If optional Yoetz remains unavailable after its named one-time repair, continue
+authorized work and disclose missing ledger or receipt coverage. Required review remains an unmet
+requirement. Separate completed implementation/tests
 from that requirement, and local ledger writes from product-file edits. Final wording must be no
 stronger than the receipt's weakest material coverage.
 

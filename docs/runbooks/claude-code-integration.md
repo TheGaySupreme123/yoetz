@@ -20,6 +20,13 @@ Yoetz status after Claude resume or compaction. `SessionStart` additional contex
 replayed session context does not establish the current ledger frontier. Plugin replacement uses
 Claude's documented `/reload-plugins` or a new session, followed by loaded-root and digest checks.
 
+A new Claude session's first Yoetz operation is MCP `start` before research, commands, edits, or
+delegation. Hook auto-attachment and `SessionStart` additional context are cues, not proof of a
+current-scope plan. If `start` fails without an exact typed continuation, the agent must ask the
+user for intro and guidance rather than inventing a workflow. Claude documents PreToolUse
+`permissionDecision: deny` and exit 2, but this integration does not ship an owner-selected
+required-startup deny gate; instruction delivery is not enforcement (#692 remaining acceptance).
+
 Design basis, checked 2026-09-09: Claude's [skills guidance](https://code.claude.com/docs/en/skills)
 recommends a use-case-first description and concise instructions with supporting references.
 Yoetz keeps this workflow in the conversation because a forked skill lacks that conversation's

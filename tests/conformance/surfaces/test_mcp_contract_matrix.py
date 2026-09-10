@@ -289,8 +289,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:b1d39059ca2bac107287d243756e86a33fb1c4526ab64e51326aeeb9a6998b00",
-        "strict": "sha256:1cb4e2208fc5dc0b3579ed6187955788352cf4f7c68ffbb4884b1141347084ec",
+        "policy": "sha256:dfc365367b490c7e81dd5eb2e968c8ac1b807ce7adc3112f95d4cdd38b4c137a",
+        "strict": "sha256:38ca2c8c855ca98aedf9be14621ddc8672dadd21271fa56f05525946f12085ed",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -319,6 +319,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     start_description = descriptor_for("start").description
     assert "fresh req_ prefixed random UUID" in start_description
     assert "workspace_ref and external_ref are admitted only as a pair" in start_description
+    assert "A new session's first Yoetz operation is this call" in start_description
+    assert "ask the user for intro and guidance" in start_description
     assert (
         "unique and already in ascending ASCII order" in descriptor_for("publish_work").description
     )
