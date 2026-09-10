@@ -924,6 +924,7 @@ def public_error_code_for_control_reason(reason: str) -> PublicErrorCode:
     if reason in {"internal_error", "response_projection_failed", "read_projection_failed"}:
         return PublicErrorCode.INTERNAL_ERROR
     if reason in {
+        "invalid_request",
         "frame_invalid",
         "frame_too_large",
         "method_forbidden",

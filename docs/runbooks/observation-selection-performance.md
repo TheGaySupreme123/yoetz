@@ -184,7 +184,9 @@ real vendor-host parent/delegate workload, encrypted capture, fresh native
 control-rejection trace, upgrade over a running older service, or the six larger
 profile combinations described above. The fix removes repeated retention encodes
 and repeated batch preflight, moves Codex cold preparation outside the store
-lock, and shares the elapsed drain budget. It does not replace the JSON store
+lock, and shares the elapsed drain budget. Connection setup may use its reserved
+preflight allowance after subtracting snapshot time; service calls retain the
+original drain deadline, so a slow connection cannot reset it. It does not replace the JSON store
 with an append-oriented representation, interrupt synchronous durable writes,
 or establish an end-to-end timeout guarantee. Historical quarantine cannot be
 attributed from the new diagnostic format. Keep those acceptance limits visible

@@ -431,3 +431,30 @@ def test_drain_diagnostic_write_failure_is_explicit(
         "retry",
         _state=tmp_path,
     )
+
+
+@pytest.mark.parametrize("reason", ["invalid_request", "frame_invalid", "request_timeout"])
+def test_control_reason_survives_diagnostic_roundtrip(tmp_path: Path, reason: str) -> None:
+    from yoetz.adapters.integrations.observation_local import LocalObservationStore
+    from yoetz.application.observation_drain import observation_control_failure
+    from yoetz.cli.hook_diagnostics import record_drain_failure
+    from yoetz.cli.observe_hooks import map_hook_payload_to_envelope
+    from yoetz.ports.control import ControlError
+
+    store = LocalObservationStore(_state=tmp_path)
+    envelope = map_hook_payload_to_envelope(
+        "PostToolUse",
+        {"session_id": "test", "tool_name": "shell", "exit_status": 1},
+        session_commitment=store.session_commitment("test"),
+        event_ordinal=1,
+        key_material=store.key_material(),
+    )
+    assert record_drain_failure(
+        observation_control_failure(ControlError(reason)), envelope, "quarantine", _state=tmp_path
+    )
+    rows = cast(
+        tuple[Mapping[str, object], ...], hook_diagnostic_summary(_state=tmp_path)["drain_failures"]
+    )
+    assert len(rows) == 1
+    assert rows[0]["control_reason"] == reason
+    assert rows[0]["reason"] == "control_" + reason

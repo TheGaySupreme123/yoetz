@@ -299,6 +299,7 @@ _CONTROL_ERROR_CLASSES: Final[Mapping[str, str]] = MappingProxyType(
         "protocol_mismatch": "unavailable",
         "frame_invalid": "unavailable",
         "frame_too_large": "unavailable",
+        "invalid_request": "unavailable",
         "request_cancelled": "unavailable",
         "method_forbidden": "unavailable",
         "internal_error": "unavailable",

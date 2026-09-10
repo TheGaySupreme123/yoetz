@@ -11,6 +11,7 @@ from types import MappingProxyType
 from typing import Final, Literal, Protocol, cast
 
 from yoetz.domain.values import JsonObject, validate_commitment
+from yoetz.ports.control_reasons import CONTROL_ERROR_REASONS
 from yoetz.protocol.canonical import parse_canonical_integer_string
 from yoetz.protocol.errors import SafeDetailValue, normalize_safe_details
 from yoetz.protocol.ids import IdKind, validate_id
@@ -30,6 +31,7 @@ from yoetz.protocol.models import (
 )
 
 __all__ = [
+    "CONTROL_ERROR_REASONS",
     "ControlCallRequest",
     "ControlCancelRequest",
     "ControlClientKind",
@@ -293,28 +295,6 @@ class ControlCancelRequest:
 type ControlRequest = ControlCallRequest | ControlCancelRequest
 
 
-_CONTROL_ERROR_REASONS = frozenset(
-    {
-        "service_unavailable",
-        "service_incompatible",
-        "peer_untrusted",
-        "protocol_mismatch",
-        "frame_invalid",
-        "frame_too_large",
-        "request_cancelled",
-        "request_timeout",
-        "vault_locked",
-        "service_draining",
-        "method_forbidden",
-        "internal_error",
-        "privacy_projection_unavailable",
-        "privacy_projection_blocked",
-        "response_projection_failed",
-        "read_projection_failed",
-        "service_generation_changed",
-        "endpoint_unsafe",
-    }
-)
 _EMPTY_ACCEPTED_STATE: Final[Mapping[str, SafeDetailValue]] = MappingProxyType({})
 # The exact structural facts a caller needs to continue after a post-commit projection failure:
 # where the ledger landed, and how many events it accepted.
@@ -354,7 +334,7 @@ class ControlError(Exception):
         accepted_state: Mapping[str, SafeDetailValue] | None = None,
         correlation_id: str | None = None,
     ) -> None:
-        if type(reason) is not str or reason not in _CONTROL_ERROR_REASONS:
+        if type(reason) is not str or reason not in CONTROL_ERROR_REASONS:
             raise TypeError("control_error_reason_invalid")
         if type(retryable) is not bool:
             raise TypeError("control_error_retryable_invalid")

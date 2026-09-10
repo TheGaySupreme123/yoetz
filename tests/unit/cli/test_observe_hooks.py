@@ -8,7 +8,7 @@ import json
 import os
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal, cast
@@ -5369,3 +5369,91 @@ async def test_control_failure_stops_batch_without_fabricating_other_row_refusal
     assert failure["correlation_id"] == correlation
     assert failure["disposition"] == ("quarantine" if terminal else "retry")
     assert failure["source"] == source.value
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("hydration_seconds", [0.0, 1.1, 1.3])
+async def test_preflight_uses_remaining_combined_allowance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hydration_seconds: float
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "allowance")
+    store.enqueue_outbox(workspace, "allowance", _drain_envelope(store, "allowance", "x", 1))
+    clock = {"now": 0.0}
+    original_list = store.list_pending_outbox_rows
+
+    def hydrated(commitment: str):
+        rows = original_list(commitment)
+        clock["now"] += hydration_seconds
+        return rows
+
+    monkeypatch.setattr(store, "list_pending_outbox_rows", hydrated)
+    timeouts: list[float] = []
+    original_wait = asyncio.wait_for
+
+    async def measured_wait[T](awaitable: Awaitable[T], timeout: float) -> T:
+        timeouts.append(timeout)
+        return await original_wait(awaitable, timeout=timeout)
+
+    monkeypatch.setattr(asyncio, "wait_for", measured_wait)
+
+    async def connect(_kind: object):
+        clock["now"] += 0.3
+        return _InstantAckClient()
+
+    await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id="allowance",
+        connect=connect,  # type: ignore[arg-type]
+        _state=tmp_path,
+        budget_seconds=0.2,
+        monotonic=lambda: clock["now"],
+    )
+    if hydration_seconds >= 1.2:
+        assert timeouts == []
+    else:
+        assert timeouts == [pytest.approx(min(1.0, 1.2 - hydration_seconds))]
+    assert store.pending_outbox_count(workspace) == 1
+    diagnostic = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
+    assert '"reason":"drain_budget_exhausted"' in diagnostic
+    assert "drain_preflight_failed" not in diagnostic
+
+
+def test_deferred_followup_records_stdout_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yoetz.cli import hook_io
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = str(tmp_path.resolve())
+    store.grant_consent(store.workspace_commitment(workspace))
+    clock = {"now": 0.0}
+
+    def advancing_clock() -> float:
+        clock["now"] += 1.0
+        return clock["now"]
+
+    def failed_write(*args: object, **kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(hook_io, "stdout_json", failed_write)
+    assert (
+        handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=json.dumps(
+                {"session_id": "deferred", "tool_name": "shell", "exit_status": 0}
+            ).encode(),
+            stdout=io.BytesIO(),
+            workspace=workspace,
+            _state=tmp_path,
+            skip_service=True,
+            _monotonic=advancing_clock,
+        )
+        == 0
+    )
+    diagnostic = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
+    assert '"reason":"hook_followup_deferred"' in diagnostic
+    assert '"reason":"stdout_write_failed"' in diagnostic

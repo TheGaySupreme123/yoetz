@@ -1513,7 +1513,7 @@ def _control_error_result(
             host_profile=host_profile,
             safe_details={"reason_code": "endpoint_unsafe"},
         )
-    if error.reason == "frame_invalid":
+    if error.reason in {"frame_invalid", "invalid_request"}:
         return _control_public_error_result(
             error,
             request_id,
@@ -1522,7 +1522,7 @@ def _control_error_result(
             message="The local control request was invalid.",
             retryable=False,
             host_profile=host_profile,
-            safe_details={"reason_code": "frame_invalid"},
+            safe_details={"reason_code": error.reason},
         )
     if error.reason == "frame_too_large":
         return _control_public_error_result(

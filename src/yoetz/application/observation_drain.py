@@ -132,7 +132,7 @@ def route_observation_ingest(
         # Invalid/oversized requests cannot heal by reconnecting. Protocol
         # failures can occur before or after admission: retain exact replay
         # identity and stop using that connection, never forge ledger refusal.
-        terminal = result.control_reason in {"frame_too_large", "request_invalid"}
+        terminal = result.control_reason in {"frame_too_large", "invalid_request"}
         if row is not None and result.control_reason not in {
             "vault_locked",
             "method_forbidden",

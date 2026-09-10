@@ -60,7 +60,14 @@ def _sync(value: JsonValue) -> None:
 def main() -> None:
     root = Path(__file__).resolve().parent.parent / "schemas"
     changed = 0
-    for path in sorted(root.rglob("*.schema.json")):
+    # These are additive contracts. Never traverse released 1.0 schemas: their
+    # exact bytes remain frozen even when the runtime admits a new reason.
+    for relative_path in (
+        "events/check-recorded-1.1.0.schema.json",
+        "findings/semantic-provenance-1.1.0.schema.json",
+        "operations/check-result-1.1.0.schema.json",
+    ):
+        path = root / relative_path
         original = path.read_bytes()
         document = cast(JsonValue, json.loads(original))
         _sync(document)

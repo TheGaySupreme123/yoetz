@@ -1051,7 +1051,7 @@ async def _try_service_ingest(
     except ControlError as error:
         return observation_control_failure(error)
     except ProtocolValueError, TypeError, ValueError:
-        reason = "request_invalid" if stage == "request_encode" else "frame_invalid"
+        reason = "invalid_request" if stage == "request_encode" else "frame_invalid"
         return ObservationControlFailure(
             ObservationIngestDisposition.REJECTED,
             "control_" + reason,
@@ -1187,12 +1187,19 @@ async def _drain_outbox_leased(
 
     connector = cast(HookDrainConnector, _connect_service()) if connect is None else connect
     client: _HookDrainClient
+    preflight_remaining = _HOOK_CONNECT_PREFLIGHT_SECONDS + budget_seconds - (monotonic() - started)
+    if preflight_remaining <= 0:
+        record_hook_diagnostic("drain_budget_exhausted", event_name, _state=_state)
+        if content_by_source_identity:
+            store.note_coverage_gap(
+                workspace_commitment,
+                ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+            )
+        return
     try:
         client = await asyncio.wait_for(
             connector(ControlClientKind.CLI),
-            timeout=max(
-                0.0, min(_HOOK_CONNECT_PREFLIGHT_SECONDS, budget_seconds - (monotonic() - started))
-            ),
+            timeout=min(_HOOK_CONNECT_PREFLIGHT_SECONDS, preflight_remaining),
         )
     except Exception:
         record_hook_diagnostic("drain_preflight_failed", event_name, _state=_state)
@@ -2962,7 +2969,7 @@ def handle_observe(
             # the service/next hook when contention spent the local allowance.
             # Never defer transient native content through this structural lane.
             record_hook_diagnostic("hook_followup_deferred", resolved_event, _state=_state)
-            hook_io.stdout_json({}, stdout)
+            _stdout_json({}, stdout)
             for name, spent in store.stage_timings_ms.items():
                 stages[f"store_{name}"] = max(0, int(spent))
             _record_pass_timing(

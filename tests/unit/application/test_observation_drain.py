@@ -1204,6 +1204,7 @@ def test_sweep_budget_yields_under_the_daemon_deadline() -> None:
         ("frame_invalid", 0, ObservationDrainAction.RETRY),
         ("frame_invalid", 127, ObservationDrainAction.QUARANTINE),
         ("frame_too_large", 0, ObservationDrainAction.QUARANTINE),
+        ("invalid_request", 0, ObservationDrainAction.QUARANTINE),
         ("method_forbidden", 128, ObservationDrainAction.RETRY),
         ("protocol_mismatch", 128, ObservationDrainAction.RETRY),
     ],

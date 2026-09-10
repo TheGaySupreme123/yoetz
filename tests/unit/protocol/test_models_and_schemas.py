@@ -3149,10 +3149,12 @@ def test_capacity_failure_forbids_attempt_provenance() -> None:
     value["semantic_status"] = "failed"
     value["semantic_reason"] = "case_capacity_exceeded"
     value["semantic_provenance"] = None
+    with pytest.raises(ProtocolValueError):
+        validate_schema_instance("check-result", "1.0.0", value)
     models.CheckResultModel.model_validate(value)
-    validate_schema_instance("check-result", "1.0.0", value)
+    validate_schema_instance("check-result", "1.1.0", value)
     value["semantic_provenance"] = _semantic_provenance_for("failed", "case_capacity_exceeded")
     with pytest.raises(ValueError):
         models.CheckResultModel.model_validate(value)
     with pytest.raises(ProtocolValueError):
-        validate_schema_instance("check-result", "1.0.0", value)
+        validate_schema_instance("check-result", "1.1.0", value)

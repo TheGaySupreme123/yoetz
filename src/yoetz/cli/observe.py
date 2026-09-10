@@ -936,7 +936,7 @@ async def _drain_pass(
         except ControlError as exc:
             result = observation_control_failure(exc)
         except ProtocolValueError, TypeError, ValueError:
-            reason = "request_invalid" if stage == "request_encode" else "frame_invalid"
+            reason = "invalid_request" if stage == "request_encode" else "frame_invalid"
             result = ObservationControlFailure(
                 ObservationIngestDisposition.REJECTED,
                 "control_" + reason,

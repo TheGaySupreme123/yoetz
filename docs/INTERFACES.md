@@ -1850,7 +1850,9 @@ operation request models, and is rejected on every other control method. `strict
 weaken or select this field.
 
 `ControlError` carries one bounded reason, a `retryable` flag, and an optional service-minted
-`correlation_id`. The closed reason set includes `endpoint_unsafe` (local AF_UNIX path/mode/peer
+`correlation_id`. The port and hook diagnostics share one lightweight closed reason vocabulary;
+`invalid_request` denotes a malformed local request and is terminal for observation draining.
+The closed reason set includes `endpoint_unsafe` (local AF_UNIX path/mode/peer
 safety refusal). The ordinary client preserves that token instead of folding it into
 `service_unavailable`. The MCP bridge maps it to public `SERVICE_UNAVAILABLE`, `retryable=false`,
 and `safe_details.reason_code=endpoint_unsafe`, with copy that names the endpoint-safety class and
@@ -2767,8 +2769,9 @@ invent structural dependencies. The complete deterministic case and its integrit
 unchanged.
 
 If the retained required structure still exceeds 131,072 bytes, semantic composition returns
-`failed/case_capacity_exceeded` before creating a semantic job or invoking a provider. Deterministic
-findings remain recorded; no provider attempt is consumed and provenance stays null. The shared
+`failed/case_capacity_exceeded` before creating a semantic job or invoking a provider.
+This additive reason belongs to the current 1.1 check/provenance schemas; released 1.0 schemas
+retain their original bytes. Deterministic findings remain recorded; no provider attempt is consumed and provenance stays null. The shared
 check/receipt gap is `semantic_case_capacity_exceeded`. A narrower claim/obligation scope is a new
 check, not a replay of the terminal request. Changing a text length or finding limit alone does not
 guarantee enough capacity.

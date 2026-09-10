@@ -19,6 +19,7 @@ from yoetz.domain.observation import (
     ObservationSource,
 )
 from yoetz.domain.values import JsonObject, JsonValue, validate_commitment
+from yoetz.ports.control_reasons import CONTROL_ERROR_REASONS
 from yoetz.protocol.ids import IdKind, validate_id
 
 try:
@@ -53,29 +54,7 @@ _EVENTS: Final = frozenset(
         "mcp_serve",
     }
 )
-_CONTROL_REASONS: Final = frozenset(
-    {
-        "service_unavailable",
-        "service_incompatible",
-        "peer_untrusted",
-        "protocol_mismatch",
-        "frame_invalid",
-        "frame_too_large",
-        "request_cancelled",
-        "request_timeout",
-        "vault_locked",
-        "service_draining",
-        "method_forbidden",
-        "internal_error",
-        "privacy_projection_unavailable",
-        "privacy_projection_blocked",
-        "response_projection_failed",
-        "read_projection_failed",
-        "service_generation_changed",
-        "endpoint_unsafe",
-        "request_invalid",
-    }
-)
+_CONTROL_REASONS: Final = CONTROL_ERROR_REASONS
 _REASONS: Final = frozenset(
     {
         *(item.value for item in ObservationGapCode),
