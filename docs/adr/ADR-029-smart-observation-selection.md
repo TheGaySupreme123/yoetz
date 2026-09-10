@@ -120,8 +120,19 @@ last durably accounted input and records bounded loss for non-replayable input. 
 pressure restores only a still-valid owner selection, with hysteresis and a recovery dwell.
 
 The initial thresholds are 65% rising pressure, 85% high pressure, and a hard stop at 100% of
-the worst relevant budget. Recovery requires pressure below 45% for ten seconds. Background
-maintenance advances this dwell even when no new hook arrives; a status read never starts it.
+the worst relevant budget. Under `observation-budget-v2-provisional`, leaving every current
+hard threshold transitions `hard_limit` to `high` immediately. Structural admission reopens only
+when the whole proposed buffer/outbox transition also fits the selected count and byte limits.
+Optional detail remains reduced until all dimensions stay at or below 45% for ten seconds.
+Retained diagnostic or quarantine bytes can therefore keep optional detail reduced without
+indefinitely reporting a hard admission stop after pending work drains. Background maintenance
+advances the dwell even when no new hook arrives; a status read never starts it.
+
+New native input is checked at the shared selected-admission commit under the store lock.
+Already accepted buffered transfers and raw outbox replay remain drainable. A generation-fenced
+session end removes its pressure snapshot; ended lanes do not keep idle maintenance scheduled.
+An unfinished session keeps its snapshot across restart. Ending a session does not erase its
+pending rows, quarantine, or loss history.
 
 Status distinguishes selected and effective settings, origin, scope and expiry, current pressure,
 and historical loss. A downgrade and a recovery each produce one notice; actual loss and stalled

@@ -35,7 +35,7 @@ __all__ = [
     "mode_limits",
 ]
 
-BUDGET_POLICY_VERSION: Final = "observation-budget-v1-provisional"
+BUDGET_POLICY_VERSION: Final = "observation-budget-v2-provisional"
 BUDGET_VALIDATION_STATUS: Final = "not_validated"
 CURRENT_SERIALIZATION_CAP_BYTES: Final = 1 * 1024 * 1024
 RISING_WATERMARK_BPS: Final = 6_500
@@ -548,6 +548,10 @@ def _next_state(
         return candidate, now_ms, None, False
     if candidate.rank > previous.state.rank:
         return candidate, now_ms, None, candidate is not previous.state
+    if previous.state is PressureState.HARD_LIMIT and candidate is not PressureState.HARD_LIMIT:
+        # Hard admission follows current usage. Optional detail still waits
+        # for the low-water dwell, even when all pending work has drained.
+        return PressureState.HIGH, now_ms, now_ms if low else None, True
     if candidate.rank == previous.state.rank:
         low_since = now_ms if low and previous.low_since_ms is None else previous.low_since_ms
         if not low:

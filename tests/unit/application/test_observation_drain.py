@@ -1196,3 +1196,32 @@ def test_sweep_budget_yields_under_the_daemon_deadline() -> None:
     assert DEFAULT_OBSERVATION_SWEEP_BUDGET_SECONDS < deadline
     # Room for one slow ingest plus its store bookkeeping to land after the budget check.
     assert deadline - DEFAULT_OBSERVATION_SWEEP_BUDGET_SECONDS >= 5.0
+
+
+@pytest.mark.parametrize(
+    ("reason", "attempts", "expected"),
+    [
+        ("frame_invalid", 0, ObservationDrainAction.RETRY),
+        ("frame_invalid", 127, ObservationDrainAction.QUARANTINE),
+        ("frame_too_large", 0, ObservationDrainAction.QUARANTINE),
+        ("method_forbidden", 128, ObservationDrainAction.RETRY),
+        ("protocol_mismatch", 128, ObservationDrainAction.RETRY),
+    ],
+)
+def test_control_recovery_is_bounded_without_fabricated_ledger_refusal(
+    reason: str, attempts: int, expected: ObservationDrainAction
+) -> None:
+    from yoetz.application.observation_drain import observation_control_failure
+    from yoetz.ports.control import ControlError
+
+    failure = observation_control_failure(ControlError(reason))
+    row = ObservationOutboxRow(
+        "host",
+        _envelope("hmac-sha256:" + "a" * 64, "input", 1),
+        attempts=attempts,
+        last_reason=failure.reason,
+        consecutive_reason_attempts=attempts,
+    )
+    decision = route_observation_ingest(failure, row=row)
+    assert decision.action is expected
+    assert decision.reason == "control_" + reason

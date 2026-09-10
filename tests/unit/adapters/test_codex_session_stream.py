@@ -549,13 +549,14 @@ def test_oversized_continuation_survives_final_envelope_backpressure(
             def overflow(
                 _store: LocalObservationStore,
                 workspace_commitment: str,
-                selected_session_id: str,
-                envelope: object,
-            ) -> str:
-                del workspace_commitment, selected_session_id, envelope
-                return ObservationGapCode.OUTBOX_OVERFLOW.value
+                state: object,
+                plan: object,
+                incoming: object,
+            ) -> bool:
+                del workspace_commitment, state, plan, incoming
+                return False
 
-            blocked.setattr(LocalObservationStore, "enqueue_outbox", overflow)
+            blocked.setattr(LocalObservationStore, "_selected_admission_plan_allowed", overflow)
         failed = reconcile_session_stream(
             store,
             workspace_commitment=workspace,
@@ -940,13 +941,14 @@ def test_rotated_identity_retries_from_header_when_first_envelope_is_blocked(
             def overflow(
                 _store: LocalObservationStore,
                 workspace_commitment: str,
-                selected_session_id: str,
-                envelope: object,
-            ) -> str:
-                del workspace_commitment, selected_session_id, envelope
-                return ObservationGapCode.OUTBOX_OVERFLOW.value
+                state: object,
+                plan: object,
+                incoming: object,
+            ) -> bool:
+                del workspace_commitment, state, plan, incoming
+                return False
 
-            blocked.setattr(LocalObservationStore, "enqueue_outbox", overflow)
+            blocked.setattr(LocalObservationStore, "_selected_admission_plan_allowed", overflow)
         failed = reconcile_session_stream(
             LocalObservationStore(_state=tmp_path),
             workspace_commitment=workspace,

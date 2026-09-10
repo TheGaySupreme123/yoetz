@@ -922,3 +922,39 @@ them from memory or from the live store.
   predecessor receipt, findings, obligations, evidence IDs, and unresolved status remain separate;
   the sibling cannot make the predecessor look resolved. If no new scope exists, keep the old
   receipt and stop instead of creating another sibling.
+
+
+## Observation recovery diagnostics
+
+Codex uses the shared selected-admission and outbox store. New native input obeys current hard
+pressure and the complete projected buffer/outbox size; accepted replay work remains drainable.
+Hard pressure can recover to high before optional detail recovers. A generation-fenced session
+end retires pressure scheduling without deleting pending work or historical losses.
+
+Hook and manual drain control failures have `control_` reasons. A protocol error is not a
+`ledger_rejected` result. A control failure stops further calls on that connection; the next
+hook, manual drain or service sweep can attempt the retained identity. Oversized or locally
+invalid requests are terminal. Transport/protocol retries are bounded to 128 consecutive
+same-cause attempts; owner-action conditions such as a forbidden method or incompatible
+protocol stay pending until corrected. Retrying does not establish whether an earlier request
+committed; exact source/cursor identity supplies replay deduplication.
+
+`yoetz observe status --workspace . --json` includes `hook_diagnostics.drain_failures`: up to
+32 retained causal records with source/session commitments, generation and position, original
+control reason and retryability, adapter stage, final disposition and correlation ID when supplied.
+A `control` stage does not identify which side of the socket failed; `request_encode` and
+`response_decode` identify locally observed boundaries. Missing correlation remains null. Typed ingest refusals have stage
+`typed_ingest` and null control fields.
+Diagnostic files rotate at 64 KiB with one backup; this is explicitly incomplete retained history.
+A failed diagnostic append records `drain_diagnostic_unavailable` when store bookkeeping succeeds.
+No command, prompt, path, raw session ID or raw source ID is included. Existing quarantine is
+not automatically replayed or reclaimed, and new diagnostics cannot explain old entries.
+
+Pre-tool hooks reuse advice at its recorded frontier; outcome hooks, lifecycle hooks and service
+ingest refresh it. Once structural ingress is durable, ordinary hooks that spent the local
+one-second allowance defer optional follow-up with `hook_followup_deferred`. Transient native
+content and lifecycle hooks do not take that deferral. Drain snapshot, connect, RPC and local
+bookkeeping share one elapsed drain budget; synchronous local writes cannot be interrupted safely.
+
+For shared-store measurements and the remaining native-host coverage boundary, see
+[the performance runbook](observation-selection-performance.md).

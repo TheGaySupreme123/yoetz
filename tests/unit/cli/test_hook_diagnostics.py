@@ -10,6 +10,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 from yoetz.cli.hook_diagnostics import (
     hook_diagnostic_summary,
     record_hook_diagnostic,
@@ -362,3 +364,70 @@ def test_host_denial_reasons_are_admitted_tokens_on_the_permission_denied_event(
         ("host_auto_review_denied", "PermissionDenied"),
         ("host_permission_rule_denied", "PermissionDenied"),
     ]
+
+
+def test_drain_diagnostics_keep_cause_without_payload_and_report_rotation(tmp_path: Path) -> None:
+    from yoetz.adapters.integrations.observation_local import LocalObservationStore
+    from yoetz.application.observation_drain import observation_control_failure
+    from yoetz.cli.hook_diagnostics import record_drain_failure
+    from yoetz.cli.observe_hooks import map_hook_payload_to_envelope
+    from yoetz.ports.control import ControlError
+
+    store = LocalObservationStore(_state=tmp_path)
+    envelope = map_hook_payload_to_envelope(
+        "PostToolUse",
+        {
+            "session_id": "private-session",
+            "tool_name": "shell",
+            "correlation_id": "private-call",
+            "exit_status": 1,
+        },
+        session_commitment=store.session_commitment("private-session"),
+        event_ordinal=1,
+        key_material=store.key_material(),
+    )
+    failure = observation_control_failure(ControlError("frame_invalid"))
+    for _ in range(150):
+        assert record_drain_failure(failure, envelope, "retry", _state=tmp_path)
+    summary = hook_diagnostic_summary(_state=tmp_path)
+    attempts = cast(tuple[Mapping[str, object], ...], summary["drain_failures"])
+    assert len(attempts) == 32
+    assert summary["drain_failure_history_complete"] is False
+    assert (tmp_path / "observation/hook-diagnostics.jsonl.1").exists()
+    for attempt in attempts:
+        assert attempt["control_reason"] == "frame_invalid"
+        assert attempt["stage"] == "control"
+        assert attempt["correlation_id"] is None
+        assert attempt["control_retryable"] is False
+    raw = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
+    assert "private-session" not in raw and "private-call" not in raw
+
+
+def test_drain_diagnostic_write_failure_is_explicit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yoetz.adapters.integrations.observation_local import LocalObservationStore
+    from yoetz.application.observation_drain import observation_control_failure
+    from yoetz.cli import hook_diagnostics
+    from yoetz.cli.observe_hooks import map_hook_payload_to_envelope
+    from yoetz.ports.control import ControlError
+
+    store = LocalObservationStore(_state=tmp_path)
+    envelope = map_hook_payload_to_envelope(
+        "PostToolUse",
+        {"session_id": "test", "tool_name": "shell", "exit_status": 1},
+        session_commitment=store.session_commitment("test"),
+        event_ordinal=1,
+        key_material=store.key_material(),
+    )
+
+    def unavailable(*args: object, **kwargs: object) -> int:
+        raise OSError("unavailable")
+
+    monkeypatch.setattr(hook_diagnostics.os, "open", unavailable)
+    assert not hook_diagnostics.record_drain_failure(
+        observation_control_failure(ControlError("frame_invalid")),
+        envelope,
+        "retry",
+        _state=tmp_path,
+    )

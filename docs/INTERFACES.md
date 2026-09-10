@@ -5128,3 +5128,16 @@ At completion or resolved-obligation frontiers, asserted command relations contr
 `command_attempt_mismatch` or `command_attempt_uncorroborated` to the existing deterministic
 case/receipt gap vector. This prevents uncorroborated accounting from becoming execution proof.
 The latter means unknown observation, not non-execution. Receipt capacity computes the same union.
+
+
+### Observation drain control provenance
+
+An adapter-local `ObservationControlFailure` is distinct from an `ObservationIngestResult`
+returned by the service. Its `control_<reason>` token identifies a bounded control error, never
+an inferred ledger refusal. Original control retryability and optional `err_` correlation remain
+separate from the drain's retry/quarantine decision. All rows after a failed control attempt are
+left unattempted on that connection. Invalid/oversized requests are terminal; uncertain protocol
+and transport outcomes retain exact replay identity within the bounded attempt policy. Service
+stage is unknown unless independently evidenced; local encode/decode stages are named explicitly.
+The CLI's bounded diagnostic projection uses opaque session/source commitments and cursor
+positions, with null absent correlation and explicit incomplete-history coverage.

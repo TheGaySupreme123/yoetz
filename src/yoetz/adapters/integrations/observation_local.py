@@ -3068,6 +3068,8 @@ class LocalObservationStore:
         state.session_generations[session_commitment] = generation
         state.ended_session_generations.pop(session_commitment, None)
         state.ended_sessions.discard(session_commitment)
+        if state.pressure_snapshots is not None:
+            state.pressure_snapshots.pop(session_commitment, None)
         if state.read_protections is not None:
             state.read_protections[:] = [
                 protection
@@ -3146,6 +3148,8 @@ class LocalObservationStore:
         state.session_workspaces.setdefault(session_commitment, workspace_commitment)
         state.ended_sessions.add(session_commitment)
         state.ended_session_generations[session_commitment] = observed
+        if state.pressure_snapshots is not None:
+            state.pressure_snapshots.pop(session_commitment, None)
         if state.read_protections is not None:
             state.read_protections[:] = [
                 protection
@@ -4496,7 +4500,7 @@ class LocalObservationStore:
             now,
             # State bytes have their own selected/current occupancy check
             # below. Avoid a second whole-state encode in this hot path.
-            state_bytes=limits.queue_bytes,
+            state_bytes=0,
         )
         projected_count = usage.queue_count + 1
         projected_bytes = usage.queue_bytes + candidate_queue_bytes
@@ -4870,6 +4874,29 @@ class LocalObservationStore:
         a selection is lowered.
         """
 
+        if incoming is not None:
+            now = self._wall_timestamp()
+            settings = state.selection_settings or ObservationSelectionSettings()
+            limits = BudgetLimits.for_profile(int(settings.aggregate_capacity(now=now)))
+            resolved = resolve_observation_selection(
+                settings, session_commitment=incoming.session_commitment, now=now
+            )
+            usage = self._selection_pressure_usage(
+                workspace,
+                state,
+                incoming.session_commitment,
+                limits,
+                now,
+                # Exact aggregate projected bytes are checked below. This
+                # gate concerns new native input; raw outbox writes also
+                # carry already-accepted replay work.
+                state_bytes=0,
+            )
+            if not evaluate_pressure(
+                usage, ObservationMode.from_value(resolved.selection.detail.value), limits=limits
+            ).admission_allowed:
+                return False
+
         candidate = _copy_state(state)
         previous_buffer = candidate.admission_buffer
         target_keys = {self._buffer_input_key(item) for item in plan.buffer.inputs}
@@ -4887,10 +4914,10 @@ class LocalObservationStore:
             if prior_index is not None:
                 current_inputs[prior_index] = item
                 continue
-            current_inputs.append(item)
-            candidate.admission_buffer = AdmissionBuffer(tuple(current_inputs))
             if not self._buffer_admission_allowed(workspace, candidate, item.envelope):
                 return False
+            current_inputs.append(item)
+            candidate.admission_buffer = AdmissionBuffer(tuple(current_inputs))
         candidate.admission_buffer = AdmissionBuffer(tuple(plan.buffer.inputs))
         for codex_session_id, envelope in plan.deliveries:
             if candidate.pending_outbox is None:
@@ -4916,7 +4943,9 @@ class LocalObservationStore:
             candidate.pending_outbox.append(
                 ObservationOutboxRow(codex_session_id=codex_session_id, envelope=envelope)
             )
-        return True
+        return len(self._encode_state(workspace, candidate)) <= self._state_byte_limit(
+            workspace, candidate
+        )
 
     def commit_selected_admission(
         self,
@@ -4937,8 +4966,6 @@ class LocalObservationStore:
         with self.batched(workspace):
             state = self._load(workspace)
             assert state.pending_outbox is not None
-            previous_buffer = state.admission_buffer
-            previous_outbox = list(state.pending_outbox)
             if not self._selected_admission_plan_allowed(
                 workspace,
                 state,
@@ -4952,26 +4979,15 @@ class LocalObservationStore:
                 return False
             state.admission_buffer = plan.buffer
             for session, envelope in plan.deliveries:
-                transfer = self._delivery_is_accepted_transfer(
-                    envelope,
-                    previous_buffer,
-                    incoming,
-                )
-                if (
-                    self.enqueue_outbox(
-                        workspace,
-                        session,
-                        envelope,
-                        accepted_transfer=transfer,
-                    )
-                    is not None
+                # The complete candidate was already checked under this same
+                # lock. Re-entering enqueue_outbox encoded the full state once
+                # per delivery, even though no admission input could change.
+                if not any(
+                    self._pending_row_matches(row, session, envelope)
+                    for row in state.pending_outbox
                 ):
-                    state.admission_buffer = previous_buffer
-                    state.pending_outbox[:] = previous_outbox
-                    if incoming is not None and not replayable and newly_observed:
-                        self.record_admission_loss(workspace, incoming)
-                    self._save(workspace, state)
-                    return False
+                    state.pending_outbox.append(ObservationOutboxRow(session, envelope))
+            self._resolve_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
             if newly_observed:
                 state.selection_admitted_count = min(
                     _MAX_SAFE_INTEGER, state.selection_admitted_count + 1
@@ -5896,7 +5912,10 @@ class LocalObservationStore:
             if snapshots is None:
                 snapshots = {}
                 state.pressure_snapshots = snapshots
-            snapshots[session_commitment] = evaluation.snapshot
+            if session_commitment in (state.ended_sessions or ()):
+                snapshots.pop(session_commitment, None)
+            else:
+                snapshots[session_commitment] = evaluation.snapshot
             if len(snapshots) > _MAX_HOOK_SEQUENCES:
                 candidates = sorted(
                     (key for key in snapshots if key != session_commitment),
@@ -5966,7 +5985,9 @@ class LocalObservationStore:
                     )
                 )
                 previous = snapshots.get(lane) if lane is not None else None
-                if not self._epoch_matches(state.monotonic_epoch):
+                if not self._epoch_matches(state.monotonic_epoch) or lane in (
+                    state.ended_sessions or ()
+                ):
                     previous = None
                 return evaluate_pressure(
                     lane_usage,
@@ -6073,9 +6094,11 @@ class LocalObservationStore:
             )
             state = self._load(workspace)
             sessions = set((state.codex_session_bindings or {}).values())
+            sessions.update(state.pressure_snapshots or ())
             sessions.update(
                 item.envelope.session_commitment for item in state.admission_buffer.inputs
             )
+            sessions.difference_update(state.ended_sessions or ())
             for session in sorted(sessions)[:_MAX_HOOK_SEQUENCES]:
                 self.update_selection_pressure(workspace, session)
 
@@ -6200,7 +6223,8 @@ class LocalObservationStore:
                 assert state.pending_lifecycles is not None
                 pressure_active = any(
                     snapshot.state is not PressureState.HEALTHY
-                    for snapshot in (state.pressure_snapshots or {}).values()
+                    for session, snapshot in (state.pressure_snapshots or {}).items()
+                    if session not in (state.ended_sessions or ())
                 )
                 if (
                     state.pending_outbox
@@ -7651,38 +7675,52 @@ class LocalObservationStore:
         dropped_sessions = state.stream_partial_dropped_sessions
         assert partials is not None
         assert dropped_sessions is not None
-        while partials and len(payload) > state_limit:
-            # Shed the read-cache before any durable row: a dropped partial
-            # is reread from the committed cursor on the next reconcile,
-            # while an evicted envelope is a lost observation (#289).
-            largest = max(partials, key=lambda key: (len(partials[key]), key.encode()))
-            del partials[largest]
-            dropped_sessions.add(largest)
-            self._note_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
-            payload = self._encode_state(workspace_commitment, state)
+        if partials and len(payload) > state_limit:
+            # Preserve the existing largest-first read-cache removal order.
+            order = sorted(
+                partials, key=lambda key: (len(partials[key]), key.encode()), reverse=True
+            )
+
+            def drop_partials(candidate: _WorkspaceState, count: int) -> None:
+                assert candidate.stream_partials is not None
+                assert candidate.stream_partial_dropped_sessions is not None
+                for key in order[:count]:
+                    del candidate.stream_partials[key]
+                    candidate.stream_partial_dropped_sessions.add(key)
+                    self._note_gap_state(candidate, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
+
+            payload = self._trim_retained_prefix(
+                workspace_commitment, state, len(order), state_limit, drop_partials
+            )
         truncated = False
-        if len(payload) > state_limit:
-            # Retain authority state and make every observation-detail loss explicit.
-            assert state.envelopes is not None
-            while state.envelopes and len(payload) > state_limit:
-                del state.envelopes[0]
-                state.envelopes_truncated = True
-                assert state.gaps is not None
-                self._note_gap_state(state, ObservationGapCode.TRUNCATED_PAYLOAD.value)
-                truncated = True
-                payload = self._encode_state(workspace_commitment, state)
+        assert state.envelopes is not None
+        if state.envelopes and len(payload) > state_limit:
+
+            def drop_envelopes(candidate: _WorkspaceState, count: int) -> None:
+                assert candidate.envelopes is not None
+                del candidate.envelopes[:count]
+                candidate.envelopes_truncated = True
+                self._note_gap_state(candidate, ObservationGapCode.TRUNCATED_PAYLOAD.value)
+
+            payload = self._trim_retained_prefix(
+                workspace_commitment, state, len(state.envelopes), state_limit, drop_envelopes
+            )
+            truncated = True
         assert state.pending_outbox is not None
         assert state.quarantine is not None
         assert state.gaps is not None
-        # Pending outbox rows are accepted durable records. They remain
-        # pending until an explicit acknowledgement or quarantine action; a
-        # state-size save must never move them into a detail bucket that can
-        # itself be evicted. Optional quarantine detail may still be shed
-        # below, with its aggregate eviction evidence retained.
-        while state.quarantine and len(payload) > state_limit:
-            evicted = state.quarantine.pop(0)
-            self._record_quarantine_eviction(state, evicted[0], evicted[1], evicted[2])
-            payload = self._encode_state(workspace_commitment, state)
+        # Pending rows are accepted durable records, never retention candidates.
+        if state.quarantine and len(payload) > state_limit:
+
+            def drop_quarantine(candidate: _WorkspaceState, count: int) -> None:
+                assert candidate.quarantine is not None
+                for session, envelope, reason, _ in candidate.quarantine[:count]:
+                    self._record_quarantine_eviction(candidate, session, envelope, reason)
+                del candidate.quarantine[:count]
+
+            payload = self._trim_retained_prefix(
+                workspace_commitment, state, len(state.quarantine), state_limit, drop_quarantine
+            )
         if len(payload) > state_limit:
             raise _error(
                 PublicErrorCode.STORAGE_UNSAFE,
@@ -7713,6 +7751,35 @@ class LocalObservationStore:
             self._state_cache.pop(workspace_commitment, None)
         else:
             self._cache_state(workspace_commitment, key, state)
+
+    def _trim_retained_prefix(
+        self,
+        workspace: str,
+        state: _WorkspaceState,
+        count: int,
+        limit: int,
+        remove: Callable[[_WorkspaceState, int], None],
+    ) -> bytes:
+        """Choose the smallest fitting retention prefix with logarithmic encodes.
+
+        Probe copies only: loss commitments and pending records in the held
+        transaction change once, after selection. If the entire optional class
+        cannot fit, remove it before considering the next retention class.
+        The final encode remains authoritative and the enclosing save retains
+        its STORAGE_UNSAFE rollback if protected state alone cannot fit.
+        """
+
+        low, high = 1, count
+        while low < high:
+            middle = (low + high) // 2
+            candidate = _copy_state(state)
+            remove(candidate, middle)
+            if len(self._encode_state(workspace, candidate)) <= limit:
+                high = middle
+            else:
+                low = middle + 1
+        remove(state, low)
+        return self._encode_state(workspace, state)
 
     def _record_quarantine_eviction(
         self,
@@ -7949,7 +8016,16 @@ class LocalObservationStore:
             _LOCAL_OUTBOX_OVERFLOW_GAP,
             _LOCAL_STREAM_PARTIAL_DROPPED_GAP,
         }
+        # Current adapter failures come from unresolved pending attempts.
+        # Successful replay retires the live cause; gap history and retained
+        # quarantine causes remain independently available.
+        transient.update(code for code in state.gaps if code.startswith("control_"))
         current = {code for code, seen in state.gaps.items() if seen.active} - transient
+        current.update(
+            row.last_reason
+            for row in state.pending_outbox
+            if row.last_reason is not None and row.last_reason.startswith("control_")
+        )
         if state.unpaired_scopes:
             # A true paired-profile orphan is session/source/generation scoped
             # detail; it keeps the aggregate gap active until an explicit
