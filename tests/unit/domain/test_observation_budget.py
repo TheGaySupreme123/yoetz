@@ -300,3 +300,26 @@ def test_new_detailed_session_under_pressure_gets_one_downgrade_notice() -> None
     assert first.transition.notice == "downgrade"
     repeated = evaluate_pressure(usage, ObservationMode.DETAILED, first.snapshot, now_ms=20)
     assert repeated.transition is None
+
+
+@pytest.mark.parametrize("mode", [ObservationMode.FOCUSED, ObservationMode.DETAILED])
+def test_hard_pressure_reopens_admission_without_restoring_optional_detail(
+    mode: ObservationMode,
+) -> None:
+    hard = evaluate_pressure(BudgetUsage(state_bytes=949_704, oldest_pending_age_ms=60_001), mode)
+    drained = evaluate_pressure(BudgetUsage(state_bytes=949_704), mode, hard.snapshot, 100_000)
+    assert drained.state is PressureState.HIGH
+    assert drained.admission_allowed
+    assert not drained.content_allowed
+    tomorrow = evaluate_pressure(
+        BudgetUsage(state_bytes=949_704), mode, drained.snapshot, 86_400_000
+    )
+    assert tomorrow.state is PressureState.HIGH
+    assert tomorrow.admission_allowed
+    assert not tomorrow.content_allowed
+    low = evaluate_pressure(BudgetUsage(state_bytes=400_000), mode, tomorrow.snapshot, 86_400_001)
+    assert not low.content_allowed
+    recovered = evaluate_pressure(BudgetUsage(state_bytes=400_000), mode, low.snapshot, 86_410_001)
+    assert recovered.state is PressureState.HEALTHY
+    assert recovered.effective_mode is mode
+    assert recovered.content_allowed

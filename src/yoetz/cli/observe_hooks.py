@@ -1016,8 +1016,13 @@ async def _try_service_ingest(
 ) -> ObservationIngestResult:
     """Attempt one typed ingest through an already-open preflight client."""
 
+    from yoetz.application.observation_drain import (
+        ObservationControlFailure,
+        observation_control_failure,
+    )
     from yoetz.ports.control import ControlError
 
+    stage = "request_encode"
     try:
         body = observation_ingest_request_to_json(
             ObservationIngestRequest(
@@ -1028,26 +1033,34 @@ async def _try_service_ingest(
                 capture_only=capture_only,
             )
         )
+        stage = "control"
         raw = await client.observation_ingest(body, deadline_ms=deadline_ms)
+        stage = "response_decode"
         try:
             return observation_ingest_result_from_json(raw)
         except ProtocolValueError, TypeError, ValueError:
-            return ObservationIngestResult(
+            return ObservationControlFailure(
                 ObservationIngestDisposition.REJECTED,
-                ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                "control_frame_invalid",
                 None,
+                "frame_invalid",
+                False,
+                None,
+                "response_decode",
             )
     except ControlError as error:
-        reason = (
-            ObservationGapCode.VAULT_LOCKED.value
-            if error.reason == "vault_locked"
-            else (
-                ObservationGapCode.SERVICE_UNAVAILABLE.value
-                if error.retryable
-                else ObservationGapCode.LEDGER_REJECTED.value
-            )
+        return observation_control_failure(error)
+    except ProtocolValueError, TypeError, ValueError:
+        reason = "invalid_request" if stage == "request_encode" else "frame_invalid"
+        return ObservationControlFailure(
+            ObservationIngestDisposition.REJECTED,
+            "control_" + reason,
+            None,
+            reason,
+            False,
+            None,
+            stage,
         )
-        return ObservationIngestResult(ObservationIngestDisposition.REJECTED, reason, None)
     except Exception:
         return ObservationIngestResult(
             ObservationIngestDisposition.REJECTED,
@@ -1156,11 +1169,13 @@ async def _drain_outbox_leased(
     from yoetz.application.observation_drain import (
         EXPECTED_OBSERVATION_BACKPRESSURE_REASONS,
         WORKSPACE_GLOBAL_OBSERVATION_STOP_REASONS,
+        ObservationControlFailure,
         ObservationDrainAction,
         route_observation_ingest,
     )
     from yoetz.ports.control import ControlClientKind
 
+    started = monotonic()
     all_pending = store.list_pending_outbox_rows(workspace_commitment)
     if not all_pending:
         if content_by_source_identity:
@@ -1172,9 +1187,19 @@ async def _drain_outbox_leased(
 
     connector = cast(HookDrainConnector, _connect_service()) if connect is None else connect
     client: _HookDrainClient
+    preflight_remaining = _HOOK_CONNECT_PREFLIGHT_SECONDS + budget_seconds - (monotonic() - started)
+    if preflight_remaining <= 0:
+        record_hook_diagnostic("drain_budget_exhausted", event_name, _state=_state)
+        if content_by_source_identity:
+            store.note_coverage_gap(
+                workspace_commitment,
+                ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+            )
+        return
     try:
         client = await asyncio.wait_for(
-            connector(ControlClientKind.CLI), timeout=_HOOK_CONNECT_PREFLIGHT_SECONDS
+            connector(ControlClientKind.CLI),
+            timeout=min(_HOOK_CONNECT_PREFLIGHT_SECONDS, preflight_remaining),
         )
     except Exception:
         record_hook_diagnostic("drain_preflight_failed", event_name, _state=_state)
@@ -1184,11 +1209,8 @@ async def _drain_outbox_leased(
                 ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
             )
         return
-    # The budget clock starts after the connect: the preflight bounds connect
-    # time on its own, and charging a slow-but-successful connect against the
-    # drain budget could exhaust the whole budget before the first row (the
-    # SessionEnd budget is smaller than the preflight by design).
-    started = monotonic()
+    # One elapsed budget includes snapshot hydration, connection preflight,
+    # service calls and the local commit after each returned decision.
 
     # Stage native content through the already-open service connection before
     # choosing a bounded FIFO prefix. The service returns the distinct pending
@@ -1238,6 +1260,17 @@ async def _drain_outbox_leased(
                 )
             except TimeoutError:
                 break
+            if isinstance(staged, ObservationControlFailure):
+                from yoetz.cli.hook_diagnostics import record_drain_failure
+
+                if not record_drain_failure(staged, source_row.envelope, "retry", _state=_state):
+                    store.note_coverage_gap(workspace_commitment, "drain_diagnostic_unavailable")
+                store.note_coverage_gap(
+                    workspace_commitment, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+                )
+                with contextlib.suppress(Exception):
+                    await client.close()
+                return
             if staged.reason == OBSERVATION_CONTENT_CAPTURE_PENDING_REASON:
                 staged_content_sources.add(source_identity)
 
@@ -1415,6 +1448,15 @@ async def _drain_outbox_leased(
                 continue
             if decision.reason is not None and not expected_backpressure:
                 record_hook_diagnostic(decision.reason, event_name, _state=_state)
+            if decision.reason is not None and not expected_backpressure:
+                from yoetz.cli.hook_diagnostics import record_drain_failure
+
+                if not record_drain_failure(
+                    result, row.envelope, decision.action.value, _state=_state
+                ):
+                    store.note_coverage_gap(workspace_commitment, "drain_diagnostic_unavailable")
+            if isinstance(result, ObservationControlFailure):
+                break
             if decision.action is ObservationDrainAction.RETRY:
                 if decision.reason in WORKSPACE_GLOBAL_OBSERVATION_STOP_REASONS:
                     break
@@ -2254,6 +2296,13 @@ def handle_observe(
             lease.__exit__(None, None, None)
 
     try:
+        if source is ObservationSource.CODEX_HOOK:
+            # Cold imports are pure preparation. Importing this runtime inside
+            # the ingress batch serialized every new Codex process behind it.
+            from importlib import import_module
+
+            import_module("yoetz.adapters.integrations.codex_session_stream")
+
         store = LocalObservationStore(_state=_state)
         resolve_started = _monotonic()
         stages["import"] = _elapsed_ms(entry_started, resolve_started)
@@ -2406,11 +2455,6 @@ def handle_observe(
             else:
                 try:
                     workspace_commitment = store.workspace_commitment(workspace_locator)
-                    consent_probe = store.consent_for(workspace_commitment)
-                    if consent_probe is None or not consent_probe.active:
-                        binding_diagnostic = _consent_binding_diagnostic(consent_probe)
-                        workspace_commitment = None
-                        workspace_locator = None
                 except Exception:
                     workspace_commitment = None
                     workspace_locator = None
@@ -2916,6 +2960,27 @@ def handle_observe(
 
         stages["store"] = _elapsed_ms(store_started, _monotonic())
 
+        if (
+            resolved_event in {"PreToolUse", "PostToolUse", "PermissionRequest"}
+            and not content_map
+            and _monotonic() - entry_started >= _HOOK_LOCAL_STAGE_ALLOWANCE_SECONDS
+        ):
+            # Ingress is already durable. Yield expensive follow-up work to
+            # the service/next hook when contention spent the local allowance.
+            # Never defer transient native content through this structural lane.
+            record_hook_diagnostic("hook_followup_deferred", resolved_event, _state=_state)
+            _stdout_json({}, stdout)
+            for name, spent in store.stage_timings_ms.items():
+                stages[f"store_{name}"] = max(0, int(spent))
+            _record_pass_timing(
+                resolved_event,
+                entry_started=entry_started,
+                stages=stages,
+                monotonic=_monotonic,
+                _state=_state,
+            )
+            return 0
+
         # Refresh deterministic advice only after the capture batch has
         # closed.  The refresh can build and persist a comparatively large
         # snapshot; keeping it outside the batch means a host cancellation
@@ -2928,7 +2993,10 @@ def handle_observe(
         # intent is already durable and the service refreshes advice when it
         # drains that intent, so avoid cold advice construction inside the
         # host's hard three-second SessionEnd window.
-        if resolved_event != "SessionEnd":
+        # PreToolUse adds an attempted action, not an outcome. Reuse the
+        # snapshot at its real frontier; post-result and lifecycle hooks plus
+        # service ingest own material advice refresh.
+        if resolved_event not in {"SessionEnd", "PreToolUse"}:
             with contextlib.suppress(Exception):
                 store.refresh_advice(workspace_commitment)
         stages["advice"] = _elapsed_ms(advice_started, _monotonic())

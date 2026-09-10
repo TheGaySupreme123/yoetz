@@ -12,8 +12,15 @@ from threading import Lock
 from typing import Final, cast
 
 from yoetz.config.paths import PathSafetyError, ensure_owner_only_dir, state_dir
-from yoetz.domain.observation import ObservationGapCode
-from yoetz.domain.values import JsonObject
+from yoetz.domain.observation import (
+    ObservationEnvelope,
+    ObservationGapCode,
+    ObservationIngestResult,
+    ObservationSource,
+)
+from yoetz.domain.values import JsonObject, JsonValue, validate_commitment
+from yoetz.ports.control_reasons import CONTROL_ERROR_REASONS
+from yoetz.protocol.ids import IdKind, validate_id
 
 try:
     import fcntl
@@ -47,9 +54,12 @@ _EVENTS: Final = frozenset(
         "mcp_serve",
     }
 )
+_CONTROL_REASONS: Final = CONTROL_ERROR_REASONS
 _REASONS: Final = frozenset(
     {
         *(item.value for item in ObservationGapCode),
+        *("control_" + reason for reason in _CONTROL_REASONS),
+        "drain_diagnostic_unavailable",
         "invalid_session",
         "observe",
         "outbox_overflow",
@@ -122,6 +132,7 @@ _REASONS: Final = frozenset(
         # Observability only: the end-to-end hook budget is a contract, not an
         # enforcement point. Aborting mid-hook would drop ingest.
         "hook_budget_exceeded",
+        "hook_followup_deferred",
         "hook_slo_breached",
         # A host's automatic tool-call reviewer (Claude Code auto mode) denied a
         # scoped semantic ``check`` before Yoetz received it, or a permission
@@ -220,7 +231,61 @@ def record_hook_diagnostic(
     )
 
 
-def _append_row(row: dict[str, object], *, _state: Path | None) -> None:
+def record_drain_failure(
+    failure: ObservationIngestResult,
+    envelope: ObservationEnvelope,
+    disposition: str,
+    *,
+    _state: Path | None,
+) -> bool:
+    """Keep bounded causal facts; source identity is a commitment, never raw input."""
+
+    from yoetz.application.observation_drain import ObservationControlFailure
+
+    control = failure if isinstance(failure, ObservationControlFailure) else None
+    reason = failure.reason
+    correlation = None if control is None else control.correlation_id
+    stage = "typed_ingest" if control is None else control.failure_stage
+    try:
+        session = validate_commitment(envelope.session_commitment)
+        source = validate_commitment(envelope.cursor.last_source_commitment)
+        if correlation is not None:
+            validate_id(IdKind.CORRELATION, correlation)
+        if control is not None and control.control_reason not in _CONTROL_REASONS:
+            return False
+        if reason not in _REASONS or stage not in {
+            "control",
+            "request_encode",
+            "response_decode",
+            "typed_ingest",
+        }:
+            return False
+        if disposition not in {"retry", "quarantine"}:
+            return False
+    except ValueError, TypeError:
+        return False
+    return _append_row(
+        {
+            "kind": "drain_failure",
+            "event": "drain",
+            "ts": _timestamp(),
+            "reason": reason,
+            "control_reason": None if control is None else control.control_reason,
+            "control_retryable": None if control is None else control.control_retryable,
+            "stage": stage,
+            "disposition": disposition,
+            "correlation_id": correlation,
+            "session_commitment": session,
+            "source_commitment": source,
+            "source": envelope.source.value,
+            "generation": envelope.cursor.source_generation,
+            "position": envelope.cursor.event_position,
+        },
+        _state=_state,
+    )
+
+
+def _append_row(row: dict[str, object], *, _state: Path | None) -> bool:
     root = state_dir() if _state is None else _state
     directory = root / "observation"
     path = directory / _FILE_NAME
@@ -238,7 +303,7 @@ def _append_row(row: dict[str, object], *, _state: Path | None) -> None:
                 if fcntl is not None:
                     fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
                 if path.is_symlink() or rotated.is_symlink():
-                    return
+                    return False
                 try:
                     size = path.lstat().st_size
                 except FileNotFoundError:
@@ -280,7 +345,8 @@ def _append_row(row: dict[str, object], *, _state: Path | None) -> None:
             finally:
                 os.close(lock_descriptor)
     except OSError, PathSafetyError, ValueError:
-        return
+        return False
+    return True
 
 
 def record_hook_timing(
@@ -435,11 +501,14 @@ class _Timings:
         )
 
 
-def _read_rows(directory: Path) -> tuple[list[dict[str, str]], list[tuple[int, str, str | None]]]:
+def _read_rows(
+    directory: Path,
+) -> tuple[list[dict[str, str]], list[tuple[int, str, str | None]], list[JsonObject]]:
     """Return retained failure rows and timing rows, oldest retained file first."""
 
     rows: list[dict[str, str]] = []
     timings: list[tuple[int, str, str | None]] = []
+    attempts: list[JsonObject] = []
     try:
         ensure_owner_only_dir(directory)
         for path in (
@@ -468,6 +537,70 @@ def _read_rows(directory: Path) -> tuple[list[dict[str, str]], list[tuple[int, s
                 if type(parsed) is not dict:
                     continue
                 row = cast(dict[str, object], parsed)
+                if row.get("kind") == "drain_failure":
+                    allowed = {
+                        "kind",
+                        "event",
+                        "ts",
+                        "reason",
+                        "control_reason",
+                        "control_retryable",
+                        "stage",
+                        "disposition",
+                        "correlation_id",
+                        "session_commitment",
+                        "source_commitment",
+                        "source",
+                        "generation",
+                        "position",
+                    }
+                    if set(row) != allowed:
+                        continue
+                    # Files are mutable local input: validate every projected value.
+                    try:
+                        reason = row["control_reason"]
+                        if reason is None:
+                            if (
+                                row["reason"] not in _REASONS
+                                or row["stage"] != "typed_ingest"
+                                or row["control_retryable"] is not None
+                            ):
+                                continue
+                        elif type(reason) is not str or reason not in _CONTROL_REASONS:
+                            continue
+                        elif (
+                            row["reason"] != "control_" + reason
+                            or type(row["control_retryable"]) is not bool
+                        ):
+                            continue
+                        if row["event"] != "drain":
+                            continue
+                        for key in ("session_commitment", "source_commitment"):
+                            validate_commitment(cast(str, row[key]))
+                        if row["correlation_id"] is not None:
+                            validate_id(IdKind.CORRELATION, cast(str, row["correlation_id"]))
+                        if row["stage"] not in {
+                            "control",
+                            "request_encode",
+                            "response_decode",
+                            "typed_ingest",
+                        }:
+                            continue
+                        if row["disposition"] not in {"retry", "quarantine"}:
+                            continue
+                        if row["source"] not in {item.value for item in ObservationSource}:
+                            continue
+                        if any(
+                            type(row[key]) is not int or not 0 <= cast(int, row[key]) <= 2**53 - 1
+                            for key in ("generation", "position")
+                        ):
+                            continue
+                        if type(row["ts"]) is not str or _parse_timestamp(row["ts"]) is None:
+                            continue
+                        attempts.append(JsonObject(cast(dict[str, JsonValue], row)))
+                    except ValueError, TypeError:
+                        continue
+                    continue
                 if set(row) in (
                     {"event", "kind", "ms", "stages", "ts"},
                     {"event", "kind", "ms", "stages", "ts", "path"},
@@ -500,8 +633,8 @@ def _read_rows(directory: Path) -> tuple[list[dict[str, str]], list[tuple[int, s
                     }
                 )
     except OSError, PathSafetyError:
-        return [], []
-    return rows, timings
+        return [], [], []
+    return rows, timings, attempts
 
 
 def hook_diagnostic_summary(
@@ -517,7 +650,7 @@ def hook_diagnostic_summary(
     """
 
     root = state_dir() if _state is None else _state
-    rows, timings = _read_rows(root / "observation")
+    rows, timings, attempts = _read_rows(root / "observation")
     now = datetime.now(UTC) if _now is None else _now.astimezone(UTC)
     horizon = now - timedelta(seconds=_RECENT_WINDOW_SECONDS)
     overall = _Recency()
@@ -541,6 +674,9 @@ def hook_diagnostic_summary(
     last = rows[-1] if rows else None
     return JsonObject(
         {
+            "drain_failures": tuple(attempts[-32:]),
+            "drain_failure_retained_count": len(attempts),
+            "drain_failure_history_complete": False,
             "count": overall.count,
             "first_seen": None if overall.first is None else _render(overall.first),
             "last_event": None if last is None else last["event"],

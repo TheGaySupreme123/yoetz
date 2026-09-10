@@ -38,7 +38,9 @@ from yoetz.application.observation_check_policy import load_observation_check_po
 from yoetz.application.observation_drain import (
     EXPECTED_OBSERVATION_BACKPRESSURE_REASONS,
     WORKSPACE_GLOBAL_OBSERVATION_STOP_REASONS,
+    ObservationControlFailure,
     ObservationDrainAction,
+    observation_control_failure,
     route_observation_ingest,
 )
 from yoetz.application.observation_verification import run_bound_approved_check
@@ -855,6 +857,7 @@ _DRAIN_TERMINAL_PASS_LIMIT: Final = "pass_limit"
 
 @dataclass(slots=True)
 class _DrainTally:
+    control_failed: bool = False
     attempted: int = 0
     acknowledged: int = 0
     retry_pending: int = 0
@@ -901,6 +904,8 @@ async def _drain_pass(
     client: _DrainClient,
     deliverable: list[tuple[str, ObservationOutboxRow]],
     tally: _DrainTally,
+    *,
+    _state: Path | None,
 ) -> int:
     """Attempt one FIFO pass over the snapshot; return the rows it resolved.
 
@@ -917,28 +922,30 @@ async def _drain_pass(
         if commitment in stopped_workspaces or lane in retired_lanes:
             continue
         tally.attempted += 1
+        stage = "request_encode"
         try:
-            raw = await client.observation_ingest(
-                observation_ingest_request_to_json(
-                    ObservationIngestRequest(
-                        codex_session_id=row.codex_session_id,
-                        envelope=row.envelope,
-                    )
-                ),
-                deadline_ms=_DRAIN_DEADLINE_MS,
-            )
-            result = observation_ingest_result_from_json(raw)
-        except ControlError as exc:
-            reason = (
-                ObservationGapCode.VAULT_LOCKED.value
-                if exc.reason == "vault_locked"
-                else (
-                    ObservationGapCode.SERVICE_UNAVAILABLE.value
-                    if exc.retryable
-                    else ObservationGapCode.LEDGER_REJECTED.value
+            body = observation_ingest_request_to_json(
+                ObservationIngestRequest(
+                    codex_session_id=row.codex_session_id, envelope=row.envelope
                 )
             )
-            result = ObservationIngestResult(ObservationIngestDisposition.REJECTED, reason, None)
+            stage = "control"
+            raw = await client.observation_ingest(body, deadline_ms=_DRAIN_DEADLINE_MS)
+            stage = "response_decode"
+            result = observation_ingest_result_from_json(raw)
+        except ControlError as exc:
+            result = observation_control_failure(exc)
+        except ProtocolValueError, TypeError, ValueError:
+            reason = "invalid_request" if stage == "request_encode" else "frame_invalid"
+            result = ObservationControlFailure(
+                ObservationIngestDisposition.REJECTED,
+                "control_" + reason,
+                None,
+                reason,
+                False,
+                None,
+                stage,
+            )
         except Exception:
             result = ObservationIngestResult(
                 ObservationIngestDisposition.REJECTED,
@@ -996,6 +1003,18 @@ async def _drain_pass(
         elif store.acknowledge_outbox_row(commitment, updated):
             tally.acknowledged += 1
             resolved += 1
+        if (
+            decision.reason is not None
+            and decision.reason not in EXPECTED_OBSERVATION_BACKPRESSURE_REASONS
+        ):
+            from yoetz.cli.hook_diagnostics import record_drain_failure
+
+            if not record_drain_failure(result, row.envelope, decision.action.value, _state=_state):
+                store.note_coverage_gap(commitment, "drain_diagnostic_unavailable")
+        if isinstance(result, ObservationControlFailure):
+            # The connection is no longer trustworthy for another lane or workspace.
+            tally.control_failed = True
+            break
     return resolved
 
 
@@ -1057,8 +1076,8 @@ async def _drain_observation_async(
                         terminal=_DRAIN_TERMINAL_SERVICE_UNAVAILABLE,
                     )
             passes += 1
-            resolved = await _drain_pass(store, client, deliverable, tally)
-            if resolved == 0:
+            resolved = await _drain_pass(store, client, deliverable, tally, _state=_state)
+            if tally.control_failed or resolved == 0:
                 terminal = _DRAIN_TERMINAL_RETRY_PENDING
                 break
             if passes >= pass_limit:

@@ -26,6 +26,7 @@ from yoetz.domain.observation import (
     ObservationIngestRequest,
     ObservationIngestResult,
 )
+from yoetz.ports.control import ControlError
 
 __all__ = [
     "DEFAULT_OBSERVATION_SWEEP_BUDGET_SECONDS",
@@ -94,6 +95,27 @@ class ObservationDrainDecision:
     reason: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class ObservationControlFailure(ObservationIngestResult):
+    """Adapter failure, with no assertion that the ledger refused an input."""
+
+    control_reason: str
+    control_retryable: bool
+    correlation_id: str | None
+    failure_stage: str = "control"
+
+
+def observation_control_failure(error: ControlError) -> ObservationControlFailure:
+    return ObservationControlFailure(
+        ObservationIngestDisposition.REJECTED,
+        "control_" + error.reason,
+        None,
+        error.reason,
+        error.retryable,
+        error.correlation_id,
+    )
+
+
 def route_observation_ingest(
     result: ObservationIngestResult,
     *,
@@ -106,6 +128,28 @@ def route_observation_ingest(
         ObservationIngestDisposition.DUPLICATE,
     }:
         return ObservationDrainDecision(ObservationDrainAction.ACKNOWLEDGE, None)
+    if isinstance(result, ObservationControlFailure):
+        # Invalid/oversized requests cannot heal by reconnecting. Protocol
+        # failures can occur before or after admission: retain exact replay
+        # identity and stop using that connection, never forge ledger refusal.
+        terminal = result.control_reason in {"frame_too_large", "invalid_request"}
+        if row is not None and result.control_reason not in {
+            "vault_locked",
+            "method_forbidden",
+            "protocol_mismatch",
+            "service_incompatible",
+            "peer_untrusted",
+            "endpoint_unsafe",
+            "privacy_projection_blocked",
+        }:
+            attempts = (
+                row.consecutive_reason_attempts + 1 if row.last_reason == result.reason else 1
+            )
+            terminal = terminal or attempts >= MAX_CONSECUTIVE_OBSERVATION_REJECTIONS
+        return ObservationDrainDecision(
+            ObservationDrainAction.QUARANTINE if terminal else ObservationDrainAction.RETRY,
+            result.reason,
+        )
     supplied_reason = result.reason
     reason = (
         supplied_reason

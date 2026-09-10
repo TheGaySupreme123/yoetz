@@ -81,6 +81,12 @@ both values, the setting origin and expiry, pressure, accounting, capture backlo
 loss. At a hard limit, replayable input pauses for retry and non-replayable input receives bounded
 loss accounting; the host is not held up to preserve an observation.
 
+After current usage falls below every hard threshold, pressure moves from `hard_limit` to `high`
+and structural admission can resume when the next input fits. Optional detail stays reduced until
+all dimensions remain at or below 45% for ten seconds. Retained history still consumes the byte
+budget: an empty pending queue does not imply healthy pressure or restored historical coverage.
+Ending a host session retires its pressure snapshot, while preserving pending work and history.
+
 ## Protect evidence and promote a buffered read
 
 When a later claim or finding will depend on a read, protect it before the read occurs:

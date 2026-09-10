@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -205,3 +206,134 @@ def test_pressure_snapshot_cache_stays_bounded(
         state = store._load(workspace)  # pyright: ignore[reportPrivateUsage]
         assert state.pressure_snapshots is not None
         assert len(state.pressure_snapshots) == 2
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        ObservationSource.CODEX_HOOK,
+        ObservationSource.CLAUDE_HOOK,
+        ObservationSource.CURSOR_HOOK,
+        ObservationSource.CODEX_SESSION_STREAM,
+    ],
+)
+def test_current_hard_pressure_blocks_new_input_but_allows_recovery(
+    tmp_path: Path, source: ObservationSource
+) -> None:
+    monotonic = [0.0]
+    store, workspace = _store(tmp_path, monotonic)
+    old = replace(_pending_envelope(session=_SESSION, receipt_time=_OLD), source=source)
+    assert store.enqueue_outbox(workspace, "session", old) is None
+    assert not store.update_selection_pressure(workspace, _SESSION).admission_allowed
+    fresh = replace(
+        old,
+        source_identity="new-input",
+        receipt_time=_NOW,
+        cursor=replace(old.cursor, event_position=2),
+    )
+    from yoetz.adapters.integrations.observation_admission import AdmissionBuffer, AdmissionPlan
+
+    plan = AdmissionPlan(buffer=AdmissionBuffer(), deliveries=(("session", fresh),), deferred=False)
+    assert not store.commit_selected_admission(workspace, plan, incoming=fresh, newly_observed=True)
+    (row,) = store.list_pending_outbox_rows(workspace)
+    assert store.acknowledge_outbox_row(workspace, row)
+    status = store.update_selection_pressure(workspace, _SESSION)
+    assert status.admission_allowed
+    assert status.state is PressureState.HIGH
+    assert not status.content_allowed
+    assert store.commit_selected_admission(workspace, plan, incoming=fresh, newly_observed=True)
+    assert [r.envelope.source_identity for r in store.list_pending_outbox_rows(workspace)] == [
+        "new-input"
+    ]
+
+
+def test_session_end_clears_pressure_only_at_current_generation(tmp_path: Path) -> None:
+    monotonic = [0.0]
+    store, workspace = _store(tmp_path, monotonic)
+    store.grant_consent(workspace)
+    session = store.bind_codex_session(workspace, "session")
+    old = _pending_envelope(session=session, receipt_time=_OLD)
+    assert store.enqueue_outbox(workspace, "session", old) is None
+    store.update_selection_pressure(workspace, session)
+    (row,) = store.list_pending_outbox_rows(workspace)
+    assert store.acknowledge_outbox_row(workspace, row)
+    store.note_session_end(workspace, session, generation=0)
+    assert workspace in store.pending_workspaces()
+    store.note_session_end(workspace, session, generation=1)
+    store.maintain_selected_admission(workspace)
+    assert workspace not in store.pending_workspaces()
+    assert store.selection_runtime_status(workspace, session)["pressure_state"] == "healthy"
+    reopened = LocalObservationStore(_state=tmp_path / "state")
+    assert workspace not in reopened.pending_workspaces()
+
+
+def test_accepted_buffer_transfer_drains_under_hard_pressure(tmp_path: Path) -> None:
+    from yoetz.adapters.integrations.observation_admission import (
+        AdmissionBuffer,
+        AdmissionPlan,
+        BufferedInput,
+    )
+
+    monotonic = [0.0]
+    store, workspace = _store(tmp_path, monotonic)
+    envelope = _pending_envelope(session=_SESSION, receipt_time=_NOW)
+    buffer = AdmissionBuffer(
+        (BufferedInput("session", "sha256:" + "1" * 64, envelope, "pending", 0),)
+    )
+    assert store.commit_selected_admission(
+        workspace, AdmissionPlan(buffer, (), True), incoming=envelope, newly_observed=True
+    )
+    store.update_capture_backlog(workspace, 512, 0, _NOW, _NOW, route_id="capture-a")
+    assert not store.update_selection_pressure(workspace, _SESSION).admission_allowed
+    transfer = AdmissionPlan(AdmissionBuffer(), (("session", envelope),), False)
+    assert store.commit_selected_admission(workspace, transfer)
+    (row,) = store.list_pending_outbox_rows(workspace)
+    assert row.envelope == envelope
+    assert store.selection_accounting(workspace)["buffered_input_count"] == 0
+
+
+def test_buffer_only_plan_checks_aggregate_bytes_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yoetz.adapters.integrations.observation_admission import (
+        AdmissionBuffer,
+        AdmissionPlan,
+        BufferedInput,
+    )
+
+    monotonic = [0.0]
+    store, workspace = _store(tmp_path, monotonic)
+    envelope = _pending_envelope(session=_SESSION, receipt_time=_NOW)
+    state = store._load(workspace)  # pyright: ignore[reportPrivateUsage]
+    initial_size = len(store._encode_state(workspace, state))  # pyright: ignore[reportPrivateUsage]
+
+    def limit(workspace: str, state: object) -> int:
+        return initial_size + 1_000
+
+    monkeypatch.setattr(store, "_state_byte_limit", limit)
+    buffer = AdmissionBuffer(
+        tuple(
+            BufferedInput(
+                "session",
+                "sha256:" + "1" * 64,
+                replace(
+                    envelope,
+                    source_identity=f"input-{i}",
+                    cursor=replace(envelope.cursor, event_position=i + 1),
+                ),
+                "pending",
+                0,
+            )
+            for i in range(4)
+        )
+    )
+    assert not store.commit_selected_admission(
+        workspace,
+        AdmissionPlan(buffer, (), True),
+        incoming=envelope,
+        newly_observed=True,
+        replayable=True,
+    )
+    assert store.selection_accounting(workspace)["buffered_input_count"] == 0
+    assert store.selection_accounting(workspace)["unrecoverable_input_count"] == 0
+    assert store.list_pending_outbox_rows(workspace) == ()

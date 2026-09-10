@@ -426,6 +426,7 @@ def test_peer_untrusted_requires_local_repair_then_same_request_replay(
         ("peer_untrusted", False),
         ("endpoint_unsafe", False),
         ("frame_invalid", False),
+        ("invalid_request", False),
         ("frame_too_large", False),
         ("method_forbidden", False),
         ("internal_error", False),

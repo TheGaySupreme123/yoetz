@@ -539,11 +539,11 @@ def test_session_start_storage_codes_carry_distinct_retryability(tmp_path: Path)
 
 def test_control_error_class_table_is_exhaustive() -> None:
     from yoetz.ports.control import (
-        _CONTROL_ERROR_REASONS,  # pyright: ignore[reportPrivateUsage]
+        CONTROL_ERROR_REASONS,
     )
 
     table = hooks_module._CONTROL_ERROR_CLASSES  # pyright: ignore[reportPrivateUsage]
-    assert set(table) == _CONTROL_ERROR_REASONS
+    assert set(table) == CONTROL_ERROR_REASONS
     assert set(table.values()) <= {"locked", "retry", "privacy", "unavailable"}
 
 

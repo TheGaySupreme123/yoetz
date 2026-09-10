@@ -611,6 +611,9 @@ def test_wire_only_errors_map_to_existing_public_codes() -> None:
     assert public_error_code_for_control_reason("vault_locked") is PublicErrorCode.VAULT_LOCKED
     assert public_error_code_for_control_reason("frame_invalid") is PublicErrorCode.INVALID_REQUEST
     assert (
+        public_error_code_for_control_reason("invalid_request") is PublicErrorCode.INVALID_REQUEST
+    )
+    assert (
         public_error_code_for_control_reason("endpoint_unsafe")
         is PublicErrorCode.SERVICE_UNAVAILABLE
     )

@@ -123,3 +123,71 @@ capture, restart or crash recovery, concurrent workspace writers, semantic
 review, or receipt coverage. The eligible content byte estimate is not evidence
 that content was captured, delivered, selected for a check, or available for a
 receipt.
+
+## Concurrent host-adapter repair probe (#689–#691)
+
+The separate [hook probe](../../scripts/benchmark_observation_hooks.py) runs eight
+concurrent processes against one fresh owner-only store. It invokes the Codex,
+Claude Code and Cursor adapters with synthetic pre-tool events, using their native
+payload shapes. The retained fixture begins with 250 envelopes, 60 pending rows
+and 199 quarantined rows (approximately 366 KiB). Interpreter startup is excluded;
+Codex's stream-module cold import inside the adapter is included. No service,
+vault, vendor host, transcript corpus or native content capture is involved.
+
+On 2026-09-10, the same harness compared source baseline
+`f98d6d6315141e6b07f3cf38c6fd566dfc4fd584` with an independent installed wheel built
+from clean revision `55c81ed1ae6f10878f6c6ea4aaee86bfa3189428`. The wheel digest was
+`sha256:028da76beaaa4e0a8c3c99fbcf981fa372f0d18268dbb4e69f1ce5bdc7a8096e`.
+Times below are milliseconds, rounded to the nearest millisecond. With eight
+samples, nearest-rank p95 and p99 both equal the maximum; this small probe cannot
+establish tail latency or a host deadline guarantee.
+
+| Adapter | Baseline retained p50 / p95 / p99 / max | Installed retained p50 / p95 / p99 / max | Installed fresh p50 / p95 / p99 / max | Baseline / installed retained inputs |
+| --- | --- | --- | --- | --- |
+| Codex | 2002 / 3316 / 3316 / 3316 | 825 / 1338 / 1338 / 1338 | 398 / 484 / 484 / 484 | 7/8 / 8/8 |
+| Claude Code | 1223 / 1888 / 1888 / 1888 | 560 / 1060 / 1060 / 1060 | 50 / 114 / 114 / 114 | 8/8 / 8/8 |
+| Cursor | 1348 / 1980 / 1980 / 1980 | 473 / 971 / 971 / 971 | 48 / 120 / 120 / 120 | 8/8 / 8/8 |
+
+Every installed retained run ended with 68 pending and the original 199
+quarantined rows; every fresh run ended with eight pending and zero quarantine.
+All eight supplied identities were retained, with zero unaccounted inputs and
+zero new recorded loss. Delivered inputs were zero because RPC was disabled.
+The baseline Codex run returned neutral success for one input that never reached
+admission accounting; its 2002 ms rejection is included in the baseline timing,
+not counted as successful throughput. The JSON report separates retained and
+not-retained invocation times and reports accounting before and after.
+
+To reproduce the installed side from a checkout containing this harness:
+
+```text
+uv run python scripts/provision_test_instance.py create \
+  --base "$HOME/.yz-instances" --tag obs689 --lifecycle disposable --expires-in 8 \
+  --revision 55c81ed1ae6f10878f6c6ea4aaee86bfa3189428
+
+env -u YOETZ_ISOLATED_ROOT "$HOME/.yz-instances/obs689/runtime/bin/python" \
+  scripts/benchmark_observation_hooks.py --fanout 8 --retained
+env -u YOETZ_ISOLATED_ROOT "$HOME/.yz-instances/obs689/runtime/bin/python" \
+  scripts/benchmark_observation_hooks.py --fanout 8
+```
+
+The retention regression separately compares final encoded bytes against the
+original linear eviction algorithm for 700 envelopes, 176 pending rows and 700
+quarantine entries. It requires at most 16 full encodes and retains all 176
+pending identities after reopening. Logical-clock tests cover hard-pressure
+recovery, accepted-buffer transfers, projected aggregate bytes and ended-session
+generation fences. Control-failure tests cover all four sources (the three hook
+sources plus Codex session streams), bounded retries, connection stop, retained
+replay identity and rotated payload-free diagnostics.
+
+These are implementation and adapter results. They do not complete the issues'
+real vendor-host parent/delegate workload, encrypted capture, fresh native
+control-rejection trace, upgrade over a running older service, or the six larger
+profile combinations described above. The fix removes repeated retention encodes
+and repeated batch preflight, moves Codex cold preparation outside the store
+lock, and shares the elapsed drain budget. Connection setup may use its reserved
+preflight allowance after subtracting snapshot time; service calls retain the
+original drain deadline, so a slow connection cannot reset it. It does not replace the JSON store
+with an append-oriented representation, interrupt synchronous durable writes,
+or establish an end-to-end timeout guarantee. Historical quarantine cannot be
+attributed from the new diagnostic format. Keep those acceptance limits visible
+when assessing the linked PR.
