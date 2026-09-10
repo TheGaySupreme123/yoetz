@@ -1,0 +1,71 @@
+name: Capture recovery verification
+
+on:
+  push:
+    branches: [codex/fix-695-capture-recovery]
+    paths: [.github/workflows/capture-recovery-verification.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: capture-recovery-verification-695
+  cancel-in-progress: true
+
+jobs:
+  export-verification-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      UV_PYTHON_INSTALL_DIR: ${{ runner.temp }}/yoetz-695-python
+      UV_NO_PROGRESS: '1'
+    steps:
+      - name: Checkout exact verification revision without persisted credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          submodules: false
+          lfs: false
+      - name: Install repository-pinned uv and Python
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+        with:
+          version: '0.11.29'
+          python-version: '3.14.6'
+          enable-cache: false
+      - name: Install repository-pinned development dependencies
+        run: uv sync --locked --all-extras --group dev
+      - name: Install repository-pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '26.5.0'
+      - name: Install locked type-checker without lifecycle scripts
+        run: npm ci --ignore-scripts
+      - name: Export source and dependency runtime only
+        shell: bash
+        run: |
+          set -euo pipefail
+          destination="${RUNNER_TEMP}/yoetz-695-export"
+          mkdir -p "$destination"
+          git bundle create "$destination/yoetz.bundle" HEAD
+          tar -C "$UV_PYTHON_INSTALL_DIR" -czf "$destination/python.tar.gz" .
+          tar -czf "$destination/venv.tar.gz" .venv
+          tar -czf "$destination/node_modules.tar.gz" node_modules
+          cp "$(command -v uv)" "$destination/uv"
+          cp "$(command -v node)" "$destination/node"
+          {
+            git rev-parse HEAD
+            uv --version
+            uv run --locked python --version
+            node --version
+          } > "$destination/versions.txt"
+          cd "$destination"
+          sha256sum yoetz.bundle python.tar.gz venv.tar.gz node_modules.tar.gz uv node versions.txt > SHA256SUMS
+      - name: Upload short-lived isolated verification inputs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: yoetz-695-verification-runtime
+          path: ${{ runner.temp }}/yoetz-695-export/
+          retention-days: 1
+          compression-level: 6
+          if-no-files-found: error
