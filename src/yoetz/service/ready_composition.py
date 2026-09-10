@@ -130,7 +130,6 @@ from yoetz.domain.findings import (
     semantic_provenance_to_json,
 )
 from yoetz.domain.observation import (
-    ObservationCaptureBacklog,
     ObservationCaptureTicket,
     observation_capture_ticket_id,
 )
@@ -190,12 +189,10 @@ from yoetz.ports.objects import (
     ObjectStorePort,
     StagedObject,
 )
-from yoetz.ports.observation import TaskObservationPort
 from yoetz.ports.privacy import HumanAuthorityCapability
 from yoetz.ports.runtime import (
     OwnershipFence,
     RouteAccess,
-    RouteCommand,
     ServiceRuntimeContext,
     StartCompletionEvidence,
     StartMilestone,
@@ -227,6 +224,7 @@ from yoetz.protocol.models import (
     validate_semantic_provenance_binding,
 )
 from yoetz.service.import_publication_authority import ImportPublicationAuthority
+from yoetz.service.observation_capture_inventory import build_capture_inventory_bootstrap
 from yoetz.service.vault import ProviderCredentialBinding, provider_credential_profile_binding
 from yoetz.version import build_version_manifest, version_manifest_json
 
@@ -3525,144 +3523,13 @@ async def provide_service_ready_context(
     if callable(require_capture_bootstrap):
         require_capture_bootstrap(True)
 
-    async def bootstrap_capture_reservations(
-        workspace: str,
-        current_runtime: TaskRuntime,
-        current_store: TaskObservationPort,
-    ) -> bool:
-        """Read the complete catalog inventory before central admission.
-
-        The coordinator invokes this callback while its process-wide capture
-        lock is held.  The current route's repository commitment scopes the
-        inventory; matching routes are all accounted for, while an unreadable
-        or inactive route fails closed instead of being silently omitted.
-        """
-
-        try:
-            current_route = await catalog.resolve_route(current_runtime.session_id)
-            if (
-                current_route is None
-                or current_route.state is not TaskRouteState.ACTIVE
-                or current_route.task_id != current_runtime.task_id
-                or current_route.repository_privacy_commitment is None
-            ):
-                raise ValueError("capture_current_route_unavailable")
-            repository = current_route.repository_privacy_commitment
-            recovery_routes = getattr(catalog, "recovery_routes", None)
-            if not callable(recovery_routes):
-                raise ValueError("capture_catalog_inventory_unavailable")
-            raw_routes = await cast(
-                Callable[[], Awaitable[tuple[TaskRoute, ...]]], recovery_routes
-            )()
-            if type(raw_routes) is not tuple:
-                raise ValueError("capture_catalog_inventory_invalid")
-            if any(type(route) is not TaskRoute for route in raw_routes):
-                raise ValueError("capture_catalog_inventory_invalid")
-            all_routes = raw_routes
-            if len({route.task_id for route in all_routes}) != len(all_routes):
-                raise ValueError("capture_catalog_inventory_duplicate")
-            routes = tuple(
-                route
-                for route in all_routes
-                if route.repository_privacy_commitment in {repository, None}
-            )
-            if not routes or len(routes) > 256:
-                raise ValueError("capture_catalog_inventory_incomplete")
-            if any(route.state is not TaskRouteState.ACTIVE for route in routes):
-                raise ValueError("capture_catalog_inventory_inactive")
-            if current_route.task_id not in {route.task_id for route in routes}:
-                raise ValueError("capture_catalog_inventory_incomplete")
-            inventory: dict[str, ObservationCaptureBacklog] = {}
-            ticket_ids_by_task: dict[str, tuple[str, ...]] = {}
-            for route in sorted(routes, key=lambda item: item.task_id.encode()):
-                task_runtime: TaskRuntime | None = None
-                release = False
-                try:
-                    if route.task_id == current_runtime.task_id:
-                        task_runtime = current_runtime
-                        task_store = current_store
-                    else:
-                        binding = await catalog.session_binding(route.session_id)
-                        if (
-                            binding is None
-                            or binding.task_id != route.task_id
-                            or binding.session_id != route.session_id
-                        ):
-                            raise ValueError("capture_route_binding_unavailable")
-                        task_runtime = await runtime.route(
-                            RouteCommand(
-                                session_id=route.session_id,
-                                writer_id=binding.writer_id,
-                                access=RouteAccess.WRITE,
-                                required_capabilities=frozenset({RuntimeCapability.WRITE}),
-                            )
-                        )
-                        release = True
-                        task_store = task_runtime.observation
-                    if task_store is None:
-                        raise ValueError("capture_task_observation_unavailable")
-                    reader = getattr(task_store, "capture_backlog", None)
-                    if not callable(reader):
-                        raise ValueError("capture_task_backlog_unavailable")
-                    backlog = reader(workspace)
-                    if type(backlog) is not ObservationCaptureBacklog:
-                        raise ValueError("capture_task_backlog_invalid")
-                    inventory[route.task_id] = backlog
-                    list_pending = getattr(task_store, "list_pending_capture_tickets", None)
-                    if callable(list_pending):
-                        raw_tickets = list_pending(route.task_id)
-                        tickets = cast(tuple[object, ...], raw_tickets)
-                        if type(raw_tickets) is not tuple or any(
-                            type(ticket) is not ObservationCaptureTicket for ticket in tickets
-                        ):
-                            raise ValueError("capture_task_ticket_inventory_invalid")
-                        scoped_ids: list[str] = []
-                        typed_tickets = cast(tuple[ObservationCaptureTicket, ...], tickets)
-                        for ticket in typed_tickets:
-                            if ticket.task_id != route.task_id:
-                                raise ValueError("capture_task_ticket_owner_invalid")
-                            if ticket.workspace_commitment == workspace:
-                                ticket_id = observation_capture_ticket_id(ticket)
-                                if ticket_id in scoped_ids:
-                                    raise ValueError("capture_task_ticket_duplicate")
-                                scoped_ids.append(ticket_id)
-                        if all(
-                            ticket.workspace_commitment == workspace for ticket in typed_tickets
-                        ):
-                            ticket_ids_by_task[route.task_id] = tuple(
-                                sorted(scoped_ids, key=str.encode)
-                            )
-                finally:
-                    if release and task_runtime is not None:
-                        with contextlib.suppress(Exception):
-                            await runtime.release(task_runtime)
-            # Re-read the catalog after all bundle reads.  A route change while
-            # the inventory was in flight must not mint a proof for a stale set.
-            final_raw_routes = await cast(
-                Callable[[], Awaitable[tuple[TaskRoute, ...]]], recovery_routes
-            )()
-            if final_raw_routes != raw_routes:
-                raise ValueError("capture_catalog_inventory_changed")
-            bootstrap = getattr(local_observation, "bootstrap_capture_reservations", None)
-            if not callable(bootstrap):
-                raise ValueError("capture_bootstrap_unavailable")
-            observed_at = timestamp_from_datetime(clock.now_utc())
-            return bool(
-                await asyncio.to_thread(
-                    bootstrap,
-                    workspace,
-                    inventory,
-                    observed_at=observed_at,
-                    complete=True,
-                    ticket_ids_by_task=ticket_ids_by_task or None,
-                )
-            )
-        except Exception:
-            mark_unknown = getattr(local_observation, "mark_capture_backlog_scope_unknown", None)
-            if callable(mark_unknown):
-                with contextlib.suppress(Exception):
-                    await asyncio.to_thread(mark_unknown, workspace)
-            return False
+    bootstrap_capture_reservations = build_capture_inventory_bootstrap(
+        catalog=catalog,
+        runtime=runtime,
+        local_observation=local_observation,
+        clock=clock,
+        generation_is_current=lambda: generation_is_current(service_generation, vault_generation),
+    )
 
     async def reconcile_observation_capture(runtime: TaskRuntime) -> None:
         store = runtime.observation
@@ -3825,6 +3692,7 @@ async def provide_service_ready_context(
         observation_coordinator,
         budget_seconds=DEFAULT_OBSERVATION_SWEEP_BUDGET_SECONDS,
         ingest_gate=observation_gate,
+        capture_recovery=observation_coordinator.recover_workspace_capture_inventory,
     )
     legacy_spool_forwarder = _LegacyHookSpoolForwarder(paths.state)
 

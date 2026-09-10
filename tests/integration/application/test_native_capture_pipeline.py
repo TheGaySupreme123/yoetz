@@ -214,6 +214,7 @@ async def _pipeline(
     codex_session_id: str,
     profile: str | None,
     install_mapping: bool = True,
+    identity_seed: int = 0,
 ) -> tuple[
     Path,
     str,
@@ -237,9 +238,9 @@ async def _pipeline(
         local.enable_content_capture(workspace, profile)
     session_commitment = local.bind_codex_session(workspace, codex_session_id)
 
-    task_id = _ids(IdKind.TASK, 1)
-    yoetz_session_id = _ids(IdKind.SESSION, 2)
-    writer_id = _ids(IdKind.WRITER, 3)
+    task_id = _ids(IdKind.TASK, identity_seed + 1)
+    yoetz_session_id = _ids(IdKind.SESSION, identity_seed + 2)
+    writer_id = _ids(IdKind.WRITER, identity_seed + 3)
     if install_mapping:
         store_mapping(
             LifecycleMapping(

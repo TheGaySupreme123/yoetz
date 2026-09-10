@@ -5517,6 +5517,7 @@ class LocalObservationStore:
         *,
         observed_at: Timestamp | None = None,
         complete: bool = True,
+        proof_guard: Callable[[], bool] | None = None,
         ticket_ids_by_task: Mapping[str, tuple[str, ...]] | None = None,
     ) -> bool:
         """Account every task in a ready inventory before opening central admission.
@@ -5550,6 +5551,19 @@ class LocalObservationStore:
         )
         with self._lock:
             state = self._load(workspace)
+            known_routes = set(state.capture_backlogs or {}) | {
+                item.task_id for item in (state.capture_reservations or {}).values()
+            }
+            if (proof_guard is not None and proof_guard() is not True) or not known_routes.issubset(
+                snapshots
+            ):
+                # The service generation can retire while waiting for this
+                # lock. A catalog omission or racing new route report is also
+                # not proof that previously retained bytes disappeared.
+                state.capture_backlog_scope_unknown = True
+                state.capture_reservation_bootstrap = None
+                self._save(workspace, state)
+                return False
             state.capture_backlogs = snapshots
             state.capture_reservation_bootstrap = proof
             state.capture_backlog_scope_unknown = False
@@ -6213,8 +6227,13 @@ class LocalObservationStore:
                 row for row in state.pending_outbox if row.codex_session_id == codex_session_id
             )
 
-    def pending_workspaces(self) -> tuple[str, ...]:
-        """Return opaque commitments with undelivered rows or lifecycle work."""
+    def pending_workspaces(self, *, include_capture_recovery: bool = False) -> tuple[str, ...]:
+        """Return delivery/lifecycle work, optionally including independent capture recovery.
+
+        READY opts in so an empty outbox and a restarted verification cache
+        cannot hide a workspace. Hooks retain the existing delivery-only view.
+        Ended healthy lanes do not keep maintenance scheduled.
+        """
 
         with self._lock:
             pending: list[str] = []
@@ -6231,6 +6250,26 @@ class LocalObservationStore:
                     or state.pending_lifecycles
                     or state.admission_buffer.inputs
                     or pressure_active
+                    or (
+                        include_capture_recovery
+                        and state.consent is not None
+                        and state.consent.active
+                        and bool(state.codex_session_bindings)
+                        and (
+                            state.capture_backlog_scope_unknown
+                            or (
+                                bool(
+                                    state.capture_backlogs
+                                    or state.capture_reservations
+                                    or state.capture_reservation_bootstrap
+                                )
+                                and any(
+                                    session not in (state.ended_sessions or ())
+                                    for session in (state.codex_session_bindings or {}).values()
+                                )
+                            )
+                        )
+                    )
                 ):
                     pending.append(workspace)
             return tuple(sorted(pending, key=str.encode))

@@ -1580,6 +1580,9 @@ in a receipt (`application/status.md`, `application/check.md`).
 `StartCatalogPort` methods are `reserve_or_resume(StartCommand) -> StartAllocation`,
 `commit_identity(StartIdentityInput) -> StartIdentityCommitments`,
 `resolve_route(session_id) -> TaskRoute | None`,
+`capture_inventory_routes(repository_privacy_commitment) -> tuple[TaskRoute, ...]` (service-only,
+ascending task IDs, at most 257 rows for that repository or unknown repository binding; includes
+inactive routes so an incomplete inventory cannot masquerade as complete; row 257 signals overflow),
 `session_binding(session_id) -> SessionBinding | None` (active binding for either an active or
 historical session of the same task),
 `list_workspace_task_ids(workspace_ref_commitment) -> tuple[str, ...]` (task ids only, ascending,
@@ -3751,6 +3754,29 @@ distinct. Intentional detail omission is separate from non-replayable rejection.
 ranges, their aggregate commitment and historical count survive current-pressure recovery.
 Capture-ticket count and byte limits remain independent from structural capacity; partial or
 unknown per-task backlog projections never assert complete workspace capture coverage.
+
+READY supplies `ObservationOutboxSweeper.capture_recovery` with
+`ObservationCoordinator.recover_workspace_capture_inventory`. This internal maintenance path
+runs without an admitted envelope or pending outbox row. `LocalObservationStore.pending_workspaces`
+opts into discovery with `include_capture_recovery=True`; ordinary callers keep their existing
+selection. Discovery includes consented, bound unknown workspaces and unfinished bound workspaces
+with retained capture context, not a fresh unmapped host or a healthy ended lane. Recovery is not
+counted as observed input, delivery, acknowledgement, or coverage.
+
+`build_capture_inventory_bootstrap` is the one READY-owned catalog/bundle proof callback used by
+both capture reservation and maintenance. Its complete inventory is bounded to 256 relevant routes,
+validated before and after bundle reads, fenced to the current service/vault generation, and
+published under shared capture exclusion. `bootstrap_capture_reservations` also evaluates its
+internal `proof_guard` under the local lock and refuses proofs omitting known task backlogs or
+reservation owners. This is an internal authority check, not a new wire field or caller grant.
+Cancelled proof writes settle before exclusion is released and unknown is retained on failure.
+Real occupancy limits still apply after a successful proof.
+
+Local loss accounting survives recovery unchanged. The existing `selection_history_gaps` carrier
+requires a later matching admitted observation; this slice does not add an independent task/check
+loss import. Consequently, task/check coverage cannot be inferred from recovered pressure or an
+empty outbox when the relevant loss carrier has not arrived. Unrouted or detail-evicted loss must
+not be reassigned to an unrelated task. The broader propagation requirement remains in #695.
 
 Yoetz-owned tool observation follows ADR-022 decision 18 (issue #564). The hook ingress for every
 host and the Codex stream reconciler recognize Yoetz's own tools under every host spelling

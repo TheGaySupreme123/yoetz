@@ -709,9 +709,9 @@ class _BlockingStore(LocalObservationStore):
 
     delay = 0.05
 
-    def pending_workspaces(self) -> tuple[str, ...]:
+    def pending_workspaces(self, *, include_capture_recovery: bool = False) -> tuple[str, ...]:
         time.sleep(self.delay)
-        return super().pending_workspaces()
+        return super().pending_workspaces(include_capture_recovery=include_capture_recovery)
 
     def list_pending_outbox_rows(
         self, workspace: str, *, codex_session_id: str | None = None
@@ -745,11 +745,11 @@ class _RendezvousStore(LocalObservationStore):
         self.worker_started = threading.Event()
         self.release_worker = threading.Event()
 
-    def pending_workspaces(self) -> tuple[str, ...]:
+    def pending_workspaces(self, *, include_capture_recovery: bool = False) -> tuple[str, ...]:
         self.worker_started.set()
         if not self.release_worker.wait(timeout=5.0):
             raise AssertionError("worker_rendezvous_not_released")
-        return super().pending_workspaces()
+        return super().pending_workspaces(include_capture_recovery=include_capture_recovery)
 
 
 def _accepted_backlog(

@@ -220,6 +220,13 @@ class ObservationOutboxSweeper:
     # behind the entire 20-second sweep. Local outbox bookkeeping stays outside the gate and is
     # already fenced by the per-workspace lease.
     ingest_gate: asyncio.Lock | None = None
+    # Independent recovery must run even when admission refused every new row.
+    # Only READY supplies the service-owned callback, never a hook/client.
+    capture_recovery: Callable[[str], Awaitable[None]] | None = None
+    _recovery_after: str = field(default="", init=False, repr=False)
+    _recovery_due: dict[str, float] = field(
+        default_factory=lambda: dict[str, float](), init=False, repr=False
+    )
     # Tests may provide a monotonic source so budget boundaries can be exercised without wall
     # clock sleeps. Production leaves this unset and uses the running loop's monotonic clock.
     _monotonic: Callable[[], float] | None = field(default=None, repr=False)
@@ -295,11 +302,41 @@ class ObservationOutboxSweeper:
         workspaces = tuple(
             dict.fromkeys((*lifecycle_workspaces, *(workspace for workspace, _row in rows)))
         )
+        # Rotate workspace maintenance independently of lane FIFO. A stuck
+        # inventory must not consume every pass before a later workspace runs.
+        if self.capture_recovery is not None:
+            workspaces = tuple(item for item in workspaces if item > self._recovery_after) + tuple(
+                item for item in workspaces if item <= self._recovery_after
+            )
         for workspace in workspaces:
             if deadline is not None and monotonic() >= deadline:
                 # Budget spent: return what this pass resolved so far. The rows
                 # left are still pending and the next pass selects them fairly.
                 break
+            if self.capture_recovery is not None and monotonic() >= self._recovery_due.get(
+                workspace, 0.0
+            ):
+                self._recovery_after = workspace
+                # Drain-until-dry passes can repeat immediately because a
+                # sibling resolved a row. Do not rescan a stuck catalog at
+                # that frequency; the service-owned retry cadence is bounded.
+                if len(self._recovery_due) >= 256 and workspace not in self._recovery_due:
+                    self._recovery_due.clear()
+                self._recovery_due[workspace] = monotonic() + 5.0
+                # This is maintenance, not a delivered observation. Never count
+                # success as an acknowledgement, activity, or native coverage.
+                remaining = 2.0 if deadline is None else max(0.0, min(2.0, deadline - monotonic()))
+                try:
+                    async with asyncio.timeout(remaining):
+                        if self.ingest_gate is None:
+                            await self.capture_recovery(workspace)
+                        else:
+                            async with self.ingest_gate:
+                                await self.capture_recovery(workspace)
+                except Exception:
+                    # Unknown accounting remains closed. Normal accepted rows
+                    # and other workspaces still get their bounded drain pass.
+                    pass
             # The lease is a POSIX file lock, which belongs to the open descriptor rather than to
             # the thread that took it, so entering and leaving it from different worker threads is
             # correct and keeps the whole hold off the event loop.
@@ -521,7 +558,11 @@ class ObservationOutboxSweeper:
         # newer rows ahead of its older, more-attempted ones, which advanced the ingest cursor
         # past the older rows and destroyed them as terminal cursor_stale quarantine (#272).
         lanes: dict[tuple[str, str], list[ObservationOutboxRow]] = {}
-        lifecycle_workspaces = self.local.pending_workspaces()
+        lifecycle_workspaces = (
+            self.local.pending_workspaces()
+            if self.capture_recovery is None
+            else self.local.pending_workspaces(include_capture_recovery=True)
+        )
         for workspace in lifecycle_workspaces:
             for row in self.local.list_pending_outbox_rows(workspace):
                 lanes.setdefault((workspace, row.codex_session_id), []).append(row)

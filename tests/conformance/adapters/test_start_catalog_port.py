@@ -631,3 +631,45 @@ async def test_generation_and_route_identity_parity() -> None:
     assert route_memory == route_sqlite
     assert route_memory is not None
     assert route_memory.state is TaskRouteState.INITIALIZING
+
+
+@pytest.mark.anyio
+async def test_capture_inventory_is_scoped_bounded_and_keeps_inactive_routes() -> None:
+    """The complete-proof caller must see unknown/inactive routes and overflow."""
+    installation = _id(IdKind.INSTALLATION, 8000)
+    clock = _Clock(datetime(2026, 9, 10, 19, 0, tzinfo=UTC))
+    memory, _ = _memory_catalog(installation, clock)
+    sqlite = _sqlite_catalog(installation, clock)
+    repository = "hmac-sha256:" + "1" * 64
+    unrelated = "hmac-sha256:" + "2" * 64
+    for index, scope in enumerate((None, unrelated, repository)):
+        for catalog in (memory, sqlite):
+            command = await _command(
+                catalog,
+                operation_id=_id(IdKind.REQUEST, 8001 + index),
+                mode=StartMode.CREATE,
+                external_ref=f"capture-task-{index}",
+                repository_privacy_commitment=scope,
+            )
+            await catalog.reserve_or_resume(command)
+    initial = await memory.capture_inventory_routes(repository)
+    assert initial == await sqlite.capture_inventory_routes(repository)
+    assert len(initial) == 2
+    assert {item.repository_privacy_commitment for item in initial} == {None, repository}
+    assert all(item.state is TaskRouteState.INITIALIZING for item in initial)
+
+    for index in range(3, 261):
+        for catalog in (memory, sqlite):
+            command = await _command(
+                catalog,
+                operation_id=_id(IdKind.REQUEST, 8001 + index),
+                mode=StartMode.CREATE,
+                external_ref=f"capture-task-{index}",
+                repository_privacy_commitment=repository,
+            )
+            await catalog.reserve_or_resume(command)
+    bounded = await memory.capture_inventory_routes(repository)
+    assert bounded == await sqlite.capture_inventory_routes(repository)
+    assert len(bounded) == 257  # Overflow sentinel; the bootstrap must refuse it.
+    assert all(item.repository_privacy_commitment in {None, repository} for item in bounded)
+    assert len(await sqlite.recovery_routes()) == 261  # General recovery stays unchanged.

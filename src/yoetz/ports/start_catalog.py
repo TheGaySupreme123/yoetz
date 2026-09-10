@@ -387,6 +387,16 @@ class StartCatalogPort(Protocol):
 
     async def recovery_routes(self) -> tuple[TaskRoute, ...]: ...
 
+    async def capture_inventory_routes(
+        self, repository_privacy_commitment: str
+    ) -> tuple[TaskRoute, ...]:
+        """Return up to 257 relevant routes, including unknown repository bindings.
+
+        The 257th row is an overflow sentinel, never a complete 256-route proof.
+        Inactive routes remain in the result; a caller must not omit them.
+        """
+        ...
+
     async def resolve_route(self, session_id: str) -> TaskRoute | None: ...
 
     async def session_binding(self, session_id: str) -> SessionBinding | None: ...

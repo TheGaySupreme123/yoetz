@@ -506,6 +506,27 @@ class SqliteStartCatalog:
                 raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
         return tuple(routes)
 
+    async def capture_inventory_routes(
+        self, repository_privacy_commitment: str
+    ) -> tuple[TaskRoute, ...]:
+        """Read a bounded repository inventory, never an installation-wide decoded list.
+
+        Keep unknown repository bindings and inactive routes visible. The caller
+        rejects the overflow sentinel rather than accepting a truncated proof.
+        """
+
+        validate_commitment(repository_privacy_commitment)
+        rows = self._rows(
+            f"SELECT {self._route_columns} FROM task_routes "
+            "WHERE repository_privacy_commitment = ? "
+            "OR repository_privacy_commitment IS NULL ORDER BY task_id ASC LIMIT 257",
+            (repository_privacy_commitment,),
+        )
+        try:
+            return tuple(_route_value(_route_from_row(row)) for row in rows)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
+
     async def commit_identity(self, value: StartIdentityInput) -> StartIdentityCommitments:
         if type(value) is not StartIdentityInput:
             raise _error(PublicErrorCode.INVALID_REQUEST)

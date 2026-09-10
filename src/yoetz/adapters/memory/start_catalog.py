@@ -390,6 +390,23 @@ class MemoryStartCatalogAdapter:
             records = tuple(sorted(self._state.routes.values(), key=lambda item: item.task_id))
         return tuple(_route_value(record) for record in records)
 
+    async def capture_inventory_routes(
+        self, repository_privacy_commitment: str
+    ) -> tuple[TaskRoute, ...]:
+        """Mirror the bounded production inventory, retaining inactive/unknown routes."""
+
+        validate_commitment(repository_privacy_commitment)
+        async with self._lock:
+            records = sorted(
+                (
+                    item
+                    for item in self._state.routes.values()
+                    if item.repository_privacy_commitment in {repository_privacy_commitment, None}
+                ),
+                key=lambda item: item.task_id,
+            )[:257]
+        return tuple(_route_value(record) for record in records)
+
     async def session_binding(self, session_id: str) -> SessionBinding | None:
         try:
             session = validate_id(IdKind.SESSION, session_id)

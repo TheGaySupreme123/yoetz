@@ -606,6 +606,10 @@ def _empty_capture_bootstrap_workspaces() -> set[str]:
     return set()
 
 
+def _empty_capture_recovery_after() -> dict[str, str]:
+    return {}
+
+
 @dataclass
 class ObservationCoordinator:
     """Resolve Codex session → mapped task SQLite observation store + ledger."""
@@ -642,6 +646,10 @@ class ObservationCoordinator:
     # old proof without a fresh authoritative read.
     _capture_bootstrap_verified_workspaces: set[str] = field(
         default_factory=_empty_capture_bootstrap_workspaces, init=False, repr=False
+    )
+
+    _capture_recovery_after: dict[str, str] = field(
+        default_factory=_empty_capture_recovery_after, init=False, repr=False
     )
 
     async def _local[ResultT](self, call: Callable[[], ResultT]) -> ResultT:
@@ -755,15 +763,10 @@ class ObservationCoordinator:
             return
         await self._reconcile_capture_ticket_reservations(workspace, runtime, store)
 
-    async def _reserve_capture_ticket(
-        self,
-        workspace: str,
-        runtime: TaskRuntime,
-        store: TaskObservationPort,
-        ticket: ObservationCaptureTicket,
-        byte_count: int,
+    async def _ensure_capture_inventory(
+        self, workspace: str, runtime: TaskRuntime, store: TaskObservationPort
     ) -> None:
-        """Reserve global count/bytes before any encrypted object is staged."""
+        """Revalidate the complete root while the caller holds capture exclusion."""
 
         ready = getattr(self.local, "capture_reservation_bootstrap_ready", None)
         if callable(ready):
@@ -808,6 +811,18 @@ class ObservationCoordinator:
                     "Observation capture budget scope is unknown.",
                     retryable=False,
                 ) from exc
+
+    async def _reserve_capture_ticket(
+        self,
+        workspace: str,
+        runtime: TaskRuntime,
+        store: TaskObservationPort,
+        ticket: ObservationCaptureTicket,
+        byte_count: int,
+    ) -> None:
+        """Reserve global count/bytes before any encrypted object is staged."""
+
+        await self._ensure_capture_inventory(workspace, runtime, store)
         reserve = getattr(self.local, "reserve_capture_ticket", None)
         if not callable(reserve):
             return
@@ -1004,6 +1019,78 @@ class ObservationCoordinator:
             # Tests and non-ready compositions still drain inline when no supervisor
             # is attached; production ready composition always injects one.
             self.verification_supervisor = None
+
+    async def recover_workspace_capture_inventory(self, workspace: str) -> None:
+        """Repair unknown capture pressure without admitting a new native input.
+
+        READY maintenance calls this independently of outbox rows. At most eight
+        local mappings and one complete catalog proof are attempted per pass.
+        Mapping rotation survives a failed pass within this service generation;
+        missing parent mappings cannot permanently hide a later worker route.
+        The sweeper owns the deadline and installation observation gate. Only
+        the same capture lock used by native staging can publish the proof.
+        """
+
+        if not self.observation_enabled or self.capture_budget_bootstrap is None:
+            return
+        async with self._capture_lock:
+            consent = await self._local(partial(self.local.consent_for, workspace))
+            if consent is None or not consent.active:
+                return
+            ready = await self._local(
+                partial(self.local.capture_reservation_bootstrap_ready, workspace)
+            )
+            if ready and workspace in self._capture_bootstrap_verified_workspaces:
+                return
+            sessions = await self._local(
+                partial(self.local.codex_sessions_for_workspace, workspace)
+            )
+            after = self._capture_recovery_after.get(workspace, "")
+            rotated = tuple(session for session in sessions if session > after) + tuple(
+                session for session in sessions if session <= after
+            )
+            if len(self._capture_recovery_after) >= _MAX_CAPTURE_BOOTSTRAP_WORKSPACES:
+                self._capture_recovery_after.clear()
+            for host_session in rotated[:8]:
+                self._capture_recovery_after[workspace] = host_session
+                # A host ID reused across workspaces is not a recovery selector.
+                try:
+                    owner = await self._local(
+                        partial(self.local.find_workspace_for_codex_session, host_session)
+                    )
+                    if owner != workspace:
+                        continue
+                    mapping = await self._local(
+                        partial(self.mapping_loader, host_session, _state=self.state_root)
+                    )
+                    if mapping is None:
+                        continue
+                except Exception:
+                    continue
+                task_runtime: TaskRuntime | None = None
+                try:
+                    task_runtime, _mapping = await self._route_observation_mapping(
+                        mapping, required_capabilities=frozenset({RuntimeCapability.WRITE})
+                    )
+                    await self._ensure_capture_inventory(
+                        workspace, task_runtime, self._observation_store(task_runtime)
+                    )
+                    # Publish pressure recovery through the normal hysteresis
+                    # path. This never clears historical rejected-input counts.
+                    await self._local(partial(self.local.maintain_selected_admission, workspace))
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    await self._local(
+                        partial(self.local.mark_capture_backlog_scope_unknown, workspace)
+                    )
+                finally:
+                    if task_runtime is not None:
+                        await self.runtime.release(task_runtime)
+                return
+            # No authoritative seed exists yet. Keep unknown state visible and
+            # retry on the next maintenance pass; do not mint an empty proof.
+            await self._local(partial(self.local.mark_capture_backlog_scope_unknown, workspace))
 
     async def rediscover_pending_verification(self) -> None:
         """Rebuild drain handles for consented workspaces with durable pending jobs.

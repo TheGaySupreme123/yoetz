@@ -958,3 +958,34 @@ bookkeeping share one elapsed drain budget; synchronous local writes cannot be i
 
 For shared-store measurements and the remaining native-host coverage boundary, see
 [the performance runbook](observation-selection-performance.md).
+
+
+## Admission-independent capture recovery (issue #695)
+
+An unknown capture inventory can block new failed-command observations with zero pending rows.
+READY maintenance now attempts the same complete catalog/bundle proof used by capture reservation
+without requiring successful host admission. The atomic guard, replay cursor retention,
+non-replayable loss accounting, exact content consent and workspace capture limits remain in force.
+Missing/inactive/unreadable routes stay unknown; no reset, capacity increase, or vault operation is
+part of this repair. The normal idle sweep interval remains 60 seconds, with a five-second minimum
+attempt interval during repeated drain passes. Recovery is eventual, not a zero-loss guarantee.
+
+The official [Codex hooks reference](https://developers.openai.com/codex/hooks), checked
+2026-09-10, distinguishes post-tool results from control of an already completed tool and delivers
+asynchronous output at a later safe conversation point. Async output does not start a new idle
+turn. Keep the existing hook and replay contracts; do not depend on another model turn to repair
+capture inventory.
+
+The regression slice uses real host normalizers, selected admission, the production READY inventory
+callback, a SQLite catalog with two activated task routes, SQLite task ledgers and encrypted object
+readback. The parent/worker routes and control transport are test fixtures, not a running vendor
+parent/subagent session. No new executable version is promoted by this evidence. Native installed
+acceptance must still record the exact executable/build, launcher and source revision, fresh and
+retained state, parent/worker mappings, admission/loss deltas and encrypted readback for this host.
+
+Recovery does not erase previous loss or independently import every local loss range into task/check
+coverage. That separate #695 propagation requirement remains open. Do not treat an empty outbox,
+recovered pressure, or a task projection without a later matching loss carrier as complete history.
+The shared behavior and remaining limits are specified in
+[ADR-029](../adr/ADR-029-smart-observation-selection.md) and
+[observation selection](../usage/observation-selection.md).

@@ -87,6 +87,26 @@ all dimensions remain at or below 45% for ten seconds. Retained history still co
 budget: an empty pending queue does not imply healthy pressure or restored historical coverage.
 Ending a host session retires its pressure snapshot, while preserving pending work and history.
 
+## Recover unknown capture accounting
+
+Capture accounting can be unknown even when the pending queue is empty, for example after a
+new task route appears or a relevant task cannot be read. Unknown is not zero: new observations
+remain subject to the hard admission guard until the service proves the complete capture
+inventory. A partial zero report from one task cannot clear that condition.
+
+The ready service retries that proof through its periodic maintenance without needing another
+host event. The normal idle sweep interval is 60 seconds, so recovery need not occur on the first
+hook after a problem clears. An unreadable, missing or inactive relevant task, unavailable mapping,
+locked vault, disabled observation, or a genuine capacity limit can still prevent recovery. A
+larger queue, repeated status reads, and clearing history are not substitutes for valid accounting.
+
+Use the selection status to distinguish current pressure from historical loss. Recovery keeps
+prior loss counts and quarantine evidence. It cannot recreate missed non-replayable events. In
+this implementation, locally recorded loss still reaches task history through a later matching
+admitted observation. Without that carrier, task/check coverage is not proven to contain the local
+loss, even after pressure recovers. Treat such an interval as incomplete rather than relying on
+an empty queue or a clean-looking task projection.
+
 ## Protect evidence and promote a buffered read
 
 When a later claim or finding will depend on a read, protect it before the read occurs:

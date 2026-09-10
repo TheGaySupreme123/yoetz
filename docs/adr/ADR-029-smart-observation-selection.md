@@ -97,7 +97,39 @@ content. Missing or unreadable relevant routes leave accounting unknown; a parti
 cannot clear that state. Reservation overlap requires exact ticket and retained-byte bindings.
 When older state lacks those bindings, pressure uses a conservative upper bound rather than
 subtracting bytes that might belong to another ticket. Content refusal preserves the structural
-observation and records both capture-budget and content-unavailable gaps.
+observation and records both capture-budget and content-unavailable gaps when that structural
+input has already been admitted. Unknown inventory at the earlier selected-admission gate instead
+refuses new input and preserves the replay cursor or records non-replayable input loss.
+
+Capture recovery is independently reachable from READY observation maintenance (issue #695),
+including an empty outbox and a new service generation. The new-input guard remains atomic and
+fail-closed. Maintenance selects only consented, bound workspaces with unknown capture accounting
+or retained capture context; a fresh unmapped workspace is not turned into unknown pressure just
+because recovery ran. Healthy ended lanes are not kept scheduled, while genuinely unknown
+accounting remains eligible for repair without reopening an ended host generation.
+
+The coordinator uses the same capture exclusion as content staging. One attempt considers at
+most eight locally owned host mappings and one complete repository inventory. The catalog's
+`capture_inventory_routes` reads at most 257 relevant routes, including routes with unknown
+repository binding and inactive routes. The 257th row is an overflow sentinel, never a complete
+inventory. Missing, unreadable, changed, or inactive relevant routes leave admission closed. The
+service rechecks catalog membership after reading task bundles and validates its current service
+and vault generation again while publishing under the local store lock. A proof cannot silently
+omit a previously known backlog route or reservation owner. Incomplete ticket identity lists do
+not authorize reservation subtraction.
+
+Only this service-owned proof can repair unknown accounting. No new host event, successful
+admission, synthetic observation, higher limit, expanded consent, or unreserved object is required.
+The proof does not imply spare capacity: genuine count, byte, pending-pair and capture ceilings
+still govern admission. Existing accepted transfers retain their normal drain path.
+
+Recovery uses the existing observation sweep, rotates workspaces and mapping selectors, and
+applies a five-second minimum per-workspace attempt interval during repeated drain passes. The
+normal idle sweep interval remains 60 seconds; this is eventual recovery, not immediate or
+lossless hook admission. An attempt receives at most two seconds of the remaining sweep budget.
+A local proof write already in a worker must settle before capture exclusion is released, so
+cancellation is not a hard real-time interruption of storage. Bundle reads yield between routes;
+the route bound limits returned/decoded rows, not the cost of every underlying database scan.
 
 Detailed and larger capacity default to a current-session override. Workspace persistence is an
 explicit owner choice. A preview precedes non-default authority and describes scope, expiry,
@@ -143,7 +175,12 @@ not amplify their own observation traffic.
 
 The stages observed, retained or summarized, delivered, and selected for a particular check are
 distinct. Summary coverage does not claim per-call content coverage or a successful verification.
-An empty queue and recovered pressure do not erase historical loss.
+An empty queue and recovered pressure do not erase historical loss. This recovery slice does not
+implement a new admission-independent task/check loss projection. Existing exact source, session,
+route and generation loss ranges still travel with a later matching admitted observation; unrouted
+loss remains workspace-level. If no such observation is admitted, task/check coverage is not proven
+to include those local losses. That separate propagation requirement in #695 remains open; do not
+copy all workspace losses to every task or describe recovery as restored historical coverage.
 
 Promotion can use only retained native identities and their original subject-state provenance.
 Where historical bytes are no longer retained, reacquisition is a new observation of a new time
