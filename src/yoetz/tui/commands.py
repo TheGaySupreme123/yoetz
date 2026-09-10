@@ -33,6 +33,7 @@ class SlashCommand:
 
 SLASH_COMMANDS: Final[tuple[SlashCommand, ...]] = (
     SlashCommand("status", "show setup, readiness, and current work"),
+    SlashCommand("observe", "show selected and effective observation detail and capacity"),
     SlashCommand("work", "open a task by title to view claims, evidence, and findings"),
     SlashCommand("check", "run a verification check"),
     SlashCommand("receipt", "view or export an honest receipt"),

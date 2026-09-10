@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import io
 import os
@@ -128,7 +129,11 @@ from yoetz.domain.findings import (
     SemanticProvenance,
     semantic_provenance_to_json,
 )
-from yoetz.domain.observation import ObservationCaptureTicket
+from yoetz.domain.observation import (
+    ObservationCaptureBacklog,
+    ObservationCaptureTicket,
+    observation_capture_ticket_id,
+)
 from yoetz.domain.privacy import (
     AuthorizationScope,
     AuthorizationScopeKind,
@@ -153,6 +158,7 @@ from yoetz.domain.receipts import (
 )
 from yoetz.domain.values import (
     Frontier,
+    Timestamp,
     disclosure_continuation,
     format_rfc3339_millis,
     parse_rfc3339_millis,
@@ -184,10 +190,12 @@ from yoetz.ports.objects import (
     ObjectStorePort,
     StagedObject,
 )
+from yoetz.ports.observation import TaskObservationPort
 from yoetz.ports.privacy import HumanAuthorityCapability
 from yoetz.ports.runtime import (
     OwnershipFence,
     RouteAccess,
+    RouteCommand,
     ServiceRuntimeContext,
     StartCompletionEvidence,
     StartMilestone,
@@ -2425,8 +2433,9 @@ def _observation_workspace_for_runtime(runtime: TaskRuntime) -> str | None:
 async def _reconcile_observation_capture(
     runtime: TaskRuntime,
     local_observation: LocalObservationStore,
+    clock: ClockPort | None = None,
 ) -> None:
-    """Retire stale native handoffs for the one task admitted to CHECK."""
+    """Retire stale native handoffs and publish the task backlog to local pressure state."""
 
     store = runtime.observation
     if store is None:
@@ -2450,6 +2459,7 @@ async def _reconcile_observation_capture(
             retryable=False,
         )
     authorities: dict[str, LocalContentCaptureAuthority | None] = {}
+    retired_ids: set[str] = set()
     for ticket in cast(tuple[ObservationCaptureTicket, ...], tickets):
         if ticket.task_id != runtime.task_id:
             raise PublicOperationError(
@@ -2473,6 +2483,58 @@ async def _reconcile_observation_capture(
             )
         ):
             tombstone(ticket)
+            retired_ids.add(observation_capture_ticket_id(ticket))
+    reader = getattr(store, "capture_backlog", None)
+    updater = getattr(local_observation, "update_capture_backlog", None)
+    workspace = _observation_workspace_for_runtime(runtime)
+    if workspace is None and len(authorities) == 1:
+        workspace = next(iter(authorities))
+    if workspace is None:
+        return
+    reconcile = getattr(local_observation, "reconcile_capture_ticket_reservations", None)
+    if callable(reconcile):
+        with contextlib.suppress(Exception):
+            reconcile(
+                workspace,
+                runtime.task_id,
+                tuple(
+                    observation_capture_ticket_id(ticket)
+                    for ticket in cast(tuple[ObservationCaptureTicket, ...], tickets)
+                    if observation_capture_ticket_id(ticket) not in retired_ids
+                ),
+            )
+    if not callable(reader) or not callable(updater):
+        return
+    try:
+        if clock is None:
+            observed_at = local_observation._wall_timestamp()  # pyright: ignore[reportPrivateUsage]
+        else:
+            raw_now = cast(object, clock.now_utc())
+            observed_at = (
+                raw_now if type(raw_now) is Timestamp else timestamp_from_datetime(raw_now)
+            )
+    except Exception:
+        return
+    try:
+        backlog = reader(workspace)
+        count = getattr(backlog, "count")
+        byte_count = getattr(backlog, "byte_count")
+        oldest_receipt_time = getattr(backlog, "oldest_receipt_time")
+    except Exception:
+        # A task read failure must retain conservative unknown scope rather
+        # than make a zero-valued snapshot look complete.
+        with contextlib.suppress(Exception):
+            updater(workspace, 0, 0, None, observed_at)
+        return
+    with contextlib.suppress(Exception):
+        updater(
+            workspace,
+            count,
+            byte_count,
+            oldest_receipt_time,
+            observed_at,
+            route_id=runtime.task_id,
+        )
 
 
 def _privacy_gated_semantic_evaluator(
@@ -3457,9 +3519,160 @@ async def provide_service_ready_context(
     # retained bytes. The owner-private store is also the authoritative consent
     # fence while task-bundle propagation is still catching up.
     local_observation.set_runtime_enabled(config.observation.enabled)
+    require_capture_bootstrap = getattr(
+        local_observation, "set_capture_reservation_bootstrap_required", None
+    )
+    if callable(require_capture_bootstrap):
+        require_capture_bootstrap(True)
+
+    async def bootstrap_capture_reservations(
+        workspace: str,
+        current_runtime: TaskRuntime,
+        current_store: TaskObservationPort,
+    ) -> bool:
+        """Read the complete catalog inventory before central admission.
+
+        The coordinator invokes this callback while its process-wide capture
+        lock is held.  The current route's repository commitment scopes the
+        inventory; matching routes are all accounted for, while an unreadable
+        or inactive route fails closed instead of being silently omitted.
+        """
+
+        try:
+            current_route = await catalog.resolve_route(current_runtime.session_id)
+            if (
+                current_route is None
+                or current_route.state is not TaskRouteState.ACTIVE
+                or current_route.task_id != current_runtime.task_id
+                or current_route.repository_privacy_commitment is None
+            ):
+                raise ValueError("capture_current_route_unavailable")
+            repository = current_route.repository_privacy_commitment
+            recovery_routes = getattr(catalog, "recovery_routes", None)
+            if not callable(recovery_routes):
+                raise ValueError("capture_catalog_inventory_unavailable")
+            raw_routes = await cast(
+                Callable[[], Awaitable[tuple[TaskRoute, ...]]], recovery_routes
+            )()
+            if type(raw_routes) is not tuple:
+                raise ValueError("capture_catalog_inventory_invalid")
+            if any(type(route) is not TaskRoute for route in raw_routes):
+                raise ValueError("capture_catalog_inventory_invalid")
+            all_routes = raw_routes
+            if len({route.task_id for route in all_routes}) != len(all_routes):
+                raise ValueError("capture_catalog_inventory_duplicate")
+            routes = tuple(
+                route
+                for route in all_routes
+                if route.repository_privacy_commitment in {repository, None}
+            )
+            if not routes or len(routes) > 256:
+                raise ValueError("capture_catalog_inventory_incomplete")
+            if any(route.state is not TaskRouteState.ACTIVE for route in routes):
+                raise ValueError("capture_catalog_inventory_inactive")
+            if current_route.task_id not in {route.task_id for route in routes}:
+                raise ValueError("capture_catalog_inventory_incomplete")
+            inventory: dict[str, ObservationCaptureBacklog] = {}
+            ticket_ids_by_task: dict[str, tuple[str, ...]] = {}
+            for route in sorted(routes, key=lambda item: item.task_id.encode()):
+                task_runtime: TaskRuntime | None = None
+                release = False
+                try:
+                    if route.task_id == current_runtime.task_id:
+                        task_runtime = current_runtime
+                        task_store = current_store
+                    else:
+                        binding = await catalog.session_binding(route.session_id)
+                        if (
+                            binding is None
+                            or binding.task_id != route.task_id
+                            or binding.session_id != route.session_id
+                        ):
+                            raise ValueError("capture_route_binding_unavailable")
+                        task_runtime = await runtime.route(
+                            RouteCommand(
+                                session_id=route.session_id,
+                                writer_id=binding.writer_id,
+                                access=RouteAccess.WRITE,
+                                required_capabilities=frozenset({RuntimeCapability.WRITE}),
+                            )
+                        )
+                        release = True
+                        task_store = task_runtime.observation
+                    if task_store is None:
+                        raise ValueError("capture_task_observation_unavailable")
+                    reader = getattr(task_store, "capture_backlog", None)
+                    if not callable(reader):
+                        raise ValueError("capture_task_backlog_unavailable")
+                    backlog = reader(workspace)
+                    if type(backlog) is not ObservationCaptureBacklog:
+                        raise ValueError("capture_task_backlog_invalid")
+                    inventory[route.task_id] = backlog
+                    list_pending = getattr(task_store, "list_pending_capture_tickets", None)
+                    if callable(list_pending):
+                        raw_tickets = list_pending(route.task_id)
+                        tickets = cast(tuple[object, ...], raw_tickets)
+                        if type(raw_tickets) is not tuple or any(
+                            type(ticket) is not ObservationCaptureTicket for ticket in tickets
+                        ):
+                            raise ValueError("capture_task_ticket_inventory_invalid")
+                        scoped_ids: list[str] = []
+                        typed_tickets = cast(tuple[ObservationCaptureTicket, ...], tickets)
+                        for ticket in typed_tickets:
+                            if ticket.task_id != route.task_id:
+                                raise ValueError("capture_task_ticket_owner_invalid")
+                            if ticket.workspace_commitment == workspace:
+                                ticket_id = observation_capture_ticket_id(ticket)
+                                if ticket_id in scoped_ids:
+                                    raise ValueError("capture_task_ticket_duplicate")
+                                scoped_ids.append(ticket_id)
+                        if all(
+                            ticket.workspace_commitment == workspace for ticket in typed_tickets
+                        ):
+                            ticket_ids_by_task[route.task_id] = tuple(
+                                sorted(scoped_ids, key=str.encode)
+                            )
+                finally:
+                    if release and task_runtime is not None:
+                        with contextlib.suppress(Exception):
+                            await runtime.release(task_runtime)
+            # Re-read the catalog after all bundle reads.  A route change while
+            # the inventory was in flight must not mint a proof for a stale set.
+            final_raw_routes = await cast(
+                Callable[[], Awaitable[tuple[TaskRoute, ...]]], recovery_routes
+            )()
+            if final_raw_routes != raw_routes:
+                raise ValueError("capture_catalog_inventory_changed")
+            bootstrap = getattr(local_observation, "bootstrap_capture_reservations", None)
+            if not callable(bootstrap):
+                raise ValueError("capture_bootstrap_unavailable")
+            observed_at = timestamp_from_datetime(clock.now_utc())
+            return bool(
+                await asyncio.to_thread(
+                    bootstrap,
+                    workspace,
+                    inventory,
+                    observed_at=observed_at,
+                    complete=True,
+                    ticket_ids_by_task=ticket_ids_by_task or None,
+                )
+            )
+        except Exception:
+            mark_unknown = getattr(local_observation, "mark_capture_backlog_scope_unknown", None)
+            if callable(mark_unknown):
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(mark_unknown, workspace)
+            return False
 
     async def reconcile_observation_capture(runtime: TaskRuntime) -> None:
-        await _reconcile_observation_capture(runtime, local_observation)
+        store = runtime.observation
+        if store is None:
+            return
+        await _reconcile_observation_capture(
+            runtime,
+            local_observation,
+            clock,
+        )
 
     if not semantic_configured:
         semantic_evaluator = _semantic_not_configured
@@ -3605,6 +3818,7 @@ async def provide_service_ready_context(
         advice_semantic_supervisor=advice_semantic_supervisor,
         advice_semantic_dispatch=_dispatch_observation_advice_semantic,
         observation_enabled=config.observation.enabled,
+        capture_budget_bootstrap=bootstrap_capture_reservations,
     )
     observation_sweeper = ObservationOutboxSweeper(
         local_observation,

@@ -11,6 +11,7 @@ import apsw
 
 from yoetz.domain.observation import (
     AdviceSnapshot,
+    ObservationCaptureBacklog,
     ObservationCapturePart,
     ObservationCaptureTicket,
     ObservationContentChunk,
@@ -47,12 +48,27 @@ from yoetz.ports.observation import ObservationLogicalIdentityClaim
 from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 
-__all__ = ["SqliteObservationStore"]
+__all__ = [
+    "CAPTURE_CONTENT_BYTE_LIMIT",
+    "CAPTURE_TICKET_LIMIT",
+    "SqliteObservationStore",
+]
 
 _MAX_EVENTS: Final = 256
 _MAX_DEDUP: Final = 4_096
 _MAX_CAPTURE_TICKETS: Final = 512
+# Native content is admitted independently of the structural observation queue.
+# Each request is bounded to 700 KiB of content and the durable manifest keeps
+# each part below 512 KiB. A 128 MiB workspace cap permits a bounded burst of
+# large handoffs without letting a larger structural queue grant more content
+# retention or unbounded disk growth.
+_MAX_CAPTURE_CONTENT_BYTES: Final = 128 * 1024 * 1024
 _CAPTURE_TICKET_SCHEMA_VERSION: Final = 11
+
+# Public names let pressure/status adapters report the contract without
+# reaching into this module's implementation constants.
+CAPTURE_TICKET_LIMIT: Final = _MAX_CAPTURE_TICKETS
+CAPTURE_CONTENT_BYTE_LIMIT: Final = _MAX_CAPTURE_CONTENT_BYTES
 
 
 def _error(code: PublicErrorCode, message: str, *, retryable: bool) -> PublicOperationError:
@@ -219,6 +235,107 @@ class SqliteObservationStore:
                 retryable=False,
             )
         return row[0] >= _CAPTURE_TICKET_SCHEMA_VERSION
+
+    def _capture_backlog_unlocked(self, workspace: str) -> ObservationCaptureBacklog:
+        """Read active capture usage without opening or decrypting an object.
+
+        The aggregate is deliberately derived from the durable ticket and
+        manifest rows instead of a cached counter.  A restart therefore cannot
+        lose accounting, and revoking or deleting a ticket immediately releases
+        its bytes.  Staging rows are included even when they have no manifests;
+        their age is still pressure relevant while the handoff is incomplete.
+        """
+
+        if not self.capture_ticket_schema_available():
+            return ObservationCaptureBacklog(0, 0, None)
+        try:
+            row = self._db.execute(
+                "SELECT COUNT(DISTINCT tickets.ticket_id),"
+                "COALESCE(SUM(COALESCE(manifests.content_bytes,0)),0),"
+                "MIN(tickets.captured_at) "
+                "FROM observation_capture_tickets AS tickets "
+                "LEFT JOIN observation_content_manifests AS manifests "
+                "ON manifests.workspace_commitment=tickets.workspace_commitment "
+                "AND manifests.logical_identity=tickets.logical_identity "
+                "WHERE tickets.workspace_commitment=? "
+                "AND tickets.state IN ('staging','pending')",
+                (workspace,),
+            ).fetchone()
+        except apsw.Error as exc:
+            raise _error(
+                PublicErrorCode.STORAGE_CORRUPT,
+                "Observation capture ticket table is unavailable.",
+                retryable=False,
+            ) from exc
+        if row is None or len(row) != 3 or type(row[0]) is not int or type(row[1]) is not int:
+            raise _error(
+                PublicErrorCode.STORAGE_CORRUPT,
+                "Observation capture backlog is invalid.",
+                retryable=False,
+            )
+        oldest_raw = row[2]
+        if oldest_raw is not None and type(oldest_raw) is not str:
+            raise _error(
+                PublicErrorCode.STORAGE_CORRUPT,
+                "Observation capture backlog timestamp is invalid.",
+                retryable=False,
+            )
+        try:
+            oldest = None if oldest_raw is None else Timestamp(oldest_raw)
+            return ObservationCaptureBacklog(
+                count=row[0],
+                byte_count=row[1],
+                oldest_receipt_time=oldest,
+            )
+        except (ProtocolValueError, TypeError, ValueError) as exc:
+            raise _error(
+                PublicErrorCode.STORAGE_CORRUPT,
+                "Observation capture backlog is invalid.",
+                retryable=False,
+            ) from exc
+
+    def capture_backlog(self, workspace: str) -> ObservationCaptureBacklog:
+        """Return bounded active capture usage for the pressure controller.
+
+        This is a read-only view.  It reports staging and pending handoffs and
+        excludes revoked/committed rows.  Content is conservatively protected
+        at this boundary because ticket metadata does not contain a trusted
+        outcome or obligation linkage; optional-detail gating belongs upstream
+        at the host hook.
+        """
+
+        return self._capture_backlog_unlocked(workspace)
+
+    # Keep a descriptive alias for callers that name the resource rather than
+    # the aggregate view. Both paths are read-only and share the same query.
+    def capture_ticket_backlog(self, workspace: str) -> ObservationCaptureBacklog:
+        return self.capture_backlog(workspace)
+
+    def _capture_ticket_content_bytes_unlocked(
+        self, *, workspace: str, logical_identity: str
+    ) -> int:
+        """Return bytes already bound to one ticket's logical identity."""
+
+        try:
+            row = self._db.execute(
+                "SELECT COALESCE(SUM(content_bytes),0) "
+                "FROM observation_content_manifests "
+                "WHERE workspace_commitment=? AND logical_identity=?",
+                (workspace, logical_identity),
+            ).fetchone()
+        except apsw.Error as exc:
+            raise _error(
+                PublicErrorCode.STORAGE_CORRUPT,
+                "Observation content manifest table is unavailable.",
+                retryable=False,
+            ) from exc
+        if row is None or len(row) != 1 or type(row[0]) is not int or row[0] < 0:
+            raise _error(
+                PublicErrorCode.STORAGE_CORRUPT,
+                "Observation content manifest byte count is invalid.",
+                retryable=False,
+            )
+        return row[0]
 
     def tombstone_capture_tickets(self, workspace: str, profile: str | None = None) -> None:
         """Fence unfinished native handoffs after consent stops authorizing them.
@@ -897,6 +1014,57 @@ class SqliteObservationStore:
                 retryable=False,
             ) from exc
         with self._db:
+            # A ticket is inserted before content capture so a crash leaves a
+            # durable staging fence. Charge bytes as each secret-scanned
+            # manifest crosses the object/manifest boundary. This keeps the
+            # aggregate bounded even when a multipart handoff is interrupted;
+            # replays of an already-recorded part have zero delta.
+            if self.capture_ticket_schema_available():
+                active_ticket = self._db.execute(
+                    "SELECT 1 FROM observation_capture_tickets "
+                    "WHERE workspace_commitment=? AND logical_identity=? "
+                    "AND state IN ('staging','pending')",
+                    (workspace, logical_identity),
+                ).fetchone()
+                if active_ticket is not None:
+                    existing_manifest = self._db.execute(
+                        "SELECT content_bytes FROM observation_content_manifests "
+                        "WHERE workspace_commitment=? AND logical_identity=? "
+                        "AND content_kind=? AND correlation_identity=? "
+                        "AND source_commitment=? AND part_index=?",
+                        (
+                            workspace,
+                            logical_identity,
+                            chunk.content_kind.value,
+                            chunk.correlation_identity,
+                            chunk.source_commitment,
+                            chunk.part_index,
+                        ),
+                    ).fetchone()
+                    existing_bytes = None if existing_manifest is None else existing_manifest[0]
+                    if existing_bytes is not None and type(existing_bytes) is not int:
+                        raise _error(
+                            PublicErrorCode.STORAGE_CORRUPT,
+                            "Observation content manifest byte count is invalid.",
+                            retryable=False,
+                        )
+                    delta = content_bytes if existing_bytes is None else 0
+                    if existing_bytes is not None and existing_bytes != content_bytes:
+                        # Let the idempotent upsert below produce the same
+                        # immutable-identity conflict, but fail before doing
+                        # any budget mutation or object inventory write.
+                        raise _error(
+                            PublicErrorCode.STORAGE_CORRUPT,
+                            "Observation content manifest conflicts.",
+                            retryable=False,
+                        )
+                    backlog = self._capture_backlog_unlocked(workspace)
+                    if backlog.byte_count + delta > _MAX_CAPTURE_CONTENT_BYTES:
+                        raise _error(
+                            PublicErrorCode.LIMIT_EXCEEDED,
+                            "Observation captured-content byte budget is exhausted.",
+                            retryable=False,
+                        )
             self._inventory_object(ref)
             self._db.execute(
                 "INSERT INTO observation_content_manifests("
@@ -1277,6 +1445,24 @@ class SqliteObservationStore:
                     "Observation capture handoff capacity is exhausted.",
                     retryable=False,
                 )
+            if ticket.state == "pending":
+                # A recovered complete ticket may be inserted directly by a
+                # repair path. Count its already-bound manifests before the
+                # row becomes active so that path cannot bypass the aggregate
+                # content budget. Normal captures charge each manifest while
+                # the ticket is still staging and therefore have no duplicate
+                # charge here.
+                candidate_bytes = self._capture_ticket_content_bytes_unlocked(
+                    workspace=ticket.workspace_commitment,
+                    logical_identity=ticket.logical_identity,
+                )
+                backlog = self._capture_backlog_unlocked(ticket.workspace_commitment)
+                if backlog.byte_count + candidate_bytes > _MAX_CAPTURE_CONTENT_BYTES:
+                    raise _error(
+                        PublicErrorCode.LIMIT_EXCEEDED,
+                        "Observation captured-content byte budget is exhausted.",
+                        retryable=False,
+                    )
             self._db.execute(
                 "INSERT INTO observation_capture_tickets("
                 "ticket_id,workspace_commitment,task_id,yoetz_session_id,session_commitment,"
@@ -1356,6 +1542,17 @@ class SqliteObservationStore:
                 raise _error(
                     PublicErrorCode.STORAGE_CORRUPT,
                     "Observation staging ticket conflicts.",
+                    retryable=False,
+                )
+            # ``record_content_manifest`` normally enforces this before the
+            # transition. Re-check the durable aggregate at the commit-before-
+            # ack fence so hand-written/legacy writers cannot transition an
+            # over-budget staging row into pending.
+            backlog = self._capture_backlog_unlocked(staging_ticket.workspace_commitment)
+            if backlog.byte_count > _MAX_CAPTURE_CONTENT_BYTES:
+                raise _error(
+                    PublicErrorCode.LIMIT_EXCEEDED,
+                    "Observation captured-content byte budget is exhausted.",
                     retryable=False,
                 )
             self._db.execute(

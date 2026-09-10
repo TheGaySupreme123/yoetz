@@ -460,6 +460,62 @@ none of the response bytes or prose. Confirm `mapping_present: true`, then drain
 rows before claiming hook coverage. Pause, resume, revoke, deduplication, restart, and gap behavior
 require their own evidence.
 
+### Smart observation selection (issue #687)
+
+Claude's shared hook ingress applies the selector only to the generic tool stream exposed by the
+exact ordinary profile `claude-code-ordinary-observation-v1`. The structural profile remains
+scoped to the existing Yoetz events; selecting a retention mode does not widen that subscription.
+With the ordinary profile, **Focused/standard (512)** is the default. A paired, proven successful
+routine `Read`, search, or inventory call may be summarized in Focused mode. Detailed keeps
+eligible routine calls as individual records while pressure is healthy. Capacity is independent
+of detail: `standard` (512), `larger` (2,048), and `largest` (8,192) can each be selected with
+Focused or Detailed. The larger profiles have finite provisional budgets and do not certify a
+Claude host cell or improve sustained throughput.
+
+The host outcome remains authoritative. `PostToolUseFailure`, denial, cancellation, interruption,
+partial, unknown or conflicting outcome fields, background or incomplete work, edits and side effects,
+declared checks/negative verification, and reads protected for an obligation, claim, or finding
+remain individual records in both modes. A pre-event keeps its native identity until a post event
+proves success; a caller label or tool result field cannot downgrade protection. Claude's
+post-only structural profile has no pre-event to pair, so it retains the host's supported
+post-only identity contract.
+
+Apply an owner choice from an exact preview:
+
+```text
+yoetz observe selection-preview --workspace /exact/project \
+  --detail detailed --capacity larger --session-id <claude-session-id> --json
+yoetz observe selection-apply --workspace /exact/project \
+  --detail detailed --capacity larger --session-id <claude-session-id> \
+  --accept --preview-digest <preview-digest> --json
+```
+
+This is a temporary session override unless `--persist` is supplied on both preview and apply
+without `--session-id`; `--persist` is the explicit workspace choice. An optional RFC3339 UTC
+`--expires-at` bounds either setting. `selection-status` reports the selected and effective values;
+`selection-revoke` restores the safe fallback at the matching scope. These controls affect future
+retention only. They do not rewrite accepted rows, extend Claude's five-second ordinary-event,
+ten-second session, or three-second teardown budgets, or change content, privacy, provider, or
+network authority. Under pressure, a selected Detailed session can be effectively Focused while
+the owner setting remains Detailed.
+
+Use `protect-read` before an upcoming read when a later claim needs its individual identity. The
+reference must be an `obl_`, `clm_`, or `fnd_` identifier; at most 32 logical reads are outstanding,
+and the protection expires after ten minutes by default (an explicit expiry cannot exceed that
+bound). This is a narrowing hint under existing observation consent and grants no content or
+disclosure authority. `promote` can only promote an exact native identity while it remains in the
+bounded buffer. After delivery it reports `promotion_window_closed` and `not_retained`; rerun the
+current read as a new observation if historical bytes are required, and do not use that rerun to
+prove the earlier state.
+
+Claude ordinary content capture remains a separate consent arm selected by the exact profile.
+Its workspace-wide capture lane allows at most 512 staging/pending tickets and 128 MiB of captured
+content, independently of the structural capacity choice. The one-second native content drain
+window and the host hook deadlines still apply. A timeout, cancellation, incomplete content group,
+or service failure leaves partial/unknown coverage or `content_capture_unavailable` where the
+boundary permits; it is never silently converted to a successful routine summary. Capture status
+proves configuration only, not accepted bytes, semantic selection, or receipt coverage.
+
 Claude Code 2.1.251 passes an MCP tool's `tool_response` to `PostToolUse` as one bare JSON string
 of the structured result (captured live on 2026-09-04 with a probe MCP server that returned both a
 text block and `structuredContent`; the text block is dropped). The binder admits that shape next

@@ -180,6 +180,9 @@ class ObservationOutboxSweeper:
     # clock sleeps. Production leaves this unset and uses the running loop's monotonic clock.
     _monotonic: Callable[[], float] | None = field(default=None, repr=False)
     _executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
+    _selection_seen_workspaces: set[str] = field(
+        default_factory=lambda: set[str](), init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         if type(self.limit) is not int or isinstance(self.limit, bool) or self.limit < 1:
@@ -236,7 +239,7 @@ class ObservationOutboxSweeper:
         monotonic = loop.time if self._monotonic is None else self._monotonic
         deadline = None if self.budget_seconds is None else monotonic() + self.budget_seconds
         rows, lifecycle_workspaces = await self._off_loop(
-            self._fair_pending_rows_and_lifecycle_workspaces
+            self._prepare_pending_rows_and_lifecycle_workspaces
         )
         attempted = 0
         acknowledged = 0
@@ -441,6 +444,27 @@ class ObservationOutboxSweeper:
 
     def _fair_pending_rows(self) -> tuple[tuple[str, ObservationOutboxRow], ...]:
         return self._fair_pending_rows_and_lifecycle_workspaces()[0]
+
+    def _prepare_pending_rows_and_lifecycle_workspaces(
+        self,
+    ) -> tuple[
+        tuple[tuple[str, ObservationOutboxRow], ...],
+        tuple[str, ...],
+    ]:
+        for workspace in self.local.pending_workspaces():
+            # A fresh service flushes accounts from the preceding runtime
+            # before extending them. Later sweeps observe due deadlines and
+            # recovery dwell even when the host emits no further hook.
+            self.local.maintain_selected_admission(
+                workspace,
+                force=workspace not in self._selection_seen_workspaces,
+            )
+            self._selection_seen_workspaces.add(workspace)
+            if len(self._selection_seen_workspaces) > 256:
+                # Forgetting an entry only forces a conservative flush next
+                # time; it never acknowledges or discards accepted inputs.
+                self._selection_seen_workspaces.remove(min(self._selection_seen_workspaces))
+        return self._fair_pending_rows_and_lifecycle_workspaces()
 
     def _fair_pending_rows_and_lifecycle_workspaces(
         self,

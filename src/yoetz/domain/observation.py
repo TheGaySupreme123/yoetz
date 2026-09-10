@@ -18,6 +18,11 @@ from yoetz.domain.observation_profiles import (
     is_content_capture_profile,
     validate_content_capture_profile,
 )
+from yoetz.domain.observation_settings import (
+    ObservationSelectionRuntimeStatus,
+    observation_selection_runtime_status_from_json,
+    observation_selection_runtime_status_to_json,
+)
 from yoetz.domain.values import (
     FindingId,
     JsonObject,
@@ -30,10 +35,12 @@ from yoetz.domain.values import (
     timestamp_from_string,
     validate_commitment,
     validate_sha256_digest,
+    writer_id,
 )
 from yoetz.protocol.canonical import canonical_digest, canonical_encode
 from yoetz.protocol.coverage import Coverage, coverage_from_json, coverage_to_json
 from yoetz.protocol.errors import PROTOCOL_REASON_CODES, ProtocolValueError
+from yoetz.protocol.ids import IdKind, validate_id
 
 __all__ = [
     "AdviceItem",
@@ -43,11 +50,19 @@ __all__ = [
     "OBSERVATION_HOOK_COMMITMENT_DOMAIN",
     "OBSERVATION_STREAM_LINE_DOMAIN",
     "OBSERVATION_WORKSPACE_DOMAIN",
+    "ROUTINE_READ_SUMMARY_CONTENT_SCOPE",
+    "ROUTINE_READ_SUMMARY_MAPPING_VERSION",
+    "ROUTINE_READ_SUMMARY_PROVENANCE",
+    "ROUTINE_READ_SUMMARY_SCHEMA",
+    "ROUTINE_READ_SUMMARY_ALLOWED_GAPS",
+    "RoutineReadSummary",
+    "RoutineReadSummaryMember",
     "ObservationControlCommand",
     "ObservationContentChunk",
     "ObservationContentManifest",
     "ObservationContentKind",
     "ObservationCapturePart",
+    "ObservationCaptureBacklog",
     "ObservationCaptureTicket",
     "ObservationCursor",
     "ObservationEnvelope",
@@ -60,6 +75,7 @@ __all__ = [
     "ObservationRevokeCommand",
     "ObservationSource",
     "ObservationStatus",
+    "ObservationSelectionRuntimeStatus",
     "ObservationStatusQuery",
     "advice_item_from_json",
     "advice_item_to_json",
@@ -79,6 +95,10 @@ __all__ = [
     "observation_earns_hook_observed",
     "observation_envelope_from_json",
     "observation_envelope_to_json",
+    "observation_selection_route",
+    "observation_selection_runtime_status_from_json",
+    "observation_selection_runtime_status_to_json",
+    "validate_observation_protection_reference",
     "observation_ingest_request_from_json",
     "observation_ingest_request_to_json",
     "observation_ingest_result_from_json",
@@ -89,6 +109,13 @@ __all__ = [
     "observation_status_query_from_json",
     "observation_status_query_to_json",
     "observation_status_to_json",
+    "routine_read_summary_from_json",
+    "routine_read_summary_from_envelope",
+    "routine_read_summary_identity",
+    "routine_read_summary_member_digest",
+    "routine_read_summary_member_from_json",
+    "routine_read_summary_member_to_json",
+    "routine_read_summary_to_json",
     "stream_line_commitment",
     "workspace_commitment_from_path",
     "is_content_capture_profile",
@@ -111,6 +138,8 @@ _MAX_CONTENT_CHUNK_BYTES: Final = 524_288
 # control-frame ceiling. Larger logical content is sent over multiple requests
 # and assembled from independently encrypted chunk objects.
 _MAX_CONTENT_TOTAL_BYTES: Final = 700_000
+_MAX_ROUTINE_READ_SUMMARY_CALLS: Final = 16
+_MAX_ROUTINE_READ_SUMMARY_INPUTS: Final = 32
 
 _TOKEN_RE: Final = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:/+-]{0,127}$", re.ASCII)
 _GAP_RE: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)
@@ -129,6 +158,85 @@ ObservationCapturePart = tuple[str, str, str, int, int]
 OBSERVATION_WORKSPACE_DOMAIN: Final = b"yoetz/observation-workspace/v1\x00"
 OBSERVATION_STREAM_LINE_DOMAIN: Final = b"yoetz/observation-stream-line/v1\x00"
 OBSERVATION_HOOK_COMMITMENT_DOMAIN: Final = b"yoetz/observation-hook-commitment/v1\x00"
+
+# A summary is an observation-store record.  It is intentionally kept separate
+# from the task-ledger event families: the local writer can account for every
+# native input before optional materialization, while a later schema decision
+# can choose how (or whether) to publish the bounded account.
+ROUTINE_READ_SUMMARY_SCHEMA: Final = "yoetz.observation-routine-read-summary/1.0.0"
+ROUTINE_READ_SUMMARY_MAPPING_VERSION: Final = "obs-selection/1.0.0"
+ROUTINE_READ_SUMMARY_PROVENANCE: Final = "routine_success_summary"
+ROUTINE_READ_SUMMARY_CONTENT_SCOPE: Final = "structural_only"
+ROUTINE_READ_SUMMARY_DETAIL_GAP: Final = "routine_read_detail_omitted"
+ROUTINE_READ_SUMMARY_ALLOWED_GAPS: Final = frozenset(
+    {"content_unselected", "observation_input_loss"}
+)
+SELECTION_ROUTE_KEYS: Final = (
+    "selection_task_id",
+    "selection_session_id",
+    "selection_writer_id",
+    "selection_authority_generation",
+)
+
+
+def observation_selection_route(
+    payload: object,
+) -> tuple[str, str, str, str] | None:
+    """Return the authenticated selection route carried by an envelope.
+
+    Route fields form one closed group.  An envelope from the legacy path may
+    omit the group, while a selected envelope must carry every field so a
+    buffered row cannot be silently rebound to a later task or authority.
+    """
+
+    if not isinstance(payload, Mapping):
+        raise _invalid("invalid_event_value_type")
+    mapping = cast(Mapping[str, JsonValue], payload)
+    present = tuple(key in mapping for key in SELECTION_ROUTE_KEYS)
+    if not any(present):
+        return None
+    if not all(present):
+        raise _invalid("invalid_event_value_type")
+    raw_task, raw_session, raw_writer, raw_generation = (
+        mapping[key] for key in SELECTION_ROUTE_KEYS
+    )
+    try:
+        selected_task = str(task_id(raw_task))
+        selected_session = str(session_id(raw_session))
+        selected_writer = str(writer_id(raw_writer))
+        if type(raw_generation) is not str:
+            raise ProtocolValueError("invalid_digest")
+        selected_generation = validate_sha256_digest(raw_generation)
+    except (ProtocolValueError, TypeError, ValueError) as exc:
+        raise _invalid("invalid_event_value_type") from exc
+    return selected_task, selected_session, selected_writer, selected_generation
+
+
+_PROTECTION_REFERENCE_KINDS: Final = (
+    ("obl_", IdKind.OBLIGATION),
+    ("clm_", IdKind.CLAIM),
+    ("fnd_", IdKind.FINDING),
+)
+
+
+def validate_observation_protection_reference(value: object) -> str:
+    """Validate the optional structural reference for one protected read.
+
+    The value is intentionally checked for identifier shape only. Existence
+    and authorization belong to the local read-protection store, which keeps
+    this envelope module independent from that store's domain adapter.
+    """
+
+    if type(value) is not str:
+        raise _invalid("invalid_event_value_type")
+    for prefix, kind in _PROTECTION_REFERENCE_KINDS:
+        if value.startswith(prefix):
+            try:
+                return str(validate_id(kind, value))
+            except (ProtocolValueError, TypeError, ValueError) as exc:
+                raise _invalid("invalid_event_value_type") from exc
+    raise _invalid("invalid_event_value_type")
+
 
 _STRUCTURAL_KEYS: Final = frozenset(
     {
@@ -168,6 +276,22 @@ _STRUCTURAL_KEYS: Final = frozenset(
         "pairing_mode",
         "correlation_kind",
         "generation_id",
+        "summary_count",
+        "input_count",
+        "member_digest",
+        "fence",
+        "provenance",
+        "summary_schema",
+        "selection_policy_version",
+        "content_scope",
+        "coverage_gaps",
+        "subject_state_digest",
+        "members",
+        "selection_task_id",
+        "selection_session_id",
+        "selection_writer_id",
+        "selection_authority_generation",
+        "protection_reference",
     }
 )
 _STRUCTURAL_TOKEN_KEYS: Final = frozenset(
@@ -178,6 +302,16 @@ _STRUCTURAL_TOKEN_KEYS: Final = frozenset(
         "pairing_mode",
         "correlation_kind",
         "generation_id",
+        "provenance",
+        "summary_schema",
+        "selection_policy_version",
+        "content_scope",
+        "subject_state_digest",
+        "selection_task_id",
+        "selection_session_id",
+        "selection_writer_id",
+        "selection_authority_generation",
+        "protection_reference",
     }
 )
 
@@ -254,13 +388,18 @@ class ObservationGapCode(str, Enum):  # noqa: UP042 - exact durable wire enum
     MAPPING_MISSING = "mapping_missing"
     SESSION_SUPERSEDED = "session_superseded"
     OUTBOX_OVERFLOW = "outbox_overflow"
+    OBSERVATION_INPUT_LOSS = "observation_input_loss"
     OUTBOX_QUARANTINED = "outbox_quarantined"
     OBSERVATION_STORAGE_CORRUPT = "observation_storage_corrupt"
     QUARANTINE_DETAIL_EVICTED = "quarantine_detail_evicted"
     CONTENT_CAPTURE_UNAVAILABLE = "content_capture_unavailable"
+    CAPTURE_BUDGET_EXHAUSTED = "capture_budget_exhausted"
     CONTENT_CAPTURE_PROFILE_MISMATCH = "content_capture_profile_mismatch"
     CONTENT_UNSELECTED = "content_unselected"
     CONTENT_REDACTED = "content_redacted"
+    ROUTINE_READ_SUMMARY_DETAIL_OMITTED = "routine_read_detail_omitted"
+    ROUTINE_READ_SUMMARY_INVALID = "routine_read_summary_invalid"
+    SELECTION_ROUTE_CHANGED = "selection_route_changed"
     POLICY_UNTRUSTED = "policy_untrusted"
     VERIFICATION_STALE = "verification_stale"
     NETWORK_CHECK_UNSUPPORTED = "network_check_unsupported"
@@ -380,6 +519,63 @@ class ObservationCaptureTicket:
         if self.state == "pending" and not expected_parts:
             raise _invalid()
         object.__setattr__(self, "expected_parts", expected_parts)
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationCaptureBacklog:
+    """Read-only accounting for unfinished native content handoffs.
+
+    Capture tickets intentionally expose metadata only.  ``byte_count`` is the
+    sum of the secret-scanned plaintext byte counts recorded in their manifests;
+    encrypted envelope sizes are not part of the capture budget.  The backlog
+    includes both staging and pending tickets and excludes revoked or committed
+    tickets.  ``oldest_receipt_time`` is the durable ticket capture timestamp,
+    so callers can derive an age against their own trusted clock without the
+    adapter reading wall-clock state.
+
+    Until a trusted envelope proves that a handoff is optional, every active
+    ticket is treated as protected by the capture admission layer.  This DTO
+    therefore reports only aggregate usage; it does not grant optional detail
+    or turn a larger structural queue into additional content authority.
+    """
+
+    count: int
+    byte_count: int
+    oldest_receipt_time: Timestamp | None
+
+    def __post_init__(self) -> None:
+        if type(self.count) is not int or self.count < 0:
+            raise _invalid("invalid_event_value_type")
+        if type(self.byte_count) is not int or self.byte_count < 0:
+            raise _invalid("invalid_event_value_type")
+        if self.oldest_receipt_time is not None and type(self.oldest_receipt_time) is not Timestamp:
+            raise _invalid("invalid_timestamp")
+        if self.count == 0 and self.oldest_receipt_time is not None:
+            raise _invalid("invalid_event_value_type")
+
+    @property
+    def ticket_count(self) -> int:
+        """Alias used by pressure readers that distinguish tickets from rows."""
+
+        return self.count
+
+    @property
+    def captured_bytes(self) -> int:
+        """Alias for the aggregate secret-scanned content byte count."""
+
+        return self.byte_count
+
+    @property
+    def protected_count(self) -> int:
+        """All active handoffs are protected until trusted classification exists."""
+
+        return self.count
+
+    @property
+    def protected_bytes(self) -> int:
+        """All active handoff bytes remain in the protected reserve."""
+
+        return self.byte_count
 
 
 def observation_capture_ticket_id(ticket: ObservationCaptureTicket) -> str:
@@ -550,6 +746,8 @@ def _structural_payload(value: object) -> JsonObject:
             raise _invalid("unknown_payload_field")
         if key in _STRUCTURAL_TOKEN_KEYS:
             _token(item)
+        if key == "protection_reference":
+            validate_observation_protection_reference(item)
         _reject_path_like(item)
     encoded = canonical_encode(payload)
     if len(encoded) > _MAX_STRUCTURAL_BYTES:
@@ -1070,6 +1268,443 @@ class ObservationEnvelope:
     __str__ = __repr__
 
 
+RoutineReadSummaryPhase = Literal["pre", "post"]
+
+
+@dataclass(frozen=True, slots=True)
+class RoutineReadSummaryMember:
+    """The identity of one source input represented by a routine-read summary.
+
+    A member deliberately carries only native identity, cursor and phase.  In
+    particular it never carries a command, path, prompt, output, or any other
+    content that could turn a bounded accounting record into an implicit
+    capture channel.
+    """
+
+    source_identity: str
+    cursor: ObservationCursor
+    tool_call_id: str | None
+    phase: RoutineReadSummaryPhase
+    receipt_time: Timestamp
+    subject_state_digest: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "source_identity", _token(self.source_identity))
+        if type(self.cursor) is not ObservationCursor:
+            raise _invalid()
+        if self.tool_call_id is not None:
+            object.__setattr__(self, "tool_call_id", _token(self.tool_call_id))
+        if self.phase not in {"pre", "post"}:
+            raise _invalid("invalid_event_enum")
+        if type(self.receipt_time) is not Timestamp:
+            raise _invalid("invalid_timestamp")
+        if self.subject_state_digest is not None:
+            validate_sha256_digest(self.subject_state_digest)
+
+
+def routine_read_summary_member_to_json(value: RoutineReadSummaryMember) -> JsonObject:
+    """Encode one summary member without exposing host content."""
+
+    if type(value) is not RoutineReadSummaryMember:
+        raise _invalid()
+    return JsonObject(
+        {
+            "source_identity": value.source_identity,
+            "cursor": observation_cursor_to_json(value.cursor),
+            "tool_call_id": value.tool_call_id,
+            "phase": value.phase,
+            "receipt_time": value.receipt_time.wire,
+            "subject_state_digest": value.subject_state_digest,
+        }
+    )
+
+
+def routine_read_summary_member_from_json(value: JsonValue) -> RoutineReadSummaryMember:
+    """Decode one exact summary member object."""
+
+    if type(value) is not JsonObject or set(value) != {
+        "source_identity",
+        "cursor",
+        "tool_call_id",
+        "phase",
+        "receipt_time",
+        "subject_state_digest",
+    }:
+        raise _invalid()
+    phase = value["phase"]
+    if type(phase) is not str or phase not in {"pre", "post"}:
+        raise _invalid("invalid_event_enum")
+    tool_call_id = value["tool_call_id"]
+    if tool_call_id is not None and type(tool_call_id) is not str:
+        raise _invalid()
+    return RoutineReadSummaryMember(
+        source_identity=cast(str, value["source_identity"]),
+        cursor=observation_cursor_from_json(value["cursor"]),
+        tool_call_id=tool_call_id,
+        phase=cast(RoutineReadSummaryPhase, phase),
+        receipt_time=timestamp_from_string(cast(str, value["receipt_time"])),
+        subject_state_digest=cast(str | None, value["subject_state_digest"]),
+    )
+
+
+def _routine_read_summary_members(
+    value: object,
+) -> tuple[RoutineReadSummaryMember, ...]:
+    raw = _exact_tuple(value, maximum=_MAX_ROUTINE_READ_SUMMARY_INPUTS)
+    result: list[RoutineReadSummaryMember] = []
+    seen: set[tuple[str, int, int, int, str]] = set()
+    for item in raw:
+        if type(item) is not RoutineReadSummaryMember:
+            raise _invalid()
+        identity = (
+            item.source_identity,
+            item.cursor.source_generation,
+            item.cursor.byte_position,
+            item.cursor.event_position,
+            item.phase,
+        )
+        if identity in seen:
+            raise _invalid("duplicate_set_member")
+        seen.add(identity)
+        result.append(item)
+    return tuple(result)
+
+
+def routine_read_summary_member_digest(
+    members: tuple[RoutineReadSummaryMember, ...],
+) -> str:
+    """Bind the ordered exact member list to a SHA-256 digest."""
+
+    normalized = _routine_read_summary_members(members)
+    if not normalized:
+        raise _invalid()
+    return canonical_digest(
+        JsonObject(
+            {"members": tuple(routine_read_summary_member_to_json(item) for item in normalized)}
+        )
+    )
+
+
+def routine_read_summary_identity(
+    *,
+    source: ObservationSource,
+    session_commitment: str,
+    source_generation: int,
+    selection_policy_version: str,
+    fence: str,
+    member_digest: str,
+    selection_task_id: str,
+    selection_session_id: str,
+    selection_writer_id: str,
+    selection_authority_generation: str,
+) -> str:
+    """Derive the stable, lane-bound identity of one summary envelope."""
+
+    if type(source) is not ObservationSource:
+        raise _invalid("invalid_event_enum")
+    validate_commitment(session_commitment)
+    source_generation = _positive(source_generation)
+    selection_policy_version = _token(selection_policy_version)
+    validate_sha256_digest(fence)
+    validate_sha256_digest(member_digest)
+    route = observation_selection_route(
+        JsonObject(
+            {
+                "selection_task_id": selection_task_id,
+                "selection_session_id": selection_session_id,
+                "selection_writer_id": selection_writer_id,
+                "selection_authority_generation": selection_authority_generation,
+            }
+        )
+    )
+    if route is None:  # pragma: no cover - the closed object above is complete
+        raise _invalid("invalid_event_value_type")
+    selected_task, selected_session, selected_writer, selected_generation = route
+    digest = canonical_digest(
+        JsonObject(
+            {
+                "source": source.value,
+                "session_commitment": session_commitment,
+                "source_generation": source_generation,
+                "selection_policy_version": selection_policy_version,
+                "fence": fence,
+                "member_digest": member_digest,
+                "selection_task_id": selected_task,
+                "selection_session_id": selected_session,
+                "selection_writer_id": selected_writer,
+                "selection_authority_generation": selected_generation,
+            }
+        )
+    )
+    return f"summary:{digest[7:]}"
+
+
+@dataclass(frozen=True, slots=True)
+class RoutineReadSummary:
+    """Bounded structural account emitted before routine-read materialization.
+
+    ``summary_count`` counts completed routine calls (post phases), while
+    ``input_count`` counts every represented source input.  The constructor
+    checks both against the exact member list so a cursor cannot be advanced by
+    an aggregate that hides an unaccounted native input.
+    """
+
+    summary_identity: str
+    session_commitment: str
+    source: ObservationSource
+    source_generation: int
+    selection_policy_version: str
+    fence: str
+    provenance: str
+    content_scope: str
+    coverage_gaps: tuple[str, ...]
+    summary_count: int
+    input_count: int
+    member_digest: str
+    members: tuple[RoutineReadSummaryMember, ...]
+    cursor: ObservationCursor
+    receipt_time: Timestamp
+    selection_task_id: str
+    selection_session_id: str
+    selection_writer_id: str
+    selection_authority_generation: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "summary_identity", _token(self.summary_identity))
+        validate_commitment(self.session_commitment)
+        if type(self.source) is not ObservationSource:
+            raise _invalid("invalid_event_enum")
+        source_generation = _positive(self.source_generation)
+        object.__setattr__(self, "source_generation", source_generation)
+        route = observation_selection_route(
+            JsonObject(
+                {
+                    "selection_task_id": self.selection_task_id,
+                    "selection_session_id": self.selection_session_id,
+                    "selection_writer_id": self.selection_writer_id,
+                    "selection_authority_generation": self.selection_authority_generation,
+                }
+            )
+        )
+        if route is None:  # pragma: no cover - the closed object above is complete
+            raise _invalid("invalid_event_value_type")
+        (
+            selected_task,
+            selected_session,
+            selected_writer,
+            selected_generation,
+        ) = route
+        object.__setattr__(self, "selection_task_id", selected_task)
+        object.__setattr__(self, "selection_session_id", selected_session)
+        object.__setattr__(self, "selection_writer_id", selected_writer)
+        object.__setattr__(self, "selection_authority_generation", selected_generation)
+        selection_policy_version = _token(self.selection_policy_version)
+        object.__setattr__(self, "selection_policy_version", selection_policy_version)
+        validate_sha256_digest(self.fence)
+        if self.provenance != ROUTINE_READ_SUMMARY_PROVENANCE:
+            raise _invalid("invalid_event_value_type")
+        if self.content_scope != ROUTINE_READ_SUMMARY_CONTENT_SCOPE:
+            raise _invalid("invalid_event_value_type")
+        coverage_gaps = _sorted_unique_gap_codes(self.coverage_gaps)
+        if any(gap not in ROUTINE_READ_SUMMARY_ALLOWED_GAPS for gap in coverage_gaps):
+            raise _invalid("invalid_known_gap")
+        object.__setattr__(self, "coverage_gaps", coverage_gaps)
+        object.__setattr__(
+            self,
+            "summary_count",
+            _positive(self.summary_count, maximum=_MAX_ROUTINE_READ_SUMMARY_CALLS),
+        )
+        object.__setattr__(
+            self,
+            "input_count",
+            _positive(self.input_count, maximum=_MAX_ROUTINE_READ_SUMMARY_INPUTS),
+        )
+        members = _routine_read_summary_members(self.members)
+        if len(members) != self.input_count:
+            raise _invalid("summary_count_mismatch")
+        post_count = sum(item.phase == "post" for item in members)
+        if post_count != self.summary_count:
+            raise _invalid("summary_count_mismatch")
+        if self.input_count > 2 * self.summary_count:
+            raise _invalid("summary_count_mismatch")
+        if any(item.cursor.source_generation != source_generation for item in members):
+            raise _invalid("cursor_generation_mismatch")
+        if not members or self.cursor != members[-1].cursor:
+            raise _invalid("cursor_accounting_mismatch")
+        digest = routine_read_summary_member_digest(members)
+        if digest != self.member_digest:
+            raise _invalid("summary_digest_mismatch")
+        expected_identity = routine_read_summary_identity(
+            source=self.source,
+            session_commitment=self.session_commitment,
+            source_generation=source_generation,
+            selection_policy_version=selection_policy_version,
+            fence=self.fence,
+            member_digest=digest,
+            selection_task_id=selected_task,
+            selection_session_id=selected_session,
+            selection_writer_id=selected_writer,
+            selection_authority_generation=selected_generation,
+        )
+        if self.summary_identity != expected_identity:
+            raise _invalid("summary_identity_mismatch")
+        if type(self.cursor) is not ObservationCursor:
+            raise _invalid()
+        if type(self.receipt_time) is not Timestamp:
+            raise _invalid("invalid_timestamp")
+        object.__setattr__(self, "members", members)
+
+
+def routine_read_summary_to_json(value: RoutineReadSummary) -> JsonObject:
+    """Encode one exact local summary record."""
+
+    if type(value) is not RoutineReadSummary:
+        raise _invalid()
+    return JsonObject(
+        {
+            "schema": ROUTINE_READ_SUMMARY_SCHEMA,
+            "summary_identity": value.summary_identity,
+            "session_commitment": value.session_commitment,
+            "source": value.source.value,
+            "source_generation": value.source_generation,
+            "selection_policy_version": value.selection_policy_version,
+            "fence": value.fence,
+            "provenance": value.provenance,
+            "content_scope": value.content_scope,
+            "coverage_gaps": value.coverage_gaps,
+            "summary_count": value.summary_count,
+            "input_count": value.input_count,
+            "member_digest": value.member_digest,
+            "members": tuple(routine_read_summary_member_to_json(item) for item in value.members),
+            "cursor": observation_cursor_to_json(value.cursor),
+            "receipt_time": value.receipt_time.wire,
+            "selection_task_id": value.selection_task_id,
+            "selection_session_id": value.selection_session_id,
+            "selection_writer_id": value.selection_writer_id,
+            "selection_authority_generation": value.selection_authority_generation,
+        }
+    )
+
+
+def routine_read_summary_from_json(value: JsonValue) -> RoutineReadSummary:
+    """Decode one exact local summary record and re-check its identity binding."""
+
+    if type(value) is not JsonObject:
+        raise _invalid()
+    required = {
+        "schema",
+        "summary_identity",
+        "session_commitment",
+        "source",
+        "source_generation",
+        "selection_policy_version",
+        "fence",
+        "provenance",
+        "content_scope",
+        "coverage_gaps",
+        "summary_count",
+        "input_count",
+        "member_digest",
+        "members",
+        "cursor",
+        "receipt_time",
+        "selection_task_id",
+        "selection_session_id",
+        "selection_writer_id",
+        "selection_authority_generation",
+    }
+    if set(value) != required or value["schema"] != ROUTINE_READ_SUMMARY_SCHEMA:
+        raise _invalid("unknown_payload_field")
+    try:
+        source = ObservationSource(cast(str, value["source"]))
+    except (TypeError, ValueError) as exc:
+        raise _invalid("invalid_event_enum") from exc
+    members_raw = value["members"]
+    if type(members_raw) is not tuple:
+        raise _invalid()
+    members = tuple(
+        routine_read_summary_member_from_json(item)
+        for item in cast(tuple[JsonValue, ...], members_raw)
+    )
+    return RoutineReadSummary(
+        summary_identity=cast(str, value["summary_identity"]),
+        session_commitment=cast(str, value["session_commitment"]),
+        source=source,
+        source_generation=cast(int, value["source_generation"]),
+        selection_policy_version=cast(str, value["selection_policy_version"]),
+        fence=cast(str, value["fence"]),
+        provenance=cast(str, value["provenance"]),
+        content_scope=cast(str, value["content_scope"]),
+        coverage_gaps=cast(tuple[str, ...], value["coverage_gaps"]),
+        summary_count=cast(int, value["summary_count"]),
+        input_count=cast(int, value["input_count"]),
+        member_digest=cast(str, value["member_digest"]),
+        members=members,
+        cursor=observation_cursor_from_json(value["cursor"]),
+        receipt_time=timestamp_from_string(cast(str, value["receipt_time"])),
+        selection_task_id=cast(str, value["selection_task_id"]),
+        selection_session_id=cast(str, value["selection_session_id"]),
+        selection_writer_id=cast(str, value["selection_writer_id"]),
+        selection_authority_generation=cast(str, value["selection_authority_generation"]),
+    )
+
+
+def routine_read_summary_from_envelope(envelope: ObservationEnvelope) -> RoutineReadSummary:
+    """Decode a summary envelope after validating its source-accounting fields."""
+
+    if type(envelope) is not ObservationEnvelope or envelope.event_kind != "RoutineReadSummary":
+        raise _invalid("invalid_event_value_type")
+    if envelope.content_object_refs or envelope.gap_codes:
+        raise _invalid("invalid_event_value_type")
+    structural = envelope.structural_payload
+    required = {
+        "action",
+        "summary_count",
+        "input_count",
+        "member_digest",
+        "fence",
+        "provenance",
+        "summary_schema",
+        "selection_policy_version",
+        "content_scope",
+        "coverage_gaps",
+        "members",
+        "selection_task_id",
+        "selection_session_id",
+        "selection_writer_id",
+        "selection_authority_generation",
+    }
+    if set(structural) != required or structural["action"] != "routine_read_summary":
+        raise _invalid("unknown_payload_field")
+    if structural["summary_schema"] != ROUTINE_READ_SUMMARY_SCHEMA:
+        raise _invalid("invalid_event_schema")
+    payload = JsonObject(
+        {
+            "schema": ROUTINE_READ_SUMMARY_SCHEMA,
+            "summary_identity": envelope.source_identity,
+            "session_commitment": envelope.session_commitment,
+            "source": envelope.source.value,
+            "source_generation": envelope.cursor.source_generation,
+            "selection_policy_version": structural["selection_policy_version"],
+            "fence": structural["fence"],
+            "provenance": structural["provenance"],
+            "content_scope": structural["content_scope"],
+            "coverage_gaps": structural["coverage_gaps"],
+            "summary_count": structural["summary_count"],
+            "input_count": structural["input_count"],
+            "member_digest": structural["member_digest"],
+            "members": structural["members"],
+            "cursor": observation_cursor_to_json(envelope.cursor),
+            "receipt_time": envelope.receipt_time.wire,
+            "selection_task_id": structural["selection_task_id"],
+            "selection_session_id": structural["selection_session_id"],
+            "selection_writer_id": structural["selection_writer_id"],
+            "selection_authority_generation": structural["selection_authority_generation"],
+        }
+    )
+    return routine_read_summary_from_json(payload)
+
+
 @dataclass(frozen=True, slots=True)
 class AdviceItem:
     """Bounded durable advice value safe for status, observe status, and hooks."""
@@ -1158,6 +1793,10 @@ class ObservationStatus:
     gaps: tuple[str, ...]
     unsupported_events: tuple[str, ...]
     advice_frontier: str | None
+    # Added as an optional projection so legacy status callers remain valid
+    # while newer local-control readers can inspect selected/effective
+    # observation pressure and bounded accounting.
+    selection_runtime: ObservationSelectionRuntimeStatus | None = None
 
     def __post_init__(self) -> None:
         if type(self.lifecycle) is not ObservationLifecycle:
@@ -1178,6 +1817,11 @@ class ObservationStatus:
         )
         if self.advice_frontier is not None:
             object.__setattr__(self, "advice_frontier", _token(self.advice_frontier))
+        if (
+            self.selection_runtime is not None
+            and type(self.selection_runtime) is not ObservationSelectionRuntimeStatus
+        ):
+            raise _invalid("invalid_event_value_type")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1513,6 +2157,10 @@ def observation_status_to_json(value: ObservationStatus) -> JsonObject:
         "unsupported_events": value.unsupported_events,
         "advice_frontier": value.advice_frontier,
     }
+    if value.selection_runtime is not None:
+        payload["selection_runtime"] = observation_selection_runtime_status_to_json(
+            value.selection_runtime
+        )
     return JsonObject(payload)
 
 
@@ -1530,7 +2178,8 @@ def observation_status_from_json(value: JsonValue) -> ObservationStatus:
         "unsupported_events",
         "advice_frontier",
     )
-    if set(source) != set(required):
+    optional = {"selection_runtime"}
+    if set(source) - set(required) - optional or not set(required).issubset(set(source)):
         raise _invalid()
     try:
         lifecycle = ObservationLifecycle(cast(str, source["lifecycle"]))
@@ -1554,6 +2203,11 @@ def observation_status_from_json(value: JsonValue) -> ObservationStatus:
             source["unsupported_events"], maximum=_MAX_UNSUPPORTED_EVENTS
         ),
         advice_frontier=cast(str | None, source["advice_frontier"]),
+        selection_runtime=(
+            None
+            if "selection_runtime" not in source
+            else observation_selection_runtime_status_from_json(source["selection_runtime"])
+        ),
     )
 
 

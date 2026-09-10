@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import os
 import re
-import shlex
 import sys
 import time
 from collections.abc import Awaitable, Callable, Generator, Mapping
@@ -29,6 +28,7 @@ from yoetz.adapters.integrations.codex_lifecycle import (
     validate_codex_session_id,
 )
 from yoetz.adapters.integrations.hook_spool import HookSpool
+from yoetz.adapters.integrations.observation_admission import build_routine_read_summary
 from yoetz.adapters.integrations.observation_local import (
     HOOK_MAPPING_VERSION,
     YOETZ_OWNED_TOOL_NAMES,
@@ -73,12 +73,21 @@ from yoetz.domain.observation import (
     observation_ingest_request_to_json,
     observation_ingest_result_from_json,
 )
+from yoetz.domain.observation_budget import ModeLimits, ObservationMode, mode_limits
 from yoetz.domain.observation_profiles import (
     CLAUDE_CODE_ORDINARY_HOOK_MAPPING_VERSION,
     CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
     CURSOR_ORDINARY_HOOK_MAPPING_VERSION,
     CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
     content_capture_profile_matches_source,
+)
+from yoetz.domain.observation_selection import (
+    SHELL_TOOLS as _SHELL_TOOLS,
+)
+from yoetz.domain.observation_selection import (
+    ObservationClassification,
+    classify_observation,
+    is_routine_read_candidate,
 )
 from yoetz.domain.values import (
     JsonObject,
@@ -197,21 +206,6 @@ _TIMING_REPORT_EVENTS: Final = frozenset({"SessionStart", "Stop", "SessionEnd"})
 # deliberately outside the local capture batch, so it is accounted for as its
 # own stage rather than being hidden in the store duration.
 _PASS_PARTITION_STAGES: Final = ("import", "resolve", "store", "advice", "drain", "deliver")
-_ROUTINE_READ_TOOLS: Final = frozenset(
-    {
-        "glob",
-        "grep",
-        "list_files",
-        "read",
-        "read_file",
-        "search",
-        "view_file",
-    }
-)
-_SHELL_TOOLS: Final = frozenset(
-    {"bash", "command", "exec", "exec_command", "local_shell", "run_terminal_cmd", "shell"}
-)
-_READ_ONLY_COMMANDS: Final = frozenset({"head", "ls", "pwd", "rg", "tail", "wc"})
 _STRUCTURAL_ALLOW: Final = frozenset(
     {
         "tool_name",
@@ -529,60 +523,25 @@ def _resolve_cursor_workspace(
 
 
 def _routine_read_action(payload: Mapping[str, JsonValue]) -> bool:
-    """Recognize a deliberately narrow, side-effect-free tool invocation.
+    """Return the adapter-owned routine candidate bit.
 
-    The returned bit is structural only; command text remains visible-content input and is never
-    copied into the observation envelope. Ambiguous shell syntax fails closed to ordinary
-    materialization. This is a rate policy, not a general shell-effect analyzer.
+    Classification rules live in the domain module so every host adapter uses
+    the same closed read set and shell safety checks.  Outcome facts are
+    intentionally ignored here: a failed read is still a read-shaped attempt
+    and must remain protected by the full classifier.
     """
 
-    tool = _token_or_none(payload.get("tool_name"))
-    if tool is None:
-        return False
-    lowered = tool.lower()
-    if lowered in _ROUTINE_READ_TOOLS:
-        return True
-    if lowered not in _SHELL_TOOLS:
-        return False
-    tool_input = payload.get("tool_input")
-    if not isinstance(tool_input, Mapping):
-        return False
-    nested = cast(Mapping[str, JsonValue], tool_input)
-    raw = nested.get("cmd") or nested.get("command")
-    if type(raw) is not str or not raw or len(raw) > 16_384:
-        return False
-    # Multiple commands, redirection, substitution, and pipelines require a real shell parser.
-    # They remain ordinary observations rather than being optimistically labelled read-only.
-    if any(marker in raw for marker in ("\n", "\r", ";", "&", "|", ">", "<", "`", "$(")):
-        return False
-    try:
-        argv = shlex.split(raw, posix=True)
-    except ValueError:
-        return False
-    if not argv:
-        return False
-    command = argv[0]
-    if "/" in command or "\\" in command:
-        # Path-qualified names are not the closed basename set; a local `./ls`
-        # or `/tmp/head` is an arbitrary executable, not a trusted read tool.
-        return False
-    if command == "rg" and any(arg == "--pre" or arg.startswith("--pre=") for arg in argv[1:]):
-        # ripgrep's preprocessor is an arbitrary executable, not a read primitive.
-        return False
-    if command in _READ_ONLY_COMMANDS:
-        return True
-    if command == "git" and len(argv) >= 2:
-        if any(
-            arg == "--ext-diff" or arg == "--output" or arg.startswith("--output=")
-            for arg in argv[1:]
-        ):
-            # `--output` writes a file; `--ext-diff` runs an external helper.
-            return False
-        return argv[1] in {"diff", "log", "rev-parse", "show", "status"}
-    return False
+    return is_routine_read_candidate(payload)
 
 
-def _extract_structural(payload: Mapping[str, JsonValue], event_name: str) -> JsonObject:
+def _extract_structural(
+    payload: Mapping[str, JsonValue],
+    event_name: str,
+    *,
+    classification: ObservationClassification | None = None,
+) -> JsonObject:
+    """Extract bounded structural fields and apply the typed selection result."""
+
     fields: dict[str, JsonValue] = {"hook_name": event_name}
     tool_name = _token_or_none(payload.get("tool_name"))
     if tool_name is not None:
@@ -609,6 +568,10 @@ def _extract_structural(payload: Mapping[str, JsonValue], event_name: str) -> Js
         "generation_id",
     ):
         token = _token_or_none(payload.get(key))
+        if key == "action" and token is not None and token.casefold() == "routine_read":
+            # ``routine_read`` is a service-owned marker.  A host or nested
+            # tool payload cannot inject it into an envelope.
+            continue
         if token is not None and key in _STRUCTURAL_ALLOW:
             fields[key] = token
     # Codex names the host tool-call id ``tool_use_id``. Normalize it to the
@@ -627,22 +590,19 @@ def _extract_structural(payload: Mapping[str, JsonValue], event_name: str) -> Js
         nested = cast(Mapping[str, JsonValue], tool_input)
         for key in ("tool_name", "permission_kind", "claim_kind", "action", "mapping_hint"):
             token = _token_or_none(nested.get(key))
+            if key == "action" and token is not None and token.casefold() == "routine_read":
+                continue
             if token is not None and key not in fields:
                 fields[key] = token
         digest = _token_or_none(nested.get("changed_paths_digest"))
         if digest is not None and "changed_paths_digest" not in fields:
             fields["changed_paths_digest"] = digest
-    success = _bool_or_none(payload.get("success"))
-    denied = _bool_or_none(payload.get("denied"))
-    if (
-        event_name in {"PreToolUse", "PostToolUse"}
-        and _routine_read_action(payload)
-        and success is not False
-        and denied is not True
+    selected = classification or classify_observation(payload, event_name)
+    if selected.routine_candidate and (
+        event_name in {"PreToolUse", "preToolUse"} or selected.proven_routine_success
     ):
-        # Service-owned classification overrides an untrusted host-supplied action token.
-        # Explicit failures and denials stay ordinary observations even when the
-        # tool name would otherwise be a routine read.
+        # The marker is emitted only from the typed classifier.  It is never
+        # copied from host ``action`` or ``tool_input.action`` text.
         fields["action"] = "routine_read"
     for key in ("exit_status", "duration_ms", "event_ordinal", "attempt"):
         number = _int_or_none(payload.get(key))
@@ -761,6 +721,7 @@ def map_hook_payload_to_envelope(
     source_generation: int = 1,
     gap_codes: tuple[str, ...] = (),
     source: ObservationSource = ObservationSource.CODEX_HOOK,
+    classification: ObservationClassification | None = None,
 ) -> ObservationEnvelope:
     """Map a bounded hook payload to a structural ObservationEnvelope."""
 
@@ -787,7 +748,7 @@ def map_hook_payload_to_envelope(
             content_object_refs=(),
             gap_codes=gaps,
         )
-    structural = _extract_structural(payload, event_name)
+    structural = _extract_structural(payload, event_name, classification=classification)
     if "event_ordinal" not in structural:
         structural = JsonObject({**structural, "event_ordinal": event_ordinal})
     identity = _source_identity(event_name, payload, structural, event_ordinal=event_ordinal)
@@ -817,6 +778,7 @@ def _visible_content_chunks(
     *,
     envelope: ObservationEnvelope,
     workspace_locator: str | None,
+    optional_limits: ModeLimits | None = None,
 ) -> tuple[tuple[ObservationContentChunk, ...], bool]:
     """Extract only explicitly visible task content and redact it before transport.
 
@@ -902,15 +864,21 @@ def _visible_content_chunks(
         add(ObservationContentKind.WORKSPACE_LOCATOR, "workspace", workspace_locator)
 
     chunks: list[ObservationContentChunk] = []
-    remaining = 680_000
+    remaining = 680_000 if optional_limits is None else optional_limits.max_optional_bytes
     truncated = False
     for selected_index, (kind, label, raw) in enumerate(selected):
         redacted, detected = redact_sensitive_content(raw)
         if not redacted:
             continue
-        if len(redacted) > remaining:
+        part_limit = remaining
+        if optional_limits is not None:
+            if kind is ObservationContentKind.TOOL_INPUT:
+                part_limit = min(part_limit, optional_limits.max_input_bytes)
+            elif kind is ObservationContentKind.TOOL_OUTPUT:
+                part_limit = min(part_limit, optional_limits.max_output_bytes)
+        if len(redacted) > part_limit:
             truncated = True
-        redacted = redacted[:remaining]
+        redacted = redacted[:part_limit]
         if not redacted:
             truncated = True
             break
@@ -2628,6 +2596,34 @@ def handle_observe(
                 else store.allocate_hook_ordinal(workspace_commitment, session_commitment)
             )
 
+            classification_payload = dict(payload if _content_payload is None else _content_payload)
+            # Native adapters have already extracted outcome facts from their
+            # exact host contract. Keep those facts beside the original tool
+            # input for conservative classification, without persisting prose.
+            for outcome_key in ("success", "denied", "exit_status", "result_status"):
+                if outcome_key in payload:
+                    classification_payload[outcome_key] = payload[outcome_key]
+            classification = classify_observation(classification_payload, resolved_event)
+            pressure = store.update_selection_pressure(workspace_commitment, session_commitment)
+            selected_focused = pressure.effective_mode is ObservationMode.FOCUSED
+            if pressure.transition is not None and pressure.transition.notice in {
+                "downgrade",
+                "recovery",
+            }:
+                _stderr_line(
+                    "yoetz_observation_detail: "
+                    f"selected={pressure.selected_mode.value} effective={pressure.effective_mode.value} "
+                    f"transition={pressure.transition.notice} pressure={pressure.dimension.value}"
+                )
+            # A protected event is a conservative workspace subject-state
+            # boundary. Flush earlier accounts before its individual identity.
+            material_boundary = not classification.routine_candidate
+            flush_ok = store.flush_selected_admission(
+                workspace_commitment,
+                summary_builder=build_routine_read_summary,
+                force=material_boundary or resolved_event in {"SessionStart", "SessionEnd"},
+                material_boundary=material_boundary,
+            )
             envelope = map_hook_payload_to_envelope(
                 resolved_event,
                 payload,
@@ -2637,7 +2633,64 @@ def handle_observe(
                 source_generation=source_generation,
                 gap_codes=tuple(sorted(set(gap_codes), key=str.encode)),
                 source=source,
+                classification=classification,
             )
+            if not selected_focused and envelope.structural_payload.get("action") == "routine_read":
+                envelope = replace(
+                    envelope,
+                    structural_payload=JsonObject(
+                        {**envelope.structural_payload, "action": "routine_read_detailed"}
+                    ),
+                )
+            read_protected = classification.routine_candidate and store.read_is_protected(
+                workspace_commitment, session_commitment, envelope
+            )
+            if read_protected:
+                reference = store.read_protection_reference(
+                    workspace_commitment, session_commitment, envelope
+                )
+                protected_fields: dict[str, DomainJsonValue] = {
+                    **envelope.structural_payload,
+                    "action": "evidence_linked_read",
+                }
+                if reference is not None:
+                    protected_fields["protection_reference"] = reference
+                envelope = replace(envelope, structural_payload=JsonObject(protected_fields))
+            route = load_mapping(codex_session_id, _state=_state)
+            authority = store.content_capture_authority(workspace_commitment)
+            selection_fence = ""
+            if route is not None and authority is not None and authority.active:
+                envelope = replace(
+                    envelope,
+                    structural_payload=JsonObject(
+                        {
+                            **envelope.structural_payload,
+                            "selection_task_id": route.yoetz_task_id,
+                            "selection_session_id": route.yoetz_session_id,
+                            "selection_writer_id": route.yoetz_writer_id,
+                            "selection_authority_generation": authority.generation,
+                        }
+                    ),
+                )
+                selection_fence = canonical_digest(
+                    JsonObject(
+                        {
+                            "task": route.yoetz_task_id,
+                            "session": route.yoetz_session_id,
+                            "writer": route.yoetz_writer_id,
+                            "host_session": session_commitment,
+                            "source": source.value,
+                            "generation": source_generation,
+                            "authority": authority.generation,
+                            "epoch": store.selection_epoch(workspace_commitment),
+                            "delegate": envelope.structural_payload.get("subagent_id"),
+                            "parent_call": envelope.structural_payload.get("parent_tool_call_id"),
+                            "classification": classification.version,
+                            "mode": pressure.effective_mode.value,
+                        }
+                    )
+                )
+            gap_codes.extend(store.selection_history_gaps(workspace_commitment, envelope))
             # Claude/Cursor native content requires the explicit profile emitted
             # by the rendered artifact and its matching consent arm. Codex hook
             # content is the profileless arm of the structural observation grant;
@@ -2671,7 +2724,45 @@ def handle_observe(
                     envelope,
                     gap_codes=tuple(sorted(set(gap_codes), key=str.encode)),
                 )
-            if not content_authorized:
+            # Pair first, before extracting optional bytes. An orphan, failure
+            # or unknown outcome must remain individually observable.
+            local_result, envelope = store.ingest_with_pairing(
+                envelope,
+                workspace_commitment=workspace_commitment,
+                pairing_mode=pairing_mode,
+                correlation_id=correlation,
+                source=source,
+                session_commitment=session_commitment,
+                source_generation=source_generation,
+                is_pre_event=_is_pre_event(resolved_event),
+                is_post_event=_is_post_event(resolved_event),
+            )
+            optional_routine = (
+                not read_protected
+                and classification.routine_candidate
+                and (resolved_event == "PreToolUse" or classification.proven_routine_success)
+            )
+            summary_eligible = (
+                selected_focused
+                and bool(selection_fence)
+                and optional_routine
+                and all(
+                    gap in {"content_unselected", "observation_input_loss"}
+                    for gap in envelope.gap_codes
+                )
+                and flush_ok
+            )
+            omit_optional_content = optional_routine and (
+                summary_eligible or not pressure.content_allowed
+            )
+            if omit_optional_content and not summary_eligible:
+                envelope = replace(
+                    envelope,
+                    gap_codes=tuple(
+                        sorted({*envelope.gap_codes, "optional_observation_detail_omitted"})
+                    ),
+                )
+            if not content_authorized or omit_optional_content or not flush_ok:
                 content_chunks, content_truncated = (), False
             else:
                 content_chunks, content_truncated = _visible_content_chunks(
@@ -2679,6 +2770,9 @@ def handle_observe(
                     payload if _content_payload is None else _content_payload,
                     envelope=envelope,
                     workspace_locator=workspace_locator,
+                    optional_limits=(
+                        mode_limits(pressure.effective_mode) if optional_routine else None
+                    ),
                 )
             if content_truncated:
                 envelope = replace(
@@ -2731,20 +2825,6 @@ def handle_observe(
                 else _HOOK_DRAIN_BUDGET_SECONDS
             )
 
-            # Local durable ingest and pairing admission share one store lock.
-            # The returned envelope is authoritative: a paired orphan's gap is
-            # present before any outbox row can be materialized.
-            local_result, envelope = store.ingest_with_pairing(
-                envelope,
-                workspace_commitment=workspace_commitment,
-                pairing_mode=pairing_mode,
-                correlation_id=correlation,
-                source=source,
-                session_commitment=session_commitment,
-                source_generation=source_generation,
-                is_pre_event=_is_pre_event(resolved_event),
-                is_post_event=_is_post_event(resolved_event),
-            )
             if content_chunks and local_result.disposition.value != "accepted":
                 # The plaintext chunks have no durable retry carrier. A local
                 # cursor/consent rejection therefore needs the same explicit
@@ -2759,15 +2839,41 @@ def handle_observe(
             if local_result.disposition.value == "accepted" and self_observation_deliverable(
                 resolved_event, envelope.structural_payload
             ):
-                overflow = store.enqueue_outbox(workspace_commitment, codex_session_id, envelope)
-                if overflow is not None:
+                plan = store.prepare_selected_admission(
+                    workspace_commitment,
+                    codex_session_id,
+                    envelope,
+                    fence=selection_fence,
+                    focused=summary_eligible,
+                    routine_candidate=classification.routine_candidate,
+                    proven_routine_success=classification.proven_routine_success,
+                    summary_builder=build_routine_read_summary,
+                )
+                admitted = flush_ok and store.commit_selected_admission(
+                    workspace_commitment,
+                    plan,
+                    incoming=envelope,
+                    newly_observed=True,
+                )
+                if not admitted:
+                    if not flush_ok:
+                        store.record_admission_loss(workspace_commitment, envelope)
                     if content_chunks:
                         store.note_coverage_gap(
                             workspace_commitment,
                             ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
                         )
-                    _stderr_line(f"hook_observe_degraded: {overflow}")
-                    record_hook_diagnostic("outbox_overflow", resolved_event, _state=_state)
+                    if store.consume_admission_loss_notice(workspace_commitment):
+                        _stderr_line(
+                            "hook_observe_degraded: outbox_overflow; loss accounted; see observe status"
+                        )
+                        record_hook_diagnostic("outbox_overflow", resolved_event, _state=_state)
+                elif read_protected and _is_post_event(resolved_event):
+                    store.consume_read_protection(
+                        workspace_commitment, session_commitment, envelope
+                    )
+            elif local_result.disposition.value == "accepted":
+                store.note_selection_omission(workspace_commitment)
 
             # Persist session end so lifecycle can report STOPPED once every bound
             # session has ended.
@@ -3248,7 +3354,7 @@ def handle_observe(
         return 0
     except BaseException:
         with contextlib.suppress(BaseException):
-            _stderr_line("hook_observe_degraded: observe")
+            _stderr_line("hook_observe_degraded: observe; observation durability unknown")
         with contextlib.suppress(BaseException):
             record_hook_diagnostic("observe", event_name or "observe", _state=_state)
         emitted = False

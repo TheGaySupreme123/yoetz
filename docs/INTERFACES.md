@@ -3698,13 +3698,56 @@ and quarantined delivery failures so terminal causes remain visible after the ro
 outbox. Hook-driven drains also write the bounded hook diagnostic, while manual and supervisor
 drains are visible through status rather than being mislabeled as hook activity (issue #540).
 
-Routine-read materialization follows ADR-022's rate policy. A service-owned structural
-`action=routine_read` label is derived only for the closed direct-read tool set or a conservatively
-parsed, single read-only shell command; host-supplied action text cannot select it. Path-qualified
-executables, Git `--output` / `--ext-diff`, explicit `success=false` or `denied=true`, and other
-ambiguous shell input stay ordinary observations. Both the pre-event and a successful or
-status-unknown post-event remain in the bounded local observation store but do not append
-task-ledger events. A failed post-event materializes normally.
+Observation selection follows ADR-029 and retains ADR-022's individual outcome rules. The shared
+`ObservationClassification` derives `routine_candidate`, `proven_routine_success`, protection and
+closed reason tokens from supported host structure and conservative single-command parsing.
+Caller action labels cannot select `routine_read`. Unknown outcomes, nonzero read results,
+denials, cancellation, ambiguous shell syntax, mutation flags and declared verification remain
+individual observations. An unknown result is never treated as a successful read.
+
+Focused is the default detail mode. `AdmissionBuffer` retains minimum pre identities and proven
+routine successes before optional content extraction and outbox admission. At most 16 completed
+calls or 32 inputs contribute to one `RoutineReadSummary`. Summary members retain exact native
+identity, source cursor, phase and observation time; the summary binds their digest, original
+route, authority generation, selection fence, and explicit structural-only content scope. It
+cannot cross source, session, delegate, generation, authority or material-state boundaries.
+Summary delivery creates one metadata-only evidence record with `routine_read_detail_omitted`
+coverage, not a per-call content or verification claim. A changed task route is rejected before
+the observation cursor advances.
+
+`ObservationSelection` separates Focused/Detailed from the 512/2,048/8,192 count profiles.
+`ObservationSelectionSettings` resolves a live session override, then an explicit workspace
+selection, then the default. Each profile also has finite queue/state byte bounds and protected
+reserves. `PressureSnapshot` drives future optional-content reduction and temporary Detailed to
+Focused behavior from count, bytes, age, pending attempts and capture backlog. Recovery requires
+low pressure for the policy dwell and a still-valid owner selection. Status reads do not start
+recovery or write notices. Background maintenance flushes due accounts and advances recovery.
+The optional `ObservationStatus.selection_runtime` local-control projection carries selected and
+effective values, scope/expiry, finite budgets and separate observed, admitted, summarized,
+delivered and intentionally omitted counters. The CLI and terminal interface expose this
+workspace-bound projection. Ordinary cooperative MCP `status` remains task-ledger scoped and
+does not expose or mutate workspace observation selection; use the local observation controls.
+
+Local control schema `2.6.0` adds this bounded observation projection. The frozen `2.5.0`
+schemas remain available for local validation and historical fixtures. A client and service with
+different schema manifests are rejected during the authenticated handshake, so both peers must
+run the `2.6.0` manifest to exchange the new projection; the service does not silently
+down-convert it to `2.5.0`. Selection state upgrades preserve pending delivery and default
+historical counters to zero, so the new accounting describes locally ingested inputs since the
+selection upgrade and never estimates older traffic.
+
+`protect_next_reads` is a bounded request to retain read evidence linked to an obligation, claim
+or finding; it grants no content or disclosure authority. `promote_buffered_observation` can retain
+an individual native identity while its successful routine account remains buffered. It reports
+historical content as `not_retained`; reacquired content is new evidence at a new state and time.
+After the buffer is delivered, promotion reports `promotion_window_closed` rather than inventing
+historical evidence.
+
+The stages observed, buffered/retained, summarized, delivered and selected for a check are
+distinct. Intentional detail omission is separate from non-replayable rejection. Bounded loss
+ranges, their aggregate commitment and historical count survive current-pressure recovery.
+Capture-ticket count and byte limits remain independent from structural capacity; partial or
+unknown per-task backlog projections never assert complete workspace capture coverage.
 
 Yoetz-owned tool observation follows ADR-022 decision 18 (issue #564). The hook ingress for every
 host and the Codex stream reconciler recognize Yoetz's own tools under every host spelling

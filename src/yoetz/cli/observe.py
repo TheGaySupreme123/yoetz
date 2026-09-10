@@ -10,13 +10,16 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final, ParamSpec, Protocol, cast
+from typing import Final, Literal, ParamSpec, Protocol, cast
 
 import typer
 
 from yoetz.adapters.approved_checks import ApprovedCheckRunner
 from yoetz.adapters.git_subject_state import GitSubjectStateAdapter, open_local_workspace
-from yoetz.adapters.integrations.codex_lifecycle import load_mapping
+from yoetz.adapters.integrations.codex_lifecycle import (
+    load_mapping,
+    validate_codex_session_id,
+)
 from yoetz.adapters.integrations.codex_marketplace import inspect_activation
 from yoetz.adapters.integrations.codex_session_stream import (
     CodexSessionStreamLocator,
@@ -55,14 +58,31 @@ from yoetz.domain.observation import (
     observation_ingest_result_from_json,
     observation_status_to_json,
 )
+from yoetz.domain.observation_budget import (
+    BUDGET_POLICY_VERSION,
+    BUDGET_VALIDATION_STATUS,
+    BudgetLimits,
+    mode_limits,
+)
 from yoetz.domain.observation_profiles import validate_content_capture_profile
-from yoetz.domain.values import JsonObject
+from yoetz.domain.observation_selection import OBSERVATION_SELECTION_VERSION
+from yoetz.domain.observation_settings import (
+    DEFAULT_OBSERVATION_SELECTION,
+    ObservationCapacityProfile,
+    ObservationDetailProfile,
+    ObservationSelection,
+    ObservationSelectionResolution,
+    ObservationSelectionSetting,
+    observation_selection_settings_to_json,
+    resolve_observation_selection,
+)
+from yoetz.domain.values import JsonObject, Timestamp, validate_sha256_digest
 from yoetz.domain.values import JsonValue as DomainJsonValue
 from yoetz.ports.control import ControlClientKind, ControlError
 from yoetz.ports.integrations import IntegrationScope, IntegrationTarget
 from yoetz.ports.subject_state import SubjectStateCaptureCommand, SubjectStateFormat
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
-from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 from yoetz.service.client import connect_service_on_demand
 
 __all__ = [
@@ -70,6 +90,13 @@ __all__ = [
     "enable_observation_content",
     "disable_observation_content",
     "observation_content_status",
+    "observation_selection_preview",
+    "observation_selection_status",
+    "protect_observation_read",
+    "promote_observation",
+    "selection_status_payload",
+    "set_observation_selection",
+    "revoke_observation_selection",
     "drain_observation",
     "observe_checks_preview",
     "observe_checks_revoke",
@@ -85,6 +112,7 @@ __all__ = [
 
 _SETUP_PROBE_SESSION: Final = "yoetz-setup-probe-session"
 _DRAIN_DEADLINE_MS: Final = 3_000
+_SELECTION_PREVIEW_SCHEMA: Final = "yoetz.observation-selection-preview/1"
 
 
 class _DrainClient(Protocol):
@@ -278,6 +306,354 @@ class _ContentCaptureFacts:
         return bool(self.effective_profiles)
 
 
+def _selection_from_cli(detail: str, capacity: str) -> ObservationSelection:
+    """Parse the closed owner-control vocabulary without trusting free text."""
+
+    try:
+        parsed_detail = ObservationDetailProfile.from_value(detail.casefold())
+        capacity_value = {
+            "standard": "512",
+            "larger": "2048",
+            "largest": "8192",
+        }.get(capacity.casefold(), capacity.casefold())
+        parsed_capacity = ObservationCapacityProfile.from_value(capacity_value)
+        return ObservationSelection(parsed_detail, parsed_capacity)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "Observation selection is invalid.",
+            retryable=False,
+        ) from exc
+
+
+def _selection_expiry(value: str | None) -> Timestamp | None:
+    if value is None:
+        return None
+    try:
+        return Timestamp(value)
+    except (TypeError, ValueError) as exc:
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "Observation selection expiry is invalid.",
+            retryable=False,
+        ) from exc
+
+
+def _validated_selection_session_id(value: str) -> str:
+    """Validate the complete host session identity before deriving a commitment."""
+
+    try:
+        return validate_codex_session_id(value)
+    except (ProtocolValueError, TypeError, ValueError) as exc:
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "Observation session id is invalid.",
+            retryable=False,
+        ) from exc
+
+
+def _selection_session_commitment(
+    store: LocalObservationStore,
+    session_id: str | None,
+) -> str | None:
+    if session_id is None:
+        return None
+    return store.session_commitment(_validated_selection_session_id(session_id))
+
+
+def _selection_resolution_payload(
+    resolution: ObservationSelectionResolution,
+) -> JsonObject:
+    selection = resolution.selection
+    return JsonObject(
+        {
+            "detail": selection.detail.value,
+            "mode": selection.detail.value,
+            "capacity": int(selection.capacity),
+            "capacity_profile": selection.capacity.name.casefold(),
+            "queue_count": selection.queue_count,
+            "origin": resolution.origin,
+            "expires_at": None if resolution.expires_at is None else resolution.expires_at.wire,
+        }
+    )
+
+
+def _selection_accounting_payload(
+    store: LocalObservationStore,
+    commitment: str,
+) -> JsonObject:
+    accounting = getattr(store, "selection_accounting", None)
+    if not callable(accounting):
+        return JsonObject({})
+    try:
+        raw = accounting(commitment)
+    except OSError, ProtocolValueError, TypeError, ValueError, RuntimeError:
+        return JsonObject({})
+    if not isinstance(raw, Mapping):
+        return JsonObject({})
+    return JsonObject(cast(Mapping[str, JsonValue], raw))
+
+
+def _selection_authority_digest(
+    store: LocalObservationStore,
+    commitment: str,
+) -> str:
+    """Commit the current local consent fence without reading content."""
+
+    consent = store.consent_for(commitment)
+    payload: dict[str, JsonValue] = {
+        "kind": "observation-selection-authority/v1",
+        "workspace_commitment": commitment,
+        "runtime_gate_generation": store.runtime_gate_generation(),
+        "consent": None,
+    }
+    if consent is not None:
+        payload["consent"] = JsonObject(
+            {
+                "workspace_commitment": consent.workspace_commitment,
+                "granted_at": consent.granted_at.wire,
+                "revoked_at": None if consent.revoked_at is None else consent.revoked_at.wire,
+                "paused": consent.paused,
+                "content_capture_profiles": consent.content_capture_profiles,
+            }
+        )
+    return canonical_digest(JsonObject(payload))
+
+
+def _selection_runtime_payload(
+    store: LocalObservationStore,
+    commitment: str,
+    session_commitment: str | None,
+) -> JsonObject | None:
+    """Read the adapter's bounded pressure projection when this revision provides it."""
+
+    runtime_status = getattr(store, "selection_runtime_status", None)
+    if not callable(runtime_status):
+        return None
+    try:
+        raw = runtime_status(commitment, session_commitment)
+    except OSError, ProtocolValueError, TypeError, ValueError, RuntimeError:
+        return None
+    if not isinstance(raw, Mapping):
+        return None
+    snapshot = dict(cast(Mapping[str, JsonValue], raw))
+    budget_policy_version = snapshot.get("policy_version", BUDGET_POLICY_VERSION)
+    selected_mode = snapshot.get("selected_mode", DEFAULT_OBSERVATION_SELECTION.detail.value)
+    effective_mode = snapshot.get("effective_mode", selected_mode)
+    selected_capacity = snapshot.get(
+        "selected_capacity", int(DEFAULT_OBSERVATION_SELECTION.capacity)
+    )
+    effective_capacity = snapshot.get("effective_capacity", selected_capacity)
+    selected_profile = _selection_capacity_profile(selected_capacity)
+    effective_profile = _selection_capacity_profile(effective_capacity)
+    origin = snapshot.get("selection_origin", "default")
+    expires_at = snapshot.get("selection_expires_at")
+    selected = JsonObject(
+        {
+            "detail": selected_mode,
+            "mode": selected_mode,
+            "capacity": selected_capacity,
+            "capacity_profile": selected_profile,
+            "queue_count": selected_capacity,
+            "origin": origin,
+            "expires_at": expires_at,
+        }
+    )
+    effective = JsonObject(
+        {
+            "detail": effective_mode,
+            "mode": effective_mode,
+            "capacity": effective_capacity,
+            "capacity_profile": effective_profile,
+            "queue_count": effective_capacity,
+            "origin": origin,
+            "expires_at": expires_at,
+        }
+    )
+    snapshot["selected"] = selected
+    snapshot["effective"] = effective
+    snapshot["effective_reason"] = (
+        "pressure_downgrade" if selected_mode != effective_mode else "selected"
+    )
+    snapshot["accounting"] = _selection_accounting_payload(store, commitment)
+    snapshot["session_commitment"] = session_commitment
+    snapshot["session_scope"] = session_commitment is not None
+    snapshot["policy_version"] = OBSERVATION_SELECTION_VERSION
+    snapshot["budget_policy_version"] = budget_policy_version
+    snapshot["validation_status"] = snapshot.get("validation_status", BUDGET_VALIDATION_STATUS)
+    snapshot["content_authority_changed"] = False
+    snapshot["privacy_authority_changed"] = False
+    return JsonObject(snapshot)
+
+
+def _selection_capacity_profile(value: object) -> str:
+    try:
+        return ObservationCapacityProfile.from_value(value).name.casefold()
+    except TypeError, ValueError:
+        return ObservationCapacityProfile.STANDARD.name.casefold()
+
+
+def _selection_preview_plan(
+    store: LocalObservationStore,
+    commitment: str,
+    selection: ObservationSelection,
+    *,
+    session_commitment: str | None,
+    scope: Literal["workspace", "session"],
+    expires_at: Timestamp | None,
+) -> tuple[JsonObject, str]:
+    """Build the exact owner-choice preimage used by preview and apply."""
+
+    if scope not in {"workspace", "session"}:
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "Observation selection scope is invalid.",
+            retryable=False,
+        )
+    if scope == "session" and session_commitment is None:
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "A session id is required for a temporary selection.",
+            retryable=False,
+        )
+    if scope == "workspace" and session_commitment is not None:
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "A workspace selection cannot carry a session id.",
+            retryable=False,
+        )
+
+    settings = store.selection_settings_for(commitment)
+    # Constructing the setting validates expiry against the store's trusted wall clock and gives
+    # the aggregate-capacity calculation the same candidate that apply will persist.  ``set_at``
+    # is deliberately omitted from the digest: it is bookkeeping, while the owner-selected
+    # selection/scope/expiry and the current durable setting/authority generations are the
+    # reviewed inputs.
+    now_fn = getattr(store, "_wall_timestamp", None)
+    if not callable(now_fn):
+        raise PublicOperationError(
+            PublicErrorCode.SERVICE_UNAVAILABLE,
+            "Observation selection timing is unavailable.",
+            retryable=True,
+        )
+    set_at = cast(Callable[[], Timestamp], now_fn)()
+    try:
+        candidate = ObservationSelectionSetting(selection, set_at, expires_at)
+    except (ProtocolValueError, TypeError, ValueError) as exc:
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "Observation selection expiry is invalid or already elapsed.",
+            retryable=False,
+        ) from exc
+    proposed = (
+        settings.with_workspace(candidate)
+        if scope == "workspace"
+        else settings.with_session(cast(str, session_commitment), candidate)
+    )
+    aggregate = proposed.aggregate_capacity(now=set_at)
+    limits = BudgetLimits.for_profile(int(aggregate))
+    mode = mode_limits(selection.detail)
+    current = resolve_observation_selection(
+        settings,
+        session_commitment=session_commitment,
+    )
+    runtime = _selection_runtime_payload(store, commitment, session_commitment)
+    pressure = "healthy" if runtime is None else runtime.get("pressure_state", "healthy")
+    accounting = _selection_accounting_payload(store, commitment)
+    authority_digest = _selection_authority_digest(store, commitment)
+    settings_digest = canonical_digest(observation_selection_settings_to_json(settings))
+    costs: JsonObject = JsonObject(
+        {
+            "queue_count_limit": limits.queue_count,
+            "queue_bytes_limit": limits.queue_bytes,
+            "state_bytes_limit": limits.state_bytes,
+            "pending_attempt_limit": limits.pending_attempts,
+            "capture_ticket_limit": limits.capture_tickets,
+            "capture_bytes_limit": limits.capture_bytes,
+            "protected_count_reserve": limits.protected_count,
+            "protected_bytes_reserve": limits.protected_bytes,
+            "session_fair_share": limits.session_fair_share,
+            "session_fair_share_bytes": limits.session_fair_share_bytes,
+            "max_records_per_summary": mode.max_records_per_summary,
+            "max_optional_bytes": mode.max_optional_bytes,
+            "max_input_bytes": mode.max_input_bytes,
+            "max_output_bytes": mode.max_output_bytes,
+        }
+    )
+    # The acceptance digest binds only owner-selected inputs and stable policy
+    # facts. Live pressure/accounting is shown below for the owner's decision,
+    # but an incoming hook or a drain between preview and apply must not make
+    # the exact owner choice unusable. A changed setting or consent fence does
+    # invalidate the digest and requires a fresh review.
+    stable_plan = JsonObject(
+        {
+            "schema": _SELECTION_PREVIEW_SCHEMA,
+            "selection_policy_version": OBSERVATION_SELECTION_VERSION,
+            "budget_policy_version": BUDGET_POLICY_VERSION,
+            "validation_status": BUDGET_VALIDATION_STATUS,
+            "workspace_commitment": commitment,
+            "scope": scope,
+            "session_commitment": session_commitment,
+            "selection_settings_digest": settings_digest,
+            "authority_generation": authority_digest,
+            "requested_selection": _selection_resolution_payload(
+                ObservationSelectionResolution(selection, scope, expires_at)
+            ),
+            "current_selection": _selection_resolution_payload(current),
+            "aggregate_capacity": aggregate.value,
+            "aggregate_capacity_profile": aggregate.name.casefold(),
+            "costs": costs,
+            "content_authority_changed": False,
+            "privacy_authority_changed": False,
+        }
+    )
+    display_plan = JsonObject(
+        {
+            **dict(stable_plan),
+            "pressure_state": pressure,
+            "accounting": accounting,
+        }
+    )
+    return display_plan, canonical_digest(stable_plan)
+
+
+def selection_status_payload(
+    store: LocalObservationStore,
+    commitment: str,
+    *,
+    session_id: str | None = None,
+) -> JsonObject:
+    """Build a read-only selected/effective projection for owner status surfaces."""
+
+    session_commitment = _selection_session_commitment(store, session_id)
+    settings = store.selection_settings_for(commitment)
+    resolution = resolve_observation_selection(
+        settings,
+        session_commitment=session_commitment,
+    )
+    runtime = _selection_runtime_payload(store, commitment, session_commitment)
+    if runtime is not None:
+        return runtime
+    selected = _selection_resolution_payload(resolution)
+    # Keep this fallback structural and conservative when an older local store has no pressure
+    # projection: selection alone never widens content or privacy authority.
+    effective = selected
+    accounting = _selection_accounting_payload(store, commitment)
+    return JsonObject(
+        {
+            "policy_version": OBSERVATION_SELECTION_VERSION,
+            "selected": selected,
+            "effective": effective,
+            "effective_reason": "selected",
+            "session_scope": session_id is not None,
+            "session_commitment": session_commitment,
+            "accounting": accounting,
+            "privacy_authority_changed": False,
+            "content_authority_changed": False,
+        }
+    )
+
+
 def _content_capture_facts(store: LocalObservationStore, commitment: str) -> _ContentCaptureFacts:
     """Read the local consent and runtime fences as one status snapshot."""
 
@@ -332,6 +708,7 @@ def observe_status(
     consent = store.consent_for(commitment)
     content_facts = _content_capture_facts(store, commitment)
     content_profiles = content_facts.requested_profiles
+    selection_status = selection_status_payload(store, commitment)
     with contextlib.suppress(Exception):
         store.refresh_advice(commitment)
     status = store.status(ObservationStatusQuery(commitment))
@@ -401,6 +778,7 @@ def observe_status(
                 "content_capture_enabled": content_facts.enabled,
                 "content_capture_consent_active": content_facts.consent_active,
                 "content_capture_runtime_enabled": content_facts.runtime_enabled,
+                "selection": selection_status,
                 "status": observation_status_to_json(status),
                 "advice": advice_payload,
                 "undelivered_count": undelivered,
@@ -422,6 +800,7 @@ def observe_status(
     payload: dict[str, JsonValue] = {
         "workspace_commitment": commitment,
         "consent": consent_label,
+        "selection": canonical_encode(selection_status).decode("utf-8"),
         "content_capture_scope": "ordinary profiles; Codex hooks follow observation consent",
         "content_profiles": ",".join(content_profiles) if content_profiles else "none",
         "effective_content_profiles": (
@@ -876,6 +1255,371 @@ def observation_content_status(
             + "); Codex hook capture follows observation consent. "
             "This status does not prove captured evidence or semantic selection."
         )
+    return 0
+
+
+@_bounded_operation("selection_status")
+def observation_selection_status(
+    *,
+    workspace: str,
+    session_id: str | None = None,
+    json_output: bool = False,
+    _state: Path | None = None,
+) -> int:
+    """Show selected/effective detail and capacity without changing state."""
+
+    store = LocalObservationStore(_state=_state)
+    commitment = store.workspace_commitment(str(_resolve_workspace(workspace)))
+    payload = selection_status_payload(store, commitment, session_id=session_id)
+    if json_output:
+        _emit(payload, json_output=True)
+    else:
+        selected = cast(Mapping[str, JsonValue], payload["selected"])
+        effective = cast(Mapping[str, JsonValue], payload["effective"])
+        accounting = payload.get("accounting")
+        accounting_map: Mapping[str, JsonValue] = (
+            cast(Mapping[str, JsonValue], accounting) if isinstance(accounting, Mapping) else {}
+        )
+
+        def counter(name: str) -> str:
+            value = accounting_map.get(name)
+            return str(value) if type(value) is int else "unknown"
+
+        typer.echo(
+            "observation_selection_status:"
+            f"selected={selected.get('mode')}/{selected.get('capacity_profile')}; "
+            f"effective={effective.get('mode')}/{effective.get('capacity_profile')}; "
+            f"origin={selected.get('origin')}; reason={payload['effective_reason']}; "
+            f"pressure={payload.get('pressure_state', 'unknown')}; "
+            "accounting="
+            f"observed:{counter('observed_count')},"
+            f"admitted:{counter('admitted_input_count')},"
+            f"delivered:{counter('delivered_input_count')},"
+            f"summarized:{counter('summarized_input_count')},"
+            f"omitted:{counter('intentionally_omitted_input_count')},"
+            f"unrecoverable:{counter('unrecoverable_input_count')}; "
+            "content_authority_unchanged; privacy_authority_unchanged"
+        )
+    return 0
+
+
+@_bounded_operation("selection_preview")
+def observation_selection_preview(
+    *,
+    workspace: str,
+    detail: str,
+    capacity: str,
+    session_id: str | None = None,
+    persist: bool = False,
+    expires_at: str | None = None,
+    json_output: bool = False,
+    _state: Path | None = None,
+) -> int:
+    """Preview a detail/capacity choice without changing local state."""
+
+    if persist and session_id is not None:
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "A workspace selection cannot carry a session id.",
+            retryable=False,
+        )
+    store = LocalObservationStore(_state=_state)
+    commitment = store.workspace_commitment(str(_resolve_workspace(workspace)))
+    selection = _selection_from_cli(detail, capacity)
+    expiry = _selection_expiry(expires_at)
+    scope: Literal["workspace", "session"] = "workspace" if persist else "session"
+    session_commitment = None if persist else _selection_session_commitment(store, session_id)
+    plan, preview_digest = _selection_preview_plan(
+        store,
+        commitment,
+        selection,
+        session_commitment=session_commitment,
+        scope=scope,
+        expires_at=expiry,
+    )
+    payload: Mapping[str, JsonValue] = {
+        **dict(plan),
+        "preview": True,
+        "preview_digest": preview_digest,
+        "acceptance": "explicit_preview_digest",
+        "apply_requires_owner": True,
+        "capacity_validation": "provisional",
+        "next_command": (
+            "yoetz observe selection-apply --workspace <workspace> "
+            f"--detail {detail.casefold()} --capacity {capacity.casefold()} "
+            f"{'--persist ' if persist else '--session-id <session-id> '}"
+            f"--accept --preview-digest {preview_digest}"
+        ),
+    }
+    _emit(payload, json_output=json_output)
+    return 0
+
+
+@_bounded_operation("selection_apply")
+def set_observation_selection(
+    *,
+    workspace: str,
+    detail: str,
+    capacity: str,
+    session_id: str | None = None,
+    persist: bool = False,
+    expires_at: str | None = None,
+    accept: bool = False,
+    preview_digest: str | None = None,
+    json_output: bool = False,
+    _state: Path | None = None,
+) -> int:
+    """Apply an owner-selected setting after exact preview-digest acceptance."""
+
+    if persist and session_id is not None:
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "A workspace selection cannot carry a session id.",
+            retryable=False,
+        )
+    store = LocalObservationStore(_state=_state)
+    commitment = store.workspace_commitment(str(_resolve_workspace(workspace)))
+    selection = _selection_from_cli(detail, capacity)
+    expiry = _selection_expiry(expires_at)
+    scope: Literal["workspace", "session"] = "workspace" if persist else "session"
+    session_commitment = None if persist else _selection_session_commitment(store, session_id)
+    plan, expected_digest = _selection_preview_plan(
+        store,
+        commitment,
+        selection,
+        session_commitment=session_commitment,
+        scope=scope,
+        expires_at=expiry,
+    )
+    if not accept or preview_digest is None:
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "An exact observation selection preview must be accepted with --accept and its "
+            "--preview-digest.",
+            retryable=False,
+        )
+    try:
+        validate_sha256_digest(preview_digest)
+    except (ProtocolValueError, TypeError, ValueError) as exc:
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "The observation selection preview digest is invalid.",
+            retryable=False,
+        ) from exc
+    if preview_digest != expected_digest:
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "The observation selection preview is stale; run selection-preview again.",
+            retryable=False,
+        )
+    setting = (
+        store.set_workspace_selection(commitment, selection, expires_at=expiry)
+        if persist
+        else store.set_session_selection(
+            commitment,
+            cast(str, session_commitment),
+            selection,
+            expires_at=expiry,
+        )
+    )
+    payload: Mapping[str, JsonValue] = {
+        **dict(plan),
+        "workspace_commitment": commitment,
+        "selection": _selection_resolution_payload(
+            ObservationSelectionResolution(selection, scope, setting.expires_at)
+        ),
+        "scope": scope,
+        "session_commitment": session_commitment,
+        "preview_digest": expected_digest,
+        "accepted_preview_digest": preview_digest,
+        "applied": True,
+        "capacity_validation": "provisional",
+        "content_authority_changed": False,
+        "privacy_authority_changed": False,
+    }
+    if json_output:
+        _emit(payload, json_output=True)
+    else:
+        typer.echo(
+            "observation_selection_applied:"
+            f"scope={scope}; detail={selection.detail.value}; "
+            f"capacity={selection.capacity.name.casefold()}({selection.queue_count}); "
+            "content_authority_unchanged; privacy_authority_unchanged"
+        )
+    return 0
+
+
+@_bounded_operation("selection_revoke")
+def revoke_observation_selection(
+    *,
+    workspace: str,
+    session_id: str | None = None,
+    persist: bool = False,
+    json_output: bool = False,
+    _state: Path | None = None,
+) -> int:
+    """Revoke one temporary or persisted selection and fall back safely."""
+
+    if persist and session_id is not None:
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "A workspace selection cannot carry a session id.",
+            retryable=False,
+        )
+    store = LocalObservationStore(_state=_state)
+    commitment = store.workspace_commitment(str(_resolve_workspace(workspace)))
+    if persist:
+        settings = store.clear_workspace_selection(commitment)
+        scope = "workspace"
+        session_commitment = None
+    else:
+        if session_id is None:
+            raise PublicOperationError(
+                PublicErrorCode.INVALID_REQUEST,
+                "A session id is required to revoke a temporary selection.",
+                retryable=False,
+            )
+        session_commitment = _selection_session_commitment(store, session_id)
+        assert session_commitment is not None
+        settings = store.clear_session_selection(commitment, session_commitment)
+        scope = "session"
+    resolution = resolve_observation_selection(
+        settings,
+        session_commitment=session_commitment,
+    )
+    payload: Mapping[str, JsonValue] = {
+        "workspace_commitment": commitment,
+        "scope": scope,
+        "session_commitment": session_commitment,
+        "revoked": True,
+        "fallback": _selection_resolution_payload(resolution),
+        "content_authority_changed": False,
+        "privacy_authority_changed": False,
+    }
+    _emit(payload, json_output=json_output)
+    return 0
+
+
+@_bounded_operation("protect_read")
+def protect_observation_read(
+    *,
+    workspace: str,
+    session_id: str,
+    reference: str,
+    count: int = 1,
+    expires_at: str | None = None,
+    json_output: bool = False,
+    _state: Path | None = None,
+) -> int:
+    """Protect the next bounded read identities for one active session.
+
+    This is a narrowing hint for early selection.  It does not grant native
+    content capture, privacy egress, or a provider route; the admission owner
+    still checks the current consent and authority generation.
+    """
+
+    if type(count) is not int or not 1 <= count <= 32:
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "Read protection count is outside its bound.",
+            retryable=False,
+        )
+    if type(reference) is not str or not reference:
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "Read protection reference is invalid.",
+            retryable=False,
+        )
+    store = LocalObservationStore(_state=_state)
+    commitment = store.workspace_commitment(str(_resolve_workspace(workspace)))
+    session_commitment = _selection_session_commitment(store, session_id)
+    assert session_commitment is not None
+    expiry = _selection_expiry(expires_at)
+    protect = getattr(store, "protect_next_reads", None)
+    if not callable(protect):
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "Read protection is unavailable.",
+            retryable=False,
+        )
+    try:
+        result = protect(
+            commitment,
+            session_commitment,
+            reference,
+            count=count,
+            expires_at=expiry,
+        )
+    except (ProtocolValueError, TypeError, ValueError) as exc:
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "Read protection request is invalid.",
+            retryable=False,
+        ) from exc
+    if isinstance(result, Mapping):
+        payload: Mapping[str, JsonValue] = cast(Mapping[str, JsonValue], result)
+    else:
+        payload = {
+            "workspace_commitment": commitment,
+            "session_commitment": session_commitment,
+            "reference": reference,
+            "count": count,
+            "expires_at": None if expiry is None else expiry.wire,
+            "protected": True,
+        }
+    _emit(
+        {
+            **dict(payload),
+            "content_authority_changed": False,
+            "privacy_authority_changed": False,
+        },
+        json_output=json_output,
+    )
+    return 0
+
+
+@_bounded_operation("promote")
+def promote_observation(
+    *,
+    workspace: str,
+    source_identity: str,
+    json_output: bool = False,
+    _state: Path | None = None,
+) -> int:
+    """Promote retained native identity metadata when it is still available."""
+
+    if type(source_identity) is not str or not source_identity:
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "Observation source identity is invalid.",
+            retryable=False,
+        )
+    store = LocalObservationStore(_state=_state)
+    commitment = store.workspace_commitment(str(_resolve_workspace(workspace)))
+    promote = getattr(store, "promote_buffered_observation", None)
+    if not callable(promote):
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "Observation promotion is unavailable.",
+            retryable=False,
+        )
+    try:
+        result = promote(commitment, source_identity)
+    except (ProtocolValueError, TypeError, ValueError) as exc:
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "Observation promotion request is invalid.",
+            retryable=False,
+        ) from exc
+    if isinstance(result, Mapping):
+        payload: Mapping[str, JsonValue] = cast(Mapping[str, JsonValue], result)
+    else:
+        payload = {
+            "workspace_commitment": commitment,
+            "source_identity": source_identity,
+            "promoted": bool(result),
+        }
+    _emit(payload, json_output=json_output)
     return 0
 
 

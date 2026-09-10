@@ -383,6 +383,13 @@ class MemoryStartCatalogAdapter:
                 raise _error(PublicErrorCode.STORAGE_CORRUPT)
         return _route_value(record)
 
+    async def recovery_routes(self) -> tuple[TaskRoute, ...]:
+        """Return the complete bounded route inventory for ready recovery."""
+
+        async with self._lock:
+            records = tuple(sorted(self._state.routes.values(), key=lambda item: item.task_id))
+        return tuple(_route_value(record) for record in records)
+
     async def session_binding(self, session_id: str) -> SessionBinding | None:
         try:
             session = validate_id(IdKind.SESSION, session_id)

@@ -166,3 +166,41 @@ reads the complete closure inventory without publishing. `yoetz closure-schema` 
 selection inputs; `--input <selection.json>` prepares one operation with fresh lowercase UUID-v4
 IDs, a dry-run publication where applicable, and a same-request recovery query. Review and submit
 explicitly. It never invents attempts, evidence, finding dispositions, or obligation satisfaction.
+
+### Protect an evidence-sensitive read
+
+If a later claim, obligation, or finding may depend on a read, protect the next read before the
+host call when possible. Use the exact current host session and an existing or planned structural
+reference with the supported CLI:
+
+```text
+yoetz observe protect-read --workspace /exact/project \
+  --session-id <host-session-id> --reference obl_<id> \
+  --count 1 --json
+```
+
+The reference must use the closed `obl_`, `clm_`, or `fnd_` form. Protection is a bounded narrowing
+of structural retention: at most 32 logical reads can be outstanding, the default lifetime is ten
+minutes, and `--expires-at` cannot extend that bound. It requires the active observation grant and
+the selected session, but it does not authorize content capture, privacy disclosure, a provider,
+credentials, or a network route. Increasing protection within these bounds is a narrower use of
+the existing grant and does not require a new permission decision.
+
+The hook binds the protection to the exact native read identity. A pre-event reserves that identity
+and its logical post consumes one slot; failures, denials, cancellation, partial or unknown
+outcomes, and missing posts remain individually visible. Never replace a protected read with a
+caller-supplied routine label or infer success from its content.
+
+If the read becomes relevant after classification but before the bounded buffer is delivered,
+promote its exact source identity:
+
+```text
+yoetz observe promote --workspace /exact/project \
+  --source-identity <source-identity> --json
+```
+
+Promotion retains the original structural identity, route, and observed time as an individual
+record. It only works while that identity is buffered. After delivery the result is
+`promotion_window_closed` with `content_availability: not_retained`; it cannot recover omitted or
+expired bytes. Rerun or reacquire the current state when needed and record it as new evidence with
+its new time and subject state. Do not use that rerun to prove the historical state.

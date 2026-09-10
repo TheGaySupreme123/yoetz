@@ -518,6 +518,84 @@ descriptors remain limited to the frozen v1.0 draft union. The CLI command uses 
 request and service boundary. Neither Codex hooks nor imported observations synthesize, replace,
 or supersede claims.
 
+## Smart observation selection (issue #687)
+
+The Codex native hook path applies the shared deterministic observation selector before optional
+content extraction and outbox admission. **Focused/standard (512)** is the default. Proven
+successful routine reads, searches, and inventory calls may be represented by bounded summaries;
+the summary preserves the native identities and source positions it represents. Detailed keeps
+eligible routine calls as individual records while the effective pressure state permits it. The
+detail mode and the capacity profile are independent choices: `standard` (512), `larger` (2,048),
+and `largest` (8,192) are each valid with either mode. The larger profiles have finite provisional
+budgets; a selected count is not a sustained-throughput or host-acceptance claim.
+
+Failures, denials, cancellation, interrupted, partial, or unknown outcomes, edits and side effects,
+declared checks or negative verification, and reads protected for an obligation, claim, or finding remain
+individual. A `PreToolUse` identity is retained before its outcome is known; only a paired,
+proven-success read can enter a summary. Ambiguous shell composition, nonzero or conflicting
+outcomes, and caller-supplied `routine_read` labels stay protected. Codex session-stream records
+remain a separate structural source and are outside this native selection/content path.
+
+Use the owner controls after an exact preview:
+
+```text
+yoetz observe selection-preview --workspace /exact/project \
+  --detail detailed --capacity larger --session-id <codex-session-id> --json
+yoetz observe selection-apply --workspace /exact/project \
+  --detail detailed --capacity larger --session-id <codex-session-id> \
+  --accept --preview-digest <preview-digest> --json
+```
+
+The default is a temporary session override. Use `--persist` on both preview and apply, and omit
+`--session-id`, only when the owner wants a workspace default. `--expires-at` is an optional
+RFC3339 UTC deadline; `selection-status` reports selected and effective mode/capacity separately.
+Revoke with `selection-revoke` at the same scope. Expiry, revoke, lowering capacity, or pressure
+affects future optional admission; accepted observations continue to drain and are not rewritten
+to fit the new target. Selection does not change Codex hook deadlines, session-stream admission,
+content consent, repository privacy, provider, or network authority.
+
+To keep an upcoming read individually linked to a later claim, use the bounded narrowing control
+with an active consent and the exact current Codex session:
+
+```text
+yoetz observe protect-read --workspace /exact/project \
+  --session-id <codex-session-id> --reference obl_<existing-id> --count 1 --json
+```
+
+Only `obl_`, `clm_`, and `fnd_` references are accepted. At most 32 logical reads can be outstanding
+and the protection expires after ten minutes by default; an explicit expiry cannot exceed that
+bound. It grants no content or disclosure authority. Promotion is limited to a native identity
+still in the local buffer:
+
+```text
+yoetz observe promote --workspace /exact/project \
+  --source-identity <source-identity> --json
+```
+
+After the buffer has drained, promotion reports `promotion_window_closed` and
+`content_availability: not_retained`. Rerun or reacquire current evidence when needed and label
+the new observation with its new time and subject state; promotion cannot recover old bytes or
+retroactively prove the earlier state.
+
+Codex's profileless native capture arm follows active observation consent; it is separate from
+selection. The workspace capture lane has independent limits of 512 staging/pending capture
+tickets and 128 MiB of captured content. A larger observation capacity does not raise those
+limits. The hook's bounded capture pass and service deadline still apply. If staging is partial,
+cancelled, times out, or lacks a complete post/content group, the event remains incomplete and
+does not become a successful routine summary; when the hook reaches the recording boundary Yoetz
+records `content_capture_unavailable`. A host kill before authenticated staging can leave transient
+content without a durable gap. Capture configuration or a successful structural receipt is not
+proof that Codex bytes were captured, selected for a check, or used by a provider.
+
+The self-observation exception covers explicit Yoetz MCP workflow names. A Codex shell event such
+as `exec_command yoetz observe status`, `yoetz observe selection-status`, `yoetz observe
+selection-preview`, or `yoetz closure-prepare` has no authenticated executed-launcher identity in
+the hook payload; a path written in the command text is still host input. It therefore remains an
+ordinary shell observation and may use the available structural, capture, or materialization
+budget. Failures, mutations, and ambiguous shell are never suppressed. This is a current support
+boundary for local CLI self-reads; use the explicit MCP status or receipt route where available or
+account for the CLI read in coverage and capacity.
+
 ## 8. Remove
 
 Skill removal and activation/MCP removal are separate, consent-gated operations. Skill removal

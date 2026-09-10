@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass, field, replace
 
 from yoetz.domain.observation import (
+    ObservationCaptureBacklog,
     ObservationControlCommand,
     ObservationCursor,
     ObservationEnvelope,
@@ -144,6 +145,21 @@ class MemoryObservationStore:
     def content_capture_profiles(self, workspace_commitment: str) -> tuple[str, ...]:
         consent = self._state.consent.get(workspace_commitment)
         return () if consent is None else consent.content_capture_profiles
+
+    def capture_backlog(self, workspace: str) -> ObservationCaptureBacklog:
+        """Return the empty capture backlog for the structural-only reference store.
+
+        The in-memory adapter intentionally has no encrypted object or native
+        capture-ticket implementation. Exposing the same read-only seam keeps
+        pressure consumers from guessing at an unavailable backlog and avoids
+        making this test adapter look like it retained content.
+        """
+
+        del workspace
+        return ObservationCaptureBacklog(0, 0, None)
+
+    def capture_ticket_backlog(self, workspace: str) -> ObservationCaptureBacklog:
+        return self.capture_backlog(workspace)
 
     def enable_content_capture(self, workspace_commitment: str, profile: str) -> None:
         """Enable one explicit native-host content arm on a live grant."""
