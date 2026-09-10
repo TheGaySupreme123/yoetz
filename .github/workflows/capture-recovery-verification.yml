@@ -37,7 +37,7 @@ jobs:
       - name: Reconstruct and commit exact locally tested product tree
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = ddf362cfb7c3bb84dc688e7b01a089ef7d86fdc3
+          test "$(git rev-parse HEAD^)" = 6066eb0dd2e41df1eed66852089fe892c6f5ad0e
           export REPORT_DIR="${RUNNER_TEMP}/yoetz-695-report"
           mkdir -p "$REPORT_DIR"
           echo "REPORT_DIR=$REPORT_DIR" >> "$GITHUB_ENV"
@@ -135,6 +135,22 @@ jobs:
             --artifact "${RUNNER_TEMP}"/yoetz-695-dist/*.whl \
             --artifact "${RUNNER_TEMP}"/yoetz-695-dist/*.tar.gz \
             2>&1 | tee "$REPORT_DIR/distribution-boundary.log"
+      - name: Verify and populate the standalone wheel resolver cache
+        run: |
+          set -euo pipefail
+          {
+            wheel=("${RUNNER_TEMP}"/yoetz-695-dist/*.whl)
+            uv venv --python 3.14.6 "${RUNNER_TEMP}/yoetz-695-offline-before"
+            if uv pip install --python "${RUNNER_TEMP}/yoetz-695-offline-before/bin/python" --offline "${wheel[0]}"; then
+              echo 'Initial offline dependency resolution succeeded.'
+            else
+              echo 'Initial offline dependency resolution needs cache warmup; stderr is recorded above.'
+            fi
+            uv venv --python 3.14.6 "${RUNNER_TEMP}/yoetz-695-wheel-warmup"
+            uv pip install --python "${RUNNER_TEMP}/yoetz-695-wheel-warmup/bin/python" "${wheel[0]}"
+            uv venv --python 3.14.6 "${RUNNER_TEMP}/yoetz-695-offline-after"
+            uv pip install --python "${RUNNER_TEMP}/yoetz-695-offline-after/bin/python" --offline "${wheel[0]}"
+          } 2>&1 | tee "$REPORT_DIR/wheel-cache-prerequisite.log"
       - name: Serialized clean install package parity and import boundaries
         run: |
           set -euo pipefail
