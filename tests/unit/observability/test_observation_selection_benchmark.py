@@ -17,6 +17,7 @@ _SPEC.loader.exec_module(_MODULE)
 
 PROTECTED_CLASSES = _MODULE.PROTECTED_CLASSES
 latency_summary = _MODULE.latency_summary
+benchmark_temp_root = _MODULE._benchmark_temp_root
 run_workload = _MODULE.run_workload
 selection_matrix = _MODULE.selection_matrix
 synthetic_events = _MODULE.synthetic_events
@@ -48,6 +49,21 @@ def test_synthetic_workload_rejects_unbounded_shape_inputs() -> None:
         synthetic_events(0)
     with pytest.raises(ValueError, match="positive"):
         synthetic_events(1, fanout=0)
+
+
+def test_temp_root_uses_platform_temp_dir_without_private_tmp(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    platform_temp = tmp_path / "platform-temp"
+    platform_temp.mkdir()
+    monkeypatch.setattr(_MODULE.tempfile, "gettempdir", lambda: str(platform_temp))
+
+    root = benchmark_temp_root()
+    try:
+        assert root.parent == platform_temp.resolve()
+        assert root.stat().st_mode & 0o777 == 0o700
+    finally:
+        root.rmdir()
 
 
 def test_latency_summary_is_bounded_and_has_tail_fields() -> None:

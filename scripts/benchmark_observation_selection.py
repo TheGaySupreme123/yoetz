@@ -313,6 +313,23 @@ def _store_limit(name: str, fallback: int) -> int:
     return int(value) if type(value) is int and not isinstance(value, bool) else fallback
 
 
+def _benchmark_temp_root(base_dir: Path | None = None) -> Path:
+    """Create one canonical, owner-only root for a replay workload.
+
+    ``/tmp`` is a symlink on macOS and ``/private/tmp`` is not portable to
+    Linux. Resolve the platform-provided temporary directory before creating
+    the leaf so the local store's path-safety check sees a symlink-free path.
+    ``base_dir`` is an explicit test seam and is never taken from a workload
+    payload.
+    """
+
+    base = Path(tempfile.gettempdir()) if base_dir is None else base_dir
+    canonical_base = base.expanduser().resolve()
+    root = Path(tempfile.mkdtemp(prefix="yz687-observation-", dir=canonical_base))
+    root.chmod(0o700)
+    return root
+
+
 def _effective_capture_role(
     classification: Any,
     event: SyntheticEvent,
@@ -477,8 +494,7 @@ def run_workload(
         raise ValueError("fanout must be a positive integer")
     checkout = Path.cwd() if checkout is None else checkout
     events = synthetic_events(count, fanout=fanout, host=host)
-    root = Path(tempfile.mkdtemp(prefix="yz687-observation-", dir="/private/tmp"))
-    root.chmod(0o700)
+    root = _benchmark_temp_root()
     workspace_path = root / "workspace"
     workspace_path.mkdir(mode=0o700)
     writes: list[tuple[str, int]] = []
