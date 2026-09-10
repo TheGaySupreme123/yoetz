@@ -17,7 +17,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      UV_PYTHON_INSTALL_DIR: ${{ runner.temp }}/yoetz-695-python
       UV_NO_PROGRESS: '1'
     steps:
       - name: Checkout exact verification revision without persisted credentials
@@ -27,6 +26,9 @@ jobs:
           fetch-depth: 0
           submodules: false
           lfs: false
+      - name: Select isolated interpreter installation directory
+        shell: bash
+        run: echo "UV_PYTHON_INSTALL_DIR=${RUNNER_TEMP}/yoetz-695-python" >> "$GITHUB_ENV"
       - name: Install repository-pinned uv and Python
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
         with:
