@@ -42,6 +42,7 @@ from yoetz.domain.receipts import (
     SchemaVersionEntry,
     receipt_document_to_json,
     render_receipt_compact,
+    render_receipt_human,
     resolved_finding_ids_for_render,
     unresolved_findings_for_render,
 )
@@ -1067,3 +1068,25 @@ def test_genuine_strict_ceiling_keeps_generic_limitations_wording() -> None:
         f"Coverage is limited by: {OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP}."
     )
     assert section.items == (OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,)
+
+
+def test_selection_summary_and_input_loss_remain_distinct_in_all_receipt_formats() -> None:
+    gaps = ("observation_input_loss", "routine_read_detail_omitted")
+    coverage = _coverage(gaps=gaps)
+    receipt = _build(
+        _context(
+            coverage=coverage,
+            gaps=tuple(CaseGap(code, code, ()) for code in gaps),
+            check=_check(CheckVerdict.NO_ISSUE_DETECTED, coverage),
+        )
+    )
+    assert receipt.conclusion is ReceiptConclusion.INSUFFICIENT_COVERAGE
+    serialized = str(receipt_document_to_json(receipt))
+    for rendered in (
+        serialized,
+        render_receipt_human(receipt, markdown=True),
+        render_receipt_human(receipt, markdown=False),
+    ):
+        assert "bounded source summaries" in rendered
+        assert "historical loss remains a limitation after queue recovery" in rendered
+        assert "new time and state only" in rendered

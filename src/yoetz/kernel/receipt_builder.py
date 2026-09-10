@@ -1055,6 +1055,18 @@ def _sections(
             )
         else:
             gap_body = f"Coverage is limited by: {', '.join(gap_codes)}."
+        if "routine_read_detail_omitted" in gap_codes:
+            gap_body += (
+                " Successful routine reads are represented by bounded source summaries; "
+                "their individual content was not retained. Summary coverage does not "
+                "establish verification or selection for this check."
+            )
+        if "observation_input_loss" in gap_codes:
+            gap_body += (
+                " Some native observation inputs could not be retained. This historical "
+                "loss remains a limitation after queue recovery; rerunning a read supplies "
+                "evidence for its new time and state only."
+            )
         bodies[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] = gap_body
         items[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] = gap_codes
     elif redactions:

@@ -57,6 +57,7 @@ from yoetz.domain.observation import (
 from yoetz.domain.observation_profiles import CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
 from yoetz.domain.values import Frontier, JsonObject, Timestamp, finding_id
 from yoetz.ports.ledger import CheckPhase, OperationKind, OperationRecord, OperationState
+from yoetz.ports.observation import TaskObservationPort
 from yoetz.ports.runtime import TaskRuntime
 from yoetz.protocol.canonical import canonical_digest, canonical_encode
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
@@ -283,7 +284,7 @@ def test_materialize_post_only_profiles_never_invent_a_pre_pair() -> None:
         assert "Codex hook" not in native_action.description
 
 
-def test_successful_routine_reads_stay_observation_only_but_failures_materialize() -> None:
+def test_individually_admitted_routine_reads_materialize_but_summaries_do_not() -> None:
     task = _task_id()
     session = f"hmac-sha256:{'ed' * 32}"
     pre = _envelope(session=session, kind="PreToolUse", identity="hook:read-pre")
@@ -291,8 +292,8 @@ def test_successful_routine_reads_stay_observation_only_but_failures_materialize
     deferred = materialize_observation_envelope(
         replace(pre, structural_payload=pre_structural), task_id=task
     )
-    assert deferred.drafts == ()
-    assert deferred.skip_reason == "routine_read_deferred"
+    assert deferred.skip_reason is None
+    assert [item.draft.schema.name for item in deferred.drafts] == ["action_recorded"]
 
     post = _envelope(
         session=session,
@@ -304,8 +305,11 @@ def test_successful_routine_reads_stay_observation_only_but_failures_materialize
     coalesced = materialize_observation_envelope(
         replace(post, structural_payload=post_structural), task_id=task
     )
-    assert coalesced.drafts == ()
-    assert coalesced.skip_reason == "routine_read_coalesced"
+    assert coalesced.skip_reason is None
+    assert [item.draft.schema.name for item in coalesced.drafts] == [
+        "action_recorded",
+        "result_recorded",
+    ]
 
     failed = materialize_observation_envelope(
         replace(
@@ -1585,7 +1589,7 @@ def test_local_outbox_v1_compatibility_and_v2_attempt_round_trip(tmp_path: Path)
     assert durable.last_attempt_at == attempted_at
     assert durable.consecutive_reason_attempts == 1
     assert json.loads(state_path.read_text(encoding="utf-8"))["schema"] == (
-        "yoetz.observation-local/13"
+        "yoetz.observation-local/15"
     )
 
     raw = json.loads(state_path.read_text(encoding="utf-8"))
@@ -1724,7 +1728,7 @@ def test_enqueue_refuses_projected_oversize_without_losing_consent(
     )
 
 
-def test_size_compaction_accounts_for_distinct_same_source_rows(
+def test_size_save_preserves_distinct_same_source_rows_when_bound_cannot_fit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import yoetz.adapters.integrations.observation_local as local_mod
@@ -1739,23 +1743,27 @@ def test_size_compaction_accounts_for_distinct_same_source_rows(
             "sess-compact",
             _envelope(session=session, identity="hook:same", ordinal=ordinal),
         )
+    state_path = next((tmp_path / "observation" / "workspaces").glob("*.json"))
+    before = state_path.read_bytes()
+    state = store._load(workspace)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    assert state.stream_partials is not None
+    state.stream_partials[session] = b"x" * 128
     # /11 persists pairing-history provenance, adding a small fixed envelope to
-    # the compacted authority state. Keep the bound tight while allowing that
-    # required marker to fit after both outbox rows are accounted for.
+    # the authority state. Keep the bound tight enough that the accepted rows
+    # cannot fit after optional cache shedding. The save must fail closed,
+    # leaving both the prior file and the caller's mutable state untouched.
     monkeypatch.setattr(local_mod, "_MAX_STATE_BYTES", 2_400)
 
-    store.note_coverage_gap(workspace, ObservationGapCode.SERVICE_UNAVAILABLE.value)
+    with pytest.raises(PublicOperationError) as raised:
+        store._save(workspace, state)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    assert raised.value.code is PublicErrorCode.STORAGE_UNSAFE
+    assert state_path.read_bytes() == before
+    assert state.stream_partials == {session: b"x" * 128}
+    assert len(state.pending_outbox or ()) == 2
 
     reopened = LocalObservationStore(_state=tmp_path)
-    state_path = next((tmp_path / "observation" / "workspaces").glob("*.json"))
-    persisted = json.loads(state_path.read_text(encoding="utf-8"))
-    accounted = (
-        reopened.pending_outbox_count(workspace)
-        + reopened.quarantined_count(workspace)
-        + int(persisted["quarantine_evicted_count"])
-    )
-    assert accounted == 2
-    assert state_path.stat().st_size <= 2_400
+    assert reopened.pending_outbox_count(workspace) == 2
+    assert reopened.quarantined_count(workspace) == 0
 
 
 def test_monotonic_samples_fenced_across_simulated_reboot(tmp_path: Path) -> None:
@@ -3755,6 +3763,16 @@ async def test_native_content_requires_matching_local_and_task_profile_grants(
         def now_utc(self) -> datetime:
             return datetime(2026, 1, 1, tzinfo=UTC)
 
+    async def bootstrap(workspace: str, runtime: TaskRuntime, store: TaskObservationPort) -> bool:
+        # This fixture owns exactly one task bundle. Capture authority still
+        # needs a complete budget inventory independently of its profile grant.
+        assert runtime.task_id == mapping.yoetz_task_id
+        assert store is task_store
+        return local.bootstrap_capture_reservations(
+            workspace,
+            {runtime.task_id: store.capture_backlog(workspace)},
+        )
+
     runtime_port = _RuntimePort()
     coordinator = _Coordinator(
         runtime=runtime_port,  # type: ignore[arg-type]
@@ -3763,6 +3781,7 @@ async def test_native_content_requires_matching_local_and_task_profile_grants(
         ids=object(),  # type: ignore[arg-type]
         state_root=tmp_path,
         mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+        capture_budget_bootstrap=bootstrap,
     )
     chunk = ObservationContentChunk(
         content_kind=ObservationContentKind.TOOL_OUTPUT,

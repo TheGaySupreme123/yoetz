@@ -63,6 +63,7 @@ from yoetz.domain.observation import (
     ObservationIngestResult,
     ObservationSource,
     observation_capture_part_descriptors,
+    observation_capture_ticket_id,
     observation_ingest_request_from_json,
     observation_ingest_result_to_json,
 )
@@ -314,12 +315,33 @@ async def _pipeline(
         observation=cast(TaskObservationPort, observation),
     )
     router = _RuntimeRouter(runtime)
+
+    async def bootstrap(workspace: str, runtime: TaskRuntime, store: TaskObservationPort) -> bool:
+        # This isolated pipeline owns exactly this one bundle; supply its
+        # complete inventory independently of the content-profile grant.
+        assert runtime.task_id == task_id
+        assert store is runtime.observation
+        current_store = cast(SqliteObservationStore, store)
+        tickets = current_store.list_pending_capture_tickets(task_id)
+        return local.bootstrap_capture_reservations(
+            workspace,
+            {task_id: current_store.capture_backlog(workspace)},
+            ticket_ids_by_task={
+                task_id: tuple(
+                    observation_capture_ticket_id(ticket)
+                    for ticket in tickets
+                    if ticket.workspace_commitment == workspace
+                )
+            },
+        )
+
     coordinator = ObservationCoordinator(
         runtime=router,
         local=local,
         clock=_Clock(),
         ids=ids,
         state_root=state,
+        capture_budget_bootstrap=bootstrap,
     )
     client = _ServiceClient(coordinator)
 
@@ -1349,6 +1371,7 @@ async def test_native_manifest_survives_preappend_cancellation_and_structural_re
         clock=_Clock(),
         ids=_Ids(object_counter=96),
         state_root=tmp_path / "state",
+        capture_budget_bootstrap=coordinator.capture_budget_bootstrap,
     )
     try:
         structural_retry = ObservationIngestRequest(
@@ -1523,6 +1546,7 @@ async def test_native_pending_ticket_replays_through_same_task_successor(
         clock=_Clock(),
         ids=_Ids(object_counter=112),
         state_root=tmp_path / "state",
+        capture_budget_bootstrap=coordinator.capture_budget_bootstrap,
     )
     first_retry = await successor_coordinator.ingest_request(
         ObservationIngestRequest(
@@ -1879,6 +1903,7 @@ async def test_native_finalize_without_manifest_stays_orphan_on_structural_retry
         clock=_Clock(),
         ids=_Ids(object_counter=96),
         state_root=tmp_path / "state",
+        capture_budget_bootstrap=coordinator.capture_budget_bootstrap,
     )
     try:
         structural_retry = ObservationIngestRequest(

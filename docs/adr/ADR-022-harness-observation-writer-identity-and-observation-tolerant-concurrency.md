@@ -136,14 +136,14 @@ unsupported claims and unbounded duplicate findings.
    configuration and availability remain visible through observation advice before a check and
    through the check coverage vector and receipt limitations after one.
 
-10. Successful routine reads are rate-limited at the task-ledger boundary. The hook adapter labels
-   only a closed set of read tools and conservatively parsed single read-only shell commands as
-   `routine_read`; path-qualified executables, side-effecting Git options, shell composition,
-   redirection, mutation flags, unknown commands, explicit failures or denials, and other
-   ambiguity fail closed to ordinary materialization. The complete hook envelope remains in the
-   bounded local observation store, but its pre-event and successful post-event do not mint
-   individual task-ledger records. A failed post-event still materializes action and result records,
-   and edits, checks, tests, lifecycle events, and other non-routine observations are unchanged.
+10. [ADR-029](ADR-029-smart-observation-selection.md) moves routine-read selection before optional
+    capture and queue admission. The adapter classifies only a closed set of read tools and
+    conservatively parsed shell commands as routine candidates. A pre-event remains an attempt
+    until an explicit successful post-event arrives. Proven successes may become a bounded
+    source summary; failures, missing outcomes, ambiguous commands and protected evidence remain
+    individual. The materializer accepts an explicit summary account and does not silently
+    coalesce an individual delivery again. Detailed mode retains individual routine records
+    within the same content and disclosure authority.
 
 11. Every newly accepted observation-authored append records one bounded pending frontier-motion
     notice for the originating Codex session. A retry of a completed append whose local notice

@@ -86,7 +86,7 @@ _RESOURCE_LIMIT: Final = 4_194_304
 # One independently reviewed cardinality tripwire guards the generated resource manifest. All
 # per-kind counts are derived from the manifest entries so adding a resource has exactly one
 # hand-authored count to review and the owning resource-ripple command can regenerate the rest.
-REVIEWED_RESOURCE_COUNT: Final = 182
+REVIEWED_RESOURCE_COUNT: Final = 188
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -106,10 +106,10 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("check-request", "1.0.0"),
     ("check-result", "1.1.0"),
     ("client-info", "1.0.0"),
-    ("control-hello", "2.5.0"),
-    ("control-hello-result", "2.5.0"),
-    ("control-request", "2.5.0"),
-    ("control-result", "2.5.0"),
+    ("control-hello", "2.6.0"),
+    ("control-hello-result", "2.6.0"),
+    ("control-request", "2.6.0"),
+    ("control-result", "2.6.0"),
     ("coverage", "1.0.0"),
     ("egress-receipt", "1.0.0"),
     ("finding", "1.1.0"),
@@ -131,6 +131,7 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("respond-request", "1.0.0"),
     ("respond-result", "1.0.0"),
     ("review-result", "6.0.0"),
+    ("routine-read-summary", "1.0.0"),
     ("runtime-attempt-evidence", "1.0.0"),
     ("semantic-provenance", "1.1.0"),
     ("service-status", "1.0.0"),

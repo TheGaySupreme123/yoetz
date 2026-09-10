@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -22,6 +22,7 @@ from builders.codex_rollout import (
 )
 from yoetz.adapters.importers.codex_jsonl import CodexParsedRecord
 from yoetz.adapters.integrations import codex_session_stream as stream_module
+from yoetz.adapters.integrations.codex_lifecycle import mapping_from_start_ids, store_mapping
 from yoetz.adapters.integrations.codex_session_stream import (
     CodexSessionStreamLocator,
     SessionStreamReader,
@@ -31,6 +32,7 @@ from yoetz.adapters.integrations.codex_session_stream import (
     should_trigger_stream_reconcile,
     stream_profile_from_id,
 )
+from yoetz.adapters.integrations.observation_admission import AdmissionPlan
 from yoetz.adapters.integrations.observation_local import (
     STREAM_MAPPING_VERSION,
     LocalObservationStore,
@@ -39,12 +41,14 @@ from yoetz.application.observation_materialize import materialize_observation_en
 from yoetz.domain.events import ResultOutcome, ResultRecordedPayload
 from yoetz.domain.observation import (
     ObservationCursor,
+    ObservationEnvelope,
     ObservationGapCode,
     ObservationIngestDisposition,
     ObservationIngestResult,
     ObservationSource,
     ObservationStatusQuery,
 )
+from yoetz.domain.observation_budget import ObservationMode
 from yoetz.domain.values import JsonObject
 
 
@@ -1373,6 +1377,7 @@ def test_reconcile_retains_yoetz_self_observation_locally_and_advances_past_it(
     # reconcile finds nothing new rather than re-reading the retained calls.
     accepted = result["accepted"]
     assert isinstance(accepted, int) and accepted >= 8
+    assert store.selection_accounting(workspace)["intentionally_omitted_input_count"] == 4
     again = reconcile_session_stream(
         store,
         workspace_commitment=workspace,
@@ -1958,3 +1963,409 @@ def test_reconcile_reports_exact_admission_and_incompatible_header(tmp_path: Pat
     assert refused["admission_provenance"] is None
     assert refused["profile_id"] is None
     assert refused["accepted"] == 0
+
+
+# --- early observation selection (#687) ------------------------------------------------------
+
+
+_STREAM_TASK_ID = "tsk_10000000-0000-4000-8000-000000000101"
+_STREAM_SESSION_ID = "ses_10000000-0000-4000-8000-000000000102"
+_STREAM_WRITER_ID = "wri_10000000-0000-4000-8000-000000000103"
+_STREAM_READ_REFERENCE = "clm_10000000-0000-4000-8000-000000000104"
+
+
+def _selection_stream_fixture(
+    tmp_path: Path,
+    *,
+    rows: tuple[dict[str, object], ...],
+    session_id: str = "stream-selection",
+) -> tuple[LocalObservationStore, str, str, Path, CodexSessionStreamLocator]:
+    home = tmp_path / "codex-home"
+    sessions = home / "sessions"
+    sessions.mkdir(parents=True)
+    target = sessions / f"rollout-{session_id}.jsonl"
+    target.write_bytes(encode_lines(*rows))
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment(session_id)
+    store.bind_session(workspace, session)
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=session_id,
+            yoetz_task_id=_STREAM_TASK_ID,
+            yoetz_session_id=_STREAM_SESSION_ID,
+            yoetz_writer_id=_STREAM_WRITER_ID,
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+    return store, workspace, session, target, CodexSessionStreamLocator(home)
+
+
+def test_stream_selects_shell_candidate_from_original_arguments_and_flushes_on_boundary(
+    tmp_path: Path,
+) -> None:
+    session_id = "stream-selection-summary"
+    rows = (
+        session_meta(session_id=session_id),
+        function_call(
+            name="shell",
+            call_id="selection-read",
+            arguments='{"command":"ls"}',
+        ),
+        function_call_output(call_id="selection-read", exit_code=0),
+    )
+    store, workspace, session, target, locator = _selection_stream_fixture(
+        tmp_path, rows=rows, session_id=session_id
+    )
+
+    first = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=locator,
+    )
+
+    assert first["accepted"] == 3
+    assert [row.envelope.event_kind for row in store.list_pending_outbox_rows(workspace)] == [
+        "session_meta"
+    ]
+    account = store.selection_accounting(workspace)
+    assert account["buffered_input_count"] == 2
+    assert account["buffered_successful_call_count"] == 1
+
+    target.write_bytes(
+        target.read_bytes()
+        + encode_lines(
+            function_call(
+                name="apply_patch",
+                call_id="selection-mutation",
+                arguments='{"patch":"x"}',
+            ),
+            function_call_output(call_id="selection-mutation", exit_code=0),
+        )
+    )
+    second = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=locator,
+    )
+
+    assert second["accepted"] == 2
+    rows_out = store.list_pending_outbox_rows(workspace)
+    summaries = [
+        row.envelope for row in rows_out if row.envelope.event_kind == "RoutineReadSummary"
+    ]
+    assert len(summaries) == 1
+    summary = summaries[0].structural_payload
+    assert summary["summary_count"] == 1
+    assert summary["input_count"] == 2
+    fence = summary["fence"]
+    assert type(fence) is str and fence.startswith("sha256:")
+    assert summary["provenance"] == "routine_success_summary"
+    assert [
+        row.envelope.structural_payload.get("action")
+        for row in rows_out
+        if row.envelope.structural_payload.get("tool_call_id") == "selection-mutation"
+    ] == ["function_call", "function_call_output"]
+
+
+def test_stream_candidate_marker_survives_store_restart(tmp_path: Path) -> None:
+    session_id = "stream-selection-restart"
+    target_rows = (
+        session_meta(session_id=session_id),
+        function_call(
+            name="shell",
+            call_id="restart-read",
+            arguments='{"command":"pwd"}',
+        ),
+    )
+    store, workspace, session, target, locator = _selection_stream_fixture(
+        tmp_path, rows=target_rows, session_id=session_id
+    )
+    first = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=locator,
+    )
+    assert first["event_position"] == 2
+    persisted = store.stream_call_tools_for_session(workspace, session, source_generation=1)
+    assert persisted["restart-read"].endswith("\x1froutine")
+
+    target.write_bytes(
+        target.read_bytes()
+        + encode_lines(function_call_output(call_id="restart-read", exit_code=0))
+    )
+    reopened = LocalObservationStore(_state=tmp_path)
+    second = reconcile_session_stream(
+        reopened,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=locator,
+    )
+
+    assert second["accepted"] == 1
+    assert reopened.selection_accounting(workspace)["buffered_successful_call_count"] == 1
+    assert not [
+        row
+        for row in reopened.list_pending_outbox_rows(workspace)
+        if row.envelope.event_kind == "RoutineReadSummary"
+    ]
+
+    reopened.flush_selected_admission(
+        workspace,
+        summary_builder=stream_module.build_routine_read_summary,
+        force=True,
+    )
+    assert [
+        row.envelope.event_kind
+        for row in reopened.list_pending_outbox_rows(workspace)
+        if row.envelope.event_kind == "RoutineReadSummary"
+    ] == ["RoutineReadSummary"]
+
+
+def test_stream_failed_routine_output_remains_individual(tmp_path: Path) -> None:
+    session_id = "stream-selection-failure"
+    rows = (
+        session_meta(session_id=session_id),
+        function_call(name="shell", call_id="failed-read", arguments='{"command":"ls"}'),
+        function_call_output(call_id="failed-read", exit_code=1),
+    )
+    store, workspace, session, _target, locator = _selection_stream_fixture(
+        tmp_path, rows=rows, session_id=session_id
+    )
+
+    result = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=locator,
+    )
+
+    assert result["accepted"] == 3
+    outbox = store.list_pending_outbox_rows(workspace)
+    assert not [row for row in outbox if row.envelope.event_kind == "RoutineReadSummary"]
+    assert [
+        row.envelope.structural_payload.get("action")
+        for row in outbox
+        if row.envelope.structural_payload.get("tool_call_id") == "failed-read"
+    ] == ["function_call", "function_call_output"]
+
+
+def test_stream_read_protection_bypasses_summary_and_preserves_reference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = "stream-selection-protected-read"
+    rows = (
+        session_meta(session_id=session_id),
+        function_call(name="shell", call_id="protected-read", arguments='{"command":"ls"}'),
+        function_call_output(call_id="protected-read", exit_code=0),
+    )
+    store, workspace, session, _target, locator = _selection_stream_fixture(
+        tmp_path, rows=rows, session_id=session_id
+    )
+    store.protect_next_reads(workspace, session, _STREAM_READ_REFERENCE)
+    consumed: list[tuple[str, object]] = []
+    original_consume = LocalObservationStore.consume_read_protection
+
+    def consume(
+        selected_store: LocalObservationStore,
+        selected_workspace: str,
+        selected_session: str,
+        envelope: ObservationEnvelope,
+    ) -> bool:
+        consumed.append((envelope.event_kind, envelope.structural_payload.get("action")))
+        return original_consume(selected_store, selected_workspace, selected_session, envelope)
+
+    monkeypatch.setattr(LocalObservationStore, "consume_read_protection", consume)
+
+    result = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=locator,
+    )
+
+    assert result["accepted"] == 3
+    outbox = store.list_pending_outbox_rows(workspace)
+    assert not [row for row in outbox if row.envelope.event_kind == "RoutineReadSummary"]
+    protected = [
+        row.envelope
+        for row in outbox
+        if row.envelope.structural_payload.get("tool_call_id") == "protected-read"
+    ]
+    assert [(item.event_kind, item.structural_payload.get("action")) for item in protected] == [
+        ("PreToolUse", "evidence_linked_read"),
+        ("PostToolUse", "evidence_linked_read"),
+    ]
+    assert [item.structural_payload.get("protection_reference") for item in protected] == [
+        _STREAM_READ_REFERENCE,
+        _STREAM_READ_REFERENCE,
+    ]
+    assert consumed == [("PostToolUse", "routine_read")]
+
+
+def test_stream_unknown_protected_read_stays_individual(tmp_path: Path) -> None:
+    session_id = "stream-selection-protected-unknown"
+    rows = (
+        session_meta(session_id=session_id),
+        function_call(name="shell", call_id="protected-unknown", arguments='{"command":"ls"}'),
+        response_item(
+            {
+                "call_id": "protected-unknown",
+                "name": "shell",
+                "output": "unknown",
+                "status": "host_pending",
+                "type": "function_call_output",
+            }
+        ),
+    )
+    store, workspace, session, _target, locator = _selection_stream_fixture(
+        tmp_path, rows=rows, session_id=session_id
+    )
+    store.protect_next_reads(workspace, session, _STREAM_READ_REFERENCE)
+
+    reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=locator,
+    )
+
+    outbox = store.list_pending_outbox_rows(workspace)
+    assert not [row for row in outbox if row.envelope.event_kind == "RoutineReadSummary"]
+    protected = [
+        row.envelope
+        for row in outbox
+        if row.envelope.structural_payload.get("tool_call_id") == "protected-unknown"
+    ]
+    assert [item.structural_payload.get("action") for item in protected] == [
+        "evidence_linked_read",
+        "evidence_linked_read",
+    ]
+    assert [item.structural_payload.get("protection_reference") for item in protected] == [
+        _STREAM_READ_REFERENCE,
+        _STREAM_READ_REFERENCE,
+    ]
+
+
+def test_stream_detailed_mode_keeps_individual_materialization_without_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = "stream-selection-detailed"
+    rows = (
+        session_meta(session_id=session_id),
+        function_call(name="read", call_id="detailed-read", arguments="{}"),
+        function_call_output(call_id="detailed-read", exit_code=0),
+    )
+    store, workspace, session, _target, locator = _selection_stream_fixture(
+        tmp_path, rows=rows, session_id=session_id
+    )
+
+    def detailed_pressure(_store: Any, _workspace: Any, _session: Any) -> Any:
+        return SimpleNamespace(
+            effective_mode=ObservationMode.DETAILED,
+            content_allowed=True,
+        )
+
+    monkeypatch.setattr(LocalObservationStore, "update_selection_pressure", detailed_pressure)
+
+    reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=locator,
+    )
+
+    outbox = store.list_pending_outbox_rows(workspace)
+    assert not [row for row in outbox if row.envelope.event_kind == "RoutineReadSummary"]
+    detailed = [
+        row.envelope
+        for row in outbox
+        if row.envelope.structural_payload.get("tool_call_id") == "detailed-read"
+    ]
+    assert [item.structural_payload.get("action") for item in detailed] == [
+        "function_call",
+        "function_call_output",
+    ]
+    assert [item.event_kind for item in detailed] == ["PreToolUse", "PostToolUse"]
+    assert tuple(
+        item.role
+        for item in materialize_observation_envelope(detailed[0], task_id=_STREAM_TASK_ID).drafts
+    ) == ("action",)
+    assert tuple(
+        item.role
+        for item in materialize_observation_envelope(detailed[1], task_id=_STREAM_TASK_ID).drafts
+    ) == ("action", "result")
+
+
+def test_stream_selection_rejection_replays_exact_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_id = "stream-selection-replay"
+    rows = (
+        session_meta(session_id=session_id),
+        function_call(name="read", call_id="replay-read", arguments="{}"),
+    )
+    store, workspace, session, target, locator = _selection_stream_fixture(
+        tmp_path, rows=rows, session_id=session_id
+    )
+    original_commit = LocalObservationStore.commit_selected_admission
+
+    def reject_routine(
+        selected_store: LocalObservationStore,
+        selected_workspace: str,
+        plan: AdmissionPlan,
+        *,
+        incoming: ObservationEnvelope | None = None,
+        newly_observed: bool = False,
+        replayable: bool = False,
+    ) -> bool:
+        if (
+            isinstance(incoming, ObservationEnvelope)
+            and incoming.structural_payload.get("tool_call_id") == "replay-read"
+        ):
+            return False
+        return original_commit(
+            selected_store,
+            selected_workspace,
+            plan,
+            incoming=incoming,
+            newly_observed=newly_observed,
+            replayable=replayable,
+        )
+
+    monkeypatch.setattr(LocalObservationStore, "commit_selected_admission", reject_routine)
+    failed = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=locator,
+    )
+    assert failed["event_position"] == 1
+    failed_position = failed["byte_position"]
+    assert type(failed_position) is int and failed_position < target.stat().st_size
+
+    monkeypatch.setattr(LocalObservationStore, "commit_selected_admission", original_commit)
+    retried = reconcile_session_stream(
+        LocalObservationStore(_state=tmp_path),
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=locator,
+    )
+    assert retried["event_position"] == 2

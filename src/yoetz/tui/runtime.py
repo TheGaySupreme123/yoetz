@@ -587,6 +587,29 @@ class YoetzRuntime:
         root = _git_root(self._cwd)
         return root if root is not None else self._cwd
 
+    async def observation_selection_status(self) -> Mapping[str, object]:
+        """Read owner-selected observation settings without touching the service.
+
+        The projection contains commitments, bounded counters, and selected /
+        effective modes only.  It never reads content or privacy policy.  A
+        richer store projection is preferred when the running package exposes
+        it; the CLI-shaped fallback keeps older services readable during an
+        upgrade.
+        """
+
+        from yoetz.adapters.integrations.observation_local import LocalObservationStore
+        from yoetz.cli.observe import selection_status_payload
+
+        try:
+            store = LocalObservationStore()
+            commitment = store.workspace_commitment(str(self.project_root()))
+            raw = selection_status_payload(store, commitment)
+            return cast(Mapping[str, object], raw)
+        except (OSError, ValueError, RuntimeError) as error:
+            raise RuntimeError_(
+                "observation_status_unavailable", "observation status is unavailable"
+            ) from error
+
     # -- service --------------------------------------------------------
 
     @asynccontextmanager

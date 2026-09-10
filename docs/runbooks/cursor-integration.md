@@ -487,6 +487,62 @@ Native semantic selection uses the accepted tool event's durable session route a
 require an approved-check policy. Local capture consent and repository disclosure permission
 remain separate requirements.
 
+### Smart observation selection (issue #687)
+
+Cursor's shared hook ingress applies the selector to the generic tool stream only when the exact
+ordinary profile `cursor-ordinary-observation-v1` is installed and rendered. The structural
+profile remains its existing post-only/native event contract; selecting a retention mode does not
+widen it. With the ordinary profile, **Focused/standard (512)** is the default. A paired, proven
+successful routine read, search, or inventory call may be represented by a bounded summary in
+Focused mode. Detailed keeps eligible routine calls as individual records while pressure is
+healthy. Capacity is independent of detail: `standard` (512), `larger` (2,048), and `largest`
+(8,192) can each be selected with either mode. The larger profiles have finite provisional budgets
+and do not certify an IDE cell or improve sustained throughput.
+
+Failures, denials, cancellation, interruption, partial, unknown or conflicting outcomes, edits and side
+effects, declared checks/negative verification, and reads protected for an obligation, claim, or
+finding remain individual records in both modes. A pre-event keeps its native tool identity until
+a post event proves success. Ambiguous shell composition and caller-supplied routine labels do not
+make an event eligible for summarization. Cursor's `afterMCPExecution` binding event remains
+binding-only for the ordinary profile; the structural profile's `afterFileEdit` remains edit
+evidence. Neither path is turned into a routine read by selection.
+
+Apply an owner choice from an exact preview:
+
+```text
+yoetz observe selection-preview --workspace /exact/project \
+  --detail detailed --capacity larger --session-id <cursor-session-id> --json
+yoetz observe selection-apply --workspace /exact/project \
+  --detail detailed --capacity larger --session-id <cursor-session-id> \
+  --accept --preview-digest <preview-digest> --json
+```
+
+This is a temporary session override unless `--persist` is supplied on both preview and apply
+without `--session-id`; `--persist` is the explicit workspace choice. An optional RFC3339 UTC
+`--expires-at` bounds either setting. `selection-status` reports selected and effective mode and
+capacity; `selection-revoke` restores the safe fallback at the matching scope. These controls
+affect future retention only. They do not rewrite accepted rows, extend Cursor's ten-second
+session/stop, five-second ordinary event, or three-second teardown budgets, or change content,
+privacy, provider, or network authority. Pressure can make a selected Detailed session effectively
+Focused until the bounded recovery policy returns it to its still-valid selection.
+
+Use `protect-read` before an upcoming read when a later claim needs its individual identity. The
+reference must be an `obl_`, `clm_`, or `fnd_` identifier; at most 32 logical reads are outstanding,
+and the protection expires after ten minutes by default (an explicit expiry cannot exceed that
+bound). It narrows retention under existing observation consent and grants no content or
+disclosure authority. `promote` can only promote an exact native identity while it remains in the
+bounded buffer. After delivery it reports `promotion_window_closed` and `not_retained`; rerun the
+current read as a new observation if historical bytes are required, and do not use that rerun to
+prove the earlier state.
+
+Cursor ordinary content capture remains a separate consent arm selected by the exact profile. Its
+workspace-wide capture lane allows at most 512 staging/pending tickets and 128 MiB of captured
+content, independently of structural capacity. The one-second native content drain window and
+host hook deadlines still apply. A timeout, cancellation, incomplete content group, or service
+failure leaves partial/unknown coverage or `content_capture_unavailable` where the boundary
+permits; it is never silently converted to a successful routine summary. Capture status proves
+configuration only, not accepted bytes, semantic selection, or receipt coverage.
+
 Cursor has no `codex exec --json` import surface. Issue #301's bounded import authorization makes
 no Cursor adapter change; Cursor evidence continues through cooperative MCP and native
 hook/observation paths.

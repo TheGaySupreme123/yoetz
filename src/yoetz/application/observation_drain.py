@@ -180,6 +180,9 @@ class ObservationOutboxSweeper:
     # clock sleeps. Production leaves this unset and uses the running loop's monotonic clock.
     _monotonic: Callable[[], float] | None = field(default=None, repr=False)
     _executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
+    _selection_seen_workspaces: set[str] = field(
+        default_factory=lambda: set[str](), init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         if type(self.limit) is not int or isinstance(self.limit, bool) or self.limit < 1:
@@ -455,6 +458,18 @@ class ObservationOutboxSweeper:
         lanes: dict[tuple[str, str], list[ObservationOutboxRow]] = {}
         lifecycle_workspaces = self.local.pending_workspaces()
         for workspace in lifecycle_workspaces:
+            # A fresh service flushes accounts from the preceding runtime
+            # before extending them. Later sweeps observe due deadlines and
+            # recovery dwell even when the host emits no further hook.
+            self.local.maintain_selected_admission(
+                workspace,
+                force=workspace not in self._selection_seen_workspaces,
+            )
+            self._selection_seen_workspaces.add(workspace)
+            if len(self._selection_seen_workspaces) > 256:
+                # Forgetting an entry only forces a conservative flush next
+                # time; it never acknowledges or discards accepted inputs.
+                self._selection_seen_workspaces.remove(min(self._selection_seen_workspaces))
             for row in self.local.list_pending_outbox_rows(workspace):
                 lanes.setdefault((workspace, row.codex_session_id), []).append(row)
         # UTF-8 byte order equals string order for encodable strings. Validate once

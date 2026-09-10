@@ -305,6 +305,195 @@ def _frozen_version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValu
     return _frozen_schema(entry, error_reason="version_schema_template_invalid")
 
 
+def _routine_read_summary_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Render the local, source-accounting summary envelope contract.
+
+    The summary is intentionally an observation envelope rather than a task-ledger
+    event payload.  Its member list binds every source identity and cursor that the
+    summary advances over; content and caller prose have no place in this schema.
+    """
+
+    token = {
+        "maxLength": 128,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/+-]*$",
+        "type": "string",
+    }
+    digest = {
+        "maxLength": 71,
+        "minLength": 71,
+        "pattern": "^sha256:[0-9a-f]{64}$",
+        "type": "string",
+    }
+    task_id = {
+        "maxLength": 40,
+        "minLength": 40,
+        "pattern": r"^tsk_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        "type": "string",
+    }
+    session_id = {
+        "maxLength": 40,
+        "minLength": 40,
+        "pattern": r"^ses_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        "type": "string",
+    }
+    writer_id = {
+        "maxLength": 40,
+        "minLength": 40,
+        "pattern": r"^wri_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        "type": "string",
+    }
+    commitment = {
+        "maxLength": 76,
+        "minLength": 76,
+        "pattern": "^hmac-sha256:[0-9a-f]{64}$",
+        "type": "string",
+    }
+    timestamp = {
+        "format": "date-time",
+        "pattern": r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$",
+        "type": "string",
+    }
+    cursor = {
+        "additionalProperties": False,
+        "properties": {
+            "source_generation": {
+                "maximum": 9_007_199_254_740_991,
+                "minimum": 1,
+                "type": "integer",
+            },
+            "byte_position": {"maximum": 9_007_199_254_740_991, "minimum": 0, "type": "integer"},
+            "event_position": {"maximum": 9_007_199_254_740_991, "minimum": 0, "type": "integer"},
+            "last_source_commitment": commitment,
+            "mapping_version": token,
+        },
+        "required": [
+            "byte_position",
+            "event_position",
+            "last_source_commitment",
+            "mapping_version",
+            "source_generation",
+        ],
+        "type": "object",
+    }
+    member = {
+        "additionalProperties": False,
+        "properties": {
+            "source_identity": token,
+            "cursor": {"$ref": "#/$defs/cursor"},
+            "tool_call_id": {"oneOf": [token, {"type": "null"}]},
+            "phase": {"enum": ["post", "pre"], "type": "string"},
+            "receipt_time": timestamp,
+            "subject_state_digest": {"oneOf": [digest, {"type": "null"}]},
+        },
+        "required": [
+            "cursor",
+            "phase",
+            "receipt_time",
+            "source_identity",
+            "subject_state_digest",
+            "tool_call_id",
+        ],
+        "type": "object",
+    }
+    structural_payload = {
+        "additionalProperties": False,
+        "properties": {
+            "action": {"const": "routine_read_summary", "type": "string"},
+            "summary_count": {"maximum": 16, "minimum": 1, "type": "integer"},
+            "input_count": {"maximum": 32, "minimum": 1, "type": "integer"},
+            "member_digest": digest,
+            "fence": digest,
+            "provenance": {"const": "routine_success_summary", "type": "string"},
+            "summary_schema": {
+                "const": "yoetz.observation-routine-read-summary/1.0.0",
+                "type": "string",
+            },
+            "selection_policy_version": {"const": "obs-selection/1.0.0", "type": "string"},
+            "content_scope": {"const": "structural_only", "type": "string"},
+            "coverage_gaps": {
+                "items": {
+                    "enum": ["content_unselected", "observation_input_loss"],
+                    "type": "string",
+                },
+                "maxItems": 2,
+                "minItems": 0,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "members": {
+                "items": {"$ref": "#/$defs/member"},
+                "maxItems": 32,
+                "minItems": 1,
+                "type": "array",
+            },
+            "selection_task_id": task_id,
+            "selection_session_id": session_id,
+            "selection_writer_id": writer_id,
+            "selection_authority_generation": digest,
+        },
+        "required": [
+            "action",
+            "content_scope",
+            "coverage_gaps",
+            "fence",
+            "input_count",
+            "member_digest",
+            "members",
+            "provenance",
+            "selection_policy_version",
+            "summary_count",
+            "summary_schema",
+            "selection_task_id",
+            "selection_session_id",
+            "selection_writer_id",
+            "selection_authority_generation",
+        ],
+        "type": "object",
+    }
+    document: dict[str, object] = {
+        "$id": SCHEMA_NAMESPACE + entry.relative_path,
+        "$schema": _DRAFT_2020_12,
+        "additionalProperties": False,
+        "$defs": {
+            "commitment": commitment,
+            "cursor": cursor,
+            "digest": digest,
+            "member": member,
+            "timestamp": timestamp,
+            "token": token,
+        },
+        "properties": {
+            "event_kind": {"const": "RoutineReadSummary", "type": "string"},
+            "session_commitment": commitment,
+            "source": {
+                "enum": ["claude_hook", "codex_hook", "codex_session_stream", "cursor_hook"],
+                "type": "string",
+            },
+            "source_identity": {"pattern": "^summary:[0-9a-f]{64}$", "type": "string"},
+            "cursor": {"$ref": "#/$defs/cursor"},
+            "receipt_time": timestamp,
+            "structural_payload": structural_payload,
+            "content_object_refs": {"maxItems": 0, "type": "array"},
+            "gap_codes": {"maxItems": 0, "type": "array"},
+        },
+        "required": [
+            "content_object_refs",
+            "cursor",
+            "event_kind",
+            "gap_codes",
+            "receipt_time",
+            "session_commitment",
+            "source",
+            "source_identity",
+            "structural_payload",
+        ],
+        "title": "Yoetz routine-read summary observation 1.0.0",
+        "type": "object",
+    }
+    return cast(dict[str, JsonValue], document)
+
+
 def _evidence_payload_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Derive additive evidence contracts from frozen v1.0 bytes."""
 
@@ -2319,6 +2508,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         lambda: __import__("yoetz.domain.events", fromlist=["AcceptedEvent"]).AcceptedEvent,
     ),
     _RegistryEntry(
+        "observations/routine-read-summary-1.0.0.schema.json",
+        "routine-read-summary",
+        "1.0.0",
+        "request_result",
+        "local-control",
+        lambda: (
+            __import__(
+                "yoetz.domain.observation", fromlist=["RoutineReadSummary"]
+            ).RoutineReadSummary
+        ),
+    ),
+    _RegistryEntry(
         "events/action-recorded-1.0.0.schema.json",
         "action-recorded",
         "1.0.0",
@@ -3181,6 +3382,38 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         None,
     ),
     _RegistryEntry(
+        "service/control-hello-2.6.0.schema.json",
+        "control-hello",
+        "2.6.0",
+        "request_result",
+        "local-control",
+        None,
+    ),
+    _RegistryEntry(
+        "service/control-hello-result-2.6.0.schema.json",
+        "control-hello-result",
+        "2.6.0",
+        "request_result",
+        "local-control",
+        None,
+    ),
+    _RegistryEntry(
+        "service/control-request-2.6.0.schema.json",
+        "control-request",
+        "2.6.0",
+        "request_result",
+        "local-control",
+        None,
+    ),
+    _RegistryEntry(
+        "service/control-result-2.6.0.schema.json",
+        "control-result",
+        "2.6.0",
+        "request_result",
+        "local-control",
+        None,
+    ),
+    _RegistryEntry(
         "service/service-status-1.0.0.schema.json",
         "service-status",
         "1.0.0",
@@ -3433,6 +3666,8 @@ def build_schema_documents(
             "operations/receipt-result-1.0.0.schema.json",
         }:
             normalized = _frozen_schema(entry)
+        elif entry.relative_path == "observations/routine-read-summary-1.0.0.schema.json":
+            normalized = _routine_read_summary_schema(entry)
         elif entry.relative_path in {
             "events/plan-published-1.0.0.schema.json",
             "events/plan-revised-1.0.0.schema.json",

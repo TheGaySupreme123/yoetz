@@ -212,6 +212,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         "application/json",
         True,
     ),
+    (
+        "fixtures/canonical/control-observation-status-2.6.case.json",
+        "canonical_vector",
+        "application/json",
+        True,
+    ),
     ("fixtures/canonical/identifiers.case.json", "canonical_vector", "application/json", True),
     ("fixtures/canonical/object-envelope.case.json", "canonical_vector", "application/json", True),
     (
@@ -678,6 +684,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     ("schemas/manifest.json", "json_schema", "application/json", True),
     (
+        "schemas/observations/routine-read-summary-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/operations/check-request-1.0.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -1009,6 +1021,30 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/service/control-result-2.5.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/service/control-hello-2.6.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/service/control-hello-result-2.6.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/service/control-request-2.6.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/service/control-result-2.6.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,

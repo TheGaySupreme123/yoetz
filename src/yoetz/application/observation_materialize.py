@@ -36,13 +36,16 @@ from yoetz.domain.events import (
     media_type_for,
 )
 from yoetz.domain.observation import (
+    ROUTINE_READ_SUMMARY_DETAIL_GAP,
     ObservationContentKind,
     ObservationContentManifest,
     ObservationEnvelope,
     ObservationGapCode,
     ObservationInspectionSnapshot,
     ObservationSource,
+    RoutineReadSummary,
     observation_content_binding_matches,
+    routine_read_summary_from_envelope,
 )
 from yoetz.domain.values import (
     Actor,
@@ -68,6 +71,7 @@ from yoetz.protocol.coverage import (
     PublicationChannel,
     coverage_for_channel,
 )
+from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 
 __all__ = [
@@ -78,6 +82,7 @@ __all__ = [
     "SESSION_BOUND_MAPPING_VERSIONS",
     "MaterializedObservationBatch",
     "MaterializedObservationDraft",
+    "materialize_routine_read_summary",
     "STREAM_COMPLETED_EVENT_KINDS",
     "canonical_logical_identity",
     "materialize_observation_envelope",
@@ -198,6 +203,7 @@ class MaterializedObservationBatch:
     channel: PublicationChannel
     gaps: tuple[str, ...]
     skip_reason: str | None = None
+    summary: RoutineReadSummary | None = None
 
 
 def stable_observation_id(
@@ -544,6 +550,79 @@ def _captured_evidence_drafts(
     return tuple(drafts), tuple(refs)
 
 
+def materialize_routine_read_summary(
+    summary: RoutineReadSummary,
+    *,
+    task_id: str,
+) -> MaterializedObservationBatch:
+    """Materialize one bounded summary without inventing per-call evidence.
+
+    The local summary envelope remains the source of the exact member list.
+    The task ledger receives one metadata-only pointer whose description binds
+    only fixed structural counters and digests.  In particular, this function
+    never turns an aggregate into content coverage or a verification result.
+    """
+
+    baseline = coverage_for_channel(PublicationChannel.HOOK_OBSERVED)
+    if type(summary) is not RoutineReadSummary:
+        return MaterializedObservationBatch(
+            (), baseline, PublicationChannel.HOOK_OBSERVED, (), "invalid_routine_read_summary"
+        )
+    gap = ROUTINE_READ_SUMMARY_DETAIL_GAP
+    summary_gaps = tuple(sorted({gap, *summary.coverage_gaps}, key=str.encode))
+    coverage = Coverage(
+        publication_channels=baseline.publication_channels,
+        authorship_assurance=baseline.authorship_assurance,
+        artifact_observation=baseline.artifact_observation,
+        evidence_immutability=baseline.evidence_immutability,
+        ledger_freshness=baseline.ledger_freshness,
+        check_types=baseline.check_types,
+        known_gaps=tuple(sorted({*baseline.known_gaps, *summary_gaps}, key=str.encode)),
+    )
+    source = f"routine-read-summary:{summary.summary_identity}"
+    evidence = stable_observation_id(
+        kind=IdKind.EVIDENCE,
+        task_id=task_id,
+        source_identity=source,
+        mapping_version=MATERIALIZATION_MAPPING_VERSION,
+        role="routine_read_summary",
+    )
+    event = stable_observation_id(
+        kind=IdKind.EVENT,
+        task_id=task_id,
+        source_identity=source,
+        mapping_version=MATERIALIZATION_MAPPING_VERSION,
+        role="routine_read_summary_event",
+    )
+    description = (
+        "Routine-read summary observed "
+        f"calls={summary.summary_count} inputs={summary.input_count} "
+        f"member_digest={summary.member_digest} content_scope={summary.content_scope}"
+    )
+    draft = _draft(
+        event=event,
+        schema_name="evidence_recorded",
+        occurred_at=summary.receipt_time,
+        payload=EvidenceRecordedPayload(
+            evidence_id(evidence),
+            EvidenceKind.OTHER,
+            EvidenceImmutability.METADATA_ONLY,
+            summary.receipt_time,
+            reference=f"routine_read_summary:{summary.summary_identity}",
+            description=description,
+        ),
+        role="routine_read_summary",
+    )
+    return MaterializedObservationBatch(
+        (draft,),
+        coverage,
+        PublicationChannel.HOOK_OBSERVED,
+        summary_gaps,
+        None,
+        summary,
+    )
+
+
 def materialize_observation_inspection_snapshot(
     snapshot: ObservationInspectionSnapshot,
     *,
@@ -681,6 +760,22 @@ def materialize_observation_envelope(
             "invalid_envelope",
         )
 
+    if envelope.event_kind == "RoutineReadSummary":
+        try:
+            summary = routine_read_summary_from_envelope(envelope)
+        except ProtocolValueError:
+            # Summary envelopes are local, bounded accounting records. A
+            # malformed one must stay out of the ledger rather than degrade to
+            # an opaque evidence record that hides the accounting failure.
+            return MaterializedObservationBatch(
+                (),
+                coverage_for_channel(PublicationChannel.HOOK_OBSERVED),
+                PublicationChannel.HOOK_OBSERVED,
+                (ObservationGapCode.ROUTINE_READ_SUMMARY_INVALID.value,),
+                "invalid_routine_read_summary",
+            )
+        return materialize_routine_read_summary(summary, task_id=task_id)
+
     structural = cast(Mapping[str, JsonValue], envelope.structural_payload)
     pairing_mode, correlation_kind = _pairing_contract(envelope, structural)
     # ``unpaired_event`` on an old Claude/Cursor envelope records the shared
@@ -731,16 +826,13 @@ def materialize_observation_envelope(
         return MaterializedObservationBatch((), coverage, channel, gaps, "lifecycle_only")
 
     drafts: list[MaterializedObservationDraft] = []
-    routine_read = structural.get("action") == "routine_read"
-
     if kind == "PreToolUse":
-        if routine_read and not captured:
-            # The full envelope remains in the observation store. Successful read-only calls are
-            # rate-limited at the task-ledger boundary rather than minting one pending action per
-            # file lookup; a failed PostToolUse still materializes below.
-            return MaterializedObservationBatch(
-                (), coverage, channel, gaps, "routine_read_deferred"
-            )
+        # A selected routine pre normally reaches the ledger only through its
+        # completed summary.  When the admission buffer has to flush an
+        # incomplete attempt (deadline, boundary, or session close), this
+        # envelope is delivered individually.  Preserve its native identity as
+        # a pending action so the missing post remains visible as an
+        # action-without-result condition; do not synthesize an outcome.
         if correlation is None:
             return MaterializedObservationBatch(
                 (), coverage, channel, gaps, "missing_tool_identity"
@@ -796,15 +888,12 @@ def materialize_observation_envelope(
         return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
 
     if kind == "PostToolUse":
-        # A routine read is coalesced only after the host supplied an explicit
-        # successful outcome. An outcome-less result must retain its durable
-        # action/result identity and folded host_outcome_unavailable gap under
-        # ADR-022 decision 12; treating UNKNOWN as a successful read would
-        # discard that limitation before the materializer can record it.
-        if routine_read and not captured and _post_outcome(structural) is ResultOutcome.SUCCESS:
-            return MaterializedObservationBatch(
-                (), coverage, channel, gaps, "routine_read_coalesced"
-            )
+        # Successful routine reads are summarized before this boundary when
+        # the selection contract is valid.  Any individually admitted copy
+        # (legacy input, an unknown route/fence, a builder fallback, or a
+        # context boundary) must still materialize its own action/result.  The
+        # summary event has its separate branch above, so this cannot turn a
+        # real summary into per-call records.
         if unpaired or correlation is None:
             # Standalone structural observation: evidence only; do not invent
             # an action.  A post-only profile has an intentional identity

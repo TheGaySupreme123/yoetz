@@ -1026,6 +1026,196 @@ def observe_content_status_cmd(
     )
 
 
+@observe_app.command("selection-status")
+def observe_selection_status_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+    session_id: Annotated[
+        str | None,
+        typer.Option(
+            "--session-id",
+            help="Optional current host session token; status stores only its commitment.",
+        ),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Show selected/effective observation detail and capacity."""
+
+    _finish(
+        _observe_operation("observation_selection_status")(
+            workspace=workspace,
+            session_id=session_id,
+            json_output=json_output,
+        )
+    )
+
+
+@observe_app.command("selection-preview")
+def observe_selection_preview_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+    detail: Annotated[
+        str,
+        typer.Option("--detail", help="focused or detailed"),
+    ],
+    capacity: Annotated[
+        str,
+        typer.Option("--capacity", help="standard, larger, or largest (512/2048/8192)"),
+    ],
+    session_id: Annotated[str | None, typer.Option("--session-id")] = None,
+    persist: Annotated[
+        bool,
+        typer.Option(
+            "--persist",
+            help="Preview an explicit workspace default instead of a session override.",
+        ),
+    ] = False,
+    expires_at: Annotated[
+        str | None,
+        typer.Option("--expires-at", help="RFC3339 UTC expiry (optional)."),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Preview a detail/capacity choice before owner apply."""
+
+    _finish(
+        _observe_operation("observation_selection_preview")(
+            workspace=workspace,
+            detail=detail,
+            capacity=capacity,
+            session_id=session_id,
+            persist=persist,
+            expires_at=expires_at,
+            json_output=json_output,
+        )
+    )
+
+
+@observe_app.command("selection-apply")
+def observe_selection_apply_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+    detail: Annotated[str, typer.Option("--detail", help="focused or detailed")],
+    capacity: Annotated[
+        str,
+        typer.Option("--capacity", help="standard, larger, or largest (512/2048/8192)"),
+    ],
+    session_id: Annotated[str | None, typer.Option("--session-id")] = None,
+    persist: Annotated[
+        bool,
+        typer.Option(
+            "--persist",
+            help="Persist for the workspace; without it the setting is session-scoped.",
+        ),
+    ] = False,
+    expires_at: Annotated[
+        str | None,
+        typer.Option("--expires-at", help="RFC3339 UTC expiry (optional)."),
+    ] = None,
+    accept: Annotated[
+        bool,
+        typer.Option(
+            "--accept",
+            help="Accept the exact selection preview shown by --preview-digest.",
+        ),
+    ] = False,
+    preview_digest: Annotated[
+        str | None,
+        typer.Option("--preview-digest", help="Exact digest returned by selection-preview."),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Apply an exact owner-selected detail/capacity preview."""
+
+    _finish(
+        _observe_operation("set_observation_selection")(
+            workspace=workspace,
+            detail=detail,
+            capacity=capacity,
+            session_id=session_id,
+            persist=persist,
+            expires_at=expires_at,
+            accept=accept,
+            preview_digest=preview_digest,
+            json_output=json_output,
+        )
+    )
+
+
+@observe_app.command("selection-revoke")
+def observe_selection_revoke_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+    session_id: Annotated[str | None, typer.Option("--session-id")] = None,
+    persist: Annotated[
+        bool,
+        typer.Option("--persist", help="Revoke the persisted workspace default."),
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Revoke a session/workspace selection and restore the safe fallback."""
+
+    _finish(
+        _observe_operation("revoke_observation_selection")(
+            workspace=workspace,
+            session_id=session_id,
+            persist=persist,
+            json_output=json_output,
+        )
+    )
+
+
+@observe_app.command("protect-read")
+def observe_protect_read_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+    session_id: Annotated[str, typer.Option("--session-id")],
+    reference: Annotated[
+        str,
+        typer.Option(
+            "--reference",
+            help="Existing obligation, claim, finding, or verification reference.",
+        ),
+    ],
+    count: Annotated[int, typer.Option("--count", min=1, max=32)] = 1,
+    expires_at: Annotated[
+        str | None,
+        typer.Option("--expires-at", help="RFC3339 UTC expiry (optional)."),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Protect the next bounded session reads within existing authority."""
+
+    _finish(
+        _observe_operation("protect_observation_read")(
+            workspace=workspace,
+            session_id=session_id,
+            reference=reference,
+            count=count,
+            expires_at=expires_at,
+            json_output=json_output,
+        )
+    )
+
+
+@observe_app.command("promote")
+def observe_promote_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+    source_identity: Annotated[
+        str,
+        typer.Option(
+            "--source-identity",
+            help="Exact retained observation source identity to promote.",
+        ),
+    ],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Promote a still-retained observation identity without new capture."""
+
+    _finish(
+        _observe_operation("promote_observation")(
+            workspace=workspace,
+            source_identity=source_identity,
+            json_output=json_output,
+        )
+    )
+
+
 @observe_app.command("pause")
 def observe_pause_cmd(
     workspace: Annotated[str, typer.Option("--workspace")],
