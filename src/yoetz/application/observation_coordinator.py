@@ -46,6 +46,7 @@ from yoetz.application.observation_advice_semantic import (
     ObservationAdviceSemanticWorker,
 )
 from yoetz.application.observation_check_policy import load_observation_check_policy
+from yoetz.application.observation_drain import ObservationCaptureRecoveryOutcome
 from yoetz.application.observation_materialize import (
     MATERIALIZATION_LEGACY_MAPPING_VERSIONS,
     MATERIALIZATION_MAPPING_VERSION,
@@ -640,6 +641,9 @@ class ObservationCoordinator:
     # current coordinator has revalidated its route scope under the capture
     # lock.  Keep this fence process-local so restart/upgrade cannot reuse an
     # old proof without a fresh authoritative read.
+    _capture_recovery_sessions: dict[str, str] = field(
+        default_factory=lambda: dict[str, str](), init=False, repr=False
+    )
     _capture_bootstrap_verified_workspaces: set[str] = field(
         default_factory=_empty_capture_bootstrap_workspaces, init=False, repr=False
     )
@@ -755,6 +759,91 @@ class ObservationCoordinator:
             return
         await self._reconcile_capture_ticket_reservations(workspace, runtime, store)
 
+    def _remember_capture_bootstrap(self, workspace: str) -> None:
+        """Cache only a successfully validated inventory for this service generation."""
+
+        if (
+            workspace not in self._capture_bootstrap_verified_workspaces
+            and len(self._capture_bootstrap_verified_workspaces)
+            >= _MAX_CAPTURE_BOOTSTRAP_WORKSPACES
+        ):
+            self._capture_bootstrap_verified_workspaces.clear()
+        self._capture_bootstrap_verified_workspaces.add(workspace)
+
+    async def recover_capture_inventory(
+        self, workspace: str
+    ) -> ObservationCaptureRecoveryOutcome | None:
+        """Repair unknown inventory without requiring a newly admitted observation.
+
+        The service sweep invokes this metadata-only path. It uses existing,
+        unambiguous lifecycle mappings, not a synthetic envelope or a new grant.
+        Eight mapping candidates per turn and a bounded rotating cursor keep
+        missing parent/worker mappings from starving a usable route. The sweep
+        owns the elapsed deadline; the authoritative bootstrap joins its local
+        publication worker before cancellation can release the capture lock.
+        """
+
+        if not await self._local(partial(self.local.capture_inventory_recovery_needed, workspace)):
+            return None
+        if not self.observation_enabled or not await self._local(self.local.runtime_enabled):
+            return ObservationCaptureRecoveryOutcome.DISABLED
+        bootstrap = self.capture_budget_bootstrap
+        if bootstrap is None:
+            return ObservationCaptureRecoveryOutcome.INVENTORY_UNKNOWN
+        if self._capture_lock.locked():
+            return ObservationCaptureRecoveryOutcome.BUSY
+        sessions = await self._local(
+            partial(self.local.unambiguous_codex_sessions_for_workspace, workspace)
+        )
+        after = self._capture_recovery_sessions.get(workspace)
+        if after is not None:
+            sessions = tuple(item for item in sessions if item > after) + tuple(
+                item for item in sessions if item <= after
+            )
+        outcome = ObservationCaptureRecoveryOutcome.MAPPING_MISSING
+        for host_session in sessions[:8]:
+            if (
+                workspace not in self._capture_recovery_sessions
+                and len(self._capture_recovery_sessions) >= _MAX_CAPTURE_BOOTSTRAP_WORKSPACES
+            ):
+                # Forgetting an old hint never publishes an inventory proof.
+                self._capture_recovery_sessions.pop(next(iter(self._capture_recovery_sessions)))
+            self._capture_recovery_sessions[workspace] = host_session
+            current_runtime: TaskRuntime | None = None
+            try:
+                mapping = await self._local(
+                    partial(self.mapping_loader, host_session, _state=self.state_root)
+                )
+                if mapping is None:
+                    continue
+                current_runtime, _ = await self._route_observation_mapping(
+                    mapping, required_capabilities=frozenset({RuntimeCapability.WRITE})
+                )
+                store = self._observation_store(current_runtime)
+                # Do not queue behind another capture or hold the general
+                # workflow gate across a catalog/bundle inventory scan.
+                if self._capture_lock.locked():
+                    return ObservationCaptureRecoveryOutcome.BUSY
+                async with self._capture_lock:
+                    if not await self._local(
+                        partial(self.local.capture_inventory_recovery_needed, workspace)
+                    ):
+                        return None
+                    if await bootstrap(workspace, current_runtime, store):
+                        self._remember_capture_bootstrap(workspace)
+                        return ObservationCaptureRecoveryOutcome.RECOVERED
+                    self._capture_bootstrap_verified_workspaces.discard(workspace)
+                    # One complete-inventory attempt per workspace turn. A
+                    # sibling mapping cannot repair the same unreadable catalog.
+                    return ObservationCaptureRecoveryOutcome.INVENTORY_UNKNOWN
+            except Exception:
+                self._capture_bootstrap_verified_workspaces.discard(workspace)
+                outcome = ObservationCaptureRecoveryOutcome.ROUTE_UNAVAILABLE
+            finally:
+                if current_runtime is not None:
+                    await self.runtime.release(current_runtime)
+        return outcome
+
     async def _reserve_capture_ticket(
         self,
         workspace: str,
@@ -786,15 +875,7 @@ class ObservationCoordinator:
                             "Observation capture budget scope is unknown.",
                             retryable=False,
                         )
-                    if (
-                        workspace not in self._capture_bootstrap_verified_workspaces
-                        and len(self._capture_bootstrap_verified_workspaces)
-                        >= _MAX_CAPTURE_BOOTSTRAP_WORKSPACES
-                    ):
-                        # Forgetting the bounded verification cache forces a
-                        # fresh route read; it never authorizes a stale proof.
-                        self._capture_bootstrap_verified_workspaces.clear()
-                    self._capture_bootstrap_verified_workspaces.add(workspace)
+                    self._remember_capture_bootstrap(workspace)
             except PublicOperationError:
                 self._capture_bootstrap_verified_workspaces.discard(workspace)
                 raise

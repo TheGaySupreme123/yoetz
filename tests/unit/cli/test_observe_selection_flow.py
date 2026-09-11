@@ -162,11 +162,14 @@ def test_detailed_keeps_individual_records_without_increasing_content_authority(
     assert store.content_capture_authority(commitment) == authority
 
 
-def test_live_pressure_does_not_invalidate_exact_owner_selection_preview(tmp_path: Path) -> None:
+def test_live_pressure_does_not_invalidate_exact_owner_selection_preview(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     store, root, workspace, commitment, session = setup_store(tmp_path)
     del root, workspace
     selection = ObservationSelection(detail=ObservationMode.DETAILED)
     expiry = Timestamp("2026-09-11T00:00:00.000Z")
+    monkeypatch.setattr(store, "_wall_timestamp", lambda: Timestamp("2026-09-10T00:01:00.000Z"))
     first_plan, first_digest = _selection_preview_plan(
         store,
         commitment,

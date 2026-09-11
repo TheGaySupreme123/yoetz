@@ -191,3 +191,24 @@ with an append-oriented representation, interrupt synchronous durable writes,
 or establish an end-to-end timeout guarantee. Historical quarantine cannot be
 attributed from the new diagnostic format. Keep those acceptance limits visible
 when assessing the linked PR.
+
+
+## Capture-inventory recovery regression (#695)
+
+The recovery regression must start from unknown capture accounting and an empty outbox, reject a
+new native failed-command input, then run the real service catalog inventory callback without a
+fresh hook. The test must distinguish a complete inventory from genuine spare capacity and verify
+subsequent encrypted-object readback, exact preservation of prior loss, and task isolation.
+
+The focused cases are in `tests/integration/service/test_capture_inventory_recovery.py` and
+`tests/unit/application/test_capture_recovery_scheduling.py`. They cover two real SQLite task
+stores and catalog routes, transient and permanently incomplete inventory, restart, cancellation
+while publication is running, an off-loop blocked task read, workspace/session fairness, real
+capture count pressure, and host-shaped Claude Code, Codex and Cursor parent/worker lanes. Runtime
+routing and control transport are in-process test doubles. These cases do not establish vendor
+installation, host deadline, full-daemon IPC throughput, or native concurrent delegation acceptance.
+
+Continue to run the existing fresh/retained concurrent adapter probe separately. Its latency and
+accounting measurements remain adapter-only evidence. Neither that probe nor a recovery summary
+proves that every local loss has reached task/check coverage; admission-independent loss
+propagation is a separate implementation slice of #695.

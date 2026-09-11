@@ -105,3 +105,29 @@ def test_new_route_invalidates_the_previous_root_proof(tmp_path: Path) -> None:
     )
     assert store.capture_reservation_bootstrap_ready(workspace) is False
     assert store.capture_backlog(workspace)["capture_backlog_scope"] == "unknown"
+
+
+def test_unknown_inventory_is_durable_maintenance_work_with_an_empty_outbox(
+    tmp_path: Path,
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = _workspace(store, tmp_path)
+    store.bootstrap_capture_reservations(
+        workspace, {"tsk_first": ObservationCaptureBacklog(0, 0, None)}
+    )
+    assert store.pending_workspaces() == ()
+    store.update_capture_backlog(workspace, 0, 0, None, _OBSERVED, route_id="tsk_second")
+    assert store.pending_outbox_count(workspace) == 0
+    assert store.pending_workspaces() == (workspace,)
+    reopened = LocalObservationStore(_state=tmp_path)
+    assert reopened.pending_workspaces() == (workspace,)
+    assert reopened.capture_inventory_recovery_needed(workspace)
+    reopened.bootstrap_capture_reservations(
+        workspace,
+        {
+            "tsk_first": ObservationCaptureBacklog(0, 0, None),
+            "tsk_second": ObservationCaptureBacklog(0, 0, None),
+        },
+    )
+    assert not reopened.capture_inventory_recovery_needed(workspace)
+    assert reopened.pending_workspaces() == ()
