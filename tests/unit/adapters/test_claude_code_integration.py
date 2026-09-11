@@ -184,7 +184,7 @@ class _ClaudeFixture:
         return ClaudeCodeCommandResult(1, b"", b"unexpected")
 
 
-def test_native_projection_uses_shared_bytes_and_only_admitted_claude_components() -> None:
+def test_native_projection_uses_claude_skill_and_shared_guidance_components() -> None:
     external = render_claude_code_plugin()
     managed = render_claude_code_plugin(
         mcp_ownership=McpOwnership.PLUGIN_MANAGED,
@@ -211,6 +211,19 @@ def test_native_projection_uses_shared_bytes_and_only_admitted_claude_components
     assert fixture["observation_evidence"] == "not_observed"
     assert managed.plan.format_profile is PluginFormatProfile.CLAUDE_CODE_PLUGIN_NATIVE
     assert external.members["skills/yoetz/SKILL.md"] == managed.members["skills/yoetz/SKILL.md"]
+    assert external.members["skills/yoetz/SKILL.md"] == read_verified_resource(
+        "skills/claude-code/yoetz/SKILL.md"
+    )
+    for name in (
+        "agent-instructions.md",
+        "coverage-and-receipts.md",
+        "publication-policy.md",
+        "request-templates.md",
+        "workflow.md",
+    ):
+        assert external.members[f"skills/yoetz/references/{name}"] == read_verified_resource(
+            f"guidance/{name}"
+        )
     assert ".mcp.json" not in external.members
     # The plugin-owned MCP entry and every hook launch the exact bound installation, never a
     # bare PATH lookup: the 2026-08-27 dogfood's bridge/service split-brain came from PATH.
@@ -262,6 +275,23 @@ def test_native_projection_uses_shared_bytes_and_only_admitted_claude_components
         )
         for row in hooks.values()
     )
+
+
+def test_native_hook_timeouts_leave_room_for_local_capture_and_service_drain() -> None:
+    artifact = render_claude_code_plugin(observation_profile="ordinary")
+    hooks = json.loads(artifact.members["hooks/hooks.json"])["hooks"]
+
+    assert {event: definition[0]["hooks"][0]["timeout"] for event, definition in hooks.items()} == {
+        "PermissionDenied": 5,
+        "PermissionRequest": 5,
+        "PreToolUse": 5,
+        "PostToolUse": 5,
+        "PostToolUseFailure": 5,
+        "SessionEnd": 3,
+        "SessionStart": 10,
+        "Stop": 10,
+        "StopFailure": 5,
+    }
 
 
 def test_launcher_binding_uses_the_invoking_installation_and_marks_the_marker(
@@ -1039,3 +1069,76 @@ def test_completed_host_command_with_missed_readback_is_outcome_unknown(
     # state is outcome_unknown, never a safe pre-mutation refusal.
     assert result.operation_state is PluginOperationState.OUTCOME_UNKNOWN
     assert result.enabled is False
+
+
+# --- compatibility floor admission (#656) -----------------------------------------------------
+
+
+def test_version_provenance_separates_certification_from_admission() -> None:
+    from yoetz.adapters.integrations.claude_code_integration import (
+        CLAUDE_CODE_MINIMUM_VERSION,
+        claude_code_version_provenance,
+    )
+
+    assert CLAUDE_CODE_MINIMUM_VERSION == "2.1.233"
+    assert claude_code_version_provenance("2.1.241") == "tested"
+    # Neighbours and later releases are admitted but never promoted to a proven cell.
+    for version in ("2.1.233", "2.1.240", "2.1.242", "2.2.0", "3.0.0"):
+        assert claude_code_version_provenance(version) == "untested", version
+    for version in ("2.1.232", "2.1.211", "1.9.9", "2.1", "2.1.241-beta", "", "x"):
+        assert claude_code_version_provenance(version) is None, version
+
+
+def test_compatible_untested_version_is_admitted_with_provenance(tmp_path: Path) -> None:
+    """A release above the floor previews and applies; the preview and status carry
+    ``untested`` provenance instead of an unearned proven cell. Below the floor stays refused."""
+
+    target = _target(tmp_path)
+    artifact = render_claude_code_plugin()
+    commands = _ClaudeFixture(artifact)
+
+    def _with_version(version: str) -> ClaudeCodePluginTarget:
+        return ClaudeCodePluginTarget(
+            target.project_root,
+            target.claude_config_root,
+            target.cache_root,
+            target.marketplace_root,
+            target.executable,
+            ClaudeCodeCapabilityIdentity(
+                version, target.identity.executable_digest, "darwin", "arm64"
+            ),
+        )
+
+    tested = preview_claude_code_plugin(
+        _REQUEST, target, ClaudeCodePluginAction.INSTALL, artifact, commands=commands
+    )
+    assert tested.version_provenance == "tested"
+    assert (
+        status_claude_code_plugin(target, artifact, commands=commands).version_provenance
+        == "tested"
+    )
+
+    newer = _with_version("2.1.250")
+    untested = preview_claude_code_plugin(
+        _REQUEST, newer, ClaudeCodePluginAction.INSTALL, artifact, commands=commands
+    )
+    assert untested.version_provenance == "untested"
+    assert untested.action is ClaudeCodePluginAction.INSTALL
+    assert (
+        status_claude_code_plugin(newer, artifact, commands=commands).version_provenance
+        == "untested"
+    )
+    # Provenance is not a second admission gate: the digest is bound to the exact host version.
+    assert untested.preview_digest != tested.preview_digest
+
+    below = _with_version("2.1.232")
+    with pytest.raises(ClaudeCodeIntegrationError) as refused:
+        preview_claude_code_plugin(
+            _REQUEST, below, ClaudeCodePluginAction.INSTALL, artifact, commands=commands
+        )
+    assert refused.value.reason is PluginArtifactReason.FORMAT_UNSUPPORTED
+    assert refused.value.safe_details == {
+        "minimum_version": "2.1.233",
+        "version_unsupported": "2.1.232",
+    }
+    assert status_claude_code_plugin(below, artifact, commands=commands).version_provenance is None

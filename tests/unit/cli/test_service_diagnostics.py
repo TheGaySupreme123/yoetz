@@ -57,3 +57,41 @@ def test_service_diagnostics_unknown_correlation_exits_one(
         ],
     )
     assert result.exit_code == 1
+
+
+def test_request_selector_joins_multiple_failure_stages(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    monkeypatch.setattr("yoetz.observability.diagnostics.log_dir", lambda: tmp_path)  # type: ignore[attr-defined]
+    request = "req_dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+    for suffix, operation in [
+        (1, "semantic_attempt_dispatch_entered_failed"),
+        (2, "semantic_terminalize_attempt_failed"),
+    ]:
+        append_diagnostic_record(
+            correlation_id=f"err_00000000-0000-4000-8000-{suffix:012d}",
+            component="semantic_attempts",
+            operation=operation,
+            reason="exception_runtime_error",
+            request_id=request,
+            root=tmp_path,
+            now=_NOW,
+        )
+    result = _RUNNER.invoke(app, ["service", "diagnostics", "--request-id", request, "--json"])
+    assert result.exit_code == 0
+    assert "semantic_attempt_dispatch_entered_failed" in result.stdout
+    assert "semantic_terminalize_attempt_failed" in result.stdout
+    assert request in result.stdout
+    invalid = _RUNNER.invoke(
+        app,
+        [
+            "service",
+            "diagnostics",
+            "--request-id",
+            request,
+            "--correlation-id",
+            _CORRELATION,
+            "--json",
+        ],
+    )
+    assert invalid.exit_code != 0

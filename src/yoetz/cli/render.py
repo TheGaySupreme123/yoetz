@@ -12,6 +12,8 @@ from yoetz.protocol.models import (
     OmittedContentModel,
     PublicErrorModel,
     ReceiptSuccessModel,
+    StatusFindingsPageModel,
+    StatusObligationsPageModel,
     StatusOperationPageModel,
     StatusSuccessModel,
 )
@@ -79,6 +81,13 @@ def render_human_check(result: CheckSuccessModel) -> str:
         f"Semantic review: {_token(result.semantic_status)} ({_token(result.semantic_reason)})",
         render_human_findings(result.findings),
     ]
+    if _token(result.semantic_reason) == "case_capacity_exceeded":
+        lines.append("No provider attempt was made. Narrow claim/obligation scope for a new check.")
+    elif _token(result.semantic_reason) == "coordinator_failure":
+        lines.append(
+            f"Inspect yoetz service diagnostics --request-id {result.request_id}. "
+            "Null provenance does not prove that no provider call occurred."
+        )
     suppressed = int(result.suppressed_count)
     if suppressed:
         lines.append(f"Suppressed findings: {suppressed}")
@@ -122,6 +131,23 @@ def render_human_status(result: StatusSuccessModel) -> str:
                     f"Replay request ID: {result.page.continuation.replay_request_id}",
                 )
             )
+    if isinstance(result.page, StatusFindingsPageModel):
+        for finding in result.page.items:
+            lines.append(
+                f"{finding.finding_id} resolved={finding.resolved}: "
+                + _projected_text(finding.detail)
+            )
+    if isinstance(result.page, StatusObligationsPageModel):
+        for obligation in result.page.items:
+            for attempt in obligation.command_attempts[:3]:
+                lines.append(
+                    f"{obligation.obligation_id} command item {attempt.requested_item_index}: {attempt.relation} (attempt only, not success)"
+                )
+            remaining = len(obligation.command_attempts) - 3
+            if remaining > 0:
+                lines.append(
+                    f"{obligation.obligation_id}: {remaining} more command attempts; use JSON status for all items"
+                )
     gaps = tuple(result.gaps) + tuple(result.coverage.known_gaps)
     lines.append("Gaps: " + (", ".join(dict.fromkeys(gaps)) if gaps else "none"))
     return "\n".join(lines)

@@ -164,6 +164,7 @@ def _check(repo_root: Path) -> bool:
         and _run(repo_root, "verify_resource_manifest.py", "--check")
         and _installed_manifest_agrees_with_schema(repo_root)
         and _run(repo_root, "sync_committed_agent_trees.py", "--check")
+        and _run(repo_root, "sync_mcp_descriptor_digests.py", "--check")
     )
 
 
@@ -176,8 +177,13 @@ def _write_pass(repo_root: Path) -> bool:
             "privacy/privacy-policy-1.0.0.schema.json",
             "--only",
             "privacy/privacy-policy-1.1.0.schema.json",
+            "--only",
+            "operations/status-result-1.1.0.schema.json",
+            "--only",
+            "operations/status-result-1.2.0.schema.json",
         ),
         ("sync_repository_authority_schemas.py", "--write"),
+        ("sync_semantic_capacity_schemas.py",),
         # Mirror the reviewed sources into the package tree and recompute the resource-set digest.
         ("verify_resource_manifest.py", "--sync"),
         # Rebind the runtime-support digests to that resource-set digest. This must precede the
@@ -197,6 +203,7 @@ def _write_pass(repo_root: Path) -> bool:
         # Mirror the regenerated schema bytes and schema inventory. The resource-set digest moves
         # when they change, which the next pass rebinds into runtime-support.
         ("verify_resource_manifest.py", "--sync"),
+        ("sync_mcp_descriptor_digests.py", "--write"),
     )
     for script_name, *arguments in steps:
         if not _run(repo_root, script_name, *arguments):

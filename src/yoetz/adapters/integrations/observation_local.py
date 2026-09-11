@@ -23,11 +23,21 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Final, cast
 
+from yoetz.adapters.integrations.observation_admission import (
+    AdmissionBuffer,
+    AdmissionPlan,
+    SummaryBuilder,
+    admission_buffer_from_json,
+    admission_buffer_to_json,
+    flush_admission,
+    plan_admission,
+)
 from yoetz.config.paths import PathSafetyError, ensure_owner_only_dir, state_dir
 from yoetz.domain.observation import (
     OBSERVATION_BACKPRESSURE_REASON,
     AdviceItem,
     AdviceSnapshot,
+    ObservationCaptureBacklog,
     ObservationControlCommand,
     ObservationCursor,
     ObservationEnvelope,
@@ -45,11 +55,47 @@ from yoetz.domain.observation import (
     observation_cursor_to_json,
     observation_envelope_from_json,
     observation_envelope_to_json,
+    observation_selection_route,
     workspace_commitment_from_path,
+)
+from yoetz.domain.observation_budget import (
+    BUDGET_POLICY_VERSION,
+    BUDGET_VALIDATION_STATUS,
+    BudgetLimits,
+    BudgetUsage,
+    ObservationMode,
+    PressureEvaluation,
+    PressureSnapshot,
+    PressureState,
+    evaluate_pressure,
 )
 from yoetz.domain.observation_profiles import (
     is_content_capture_profile,
     validate_content_capture_profile,
+)
+from yoetz.domain.observation_read_protection import (
+    DEFAULT_READ_PROTECTION_TTL_SECONDS,
+    MAX_READ_PROTECTION_COUNT,
+    MAX_READ_PROTECTIONS,
+    ReadProtection,
+    read_protection_attempt_identity,
+    read_protection_from_json,
+    read_protection_to_json,
+    validate_read_protection_reference,
+)
+from yoetz.domain.observation_selection import ROUTINE_READ_TOOLS, SHELL_TOOLS
+from yoetz.domain.observation_settings import (
+    DEFAULT_OBSERVATION_SELECTION,
+    ObservationCapacityProfile,
+    ObservationSelection,
+    ObservationSelectionResolution,
+    ObservationSelectionRuntimeStatus,
+    ObservationSelectionSetting,
+    ObservationSelectionSettings,
+    observation_selection_runtime_status_from_json,
+    observation_selection_settings_from_json,
+    observation_selection_settings_to_json,
+    resolve_observation_selection,
 )
 from yoetz.domain.values import (
     Frontier,
@@ -78,6 +124,7 @@ __all__ = [
     "LocalObservationStore",
     "ObservationOutboxRow",
     "PendingSessionLifecycle",
+    "ReadProtection",
     "STREAM_MAPPING_VERSION",
     "YOETZ_OWNED_TOOL_NAMES",
     "YOETZ_READ_TOOL_NAMES",
@@ -91,18 +138,32 @@ __all__ = [
 HOOK_MAPPING_VERSION: Final = "codex-obs-hook/1.0.0"
 # 1.3.0: a stream cursor is paired with the exact rollout profile its generation's header
 # admitted; cursors persisted under 1.2.0 carry no profile and replay from the header (#568).
-STREAM_MAPPING_VERSION: Final = "codex-obs-stream/1.3.0"
+STREAM_MAPPING_VERSION: Final = "codex-obs-stream/1.4.0"
 _KEY_BYTES: Final = 32
 _MAX_STATE_BYTES: Final = 1_048_576
+# Keep an unpatched copy of the standard bound for compatibility with tests
+# and for deciding when an existing expanded-profile file is a durable
+# occupancy ceiling.  ``_MAX_STATE_BYTES`` remains the compatibility seam
+# used by the standard profile's bounded-store tests.
+_DEFAULT_STATE_BYTES: Final = 1_048_576
 _MAX_LEGACY_STATE_BYTES: Final = 36 * 1_048_576
 _MAX_ENVELOPES: Final = 256
 _MAX_DEDUP: Final = 4_096
 _MAX_OPEN_PRE: Final = 256
+# A pre event is an accepted pairing identity, but its post may be lost by a
+# host crash.  Keep that identity long enough for normal hook/retry delivery;
+# after the deadline it is accounted for as an incomplete pairing gap so a
+# missing post cannot pin pressure forever.
+_OPEN_PRE_TTL_MS: Final = 600_000
 # Keep true paired-profile orphan identities separate from the aggregate gap
 # history.  A valid pair in another source/session/generation must not clear
 # one of these conditions.
 _MAX_UNPAIRED_SCOPES: Final = 256
 _MAX_OUTBOX: Final = 512
+# The largest selected profile is the hard local JSON ceiling.  Profile
+# specific limits come from the pure budget policy below; the standard value
+# continues to derive from the long-standing compatibility constant.
+_MAX_EXPANDED_STATE_BYTES: Final = 16 * 1_048_576
 _MAX_PENDING_LIFECYCLES: Final = 256
 _MAX_QUARANTINE: Final = 512
 # Quarantined detail is a diagnostic aid, not the durable record; entries this
@@ -133,11 +194,17 @@ _MAX_STREAM_CALL_TOOLS: Final = 256
 _MAX_STATE_CACHE_ENTRIES: Final = 8
 _MAX_HOOK_SEQUENCES: Final = 256
 _MAX_FRONTIER_MOTION_NOTICES: Final = 256
+_MAX_CAPTURE_BACKLOG_ROUTES: Final = 256
+_MAX_CAPTURE_TICKET_RESERVATIONS: Final = 512
+_MAX_CAPTURE_CONTENT_BYTES: Final = 128 * 1024 * 1024
+_CAPTURE_BOOTSTRAP_SCHEMA: Final = "yoetz.capture-reservation-bootstrap/1"
 _MAX_SAFE_INTEGER: Final = 9_007_199_254_740_991
 # Wall/monotonic drift tolerated before persisted monotonic samples are treated
 # as belonging to a different boot epoch (and therefore fenced off).
 _EPOCH_TOLERANCE_SECONDS: Final = 2.0
 _OUTBOX_REASON_RE: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)
+_CAPTURE_BACKLOG_ROUTE_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$", re.ASCII)
+_UNKNOWN_CAPTURE_BACKLOG_ROUTE: Final = "_unknown"
 _OBSERVATION_GAP_CODES: Final = frozenset(item.value for item in ObservationGapCode)
 _RUNTIME_GATE_SCHEMA: Final = "yoetz.observation-runtime-gate/1"
 _RUNTIME_GATE_NAME: Final = "runtime-gate.json"
@@ -149,6 +216,8 @@ _PAIRING_PROVENANCE_SCHEMAS: Final = (
     "yoetz.observation-local/11",
     "yoetz.observation-local/12",
     "yoetz.observation-local/13",
+    "yoetz.observation-local/14",
+    "yoetz.observation-local/15",
 )
 _RETENTION_PROVENANCE_SCHEMAS: Final = _PAIRING_PROVENANCE_SCHEMAS
 # Never a legal character in an event-kind token. An interim build stamped
@@ -156,6 +225,8 @@ _RETENTION_PROVENANCE_SCHEMAS: Final = _PAIRING_PROVENANCE_SCHEMAS
 # it so such a value can never be mistaken for an event kind.
 _OPEN_PRE_SEPARATOR: Final = "|"
 _LOCAL_OUTBOX_OVERFLOW_GAP: Final = "_local_outbox_overflow"
+_PENDING_ATTEMPT_LIMIT_GAP: Final = "pending_attempt_limit"
+_PENDING_ATTEMPT_EXPIRED_GAP: Final = "pending_attempt_expired"
 _LOCAL_STREAM_PARTIAL_DROPPED_GAP: Final = "_local_stream_partial_dropped"
 _LEGACY_STREAM_PARTIAL_DROPPED_SESSION: Final = "_legacy_unknown"
 _STORE_LOCK_TIMEOUT_SECONDS: Final = 2.0
@@ -704,6 +775,339 @@ class _GapState:
     active: bool = True
 
 
+@dataclass(frozen=True, slots=True)
+class _OpenPre:
+    """Durable identity for an accepted pre event awaiting its post.
+
+    Older local states stored only the event kind.  The optional timestamps
+    keep those states readable while every new entry records the original
+    receipt and a wall-clock deadline.  Pairing scope is copied from the
+    envelope so a restart or a reused host correlation id cannot extend the
+    wrong pending attempt.
+    """
+
+    event_kind: str
+    source: ObservationSource | None
+    session_commitment: str | None
+    source_generation: int | None
+    correlation_id: str
+    receipt_time: Timestamp | None
+    deadline: Timestamp | None
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.event_kind) is not str
+            or not 1 <= len(self.event_kind) <= 128
+            or _OPEN_PRE_SEPARATOR in self.event_kind
+            or not self.event_kind.isascii()
+            or not all(0x21 <= ord(char) <= 0x7E for char in self.event_kind)
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        if type(self.source) is not ObservationSource and self.source is not None:
+            raise ProtocolValueError("invalid_event_enum")
+        scoped = self.source is not None
+        if scoped != (self.session_commitment is not None and self.source_generation is not None):
+            raise ProtocolValueError("invalid_event_value_type")
+        if self.session_commitment is not None:
+            validate_commitment(self.session_commitment)
+        if self.source_generation is not None and (
+            type(self.source_generation) is not int
+            or isinstance(self.source_generation, bool)
+            or not 1 <= self.source_generation <= _MAX_SAFE_INTEGER
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        if (
+            type(self.correlation_id) is not str
+            or not 1 <= len(self.correlation_id) <= 128
+            or not self.correlation_id.isascii()
+            or not all(0x21 <= ord(char) <= 0x7E for char in self.correlation_id)
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        if self.receipt_time is not None and type(self.receipt_time) is not Timestamp:
+            raise ProtocolValueError("invalid_timestamp")
+        if self.deadline is not None and type(self.deadline) is not Timestamp:
+            raise ProtocolValueError("invalid_timestamp")
+        if (
+            self.receipt_time is None
+            and self.deadline is not None
+            or self.receipt_time is not None
+            and self.deadline is None
+        ):
+            raise ProtocolValueError("invalid_timestamp")
+        if (
+            self.receipt_time is not None
+            and self.deadline is not None
+            and self.deadline < self.receipt_time
+        ):
+            raise ProtocolValueError("invalid_timestamp")
+
+
+def _open_pre_deadline(receipt_time: Timestamp | None) -> Timestamp | None:
+    if receipt_time is None:
+        return None
+    try:
+        return timestamp_from_datetime(
+            receipt_time.as_datetime() + timedelta(milliseconds=_OPEN_PRE_TTL_MS)
+        )
+    except OverflowError, ProtocolValueError, ValueError:
+        return None
+
+
+def _open_pre_to_json(value: _OpenPre) -> JsonObject:
+    return JsonObject(
+        {
+            "event_kind": value.event_kind,
+            "source": None if value.source is None else value.source.value,
+            "session_commitment": value.session_commitment,
+            "source_generation": value.source_generation,
+            "correlation_id": value.correlation_id,
+            "receipt_time": None if value.receipt_time is None else value.receipt_time.wire,
+            "deadline": None if value.deadline is None else value.deadline.wire,
+        }
+    )
+
+
+def _safe_timestamp(value: object) -> Timestamp | None:
+    if type(value) is not str:
+        return None
+    try:
+        return Timestamp(value)
+    except ProtocolValueError, TypeError, ValueError:
+        return None
+
+
+def _open_pre_from_json(
+    raw: object,
+    *,
+    key: str,
+    legacy_receipt_time: Timestamp | None,
+) -> _OpenPre | None:
+    """Decode one current typed entry or upgrade a legacy event-kind value."""
+
+    if type(raw) is str:
+        event_kind = raw.split(_OPEN_PRE_SEPARATOR, 1)[0]
+        receipt_time = legacy_receipt_time
+        try:
+            return _OpenPre(
+                event_kind=event_kind,
+                source=None,
+                session_commitment=None,
+                source_generation=None,
+                correlation_id=key,
+                receipt_time=receipt_time,
+                deadline=_open_pre_deadline(receipt_time),
+            )
+        except ProtocolValueError, TypeError, ValueError:
+            return None
+    if not isinstance(raw, Mapping):
+        return None
+    row = cast(Mapping[str, JsonValue], raw)
+    event_kind = row.get("event_kind")
+    correlation_id = row.get("correlation_id", key)
+    source_raw = row.get("source")
+    session_commitment = row.get("session_commitment")
+    source_generation = row.get("source_generation")
+    if type(event_kind) is not str or type(correlation_id) is not str:
+        return None
+    if session_commitment is not None and type(session_commitment) is not str:
+        return None
+    if source_generation is not None and type(source_generation) is not int:
+        return None
+    source: ObservationSource | None
+    if source_raw is None:
+        source = None
+    elif type(source_raw) is str:
+        try:
+            source = ObservationSource(source_raw)
+        except ValueError, TypeError:
+            return None
+    else:
+        return None
+    receipt_time = _safe_timestamp(row.get("receipt_time")) or legacy_receipt_time
+    deadline = _safe_timestamp(row.get("deadline"))
+    if receipt_time is not None and deadline is None:
+        deadline = _open_pre_deadline(receipt_time)
+    try:
+        return _OpenPre(
+            event_kind=event_kind,
+            source=source,
+            session_commitment=session_commitment,
+            source_generation=source_generation,
+            correlation_id=correlation_id,
+            receipt_time=receipt_time,
+            deadline=deadline,
+        )
+    except ProtocolValueError, TypeError, ValueError:
+        return None
+
+
+def _open_pre_map_from_json(
+    raw: object,
+    *,
+    legacy_receipt_time: Timestamp | None,
+) -> dict[str, _OpenPre]:
+    if not isinstance(raw, Mapping):
+        return {}
+    result: dict[str, _OpenPre] = {}
+    for key, value in cast(Mapping[object, object], raw).items():
+        if (
+            type(key) is not str
+            or not 1 <= len(key) <= 128
+            or not key.isascii()
+            or not all(0x21 <= ord(char) <= 0x7E for char in key)
+        ):
+            continue
+        entry = _open_pre_from_json(
+            value,
+            key=key,
+            legacy_receipt_time=legacy_receipt_time,
+        )
+        if entry is not None:
+            result[key] = entry
+        if len(result) >= _MAX_OPEN_PRE:
+            break
+    return result
+
+
+@dataclass(frozen=True, slots=True)
+class _CaptureBacklogSnapshot:
+    """Bounded, task-scoped capture backlog feedback cached locally.
+
+    The local store may know only the routes that have reported recently.  It
+    therefore keeps this per-task snapshot separate from workspace authority
+    and carries an explicit scope flag on the enclosing state rather than
+    presenting the sum as a workspace-global measurement.
+    """
+
+    count: int
+    byte_count: int
+    oldest_receipt_time: Timestamp | None
+    observed_at: Timestamp
+    # A complete task inventory may carry the durable ticket identities that
+    # its aggregate already includes.  Partial legacy reports leave this
+    # empty, so central reservations remain conservatively additive.
+    accounted_ticket_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.count) is not int
+            or isinstance(self.count, bool)
+            or not 0 <= self.count <= _MAX_SAFE_INTEGER
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        if (
+            type(self.byte_count) is not int
+            or isinstance(self.byte_count, bool)
+            or not 0 <= self.byte_count <= _MAX_SAFE_INTEGER
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        if self.oldest_receipt_time is not None and type(self.oldest_receipt_time) is not Timestamp:
+            raise ProtocolValueError("invalid_timestamp")
+        if self.count == 0 and self.oldest_receipt_time is not None:
+            raise ProtocolValueError("invalid_event_value_type")
+        if type(self.observed_at) is not Timestamp:
+            raise ProtocolValueError("invalid_timestamp")
+        if type(self.accounted_ticket_ids) is not tuple:
+            raise ProtocolValueError("invalid_event_value_type")
+        if len(self.accounted_ticket_ids) > _MAX_CAPTURE_TICKET_RESERVATIONS:
+            raise ProtocolValueError("invalid_event_value_type")
+        if len(self.accounted_ticket_ids) > self.count:
+            raise ProtocolValueError("invalid_event_value_type")
+        previous: str | None = None
+        for ticket_id in self.accounted_ticket_ids:
+            try:
+                normalized = validate_sha256_digest(ticket_id)
+            except (ProtocolValueError, TypeError, ValueError) as exc:
+                raise ProtocolValueError("invalid_event_value_type") from exc
+            if normalized != ticket_id or (
+                previous is not None and ticket_id.encode("ascii") <= previous.encode("ascii")
+            ):
+                raise ProtocolValueError("invalid_event_value_type")
+            previous = ticket_id
+
+
+@dataclass(frozen=True, slots=True)
+class _CaptureReservation:
+    """One central workspace capture reservation held across task bundles."""
+
+    ticket_id: str
+    task_id: str
+    byte_count: int
+    reserved_at: Timestamp
+    needs_reconcile: bool = True
+
+    def __post_init__(self) -> None:
+        try:
+            validate_sha256_digest(self.ticket_id)
+        except (ProtocolValueError, TypeError, ValueError) as exc:
+            raise ProtocolValueError("invalid_event_value_type") from exc
+        if (
+            type(self.task_id) is not str
+            or _CAPTURE_BACKLOG_ROUTE_RE.fullmatch(self.task_id) is None
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        if (
+            type(self.byte_count) is not int
+            or isinstance(self.byte_count, bool)
+            or not 0 <= self.byte_count <= _MAX_CAPTURE_CONTENT_BYTES
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        if type(self.reserved_at) is not Timestamp or type(self.needs_reconcile) is not bool:
+            raise ProtocolValueError("invalid_event_value_type")
+
+
+def _capture_reservation_key(ticket_id: str, task_id: str) -> str:
+    """Derive a bounded key from the authenticated ticket/task pair."""
+
+    return canonical_digest(JsonObject({"task_id": task_id, "ticket_id": ticket_id}))
+
+
+@dataclass(frozen=True, slots=True)
+class _CaptureBootstrap:
+    """Proof that a complete task inventory was accounted before reservations opened."""
+
+    proof: str
+    observed_at: Timestamp
+    route_count: int
+
+    def __post_init__(self) -> None:
+        try:
+            validate_sha256_digest(self.proof)
+        except (ProtocolValueError, TypeError, ValueError) as exc:
+            raise ProtocolValueError("invalid_event_value_type") from exc
+        if type(self.observed_at) is not Timestamp:
+            raise ProtocolValueError("invalid_timestamp")
+        if (
+            type(self.route_count) is not int
+            or isinstance(self.route_count, bool)
+            or not 0 <= self.route_count <= _MAX_CAPTURE_BACKLOG_ROUTES
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+
+
+def _capture_bootstrap_proof(
+    workspace: str, snapshots: Mapping[str, _CaptureBacklogSnapshot]
+) -> str:
+    """Digest the route set from one complete read.
+
+    The per-route counts are live feedback and change after every durable
+    ticket mutation.  Keeping them out of this identity lets a complete
+    inventory remain valid while those counters are refreshed; adding a new
+    route still invalidates the proof through its opaque task id.
+    """
+
+    routes = tuple(sorted(snapshots, key=str.encode))
+    return canonical_digest(
+        JsonObject(
+            {
+                "schema": _CAPTURE_BOOTSTRAP_SCHEMA,
+                "workspace": workspace,
+                "routes": routes,
+            }
+        )
+    )
+
+
 @dataclass
 class _WorkspaceState:
     consent: LocalObservationConsent | None = None
@@ -727,7 +1131,7 @@ class _WorkspaceState:
     # deletion so a replayed append cannot re-announce already-delivered motion.
     frontier_motion_delivered: dict[str, _FrontierMotionDelivered] | None = None
     frontier_motion_recency: int = 0
-    open_pre: dict[str, str] | None = None
+    open_pre: dict[str, _OpenPre] | None = None
     unpaired_scopes: set[str] | None = None
     # True when a state was written by a pre-/11 reader that could not retain
     # scoped pairing provenance. It is deliberately sticky: a later save must
@@ -752,6 +1156,19 @@ class _WorkspaceState:
     # after a restart or reboot they are fenced off (see `_epoch_matches`).
     monotonic_epoch: float | None = None
     pending_outbox: list[ObservationOutboxRow] | None = None
+    admission_buffer: AdmissionBuffer = dataclasses.field(default_factory=AdmissionBuffer)
+    selection_epoch: int = 0
+    selection_observed_count: int = 0
+    selection_admitted_count: int = 0
+    selection_delivered_count: int = 0
+    selection_summarized_input_count: int = 0
+    selection_omitted_count: int = 0
+    selection_summarized_count: int = 0
+    selection_rejected_count: int = 0
+    selection_loss_commitment: str | None = None
+    selection_loss_ranges: tuple[JsonObject, ...] = ()
+    selection_last_loss_notice_ms: int | None = None
+    selection_loss_notice_pending: bool = False
     # (codex_session_id, envelope, reason, quarantined_at). The timestamp is
     # store-authored at quarantine time so the age bound measures time *in*
     # quarantine, never the (possibly much older) envelope receipt time.
@@ -775,8 +1192,35 @@ class _WorkspaceState:
     quarantine_evicted_last: Timestamp | None = None
     trusted_policy_digest: str | None = None
     trusted_policy_mac: str | None = None
+    # Owner-selected detail/capacity settings.  This is separate from consent
+    # and privacy authority: a setting never grants content or egress.
+    selection_settings: ObservationSelectionSettings | None = None
+    # Explicit read-retention scopes are structural-only hints. Each row is
+    # fenced to the consent generation and host-session generation that
+    # created it; it never carries or grants content authority.
+    read_protections: list[ReadProtection] | None = None
+    # Per-task capture backlog feedback.  This is deliberately distinct from
+    # workspace consent, outbox state, and structural queue capacity: the map
+    # is a bounded cache of route reports, never a workspace-global claim.
+    capture_backlogs: dict[str, _CaptureBacklogSnapshot] | None = None
+    # Central reservations are the workspace-global admission fence for the
+    # coordinator's native capture lane. They survive a crash until READY
+    # reconciles the corresponding task ticket inventory.
+    capture_reservations: dict[str, _CaptureReservation] | None = None
+    capture_backlog_scope_unknown: bool = False
+    # The proof is distinct from route feedback. Legacy state and partial task
+    # reads never enable a new central reservation; only a complete ready
+    # inventory may mint this marker.
+    capture_reservation_bootstrap: _CaptureBootstrap | None = None
+    # Per-session pressure state is the only mutable part of hysteresis; the
+    # pure domain evaluator remains the authority for every transition.
+    pressure_snapshots: dict[str, PressureSnapshot] | None = None
 
     def __post_init__(self) -> None:
+        if self.selection_settings is None:
+            self.selection_settings = ObservationSelectionSettings()
+        elif type(self.selection_settings) is not ObservationSelectionSettings:
+            raise ProtocolValueError("invalid_event_value_type")
         if self.session_workspaces is None:
             self.session_workspaces = {}
         if self.cursors is None:
@@ -837,6 +1281,28 @@ class _WorkspaceState:
             self.frontier_motion_notices = {}
         if self.frontier_motion_delivered is None:
             self.frontier_motion_delivered = {}
+        if self.capture_backlogs is None:
+            self.capture_backlogs = {}
+        elif type(self.capture_backlogs) is not dict:
+            raise ProtocolValueError("invalid_event_value_type")
+        if self.capture_reservations is None:
+            self.capture_reservations = {}
+        elif type(self.capture_reservations) is not dict:
+            raise ProtocolValueError("invalid_event_value_type")
+        if self.read_protections is None:
+            self.read_protections = []
+        elif type(self.read_protections) is not list or any(
+            type(item) is not ReadProtection for item in self.read_protections
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        if len(self.read_protections) > MAX_READ_PROTECTIONS:
+            raise ProtocolValueError("invalid_event_value_type")
+        if type(self.capture_backlog_scope_unknown) is not bool:
+            raise ProtocolValueError("invalid_event_value_type")
+        if self.pressure_snapshots is None:
+            self.pressure_snapshots = {}
+        elif type(self.pressure_snapshots) is not dict:
+            raise ProtocolValueError("invalid_event_value_type")
 
 
 def _cursor_key(source: ObservationSource, session_commitment: str) -> str:
@@ -951,6 +1417,80 @@ def _load_session_advice(raw: object) -> dict[str, AdviceSnapshot]:
         except ProtocolValueError, TypeError, ValueError:
             continue
     return result
+
+
+def _pressure_snapshots_to_json(
+    snapshots: Mapping[str, PressureSnapshot],
+) -> JsonObject:
+    """Encode the bounded per-session hysteresis map deterministically."""
+
+    return JsonObject(
+        {
+            key: JsonObject(
+                {
+                    "state": snapshot.state.value,
+                    "since_ms": snapshot.since_ms,
+                    "low_since_ms": snapshot.low_since_ms,
+                    "transition_identity": snapshot.transition_identity,
+                }
+            )
+            for key, snapshot in sorted(snapshots.items(), key=lambda item: item[0].encode())
+        }
+    )
+
+
+def _load_pressure_snapshots(raw: object) -> dict[str, PressureSnapshot]:
+    """Load at most the bounded set of valid, commitment-keyed snapshots."""
+
+    if not isinstance(raw, Mapping):
+        return {}
+    loaded: dict[str, PressureSnapshot] = {}
+    for key, value in sorted(
+        cast(Mapping[str, JsonValue], raw).items(), key=lambda item: str(item[0]).encode()
+    ):
+        if (
+            type(key) is not str
+            or len(loaded) >= _MAX_HOOK_SEQUENCES
+            or not isinstance(value, Mapping)
+        ):
+            continue
+        try:
+            validate_commitment(key)
+            row = cast(Mapping[str, JsonValue], value)
+            raw_state = row.get("state")
+            raw_since = row.get("since_ms")
+            raw_low = row.get("low_since_ms")
+            raw_identity = row.get("transition_identity")
+            if (
+                type(raw_state) is not str
+                or type(raw_since) is not int
+                or isinstance(raw_since, bool)
+                or raw_since < 0
+                or (
+                    raw_low is not None
+                    and (
+                        type(raw_low) is not int or isinstance(raw_low, bool) or raw_low < raw_since
+                    )
+                )
+                or (raw_identity is not None and type(raw_identity) is not str)
+            ):
+                continue
+            loaded[key] = PressureSnapshot(
+                PressureState(raw_state),
+                raw_since,
+                raw_low,
+                raw_identity,
+            )
+        except ProtocolValueError, TypeError, ValueError:
+            continue
+    return loaded
+
+
+def _timestamp_age_ms(now: Timestamp, earlier: Timestamp | None) -> int:
+    if earlier is None or earlier >= now:
+        return 0
+    delta = now.as_datetime() - earlier.as_datetime()
+    return max(0, delta.days * 86_400_000 + delta.seconds * 1_000 + delta.microseconds // 1_000)
 
 
 def _load_frontier_motion_notices(raw: object) -> dict[str, FrontierMotionNotice]:
@@ -1168,7 +1708,77 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         ended_session_generations=dict(state.ended_session_generations or {}),
         pending_lifecycles=list(state.pending_lifecycles or ()),
         content_capture_epoch=state.content_capture_epoch,
+        selection_settings=state.selection_settings,
+        read_protections=list(state.read_protections or ()),
+        capture_backlogs=dict(state.capture_backlogs or {}),
+        capture_reservations=dict(state.capture_reservations or {}),
+        capture_backlog_scope_unknown=state.capture_backlog_scope_unknown,
+        capture_reservation_bootstrap=state.capture_reservation_bootstrap,
+        pressure_snapshots=dict(state.pressure_snapshots or {}),
     )
+
+
+def _restore_state(target: _WorkspaceState, source: _WorkspaceState) -> None:
+    """Restore a state object from a previously captured independent copy.
+
+    ``_save`` performs bounded retention before it writes the replacement file.
+    If the protected durable rows still cannot fit, that retention work is
+    rejected along with the write. Restoring the caller's mutable state keeps
+    a failed save from leaking its speculative cache/history pruning into a
+    surrounding batch or a later retry.
+    """
+
+    for field in dataclasses.fields(_WorkspaceState):
+        setattr(target, field.name, getattr(source, field.name))
+
+
+class _ObservationBatch(contextlib.AbstractContextManager[None]):
+    """One local transaction, including a savepoint for nested callers.
+
+    A class context manager preserves typed immutable protocol exceptions;
+    generator context managers try to assign their traceback on propagation.
+    """
+
+    def __init__(self, store: LocalObservationStore, workspace: str) -> None:
+        self.store = store
+        self.workspace = workspace
+        self.state: _WorkspaceState | None = None
+        self.before: _WorkspaceState | None = None
+        self.nested = False
+        self.was_dirty = False
+
+    def __enter__(self) -> None:
+        self.store._lock.__enter__()  # pyright: ignore[reportPrivateUsage]
+        try:
+            self.nested = self.workspace in self.store._batch  # pyright: ignore[reportPrivateUsage]
+            self.was_dirty = self.workspace in self.store._batch_dirty  # pyright: ignore[reportPrivateUsage]
+            self.state = self.store._load(self.workspace)  # pyright: ignore[reportPrivateUsage]
+            self.before = _copy_state(self.state)
+            if not self.nested:
+                self.store._batch[self.workspace] = self.state  # pyright: ignore[reportPrivateUsage]
+        except BaseException:
+            self.store._lock.__exit__(None, None, None)  # pyright: ignore[reportPrivateUsage]
+            raise
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        assert self.state is not None and self.before is not None
+        try:
+            if exc_type is not None:
+                _restore_state(self.state, self.before)
+                if not self.was_dirty:
+                    self.store._batch_dirty.discard(self.workspace)  # pyright: ignore[reportPrivateUsage]
+            if not self.nested:
+                self.store._batch.pop(self.workspace, None)  # pyright: ignore[reportPrivateUsage]
+                dirty = self.workspace in self.store._batch_dirty  # pyright: ignore[reportPrivateUsage]
+                self.store._batch_dirty.discard(self.workspace)  # pyright: ignore[reportPrivateUsage]
+                if exc_type is None and dirty:
+                    try:
+                        self.store._save(self.workspace, self.state)  # pyright: ignore[reportPrivateUsage]
+                    except BaseException:
+                        _restore_state(self.state, self.before)
+                        raise
+        finally:
+            self.store._lock.__exit__(exc_type, exc, traceback)  # pyright: ignore[reportPrivateUsage]
 
 
 def _new_content_capture_epoch() -> str:
@@ -1267,6 +1877,75 @@ def _dedup_key(workspace: str, envelope: ObservationEnvelope) -> str:
     )
 
 
+def _outbox_row_is_protected(envelope: ObservationEnvelope) -> bool:
+    """Return whether a retained row is outside optional-read admission.
+
+    Routine summaries and clean detailed routine reads are disposable
+    selection output.  Every other envelope remains protected, including
+    unknown, failed, pre-event, and content-bearing rows.  The local store
+    derives this from its service-owned structural shape; a host label cannot
+    downgrade a row's protection.
+    """
+
+    if envelope.event_kind == "RoutineReadSummary":
+        return False
+    return not (
+        envelope.structural_payload.get("action") == "routine_read_detailed"
+        and not envelope.gap_codes
+        and not envelope.content_object_refs
+    )
+
+
+_OPTIONAL_ROUTINE_SELECTION_GAPS: Final = frozenset(
+    {"content_unselected", "observation_input_loss"}
+)
+
+
+def _optional_routine_selection_envelope(envelope: ObservationEnvelope) -> bool:
+    """Recognize an input whose exact selected account is durable elsewhere.
+
+    The diagnostic envelope cache is secondary to the admission buffer and
+    outbox.  Only service-marked routine reads with no captured content (and
+    the two bounded selection coverage gaps) may be reclaimed.  A plain read
+    without an authenticated selection route remains in the cache because it
+    may still be the only durable diagnostic record for the host event.
+    """
+
+    if envelope.content_object_refs or any(
+        gap not in _OPTIONAL_ROUTINE_SELECTION_GAPS for gap in envelope.gap_codes
+    ):
+        return False
+    action = envelope.structural_payload.get("action")
+    if action == "routine_read_detailed":
+        return True
+    if action != "routine_read":
+        return False
+    try:
+        return observation_selection_route(envelope.structural_payload) is not None
+    except ProtocolValueError, TypeError, ValueError:
+        return False
+
+
+def _read_protection_envelope_is_read(envelope: ObservationEnvelope) -> bool:
+    """Recognize only service-owned read structure at the local-store boundary."""
+
+    if type(envelope) is not ObservationEnvelope:
+        return False
+    tool_name = envelope.structural_payload.get("tool_name")
+    if type(tool_name) is not str:
+        return False
+    lowered = tool_name.casefold()
+    if lowered in ROUTINE_READ_TOOLS:
+        return True
+    # Shell command text is intentionally absent from structural envelopes.
+    # The adapter's typed classifier emits this marker only for its closed
+    # shell read grammar; an arbitrary host action or reference is ignored.
+    return lowered in SHELL_TOOLS and envelope.structural_payload.get("action") in {
+        "routine_read",
+        "routine_read_detailed",
+    }
+
+
 class LocalObservationStore:
     """Durable ObservationPort-shaped local store for consent and structural envelopes."""
 
@@ -1312,6 +1991,10 @@ class LocalObservationStore:
         # 10-18 times measured on a lived-in store (#242).
         self._batch: dict[str, _WorkspaceState] = {}
         self._batch_dirty: set[str] = set()
+        # Production READY composition enables this gate before exposing the
+        # coordinator.  Reference stores and hook-only readers leave it off;
+        # they do not own the workspace-global capture admission lane.
+        self._capture_reservation_bootstrap_required = False
 
     def _now_mono(self) -> float:
         import time
@@ -1398,6 +2081,20 @@ class LocalObservationStore:
                 + b"\n"
             )
             _atomic_write(gate_path, payload)
+
+    def set_capture_reservation_bootstrap_required(self, required: bool = True) -> None:
+        """Require a persisted complete route inventory before central admission.
+
+        The flag is process-local because READY composition is the authority
+        that owns the coordinator.  Every new service generation sets it
+        before accepting capture work, so a missing or stale persisted proof
+        fails closed after restart and upgrade while read-only hook stores keep
+        their legacy behavior.
+        """
+
+        if type(required) is not bool:
+            raise TypeError("capture_bootstrap_requirement_invalid")
+        self._capture_reservation_bootstrap_required = required
 
     def _runtime_gate_facts(self) -> tuple[bool, str]:
         """Read the enabled bit and fence nonce from one marker descriptor.
@@ -1688,6 +2385,648 @@ class LocalObservationStore:
                 and consent.content_capture_profiles == profiles
             )
 
+    def selection_settings_for(
+        self,
+        workspace_commitment: str,
+        *,
+        now: Timestamp | None = None,
+    ) -> ObservationSelectionSettings:
+        """Return owner-selected settings after atomically expiring stale entries.
+
+        Settings are kept in the same owner-private workspace file as consent
+        and the bounded outbox.  Expiry is an exclusive wall-clock boundary;
+        a read that observes it removes the entry under the existing store
+        lock, so a concurrent hook cannot continue using an expired override.
+        """
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            current = state.selection_settings or ObservationSelectionSettings()
+            stamp = now if now is not None else self._wall_timestamp()
+            active = self._prune_selection_settings(current, stamp)
+            if active != current:
+                state.selection_settings = active
+                self._save(workspace_commitment, state)
+            return active
+
+    def set_workspace_selection(
+        self,
+        workspace_commitment: str,
+        selection: ObservationSelection,
+        *,
+        expires_at: Timestamp | None = None,
+        set_at: Timestamp | None = None,
+    ) -> ObservationSelectionSetting:
+        """Persist the owner-selected default for this workspace.
+
+        This changes future structural admission only.  It neither grants
+        observation consent nor changes native content or privacy authority.
+        """
+
+        setting = self._selection_setting(selection, expires_at=expires_at, set_at=set_at)
+        with self._lock:
+            state = self._load(workspace_commitment)
+            settings = self._prune_selection_settings(
+                state.selection_settings or ObservationSelectionSettings(),
+                setting.set_at,
+            )
+            next_settings = settings.with_workspace(setting)
+            if next_settings != settings:
+                state.selection_settings = next_settings
+                self._save(workspace_commitment, state)
+            return setting
+
+    def set_session_selection(
+        self,
+        workspace_commitment: str,
+        session_commitment: str,
+        selection: ObservationSelection,
+        *,
+        expires_at: Timestamp | None = None,
+        set_at: Timestamp | None = None,
+    ) -> ObservationSelectionSetting:
+        """Persist a temporary owner-selected override for one session."""
+
+        setting = self._selection_setting(selection, expires_at=expires_at, set_at=set_at)
+        with self._lock:
+            state = self._load(workspace_commitment)
+            settings = self._prune_selection_settings(
+                state.selection_settings or ObservationSelectionSettings(),
+                setting.set_at,
+            )
+            next_settings = settings.with_session(session_commitment, setting)
+            if next_settings != settings:
+                state.selection_settings = next_settings
+                self._save(workspace_commitment, state)
+            return setting
+
+    def clear_workspace_selection(
+        self,
+        workspace_commitment: str,
+        *,
+        now: Timestamp | None = None,
+    ) -> ObservationSelectionSettings:
+        """Remove the persisted workspace default and fall back to configuration."""
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            settings = self._prune_selection_settings(
+                state.selection_settings or ObservationSelectionSettings(),
+                now if now is not None else self._wall_timestamp(),
+            )
+            next_settings = settings.with_workspace(None)
+            if next_settings != settings:
+                state.selection_settings = next_settings
+                self._save(workspace_commitment, state)
+            return next_settings
+
+    def clear_session_selection(
+        self,
+        workspace_commitment: str,
+        session_commitment: str,
+        *,
+        now: Timestamp | None = None,
+    ) -> ObservationSelectionSettings:
+        """Revoke one session override without changing workspace defaults."""
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            settings = self._prune_selection_settings(
+                state.selection_settings or ObservationSelectionSettings(),
+                now if now is not None else self._wall_timestamp(),
+            )
+            next_settings = settings.without_session(session_commitment)
+            if next_settings != settings:
+                state.selection_settings = next_settings
+                self._save(workspace_commitment, state)
+            return next_settings
+
+    @staticmethod
+    def _read_protection_auth_generation(
+        workspace_commitment: str, state: _WorkspaceState
+    ) -> str | None:
+        """Return the opaque consent fence used by explicit read scopes.
+
+        ``content_capture_epoch`` is only a nonce here. Including it prevents
+        a pause/resume or revoke/grant ABA from reactivating an old scope;
+        checking content authority remains a separate caller responsibility.
+        """
+
+        consent = state.consent
+        if consent is None:
+            return None
+        epoch = _ensure_content_capture_epoch(state)
+        return canonical_digest(
+            JsonObject(
+                {
+                    "kind": "observation-read-protection-auth/v1",
+                    "workspace_commitment": workspace_commitment,
+                    "consent_granted_at": consent.granted_at.wire,
+                    "consent_revoked_at": (
+                        None if consent.revoked_at is None else consent.revoked_at.wire
+                    ),
+                    "consent_paused": consent.paused,
+                    "consent_epoch": epoch,
+                }
+            )
+        )
+
+    @staticmethod
+    def _read_protection_generation(state: _WorkspaceState, session_commitment: str) -> int:
+        assert state.session_generations is not None
+        generation = state.session_generations.get(session_commitment, 0)
+        return generation if generation >= 1 else 1
+
+    def _prune_read_protections(
+        self,
+        state: _WorkspaceState,
+        *,
+        workspace_commitment: str,
+        now: Timestamp,
+        auth_generation: str | None = None,
+    ) -> bool:
+        """Drop expired or generation-fenced scopes before they can match."""
+
+        assert state.read_protections is not None
+        if auth_generation is None:
+            auth_generation = self._read_protection_auth_generation(workspace_commitment, state)
+        kept: list[ReadProtection] = []
+        changed = False
+        for protection in state.read_protections:
+            current_generation = self._read_protection_generation(
+                state, protection.session_commitment
+            )
+            if (
+                protection.expires_at <= now
+                or protection.auth_generation != auth_generation
+                or protection.session_generation != current_generation
+            ):
+                changed = True
+                continue
+            kept.append(protection)
+        if changed:
+            state.read_protections[:] = kept
+        return changed
+
+    def _read_protection_candidates(
+        self,
+        state: _WorkspaceState,
+        *,
+        workspace_commitment: str,
+        session_commitment: str,
+        envelope: ObservationEnvelope,
+        now: Timestamp,
+        attempt_id: str | None = None,
+    ) -> tuple[str | None, list[tuple[int, ReadProtection]]]:
+        """Return current matching scopes and their opaque auth fence."""
+
+        if (
+            type(envelope) is not ObservationEnvelope
+            or envelope.session_commitment != session_commitment
+            or not _read_protection_envelope_is_read(envelope)
+        ):
+            return None, []
+        consent = state.consent
+        if consent is None or not consent.active:
+            return None, []
+        auth_generation = self._read_protection_auth_generation(workspace_commitment, state)
+        if auth_generation is None:
+            return None, []
+        current_generation = self._read_protection_generation(state, session_commitment)
+        if (
+            session_commitment in (state.ended_sessions or set())
+            or envelope.cursor.source_generation != current_generation
+        ):
+            return auth_generation, []
+        matches = [
+            (index, protection)
+            for index, protection in enumerate(state.read_protections or ())
+            if (
+                protection.session_commitment == session_commitment
+                and protection.auth_generation == auth_generation
+                and protection.session_generation == current_generation
+                and protection.expires_at > now
+                and (
+                    protection.remaining > 0
+                    or (
+                        attempt_id is not None
+                        and (protection.reserved(attempt_id) or protection.consumed(attempt_id))
+                    )
+                )
+            )
+        ]
+        if attempt_id is not None:
+            matches.sort(
+                key=lambda item: (
+                    0 if item[1].reserved(attempt_id) or item[1].consumed(attempt_id) else 1
+                )
+            )
+        return auth_generation, matches
+
+    def protect_next_reads(
+        self,
+        workspace_commitment: str,
+        session_commitment: str,
+        reference: str,
+        *,
+        count: int = 1,
+        expires_at: Timestamp | None = None,
+    ) -> JsonObject:
+        """Protect a bounded number of future reads for one current session.
+
+        This operation only raises retention protection. It cannot create
+        consent, enable content capture, or authorize privacy/provider egress.
+        The reference is syntax-checked so a later claim may be created after
+        this request; no projection lookup is performed.
+        """
+
+        try:
+            workspace_commitment = validate_commitment(workspace_commitment)
+            session_commitment = validate_commitment(session_commitment)
+            reference = validate_read_protection_reference(reference)
+        except ProtocolValueError, TypeError, ValueError:
+            raise
+        if (
+            type(count) is not int
+            or isinstance(count, bool)
+            or not 1 <= count <= MAX_READ_PROTECTION_COUNT
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        if expires_at is not None and type(expires_at) is not Timestamp:
+            raise ProtocolValueError("invalid_timestamp")
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            consent = state.consent
+            if consent is None:
+                raise _error(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "Observation consent is missing.",
+                    retryable=False,
+                )
+            if consent.workspace_commitment != workspace_commitment:
+                raise _error(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "Observation workspace is invalid.",
+                    retryable=False,
+                )
+            if not consent.active:
+                raise _error(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "Observation consent is inactive.",
+                    retryable=False,
+                )
+            assert state.session_workspaces is not None
+            bound_workspace = state.session_workspaces.get(session_commitment)
+            if bound_workspace is not None and bound_workspace != workspace_commitment:
+                raise _error(
+                    PublicErrorCode.SESSION_CONFLICT,
+                    "Observation session is already bound.",
+                    retryable=False,
+                )
+            now = self._wall_timestamp()
+            maximum_expiry = timestamp_from_datetime(
+                now.as_datetime() + timedelta(seconds=DEFAULT_READ_PROTECTION_TTL_SECONDS)
+            )
+            effective_expiry = maximum_expiry if expires_at is None else expires_at
+            if effective_expiry <= now or effective_expiry > maximum_expiry:
+                raise ProtocolValueError("invalid_timestamp")
+            auth_generation = self._read_protection_auth_generation(workspace_commitment, state)
+            if auth_generation is None:
+                raise _error(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "Observation consent is missing.",
+                    retryable=False,
+                )
+            self._prune_read_protections(
+                state,
+                workspace_commitment=workspace_commitment,
+                now=now,
+                auth_generation=auth_generation,
+            )
+            assert state.read_protections is not None
+            current_generation = self._read_protection_generation(state, session_commitment)
+            same_scope = next(
+                (
+                    index
+                    for index, protection in enumerate(state.read_protections)
+                    if (
+                        protection.reference == reference
+                        and protection.session_commitment == session_commitment
+                        and protection.auth_generation == auth_generation
+                        and protection.session_generation == current_generation
+                    )
+                ),
+                None,
+            )
+            outstanding = sum(
+                protection.remaining + len(protection.reserved_attempt_ids)
+                for protection in state.read_protections
+            )
+            existing_remaining = (
+                0 if same_scope is None else state.read_protections[same_scope].remaining
+            )
+            if outstanding + count > MAX_READ_PROTECTION_COUNT:
+                raise ProtocolValueError("invalid_event_value_type")
+            if same_scope is not None:
+                prior = state.read_protections[same_scope]
+                state.read_protections[same_scope] = ReadProtection(
+                    reference=prior.reference,
+                    session_commitment=prior.session_commitment,
+                    auth_generation=prior.auth_generation,
+                    session_generation=prior.session_generation,
+                    remaining=existing_remaining + count,
+                    expires_at=max(prior.expires_at, effective_expiry),
+                    reserved_attempt_ids=prior.reserved_attempt_ids,
+                    consumed_attempt_ids=prior.consumed_attempt_ids,
+                )
+            else:
+                if len(state.read_protections) >= MAX_READ_PROTECTIONS:
+                    raise ProtocolValueError("invalid_event_value_type")
+                state.read_protections.append(
+                    ReadProtection(
+                        reference=reference,
+                        session_commitment=session_commitment,
+                        auth_generation=auth_generation,
+                        session_generation=current_generation,
+                        remaining=count,
+                        expires_at=effective_expiry,
+                    )
+                )
+            self._save(workspace_commitment, state)
+            remaining = (
+                state.read_protections[same_scope].remaining if same_scope is not None else count
+            )
+            return JsonObject(
+                {
+                    "workspace_commitment": workspace_commitment,
+                    "session_commitment": session_commitment,
+                    "reference": reference,
+                    "count": count,
+                    "remaining": remaining,
+                    "expires_at": effective_expiry.wire,
+                    "session_generation": current_generation,
+                    "protected": True,
+                    "content_authority_changed": False,
+                    "privacy_authority_changed": False,
+                }
+            )
+
+    def read_is_protected(
+        self,
+        workspace_commitment: str,
+        session_commitment: str,
+        envelope: ObservationEnvelope,
+    ) -> bool:
+        """Return whether one read envelope has an active explicit scope."""
+
+        if type(envelope) is not ObservationEnvelope or envelope.event_kind not in {
+            "PreToolUse",
+            "preToolUse",
+            "PostToolUse",
+            "postToolUse",
+            "PostToolUseFailure",
+            "postToolUseFailure",
+        }:
+            return False
+        try:
+            validate_commitment(workspace_commitment)
+            validate_commitment(session_commitment)
+            attempt_id = read_protection_attempt_identity(envelope)
+        except ProtocolValueError, TypeError, ValueError:
+            return False
+        with self._lock:
+            state = self._load(workspace_commitment)
+            now = self._wall_timestamp()
+            prior_epoch = state.content_capture_epoch
+            auth_generation = self._read_protection_auth_generation(workspace_commitment, state)
+            changed = self._prune_read_protections(
+                state,
+                workspace_commitment=workspace_commitment,
+                now=now,
+                auth_generation=auth_generation,
+            )
+            if state.content_capture_epoch != prior_epoch:
+                changed = True
+            _auth, matches = self._read_protection_candidates(
+                state,
+                workspace_commitment=workspace_commitment,
+                session_commitment=session_commitment,
+                envelope=envelope,
+                now=now,
+                attempt_id=attempt_id,
+            )
+            if not matches:
+                if changed:
+                    self._save(workspace_commitment, state)
+                return False
+            # A pre-event (and a post-only profile's post event) reserves an
+            # exact native identity. This makes an out-of-order post unable
+            # to consume another call's remaining slot.
+            index, protection = matches[0]
+            if protection.reserved(attempt_id) or protection.consumed(attempt_id):
+                if changed:
+                    self._save(workspace_commitment, state)
+                return True
+            if protection.remaining <= 0:
+                if changed:
+                    self._save(workspace_commitment, state)
+                return False
+            assert state.read_protections is not None
+            state.read_protections[index] = protection.reserve(attempt_id)
+            self._save(workspace_commitment, state)
+            return True
+
+    def read_protection_reference(
+        self,
+        workspace_commitment: str,
+        session_commitment: str,
+        envelope: ObservationEnvelope,
+    ) -> str | None:
+        """Return the service-stored reference for one active protected read."""
+
+        if type(envelope) is not ObservationEnvelope or envelope.event_kind not in {
+            "PreToolUse",
+            "preToolUse",
+            "PostToolUse",
+            "postToolUse",
+            "PostToolUseFailure",
+            "postToolUseFailure",
+        }:
+            return None
+        try:
+            validate_commitment(workspace_commitment)
+            validate_commitment(session_commitment)
+            attempt_id = read_protection_attempt_identity(envelope)
+        except ProtocolValueError, TypeError, ValueError:
+            return None
+        with self._lock:
+            state = self._load(workspace_commitment)
+            now = self._wall_timestamp()
+            prior_epoch = state.content_capture_epoch
+            auth_generation = self._read_protection_auth_generation(workspace_commitment, state)
+            changed = self._prune_read_protections(
+                state,
+                workspace_commitment=workspace_commitment,
+                now=now,
+                auth_generation=auth_generation,
+            )
+            if state.content_capture_epoch != prior_epoch:
+                changed = True
+            if changed:
+                self._save(workspace_commitment, state)
+            _auth, matches = self._read_protection_candidates(
+                state,
+                workspace_commitment=workspace_commitment,
+                session_commitment=session_commitment,
+                envelope=envelope,
+                now=now,
+                attempt_id=attempt_id,
+            )
+            return None if not matches else matches[0][1].reference
+
+    def consume_read_protection(
+        self,
+        workspace_commitment: str,
+        session_commitment: str,
+        envelope: ObservationEnvelope,
+    ) -> bool:
+        """Account one logical post exactly once; pre-events never consume."""
+
+        if type(envelope) is not ObservationEnvelope or envelope.event_kind not in {
+            "PostToolUse",
+            "postToolUse",
+            "PostToolUseFailure",
+            "postToolUseFailure",
+        }:
+            return False
+        try:
+            validate_commitment(workspace_commitment)
+            validate_commitment(session_commitment)
+            attempt_id = read_protection_attempt_identity(envelope)
+        except ProtocolValueError, TypeError, ValueError:
+            return False
+        with self._lock:
+            state = self._load(workspace_commitment)
+            now = self._wall_timestamp()
+            prior_epoch = state.content_capture_epoch
+            auth_generation = self._read_protection_auth_generation(workspace_commitment, state)
+            changed = self._prune_read_protections(
+                state,
+                workspace_commitment=workspace_commitment,
+                now=now,
+                auth_generation=auth_generation,
+            )
+            if state.content_capture_epoch != prior_epoch:
+                changed = True
+            _auth, matches = self._read_protection_candidates(
+                state,
+                workspace_commitment=workspace_commitment,
+                session_commitment=session_commitment,
+                envelope=envelope,
+                now=now,
+                attempt_id=attempt_id,
+            )
+            # An exact retry of a previously consumed post is a no-op. Check
+            # exhausted rows too, since their identity remains until expiry.
+            if auth_generation is not None:
+                current_generation = self._read_protection_generation(state, session_commitment)
+                for protection in state.read_protections or ():
+                    if (
+                        protection.session_commitment == session_commitment
+                        and protection.auth_generation == auth_generation
+                        and protection.session_generation == current_generation
+                        and protection.consumed(attempt_id)
+                    ):
+                        if changed:
+                            self._save(workspace_commitment, state)
+                        return False
+            if not matches:
+                if changed:
+                    self._save(workspace_commitment, state)
+                return False
+            index, protection = matches[0]
+            assert state.read_protections is not None
+            state.read_protections[index] = protection.consume(attempt_id)
+            self._save(workspace_commitment, state)
+            return True
+
+    def session_selection_setting(
+        self,
+        workspace_commitment: str,
+        session_commitment: str,
+        *,
+        now: Timestamp | None = None,
+    ) -> ObservationSelectionSetting | None:
+        """Return one active temporary override, expiring it when necessary."""
+
+        return self.selection_settings_for(workspace_commitment, now=now).session(
+            session_commitment
+        )
+
+    def resolve_selection(
+        self,
+        workspace_commitment: str,
+        *,
+        session_commitment: str | None = None,
+        configured: ObservationSelection | None = None,
+        now: Timestamp | None = None,
+    ) -> ObservationSelectionResolution:
+        """Resolve active session > workspace > configured > Focused/512.
+
+        The returned value is a pure selection projection.  It contains no
+        content authority and does not inspect or change privacy policy.
+        ``selection_settings_for`` performs any required expiry cleanup under
+        the owner-private store lock before this resolution.
+        """
+
+        settings = self.selection_settings_for(workspace_commitment, now=now)
+        return resolve_observation_selection(
+            settings,
+            session_commitment=session_commitment,
+            configured=DEFAULT_OBSERVATION_SELECTION if configured is None else configured,
+            now=now,
+        )
+
+    def _selection_setting(
+        self,
+        selection: ObservationSelection,
+        *,
+        expires_at: Timestamp | None,
+        set_at: Timestamp | None,
+    ) -> ObservationSelectionSetting:
+        if type(selection) is not ObservationSelection:
+            raise ProtocolValueError("invalid_event_value_type")
+        stamp = set_at if set_at is not None else self._wall_timestamp()
+        try:
+            setting = ObservationSelectionSetting(selection, stamp, expires_at)
+        except ProtocolValueError, TypeError, ValueError:
+            raise
+        if setting.expired(stamp):
+            raise _error(
+                PublicErrorCode.INVALID_REQUEST,
+                "Observation selection expiry must be in the future.",
+                retryable=False,
+            )
+        return setting
+
+    @staticmethod
+    def _prune_selection_settings(
+        settings: ObservationSelectionSettings,
+        now: Timestamp,
+    ) -> ObservationSelectionSettings:
+        if type(settings) is not ObservationSelectionSettings or type(now) is not Timestamp:
+            raise ProtocolValueError("invalid_event_value_type")
+        workspace = settings.workspace
+        if workspace is not None and workspace.expired(now):
+            workspace = None
+        sessions = tuple(
+            (key, setting) for key, setting in settings.sessions if not setting.expired(now)
+        )
+        if workspace == settings.workspace and sessions == settings.sessions:
+            return settings
+        return ObservationSelectionSettings(workspace=workspace, sessions=sessions)
+
     def bind_session(self, workspace_commitment: str, session_commitment: str) -> None:
         with self._lock:
             state = self._load(workspace_commitment)
@@ -1714,6 +3053,7 @@ class LocalObservationStore:
         with self._lock:
             state = self._load(workspace_commitment)
             generation = self._begin_session_generation_state(state, session_commitment)
+            self._prune_open_pre(state, self._wall_timestamp())
             self._save(workspace_commitment, state)
             return generation
 
@@ -1728,6 +3068,14 @@ class LocalObservationStore:
         state.session_generations[session_commitment] = generation
         state.ended_session_generations.pop(session_commitment, None)
         state.ended_sessions.discard(session_commitment)
+        if state.pressure_snapshots is not None:
+            state.pressure_snapshots.pop(session_commitment, None)
+        if state.read_protections is not None:
+            state.read_protections[:] = [
+                protection
+                for protection in state.read_protections
+                if protection.session_commitment != session_commitment
+            ]
         assert state.stream_partial_dropped_sessions is not None
         state.stream_partial_dropped_sessions.discard(session_commitment)
         state.stream_partial_dropped_sessions.discard(_LEGACY_STREAM_PARTIAL_DROPPED_SESSION)
@@ -1776,6 +3124,7 @@ class LocalObservationStore:
             if self._note_session_end_state(
                 state, workspace_commitment, session_commitment, generation
             ):
+                self._prune_open_pre(state, self._wall_timestamp())
                 self._save(workspace_commitment, state)
 
     @staticmethod
@@ -1799,6 +3148,20 @@ class LocalObservationStore:
         state.session_workspaces.setdefault(session_commitment, workspace_commitment)
         state.ended_sessions.add(session_commitment)
         state.ended_session_generations[session_commitment] = observed
+        if state.pressure_snapshots is not None:
+            state.pressure_snapshots.pop(session_commitment, None)
+        if state.read_protections is not None:
+            state.read_protections[:] = [
+                protection
+                for protection in state.read_protections
+                if protection.session_commitment != session_commitment
+            ]
+        settings = state.selection_settings or ObservationSelectionSettings()
+        cleared_settings = settings.without_session(session_commitment)
+        if cleared_settings != settings:
+            # Session overrides are temporary by default.  Ending a session is
+            # the durable reverse path; a workspace default remains intact.
+            state.selection_settings = cleared_settings
         assert state.stream_partial_dropped_sessions is not None
         state.stream_partial_dropped_sessions.discard(session_commitment)
         if not state.stream_partial_dropped_sessions:
@@ -2075,6 +3438,44 @@ class LocalObservationStore:
             ]
             return tuple(sorted(result, key=str.encode))
 
+    def _prune_open_pre(self, state: _WorkspaceState, now: Timestamp) -> bool:
+        """Bound missing-post bookkeeping across restarts and session fences.
+
+        Expiry records one aggregate incomplete-pairing gap before removing
+        the identity.  It never fabricates a post/failure event, and it keeps
+        newer session generations independent from an older stale pre.
+        """
+
+        assert state.open_pre is not None
+        if not state.open_pre:
+            return False
+        ended = state.ended_sessions or set()
+        ended_generations = state.ended_session_generations or {}
+        generations = state.session_generations or {}
+        stale_keys: list[str] = []
+        for key, entry in state.open_pre.items():
+            stale = entry.deadline is None or entry.deadline <= now
+            if entry.session_commitment is not None:
+                ended_generation = ended_generations.get(entry.session_commitment)
+                stale = stale or (
+                    entry.session_commitment in ended
+                    and (ended_generation is None or entry.source_generation == ended_generation)
+                )
+                current_generation = generations.get(entry.session_commitment)
+                stale = stale or (
+                    current_generation is not None
+                    and entry.source_generation is not None
+                    and entry.source_generation < current_generation
+                )
+            if stale:
+                stale_keys.append(key)
+        if not stale_keys:
+            return False
+        for key in stale_keys:
+            del state.open_pre[key]
+        self._note_gap_state(state, _PENDING_ATTEMPT_EXPIRED_GAP)
+        return True
+
     def note_open_pre(
         self,
         workspace: str,
@@ -2084,7 +3485,8 @@ class LocalObservationStore:
         source: ObservationSource | None = None,
         session_commitment: str | None = None,
         source_generation: int | None = None,
-    ) -> None:
+        receipt_time: Timestamp | None = None,
+    ) -> bool:
         """Record an open Pre event awaiting its Post.
 
         New hook callers provide the complete source/session/generation scope.
@@ -2095,6 +3497,8 @@ class LocalObservationStore:
         with self._lock:
             state = self._load(workspace)
             assert state.open_pre is not None
+            now = self._wall_timestamp()
+            self._prune_open_pre(state, now)
             key = (
                 _pairing_key(
                     source=source,
@@ -2107,12 +3511,48 @@ class LocalObservationStore:
                 and source_generation is not None
                 else correlation_id
             )
-            if len(state.open_pre) >= _MAX_OPEN_PRE:
-                # Drop oldest insertion order by rebuilding from remaining items.
-                oldest = next(iter(state.open_pre))
-                del state.open_pre[oldest]
-            state.open_pre[key] = event_kind
+            if key not in state.open_pre and len(state.open_pre) >= _MAX_OPEN_PRE:
+                # A pending pre is an accepted pairing identity.  Keep every
+                # existing identity when this bounded map is full; callers
+                # that have the envelope can attach the typed gap so the new
+                # attempt remains visible without stealing an older pair.
+                self._note_gap_state(state, _PENDING_ATTEMPT_LIMIT_GAP)
+                self._save(workspace, state)
+                return False
+            if key in state.open_pre:
+                # A host retry must not extend the original pending deadline.
+                self._save(workspace, state)
+                return True
+            stamp = now if receipt_time is None else receipt_time
+            state.open_pre[key] = _OpenPre(
+                event_kind=event_kind.split(_OPEN_PRE_SEPARATOR, 1)[0],
+                source=(
+                    source
+                    if source is not None
+                    and session_commitment is not None
+                    and source_generation is not None
+                    else None
+                ),
+                session_commitment=(
+                    session_commitment
+                    if source is not None
+                    and session_commitment is not None
+                    and source_generation is not None
+                    else None
+                ),
+                source_generation=(
+                    source_generation
+                    if source is not None
+                    and session_commitment is not None
+                    and source_generation is not None
+                    else None
+                ),
+                correlation_id=correlation_id,
+                receipt_time=stamp,
+                deadline=_open_pre_deadline(stamp),
+            )
             self._save(workspace, state)
+            return True
 
     def consume_open_pre(
         self,
@@ -2126,6 +3566,7 @@ class LocalObservationStore:
         with self._lock:
             state = self._load(workspace)
             assert state.open_pre is not None
+            changed = self._prune_open_pre(state, self._wall_timestamp())
             key = (
                 _pairing_key(
                     source=source,
@@ -2138,11 +3579,13 @@ class LocalObservationStore:
                 and source_generation is not None
                 else correlation_id
             )
-            raw = state.open_pre.pop(key, None)
-            if raw is None:
+            entry = state.open_pre.pop(key, None)
+            if entry is None:
+                if changed:
+                    self._save(workspace, state)
                 return None
             self._save(workspace, state)
-            return raw.split(_OPEN_PRE_SEPARATOR, 1)[0]
+            return entry.event_kind
 
     def has_open_pre(
         self,
@@ -2156,6 +3599,7 @@ class LocalObservationStore:
         with self._lock:
             state = self._load(workspace)
             assert state.open_pre is not None
+            changed = self._prune_open_pre(state, self._wall_timestamp())
             key = (
                 _pairing_key(
                     source=source,
@@ -2168,7 +3612,10 @@ class LocalObservationStore:
                 and source_generation is not None
                 else correlation_id
             )
-            return key in state.open_pre
+            result = key in state.open_pre
+            if changed:
+                self._save(workspace, state)
+            return result
 
     def note_unpaired_event(
         self,
@@ -2610,6 +4057,7 @@ class LocalObservationStore:
             state = self._load(workspace)
             assert state.envelopes is not None
             assert state.gaps is not None
+            assert state.cursors is not None
             status = self._status_unlocked(workspace)
             typed_checks: tuple[ObservationCheckFact, ...] = ()
             if type(check_facts) is tuple:
@@ -2643,7 +4091,12 @@ class LocalObservationStore:
                     plan_path_digests=typed_plans,
                     prior_snapshot=state.advice_snapshot,
                     semantic_addon=typed_semantic,
-                    has_real_observation=bool(state.envelopes),
+                    # Selected routine diagnostics may have been reclaimed
+                    # after their exact account became durable in the
+                    # admission buffer/outbox. A cursor still proves that a
+                    # source contributed an accepted observation, even when
+                    # no secondary envelope cache remains for it.
+                    has_real_observation=bool(state.envelopes) or bool(state.cursors),
                 )
             )
             if snapshot is not state.advice_snapshot:
@@ -2933,8 +4386,198 @@ class LocalObservationStore:
             self._save(workspace, state)
             return next_value
 
+    def _outbox_limits(
+        self,
+        state: _WorkspaceState,
+        session_commitment: str,
+    ) -> tuple[int, int]:
+        """Return aggregate and selected-session row limits for one enqueue.
+
+        The aggregate workspace queue follows the highest active owner
+        selection so one explicitly larger lane can use its selected capacity.
+        Admission for the current lane still follows its own resolved setting;
+        a sibling's larger selection must not silently widen this session.
+        """
+
+        settings = state.selection_settings or ObservationSelectionSettings()
+        now = self._wall_timestamp()
+        aggregate_limit = self._aggregate_outbox_limit(state, now=now)
+        resolved = resolve_observation_selection(
+            settings,
+            session_commitment=session_commitment,
+            configured=DEFAULT_OBSERVATION_SELECTION,
+            now=now,
+        )
+        return aggregate_limit, resolved.selection.queue_count
+
+    def _aggregate_outbox_limit(
+        self,
+        state: _WorkspaceState,
+        *,
+        now: Timestamp | None = None,
+    ) -> int:
+        """Return the largest active workspace queue capacity."""
+
+        settings = state.selection_settings or ObservationSelectionSettings()
+        stamp = self._wall_timestamp() if now is None else now
+        capacity = settings.aggregate_capacity(now=stamp)
+        return (
+            _MAX_OUTBOX
+            if capacity is ObservationCapacityProfile.STANDARD
+            else BudgetLimits.for_profile(int(capacity)).queue_count
+        )
+
+    def _state_byte_limit(self, workspace_commitment: str, state: _WorkspaceState) -> int:
+        """Return the active state bound while preserving prior larger occupancy.
+
+        A capacity override may be lowered while rows accepted under a larger
+        profile are still pending.  The existing file size is the durable
+        occupancy ceiling for that drain, capped by the largest supported
+        profile.  Small standard-profile files continue to honor the historic
+        ``_MAX_STATE_BYTES`` test/deployment seam, so a temporary pressure cap
+        can still exercise the standard retention ladder.
+        """
+
+        settings = state.selection_settings or ObservationSelectionSettings()
+        capacity = settings.aggregate_capacity(now=self._wall_timestamp())
+        selected = (
+            _MAX_STATE_BYTES
+            if capacity is ObservationCapacityProfile.STANDARD
+            else BudgetLimits.for_profile(int(capacity)).state_bytes
+        )
+        path = self._workspace_path(workspace_commitment)
+        current_size = 0
+        key = self._stat_key(path)
+        if key is not None:
+            current_size = key[1]
+        if current_size > _DEFAULT_STATE_BYTES and current_size > selected:
+            selected = current_size
+        return min(_MAX_EXPANDED_STATE_BYTES, max(1, selected))
+
+    def _admission_allowed(
+        self,
+        workspace: str,
+        state: _WorkspaceState,
+        envelope: ObservationEnvelope,
+        candidate_queue_bytes: int,
+        candidate_session_bytes: int,
+        *,
+        accepted_transfer: bool = False,
+    ) -> bool:
+        """Check count, bytes, reserves, and per-session admission.
+
+        ``accepted_transfer`` is used only while flushing a previously
+        accepted admission-buffer input.  Such a transfer may be over a newly
+        lowered target, but it still stays below the largest finite profile
+        and the local state-byte bound.  New host input always follows the
+        current selection and cannot use this escape hatch.
+        """
+
+        now = self._wall_timestamp()
+        settings = state.selection_settings or ObservationSelectionSettings()
+        aggregate_capacity = settings.aggregate_capacity(now=now)
+        limits = BudgetLimits.for_profile(
+            int(ObservationCapacityProfile.LARGEST if accepted_transfer else aggregate_capacity)
+        )
+        aggregate_limit = (
+            limits.queue_count
+            if accepted_transfer
+            else self._aggregate_outbox_limit(state, now=now)
+        )
+        resolved = resolve_observation_selection(
+            settings,
+            session_commitment=envelope.session_commitment,
+            configured=DEFAULT_OBSERVATION_SELECTION,
+            now=now,
+        )
+        session_limit = resolved.selection.queue_count
+        session_limits = BudgetLimits.for_profile(int(resolved.selection.capacity))
+        usage = self._selection_pressure_usage(
+            workspace,
+            state,
+            envelope.session_commitment,
+            limits,
+            now,
+            # State bytes have their own selected/current occupancy check
+            # below. Avoid a second whole-state encode in this hot path.
+            state_bytes=0,
+        )
+        projected_count = usage.queue_count + 1
+        projected_bytes = usage.queue_bytes + candidate_queue_bytes
+        protected = _outbox_row_is_protected(envelope)
+        if projected_count > aggregate_limit or projected_bytes > limits.queue_bytes:
+            return False
+        if not accepted_transfer:
+            if usage.session_queue_count + 1 > session_limit:
+                return False
+            if usage.session_queue_bytes + candidate_session_bytes > session_limits.queue_bytes:
+                return False
+            if not protected:
+                count_remaining = max(0, limits.protected_count - usage.protected_count)
+                bytes_remaining = max(0, limits.protected_bytes - usage.protected_bytes)
+                if projected_count > aggregate_limit - count_remaining:
+                    return False
+                if projected_bytes > limits.queue_bytes - bytes_remaining:
+                    return False
+                if usage.session_queue_count + 1 > limits.session_fair_share:
+                    return False
+                if (
+                    usage.session_queue_bytes + candidate_session_bytes
+                    > limits.session_fair_share_bytes
+                ):
+                    return False
+        return True
+
+    def _outbox_admission_allowed(
+        self,
+        workspace: str,
+        state: _WorkspaceState,
+        codex_session_id: str,
+        envelope: ObservationEnvelope,
+        *,
+        accepted_transfer: bool = False,
+    ) -> bool:
+        """Check one pending outbox row against the active budget."""
+
+        candidate = JsonObject(
+            {
+                "codex_session_id": codex_session_id,
+                "envelope": observation_envelope_to_json(envelope),
+            }
+        )
+        return self._admission_allowed(
+            workspace,
+            state,
+            envelope,
+            len(canonical_encode(candidate)),
+            len(canonical_encode(observation_envelope_to_json(envelope))),
+            accepted_transfer=accepted_transfer,
+        )
+
+    def _buffer_admission_allowed(
+        self,
+        workspace: str,
+        state: _WorkspaceState,
+        envelope: ObservationEnvelope,
+    ) -> bool:
+        """Check one newly buffered input before it becomes durable state."""
+
+        envelope_bytes = len(canonical_encode(observation_envelope_to_json(envelope)))
+        return self._admission_allowed(
+            workspace,
+            state,
+            envelope,
+            envelope_bytes,
+            envelope_bytes,
+        )
+
     def enqueue_outbox(
-        self, workspace: str, codex_session_id: str, envelope: ObservationEnvelope
+        self,
+        workspace: str,
+        codex_session_id: str,
+        envelope: ObservationEnvelope,
+        *,
+        accepted_transfer: bool = False,
     ) -> str | None:
         """Queue a structural envelope for service drain. Returns overflow gap or None."""
 
@@ -2942,10 +4585,6 @@ class LocalObservationStore:
             state = self._load(workspace)
             assert state.pending_outbox is not None
             assert state.gaps is not None
-            if len(state.pending_outbox) >= _MAX_OUTBOX:
-                self._note_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
-                self._save(workspace, state)
-                return ObservationGapCode.OUTBOX_OVERFLOW.value
             # Dedup identical source identities already pending for this session.
             for row in state.pending_outbox:
                 if (
@@ -2956,6 +4595,16 @@ class LocalObservationStore:
                     and row.envelope.cursor.event_position == envelope.cursor.event_position
                 ):
                     return None
+            if not self._outbox_admission_allowed(
+                workspace,
+                state,
+                codex_session_id,
+                envelope,
+                accepted_transfer=accepted_transfer,
+            ):
+                self._note_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
+                self._save(workspace, state)
+                return ObservationGapCode.OUTBOX_OVERFLOW.value
             state.pending_outbox.append(
                 ObservationOutboxRow(codex_session_id=codex_session_id, envelope=envelope)
             )
@@ -2963,7 +4612,7 @@ class LocalObservationStore:
             # the bytes _save would otherwise re-encode: one encode, not three.
             self._resolve_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
             projected = self._encode_state(workspace, state)
-            if len(projected) > _MAX_STATE_BYTES:
+            if len(projected) > self._state_byte_limit(workspace, state):
                 state.pending_outbox.pop()
                 self._note_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
                 self._save(workspace, state)
@@ -2978,6 +4627,1604 @@ class LocalObservationStore:
 
         rows = self.list_pending_outbox_rows(workspace, codex_session_id=codex_session_id)
         return tuple((row.codex_session_id, row.envelope) for row in rows)
+
+    def selection_epoch(self, workspace: str) -> int:
+        with self._lock:
+            return self._load(workspace).selection_epoch
+
+    def record_admission_loss(self, workspace: str, envelope: ObservationEnvelope) -> bool:
+        """Record a non-replayable rejection and aggregate its notice cadence.
+
+        Exact endpoints and a rolling commitment survive recovery. A bounded
+        range is explicitly not an exhaustive identity list; when 64 distinct
+        lanes are already represented, only the aggregate commitment grows.
+        The return value requests one notice, then at most one per minute of
+        continuing loss. It makes no claim that the host displayed a notice.
+        """
+
+        with self._lock:
+            state = self._load(workspace)
+            route = self._selection_loss_route(envelope)
+            lane = canonical_digest(
+                JsonObject(
+                    {
+                        "source": envelope.source.value,
+                        "session": envelope.session_commitment,
+                        "generation": envelope.cursor.source_generation,
+                        "route": route,
+                    }
+                )
+            )
+            entries = list(state.selection_loss_ranges)
+            index = next((i for i, entry in enumerate(entries) if entry.get("lane") == lane), None)
+            previous = None if index is None else entries[index]
+            # An exact native retry is not a newly lost input.
+            if previous is not None and previous.get("last_identity") == envelope.source_identity:
+                return False
+            state.selection_rejected_count = min(
+                _MAX_SAFE_INTEGER, state.selection_rejected_count + 1
+            )
+            state.selection_loss_commitment = canonical_digest(
+                JsonObject(
+                    {
+                        "previous": state.selection_loss_commitment,
+                        "lane": lane,
+                        "identity": envelope.source_identity,
+                        "cursor": observation_cursor_to_json(envelope.cursor),
+                    }
+                )
+            )
+            entry = JsonObject(
+                {
+                    "lane": lane,
+                    "source": envelope.source.value,
+                    "session": envelope.session_commitment,
+                    "source_generation": envelope.cursor.source_generation,
+                    "route": route,
+                    "first_identity": envelope.source_identity
+                    if previous is None
+                    else previous["first_identity"],
+                    "last_identity": envelope.source_identity,
+                    "first_position": envelope.cursor.event_position
+                    if previous is None
+                    else previous["first_position"],
+                    "last_position": envelope.cursor.event_position,
+                    "count": 1
+                    if previous is None
+                    else min(_MAX_SAFE_INTEGER, cast(int, previous["count"]) + 1),
+                    "identity_extent": "bounded_range",
+                }
+            )
+            if index is not None:
+                entries[index] = entry
+            elif len(entries) < 64:
+                entries.append(entry)
+            state.selection_loss_ranges = tuple(entries)
+            now_ms = int(self._wall_now() * 1000)
+            previous_notice = state.selection_last_loss_notice_ms
+            notice = (
+                previous_notice is None
+                or now_ms < previous_notice
+                or now_ms - previous_notice >= 60_000
+            )
+            if notice:
+                state.selection_last_loss_notice_ms = now_ms
+                state.selection_loss_notice_pending = True
+            self._note_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
+            self._save(workspace, state)
+            return notice
+
+    @staticmethod
+    def _selection_loss_route(envelope: ObservationEnvelope) -> JsonObject:
+        structural = envelope.structural_payload
+        return JsonObject(
+            {
+                key: structural.get(key)
+                for key in (
+                    "selection_task_id",
+                    "selection_session_id",
+                    "selection_writer_id",
+                    "selection_authority_generation",
+                )
+            }
+        )
+
+    def selection_history_gaps(
+        self, workspace: str, envelope: ObservationEnvelope
+    ) -> tuple[str, ...]:
+        """Carry known routed loss into later evidence without retargeting history.
+
+        Unrouted or evicted range detail remains visible in workspace status;
+        it cannot be attributed to a later task merely because the host reused
+        a session. A recovered queue never clears an exact matching history.
+        """
+
+        route = self._selection_loss_route(envelope)
+        if any(value is None for value in route.values()):
+            return ()
+        with self._lock:
+            state = self._load(workspace)
+            matched = any(
+                entry.get("source") == envelope.source.value
+                and entry.get("session") == envelope.session_commitment
+                and entry.get("source_generation") == envelope.cursor.source_generation
+                and entry.get("route") == route
+                for entry in state.selection_loss_ranges
+            )
+            return (ObservationGapCode.OBSERVATION_INPUT_LOSS.value,) if matched else ()
+
+    def consume_admission_loss_notice(self, workspace: str) -> bool:
+        with self._lock:
+            state = self._load(workspace)
+            if not state.selection_loss_notice_pending:
+                return False
+            state.selection_loss_notice_pending = False
+            self._save(workspace, state)
+            return True
+
+    def prepare_selected_admission(
+        self,
+        workspace: str,
+        codex_session_id: str,
+        envelope: ObservationEnvelope,
+        *,
+        fence: str,
+        focused: bool,
+        routine_candidate: bool,
+        proven_routine_success: bool,
+        summary_builder: SummaryBuilder,
+    ) -> AdmissionPlan:
+        """Prepare admission from a held state; this operation writes nothing."""
+
+        with self._lock:
+            state = self._load(workspace)
+            return plan_admission(
+                state.admission_buffer,
+                envelope,
+                host_session=codex_session_id,
+                fence=fence,
+                focused=focused,
+                routine_candidate=routine_candidate,
+                proven_routine_success=proven_routine_success,
+                now_ms=int(self._wall_now() * 1000),
+                summary_builder=summary_builder,
+            )
+
+    @staticmethod
+    def _buffer_input_key(item: object) -> tuple[object, ...]:
+        """Return the stable identity of one already accepted buffer input."""
+
+        envelope = getattr(item, "envelope", None)
+        cursor = getattr(envelope, "cursor", None)
+        return (
+            getattr(item, "host_session", None),
+            getattr(item, "fence", None),
+            getattr(envelope, "session_commitment", None),
+            getattr(getattr(envelope, "source", None), "value", None),
+            getattr(envelope, "source_identity", None),
+            getattr(cursor, "source_generation", None),
+            getattr(cursor, "byte_position", None),
+            getattr(cursor, "event_position", None),
+        )
+
+    @staticmethod
+    def _pending_row_matches(
+        row: ObservationOutboxRow,
+        codex_session_id: str,
+        envelope: ObservationEnvelope,
+    ) -> bool:
+        """Match the idempotency identity used by :meth:`enqueue_outbox`."""
+
+        return (
+            row.codex_session_id == codex_session_id
+            and row.envelope.source_identity == envelope.source_identity
+            and row.envelope.event_kind == envelope.event_kind
+            and row.envelope.cursor.source_generation == envelope.cursor.source_generation
+            and row.envelope.cursor.event_position == envelope.cursor.event_position
+        )
+
+    def _delivery_is_accepted_transfer(
+        self,
+        envelope: ObservationEnvelope,
+        previous_buffer: AdmissionBuffer,
+        incoming: ObservationEnvelope | None,
+    ) -> bool:
+        """Recognize a delivery made solely from prior accepted buffer input.
+
+        A summary containing the current incoming envelope is a new admission,
+        even when it also represents older buffered inputs.  This prevents a
+        fresh host event from borrowing the over-target drain allowance.
+        """
+
+        if incoming is not None and (
+            envelope.source is incoming.source
+            and envelope.source_identity == incoming.source_identity
+            and envelope.cursor.source_generation == incoming.cursor.source_generation
+            and envelope.cursor.event_position == incoming.cursor.event_position
+        ):
+            return False
+        prior_ids = {item.envelope.source_identity for item in previous_buffer.inputs}
+        if not prior_ids:
+            return False
+        if envelope.event_kind == "RoutineReadSummary":
+            members = envelope.structural_payload.get("members")
+            if not isinstance(members, tuple) or not members:
+                return False
+            return all(
+                isinstance(member, Mapping)
+                and type(member.get("source_identity")) is str
+                and member.get("source_identity") in prior_ids
+                for member in members
+            )
+        return envelope.source_identity in prior_ids
+
+    def _selected_admission_plan_allowed(
+        self,
+        workspace: str,
+        state: _WorkspaceState,
+        plan: AdmissionPlan,
+        incoming: ObservationEnvelope | None,
+    ) -> bool:
+        """Preflight a buffer transition without mutating the held state.
+
+        The candidate starts with the old accepted inputs, removes inputs that
+        the plan is about to deliver, and then admits only genuinely new buffer
+        entries and deliveries.  This catches a full queue even when a plan has
+        no delivery yet, while allowing accepted buffered inputs to drain after
+        a selection is lowered.
+        """
+
+        if incoming is not None:
+            now = self._wall_timestamp()
+            settings = state.selection_settings or ObservationSelectionSettings()
+            limits = BudgetLimits.for_profile(int(settings.aggregate_capacity(now=now)))
+            resolved = resolve_observation_selection(
+                settings, session_commitment=incoming.session_commitment, now=now
+            )
+            usage = self._selection_pressure_usage(
+                workspace,
+                state,
+                incoming.session_commitment,
+                limits,
+                now,
+                # Exact aggregate projected bytes are checked below. This
+                # gate concerns new native input; raw outbox writes also
+                # carry already-accepted replay work.
+                state_bytes=0,
+            )
+            if not evaluate_pressure(
+                usage, ObservationMode.from_value(resolved.selection.detail.value), limits=limits
+            ).admission_allowed:
+                return False
+
+        candidate = _copy_state(state)
+        previous_buffer = candidate.admission_buffer
+        target_keys = {self._buffer_input_key(item) for item in plan.buffer.inputs}
+        retained = tuple(
+            item for item in previous_buffer.inputs if self._buffer_input_key(item) in target_keys
+        )
+        candidate.admission_buffer = AdmissionBuffer(retained)
+        retained_indexes = {
+            self._buffer_input_key(item): index for index, item in enumerate(retained)
+        }
+        current_inputs = list(retained)
+        for item in plan.buffer.inputs:
+            key = self._buffer_input_key(item)
+            prior_index = retained_indexes.get(key)
+            if prior_index is not None:
+                current_inputs[prior_index] = item
+                continue
+            if not self._buffer_admission_allowed(workspace, candidate, item.envelope):
+                return False
+            current_inputs.append(item)
+            candidate.admission_buffer = AdmissionBuffer(tuple(current_inputs))
+        candidate.admission_buffer = AdmissionBuffer(tuple(plan.buffer.inputs))
+        for codex_session_id, envelope in plan.deliveries:
+            if candidate.pending_outbox is None:
+                return False
+            if any(
+                self._pending_row_matches(row, codex_session_id, envelope)
+                for row in candidate.pending_outbox
+            ):
+                continue
+            transfer = self._delivery_is_accepted_transfer(
+                envelope,
+                previous_buffer,
+                incoming,
+            )
+            if not self._outbox_admission_allowed(
+                workspace,
+                candidate,
+                codex_session_id,
+                envelope,
+                accepted_transfer=transfer,
+            ):
+                return False
+            candidate.pending_outbox.append(
+                ObservationOutboxRow(codex_session_id=codex_session_id, envelope=envelope)
+            )
+        return len(self._encode_state(workspace, candidate)) <= self._state_byte_limit(
+            workspace, candidate
+        )
+
+    def commit_selected_admission(
+        self,
+        workspace: str,
+        plan: AdmissionPlan,
+        *,
+        incoming: ObservationEnvelope | None = None,
+        newly_observed: bool = False,
+        replayable: bool = False,
+    ) -> bool:
+        """Commit a buffer/cursor account and its deliveries in one local batch.
+
+        Failure restores every old buffered input and outbox row. Replayable
+        callers keep their source cursor at the previous accounted position.
+        Non-replayable rejection is recorded separately from intentional summary.
+        """
+
+        with self.batched(workspace):
+            state = self._load(workspace)
+            assert state.pending_outbox is not None
+            if not self._selected_admission_plan_allowed(
+                workspace,
+                state,
+                plan,
+                incoming,
+            ):
+                if incoming is not None and not replayable and newly_observed:
+                    self.record_admission_loss(workspace, incoming)
+                self._note_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
+                self._save(workspace, state)
+                return False
+            state.admission_buffer = plan.buffer
+            for session, envelope in plan.deliveries:
+                # The complete candidate was already checked under this same
+                # lock. Re-entering enqueue_outbox encoded the full state once
+                # per delivery, even though no admission input could change.
+                if not any(
+                    self._pending_row_matches(row, session, envelope)
+                    for row in state.pending_outbox
+                ):
+                    state.pending_outbox.append(ObservationOutboxRow(session, envelope))
+            self._resolve_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
+            if newly_observed:
+                state.selection_admitted_count = min(
+                    _MAX_SAFE_INTEGER, state.selection_admitted_count + 1
+                )
+            state.selection_summarized_input_count = min(
+                _MAX_SAFE_INTEGER,
+                state.selection_summarized_input_count
+                + sum(
+                    self._represented_input_count(envelope)
+                    for _, envelope in plan.deliveries
+                    if envelope.event_kind == "RoutineReadSummary"
+                ),
+            )
+            state.selection_summarized_count = min(
+                _MAX_SAFE_INTEGER,
+                state.selection_summarized_count
+                + sum(
+                    envelope.event_kind == "RoutineReadSummary" for _, envelope in plan.deliveries
+                ),
+            )
+            self._reclaim_optional_selection_cache(state, plan)
+            self._save(workspace, state)
+            return True
+
+    def flush_selected_admission(
+        self,
+        workspace: str,
+        *,
+        summary_builder: SummaryBuilder,
+        force: bool = False,
+        host_session: str | None = None,
+        material_boundary: bool = False,
+    ) -> bool:
+        with self.batched(workspace):
+            state = self._load(workspace)
+            plan = flush_admission(
+                state.admission_buffer,
+                now_ms=int(self._wall_now() * 1000),
+                summary_builder=summary_builder,
+                force=force,
+                host_session=host_session,
+            )
+            if not plan.deliveries:
+                if material_boundary:
+                    state.selection_epoch = min(_MAX_SAFE_INTEGER, state.selection_epoch + 1)
+                    self._save(workspace, state)
+                return True
+            accepted = self.commit_selected_admission(workspace, plan)
+            if accepted and material_boundary:
+                state.selection_epoch = min(_MAX_SAFE_INTEGER, state.selection_epoch + 1)
+                self._save(workspace, state)
+            return accepted
+
+    def selection_accounting(self, workspace: str) -> JsonObject:
+        """Read bounded retention accounting without changing pressure or state."""
+
+        with self._lock:
+            state = self._load(workspace)
+            return JsonObject(
+                {
+                    "observed_count": state.selection_observed_count,
+                    "accounting_scope": "locally_ingested_since_selection_upgrade",
+                    "admitted_input_count": state.selection_admitted_count,
+                    "delivered_input_count": state.selection_delivered_count,
+                    "summarized_input_count": state.selection_summarized_input_count,
+                    "intentionally_omitted_input_count": state.selection_omitted_count,
+                    "check_selection": "reported_by_each_check",
+                    "summary_record_count": state.selection_summarized_count,
+                    "buffered_input_count": len(state.admission_buffer.inputs),
+                    "pending_attempt_count": state.admission_buffer.pending_attempt_count,
+                    "buffered_successful_call_count": state.admission_buffer.summarized_call_count,
+                    "unrecoverable_input_count": state.selection_rejected_count,
+                    "loss_identity_commitment": state.selection_loss_commitment,
+                    "loss_ranges": state.selection_loss_ranges,
+                    "loss_identity_list_complete": False,
+                    "selection_epoch": state.selection_epoch,
+                }
+            )
+
+    @staticmethod
+    def _represented_input_count(envelope: ObservationEnvelope) -> int:
+        count = envelope.structural_payload.get("input_count")
+        if envelope.event_kind == "RoutineReadSummary" and type(count) is int and 1 <= count <= 32:
+            return count
+        return 1
+
+    @staticmethod
+    def _optional_selection_account_identities(
+        envelope: ObservationEnvelope,
+    ) -> set[tuple[str, str, str]]:
+        """Return source identities represented by an optional durable account."""
+
+        if envelope.event_kind == "RoutineReadSummary":
+            members = envelope.structural_payload.get("members")
+            if not isinstance(members, tuple):
+                return set()
+            return {
+                (envelope.source.value, envelope.session_commitment, source_identity)
+                for member in members
+                if isinstance(member, Mapping)
+                and type(source_identity := member.get("source_identity")) is str
+            }
+        if not _optional_routine_selection_envelope(envelope):
+            return set()
+        return {(envelope.source.value, envelope.session_commitment, envelope.source_identity)}
+
+    def _reclaim_optional_selection_cache(
+        self,
+        state: _WorkspaceState,
+        plan: AdmissionPlan,
+    ) -> None:
+        """Drop diagnostic duplicates once a selected account is durable.
+
+        The source cursor and dedup set remain the authoritative ingest record.
+        Selected inputs are accounted by the immutable admission buffer or an
+        outbox summary/individual row, so keeping the full raw envelope as a
+        second copy only inflates every subsequent state serialization.  The
+        exact source identity stays available through that durable account;
+        protected, failed, and unselected envelopes remain in the diagnostic
+        cache.
+        """
+
+        assert state.envelopes is not None
+        assert state.pending_outbox is not None
+        assert state.quarantine is not None
+        identities: set[tuple[str, str, str]] = set()
+        for item in state.admission_buffer.inputs:
+            identities.update(self._optional_selection_account_identities(item.envelope))
+        for _, envelope in plan.deliveries:
+            identities.update(self._optional_selection_account_identities(envelope))
+        for row in state.pending_outbox:
+            identities.update(self._optional_selection_account_identities(row.envelope))
+        for _, envelope, _, _ in state.quarantine:
+            identities.update(self._optional_selection_account_identities(envelope))
+        if not identities:
+            return
+        state.envelopes[:] = [
+            envelope
+            for envelope in state.envelopes
+            if (
+                envelope.source.value,
+                envelope.session_commitment,
+                envelope.source_identity,
+            )
+            not in identities
+        ]
+
+    def note_selection_omission(self, workspace: str) -> None:
+        """Count an accepted redundant self-observation after its exact dedup gate."""
+
+        with self._lock:
+            state = self._load(workspace)
+            state.selection_omitted_count = min(
+                _MAX_SAFE_INTEGER, state.selection_omitted_count + 1
+            )
+            self._save(workspace, state)
+
+    @staticmethod
+    def _merge_capture_backlog_snapshot(
+        snapshot: _CaptureBacklogSnapshot,
+        reservations: tuple[_CaptureReservation, ...],
+    ) -> _CaptureBacklogSnapshot:
+        """Add only reservations absent from a task's complete inventory.
+
+        A legacy aggregate can predate central reservation identities. Treat
+        every reservation as new when no identities were recorded; a complete
+        bootstrap supplies the identities and avoids charging an already
+        counted ticket twice. Reservation bytes remain an upper bound for
+        identities that are present in both views.
+        """
+
+        accounted = set(snapshot.accounted_ticket_ids)
+        accounted_reservations = tuple(item for item in reservations if item.ticket_id in accounted)
+        extra_reservations = tuple(item for item in reservations if item.ticket_id not in accounted)
+        oldest_candidates = [
+            item
+            for item in (
+                snapshot.oldest_receipt_time,
+                *(reservation.reserved_at for reservation in reservations),
+            )
+            if item is not None
+        ]
+        return dataclasses.replace(
+            snapshot,
+            count=max(snapshot.count, len(accounted_reservations)) + len(extra_reservations),
+            # Capture backlog bytes are an aggregate and ticket identities do
+            # not bind each reservation to its retained manifests. Charge all
+            # reservation upper bounds additively, even for an identity the
+            # inventory listed, so a legacy ticket can never hide a retry
+            # growth or another ticket's bytes.
+            byte_count=snapshot.byte_count + sum(item.byte_count for item in reservations),
+            oldest_receipt_time=(min(oldest_candidates) if oldest_candidates else None),
+        )
+
+    @classmethod
+    def _capture_backlog_usage(
+        cls,
+        state: _WorkspaceState,
+    ) -> tuple[int, int, Timestamp | None, bool]:
+        """Combine task snapshots with central reservations without double charging a route."""
+
+        snapshots = state.capture_backlogs or {}
+        reservations = state.capture_reservations or {}
+        reservations_by_task: dict[str, list[_CaptureReservation]] = {}
+        for reservation in reservations.values():
+            reservations_by_task.setdefault(reservation.task_id, []).append(reservation)
+
+        count = 0
+        byte_count = 0
+        oldest_candidates: list[Timestamp] = []
+        for route_id, snapshot in snapshots.items():
+            merged = cls._merge_capture_backlog_snapshot(
+                snapshot, tuple(reservations_by_task.get(route_id, ()))
+            )
+            count += merged.count
+            byte_count += merged.byte_count
+            if merged.oldest_receipt_time is not None:
+                oldest_candidates.append(merged.oldest_receipt_time)
+
+        for task_id, task_reservations in reservations_by_task.items():
+            if task_id in snapshots:
+                continue
+            count += len(task_reservations)
+            byte_count += sum(item.byte_count for item in task_reservations)
+            oldest_candidates.extend(item.reserved_at for item in task_reservations)
+
+        return (
+            count,
+            byte_count,
+            min(oldest_candidates) if oldest_candidates else None,
+            state.capture_backlog_scope_unknown
+            or any(item.needs_reconcile for item in reservations.values()),
+        )
+
+    def reserve_capture_ticket(
+        self,
+        workspace: str,
+        ticket_id: str,
+        task_id: str,
+        byte_count: int,
+    ) -> None:
+        """Atomically reserve one ticket and its bounded content bytes workspace-wide.
+
+        ``byte_count`` is an upper bound computed before encrypted object
+        staging. Repeating the same ticket identity is idempotent and may only
+        increase its reservation, so a changed retry cannot release capacity
+        that an earlier attempt already consumed.
+        """
+
+        try:
+            workspace = validate_commitment(workspace)
+            ticket_id = validate_sha256_digest(ticket_id)
+        except ProtocolValueError, TypeError, ValueError:
+            raise ProtocolValueError("invalid_event_value_type")
+        if (
+            type(task_id) is not str
+            or _CAPTURE_BACKLOG_ROUTE_RE.fullmatch(task_id) is None
+            or type(byte_count) is not int
+            or isinstance(byte_count, bool)
+            or not 0 <= byte_count <= _MAX_CAPTURE_CONTENT_BYTES
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        key = _capture_reservation_key(ticket_id, task_id)
+        with self._lock:
+            state = self._load(workspace)
+            assert state.capture_reservations is not None
+            existing = state.capture_reservations.get(key)
+            if self._capture_reservation_bootstrap_required and (
+                state.capture_reservation_bootstrap is None or state.capture_backlog_scope_unknown
+            ):
+                raise _error(
+                    PublicErrorCode.LIMIT_EXCEEDED,
+                    "Observation capture budget scope is unknown.",
+                    retryable=False,
+                )
+            if existing is not None:
+                if existing.ticket_id != ticket_id or existing.task_id != task_id:
+                    raise _error(
+                        PublicErrorCode.STORAGE_CORRUPT,
+                        "Observation capture reservation conflicts.",
+                        retryable=False,
+                    )
+                if byte_count <= existing.byte_count:
+                    return
+                if state.capture_backlog_scope_unknown or existing.needs_reconcile:
+                    raise _error(
+                        PublicErrorCode.LIMIT_EXCEEDED,
+                        "Observation capture budget scope is unknown.",
+                        retryable=False,
+                    )
+                candidate = dataclasses.replace(existing, byte_count=byte_count)
+            else:
+                if state.capture_backlog_scope_unknown:
+                    raise _error(
+                        PublicErrorCode.LIMIT_EXCEEDED,
+                        "Observation capture budget scope is unknown.",
+                        retryable=False,
+                    )
+                if len(state.capture_reservations) >= _MAX_CAPTURE_TICKET_RESERVATIONS:
+                    raise _error(
+                        PublicErrorCode.LIMIT_EXCEEDED,
+                        "Observation capture handoff capacity is exhausted.",
+                        retryable=False,
+                    )
+                candidate = _CaptureReservation(
+                    ticket_id=ticket_id,
+                    task_id=task_id,
+                    byte_count=byte_count,
+                    reserved_at=self._wall_timestamp(),
+                    needs_reconcile=True,
+                )
+            _current_count, _current_bytes, _oldest, unknown = self._capture_backlog_usage(state)
+            if unknown and existing is None:
+                raise _error(
+                    PublicErrorCode.LIMIT_EXCEEDED,
+                    "Observation capture budget scope is unknown.",
+                    retryable=False,
+                )
+            # Evaluate the complete proposed reservation map. Adding a delta
+            # to the current aggregate would double-charge a stale task
+            # snapshot that already contains this ticket's retained bytes.
+            proposed_reservations = dict(state.capture_reservations)
+            proposed_reservations[key] = candidate
+            proposed_state = dataclasses.replace(state, capture_reservations=proposed_reservations)
+            proposed_count, proposed_bytes, _oldest, _unknown = self._capture_backlog_usage(
+                proposed_state
+            )
+            if (
+                proposed_count > _MAX_CAPTURE_TICKET_RESERVATIONS
+                or proposed_bytes > _MAX_CAPTURE_CONTENT_BYTES
+            ):
+                raise _error(
+                    PublicErrorCode.LIMIT_EXCEEDED,
+                    "Observation captured-content byte budget is exhausted.",
+                    retryable=False,
+                )
+            state.capture_reservations[key] = candidate
+            self._save(workspace, state)
+
+    def confirm_capture_ticket_reservation(
+        self, workspace: str, ticket_id: str, task_id: str
+    ) -> None:
+        """Mark a reservation durable after its staging ticket transaction commits."""
+
+        workspace = validate_commitment(workspace)
+        ticket_id = validate_sha256_digest(ticket_id)
+        if type(task_id) is not str or _CAPTURE_BACKLOG_ROUTE_RE.fullmatch(task_id) is None:
+            raise ProtocolValueError("invalid_event_value_type")
+        key = _capture_reservation_key(ticket_id, task_id)
+        with self._lock:
+            state = self._load(workspace)
+            assert state.capture_reservations is not None
+            existing = state.capture_reservations.get(key)
+            if existing is None:
+                return
+            if existing.ticket_id != ticket_id or existing.task_id != task_id:
+                raise _error(
+                    PublicErrorCode.STORAGE_CORRUPT,
+                    "Observation capture reservation conflicts.",
+                    retryable=False,
+                )
+            if existing.needs_reconcile:
+                state.capture_reservations[key] = dataclasses.replace(
+                    existing, needs_reconcile=False
+                )
+                self._save(workspace, state)
+
+    def release_capture_ticket_reservation(
+        self, workspace: str, ticket_id: str, task_id: str
+    ) -> None:
+        """Release one reservation only after durable ticket retirement."""
+
+        workspace = validate_commitment(workspace)
+        ticket_id = validate_sha256_digest(ticket_id)
+        if type(task_id) is not str or _CAPTURE_BACKLOG_ROUTE_RE.fullmatch(task_id) is None:
+            raise ProtocolValueError("invalid_event_value_type")
+        key = _capture_reservation_key(ticket_id, task_id)
+        with self._lock:
+            state = self._load(workspace)
+            assert state.capture_reservations is not None
+            existing = state.capture_reservations.get(key)
+            if existing is None:
+                return
+            if existing.ticket_id != ticket_id or existing.task_id != task_id:
+                raise _error(
+                    PublicErrorCode.STORAGE_CORRUPT,
+                    "Observation capture reservation conflicts.",
+                    retryable=False,
+                )
+            del state.capture_reservations[key]
+            self._save(workspace, state)
+
+    def reconcile_capture_ticket_reservations(
+        self, workspace: str, task_id: str, active_ticket_ids: tuple[str, ...]
+    ) -> None:
+        """Reconcile a task's reservations against its durable active tickets.
+
+        A reservation that outlived a committed deletion is released. A
+        durable active ticket without a reservation latches unknown scope so a
+        later capture cannot assume the central counter is complete.
+        """
+
+        workspace = validate_commitment(workspace)
+        if type(task_id) is not str or _CAPTURE_BACKLOG_ROUTE_RE.fullmatch(task_id) is None:
+            raise ProtocolValueError("invalid_event_value_type")
+        if type(active_ticket_ids) is not tuple:
+            raise ProtocolValueError("invalid_event_value_type")
+        active: set[str] = set()
+        for ticket_id in active_ticket_ids:
+            try:
+                normalized = validate_sha256_digest(ticket_id)
+            except (ProtocolValueError, TypeError, ValueError) as exc:
+                raise ProtocolValueError("invalid_event_value_type") from exc
+            if normalized in active:
+                raise ProtocolValueError("duplicate_set_member")
+            active.add(normalized)
+        with self._lock:
+            state = self._load(workspace)
+            assert state.capture_reservations is not None
+            assert state.capture_backlogs is not None
+            changed = False
+            known: set[str] = set()
+            for key, reservation in tuple(state.capture_reservations.items()):
+                if reservation.task_id != task_id:
+                    continue
+                known.add(reservation.ticket_id)
+                if reservation.ticket_id not in active:
+                    del state.capture_reservations[key]
+                    changed = True
+                elif reservation.needs_reconcile:
+                    state.capture_reservations[key] = dataclasses.replace(
+                        reservation, needs_reconcile=False
+                    )
+                    changed = True
+            snapshot = state.capture_backlogs.get(task_id)
+            if snapshot is not None and len(active) <= snapshot.count:
+                accounted_ids = tuple(sorted(active, key=str.encode))
+                if snapshot.accounted_ticket_ids != accounted_ids:
+                    state.capture_backlogs[task_id] = dataclasses.replace(
+                        snapshot, accounted_ticket_ids=accounted_ids
+                    )
+                    changed = True
+            elif snapshot is not None or active - known:
+                state.capture_backlog_scope_unknown = True
+                state.capture_reservation_bootstrap = None
+                changed = True
+            if changed:
+                self._save(workspace, state)
+
+    def mark_capture_backlog_scope_unknown(self, workspace: str) -> None:
+        """Latch unknown scope after an inventory read failed or was incomplete."""
+
+        workspace = validate_commitment(workspace)
+        with self._lock:
+            state = self._load(workspace)
+            if (
+                not state.capture_backlog_scope_unknown
+                or state.capture_reservation_bootstrap is not None
+            ):
+                state.capture_backlog_scope_unknown = True
+                state.capture_reservation_bootstrap = None
+                self._save(workspace, state)
+
+    @staticmethod
+    def _capture_bootstrap_snapshots(
+        backlogs: Mapping[str, ObservationCaptureBacklog],
+        observed_at: Timestamp,
+        ticket_ids_by_task: Mapping[str, tuple[str, ...]] | None = None,
+    ) -> dict[str, _CaptureBacklogSnapshot]:
+        if not isinstance(cast(object, backlogs), Mapping) or len(backlogs) > (
+            _MAX_CAPTURE_BACKLOG_ROUTES
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        accounted: dict[str, tuple[str, ...]] = {}
+        if ticket_ids_by_task is not None:
+            if (
+                not isinstance(cast(object, ticket_ids_by_task), Mapping)
+                or len(ticket_ids_by_task) > _MAX_CAPTURE_BACKLOG_ROUTES
+            ):
+                raise ProtocolValueError("invalid_event_value_type")
+            accounted_total = 0
+            for task_id, ticket_ids in ticket_ids_by_task.items():
+                if (
+                    type(task_id) is not str
+                    or _CAPTURE_BACKLOG_ROUTE_RE.fullmatch(task_id) is None
+                    or task_id not in backlogs
+                    or type(ticket_ids) is not tuple
+                ):
+                    raise ProtocolValueError("invalid_event_value_type")
+                normalized_ids: list[str] = []
+                for ticket_id in ticket_ids:
+                    try:
+                        normalized = validate_sha256_digest(ticket_id)
+                    except (ProtocolValueError, TypeError, ValueError) as exc:
+                        raise ProtocolValueError("invalid_event_value_type") from exc
+                    if normalized in normalized_ids:
+                        raise ProtocolValueError("duplicate_set_member")
+                    normalized_ids.append(normalized)
+                normalized_ids.sort(key=str.encode)
+                accounted_total += len(normalized_ids)
+                if accounted_total > _MAX_CAPTURE_TICKET_RESERVATIONS:
+                    raise ProtocolValueError("invalid_event_value_type")
+                accounted[task_id] = tuple(normalized_ids)
+        snapshots: dict[str, _CaptureBacklogSnapshot] = {}
+        for task_id, backlog in backlogs.items():
+            if (
+                type(task_id) is not str
+                or _CAPTURE_BACKLOG_ROUTE_RE.fullmatch(task_id) is None
+                or type(backlog) is not ObservationCaptureBacklog
+            ):
+                raise ProtocolValueError("invalid_event_value_type")
+            if backlog.count > _MAX_SAFE_INTEGER or backlog.byte_count > _MAX_SAFE_INTEGER:
+                raise ProtocolValueError("invalid_event_value_type")
+            snapshots[task_id] = _CaptureBacklogSnapshot(
+                count=backlog.count,
+                byte_count=backlog.byte_count,
+                oldest_receipt_time=backlog.oldest_receipt_time,
+                observed_at=observed_at,
+                accounted_ticket_ids=accounted.get(task_id, ()),
+            )
+        return snapshots
+
+    def bootstrap_capture_reservations(
+        self,
+        workspace: str,
+        backlogs: Mapping[str, ObservationCaptureBacklog],
+        *,
+        observed_at: Timestamp | None = None,
+        complete: bool = True,
+        proof_guard: Callable[[], bool] | None = None,
+        ticket_ids_by_task: Mapping[str, tuple[str, ...]] | None = None,
+    ) -> bool:
+        """Account every task in a ready inventory before opening central admission.
+
+        Complete is supplied only by ready after it has read the service
+        catalog and every task bundle. A partial or failed read latches unknown
+        scope and leaves central admission closed. When the optional ticket
+        identities are supplied, reservations are reconciled against that
+        complete set; without identities legacy reservations remain additive
+        so an aggregate can never hide their bytes or count.
+        """
+
+        workspace = validate_commitment(workspace)
+        if type(complete) is not bool or (proof_guard is not None and not callable(proof_guard)):
+            raise ProtocolValueError("invalid_event_value_type")
+        stamp = self._wall_timestamp() if observed_at is None else observed_at
+        if type(stamp) is not Timestamp:
+            raise ProtocolValueError("invalid_timestamp")
+        if not complete:
+            self.mark_capture_backlog_scope_unknown(workspace)
+            return False
+        snapshots = self._capture_bootstrap_snapshots(
+            backlogs,
+            stamp,
+            ticket_ids_by_task,
+        )
+        proof = _CaptureBootstrap(
+            proof=_capture_bootstrap_proof(workspace, snapshots),
+            observed_at=stamp,
+            route_count=len(snapshots),
+        )
+        with self._lock:
+            state = self._load(workspace)
+            # READY can change generation while this worker waits for flock.
+            # Revalidate under the store lock before replacing any accounting.
+            try:
+                current = proof_guard is None or proof_guard() is True
+            except Exception:
+                current = False
+            if not current:
+                state.capture_reservation_bootstrap = None
+                state.capture_backlog_scope_unknown = True
+                self._save(workspace, state)
+                return False
+            state.capture_backlogs = snapshots
+            state.capture_reservation_bootstrap = proof
+            state.capture_backlog_scope_unknown = False
+            assert state.capture_reservations is not None
+            if state.capture_reservations:
+                reconciled: dict[str, _CaptureReservation] = {}
+                for key, item in state.capture_reservations.items():
+                    task_ids = (
+                        None if ticket_ids_by_task is None else ticket_ids_by_task.get(item.task_id)
+                    )
+                    if task_ids is not None and item.ticket_id not in task_ids:
+                        # The complete task inventory proves this old
+                        # reservation no longer has a durable ticket. It is
+                        # safe to release it because the coordinator's
+                        # capture lock excludes an in-flight reservation.
+                        continue
+                    reconciled[key] = dataclasses.replace(
+                        item,
+                        needs_reconcile=False,
+                    )
+                state.capture_reservations = reconciled
+            self._save(workspace, state)
+        return True
+
+    @staticmethod
+    def _capture_inventory_recovery_pending(state: _WorkspaceState) -> bool:
+        """Use the same unknown dimensions as capture pressure, without summing occupancy."""
+
+        return state.capture_backlog_scope_unknown or any(
+            item.needs_reconcile for item in (state.capture_reservations or {}).values()
+        )
+
+    def capture_inventory_recovery_needed(self, workspace: str) -> bool:
+        """Read durable recovery demand independently of native-input admission."""
+
+        workspace = validate_commitment(workspace)
+        with self._lock:
+            return self._capture_inventory_recovery_pending(self._load(workspace))
+
+    def capture_reservation_bootstrap_ready(
+        self, workspace: str, task_id: str | None = None
+    ) -> bool:
+        """Return whether central admission has a complete persisted root proof."""
+
+        workspace = validate_commitment(workspace)
+        if task_id is not None and (
+            type(task_id) is not str or _CAPTURE_BACKLOG_ROUTE_RE.fullmatch(task_id) is None
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        with self._lock:
+            state = self._load(workspace)
+            if state.capture_reservation_bootstrap is None or state.capture_backlog_scope_unknown:
+                return False
+            if task_id is None:
+                return True
+            return task_id in (state.capture_backlogs or {})
+
+    def update_capture_backlog(
+        self,
+        workspace: str,
+        count: int,
+        byte_count: int,
+        oldest_receipt_time: Timestamp | None,
+        observed_at: Timestamp,
+        *,
+        route_id: str | None = None,
+    ) -> None:
+        """Cache one task's read-only capture backlog after a durable store transaction.
+
+        A route report is deliberately not treated as a workspace-global
+        reservation. The bounded map keeps active task reports for pressure
+        feedback, while a missing route or a saturated map latches an unknown
+        scope so pressure logic cannot infer that unreported work is absent.
+        """
+
+        if (
+            type(count) is not int
+            or isinstance(count, bool)
+            or not 0 <= count <= _MAX_SAFE_INTEGER
+            or type(byte_count) is not int
+            or isinstance(byte_count, bool)
+            or not 0 <= byte_count <= _MAX_SAFE_INTEGER
+            or type(observed_at) is not Timestamp
+            or (oldest_receipt_time is not None and type(oldest_receipt_time) is not Timestamp)
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        if route_id is not None and (
+            type(route_id) is not str or _CAPTURE_BACKLOG_ROUTE_RE.fullmatch(route_id) is None
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        key = _UNKNOWN_CAPTURE_BACKLOG_ROUTE if route_id is None else route_id
+        snapshot = _CaptureBacklogSnapshot(
+            count=count,
+            byte_count=byte_count,
+            oldest_receipt_time=oldest_receipt_time,
+            observed_at=observed_at,
+        )
+        with self._lock:
+            state = self._load(workspace)
+            assert state.capture_backlogs is not None
+            if route_id is not None:
+                previous = state.capture_backlogs.get(route_id)
+                if previous is not None and len(previous.accounted_ticket_ids) <= count:
+                    snapshot = dataclasses.replace(
+                        snapshot,
+                        accounted_ticket_ids=previous.accounted_ticket_ids,
+                    )
+            if route_id is not None and (
+                state.capture_reservation_bootstrap is not None
+                and route_id not in state.capture_backlogs
+            ):
+                # A new route invalidates the old root inventory. The next
+                # complete ready enumeration may mint a replacement proof.
+                state.capture_reservation_bootstrap = None
+                state.capture_backlog_scope_unknown = True
+            elif route_id is None:
+                # An unscoped report cannot be part of a complete root
+                # inventory. Preserve the report for pressure feedback but
+                # force a fresh authoritative enumeration before admission.
+                state.capture_reservation_bootstrap = None
+                state.capture_backlog_scope_unknown = True
+            if key not in state.capture_backlogs and len(state.capture_backlogs) >= (
+                _MAX_CAPTURE_BACKLOG_ROUTES
+            ):
+                # Preserve all existing active reports. Losing one silently
+                # would make the aggregate appear smaller and could authorize
+                # optional detail during pressure.
+                state.capture_backlog_scope_unknown = True
+                self._save(workspace, state)
+                return
+            state.capture_backlogs[key] = snapshot
+            self._save(workspace, state)
+
+    def capture_backlog(self, workspace: str) -> JsonObject:
+        """Return conservative aggregate feedback from known task routes.
+
+        ``partial`` means the returned totals are the sum of known routes and
+        are not a complete workspace aggregate. ``unknown`` means at least
+        one route is missing or the bounded route cache saturated. The
+        snapshot is read-only and contains counts and timestamps only.
+        """
+
+        with self._lock:
+            state = self._load(workspace)
+            snapshots = state.capture_backlogs or {}
+            reservations = state.capture_reservations or {}
+            reservations_by_task: dict[str, list[_CaptureReservation]] = {}
+            for reservation in reservations.values():
+                reservations_by_task.setdefault(reservation.task_id, []).append(reservation)
+            routes_by_task = dict(snapshots)
+            for task_id, task_reservations in reservations_by_task.items():
+                snapshot = snapshots.get(task_id)
+                if snapshot is None:
+                    reserved_oldest = min(item.reserved_at for item in task_reservations)
+                    reserved_observed = max(item.reserved_at for item in task_reservations)
+                    routes_by_task[task_id] = _CaptureBacklogSnapshot(
+                        count=len(task_reservations),
+                        byte_count=sum(item.byte_count for item in task_reservations),
+                        oldest_receipt_time=reserved_oldest,
+                        observed_at=reserved_observed,
+                    )
+                else:
+                    routes_by_task[task_id] = self._merge_capture_backlog_snapshot(
+                        snapshot, tuple(task_reservations)
+                    )
+            count = sum(snapshot.count for snapshot in routes_by_task.values())
+            byte_count = sum(snapshot.byte_count for snapshot in routes_by_task.values())
+            oldest_candidates = tuple(
+                snapshot.oldest_receipt_time
+                for snapshot in routes_by_task.values()
+                if snapshot.oldest_receipt_time is not None
+            )
+            oldest = min(oldest_candidates) if oldest_candidates else None
+            observed_candidates = tuple(
+                snapshot.observed_at for snapshot in routes_by_task.values()
+            )
+            observed_at = max(observed_candidates) if observed_candidates else None
+            reservation_unknown = any(item.needs_reconcile for item in reservations.values())
+            routes = JsonObject(
+                {
+                    key: JsonObject(
+                        {
+                            "count": snapshot.count,
+                            "byte_count": snapshot.byte_count,
+                            "oldest_receipt_time": (
+                                None
+                                if snapshot.oldest_receipt_time is None
+                                else snapshot.oldest_receipt_time.wire
+                            ),
+                            "observed_at": snapshot.observed_at.wire,
+                            "reservation_count": len(reservations_by_task.get(key, ())),
+                            "reservation_unknown": any(
+                                item.needs_reconcile for item in reservations_by_task.get(key, ())
+                            ),
+                        }
+                    )
+                    for key, snapshot in sorted(
+                        routes_by_task.items(), key=lambda item: item[0].encode()
+                    )
+                }
+            )
+            scope_unknown = state.capture_backlog_scope_unknown or reservation_unknown
+            return JsonObject(
+                {
+                    "capture_backlog_scope": (
+                        "unknown" if scope_unknown or not routes_by_task else "partial"
+                    ),
+                    "route_count": len(routes_by_task),
+                    "count": count,
+                    "byte_count": byte_count,
+                    "oldest_receipt_time": None if oldest is None else oldest.wire,
+                    "observed_at": None if observed_at is None else observed_at.wire,
+                    "reservation_count": len(reservations),
+                    "reserved_byte_count": sum(item.byte_count for item in reservations.values()),
+                    "reservation_unknown": reservation_unknown,
+                    "routes": routes,
+                }
+            )
+
+    def capture_backlog_status(self, workspace: str) -> JsonObject:
+        """Compatibility alias for the read-only local pressure snapshot."""
+
+        return self.capture_backlog(workspace)
+
+    def _selection_pressure_usage(
+        self,
+        workspace: str,
+        state: _WorkspaceState,
+        session_commitment: str,
+        limits: BudgetLimits,
+        now: Timestamp,
+        *,
+        state_bytes: int | None = None,
+    ) -> BudgetUsage:
+        """Build one bounded usage sample without changing selection state."""
+
+        rows = tuple(state.pending_outbox or ())
+        buffered = tuple(state.admission_buffer.inputs)
+        row_payloads = tuple(
+            JsonObject(
+                {
+                    "codex_session_id": row.codex_session_id,
+                    "envelope": observation_envelope_to_json(row.envelope),
+                }
+            )
+            for row in rows
+        )
+        queue_count = len(rows) + len(buffered)
+        row_sizes = tuple(len(canonical_encode(item)) for item in row_payloads)
+        buffered_sizes = tuple(
+            len(canonical_encode(observation_envelope_to_json(item.envelope))) for item in buffered
+        )
+        queue_bytes = sum(row_sizes) + sum(buffered_sizes)
+        protected_count = sum(_outbox_row_is_protected(row.envelope) for row in rows) + len(
+            buffered
+        )
+        protected_bytes = sum(
+            size
+            for row, size in zip(rows, row_sizes, strict=True)
+            if _outbox_row_is_protected(row.envelope)
+        ) + sum(buffered_sizes)
+        if state_bytes is None:
+            state_bytes = len(canonical_encode(self._state_to_json(workspace, state))) + 1
+        session_rows = tuple(
+            row for row in rows if row.envelope.session_commitment == session_commitment
+        )
+        session_buffered = tuple(
+            item for item in buffered if item.envelope.session_commitment == session_commitment
+        )
+        session_bytes = sum(
+            len(canonical_encode(observation_envelope_to_json(row.envelope)))
+            for row in session_rows
+        ) + sum(
+            len(canonical_encode(observation_envelope_to_json(item.envelope)))
+            for item in session_buffered
+        )
+        # Retries must not make a stalled row look young.  The envelope
+        # receipt is the original observation time; ``last_attempt_at`` is
+        # only delivery-attempt metadata.
+        oldest = min((row.envelope.receipt_time for row in rows), default=None)
+        (
+            capture_tickets,
+            capture_bytes,
+            capture_oldest,
+            capture_scope_unknown,
+        ) = self._capture_backlog_usage(state)
+        if capture_oldest is not None and (oldest is None or capture_oldest < oldest):
+            oldest = capture_oldest
+        if capture_scope_unknown:
+            # Missing capture routes are an unknown backlog, never a clean
+            # zero.  Drive the capture dimension to its hard ceiling.
+            capture_tickets = limits.capture_tickets
+            capture_bytes = limits.capture_bytes
+        pending_keys = set(state.open_pre or ())
+        for item in buffered:
+            if item.kind != "pending":
+                continue
+            correlation = _envelope_pairing_correlation(item.envelope, "paired")
+            if correlation is not None:
+                pending_keys.add(
+                    _pairing_key(
+                        source=item.envelope.source,
+                        session_commitment=item.envelope.session_commitment,
+                        source_generation=item.envelope.cursor.source_generation,
+                        correlation_id=correlation,
+                    )
+                )
+            else:
+                pending_keys.add(
+                    "pending:"
+                    + item.envelope.source.value
+                    + ":"
+                    + item.envelope.session_commitment
+                    + ":"
+                    + item.envelope.source_identity
+                )
+        return BudgetUsage(
+            queue_count=queue_count,
+            queue_bytes=queue_bytes,
+            state_bytes=state_bytes,
+            oldest_pending_age_ms=_timestamp_age_ms(now, oldest),
+            pending_attempts=len(pending_keys),
+            capture_tickets=capture_tickets,
+            capture_bytes=capture_bytes,
+            protected_count=protected_count,
+            protected_bytes=protected_bytes,
+            session_queue_count=len(session_rows) + len(session_buffered),
+            session_queue_bytes=session_bytes,
+        )
+
+    def update_selection_pressure(
+        self,
+        workspace: str,
+        session_commitment: str,
+    ) -> PressureEvaluation:
+        """Advance one session's pressure snapshot from live adapter usage.
+
+        This is a writer-side operation used by hooks and the sweeper.  Reads
+        use :meth:`selection_runtime_status` and never start the recovery
+        dwell or persist a notice.
+        """
+
+        if type(session_commitment) is not str:
+            raise ProtocolValueError("invalid_commitment")
+        with self._lock:
+            state = self._load(workspace)
+            now = self._wall_timestamp()
+            self._prune_open_pre(state, now)
+            settings = state.selection_settings or ObservationSelectionSettings()
+            resolved = resolve_observation_selection(
+                settings,
+                session_commitment=session_commitment,
+                now=now,
+            )
+            limits = BudgetLimits.for_profile(int(settings.aggregate_capacity(now=now)))
+            mode = ObservationMode.from_value(resolved.selection.detail.value)
+            usage = self._selection_pressure_usage(
+                workspace,
+                state,
+                session_commitment,
+                limits,
+                now,
+            )
+            previous = None
+            if self._epoch_matches(state.monotonic_epoch):
+                previous = (state.pressure_snapshots or {}).get(session_commitment)
+            evaluation = evaluate_pressure(
+                usage,
+                mode,
+                previous,
+                max(0, int(self._now_mono() * 1000)),
+                limits=limits,
+            )
+            snapshots = state.pressure_snapshots
+            if snapshots is None:
+                snapshots = {}
+                state.pressure_snapshots = snapshots
+            if session_commitment in (state.ended_sessions or ()):
+                snapshots.pop(session_commitment, None)
+            else:
+                snapshots[session_commitment] = evaluation.snapshot
+            if len(snapshots) > _MAX_HOOK_SEQUENCES:
+                candidates = sorted(
+                    (key for key in snapshots if key != session_commitment),
+                    key=lambda key: (snapshots[key].since_ms, key.encode()),
+                )
+                if candidates:
+                    del snapshots[candidates[0]]
+            state.monotonic_epoch = self._boot_epoch()
+            if previous != evaluation.snapshot or not self._epoch_matches(state.monotonic_epoch):
+                self._save(workspace, state)
+            return evaluation
+
+    def selection_runtime_status(
+        self,
+        workspace: str,
+        session_commitment: str | None = None,
+    ) -> JsonObject:
+        """Return selected/effective pressure state without starting recovery.
+
+        A workspace read is an aggregate projection.  It evaluates every
+        still-active session lane and carries forward the worst pressure state
+        so one high child cannot be hidden by a healthy workspace/default
+        selection.  The pure evaluation is deliberately not persisted; only
+        the hook/sweeper writer advances hysteresis snapshots.
+        """
+
+        with self._lock:
+            state = self._load(workspace)
+            now = self._wall_timestamp()
+            settings = state.selection_settings or ObservationSelectionSettings()
+            resolved = resolve_observation_selection(
+                settings,
+                session_commitment=session_commitment,
+                now=now,
+            )
+            aggregate = settings.aggregate_capacity(now=now)
+            limits = BudgetLimits.for_profile(int(aggregate))
+            path = self._workspace_path(workspace)
+            stat_key = self._stat_key(path)
+            usage = self._selection_pressure_usage(
+                workspace,
+                state,
+                session_commitment or "",
+                limits,
+                now,
+                state_bytes=0 if stat_key is None else stat_key[1],
+            )
+            monotonic_ms = max(0, int(self._now_mono() * 1000))
+            snapshots = state.pressure_snapshots or {}
+
+            def evaluate_lane(lane: str | None) -> PressureEvaluation:
+                lane_resolution = resolve_observation_selection(
+                    settings,
+                    session_commitment=lane,
+                    now=now,
+                )
+                lane_usage = (
+                    usage
+                    if lane == session_commitment
+                    else self._selection_pressure_usage(
+                        workspace,
+                        state,
+                        "" if lane is None else lane,
+                        limits,
+                        now,
+                        state_bytes=0 if stat_key is None else stat_key[1],
+                    )
+                )
+                previous = snapshots.get(lane) if lane is not None else None
+                if not self._epoch_matches(state.monotonic_epoch) or lane in (
+                    state.ended_sessions or ()
+                ):
+                    previous = None
+                return evaluate_pressure(
+                    lane_usage,
+                    ObservationMode.from_value(lane_resolution.selection.detail.value),
+                    previous,
+                    monotonic_ms,
+                    limits=limits,
+                )
+
+            lane_evaluations: list[tuple[str | None, PressureEvaluation]] = []
+            if session_commitment is not None:
+                lane_evaluations.append((session_commitment, evaluate_lane(session_commitment)))
+            else:
+                # A snapshot is valid for this workspace only while its lane is
+                # still active.  Session overrides also count as active owner
+                # lanes before a host binding has been materialized; ended
+                # lanes never keep workspace pressure elevated.
+                ended = state.ended_sessions or set()
+                active_lanes = {
+                    key
+                    for key, setting in settings.sessions
+                    if not setting.expired(now) and key not in ended
+                }
+                active_lanes.update(
+                    key
+                    for key, bound_workspace in (state.session_workspaces or {}).items()
+                    if bound_workspace == workspace and key not in ended
+                )
+                active_lanes.update(
+                    key for key in (state.codex_session_bindings or {}).values() if key not in ended
+                )
+                # Always evaluate the workspace lane so a workspace selection
+                # remains visible when no child session is currently active.
+                lane_evaluations.append((None, evaluate_lane(None)))
+                for lane in sorted(active_lanes, key=str.encode):
+                    lane_evaluations.append((lane, evaluate_lane(lane)))
+
+            lane, evaluation = max(
+                lane_evaluations,
+                key=lambda item: (
+                    item[1].state.rank,
+                    item[1].utilization_bps,
+                    b"" if item[0] is None else item[0].encode(),
+                ),
+            )
+            del lane
+            pressure_state = evaluation.state
+            selected_mode = ObservationMode.from_value(resolved.selection.detail.value)
+            if session_commitment is None:
+                # Workspace status is a worst-lane projection.  A workspace
+                # Detailed setting is never reported as effective Detailed
+                # while an active sibling lane is pressure-downgraded.
+                effective_mode = min(
+                    (item[1].effective_mode for item in lane_evaluations),
+                    key=lambda mode: 0 if mode is ObservationMode.FOCUSED else 1,
+                )
+            else:
+                effective_mode = evaluation.effective_mode
+            capture = self.capture_backlog(workspace)
+            return JsonObject(
+                {
+                    "policy_version": BUDGET_POLICY_VERSION,
+                    "validation_status": BUDGET_VALIDATION_STATUS,
+                    "selected_mode": selected_mode.value,
+                    "effective_mode": effective_mode.value,
+                    "selected_capacity": resolved.selection.capacity.value,
+                    "effective_capacity": aggregate.value,
+                    "selection_origin": resolved.origin,
+                    "selection_expires_at": (
+                        None if resolved.expires_at is None else resolved.expires_at.wire
+                    ),
+                    "pressure_state": pressure_state.value,
+                    "pressure_transition_identity": evaluation.transition_identity,
+                    "content_allowed": all(item[1].content_allowed for item in lane_evaluations),
+                    "admission_allowed": all(
+                        item[1].admission_allowed for item in lane_evaluations
+                    ),
+                    "queue_count": usage.queue_count,
+                    "queue_bytes": usage.queue_bytes,
+                    "state_bytes": usage.state_bytes,
+                    "oldest_pending_age_ms": usage.oldest_pending_age_ms,
+                    "pending_attempts": usage.pending_attempts,
+                    "pending_lifecycle_count": len(state.pending_lifecycles or ()),
+                    "capture_backlog": capture,
+                    "protected_count_reserve": limits.protected_count,
+                    "protected_bytes_reserve": limits.protected_bytes,
+                    "session_fair_share": limits.session_fair_share,
+                    "session_fair_share_bytes": limits.session_fair_share_bytes,
+                    "accounting": self.selection_accounting(workspace),
+                    "session_commitment": session_commitment,
+                }
+            )
+
+    def maintain_selected_admission(self, workspace: str, *, force: bool = False) -> None:
+        """Flush due accounts and advance pressure recovery from background drain."""
+
+        from yoetz.adapters.integrations.observation_admission import build_routine_read_summary
+
+        with self.batched(workspace):
+            self.flush_selected_admission(
+                workspace,
+                summary_builder=build_routine_read_summary,
+                force=force,
+            )
+            state = self._load(workspace)
+            sessions = set((state.codex_session_bindings or {}).values())
+            sessions.update(state.pressure_snapshots or ())
+            sessions.update(
+                item.envelope.session_commitment for item in state.admission_buffer.inputs
+            )
+            sessions.difference_update(state.ended_sessions or ())
+            for session in sorted(sessions)[:_MAX_HOOK_SEQUENCES]:
+                self.update_selection_pressure(workspace, session)
+
+    def promote_buffered_observation(self, workspace: str, source_identity: str) -> JsonObject:
+        """Promote retained structural call identities before summary admission.
+
+        Optional historical content was never retained by this buffer. A
+        successful promotion therefore preserves native identity and time,
+        while explicitly reporting that bytes must be reacquired if needed.
+        """
+
+        from yoetz.adapters.integrations.observation_admission import build_routine_read_summary
+
+        if type(source_identity) is not str or not 1 <= len(source_identity) <= 128:
+            raise ProtocolValueError("invalid_event_value_type")
+        with self.batched(workspace):
+            state = self._load(workspace)
+            if state.consent is None or not state.consent.active:
+                return JsonObject({"outcome": "unavailable", "reason": "consent_inactive"})
+            target = next(
+                (
+                    item
+                    for item in state.admission_buffer.inputs
+                    if item.envelope.source_identity == source_identity
+                ),
+                None,
+            )
+            if target is None:
+                return JsonObject(
+                    {
+                        "outcome": "unavailable",
+                        "reason": "promotion_window_closed",
+                        "content_availability": "not_retained",
+                        "next_action": "reacquire_current_state_evidence",
+                    }
+                )
+            if target.kind == "pending":
+                return JsonObject({"outcome": "pending", "reason": "tool_outcome_not_observed"})
+            call_id = target.envelope.structural_payload.get("tool_call_id") or (
+                target.envelope.structural_payload.get("correlation_id")
+            )
+            lane = tuple(item for item in state.admission_buffer.inputs if item.lane == target.lane)
+            remaining = tuple(
+                item for item in state.admission_buffer.inputs if item.lane != target.lane
+            )
+            deliveries: list[tuple[str, ObservationEnvelope]] = []
+            successes: list[ObservationEnvelope] = []
+            promoted_ids: list[str] = []
+            for item in lane:
+                item_call = item.envelope.structural_payload.get("tool_call_id") or (
+                    item.envelope.structural_payload.get("correlation_id")
+                )
+                promote = item is target or (call_id is not None and item_call == call_id)
+                if promote or item.kind == "pending":
+                    if successes:
+                        deliveries.append(
+                            (
+                                item.host_session,
+                                build_routine_read_summary(tuple(successes), item.fence),
+                            )
+                        )
+                        successes.clear()
+                    envelope = item.envelope
+                    if promote:
+                        promoted_ids.append(envelope.source_identity)
+                        envelope = dataclasses.replace(
+                            envelope,
+                            structural_payload=JsonObject(
+                                {**envelope.structural_payload, "action": "evidence_linked_read"}
+                            ),
+                            gap_codes=tuple(
+                                sorted({*envelope.gap_codes, "routine_read_detail_omitted"})
+                            ),
+                        )
+                    deliveries.append((item.host_session, envelope))
+                else:
+                    successes.append(item.envelope)
+            if successes:
+                deliveries.append(
+                    (
+                        target.host_session,
+                        build_routine_read_summary(tuple(successes), target.fence),
+                    )
+                )
+            admitted = self.commit_selected_admission(
+                workspace,
+                AdmissionPlan(AdmissionBuffer(remaining), tuple(deliveries), False),
+            )
+            return JsonObject(
+                {
+                    "outcome": "queued_individual" if admitted else "pending",
+                    "reason": "structural_promotion" if admitted else "admission_backpressure",
+                    "source_identities": tuple(promoted_ids),
+                    "original_receipt_time": target.envelope.receipt_time.wire,
+                    "original_cursor": observation_cursor_to_json(target.envelope.cursor),
+                    "content_availability": "not_retained",
+                    "next_action": "reacquire_content_if_required",
+                }
+            )
 
     def list_pending_outbox_rows(
         self, workspace: str, *, codex_session_id: str | None = None
@@ -2994,14 +6241,25 @@ class LocalObservationStore:
             )
 
     def pending_workspaces(self) -> tuple[str, ...]:
-        """Return opaque commitments with undelivered rows or lifecycle work."""
+        """Return opaque commitments with delivery, lifecycle, or capture recovery work."""
 
         with self._lock:
             pending: list[str] = []
             for workspace, state in self._iter_workspaces():
                 assert state.pending_outbox is not None
                 assert state.pending_lifecycles is not None
-                if state.pending_outbox or state.pending_lifecycles:
+                pressure_active = any(
+                    snapshot.state is not PressureState.HEALTHY
+                    for session, snapshot in (state.pressure_snapshots or {}).items()
+                    if session not in (state.ended_sessions or ())
+                )
+                if (
+                    state.pending_outbox
+                    or state.pending_lifecycles
+                    or state.admission_buffer.inputs
+                    or pressure_active
+                    or self._capture_inventory_recovery_pending(state)
+                ):
                     pending.append(workspace)
             return tuple(sorted(pending, key=str.encode))
 
@@ -3249,6 +6507,7 @@ class LocalObservationStore:
                         state.pending_lifecycles[:] = remaining
                         changed = True
                     if changed:
+                        self._prune_open_pre(state, self._wall_timestamp())
                         self._save(workspace_commitment, state)
                 return True
 
@@ -3417,6 +6676,11 @@ class LocalObservationStore:
                     and row.envelope.source_identity == source_identity
                 ):
                     del state.pending_outbox[index]
+                    state.selection_delivered_count = min(
+                        _MAX_SAFE_INTEGER,
+                        state.selection_delivered_count
+                        + self._represented_input_count(row.envelope),
+                    )
                     self._resolve_delivered(state)
                     state.last_successful_drain_mono_ms = int(self._now_mono() * 1000)
                     state.monotonic_epoch = self._boot_epoch()
@@ -3433,6 +6697,11 @@ class LocalObservationStore:
             for index, row in enumerate(state.pending_outbox):
                 if row.row_identity == expected.row_identity and row.attempts == expected.attempts:
                     del state.pending_outbox[index]
+                    state.selection_delivered_count = min(
+                        _MAX_SAFE_INTEGER,
+                        state.selection_delivered_count
+                        + self._represented_input_count(row.envelope),
+                    )
                     self._resolve_delivered(state)
                     state.last_successful_drain_mono_ms = int(self._now_mono() * 1000)
                     state.monotonic_epoch = self._boot_epoch()
@@ -3827,6 +7096,9 @@ class LocalObservationStore:
                     existing,
                 )
             state.dedup.add(key)
+            state.selection_observed_count = min(
+                _MAX_SAFE_INTEGER, state.selection_observed_count + 1
+            )
             if len(state.dedup) > _MAX_DEDUP:
                 # Bounded retention: drop an arbitrary oldest-looking member.
                 state.dedup.pop()
@@ -3994,6 +7266,33 @@ class LocalObservationStore:
         paired = pairing_mode == "paired"
         pairing_pre_open = False
         with self._lock:
+            if paired and correlation_id is not None and is_pre_event:
+                # Check the pending-attempt bound before ingesting the new
+                # envelope.  ``note_open_pre`` repeats the check after the
+                # envelope is durably retained, but the returned envelope
+                # needs the typed reason when this new identity cannot be
+                # paired without evicting an older one.
+                state = self._load(workspace_commitment)
+                assert state.open_pre is not None
+                pre_key = _pairing_key(
+                    source=source,
+                    session_commitment=session_commitment,
+                    source_generation=source_generation,
+                    correlation_id=correlation_id,
+                )
+                if pre_key not in state.open_pre and len(state.open_pre) >= _MAX_OPEN_PRE:
+                    envelope = dataclasses.replace(
+                        envelope,
+                        gap_codes=tuple(
+                            sorted(
+                                {
+                                    *envelope.gap_codes,
+                                    _PENDING_ATTEMPT_LIMIT_GAP,
+                                },
+                                key=str.encode,
+                            )
+                        ),
+                    )
             if paired and correlation_id is not None and is_post_event:
                 pairing_pre_open = self.has_open_pre(
                     workspace_commitment,
@@ -4028,6 +7327,7 @@ class LocalObservationStore:
                     source=source,
                     session_commitment=session_commitment,
                     source_generation=source_generation,
+                    receipt_time=envelope.receipt_time,
                 )
             elif paired and correlation_id is not None and is_post_event:
                 if pairing_pre_open:
@@ -4167,9 +7467,8 @@ class LocalObservationStore:
             self._save(command.workspace_commitment, state)
             return self._status_unlocked(command.workspace_commitment)
 
-    @contextlib.contextmanager
-    def batched(self, workspace_commitment: str) -> Generator[None]:
-        """Hold one workspace state open across a pass; serialize once at exit.
+    def batched(self, workspace_commitment: str) -> _ObservationBatch:
+        """Hold one workspace transaction; serialize once on successful exit.
 
         Durability trade-off: a SIGKILL inside a batch loses that batch's local
         mutations rather than only the tail. That matches the outbox's design —
@@ -4177,22 +7476,11 @@ class LocalObservationStore:
         by stream reconcile — but callers MUST close the batch before any
         service RPC so an outbox acknowledgement can never become durable ahead
         of the ingest it acknowledges, and MUST NOT span a network wait: the
-        batch holds the interprocess store lock for its whole duration.
+        batch holds the interprocess store lock for its whole duration. An
+        exception rolls back the current batch, including a nested savepoint,
+        so ingest identity cannot commit without its selected admission.
         """
-
-        with self._lock:
-            nested = workspace_commitment in self._batch
-            if not nested:
-                self._batch[workspace_commitment] = self._load(workspace_commitment)
-            try:
-                yield
-            finally:
-                if not nested:
-                    state = self._batch.pop(workspace_commitment, None)
-                    dirty = workspace_commitment in self._batch_dirty
-                    self._batch_dirty.discard(workspace_commitment)
-                    if state is not None and dirty:
-                        self._save(workspace_commitment, state)
+        return _ObservationBatch(self, workspace_commitment)
 
     def _workspace_path(self, workspace_commitment: str) -> Path:
         digest = workspace_commitment.removeprefix("hmac-sha256:")
@@ -4361,18 +7649,40 @@ class LocalObservationStore:
         *,
         projected: bytes | None = None,
     ) -> None:
+        """Save one workspace state without leaking failed retention work.
+
+        The bounded retention pass mutates the state before it knows whether
+        the protected durable rows can fit. Keep that speculative work out of
+        callers, batches, and the parse cache when the write is rejected.
+        """
+
+        if self._batch.get(workspace_commitment) is state:
+            self._batch_dirty.add(workspace_commitment)
+            return
+        prior = _copy_state(state)
+        try:
+            self._save_unchecked(workspace_commitment, state, projected=projected)
+        except BaseException:
+            _restore_state(state, prior)
+            raise
+
+    def _save_unchecked(
+        self,
+        workspace_commitment: str,
+        state: _WorkspaceState,
+        *,
+        projected: bytes | None = None,
+    ) -> None:
         """Serialize one workspace state, trimming to the safe local bound.
 
         ``projected`` reuses bytes a caller already encoded for a size check;
         they are discarded when pruning mutated the state after that encode.
         """
 
-        if self._batch.get(workspace_commitment) is state:
-            self._batch_dirty.add(workspace_commitment)
-            return
         directory = self._root / "workspaces"
         _ensure_dir(directory)
         path = self._workspace_path(workspace_commitment)
+        state_limit = self._state_byte_limit(workspace_commitment, state)
         quarantined_before = len(state.quarantine or ())
         notices_before = len(state.frontier_motion_notices or ())
         delivered_before = len(state.frontier_motion_delivered or ())
@@ -4393,54 +7703,53 @@ class LocalObservationStore:
         dropped_sessions = state.stream_partial_dropped_sessions
         assert partials is not None
         assert dropped_sessions is not None
-        while partials and len(payload) > _MAX_STATE_BYTES:
-            # Shed the read-cache before any durable row: a dropped partial
-            # is reread from the committed cursor on the next reconcile,
-            # while an evicted envelope is a lost observation (#289).
-            largest = max(partials, key=lambda key: (len(partials[key]), key.encode()))
-            del partials[largest]
-            dropped_sessions.add(largest)
-            self._note_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
-            payload = self._encode_state(workspace_commitment, state)
+        if partials and len(payload) > state_limit:
+            # Preserve the existing largest-first read-cache removal order.
+            order = sorted(
+                partials, key=lambda key: (len(partials[key]), key.encode()), reverse=True
+            )
+
+            def drop_partials(candidate: _WorkspaceState, count: int) -> None:
+                assert candidate.stream_partials is not None
+                assert candidate.stream_partial_dropped_sessions is not None
+                for key in order[:count]:
+                    del candidate.stream_partials[key]
+                    candidate.stream_partial_dropped_sessions.add(key)
+                    self._note_gap_state(candidate, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
+
+            payload = self._trim_retained_prefix(
+                workspace_commitment, state, len(order), state_limit, drop_partials
+            )
         truncated = False
-        if len(payload) > _MAX_STATE_BYTES:
-            # Retain authority state and make every observation-detail loss explicit.
-            assert state.envelopes is not None
-            while state.envelopes and len(payload) > _MAX_STATE_BYTES:
-                del state.envelopes[0]
-                state.envelopes_truncated = True
-                assert state.gaps is not None
-                self._note_gap_state(state, ObservationGapCode.TRUNCATED_PAYLOAD.value)
-                truncated = True
-                payload = self._encode_state(workspace_commitment, state)
+        assert state.envelopes is not None
+        if state.envelopes and len(payload) > state_limit:
+
+            def drop_envelopes(candidate: _WorkspaceState, count: int) -> None:
+                assert candidate.envelopes is not None
+                del candidate.envelopes[:count]
+                candidate.envelopes_truncated = True
+                self._note_gap_state(candidate, ObservationGapCode.TRUNCATED_PAYLOAD.value)
+
+            payload = self._trim_retained_prefix(
+                workspace_commitment, state, len(state.envelopes), state_limit, drop_envelopes
+            )
+            truncated = True
         assert state.pending_outbox is not None
         assert state.quarantine is not None
         assert state.gaps is not None
-        while state.pending_outbox and len(payload) > _MAX_STATE_BYTES:
-            row = state.pending_outbox.pop(0)
-            already = any(
-                entry[0] == row.codex_session_id
-                and observation_envelope_to_json(entry[1])
-                == observation_envelope_to_json(row.envelope)
-                for entry in state.quarantine
+        # Pending rows are accepted durable records, never retention candidates.
+        if state.quarantine and len(payload) > state_limit:
+
+            def drop_quarantine(candidate: _WorkspaceState, count: int) -> None:
+                assert candidate.quarantine is not None
+                for session, envelope, reason, _ in candidate.quarantine[:count]:
+                    self._record_quarantine_eviction(candidate, session, envelope, reason)
+                del candidate.quarantine[:count]
+
+            payload = self._trim_retained_prefix(
+                workspace_commitment, state, len(state.quarantine), state_limit, drop_quarantine
             )
-            if not already:
-                state.quarantine.append(
-                    (
-                        row.codex_session_id,
-                        row.envelope,
-                        ObservationGapCode.OUTBOX_OVERFLOW.value,
-                        self._wall_timestamp(),
-                    )
-                )
-            self._note_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
-            self._note_gap_state(state, ObservationGapCode.OUTBOX_QUARANTINED.value)
-            payload = self._encode_state(workspace_commitment, state)
-        while state.quarantine and len(payload) > _MAX_STATE_BYTES:
-            evicted = state.quarantine.pop(0)
-            self._record_quarantine_eviction(state, evicted[0], evicted[1], evicted[2])
-            payload = self._encode_state(workspace_commitment, state)
-        if len(payload) > _MAX_STATE_BYTES:
+        if len(payload) > state_limit:
             raise _error(
                 PublicErrorCode.STORAGE_UNSAFE,
                 "Observation state exceeds its safe local bound.",
@@ -4451,7 +7760,7 @@ class LocalObservationStore:
             not truncated
             and truncation is not None
             and truncation.active
-            and len(payload) + _MAX_STATE_BYTES // _STATE_HEADROOM_DIVISOR <= _MAX_STATE_BYTES
+            and len(payload) + state_limit // _STATE_HEADROOM_DIVISOR <= state_limit
         ):
             # Landing with a full headroom margin, having shed nothing, is live
             # proof the store is no longer losing observations to the bound.
@@ -4470,6 +7779,35 @@ class LocalObservationStore:
             self._state_cache.pop(workspace_commitment, None)
         else:
             self._cache_state(workspace_commitment, key, state)
+
+    def _trim_retained_prefix(
+        self,
+        workspace: str,
+        state: _WorkspaceState,
+        count: int,
+        limit: int,
+        remove: Callable[[_WorkspaceState, int], None],
+    ) -> bytes:
+        """Choose the smallest fitting retention prefix with logarithmic encodes.
+
+        Probe copies only: loss commitments and pending records in the held
+        transaction change once, after selection. If the entire optional class
+        cannot fit, remove it before considering the next retention class.
+        The final encode remains authoritative and the enclosing save retains
+        its STORAGE_UNSAFE rollback if protected state alone cannot fit.
+        """
+
+        low, high = 1, count
+        while low < high:
+            middle = (low + high) // 2
+            candidate = _copy_state(state)
+            remove(candidate, middle)
+            if len(self._encode_state(workspace, candidate)) <= limit:
+                high = middle
+            else:
+                low = middle + 1
+        remove(state, low)
+        return self._encode_state(workspace, state)
 
     def _record_quarantine_eviction(
         self,
@@ -4546,10 +7884,24 @@ class LocalObservationStore:
             ObservationSource.CURSOR_HOOK: False,
         }
         assert state.envelopes is not None
+        assert state.cursors is not None
         assert state.gaps is not None
         assert state.unsupported_events is not None
         assert state.pending_outbox is not None
         assert state.session_workspaces is not None
+        # The envelope list is a bounded diagnostic cache. Selected routine
+        # entries can be reclaimed once their exact source identities are
+        # represented by the durable admission buffer/outbox, so source
+        # coverage must come from the authoritative cursor account as well.
+        for cursor_key in state.cursors:
+            raw_source, separator, _ = cursor_key.partition(":")
+            if not separator:
+                continue
+            try:
+                source = ObservationSource(raw_source)
+            except ProtocolValueError, TypeError, ValueError:
+                continue
+            coverage[source] = True
         for envelope in state.envelopes:
             coverage[envelope.source] = True
         pending = len(state.pending_outbox)
@@ -4614,6 +7966,16 @@ class LocalObservationStore:
             now_monotonic=self._now_mono(),
             thresholds=DEFAULT_OBSERVATION_HEALTH_THRESHOLDS,
         )
+        selection_runtime: ObservationSelectionRuntimeStatus | None = None
+        try:
+            selection_runtime = observation_selection_runtime_status_from_json(
+                self.selection_runtime_status(workspace_commitment)
+            )
+        except OSError, ProtocolValueError, TypeError, ValueError, RuntimeError:
+            # Selection status is an optional extension.  A legacy/corrupt
+            # pressure projection must not hide the authoritative lifecycle
+            # status or make a read fail open into invented budget facts.
+            selection_runtime = None
         return ObservationStatus(
             lifecycle=lifecycle,
             workspace_commitment=workspace_commitment,
@@ -4623,6 +7985,7 @@ class LocalObservationStore:
             gaps=current_gaps,
             unsupported_events=tuple(sorted(state.unsupported_events, key=str.encode)),
             advice_frontier=state.advice_frontier,
+            selection_runtime=selection_runtime,
         )
 
     @staticmethod
@@ -4681,7 +8044,16 @@ class LocalObservationStore:
             _LOCAL_OUTBOX_OVERFLOW_GAP,
             _LOCAL_STREAM_PARTIAL_DROPPED_GAP,
         }
+        # Current adapter failures come from unresolved pending attempts.
+        # Successful replay retires the live cause; gap history and retained
+        # quarantine causes remain independently available.
+        transient.update(code for code in state.gaps if code.startswith("control_"))
         current = {code for code, seen in state.gaps.items() if seen.active} - transient
+        current.update(
+            row.last_reason
+            for row in state.pending_outbox
+            if row.last_reason is not None and row.last_reason.startswith("control_")
+        )
         if state.unpaired_scopes:
             # A true paired-profile orphan is session/source/generation scoped
             # detail; it keeps the aggregate gap active until an explicit
@@ -4706,7 +8078,7 @@ class LocalObservationStore:
                 )
             )
         overflow_gap = state.gaps.get(_LOCAL_OUTBOX_OVERFLOW_GAP)
-        if len(state.pending_outbox) >= _MAX_OUTBOX or (
+        if len(state.pending_outbox) >= self._aggregate_outbox_limit(state) or (
             overflow_gap is not None and overflow_gap.active
         ):
             current.add(ObservationGapCode.OUTBOX_OVERFLOW.value)
@@ -4753,6 +8125,7 @@ class LocalObservationStore:
         assert state.stream_call_tool_generations is not None
         assert state.stream_source_identities is not None
         assert state.codex_session_bindings is not None
+        assert state.read_protections is not None
         consent_json: JsonValue = None
         if consent is not None:
             consent_body: dict[str, JsonValue] = {
@@ -4765,7 +8138,9 @@ class LocalObservationStore:
                 consent_body["content_capture_profiles"] = consent.content_capture_profiles
             consent_json = JsonObject(consent_body)
         payload: dict[str, JsonValue] = {
-            # /13 adds durable content-consent and runtime-gate fence epochs after /12's
+            # /15 adds bounded explicit read-protection scopes after /14's
+            # owner-selected detail/capacity settings and /13's
+            # durable content-consent and runtime-gate fence epochs, /12's
             # explicit native-host content-consent arm, /11's
             # source/session/generation-scoped paired-profile orphan identities,
             # retention provenance, and pairing-history fencing. /10 adds
@@ -4777,7 +8152,23 @@ class LocalObservationStore:
             # corruption-session tracking. /3 added quarantined_at per
             # quarantine entry and the reclaimed counter. Readers tolerate both directions:
             # unknown keys are ignored and missing keys default safely.
-            "schema": "yoetz.observation-local/13",
+            "schema": "yoetz.observation-local/15",
+            "admission_buffer": admission_buffer_to_json(state.admission_buffer),
+            "selection_epoch": state.selection_epoch,
+            "selection_observed_count": state.selection_observed_count,
+            "selection_admitted_count": state.selection_admitted_count,
+            "selection_delivered_count": state.selection_delivered_count,
+            "selection_summarized_input_count": state.selection_summarized_input_count,
+            "selection_omitted_count": state.selection_omitted_count,
+            "selection_summarized_count": state.selection_summarized_count,
+            "selection_rejected_count": state.selection_rejected_count,
+            "selection_loss_commitment": state.selection_loss_commitment,
+            "selection_loss_ranges": state.selection_loss_ranges,
+            "selection_last_loss_notice_ms": state.selection_last_loss_notice_ms,
+            "selection_loss_notice_pending": state.selection_loss_notice_pending,
+            "read_protections": tuple(
+                read_protection_to_json(item) for item in state.read_protections
+            ),
             "pairing_state_unknown": state.pairing_state_unknown,
             "workspace_commitment": workspace,
             "content_capture_epoch": content_capture_epoch,
@@ -4851,7 +8242,9 @@ class LocalObservationStore:
                     )
                 }
             ),
-            "open_pre": JsonObject({key: value for key, value in sorted(state.open_pre.items())}),
+            "open_pre": JsonObject(
+                {key: _open_pre_to_json(value) for key, value in sorted(state.open_pre.items())}
+            ),
             "stream_cursors": JsonObject(
                 {
                     key: observation_cursor_to_json(cursor)
@@ -5028,6 +8421,66 @@ class LocalObservationStore:
                 )
                 for intent in state.pending_lifecycles
             )
+        if state.selection_settings is not None and (
+            state.selection_settings.workspace is not None or state.selection_settings.sessions
+        ):
+            payload["selection_settings"] = observation_selection_settings_to_json(
+                state.selection_settings
+            )
+        if (
+            state.capture_backlogs
+            or state.capture_backlog_scope_unknown
+            or state.capture_reservation_bootstrap is not None
+        ):
+            payload["capture_backlogs"] = JsonObject(
+                {
+                    key: JsonObject(
+                        {
+                            "count": snapshot.count,
+                            "byte_count": snapshot.byte_count,
+                            "oldest_receipt_time": (
+                                None
+                                if snapshot.oldest_receipt_time is None
+                                else snapshot.oldest_receipt_time.wire
+                            ),
+                            "observed_at": snapshot.observed_at.wire,
+                            "accounted_ticket_ids": snapshot.accounted_ticket_ids,
+                        }
+                    )
+                    for key, snapshot in sorted(
+                        (state.capture_backlogs or {}).items(),
+                        key=lambda item: item[0].encode(),
+                    )
+                }
+            )
+            payload["capture_backlog_scope_unknown"] = state.capture_backlog_scope_unknown
+            if state.capture_reservation_bootstrap is not None:
+                payload["capture_reservation_bootstrap"] = JsonObject(
+                    {
+                        "proof": state.capture_reservation_bootstrap.proof,
+                        "observed_at": state.capture_reservation_bootstrap.observed_at.wire,
+                        "route_count": state.capture_reservation_bootstrap.route_count,
+                    }
+                )
+        if state.capture_reservations:
+            payload["capture_reservations"] = JsonObject(
+                {
+                    key: JsonObject(
+                        {
+                            "ticket_id": reservation.ticket_id,
+                            "task_id": reservation.task_id,
+                            "byte_count": reservation.byte_count,
+                            "reserved_at": reservation.reserved_at.wire,
+                            "needs_reconcile": reservation.needs_reconcile,
+                        }
+                    )
+                    for key, reservation in sorted(
+                        state.capture_reservations.items(), key=lambda item: item[0].encode()
+                    )
+                }
+            )
+        if state.pressure_snapshots:
+            payload["pressure_snapshots"] = _pressure_snapshots_to_json(state.pressure_snapshots)
         return payload
 
     def _state_from_json(self, raw: Mapping[str, JsonValue]) -> _WorkspaceState:
@@ -5259,10 +8712,10 @@ class LocalObservationStore:
             )
             if type(value) is str and value
         }
-        open_pre = {
-            str(key): str(value)
-            for key, value in cast(Mapping[str, JsonValue], raw.get("open_pre") or {}).items()
-        }
+        open_pre = _open_pre_map_from_json(
+            raw.get("open_pre"),
+            legacy_receipt_time=_safe_timestamp(raw.get("last_receipt")),
+        )
         unpaired_raw = raw.get("unpaired_scopes")
         unpaired_scopes = (
             {
@@ -5439,8 +8892,205 @@ class LocalObservationStore:
                 # the next durable save.  It must never make an old fence
                 # current by falling back to consent fields alone.
                 content_capture_epoch = None
+        read_protections: list[ReadProtection] = []
+        raw_read_protections = raw.get("read_protections")
+        read_protection_total = 0
+        if isinstance(raw_read_protections, (tuple, list)):
+            for item in cast(tuple[JsonValue, ...] | list[JsonValue], raw_read_protections):
+                try:
+                    protection = read_protection_from_json(item)
+                except ProtocolValueError, TypeError, ValueError:
+                    continue
+                protection_total = protection.remaining + len(protection.reserved_attempt_ids)
+                if protection_total > MAX_READ_PROTECTION_COUNT - read_protection_total:
+                    continue
+                read_protections.append(protection)
+                read_protection_total += protection_total
+                if len(read_protections) >= MAX_READ_PROTECTIONS:
+                    break
+        selection_settings = observation_selection_settings_from_json(raw.get("selection_settings"))
+        capture_backlogs: dict[str, _CaptureBacklogSnapshot] = {}
+        raw_capture_scope = raw.get("capture_backlog_scope_unknown")
+        capture_backlog_scope_unknown = raw_capture_scope is True or (
+            raw_capture_scope is not None and type(raw_capture_scope) is not bool
+        )
+        raw_capture_backlogs = raw.get("capture_backlogs")
+        if isinstance(raw_capture_backlogs, Mapping):
+            for raw_route_id, raw_snapshot in sorted(
+                cast(Mapping[str, JsonValue], raw_capture_backlogs).items(),
+                key=lambda item: item[0].encode(),
+            ):
+                if type(raw_route_id) is not str or (
+                    raw_route_id != _UNKNOWN_CAPTURE_BACKLOG_ROUTE
+                    and _CAPTURE_BACKLOG_ROUTE_RE.fullmatch(raw_route_id) is None
+                ):
+                    capture_backlog_scope_unknown = True
+                    continue
+                if not isinstance(raw_snapshot, Mapping):
+                    capture_backlog_scope_unknown = True
+                    continue
+                snapshot_row = cast(Mapping[str, JsonValue], raw_snapshot)
+                raw_count = snapshot_row.get("count")
+                raw_byte_count = snapshot_row.get("byte_count")
+                raw_oldest = snapshot_row.get("oldest_receipt_time")
+                raw_observed = snapshot_row.get("observed_at")
+                raw_accounted = snapshot_row.get("accounted_ticket_ids", ())
+                if (
+                    type(raw_count) is not int
+                    or isinstance(raw_count, bool)
+                    or not 0 <= raw_count <= _MAX_SAFE_INTEGER
+                    or type(raw_byte_count) is not int
+                    or isinstance(raw_byte_count, bool)
+                    or not 0 <= raw_byte_count <= _MAX_SAFE_INTEGER
+                    or (raw_oldest is not None and type(raw_oldest) is not str)
+                    or type(raw_observed) is not str
+                    or not isinstance(raw_accounted, (tuple, list))
+                    or not all(type(ticket_id) is str for ticket_id in raw_accounted)
+                ):
+                    capture_backlog_scope_unknown = True
+                    continue
+                try:
+                    accounted_ids = tuple(
+                        validate_sha256_digest(ticket_id)
+                        for ticket_id in cast(tuple[str, ...] | list[str], raw_accounted)
+                    )
+                    if accounted_ids != tuple(sorted(set(accounted_ids), key=str.encode)):
+                        raise ProtocolValueError("invalid_event_value_type")
+                    snapshot = _CaptureBacklogSnapshot(
+                        count=raw_count,
+                        byte_count=raw_byte_count,
+                        oldest_receipt_time=(None if raw_oldest is None else Timestamp(raw_oldest)),
+                        observed_at=Timestamp(raw_observed),
+                        accounted_ticket_ids=accounted_ids,
+                    )
+                except ProtocolValueError, TypeError, ValueError:
+                    capture_backlog_scope_unknown = True
+                    continue
+                if (
+                    raw_route_id not in capture_backlogs
+                    and len(capture_backlogs) >= _MAX_CAPTURE_BACKLOG_ROUTES
+                ):
+                    capture_backlog_scope_unknown = True
+                    continue
+                capture_backlogs[raw_route_id] = snapshot
+        capture_reservations: dict[str, _CaptureReservation] = {}
+        raw_capture_reservations = raw.get("capture_reservations")
+        if raw_capture_reservations is not None and not isinstance(
+            raw_capture_reservations, Mapping
+        ):
+            capture_backlog_scope_unknown = True
+        elif isinstance(raw_capture_reservations, Mapping):
+            for raw_key, raw_reservation in sorted(
+                cast(Mapping[str, JsonValue], raw_capture_reservations).items(),
+                key=lambda item: item[0].encode() if type(item[0]) is str else b"",
+            ):
+                if type(raw_key) is not str:
+                    capture_backlog_scope_unknown = True
+                    continue
+                try:
+                    validate_sha256_digest(raw_key)
+                except ProtocolValueError, TypeError, ValueError:
+                    capture_backlog_scope_unknown = True
+                    continue
+                if not isinstance(raw_reservation, Mapping):
+                    capture_backlog_scope_unknown = True
+                    continue
+                reservation_row = cast(Mapping[str, JsonValue], raw_reservation)
+                raw_ticket_id = reservation_row.get("ticket_id")
+                raw_task_id = reservation_row.get("task_id")
+                raw_byte_count = reservation_row.get("byte_count")
+                raw_reserved_at = reservation_row.get("reserved_at")
+                raw_needs_reconcile = reservation_row.get("needs_reconcile")
+                if (
+                    type(raw_ticket_id) is not str
+                    or type(raw_task_id) is not str
+                    or type(raw_byte_count) is not int
+                    or isinstance(raw_byte_count, bool)
+                    or type(raw_reserved_at) is not str
+                    or type(raw_needs_reconcile) is not bool
+                ):
+                    capture_backlog_scope_unknown = True
+                    continue
+                try:
+                    reservation = _CaptureReservation(
+                        ticket_id=raw_ticket_id,
+                        task_id=raw_task_id,
+                        byte_count=raw_byte_count,
+                        reserved_at=Timestamp(raw_reserved_at),
+                        needs_reconcile=raw_needs_reconcile,
+                    )
+                except ProtocolValueError, TypeError, ValueError:
+                    capture_backlog_scope_unknown = True
+                    continue
+                if _capture_reservation_key(reservation.ticket_id, reservation.task_id) != raw_key:
+                    capture_backlog_scope_unknown = True
+                    continue
+                if (
+                    raw_key not in capture_reservations
+                    and len(capture_reservations) >= _MAX_CAPTURE_TICKET_RESERVATIONS
+                ):
+                    capture_backlog_scope_unknown = True
+                    continue
+                capture_reservations[raw_key] = reservation
+        capture_reservation_bootstrap: _CaptureBootstrap | None = None
+        raw_capture_bootstrap = raw.get("capture_reservation_bootstrap")
+        if raw_capture_bootstrap is not None:
+            if not isinstance(raw_capture_bootstrap, Mapping):
+                capture_backlog_scope_unknown = True
+            else:
+                bootstrap_row = cast(Mapping[str, JsonValue], raw_capture_bootstrap)
+                raw_proof = bootstrap_row.get("proof")
+                raw_observed = bootstrap_row.get("observed_at")
+                raw_route_count = bootstrap_row.get("route_count")
+                if (
+                    type(raw_proof) is not str
+                    or type(raw_observed) is not str
+                    or type(raw_route_count) is not int
+                    or isinstance(raw_route_count, bool)
+                ):
+                    capture_backlog_scope_unknown = True
+                else:
+                    try:
+                        capture_reservation_bootstrap = _CaptureBootstrap(
+                            proof=raw_proof,
+                            observed_at=Timestamp(raw_observed),
+                            route_count=raw_route_count,
+                        )
+                    except ProtocolValueError, TypeError, ValueError:
+                        capture_backlog_scope_unknown = True
+        if capture_reservation_bootstrap is not None:
+            expected_proof = _capture_bootstrap_proof(
+                str(raw.get("workspace_commitment", "")), capture_backlogs
+            )
+            if (
+                expected_proof != capture_reservation_bootstrap.proof
+                or capture_reservation_bootstrap.route_count != len(capture_backlogs)
+            ):
+                capture_reservation_bootstrap = None
+                capture_backlog_scope_unknown = True
+        pressure_snapshots = _load_pressure_snapshots(raw.get("pressure_snapshots"))
         state = _WorkspaceState(
             consent=consent,
+            admission_buffer=admission_buffer_from_json(raw.get("admission_buffer")),
+            selection_epoch=int(cast(int, raw.get("selection_epoch", 0))),
+            selection_observed_count=int(cast(int, raw.get("selection_observed_count", 0))),
+            selection_admitted_count=int(cast(int, raw.get("selection_admitted_count", 0))),
+            selection_delivered_count=int(cast(int, raw.get("selection_delivered_count", 0))),
+            selection_summarized_input_count=int(
+                cast(int, raw.get("selection_summarized_input_count", 0))
+            ),
+            selection_omitted_count=int(cast(int, raw.get("selection_omitted_count", 0))),
+            selection_summarized_count=int(cast(int, raw.get("selection_summarized_count", 0))),
+            selection_rejected_count=int(cast(int, raw.get("selection_rejected_count", 0))),
+            selection_loss_commitment=cast(str | None, raw.get("selection_loss_commitment")),
+            selection_loss_ranges=tuple(
+                JsonObject(cast(Mapping[str, JsonValue], item))
+                for item in cast(tuple[JsonValue, ...], raw.get("selection_loss_ranges", ()))[:64]
+            ),
+            selection_last_loss_notice_ms=cast(
+                int | None, raw.get("selection_last_loss_notice_ms")
+            ),
+            selection_loss_notice_pending=raw.get("selection_loss_notice_pending") is True,
             session_workspaces=session_workspaces,
             cursors=cursors,
             dedup=set(cast(tuple[str, ...], dedup_raw)),
@@ -5449,6 +9099,9 @@ class LocalObservationStore:
             ended_session_generations=ended_session_generations,
             pending_lifecycles=pending_lifecycles,
             content_capture_epoch=content_capture_epoch,
+            selection_settings=selection_settings,
+            read_protections=read_protections,
+            pressure_snapshots=pressure_snapshots,
             envelopes=envelopes,
             envelopes_truncated=envelopes_truncated,
             gaps=gap_history,
@@ -5504,6 +9157,10 @@ class LocalObservationStore:
             trusted_policy_mac=cast(str | None, raw.get("trusted_policy_mac")),
             codex_session_bindings=bindings,
             storage_corrupt_sessions=storage_corrupt_sessions,
+            capture_backlogs=capture_backlogs,
+            capture_reservations=capture_reservations,
+            capture_backlog_scope_unknown=capture_backlog_scope_unknown,
+            capture_reservation_bootstrap=capture_reservation_bootstrap,
         )
         if any(notice.recency_ordinal == 0 for notice in frontier_motion_notices.values()) or any(
             mark.recency_ordinal == 0 for mark in frontier_motion_delivered.values()

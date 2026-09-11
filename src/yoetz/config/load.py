@@ -311,6 +311,12 @@ def load_config(
     file_values, read = _read_config(selected_path)
     if read:
         _reject_file_release_probe(file_values)
+        # Existing files with omitted leaves retain the released defaults. An upgrade or an
+        # unrelated rewrite must not silently opt an existing installation into required review.
+        for leaf, legacy in (("semantic", "optional"), ("max_findings", 3)):
+            _, present = _file_leaf(file_values, ("verification", leaf))
+            if not present:
+                _set_leaf(file_values, ("verification", leaf), legacy)
     if explicit and read and _in_repository(selected_path):
         _emit_explicit_project_config()
     return validate_config_mapping(_merge_selected(file_values, env_values, override_values))

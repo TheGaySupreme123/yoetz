@@ -1,5 +1,49 @@
 # Codex integration runbook
 
+## Conditional agent guidance
+
+The skill keeps its activation boundary, core workflow, and safety floor in the entrypoint.
+Read workflow guidance before `start`, publication policy before `publish_work`, and coverage
+and receipts before `check`. Setup/consent, vault/credential operations, transcript import, and
+recommendation decisions route to the corresponding sections of request templates only when
+needed. Already-read guidance need not be fetched again while present in context.
+
+Use `semantic_if_configured` only when semantic review is known to be optional; omit `mode` when
+relying on the configured default. Select `semantic_required` for an explicit user requirement,
+effective policy, or named acceptance criterion requiring independent semantic judgment. Preserve
+required review and all host/disclosure approval boundaries. Installed guidance bytes alone prove
+neither activation nor semantic dispatch.
+
+The Codex skill routes to the existing five MCP guidance URIs with installed reference fallbacks.
+The server initializes only the safety floor. Consumer source-inspection restrictions do not
+prohibit developing or debugging Yoetz itself against isolated test state.
+
+A new Codex session reads guidance and discovers tool schemas before calling MCP `start` as
+its first workflow operation, before substantive research, commands, edits, or delegation.
+Guidance reads (including `read_guidance`), discovery commands, and necessary bootstrap clarification
+remain permitted. Hook auto-attachment is a cue, not proof of a current-scope plan: mapped
+SessionStart context directs cooperative `start mode=attach` before `status` with the returned
+ids; unmapped context directs `start` before material work. Same-session compaction uses held
+current ids for `status`. Both startup messages route failures through exact continuations,
+same-request recovery, and a named one-time repair before a blocked-startup user handoff.
+A first non-retryable failure alone does not permit continuing without Yoetz; see
+[startup failure precedence](../../guidance/coverage-and-receipts.md#startup-failure-precedence).
+Codex has no demonstrated PreToolUse deny gate; instruction delivery is not enforcement (#692).
+
+The Codex entrypoint is written directly for Codex and selected by its installer. The other native
+installers select their own skills. Keep installed-source evidence separate from compatibility
+directory discovery; a project skill discovered elsewhere is not proof of this integration.
+
+Design basis, checked 2026-09-09: OpenAI's
+[Skill Creator](https://github.com/openai/codex/blob/main/codex-rs/skills/src/assets/samples/skill-creator/SKILL.md)
+assumes Codex is capable and recommends task-specific constraints, precise discovery metadata,
+and conditional references. Its
+[PR comment skill](https://github.com/openai/skills/blob/main/skills/.curated/gh-address-comments/SKILL.md)
+uses a short operational sequence and a helper for repetitive mechanics. Yoetz keeps its exact
+MCP read fallback and bounded closure composer because those address demonstrated authoring
+failures; generic host-identification instructions are unnecessary. The five protocol references
+retain one canonical owner and are copied into each installed skill.
+
 Cursor's explicit-start repair (issue #661) leaves Codex's lifecycle binder and hook subscription
 unchanged. [The official hooks reference](https://developers.openai.com/codex/hooks), checked
 2026-09-08, specifies `tool_response` containing the MCP call result on `PostToolUse`, with
@@ -57,9 +101,16 @@ Session-stream (rollout) parsing is a separate, narrower fact. `0.148.0` and `0.
 an exact fixture-proven rollout grammar profile (`codex-rollout-jsonl/<version>/v1`, ADR-005).
 That parser proof is what lets an isolated dogfood run advertise the `session_stream` facet for
 that exact release; it is not host support, and it says nothing about skills, MCP, hooks, or
-activation. Any other release — including a patch neighbour — is refused at the session header as
-`unsupported_format`, keeps its cursor, and reads no further lines; it earns a profile only through
-its own fixtures. Explicit-path recovery uses the same atomic cursor, profile, source identity,
+activation. Any other release is admitted under the structural compatibility profile
+(`codex-rollout-jsonl/compatible/v1`, ADR-005 structural admission amendment, issue #656): the
+version is recorded as provenance, lines whose wrapper/item structure Yoetz already understands
+are observed, and unknown or malformed lines stay bounded `unsupported_event` gaps. The reconcile
+result reports `admission` as `structurally_supported` (exact profile, every line understood),
+`partially_understood` (compatible profile or any unknown line, with `admission_reasons` naming
+the affected family), or `incompatible` (a header that is not `session_meta`, a non-object
+payload, or an unknown `history_mode` — refused as `unsupported_format`, cursor kept). A
+compatible release still earns an exact profile and the `session_stream` facet only through its
+own fixtures. Explicit-path recovery uses the same atomic cursor, profile, source identity,
 and tool-pairing frontier as automatic reconciliation, including mapping upgrades and delivery
 backpressure.
 
@@ -160,6 +211,13 @@ needs approval; with `approvals_reviewer = "auto_review"` that approval goes to 
 whose bundled policy requires authorization for sensitive egress to name payload and destination
 "from trusted user content" — no descriptor wording can satisfy it. `approval_mode = "approve"`
 for one tool means the reviewer is never invoked for it; `prompt` forces it every time.
+
+Codex copies the initialize `instructions` into every tool description, so the guardian reads
+them. Since issue #479 the policy-route instructions name the semantic destination read at bridge
+startup (provider, endpoint profile, and host, or the Codex runtime class) and the payload bound.
+That gives the reviewer a named destination to score instead of nothing; it is still not trusted
+user content, admits nothing, and goes stale until Codex restarts the bridge. Admission remains
+the lever.
 
 Host admission (issue #467) writes the per-tool override into the trusted project's
 `.codex/config.toml`, which Codex loads only when the project is trusted, deep-merges over the
@@ -265,6 +323,22 @@ absence only; a modified or untrusted byte-present tree is `installed_not_activa
 `active` (issue #347). None of them—and not even
 `active`—proves a later Codex process loaded a hook or delivered an observation.
 
+Complete Codex's own trust step in a fresh native process before testing hook delivery. Open
+`/hooks`, review the commands from the intended Yoetz plugin, and approve those hooks through
+Codex's normal review UI. Confirm the hooks are active, then start a fresh session so its
+`SessionStart` runs with that trust. New or changed hooks can remain installed but inactive;
+the plugin's skill and MCP tools may still work in that state. A non-interactive run with no
+observation rows is therefore not, by itself, evidence of a Yoetz ingestion failure. Installation
+inspection reports hook trust as unknown because it does not inspect Codex's effective trust
+decision. Do not replace this check with a hook-trust bypass flag.
+
+Project trust is a separate gate for the project-local MCP admission table above. When a check
+returns `MCP tool call requires approval, but approval policy is never`, it was refused by Codex
+before Yoetz dispatched it. Confirm the project is trusted in the selected Codex home and test a
+fresh process with the intended MCP owner and per-tool policy. An installed admission entry or
+`codex mcp get` output alone does not prove the running process applied that policy. A normal
+interactive process can present any remaining approval request without changing the sandbox.
+
 The managed project source always carries the canonical async-free render; the host-specific form
 (async pure-ingress hooks from Codex `0.148.0-alpha.6`) exists only in the versioned activation
 cache, which apply seeds and verifies against the previewed install digest. Because the package
@@ -346,11 +420,51 @@ canonicalizer resolves it to the safe Git root. `UserPromptSubmit` must keep tha
 without it, a fresh unmapped session has no older session binding from which to recover the
 workspace and its bounded auto-attach retry stops before a service call.
 
-For supported content-bearing Codex events, the ready service secret-scans and encrypts selected
-tool output, changed-file, and workspace-diff bytes before materializing their exact digest/object
-bindings as `observation_captured` ledger evidence. Inspection facts and bounded excerpts receive
-separate evidence records. This proves retained byte identity only; it is not an approved check,
-artifact verification, independent reproduction, or permission to send the bytes to a model.
+For supported content-bearing Codex hook events, the native adapter reads the documented
+`PostToolUse.tool_response` output and the explicitly linked code/diff fields. The ready service
+secret-scans and encrypts selected tool output, changed-file/code, and workspace-diff bytes before
+materializing their exact digest/object bindings as `observation_captured` ledger evidence. This is
+the source-qualified,
+profileless `codex_hook` arm: active observation consent and the exact hook source bind it; no
+Claude/Cursor content profile is inferred or accepted. Inspection facts and bounded excerpts
+receive separate evidence records. This proves retained byte identity only; it is not an approved
+check, artifact verification, independent reproduction, or permission to send the bytes to a model.
+Installation, an object header, a successful structural receipt, and a typed MCP response are
+separate evidence; none proves that the provider selected native Codex bytes.
+
+The Codex hook capture arm is eligible only for content explicitly linked to the hook event and
+its exact task, workspace, host/Yoetz session, source generation, tool-call correlation, multipart
+set, object kind, and digest. Codex session-stream records remain outside the native ticket lane
+and are excluded from semantic selection. Tool input and path/locator content are excluded from
+semantic selection too, although the current Codex hook path may still stage consented input/locator
+chunks locally in the bounded encrypted capture lane pending a follow-up staging filter. Encrypted
+capture and semantic disclosure have separate authority: selecting these bytes into a frozen
+semantic case still requires the effective repository privacy grant and the independently authorized
+provider attempt.
+
+For the supported native `hooks observe` path, the hook first closes its local structural envelope,
+pairing, lifecycle intent, and outbox state, then presents eligible content to the service-owned
+capture lane before the structural FIFO advances. The capture acknowledgement follows durable
+encrypted object/manifest and metadata-ticket publication; native content is never copied into the
+structural spool. If authenticated staging cannot complete during the bounded pass, a completed
+hook records `content_capture_unavailable` alongside the structural record. A host process killed
+before that boundary may still leave the honest content gap; after the ticket is durable, a later
+structural retry can reuse its fenced manifests without rereading a plaintext spool. Advice
+selection remains after drain, and advice is committed only after the host output is emitted.
+`SessionEnd` records its lifecycle intent and defers service delivery without rebuilding local
+advice, because the closing host cannot receive it. A later hook or the service sweeper drains the
+end event and refreshes advice.
+The encrypted capture-ticket handoff does not change Codex's historical session-stream path.
+Session-stream reconciliation remains a separate source and cannot supply content to a `codex_hook`
+ticket; session-stream, input, and locator content remain excluded from semantic selection. The
+current hook path may still stage consented input/locator chunks locally pending the follow-up
+staging filter. Codex keeps its existing replay semantics; the shared operation-replay,
+source-generation fencing, and teardown repairs apply to all host adapters.
+
+Legacy synchronous `hooks spool` is a separate structural fast path. It only appends the owner-only
+structural spool record and returns; it does not normalize or pair the event, open the service, drain
+an outbox, or carry native content. The READY forwarder later consumes the spool and performs normal
+service-side normalization, pairing, and forwarding.
 
 Yoetz's own MCP tools fire these same `PreToolUse`/`PostToolUse` hooks, and the hook process that
 records them also drains the outbox, so the prescribed start/status/check/respond/receipt workflow
@@ -360,7 +474,9 @@ denial in either phase, or the `PostToolUse` of `start`, `publish_work`, `check`
 and keeps the pre-event of every Yoetz call and the post-event of a non-failed `status`, `receipt`,
 or `read_guidance` in the bounded local store only. Yoetz tool input/output is never captured as
 content. The same policy applies to the legacy spool replay and to the Codex session stream, so
-neither path reintroduces the rows. Ordinary tools are unchanged. To confirm closure converged,
+neither path reintroduces the rows. The shared host-spelling advice guard also suppresses pending
+frontier or recommendation delivery on a Yoetz-owned hook, while explicit self-call failures stay
+retained and enqueued. Ordinary tools are unchanged. To confirm closure converged,
 run `yoetz observe drain --workspace . --json` after the agent stops and require
 `terminal: drained` with `pending_after: 0`; `retry_pending` names the retryable head cause in
 `reasons` (a check barrier's `operation_pending` clears when the check completes), and
@@ -413,6 +529,84 @@ descriptor advertises `publish-work-request/1.1.0`, which admits `claim_recorded
 descriptors remain limited to the frozen v1.0 draft union. The CLI command uses the same public
 request and service boundary. Neither Codex hooks nor imported observations synthesize, replace,
 or supersede claims.
+
+## Smart observation selection (issue #687)
+
+The Codex native hook path applies the shared deterministic observation selector before optional
+content extraction and outbox admission. **Focused/standard (512)** is the default. Proven
+successful routine reads, searches, and inventory calls may be represented by bounded summaries;
+the summary preserves the native identities and source positions it represents. Detailed keeps
+eligible routine calls as individual records while the effective pressure state permits it. The
+detail mode and the capacity profile are independent choices: `standard` (512), `larger` (2,048),
+and `largest` (8,192) are each valid with either mode. The larger profiles have finite provisional
+budgets; a selected count is not a sustained-throughput or host-acceptance claim.
+
+Failures, denials, cancellation, interrupted, partial, or unknown outcomes, edits and side effects,
+declared checks or negative verification, and reads protected for an obligation, claim, or finding remain
+individual. A `PreToolUse` identity is retained before its outcome is known; only a paired,
+proven-success read can enter a summary. Ambiguous shell composition, nonzero or conflicting
+outcomes, and caller-supplied `routine_read` labels stay protected. Codex session-stream records
+remain a separate structural source and are outside this native selection/content path.
+
+Use the owner controls after an exact preview:
+
+```text
+yoetz observe selection-preview --workspace /exact/project \
+  --detail detailed --capacity larger --session-id <codex-session-id> --json
+yoetz observe selection-apply --workspace /exact/project \
+  --detail detailed --capacity larger --session-id <codex-session-id> \
+  --accept --preview-digest <preview-digest> --json
+```
+
+The default is a temporary session override. Use `--persist` on both preview and apply, and omit
+`--session-id`, only when the owner wants a workspace default. `--expires-at` is an optional
+RFC3339 UTC deadline; `selection-status` reports selected and effective mode/capacity separately.
+Revoke with `selection-revoke` at the same scope. Expiry, revoke, lowering capacity, or pressure
+affects future optional admission; accepted observations continue to drain and are not rewritten
+to fit the new target. Selection does not change Codex hook deadlines, session-stream admission,
+content consent, repository privacy, provider, or network authority.
+
+To keep an upcoming read individually linked to a later claim, use the bounded narrowing control
+with an active consent and the exact current Codex session:
+
+```text
+yoetz observe protect-read --workspace /exact/project \
+  --session-id <codex-session-id> --reference obl_<existing-id> --count 1 --json
+```
+
+Only `obl_`, `clm_`, and `fnd_` references are accepted. At most 32 logical reads can be outstanding
+and the protection expires after ten minutes by default; an explicit expiry cannot exceed that
+bound. It grants no content or disclosure authority. Promotion is limited to a native identity
+still in the local buffer:
+
+```text
+yoetz observe promote --workspace /exact/project \
+  --source-identity <source-identity> --json
+```
+
+After the buffer has drained, promotion reports `promotion_window_closed` and
+`content_availability: not_retained`. Rerun or reacquire current evidence when needed and label
+the new observation with its new time and subject state; promotion cannot recover old bytes or
+retroactively prove the earlier state.
+
+Codex's profileless native capture arm follows active observation consent; it is separate from
+selection. The workspace capture lane has independent limits of 512 staging/pending capture
+tickets and 128 MiB of captured content. A larger observation capacity does not raise those
+limits. The hook's bounded capture pass and service deadline still apply. If staging is partial,
+cancelled, times out, or lacks a complete post/content group, the event remains incomplete and
+does not become a successful routine summary; when the hook reaches the recording boundary Yoetz
+records `content_capture_unavailable`. A host kill before authenticated staging can leave transient
+content without a durable gap. Capture configuration or a successful structural receipt is not
+proof that Codex bytes were captured, selected for a check, or used by a provider.
+
+The self-observation exception covers explicit Yoetz MCP workflow names. A Codex shell event such
+as `exec_command yoetz observe status`, `yoetz observe selection-status`, `yoetz observe
+selection-preview`, or `yoetz closure-prepare` has no authenticated executed-launcher identity in
+the hook payload; a path written in the command text is still host input. It therefore remains an
+ordinary shell observation and may use the available structural, capture, or materialization
+budget. Failures, mutations, and ambiguous shell are never suppressed. This is a current support
+boundary for local CLI self-reads; use the explicit MCP status or receipt route where available or
+account for the CLI read in coverage and capacity.
 
 ## 8. Remove
 
@@ -542,7 +736,7 @@ reviewer egress.
 | Resource invalid | Reinstall from a verified package artifact. |
 | Preview stale | Run `status`, then a fresh preview. |
 | Modified/partial content | Preserve and review manually; use `replace_modified` deliberately if desired. |
-| Compatibility is `unsupported` | Automatic activation is unprofiled; use a supported Yoetz/Codex version pair when capability evidence is required. |
+| Compatibility is `unsupported` | Automatic activation is unprofiled; use a supported Yoetz/Codex version pair when capability evidence is required. Session-stream parsing is separate: a newer Codex release is still admitted structurally, and `observe reconcile` reports `admission: partially_understood` with the affected `admission_reasons` rather than `unsupported_format` (issue #656). |
 | Write/swap interrupted | Run `status`; preserve any staged content; do not delete it yourself. |
 | Skill not discovered, or duplicate `$yoetz` names loaded | Check the exact scope, loaded skill roots, managed path, trust, version, and capability matrix; reload Codex. |
 | Setup reports `installed_not_activated` | Run `yoetz recommend list --codex-path <exact-executable> --codex-home <exact-home>`, then accept only the freshly shown target/preview digest. Historical acceptance cannot suppress an observed inactive target; a decline suppresses only its unchanged exact target. Review canonical inventory and the versioned cache; marketplace/config presence alone is insufficient. A marker-consistent stale cache is refreshed by an ordinary approved re-run. |
@@ -554,8 +748,8 @@ reviewer egress.
 | MCP unavailable | Diagnose through separate MCP configuration/startup steps. |
 | Trigger absent or failed | Use the manual re-grounding procedure; never edit hook configuration through this integration. |
 | `observe status` shows no envelopes for a session | Read `hook_diagnostics.reasons`: `workspace_unresolvable` means the hook's `--workspace` locator could not be canonicalized; `workspace_unconsented` means the session's Git root carries no active consent (a session started in a subdirectory canonicalizes to the same root as the consent, so grant consent at the repository root); `paused` means consent is paused. A successful ingest records no diagnostic, so read `recent_count` together with the envelopes: no new envelopes and a zero `recent_count` means the hooks never reached the ingress or the runtime gate is disabled, not that a binding drop occurred. |
-| `observe status` shows `mapping_present: false` after a consented `SessionStart` | The hook sends `start mode=create_or_attach` with the canonical `--workspace` root as `workspace_ref` and `codex-session:<session_id>` as `external_ref`. On the exact `workspace_task_exists` conflict it retries once with `mode=attach` only if the private local lifecycle store already holds a valid mapping from an earlier Codex session whose `SessionEnd` was received, every other bound session is ended, and the candidate is bound only to this consented workspace. The catalog then requires one mapped task, the selector still active, no sibling task, the matching repository-privacy binding, and no start already pending for that route. Recovery takes a nonblocking workspace reservation before pruning or scanning, then holds it with ordered locks for every eligible ended same-host session through full candidate revalidation, the service RPC, authorized rewrites, and pruning. The revalidation includes unmapped sessions, cross-workspace ownership, mapping identities, and mapping recency; a busy workspace reservation defers with `auto_attach_recovery_busy`, while candidate-lock contention or a changed snapshot falls back to the ordinary service request. A successful recovery rewrites every ended same-host predecessor mapping for that task to the rotated session and writer so pending predecessor rows drain on the successor route rather than being quarantined. The candidate set is bounded (#549): a recovery unbinds the ended predecessors it consumed, and each `SessionStart` pass keeps at most the 32 most recently mapped ended bindings per workspace, pruning unmapped ended sessions first; a binding is never pruned while its session is live or while a pending or quarantined row still names it, so protected rows may keep the total above 32, ended unmapped rows still terminalize, and a pruned session that resumes re-binds on its next hook event. The public error reveals no selector; a hard crash without `SessionEnd` remains fail-closed rather than being guessed from age. Otherwise read `hook_diagnostics.reasons` for the typed cause: `auto_attach_workspace_unbound` (no paired request was legal), `auto_attach_request_invalid` (an authoring defect — file it), `auto_attach_conflict` / `auto_attach_refused` (the service answered and declined), `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`, `vault_locked`, `timeout`, `storage_unsafe` / `storage_corrupt`, or `service_unavailable` (the daemon was still starting; `UserPromptSubmit`, `Stop`, and `SessionEnd` retry under the bounded budget and add `auto_attach_retry_failed` beside the cause). An explicit MCP `start` remains the recovery path; for `vault_locked` on a never-initialized install, that `start` returns the typed `vault_initialization_required` continuation below rather than a dead end. |
-| `observe status` shows `mapping_stale` after every resume or compaction | Before issue #578 the `yoetz hooks session-start` status read connected without a workspace locator, so the daemon's repository fence refused every probe as `SESSION_CONFLICT` and a live mapping was reported stale. The command now derives its locator from `--workspace` or, absent that (the rendered command passes none), the hook's working directory; `yoetz hooks observe --event SessionStart --workspace .` does the same. A fence refusal is now `status_workspace_unbound` / `status_workspace_mismatch` with a keep-the-mapping advisory; `mapping_stale` means the daemon actually reported the session replaced, and the advisory names the replacement ids. |
+| `observe status` shows `mapping_present: false` after a consented `SessionStart` | The hook sends `start mode=create_or_attach` with the canonical `--workspace` root as `workspace_ref` and `codex-session:<session_id>` as `external_ref`. On the exact `workspace_task_exists` conflict it retries once with `mode=attach` only if the private local lifecycle store already holds a valid mapping from an earlier Codex session whose `SessionEnd` was received, every other bound session is ended, and the candidate is bound only to this consented workspace. The catalog then requires one mapped task, the selector still active, no sibling task, the matching repository-privacy binding, and no start already pending for that route. Recovery takes a nonblocking workspace reservation before pruning or scanning, then holds it with ordered locks for every eligible ended same-host session through full candidate revalidation, the service RPC, authorized rewrites, and pruning. The revalidation includes unmapped sessions, cross-workspace ownership, mapping identities, and mapping recency; a busy workspace reservation defers with `auto_attach_recovery_busy`, while candidate-lock contention or a changed snapshot falls back to the ordinary service request. A successful recovery rewrites every ended same-host predecessor mapping for that task to the rotated session and writer so pending predecessor rows drain on the successor route rather than being quarantined. The candidate set is bounded (#549): a recovery unbinds the ended predecessors it consumed, and each `SessionStart` pass keeps at most the 32 most recently mapped ended bindings per workspace, pruning unmapped ended sessions first; a binding is never pruned while its session is live or while a pending or quarantined row still names it, so protected rows may keep the total above 32, ended unmapped rows still terminalize, and a pruned session that resumes re-binds on its next hook event. The public error reveals no selector; a hard crash without `SessionEnd` remains fail-closed rather than being guessed from age. Otherwise read `hook_diagnostics.reasons` for the typed cause: `auto_attach_workspace_unbound` (no paired request was legal), `auto_attach_request_invalid` (an authoring defect — file it), `auto_attach_conflict` / `auto_attach_refused` (the service answered and declined), `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`, `vault_locked`, `timeout`, `storage_unsafe` / `storage_corrupt`, or `service_unavailable` (the daemon was still starting; `UserPromptSubmit` and `Stop` retry under the bounded budget; teardown `SessionEnd` records its lifecycle intent and drains without an auto-attach retry). An explicit MCP `start` remains the recovery path; for `vault_locked` on a never-initialized install, that `start` returns the typed `vault_initialization_required` continuation below rather than a dead end. |
+| `observe status` shows `mapping_stale` after every resume or compaction | Before issue #578 the `yoetz hooks session-start` status read connected without a workspace locator, so the daemon's repository fence refused every probe as `SESSION_CONFLICT` and a live mapping was reported stale. The rendered command now passes `--workspace .`, and the probe selects its locator in a fixed order (issue #659): an explicit project path other than the bare `.`, then the host payload's session `cwd` (a subdirectory resolves to the repository root), then the hook's own working directory. The host cwd outranks the bare `.` because Codex hook working directories are not stable across surfaces; an explicit path that cannot be canonicalized never falls through to another repository. `yoetz hooks observe --event SessionStart` and the shared mapped-session lane derive the probe locator the same way when no explicit workspace was consented. A fence refusal is `status_workspace_unbound` / `status_workspace_mismatch` with a keep-the-mapping advisory, and a companion diagnostic row names the locator source (`locator_source_explicit`, `locator_source_host_payload`, `locator_source_cwd`, `locator_absent`, or `locator_unresolvable`) so an absent context and a supplied one that failed to resolve are distinguishable; `mapping_stale` means the daemon actually reported the session replaced, and the advisory names the replacement ids. |
 | The agent created a sibling task instead of continuing the auto-attached one | The `SessionStart` context names the mapped `session_id` and `writer_id` and says to continue with `start mode=attach` by that session id; guidance and the `start` tool description name the canonical absolute repository root as `workspace_ref`, the value the hook commits (issue #580). The agent's successful scoped `start` re-binds the mapping through `yoetz hooks post-tool-use` from `structuredContent`; a scoped start that binds nothing records `start_bind_unparsed` / `start_bind_invalid_ids` / `start_bind_write_failed`. |
 | `observe status` shows `ledger_rejected` and `outbox_quarantined` | The service was reachable but rejected one envelope non-retryably. A repeated envelope after a lost acknowledgement, a service restart, or a workflow reattach (a second `start` in the same Codex session) is not such a rejection: its committed operation is resolved task-wide and the row is acknowledged idempotently with no quarantine row. A pending row from an ended host session whose task a successor recovered is delivered on the successor route (`session_superseded` is followed) and is also not `ledger_rejected`. A successor binding that cannot be followed quarantines that row as `session_superseded`, not `mapping_missing`. A `ledger_rejected` row is a genuine conflicting reuse of an event or operation identity. The row is retained under `quarantine_causes`, aggregate `delivery_causes`, and gaps; `pending_delivery_causes` names only rows still in the outbox. Later rows can drain; reclaim only after the underlying defect is understood. A hook-driven attempt also appears in the bounded `hook_diagnostics`, while manual and supervisor drains are represented by status rather than hook activity. Do not restart a ready service. A row is also quarantined after 128 consecutive rejections with the same retryable reason so a catch-all failure cannot block the lane forever; pause, vault, disabled, and designed back-pressure reasons keep their existing recovery behavior. |
 | `observe status` exits with `observation_status_failed:<reason>` | The reason names the layer: `workspace_unresolvable` (exit 2) is the locator; `storage_unsafe` (exit 20) is an unsafe state/lock path; `storage_unavailable` (exit 20) is a bounded open, permission, read-only, missing-parent, or lock-acquisition failure; `storage_corrupt` (exit 40) is invalid stored data. The fixed remediation never prints the absolute state path. A sandboxed Codex result proves only that sandbox cell; run and record an unrestricted-terminal comparison separately before making that claim. |
@@ -678,3 +872,115 @@ Fallback endpoint pairing (issue #582) is host-independent: whether the evaluato
 API provider serves a given attempt is a service-side dispatch decision recorded in provenance
 (`fallback_from`), with no Codex-host-specific behaviour, registration, or route input — the
 strict/policy route ceiling applies to dispatch authority regardless of which endpoint serves.
+
+
+### Large tasks and semantic failure recovery (#674–#676)
+
+Codex uses the shared service status snapshot cache and bounded semantic reference selection.
+A reduced reference scope reports `semantic_reference_scope_reduced`; it is not full-task semantic
+coverage. `failed/case_capacity_exceeded` and `semantic_case_capacity_exceeded` mean the required
+packet could not fit before any provider attempt. Select a smaller claim/obligation scope for a new
+check. Shorter prose alone need not fix structural capacity.
+
+For `coordinator_failure`, use the check's original request ID with
+`yoetz service diagnostics --request-id req_…` to read bounded failure stages. Dispatch entry can
+have an unknown outcome, even with null provenance. A missing record is a diagnostic coverage gap,
+not proof of non-dispatch. Preserve the original request/attempt identity and existing retry rules.
+These shared-path regressions do not certify a fresh installed native-host session.
+
+
+### Evidence-first closure
+
+The shared guidance instructs this host to paginate `status view=evidence` before publishing
+replacement evidence, match state and source identity, and reuse only suitable observed IDs.
+Digest-only, unavailable, unselected and clipped items remain separate limits. Evidence discovery
+and reuse do not prove native capture coverage or command success. Read `command_attempts` on
+obligation rows: this profile may omit command text, in which case reconciliation is `unknown`.
+Only service-stamped, explicitly linked observations can support a match or mismatch. The optional
+CLI closure composer uses the same projected status inputs; it does not grant capture or egress.
+These shared regressions are synthetic contract evidence, not live-host certification.
+
+### Bounded workflow recovery examples (#613)
+
+These examples use the existing MCP operations and selectors on the local Codex cell. Replace
+placeholders with values returned by the current call or session-start context; do not reconstruct
+them from memory or from the live store.
+
+- **Read retry.** If a `status`, diagnostics, or `status view=operation` read times out, send the
+  same read intent with a new read `request_id`. Keep its view, operation filter, cursor, and limit
+  unchanged. An unreadable read does not establish that an operation or task is absent.
+- **Ambiguous write.** If a `start` response is lost before session/writer IDs are returned,
+  replay the exact original `start` body once with the same request ID. Otherwise read
+  `status view=operation` with `filter.operation_request_id` set to the original write ID:
+  replay only `absent`; use stored `complete`; follow an exact typed continuation and required
+  approval before replaying `pending`. Retain and report pending without a continuation,
+  `quarantined`, or unknown. Never invent session/writer IDs or create a task to escape a write.
+- **Exact-session attach.** When `SessionStart` or recovery context provides a held
+  `session_id`, use that exact value as the `mode=attach` selector. Codex's canonical repository
+  context supplies the workspace fence; if the request carries identity refs, include the
+  canonical `workspace_ref` + `external_ref` pair together, never `workspace_ref` alone. Use the
+  returned successor `session_id` and `writer_id`, then read `status` before continuing. A bare
+  `task_id` is not an attach selector.
+- **Same-pair fresh conversation.** With no held session, call `start mode=create_or_attach` using
+  the same exact canonical `workspace_ref` and stable `external_ref` pair, with no `session_id`.
+  A remote URL is not the workspace identity, and a fresh Codex conversation is not an implicit
+  second task.
+- **Explicit sibling handoff.** Use `start mode=create` only after same-task pair/session recovery
+  is exhausted, every earlier write has a known terminal outcome, the binding is healthy and
+  authorized, and the user has declared one bounded remaining or repaired verification scope. Keep
+  the same canonical `workspace_ref`, choose one different stable `external_ref` such as
+  `<work-item>-recovery-v1`, and establish the Codex mapping from the returned task/session/writer.
+  Publish a fresh plan, evidence, checks, and receipt for that scope. The handoff must say that the
+  predecessor receipt, findings, obligations, evidence IDs, and unresolved status remain separate;
+  the sibling cannot make the predecessor look resolved. If no new scope exists, keep the old
+  receipt and stop instead of creating another sibling.
+
+
+## Observation recovery diagnostics
+
+Codex uses the shared selected-admission and outbox store. New native input obeys current hard
+pressure and the complete projected buffer/outbox size; accepted replay work remains drainable.
+Hard pressure can recover to high before optional detail recovers. A generation-fenced session
+end retires pressure scheduling without deleting pending work or historical losses.
+
+Unknown capture inventory can reject new input even when the outbox is empty. The READY
+service now schedules a bounded inventory recovery pass independently of the next hook (#695),
+using an existing unambiguous mapping and the authoritative catalog/bundle inventory. An unreadable
+route or missing mapping stays blocked rather than being assumed empty; recovery retries after
+it becomes readable without requiring a fresh event. Do not reset local state, enlarge capacity,
+or toggle consent to manufacture a healthy status. Real hard limits continue to apply after
+inventory recovery, and previous loss counts and identities remain unchanged.
+
+Recovery emits fixed `capture_inventory_*` reason counts in its internal maintenance summary;
+these are not ledger receipts or a new hook diagnostic format. Historical local selection losses
+still need a separately attributed task/check propagation path when no later envelope is admitted.
+Host-shaped regression tests, including interleaved parent/worker routes and encrypted readback,
+are not a version-pinned acceptance run inside the installed vendor application.
+
+Hook and manual drain control failures have `control_` reasons. A protocol error is not a
+`ledger_rejected` result. A control failure stops further calls on that connection; the next
+hook, manual drain or service sweep can attempt the retained identity. Oversized or locally
+invalid requests are terminal. Transport/protocol retries are bounded to 128 consecutive
+same-cause attempts; owner-action conditions such as a forbidden method or incompatible
+protocol stay pending until corrected. Retrying does not establish whether an earlier request
+committed; exact source/cursor identity supplies replay deduplication.
+
+`yoetz observe status --workspace . --json` includes `hook_diagnostics.drain_failures`: up to
+32 retained causal records with source/session commitments, generation and position, original
+control reason and retryability, adapter stage, final disposition and correlation ID when supplied.
+A `control` stage does not identify which side of the socket failed; `request_encode` and
+`response_decode` identify locally observed boundaries. Missing correlation remains null. Typed ingest refusals have stage
+`typed_ingest` and null control fields.
+Diagnostic files rotate at 64 KiB with one backup; this is explicitly incomplete retained history.
+A failed diagnostic append records `drain_diagnostic_unavailable` when store bookkeeping succeeds.
+No command, prompt, path, raw session ID or raw source ID is included. Existing quarantine is
+not automatically replayed or reclaimed, and new diagnostics cannot explain old entries.
+
+Pre-tool hooks reuse advice at its recorded frontier; outcome hooks, lifecycle hooks and service
+ingest refresh it. Once structural ingress is durable, ordinary hooks that spent the local
+one-second allowance defer optional follow-up with `hook_followup_deferred`. Transient native
+content and lifecycle hooks do not take that deferral. Drain snapshot, connect, RPC and local
+bookkeeping share one elapsed drain budget; synchronous local writes cannot be interrupted safely.
+
+For shared-store measurements and the remaining native-host coverage boundary, see
+[the performance runbook](observation-selection-performance.md).

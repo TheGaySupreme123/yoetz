@@ -21,10 +21,29 @@ _DIGEST: Final[dict[str, Any]] = {
     "pattern": "^sha256:[0-9a-f]{64}$",
     "type": "string",
 }
+_COMMITMENT: Final[dict[str, Any]] = {
+    "maxLength": 76,
+    "minLength": 76,
+    "pattern": "^hmac-sha256:[0-9a-f]{64}$",
+    "type": "string",
+}
 _ORDINARY_CONTENT_CAPTURE_PROFILES: Final = (
     "claude-code-ordinary-observation-v1",
     "cursor-ordinary-observation-v1",
 )
+_MAX_SAFE_INTEGER: Final = 9_007_199_254_740_991
+_OBSERVATION_TIMESTAMP: Final[dict[str, Any]] = {
+    "maxLength": 24,
+    "minLength": 24,
+    "pattern": r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$",
+    "type": "string",
+}
+_OBSERVATION_TOKEN: Final[dict[str, Any]] = {
+    "maxLength": 128,
+    "minLength": 1,
+    "pattern": r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$",
+    "type": "string",
+}
 
 
 def _load(name: str) -> dict[str, Any]:
@@ -490,6 +509,63 @@ def _claim_v24_request() -> dict[str, Any]:
     return generated
 
 
+def _capture_v25_request() -> dict[str, Any]:
+    """Append the authenticated native capture handoff to the active 2.4 control wire."""
+
+    generated = _with_id("control-request", "2.5.0", _claim_v24_request())
+    ingest = generated["$defs"]["observation_ingest_body"]
+    # Native hook content is staged before the FIFO structural request.  Keep this opt-in marker
+    # outside the frozen 2.4 schema and accept only the literal true arm; ordinary structural
+    # requests omit it and retain the domain model's false default.
+    ingest["properties"]["capture_only"] = {"const": True}
+    # The capture lane is intentionally narrower than ordinary observation ingest.  Keep the
+    # discriminator and the authorization-bound payload in one schema branch so validation cannot
+    # admit a capture marker with an empty chunk set, an unknown profile, or a cross-host source.
+    ingest["oneOf"] = [
+        {"not": {"required": ["capture_only"]}},
+        {
+            "properties": {
+                "capture_only": {"const": True},
+                "content_capture_profile": {"const": "claude-code-ordinary-observation-v1"},
+                "content_chunks": {"minItems": 1},
+                "envelope": {
+                    "properties": {"source": {"const": "claude_hook"}},
+                    "required": ["source"],
+                },
+            },
+            "required": ["capture_only", "content_capture_profile", "content_chunks"],
+        },
+        {
+            "properties": {
+                "capture_only": {"const": True},
+                "content_capture_profile": {"const": "cursor-ordinary-observation-v1"},
+                "content_chunks": {"minItems": 1},
+                "envelope": {
+                    "properties": {"source": {"const": "cursor_hook"}},
+                    "required": ["source"],
+                },
+            },
+            "required": ["capture_only", "content_capture_profile", "content_chunks"],
+        },
+        {
+            "not": {"required": ["content_capture_profile"]},
+            "properties": {
+                "capture_only": {"const": True},
+                "content_chunks": {"minItems": 1},
+                "envelope": {
+                    "properties": {"source": {"const": "codex_hook"}},
+                    "required": ["source"],
+                },
+            },
+            # Codex's native hook arm is authorized by the existing structural
+            # observation grant. It is intentionally profile-less: adding a
+            # public Codex profile would create a second consent vocabulary.
+            "required": ["capture_only", "content_chunks"],
+        },
+    ]
+    return generated
+
+
 def _semantic_provenance_v24_result() -> dict[str, Any]:
     generated = _with_id("control-result", "2.4.0", _status_v23_result())
     for old, new in (
@@ -507,6 +583,244 @@ def _semantic_provenance_v24_result() -> dict[str, Any]:
         _PRIVACY_POLICY,
         "https://schemas.yoetz.dev/0.1/privacy/privacy-policy-1.1.0.schema.json",
     )
+    return generated
+
+
+def _selection_runtime_v26_result() -> dict[str, Any]:
+    """Add the bounded optional selection projection to the new result wire.
+
+    The observation status projection was added after the frozen 2.5 result contract.
+    Keep released result bytes unchanged and attach the optional, structural-only
+    projection to the new 2.6 result schema.  The nested maps are closed to the counters and
+    opaque commitments emitted by the local store; they cannot become a content carrier.
+    """
+
+    generated = _with_id("control-result", "2.6.0", _semantic_provenance_v24_result())
+    definitions = generated["$defs"]
+
+    integer = {"maximum": _MAX_SAFE_INTEGER, "minimum": 0, "type": "integer"}
+    positive_integer = {"maximum": _MAX_SAFE_INTEGER, "minimum": 1, "type": "integer"}
+    nullable_timestamp = {"anyOf": [{"type": "null"}, copy.deepcopy(_OBSERVATION_TIMESTAMP)]}
+    nullable_token = {"anyOf": [{"type": "null"}, copy.deepcopy(_OBSERVATION_TOKEN)]}
+    nullable_commitment = {"anyOf": [{"type": "null"}, copy.deepcopy(_DIGEST)]}
+    nullable_session_commitment = {"anyOf": [{"type": "null"}, copy.deepcopy(_COMMITMENT)]}
+
+    definitions["observation_capture_backlog_route"] = {
+        "additionalProperties": False,
+        "properties": {
+            "count": copy.deepcopy(integer),
+            "byte_count": copy.deepcopy(integer),
+            "oldest_receipt_time": copy.deepcopy(nullable_timestamp),
+            "observed_at": copy.deepcopy(_OBSERVATION_TIMESTAMP),
+            "reservation_count": {"maximum": 512, "minimum": 0, "type": "integer"},
+            "reservation_unknown": {"type": "boolean"},
+        },
+        "required": [
+            "count",
+            "byte_count",
+            "oldest_receipt_time",
+            "observed_at",
+            "reservation_count",
+            "reservation_unknown",
+        ],
+        "type": "object",
+    }
+    definitions["observation_capture_backlog"] = {
+        "additionalProperties": False,
+        "properties": {
+            "capture_backlog_scope": {"enum": ["unknown", "partial"], "type": "string"},
+            "route_count": {"maximum": 256, "minimum": 0, "type": "integer"},
+            "count": copy.deepcopy(integer),
+            "byte_count": copy.deepcopy(integer),
+            "oldest_receipt_time": copy.deepcopy(nullable_timestamp),
+            "observed_at": copy.deepcopy(nullable_timestamp),
+            "reservation_count": {"maximum": 512, "minimum": 0, "type": "integer"},
+            "reserved_byte_count": copy.deepcopy(integer),
+            "reservation_unknown": {"type": "boolean"},
+            "routes": {
+                "additionalProperties": {"$ref": "#/$defs/observation_capture_backlog_route"},
+                "maxProperties": 256,
+                "propertyNames": copy.deepcopy(_OBSERVATION_TOKEN),
+                "type": "object",
+            },
+        },
+        "required": [
+            "capture_backlog_scope",
+            "route_count",
+            "count",
+            "byte_count",
+            "oldest_receipt_time",
+            "observed_at",
+            "reservation_count",
+            "reserved_byte_count",
+            "reservation_unknown",
+            "routes",
+        ],
+        "type": "object",
+    }
+    definitions["observation_selection_loss_route"] = {
+        "additionalProperties": False,
+        "properties": {
+            "selection_task_id": nullable_token,
+            "selection_session_id": nullable_token,
+            "selection_writer_id": nullable_token,
+            "selection_authority_generation": nullable_commitment,
+        },
+        "required": [
+            "selection_task_id",
+            "selection_session_id",
+            "selection_writer_id",
+            "selection_authority_generation",
+        ],
+        "type": "object",
+    }
+    definitions["observation_selection_loss_range"] = {
+        "additionalProperties": False,
+        "properties": {
+            "lane": copy.deepcopy(_DIGEST),
+            "source": {
+                "enum": ["claude_hook", "codex_hook", "codex_session_stream", "cursor_hook"],
+                "type": "string",
+            },
+            "session": copy.deepcopy(_COMMITMENT),
+            "source_generation": copy.deepcopy(positive_integer),
+            "route": {"$ref": "#/$defs/observation_selection_loss_route"},
+            "first_identity": copy.deepcopy(_OBSERVATION_TOKEN),
+            "last_identity": copy.deepcopy(_OBSERVATION_TOKEN),
+            "first_position": copy.deepcopy(integer),
+            "last_position": copy.deepcopy(integer),
+            "count": copy.deepcopy(positive_integer),
+            "identity_extent": {"const": "bounded_range", "type": "string"},
+        },
+        "required": [
+            "lane",
+            "source",
+            "session",
+            "source_generation",
+            "route",
+            "first_identity",
+            "last_identity",
+            "first_position",
+            "last_position",
+            "count",
+            "identity_extent",
+        ],
+        "type": "object",
+    }
+    definitions["observation_selection_accounting"] = {
+        "additionalProperties": False,
+        "properties": {
+            "observed_count": copy.deepcopy(integer),
+            "accounting_scope": {
+                "const": "locally_ingested_since_selection_upgrade",
+                "type": "string",
+            },
+            "admitted_input_count": copy.deepcopy(integer),
+            "delivered_input_count": copy.deepcopy(integer),
+            "summarized_input_count": copy.deepcopy(integer),
+            "intentionally_omitted_input_count": copy.deepcopy(integer),
+            "check_selection": {"const": "reported_by_each_check", "type": "string"},
+            "summary_record_count": copy.deepcopy(integer),
+            "buffered_input_count": copy.deepcopy(integer),
+            "pending_attempt_count": copy.deepcopy(integer),
+            "buffered_successful_call_count": copy.deepcopy(integer),
+            "unrecoverable_input_count": copy.deepcopy(integer),
+            "loss_identity_commitment": copy.deepcopy(nullable_commitment),
+            "loss_ranges": {
+                "items": {"$ref": "#/$defs/observation_selection_loss_range"},
+                "maxItems": 64,
+                "type": "array",
+            },
+            "loss_identity_list_complete": {"const": False, "type": "boolean"},
+            "selection_epoch": copy.deepcopy(integer),
+        },
+        "required": [
+            "observed_count",
+            "accounting_scope",
+            "admitted_input_count",
+            "delivered_input_count",
+            "summarized_input_count",
+            "intentionally_omitted_input_count",
+            "check_selection",
+            "summary_record_count",
+            "buffered_input_count",
+            "pending_attempt_count",
+            "buffered_successful_call_count",
+            "unrecoverable_input_count",
+            "loss_identity_commitment",
+            "loss_ranges",
+            "loss_identity_list_complete",
+            "selection_epoch",
+        ],
+        "type": "object",
+    }
+    definitions["observation_selection_runtime"] = {
+        "additionalProperties": False,
+        "properties": {
+            "selected_mode": {"enum": ["focused", "detailed"], "type": "string"},
+            "effective_mode": {"enum": ["focused", "detailed"], "type": "string"},
+            "selected_capacity": {"enum": [512, 2048, 8192], "type": "integer"},
+            "effective_capacity": {"enum": [512, 2048, 8192], "type": "integer"},
+            "selection_origin": {
+                "enum": ["session", "workspace", "configured", "default"],
+                "type": "string",
+            },
+            "selection_expires_at": copy.deepcopy(nullable_timestamp),
+            "pressure_state": {
+                "enum": ["healthy", "rising", "high", "hard_limit"],
+                "type": "string",
+            },
+            "pressure_transition_identity": copy.deepcopy(nullable_token),
+            "content_allowed": {"type": "boolean"},
+            "admission_allowed": {"type": "boolean"},
+            "queue_count": copy.deepcopy(integer),
+            "queue_bytes": copy.deepcopy(integer),
+            "state_bytes": copy.deepcopy(integer),
+            "oldest_pending_age_ms": copy.deepcopy(integer),
+            "pending_attempts": copy.deepcopy(integer),
+            "pending_lifecycle_count": copy.deepcopy(integer),
+            "capture_backlog": {"$ref": "#/$defs/observation_capture_backlog"},
+            "protected_count_reserve": copy.deepcopy(integer),
+            "protected_bytes_reserve": copy.deepcopy(integer),
+            "session_fair_share": copy.deepcopy(integer),
+            "session_fair_share_bytes": copy.deepcopy(integer),
+            "accounting": {"$ref": "#/$defs/observation_selection_accounting"},
+            "session_commitment": copy.deepcopy(nullable_session_commitment),
+            "policy_version": copy.deepcopy(_OBSERVATION_TOKEN),
+            "validation_status": copy.deepcopy(_OBSERVATION_TOKEN),
+        },
+        "required": [
+            "selected_mode",
+            "effective_mode",
+            "selected_capacity",
+            "effective_capacity",
+            "selection_origin",
+            "selection_expires_at",
+            "pressure_state",
+            "pressure_transition_identity",
+            "content_allowed",
+            "admission_allowed",
+            "queue_count",
+            "queue_bytes",
+            "state_bytes",
+            "oldest_pending_age_ms",
+            "pending_attempts",
+            "pending_lifecycle_count",
+            "capture_backlog",
+            "protected_count_reserve",
+            "protected_bytes_reserve",
+            "session_fair_share",
+            "session_fair_share_bytes",
+            "accounting",
+            "session_commitment",
+            "policy_version",
+            "validation_status",
+        ],
+        "type": "object",
+    }
+    definitions["observation_status"]["properties"]["selection_runtime"] = {
+        "$ref": "#/$defs/observation_selection_runtime"
+    }
     return generated
 
 
@@ -550,6 +864,28 @@ def _documents() -> dict[Path, bytes]:
         ),
         ("control-request", "2.4.0"): _claim_v24_request(),
         ("control-result", "2.4.0"): _semantic_provenance_v24_result(),
+        ("control-hello", "2.5.0"): _with_id("control-hello", "2.5.0", _hello()),
+        ("control-hello-result", "2.5.0"): _with_id(
+            "control-hello-result",
+            "2.5.0",
+            _with_id(
+                "control-hello-result",
+                "2.4.0",
+                _with_id("control-hello-result", "2.0.0", _load("control-hello-result")),
+            ),
+        ),
+        ("control-request", "2.5.0"): _capture_v25_request(),
+        ("control-result", "2.5.0"): _with_id(
+            "control-result", "2.5.0", _semantic_provenance_v24_result()
+        ),
+        ("control-hello", "2.6.0"): _with_id("control-hello", "2.6.0", _hello()),
+        ("control-hello-result", "2.6.0"): _with_id(
+            "control-hello-result",
+            "2.6.0",
+            _with_id("control-hello-result", "2.0.0", _load("control-hello-result")),
+        ),
+        ("control-request", "2.6.0"): _with_id("control-request", "2.6.0", _capture_v25_request()),
+        ("control-result", "2.6.0"): _selection_runtime_v26_result(),
     }
     return {
         _SERVICE / f"{name}-{version}.schema.json": canonical_encode(document)

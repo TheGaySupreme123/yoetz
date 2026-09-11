@@ -38,7 +38,11 @@ from yoetz.domain.events import (
     encode_payload,
 )
 from yoetz.domain.findings import Finding, FindingKind
-from yoetz.domain.observation import ObservationContentKind, ObservationContentManifest
+from yoetz.domain.observation import (
+    ObservationContentKind,
+    ObservationContentManifest,
+    ObservationSource,
+)
 from yoetz.domain.observation_profiles import ORDINARY_CONTENT_CAPTURE_PROFILE_IDS
 from yoetz.domain.privacy import (
     MAX_EGRESS_ENVELOPE_BYTES,
@@ -175,7 +179,14 @@ _CAPTURED_CONTENT_KINDS: Final = frozenset(
 )
 # The resolver and pure builder share the closed profile vocabulary. The builder still
 # treats its scope as a service-authenticated assertion; it does not discover consent.
-_AUTHORIZED_CAPTURE_PROFILES: Final = ORDINARY_CONTENT_CAPTURE_PROFILE_IDS
+#
+# Codex's original observation consent predates the opt-in Claude/Cursor content profiles.  The
+# source token below is an internal scope label for that historical, profileless grant; it is not a
+# user-selectable content profile and is never accepted by the local consent/profile adapters.
+_CODEX_HISTORICAL_CAPTURE_SCOPE: Final = ObservationSource.CODEX_HOOK.value
+_AUTHORIZED_CAPTURE_PROFILES: Final = frozenset(
+    {*ORDINARY_CONTENT_CAPTURE_PROFILE_IDS, _CODEX_HISTORICAL_CAPTURE_SCOPE}
+)
 MAX_CAPTURED_SEMANTIC_CONTENT_PARTS: Final = 64
 MAX_CAPTURED_SEMANTIC_INPUT_BYTES: Final = 2 * MAX_CAPTURED_SEMANTIC_CONTENT_BYTES
 _CAPTURE_GAP_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)
@@ -1301,11 +1312,32 @@ def build_semantic_case(
                 continue
             linked_subjects.update(str(ref) for ref in claim_record.payload.supporting_refs)
 
-        evidence_rows = sorted(projection.evidence.items(), key=lambda pair: str(pair[0]))
+        # Authenticated native captures are more useful than a metadata-only description, and
+        # their retained bytes are otherwise easy to starve: the evidence cap is shared by every
+        # evidence row while the projection can contain many opaque stream events.  Keep the
+        # ordering deterministic within each class and use the captured-group leaders only; a
+        # payload merely lacking a captured object is still metadata, never native capture.
+        evidence_rows = sorted(
+            projection.evidence.items(),
+            key=lambda pair: (
+                0 if str(pair[0]) in captured_groups else 1,
+                str(pair[0]).encode("ascii"),
+            ),
+        )
+        processed_evidence_refs: set[str] = set()
+        captured_rows_omitted_by_limit: set[str] = set()
         for evidence_id, record in evidence_rows:
             if len(targeted) >= selection.max_excerpts:
+                # Captured groups are ordered first, so anything not visited here is excluded by
+                # the excerpt-count cap. Keep that loss visible instead of silently reporting a
+                # complete coverage snapshot. Rows excluded by a deliberate kind/relevance
+                # selection are processed below and retain their ordinary omission reason.
+                captured_rows_omitted_by_limit.update(
+                    set(captured_groups) - processed_evidence_refs
+                )
                 break
             ref = str(evidence_id)
+            processed_evidence_refs.add(ref)
             if ref not in allowed:
                 continue
             payload = record.payload
@@ -1333,6 +1365,8 @@ def build_semantic_case(
                 else _EVIDENCE_EXCERPT_KIND.get(payload.evidence_kind, "evidence")
             )
             if excerpt_kind not in selection.excerpt_kinds:
+                if captured_group is not None:
+                    capture_gap_set.add("content_unselected")
                 omissions.append(
                     _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
                 )
@@ -1340,6 +1374,8 @@ def build_semantic_case(
             if selection.relevance == "linked_subjects_only":
                 source_event = str(record.source_event_id)
                 if ref not in linked_subjects and source_event not in linked_subjects:
+                    if captured_group is not None:
+                        capture_gap_set.add("content_unselected")
                     omissions.append(
                         _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
                     )
@@ -1461,6 +1497,8 @@ def build_semantic_case(
                 )
             )[:16]
             if not linked:
+                if captured_group is not None:
+                    capture_gap_set.add("content_unselected")
                 omissions.append(
                     _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
                 )
@@ -1504,6 +1542,19 @@ def build_semantic_case(
                 # actually admitted to the packet.
                 capture_gap_set.add("truncated_payload")
             excerpt_bytes_used += item.content_bytes
+
+        if captured_rows_omitted_by_limit:
+            capture_gap_set.add("content_unselected")
+            for ref in sorted(captured_rows_omitted_by_limit, key=str.encode):
+                captured_group = captured_groups[ref]
+                omissions.append(
+                    _omit(
+                        ref,
+                        DataCategory.EVIDENCE_EXCERPT,
+                        captured_group.source_kind,
+                        "not_selected",
+                    )
+                )
 
         # Optional command excerpts from actions when expanded selection allows exact commands.
         if selection.include_exact_command_text and "command" in selection.excerpt_kinds:
@@ -1593,9 +1644,18 @@ def build_semantic_case(
                     )
                     continue
                 linked = tuple(
-                    item
-                    for item in (ref, str(record.payload.action_id), str(record.source_event_id))
-                    if item in allowed
+                    sorted(
+                        {
+                            item
+                            for item in (
+                                ref,
+                                str(record.payload.action_id),
+                                str(record.source_event_id),
+                            )
+                            if item in allowed
+                        },
+                        key=str.encode,
+                    )
                 )[:16]
                 if not linked:
                     continue
@@ -1624,6 +1684,23 @@ def build_semantic_case(
                     )
                 )
                 excerpt_bytes_used += item.content_bytes
+
+    # A valid capture can exist even when a custom policy disables the excerpt section entirely or
+    # sets its excerpt count to zero. Keep that policy exclusion visible just as we do for a group
+    # rejected by kind/relevance, while retaining only bounded identity metadata in the omission.
+    if captured_groups and ("targeted_excerpts" not in sections or selection.max_excerpts == 0):
+        capture_gap_set.add("content_unselected")
+        for ref, captured_group in sorted(
+            captured_groups.items(), key=lambda pair: pair[0].encode("ascii")
+        ):
+            omissions.append(
+                _omit(
+                    ref,
+                    DataCategory.EVIDENCE_EXCERPT,
+                    captured_group.source_kind,
+                    "not_selected",
+                )
+            )
 
     # Cap lists per selection.
     goal_ids = goal_ids[:4]
@@ -1768,6 +1845,78 @@ def build_semantic_case(
         omissions=tuple(omissions),
     )
 
+    # The deterministic case owns the complete frontier. The reviewer needs the dependency
+    # closure of its selected packet, not every unrelated logical/source ID in that frontier.
+    required_refs: set[str] = set(local_check_refs) | {
+        str(ref) for ref in projection.findings if str(ref) in allowed
+    }
+
+    def retain(value: JsonValue) -> None:
+        if isinstance(value, str):
+            if value in allowed:
+                required_refs.add(value)
+        elif isinstance(value, dict):
+            for child in value.values():
+                retain(child)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                retain(child)
+
+    retain(_packet_to_json(packet))
+    retain(cast(JsonValue, _item_catalog_json(items)))
+    for item in items:
+        if item.section == "excerpt":
+            continue
+        # Canonical payload/structural items carry typed dependencies beyond their short
+        # linked_subject_refs catalog. Prose and captured byte excerpts are not parsed as IDs.
+        try:
+            content = strict_json_parse(item.content)
+        except ValueError:
+            continue
+        retain(content)
+    # Follow typed recorded payload dependencies to a fixed point. This keeps support,
+    # limitations, availability and provenance connected without emitting unselected prose.
+    records_by_ref = {
+        str(ref): record
+        for family in (
+            projection.obligations,
+            projection.actions,
+            projection.results,
+            projection.evidence,
+            projection.claims,
+            projection.findings,
+        )
+        for ref, record in family.items()
+    }
+    visited: set[str] = set()
+    while pending := required_refs - visited:
+        for ref in sorted(pending):
+            visited.add(ref)
+            record = records_by_ref.get(ref)
+            if record is None:
+                continue
+            if str(record.source_event_id) in allowed:
+                required_refs.add(str(record.source_event_id))
+            if record.payload is not None and not record.redacted:
+                retain(cast(JsonValue, encode_payload(record.payload)))
+    selected_frontier_refs = frozenset(required_refs & frontier_refs)
+    omitted_reference_count = len(frontier_refs - selected_frontier_refs)
+    frontier_refs = selected_frontier_refs
+    if omitted_reference_count:
+        packet = replace(
+            packet,
+            coverage=replace(
+                packet.coverage,
+                ledger_freshness=LedgerFreshness.PARTIAL,
+                known_gaps=tuple(
+                    sorted(
+                        {*packet.coverage.known_gaps, "semantic_reference_scope_reduced"},
+                        key=str.encode,
+                    )
+                ),
+            ),
+        )
+
     selection_digest = review_selection_digest(selection)
     # Bind assessments/omissions/packet lists into the digest so provenance covers the full case.
     case_digest = canonical_digest(
@@ -1776,6 +1925,7 @@ def build_semantic_case(
             {
                 "dependency_digest": dependency_digest,
                 "frontier_refs": sorted(frontier_refs),
+                "omitted_reference_count": omitted_reference_count,
                 "items": [
                     {
                         "content_digest": item.content_digest,
@@ -1847,6 +1997,7 @@ def build_semantic_case(
         items=tuple(items),
         question_set=_QUESTION_SET,
         case_digest=case_digest,
+        omitted_reference_count=omitted_reference_count,
     )
 
 
@@ -1987,6 +2138,7 @@ def _case_envelope_json(case: SemanticCase) -> dict[str, JsonValue]:
             "case_id": case.case_id,
             "dependency_digest": case.dependency_digest,
             "frontier_refs": sorted(case.frontier_refs),
+            "omitted_reference_count": str(case.omitted_reference_count),
             "item_catalog": _item_catalog_json(case.items),
             "local_check_refs": sorted(case.local_check_refs),
             "policy_id": case.policy_id,
@@ -2229,6 +2381,7 @@ def assemble_filtered_review_packet(
             # are not citable at all. Naming the accept set explicitly is what lets a reviewer cite
             # correctly instead of guessing and having the challenge dropped.
             "citable_refs": sorted(frontier_refs | local_check_refs),
+            "omitted_reference_count": envelope.get("omitted_reference_count", "0"),
             "selection_accounting": cast(JsonValue, accounting),
             "dependency_digest": envelope.get("dependency_digest", ""),
             "frontier_refs": sorted(frontier_refs),

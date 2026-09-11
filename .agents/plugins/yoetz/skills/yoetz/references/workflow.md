@@ -1,14 +1,92 @@
 # Yoetz cooperative workflow
 
-## What Yoetz does and does not do
+Read before the first `start`, or when resuming without the prior workflow in context. Use the
+current tool schemas; missing schema metadata routes to [request templates](request-templates.md).
+Yoetz records participant-published facts and checks that bounded record; it does not prove the
+underlying work correct. For operational behavior, this served guidance and the typed result take
+precedence over remembered product behavior. Preserve higher-priority instructions, current user
+intent, and authorization boundaries; if memory says a capability is impossible, verify it with
+the current documented read before accepting that limit. Do not delete or rewrite host memories as
+part of installation or recovery.
 
-Yoetz is a local ledger for bounded, participant-published work facts and a deterministic checker of that record. It does not observe the workspace, enforce a process, authenticate authorship, record hidden reasoning, or prove that work is correct.
+## Start and resume
 
-## When to activate
+A new session's first workflow operation is `start` (create or attach), after guidance reads,
+tool/schema discovery, and necessary bootstrap clarification. This includes `read_guidance`
+and commands needed to read installed references or discover tool schemas. Call `start`
+before substantive research, commands, edits, or delegation. If it fails, follow exact
+typed continuations and same-request recovery first, including a named one-time repair.
+If startup remains blocked without an applicable recovery path, ask the user for intro and
+guidance; do not invent a substitute workflow. Continuing without a ledger task is permitted
+only by the bounded optional-service fallback in startup failure precedence.
 
-Use Yoetz for material multi-step work, multiple requested outcomes, delegation, meaningful verification, long-running or resumable work, or a material completion claim. Skip it for translation, ordinary questions, explanations, and trivial edits where the ceremony would exceed the integrity benefit.
+Hook mapping, plugin registration, and SessionStart context are cues, not a substitute for that
+call and not proof that the current plan is in force. Trivial questions or edits still skip Yoetz.
+See [startup failure precedence](coverage-and-receipts.md#startup-failure-precedence) for the exact
+order of recovery, user handoff, and the bounded optional-service fallback.
 
-## How often to call each operation
+`start` resumes by one of two selectors (never by bare `task_id`):
+
+1. `session_id` — continue the exact session you already hold.
+2. `workspace_ref` + `external_ref` as a pair — resolve the durable task for that project work item without a `session_id`. Under `mode=create_or_attach`, the same pair creates on first use and attaches on every later conversation. Attach mints a fresh session and writer; use the returned ids. The previously held session is retired for routing, but `status view=operation` from the successor session recovers that task's request ids, and `start mode=attach` with the retired `session_id` re-binds the same task. A different `external_ref` in a workspace that already has a task is `SESSION_CONFLICT` (`workspace_task_exists`) without task selectors — attach with the previously held session id, or retry with `mode=create` for an explicit sibling.
+
+Convention:
+
+- `workspace_ref` = the canonical absolute repository root of the working tree you are in (a linked Git worktree is its own root). Never a remote URL: the workspace commitment is keyed on the exact value, so hook observation on Claude Code, Codex, and Cursor auto-attaches with this root and `workspace_task_exists` protects you from a sibling only under the same value. A remote URL or any other spelling is a different workspace and silently creates a sibling task.
+- `external_ref` = stable task identity within that project (branch name, issue reference, or plan slug). A hook-mapped task carries `<host>-session:<host session id>`; do not reproduce that pair. Attach to a host-mapped task with `mode=attach` and the `session_id` the session-start context names.
+
+Same conversation resuming, or a fresh conversation continuing the same work → `mode=create_or_attach` with the same pair and no `session_id`. Sibling work in the same project → use `mode=create` with the same `workspace_ref` and a different `external_ref` only when the recovery table permits one; do not use `create_or_attach` for a new sibling. Both refs are one-shot redacted values: only installation-keyed HMAC commitments are persisted, so a repository path or remote URL never lands in durable state — do not self-censor into unstable refs.
+
+## Recovery decision table (0.2)
+
+Use this table after a reconnect, timeout, session rotation, host handoff, or a known terminal
+same-task boundary. It uses the existing `start`, `status`, and workflow operations; it does not
+add a task-lineage field or change the wire contract.
+
+The operation view requires both `session_id` and `writer_id`. If a `start` response is lost before
+those ids are returned, do not invent them or issue a fabricated status query: replay the exact
+original `start` body once with its same `request_id`; the start idempotency path returns the stored
+result or a typed boundary.
+
+| Situation | Required action | Do not do |
+| --- | --- | --- |
+| A read-only timeout or reconnect permits a retry (`status`, diagnostics, or an operation-recovery read) | Repeat the same read intent with a new read `request_id`; preserve its view, filter, cursor, and limit. A missing read is not proof that the record is absent. | Reuse a timed-out read ID as if it were a write, or infer absence from an unreadable response. |
+| Any write has an unknown outcome (`start`, `publish_work`, `check`, `respond`, `receipt`, or equivalent) | For `start` without returned session/writer ids, use the exact-start branch above. Otherwise read `status view=operation` with `filter.operation_request_id` set to the exact original write `request_id`. If `state=absent`, replay the exact original body once with that same request ID. If `state=complete`, use the stored outcome and do not replay. If `state=pending` includes an exact typed continuation, follow that continuation and its required user-approval path, then replay the original request once; without a continuation, retain and report pending. If `state=quarantined` or unknown, retain and report that boundary. | Mint a fresh request ID, fresh task, or sibling to escape an ambiguous write; replay a complete, quarantined, or pending operation without its exact continuation; fabricate start identity; guess the result. |
+| A typed `OPERATION_PENDING` result is returned | If it is a `start` result without returned session/writer ids, use the exact-start branch above. Otherwise read operation status once with the exact `filter.operation_request_id`. Replay the original request only when the typed result or status page supplies an exact continuation and its required approval has completed; otherwise retain and report `pending`, `quarantined`, or unknown. | Blindly replay a pending request, fabricate start identity, repeat probes, create a new task, or claim a clean completion. |
+| An exact held `session_id` is available after rotation or handoff | Use that exact `session_id` as the `mode=attach` selector. The host binding or CLI repository context supplies the canonical workspace fence; if the request carries identity refs, send the canonical `workspace_ref` + `external_ref` pair together. Use the returned successor session/writer and inspect `status` before continuing. | Add an unpaired `workspace_ref`, use a bare `task_id` or workspace membership as resume authority, or guess a sibling. |
+| The same work resumes in a fresh host conversation with no held session | Call `start mode=create_or_attach` with the exact canonical `workspace_ref` + `external_ref` pair and no `session_id`. A fresh conversation is not automatically a new task. | Use a remote URL as `workspace_ref`, invent a task ID, or create an implicit second task. |
+| The same-task pair/session cannot be recovered, every prior write has a known terminal outcome, and the user declares a bounded remaining or repaired verification scope | Start one intentional sibling with `mode=create`, the same canonical workspace, and a different stable `external_ref`. Give it a fresh plan, evidence, checks, and native binding; begin with a bounded handoff note that the predecessor receipt remains separate and unresolved. | Silently replace the task, inherit findings/obligations/evidence, reuse cross-task IDs without an existing contract, or invent lineage. |
+| Recovery is exhausted but no new scope is declared, or a sibling would only make the old receipt look clean | Keep the old receipt and limitations, report the bounded failure, and wait for a supported continuation decision. | Loop through new siblings, move unresolved findings out of view, or present the latest sibling as whole-work closure. |
+| The ledger has immutable proof limits, writes are terminal, and a fresh review of the repaired/current state is wanted | Use one explicitly scoped verification sibling on a healthy authorized binding. Publish its current-state plan and obligations, collect new admissible evidence/checks, verify native mapping, and disclose the old receipt's limits. | Repeat work only to obtain a smaller finding count, drop outstanding acceptance criteria, or present the sibling as proof that the old task was resolved. |
+| The first `start` fails | Follow exact continuations and same-request recovery first, including a named one-time repair. Outside the fallback below, if startup remains blocked without an applicable recovery path, ask the user for intro and guidance and pause material work. | Invent a substitute workflow, skip recovery, keep working without a ledger task, or treat hook mapping as activation. |
+| After successful startup Yoetz becomes unavailable, or a named one-time repair/retry ends in terminal unavailability | Continue ordinary work only when Yoetz is optional, the user/host permits it, and no write or approval remains pending; disclose which subsequent work lacks Yoetz proof. A first non-retryable `start` failure alone does not qualify. Once healthy, use the sibling row only when a tracked continuation is still wanted and no write is ambiguous. | Claim a live task, finding, verdict, or receipt, bypass startup handoff, or reset old findings by switching tasks. |
+
+An explicit sibling is a new ledger boundary. Its receipt covers only its newly declared scope and
+newly observed work. The predecessor's receipt, actionable findings, feedback obligations, and
+unresolved status remain intact and must be disclosed when the sibling is used for a repaired or
+remaining verification. A sibling does not inherit the predecessor's mapping, session, evidence
+IDs, or receipt authority unless a current contract explicitly permits that exact reuse. If the old
+task identity is unknown, say so rather than guessing or exposing a task ID. If an operation may
+have committed, its operation-recovery row always wins over the sibling row.
+
+“Not give up” means using this one bounded, explicit verification handoff after the known terminal
+boundary. It does not mean creating tasks until a receipt looks clean.
+
+Tell the user that Yoetz is being used, and claim activation only after `start` returns. Apply
+[startup failure precedence](coverage-and-receipts.md#startup-failure-precedence) before any
+continue-and-disclose fallback. A first non-retryable failure does not itself permit material work
+without a task. Never invent ledger, check, or receipt coverage.
+
+## Material work
+
+Before substantive work, publish the bounded plan, requested outcomes, and acceptance evidence.
+Read [publication policy](publication-policy.md) before the first `publish_work`; declare explicit
+obligations or the admitted empty-scope reason. Group work into independently reviewable outcomes,
+not one obligation per file. Publish material transitions and evidence as they occur. Delegate only
+when the task warrants and permits it; give each delegate a distinct logical writer and bounded
+assignment, never a transcript. A delegate's summary is a claim, not proof.
+
+## Cadence
 
 <a id="cadence"></a>
 
@@ -17,7 +95,7 @@ Use Yoetz for material multi-step work, multiple requested outcomes, delegation,
 | `start` | Once per task, before substantive work. On resume (same or fresh conversation), `mode=create_or_attach` with the same `workspace_ref` + `external_ref` pair and no `session_id`; attach selectors are `session_id` or the ref pair, never bare `task_id`. When the host's session-start context names a task already mapped to this session, continue it with `mode=attach` and the `session_id` that context names instead of a new pair. |
 | `publish_work` | One batch per material transition, usually one to eight events; a batch admits up to 100, so keep one transition in one batch rather than splitting it. A normal session is a handful of batches, never one per file, tool call, or message. Every set-valued reference list must already be unique and in ascending ASCII order; a one-element dry-run subset cannot demonstrate that kernel rule. |
 | `status` | After resume, compaction, or delegate handoff, and before any completion claim. Not between routine tool calls. |
-| `check` | After publishing the completion claim and its evidence, and again after any material edit or new evidence. A readable response identifying a finding that check returned is not material change; a redacted or unreadable response requires a recheck. Also consider a check when you move between subtasks or phases — after publishing that transition's batch — not only at the completion claim. Choose the mode deliberately: `deterministic_only` is local and fast and catches record-hygiene gaps (stale ledger, digest-only evidence, open obligations) early; reserve semantic review for the claim unless the transition itself warrants it. A check with no new events since the last one adds nothing. |
+| `check` | After publishing the completion claim and its evidence, and again after any material edit or new evidence. A readable response identifying a finding that check returned is not material change; a redacted or unreadable response requires a recheck. Also consider a check when you move between subtasks or phases — after publishing that transition's batch — not only at the completion claim. Use `semantic_if_configured` only when review is known to be optional; select `semantic_required` when the user, effective policy, or named acceptance criterion requires independent semantic judgment; omit `mode` when relying on the configured default. Reserve `deterministic_only` for explicitly local/structural work or a deliberate no-egress choice and disclose `semantic_review_not_requested`; classify required review as unmet and preserve that requirement in later final checks. A check with no new events since the last one adds nothing. |
 | `respond` | Once per finding, at the result frontier of the check that returned it — not the finding's `subject_frontier`, which precedes the finding's own record. |
 | `receipt` | Once at the end, and again only if material state changed after the previous receipt. |
 
@@ -37,88 +115,108 @@ not MCP tools and not `yoetz observe` verbs. The ten values are `resolve_failed_
 `yoetz observe status` from the host shell and wait for drain to recover. If the gap remains at
 check time, disclose it as a limitation. There is no `refresh_observation` MCP tool or CLI command.
 
-## When to stop retrying
+## Completion
 
-<a id="stop-rules"></a>
+Read `status` and `closure_readiness` before closing. Resolve remediable open obligations and
+publish the completion claim with its evidence; that claim is an assertion, not a conclusion.
+Read [coverage and receipts](coverage-and-receipts.md) before the first `check` for mode selection,
+finding disposition, pending decisions, and coverage-bounded wording. `respond` does not clear a
+finding: only a later qualifying check of the repaired record may resolve it. Recheck after material
+changes or new evidence, not unchanged state. Request `receipt` last, then report what it supports.
 
-- Semantic review that does not succeed is a coverage gap, not a retry problem. `not_configured`, `blocked_by_policy`, and `human_denied` will not change without owner action: take the first answer, except when installed plugin status names `policy` while this process is a live strict route (`full_restart_required` / activation mismatch). That case needs a full host quit, not a privacy change and not a fresh semantic check against the stale process. `unavailable` and `timeout` already spent that job's own attempt budget. `refused`, `failed`, and every `invalid` reason except `response_content_invalid` are not retried inside the job at all. `response_content_invalid` (an incomplete or overlong provider answer) may spend exactly one in-job repair retry when the profile has retry budget and deadline left, so by the time you see it that repair is already spent. A fresh request is a fresh gamble rather than a continuation.
-- When a second job in one session again returns no judgment, stop: run `deterministic_only`, disclose the gap naming the recorded `semantic_status` and `semantic_reason`, and do not spend a third job on the same binding.
-- On `OPERATION_PENDING`, read `status` with `view=operation` once and replay the same `request_id` once. If it is still pending, continue with a new deterministic-only request and state that the earlier operation never reached a terminal result.
-- A rejected request is a schema problem, not a retry problem. Correct the named field and resend once; do not resend the same body.
+Before claiming feedback complete, put its obligation in a supported plan revision or exact
+next-version restatement; a stored or resolved obligation alone does not update effective scope.
+Include each material delivery outcome the user requested in the effective obligations, or state the
+narrower scope of the claim and receipt. Place the final receipt after the last material outcome it
+covers, and distinguish check input, check result, response-only records, and later observation
+appends using the returned facts.
 
-## Startup and availability disclosure
+Continue authorized implementation and focused verification through completion. Distinguish
+completed work from an unmet required review; never silently substitute deterministic coverage
+for required semantic review. If required review is unavailable or fails, report completed
+implementation/structural checks separately from the unmet requirement and do not claim overall
+completion. Describe local ledger writes separately from product-file changes.
 
-Tell the user briefly that Yoetz is being used as a local work ledger and verifier. Do not imply initialization succeeded before `start` returns. If the optional service is unavailable, continue unless the user or host requires it, disclose that no live ledger or receipt will exist, and invent no state.
+## Errors and continuations
 
-If the host drops schema examples or renders required fields as unknown, read
-`yoetz://guidance/request-templates.md` and replace every illustrative value in the complete request
-body. Never inspect product source to reconstruct a request.
+Read the typed result before acting. For a retryable read timeout or reconnect, issue a new read
+`request_id` with the same intent. For any write with an unknown outcome, query `status
+view=operation` using `filter.operation_request_id` for the exact original write `request_id` and
+follow the state branches in the recovery table: replay once only for `absent`, use the stored
+outcome for `complete`, and replay after an exact typed continuation and required approval only for
+`pending`; retain and report `quarantined` or unknown state. A timeout does not authorize a fresh
+task. A `retryable: false` error is terminal except for its exact typed continuation: do not probe
+with new requests or other operations. Read
+[Recovery](coverage-and-receipts.md#recovery) only when an error, outage, or inherited
+unavailability requires it. Delegates inheriting `terminal_unavailable` make no Yoetz calls; only
+the coordinator performs a named repair.
 
-## The ten steps
+For `vault_initialization_required`, setup/settings changes, credential or vault operations,
+import, or a recommendation, read [Setup and consent](request-templates.md#setup-and-consent)
+before acting. Preserve exact request and pending identities. Never run service lifecycle commands
+for `INTERNAL_ERROR` or a message that did not name that command.
 
-1. Decide whether the task is material enough for Yoetz.
-2. Start or attach with stable request identity and the intended create or attach semantics.
-3. Publish a bounded plan, requested outcomes, acceptance evidence, and assignments. Declare completion scope with obligation refs, or — only when the effective ref set is empty — one typed `no_obligations_reason`: `no_material_change`, `single_atomic_change`, or `exploratory_scope_unknown`. Group large inventories into independently reviewable work packages; files are leaf evidence, not automatic obligations.
-4. Delegate with the session, task, distinct logical writer, and bounded assignment context. Do not send or publish full transcripts.
-5. Publish material work-package transitions: assignment, decision, blocked attempt, independently useful result, completion, or revision. Omit routine reads, searches, formatting, and per-file mechanics.
-6. Stay next to the record. After resume, compaction, handoff, or uncertainty about what is already done or committed, call `status`. `view=candidate_findings` is an advisory read: it creates no verdict, IDs, receipt, or event. For claim correction, read `candidate_findings`, `history`, and `results`, then dry-run one `claim_recorded/1.1.0` replacement: admissible support belongs in `supporting_refs`, partial/failed results in `limitation_refs`, and prior effective claim ids in `supersedes_claim_refs`.
-7. Before completion, publish the intended material completion claim and current evidence, then call `check`. Read `declared_obligation_count`, `no_obligations_reason`, and `closure_readiness` on `status` first. A readable plan with zero declared obligations and no reason is blocked by `no_obligations_declared`; add effective obligations or revise the plan with a typed reason. The reason clears readiness but a completion claim over zero obligations still yields an insufficient-coverage gap. Resolve remediable blockers before spending a check or receipt. `receipt_findings_unresolved` is different: it says an actionable finding is still current. Only a later qualifying check of the repaired record resolves it, never a response; if you can repair the record, do so and recheck. Then read the finding's `resolved` state. If the issue re-fires, or it does not re-fire but remains `resolved=false` because the check did not qualify, proceed to the receipt rather than rechecking unchanged state. A deterministic check with otherwise readable proof may still qualify when its only case-wide host-observation limits are `captured_object_unavailable`, `content_unselected`, `host_outcome_unavailable`, or `unpaired_event`; those codes remain receipt limitations, require the original finding coverage to have been readable, and never relax semantic-finding proof. Choose mode deliberately: `semantic_if_configured` for most material implementation/review claims; `semantic_required` when completion depends on qualitative correctness, design conformance, security/privacy reasoning, interoperability, or whether the code satisfies the ask; `deterministic_only` only for explicitly local/structural checks, semantic-disabled policy, or a deliberate no-egress choice — and disclose that limitation. Publish the smallest state-bound diff/symbol and the directly relevant test or failure excerpt; never rely on self-asserted completion prose alone.
-8. Respond to each challenge by accepting and acting, supplying evidence, revising the claim, disputing with evidence, or stating an unresolved limitation. Agents can record `acknowledged`, `provenance_disputed`, or `rejected`; `waived` is reserved for an authorized local-CLI human. A readable response identifies the finding as answered and removes it from `unanswered_finding_count`, but it does not erase the historical finding, reduce `receipt_blocking_finding_count`, or close an underlying coverage gap. Repair the record and recheck: a later qualifying check that finds the same issue absent resolves the finding, which then stays visible as history; the receipt wording names resolved history apart from current findings and from coverage limitations.
-9. Recheck after any material edit, evidence change, or plan change. A readable response to a finding returned by the current check needs no recheck; a redacted or unreadable response does because it cannot prove which finding it answered.
-10. Request a receipt and keep the final answer no stronger than its weakest material coverage, freshness, unresolved findings, and limitations. All receipt formats (`json`, `markdown`, `text`) project under default policy; if a stricter owner policy blocks `json`, re-request `markdown` or `text`.
+## Consumer and maintainer scope
 
-## State the record you changed
+To operate Yoetz, use schemas, guidance, and `status`; do not inspect its live SQLite databases,
+catalog, or product source to reconstruct a request or recover a pending decision. An assigned
+Yoetz development/debugging task may inspect source and isolated tests. That exception grants no
+access to live mutable storage and no setup, credential, or egress authority.
 
-Using Yoetz is itself a state change. A run that starts a task, advances the ledger, or obtains a check or receipt has changed durable local state even when it edited no product file. Separate the two in the final answer instead of collapsing them.
+## Evidence-first closure
 
-Permitted: “No product source, provider configuration, credential binding, or privacy authorization was changed. This run created a Yoetz task, published N events, and recorded one check and one receipt.”
+Before a material evidence publication or completion claim, paginate `status view=evidence` at
+one frontier, preserving the cursor-bound filter and limit. Reuse only matching observed IDs;
+do not author duplicate digest-only placeholders. Read per-item availability and subject state:
+a digest-only or clipped item does not make other native excerpts absent. The full procedure and
+mixed example are in `yoetz://guidance/publication-policy.md`.
 
-Forbidden: “Nothing changed” or “no runtime state changed” after a real session, publication, check, or receipt.
+`status view=obligations` separates asserted `unattempted_items` accounting from `command_attempts`:
+matching observation supports an attempt only; mismatch requires correcting the assertion or a
+supported obligation revision with rationale; unknown does not mean the command never ran.
+Do not copy a command onto an edit action just to close the accounting gap. Do not normalize shell
+wrappers or changed test targets into an exact-command claim.
 
-Reuse the original request and operation IDs after timeout or reconnect. A timeout has unknown outcome; retry idempotently or inspect status. An operation that reports failure after its write may have committed: read `status` for the authoritative frontier before assuming it failed. Prefer `status view=operation` with the write's `request_id` as a state lookup without reconstructing the body — a complete `publish_work` surfaces stored frontiers and accepted event ids; pending, quarantined, absent, and non-publish states report only what is honest for that state. When replaying a write, reuse the same `request_id` rather than composing a new one — a matching body returns the stored result, and a different body returns `REQUEST_IDENTITY_CONFLICT` with the committed frontier rather than re-appending.
+The optional CLI `yoetz closure-prepare --session-id <returned-session> --writer-id <returned-writer>`
+reads the complete closure inventory without publishing. `yoetz closure-schema` describes explicit
+selection inputs; `--input <selection.json>` prepares one operation with fresh lowercase UUID-v4
+IDs, a dry-run publication where applicable, and a same-request recovery query. Review and submit
+explicitly. It never invents attempts, evidence, finding dispositions, or obligation satisfaction.
 
-## Multi-agent attribution and handoff
+### Protect an evidence-sensitive read
 
-The parent publishes assignments and gives each delegate a distinct logical writer identity. A delegate publishes its own bounded claims; the parent neither impersonates it nor upgrades self-asserted authorship. Before integration, read current assignments, decisions, contradictions, and obligations. A delegate summary is a claim, not proof, and contradictions remain visible until a recorded decision resolves them.
+If a later claim, obligation, or finding may depend on a read, protect the next read before the
+host call when possible. Use the exact current host session and an existing or planned structural
+reference with the supported CLI:
 
-## Resume and compaction
+```text
+yoetz observe protect-read --workspace /exact/project \
+  --session-id <host-session-id> --reference obl_<id> \
+  --count 1 --json
+```
 
-On resume, attach to the existing task and read status before reconstructing work from memory. Preserve request and writer sequences and do not duplicate a prior publication. A trigger, when an exact capability profile proves one, may prompt the same bounded re-grounding; it observes nothing and changes no coverage.
+The reference must use the closed `obl_`, `clm_`, or `fnd_` form. Protection is a bounded narrowing
+of structural retention: at most 32 logical reads can be outstanding, the default lifetime is ten
+minutes, and `--expires-at` cannot extend that bound. It requires the active observation grant and
+the selected session, but it does not authorize content capture, privacy disclosure, a provider,
+credentials, or a network route. Increasing protection within these bounds is a narrower use of
+the existing grant and does not require a new permission decision.
 
-### Workspace grouping and attach selectors
+The hook binds the protection to the exact native read identity. A pre-event reserves that identity
+and its logical post consumes one slot; failures, denials, cancellation, partial or unknown
+outcomes, and missing posts remain individually visible. Never replace a protected read with a
+caller-supplied routine label or infer success from its content.
 
-`start` resumes by one of two selectors (never by bare `task_id`):
+If the read becomes relevant after classification but before the bounded buffer is delivered,
+promote its exact source identity:
 
-1. `session_id` — continue the exact session you already hold.
-2. `workspace_ref` + `external_ref` as a pair — resolve the durable task for that project work item without a `session_id`. Under `mode=create_or_attach`, the same pair creates on first use and attaches on every later conversation. Attach mints a fresh session and writer; use the returned ids. The previously held session is retired for routing, but `status view=operation` from the successor session recovers that task's request ids, and `start mode=attach` with the retired `session_id` re-binds the same task. A different `external_ref` in a workspace that already has a task is `SESSION_CONFLICT` (`workspace_task_exists`) without task selectors — attach with the previously held session id, or retry with `mode=create` for an explicit sibling.
+```text
+yoetz observe promote --workspace /exact/project \
+  --source-identity <source-identity> --json
+```
 
-Convention:
-
-- `workspace_ref` = the canonical absolute repository root of the working tree you are in (a linked Git worktree is its own root). Never a remote URL: the workspace commitment is keyed on the exact value, so hook observation on Claude Code, Codex, and Cursor auto-attaches with this root and `workspace_task_exists` protects you from a sibling only under the same value. A remote URL or any other spelling is a different workspace and silently creates a sibling task.
-- `external_ref` = stable task identity within that project (branch name, issue reference, or plan slug). A hook-mapped task carries `<host>-session:<host session id>`; do not reproduce that pair. Attach to a host-mapped task with `mode=attach` and the `session_id` the session-start context names.
-
-Same conversation resuming, or a fresh conversation continuing the same work → `mode=create_or_attach` with the same pair and no `session_id`. Sibling work in the same project → `mode=create` with the same `workspace_ref` and a different `external_ref` (do not use `create_or_attach` for a new sibling). Both refs are one-shot redacted values: only installation-keyed HMAC commitments are persisted, so a repository path or remote URL never lands in durable state — do not self-censor into unstable refs.
-
-## Findings and recheck
-
-Candidate findings are what deterministic packs currently say about the record. They carry no verdict and cannot be cited as a check. An empty candidate list means only that no rule fired in that advisory read. Only a recorded check can support receipt-bounded completion wording.
-
-The cheapest finding is the one that never fires. Before the first `check`, read `status` with `view=obligations`: every row exposes its exact `requested_items` plus the `unattempted_items` subset under the existing obligation-text privacy category. Record each attempted value exactly on `action_recorded.attempted_items` (`attempted_items` belongs to that family alone — never a claim), and do not resolve the obligation while `unattempted_items` remains non-empty. Also confirm that completion scope is declared, every claim has linked evidence, and every declared obligation is resolved or deliberately left open with a stated reason. A typed empty-scope declaration still produces `completion_scope_declared_none` when a completion claim exists; it records the scope decision rather than proving it. This pre-flight costs one status read; an actionable finding costs the receipt for the rest of the task.
-
-## Degraded and unavailable behavior
-
-Never invent success. State the unavailable or degraded boundary, continue ordinary work when allowed, and do not claim a live task, finding, verdict, or receipt. If the host requires Yoetz, stop at that host-owned requirement.
-
-Read `retryable` on every error before acting. A `retryable: false` error is terminal for that call: do not repeat it with a new `request_id`, do not probe with other Yoetz operations to "confirm", and do not rewrite state to work around it. Record the `correlation_id`; if a shell is available, run `yoetz service diagnostics --correlation-id <id>` once and report its bounded record, then continue without Yoetz. A `SERVICE_UNAVAILABLE` error whose message names a repair command (for example `yoetz service restart` when the running service belongs to a different Yoetz installation) is the one case where a single repair is appropriate: run exactly that command if the host allows shell use, then retry the original call once with the same `request_id`. If it fails again, treat Yoetz as unavailable for the rest of the task and say so. Lifecycle commands (`yoetz service stop`, `service run`, `service restart`) are never a response to `INTERNAL_ERROR` or to any message that did not name that exact command.
-
-One typed exception: an error carrying `safe_details.continuation: vault_initialization_required` is a bounded first-run handoff, not an ordinary terminal error. The vault was never initialized, nothing was written, and no unlock or recovery path applies. Suspend the original request and follow the continuation exactly once: run the carried `prepare_command`, present the returned pending's danger text and digests to the user, and wait for their exact decision; if a pending consent action already exists, read it with `yoetz consent status` instead of preparing another. Yoetz generates and stores the initialization secret locally — never request, receive, or transmit a secret or recovery material. Relaying an approval through the carried `authorize_command` is valid only for an allowlisted first-party agent-chat client acting on an explicit current-chat instruction; every other host directs the user to run the carried `review_command` on a local terminal and waits. When the ceremony reports ready, replay the exact original `request_id` and body once (`replay_request_id` names it) and continue normally; on denial or expiry, do not prepare again in the same task — state the boundary and continue without Yoetz. Never create a replacement `start`, and never treat chat assent as authority.
-
-### Inherited unavailability and delegation
-
-An availability failure belongs to the host binding — this MCP process, its route, and the service endpoint — not to the request that first saw it. When an error carries `safe_details.availability: terminal_unavailable`, the bridge has latched that state: every later call under a new `request_id` returns the same `correlation_id` with `availability_inherited: true` and records no new diagnostic, until the named repair changes the running service, the original `request_id` replays successfully, or — for a `retryable: true` class only — the bridge's own quiet handshake finds the service listening again, in which case the call simply proceeds. That handshake belongs to the bridge, never to you: nobody probes to find out. An inherited answer is not a fresh failure; do not diagnose it again.
-
-When you delegate after that result, carry it into every assignment as a bounded `yoetz_availability` block: `state: terminal_unavailable`, the host binding (`host_profile`, `route_profile`), the parent `correlation_id` and original `request_id`, and the proof limit ("no live Yoetz ledger, publication, check, or receipt exists for this task") — never transcript content. A delegate that inherits `terminal_unavailable` makes no Yoetz call for that binding and work item: no `start`, `status`, `check`, diagnostics, or `yoetz service` command. It publishes nothing, states that the parent has no live ledger, and returns its work to the coordinator. Only the coordinator runs the one repair the typed result named and replays the original `request_id` once. In the final report, separate the initial integration cause (the parent's correlation) from delegate amplification, and never claim delegate publications, assignments, or attribution without a task and session.
-
-## Safety and privacy
-
-Publish no hidden reasoning, transcript, secret, broad repository content, or unrelated source. Prefer typed facts, digests, bounded counts, and only the smallest material state-bound excerpt. See [publication policy](publication-policy.md) and [coverage and receipts](coverage-and-receipts.md).
+Promotion retains the original structural identity, route, and observed time as an individual
+record. It only works while that identity is buffered. After delivery the result is
+`promotion_window_closed` with `content_availability: not_retained`; it cannot recover omitted or
+expired bytes. Rerun or reacquire the current state when needed and record it as new evidence with
+its new time and subject state. Do not use that rerun to prove the historical state.

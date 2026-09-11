@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -30,7 +31,9 @@ from yoetz.application.egress import (
     SemanticEgressBlocked,
     SemanticEgressProviderOutcome,
 )
+from yoetz.application.semantic_content import CapturedContentResolution
 from yoetz.domain.findings import SamplingParams, SemanticDispatchKind, SemanticFailureClass
+from yoetz.domain.observation_profiles import CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
 from yoetz.domain.privacy import (
     AuthorizationScope,
     AuthorizationScopeKind,
@@ -78,6 +81,8 @@ _WRITER = "wri_53000000-0000-4000-8000-000000000001"
 _REQUEST = "req_53000000-0000-4000-8000-000000000001"
 _INSTALLATION = "ins_53000000-0000-4000-8000-000000000001"
 _REPOSITORY = "hmac-sha256:" + "b" * 64
+_OBSERVATION_WORKSPACE = "hmac-sha256:" + "a" * 64
+_OBSERVATION_SESSION = "hmac-sha256:" + "c" * 64
 _PROVIDER = ProviderBinding(
     "sensitive-provider",
     "model",
@@ -88,6 +93,9 @@ _PROVIDER = ProviderBinding(
 
 type _SemanticEvaluator = Callable[
     [FrozenCase, tuple[object, ...]], Awaitable[FinalSemanticEvaluation]
+]
+type _DurableSemanticEvaluator = Callable[
+    [FrozenCase, tuple[object, ...], TaskRuntime], Awaitable[FinalSemanticEvaluation]
 ]
 
 
@@ -364,6 +372,184 @@ def _route_for(task_id: str, session_id: str) -> TaskRoute:
         ),
         _REPOSITORY,
     )
+
+
+class _RoutedObservation:
+    def __init__(
+        self,
+        *,
+        task_id: str = _TASK,
+        session_id: str = _SESSION,
+        route_task: str | None = None,
+    ) -> None:
+        self.task_id = task_id
+        self.session_id = session_id
+        self.route_task = task_id if route_task is None else route_task
+
+    def workspace_for_yoetz_session(self, session_id: str) -> str | None:
+        assert session_id == self.session_id
+        return _OBSERVATION_WORKSPACE
+
+    def observation_route_for_session(
+        self, *, workspace: str, yoetz_session_id: str
+    ) -> tuple[str, str, bool] | None:
+        assert workspace == _OBSERVATION_WORKSPACE
+        assert yoetz_session_id == self.session_id
+        return (_OBSERVATION_SESSION, self.route_task, True)
+
+
+class _AmbiguousObservation:
+    def workspace_for_yoetz_session(self, _session: str) -> object:
+        return (_OBSERVATION_WORKSPACE, "hmac-sha256:" + "d" * 64)
+
+    def observation_route_for_session(
+        self, *, workspace: str, yoetz_session_id: str
+    ) -> tuple[str, str, bool]:
+        del workspace, yoetz_session_id
+        return (_OBSERVATION_SESSION, _TASK, True)
+
+
+class _MissingRouteObservation:
+    def workspace_for_yoetz_session(self, _session: str) -> str:
+        return _OBSERVATION_WORKSPACE
+
+    def observation_route_for_session(self, *, workspace: str, yoetz_session_id: str) -> None:
+        del workspace, yoetz_session_id
+        return None
+
+
+class _CaptureFence:
+    def __init__(self, *, allowed: bool = True) -> None:
+        self.allowed = allowed
+        self.calls: list[tuple[str, str, tuple[str, ...]]] = []
+
+    def content_capture_authority_is_current(
+        self, workspace: str, generation: str, profiles: tuple[str, ...]
+    ) -> bool:
+        self.calls.append((workspace, generation, profiles))
+        return self.allowed
+
+
+def _runtime_with_observation(observation: object) -> TaskRuntime:
+    return cast(
+        TaskRuntime,
+        SimpleNamespace(
+            task_id=_TASK,
+            session_id=_SESSION,
+            observation=observation,
+        ),
+    )
+
+
+def test_ready_semantic_content_binding_uses_verified_observation_workspace() -> None:
+    runtime = _runtime_with_observation(_RoutedObservation())
+    workspace_for_runtime = cast(
+        Callable[[TaskRuntime], str | None],
+        getattr(ready_composition_module, "_observation_workspace_for_runtime"),
+    )
+
+    assert workspace_for_runtime(runtime) == _OBSERVATION_WORKSPACE
+    assert _OBSERVATION_WORKSPACE != _REPOSITORY
+
+
+@pytest.mark.parametrize(
+    "observation",
+    (
+        _RoutedObservation(route_task="tsk_53000000-0000-4000-8000-000000000099"),
+        _AmbiguousObservation(),
+        _MissingRouteObservation(),
+    ),
+    ids=("wrong-task", "ambiguous-workspace", "missing-route"),
+)
+def test_ready_semantic_content_binding_fails_closed_for_ambiguous_or_mismatched_route(
+    observation: object,
+) -> None:
+    runtime = _runtime_with_observation(observation)
+    workspace_for_runtime = cast(
+        Callable[[TaskRuntime], str | None],
+        getattr(ready_composition_module, "_observation_workspace_for_runtime"),
+    )
+
+    assert workspace_for_runtime(runtime) is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("fence_allowed", (True, False), ids=("current", "revoked"))
+async def test_ready_semantic_content_resolution_and_fence_use_observation_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    fence_allowed: bool,
+) -> None:
+    adapter = memory_adapter(append_command())
+    frozen, runtime = await _durable_semantic_case(adapter)
+    runtime = replace(
+        runtime,
+        observation=_RoutedObservation(task_id=runtime.task_id, session_id=runtime.session_id),
+    )
+    privacy = _Privacy(task_id=runtime.task_id)
+    baseline = _test_effective_policy()
+    assisted = replace(
+        baseline.policy,
+        review_context_profile=ReviewContextProfile.ASSISTED,
+        review_selection=ReviewSelectionPolicy.for_profile(ReviewContextProfile.ASSISTED),
+    )
+    privacy.policy_application = _PolicyApplication(
+        replace(baseline, policy=assisted), repository_granted=True
+    )
+    privacy.terminal_provider_result = True
+    local_fence = _CaptureFence(allowed=fence_allowed)
+    resolved: list[str] = []
+
+    async def resolve_content(**kwargs: object) -> CapturedContentResolution:
+        resolved.append(cast(str, kwargs["workspace_commitment"]))
+        return CapturedContentResolution(
+            None,
+            (),
+            (),
+            "sha256:" + "e" * 64,
+            (CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,),
+            True,
+        )
+
+    monkeypatch.setattr(
+        ready_composition_module,
+        "resolve_captured_semantic_content",
+        resolve_content,
+    )
+
+    async def resolve_provider() -> ProviderBinding:
+        return _PROVIDER
+
+    evaluator_factory = cast(
+        Callable[..., _DurableSemanticEvaluator],
+        getattr(ready_composition_module, "_privacy_gated_semantic_evaluator"),
+    )
+    evaluator = evaluator_factory(
+        cast(PrivacyCoordinator, privacy),
+        FixedClock(),
+        _INSTALLATION,
+        resolve_provider,
+        cast(StartCatalogPort, _Catalog(_route_for(runtime.task_id, runtime.session_id))),
+        ready_composition_module.IdPort(),
+        local_observation=local_fence,
+    )
+
+    result = await evaluator(frozen, (), runtime)
+
+    assert result.status is (
+        SemanticStatus.UNAVAILABLE if fence_allowed else SemanticStatus.BLOCKED_BY_POLICY
+    )
+    assert resolved == [_OBSERVATION_WORKSPACE]
+    assert local_fence.calls
+    assert all(
+        call
+        == (
+            _OBSERVATION_WORKSPACE,
+            "sha256:" + "e" * 64,
+            (CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,),
+        )
+        for call in local_fence.calls
+    )
+    assert privacy.calls == (3 if fence_allowed else 0)
 
 
 async def _durable_semantic_case(
@@ -1037,3 +1223,87 @@ async def test_only_explicit_trusted_missing_authority_advertises_repository_set
     assert result.continuation is None
     assert provider_resolutions == 0
     assert privacy.calls == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "adapter_factory", (memory_adapter, sqlite_adapter), ids=("memory", "sqlite")
+)
+async def test_required_packet_capacity_refuses_before_job_and_provider(
+    adapter_factory: Callable[[object], MemoryLedgerAdapter | SqliteLedger],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.application.semantic_case as semantic_case_module
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    monkeypatch.setattr(semantic_case_module, "MAX_EGRESS_ENVELOPE_BYTES", 1)
+    adapter = adapter_factory(append_command())
+    frozen, runtime = await _durable_semantic_case(adapter)
+    privacy = _Privacy(task_id=runtime.task_id)
+    evaluator = cast(
+        _DurableSemanticEvaluator,
+        _evaluator(
+            privacy,
+            lambda: _PROVIDER,
+            _route_for(runtime.task_id, runtime.session_id),
+        ),
+    )
+    result = await evaluator(frozen, (), runtime)
+    assert (result.status, result.reason) == (
+        SemanticStatus.FAILED,
+        SemanticReason.CASE_CAPACITY_EXCEEDED,
+    )
+    assert result.provenance is None
+    assert result.attempt_accounting is None
+    assert privacy.calls == privacy.resume_calls == 0
+    assert await adapter.load_semantic_job(runtime.writer_id or "", _REQUEST) is None
+    _assert_record(
+        tmp_path,
+        "semantic_not_dispatched_case_envelope_unbounded",
+        SemanticReason.CASE_CAPACITY_EXCEEDED,
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stage", ["privacy_dispatch_entered", "response_mapping"])
+async def test_dispatch_and_mapping_failures_keep_original_check_join(
+    stage: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yoetz.observability.semantic_context import semantic_check_request
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    adapter = memory_adapter(append_command())
+    frozen, runtime = await _durable_semantic_case(adapter)
+    privacy = _Privacy(task_id=runtime.task_id)
+
+    async def failed_dispatch(candidate: object, deadline: object) -> object:
+        assert semantic_check_request.get() == _REQUEST
+        raise RuntimeError("PRIVATE_SENTINEL_case_contents")
+
+    def failed_mapping(*args: object, **kwargs: object) -> object:
+        raise ValueError("PRIVATE_SENTINEL_provider_response")
+
+    if stage == "privacy_dispatch_entered":
+        monkeypatch.setattr(privacy, "evaluate_semantic", failed_dispatch)
+    else:
+        monkeypatch.setattr(ready_composition_module, "_map_egress_to_final", failed_mapping)
+    evaluator = cast(
+        _DurableSemanticEvaluator,
+        _evaluator(
+            privacy,
+            lambda: _PROVIDER,
+            _route_for(runtime.task_id, runtime.session_id),
+        ),
+    )
+    result = await evaluator(frozen, (), runtime)
+    assert (result.status, result.reason) == (
+        SemanticStatus.FAILED,
+        SemanticReason.COORDINATOR_FAILURE,
+    )
+    assert result.provenance is None
+    rows = _records(tmp_path)
+    assert any(row["operation"] == f"semantic_attempt_{stage}_failed" for row in rows)
+    assert all(row["request_id"] == _REQUEST for row in rows)
+    assert "PRIVATE_SENTINEL" not in repr(rows)
+    assert semantic_check_request.get() is None

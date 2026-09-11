@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import contextlib
+import contextvars
 import hashlib
 import io
 import os
+import threading
 from collections.abc import Awaitable, Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast
 
@@ -17,8 +23,14 @@ import apsw
 import yoetz.adapters.sqlite.connection as connection_module
 import yoetz.adapters.sqlite.recovery as recovery_module
 from yoetz.adapters.importers.codex_plan import CodexImportPlans
-from yoetz.adapters.integrations.hook_spool import HookSpool
-from yoetz.adapters.integrations.observation_local import LocalObservationStore
+from yoetz.adapters.integrations.hook_spool import (
+    DEFAULT_HOOK_SPOOL_CLAIM_LIMIT,
+    HookSpool,
+)
+from yoetz.adapters.integrations.observation_local import (
+    LocalContentCaptureAuthority,
+    LocalObservationStore,
+)
 from yoetz.adapters.objects.encrypted_files import EncryptedFilesObjectStore
 from yoetz.adapters.privacy.catalog import CatalogPrivacyAudit, CatalogPrivacyPolicyStore
 from yoetz.adapters.privacy.gateway import PolicyEnforcingOutboundGateway
@@ -51,6 +63,7 @@ from yoetz.application.check import FinalSemanticEvaluation
 from yoetz.application.egress import (
     PrivacyCoordinator,
     RepositoryGrantAdmission,
+    SemanticEgressAttemptUnknown,
     SemanticEgressAwaitingHuman,
     SemanticEgressBlocked,
     SemanticEgressProviderOutcome,
@@ -58,9 +71,13 @@ from yoetz.application.egress import (
 )
 from yoetz.application.observation_advice import (
     ObservationAdviceContextBuilder,
-    ObservationAdviceSemanticAddon,
-    minimized_semantic_evidence_packet,
     stable_advice_finding_id,
+)
+from yoetz.application.observation_advice_semantic import (
+    ObservationAdviceSemanticAttempt,
+    ObservationAdviceSemanticOutcome,
+    ObservationAdviceSemanticScheduler,
+    ObservationAdviceSemanticSupervisor,
 )
 from yoetz.application.observation_control import build_observation_support_handlers
 from yoetz.application.observation_coordinator import ObservationCoordinator
@@ -113,6 +130,11 @@ from yoetz.domain.findings import (
     SemanticProvenance,
     semantic_provenance_to_json,
 )
+from yoetz.domain.observation import (
+    ObservationCaptureBacklog,
+    ObservationCaptureTicket,
+    observation_capture_ticket_id,
+)
 from yoetz.domain.privacy import (
     AuthorizationScope,
     AuthorizationScopeKind,
@@ -137,22 +159,23 @@ from yoetz.domain.receipts import (
 )
 from yoetz.domain.values import (
     Frontier,
+    Timestamp,
     disclosure_continuation,
     format_rfc3339_millis,
     parse_rfc3339_millis,
     repository_grant_continuation,
+    timestamp_from_datetime,
+    validate_commitment,
 )
 from yoetz.domain.values import (
     JsonValue as DomainJsonValue,
 )
-from yoetz.kernel.policies.observation_advice import (
-    ObservationAdviceCandidate,
-    ObservationCompositionFact,
-)
+from yoetz.kernel.policies.observation_advice import ObservationCompositionFact
 from yoetz.observability.logging import (
     record_bounded_event_without_raising,
     record_unexpected_exception_without_raising,
 )
+from yoetz.observability.semantic_context import semantic_check_request
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.control import ControlError, ControlMethod
 from yoetz.ports.diagnostics import DiagnosticsPort, RuntimeCapability, StartupCheckResult
@@ -168,10 +191,13 @@ from yoetz.ports.objects import (
     ObjectStorePort,
     StagedObject,
 )
+from yoetz.ports.observation import TaskObservationPort
 from yoetz.ports.privacy import HumanAuthorityCapability
 from yoetz.ports.runtime import (
+    BundleRuntimePort,
     OwnershipFence,
     RouteAccess,
+    RouteCommand,
     ServiceRuntimeContext,
     StartCompletionEvidence,
     StartMilestone,
@@ -219,6 +245,7 @@ __all__ = [
 _CATALOG_NAME = "catalog.sqlite3"
 _LEDGER_NAME = "ledger.sqlite3"
 _ZERO_DIGEST = "sha256:" + "0" * 64
+_LEGACY_HOOK_SPOOL_BATCH_LIMIT: Final = DEFAULT_HOOK_SPOOL_CLAIM_LIMIT
 
 
 class _Lifecycle(Protocol):
@@ -347,6 +374,156 @@ class _BundleInspection:
     fresh_allocation: bool
     recovery_state: object
     recovery_verdict: object
+
+
+@dataclass(frozen=True, slots=True)
+class _ReadyObservationSweep:
+    """Callable sweep with an explicit per-row maintenance-gate contract."""
+
+    callback: Callable[[], Awaitable[ObservationDrainSummary]]
+    row_gate_bound: bool
+
+    async def __call__(self) -> ObservationDrainSummary:
+        return await self.callback()
+
+
+def _replay_legacy_hook_spool(state: Path, *, stop: threading.Event | None = None) -> None:
+    """Normalize one bounded crash-safe legacy-hook spool pass off the service loop."""
+
+    spool = HookSpool(_state=state)
+    from yoetz.cli.observe_hooks import handle_observe
+
+    remaining = _LEGACY_HOOK_SPOOL_BATCH_LIMIT
+    for workspace_commitment in spool.pending_workspaces():
+        if remaining <= 0 or (stop is not None and stop.is_set()):
+            return
+        with spool.claim(workspace_commitment, limit=remaining) as records:
+            for record in records:
+                handle_observe(
+                    event_name=record.event_name,
+                    stdin_bytes=canonical_encode(cast(DomainJsonValue, record.payload)),
+                    stdout=io.BytesIO(),
+                    _state=state,
+                    skip_service=True,
+                    _workspace_commitment=workspace_commitment,
+                )
+        # Invalid structural lines are consumed too, even though they produce no record. Count
+        # an empty batch as one unit so malformed workspaces cannot make this pass unbounded.
+        remaining -= max(1, len(records))
+        # A claim commits its cursor for the complete bounded batch only after this context exits.
+        # Stop between claims so generation close cannot leave a partially committed batch.
+        if stop is not None and stop.is_set():
+            return
+
+
+class _LegacyHookSpoolForwarder:
+    """Own one serialized spool worker for the lifetime of a READY generation.
+
+    The spool claim renames a file and the local hook adapter opens its own short-lived state
+    handles. One replay pass claims at most one bounded batch. A cancelled await therefore cannot
+    safely start a second claim until the first worker has finished; retaining the future also lets
+    the next maintenance pass join that worker. ``close`` asks the worker to stop between claims
+    during generation teardown but lets its active batch finish its owned local writes.
+    """
+
+    def __init__(self, state: Path) -> None:
+        self._state = state
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yoetz-hook-spool")
+        self._stop = threading.Event()
+        self._future: asyncio.Future[None] | None = None
+        self._closed = False
+
+    async def replay(self) -> None:
+        if self._closed:
+            return
+        future = self._future
+        if future is None:
+            future = asyncio.get_running_loop().run_in_executor(
+                self._executor,
+                partial(_replay_legacy_hook_spool, self._state, stop=self._stop),
+            )
+            self._future = future
+        elif future.done():
+            # Propagate the prior worker's failure before allowing another pass to begin.  A
+            # persistent spool error must remain observable and must not be converted into a
+            # false successful drain merely because a fresh worker was started.
+            self._future = None
+            future.result()
+            future = asyncio.get_running_loop().run_in_executor(
+                self._executor,
+                partial(_replay_legacy_hook_spool, self._state, stop=self._stop),
+            )
+            self._future = future
+        try:
+            # wait() leaves its input future running when this caller is cancelled. Unlike
+            # shield(), it does not report a retained worker's late exception as unhandled
+            # before the next pass can observe that exception (Python 3.14).
+            await asyncio.wait((future,))
+            future.result()
+        except asyncio.CancelledError:
+            # The worker still owns its claim. Keep it joinable by the next pass.
+            raise
+        except BaseException:
+            if self._future is future:
+                self._future = None
+            raise
+        else:
+            if self._future is future:
+                self._future = None
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._stop.set()
+        future = self._future
+        if future is not None:
+
+            def observe_closed_worker(done: asyncio.Future[None]) -> None:
+                if done.cancelled():
+                    return
+                error = done.exception()
+                if isinstance(error, Exception):
+                    record_unexpected_exception_without_raising(
+                        error,
+                        component="service.ready_composition",
+                        operation="legacy_hook_spool_replay_failed",
+                    )
+
+            future.add_done_callback(observe_closed_worker)
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+
+async def _run_blocking_joined[ResultT](call: Callable[[], ResultT], *, operation: str) -> ResultT:
+    """Run a side-effecting local operation off-loop and join it before cancellation returns."""
+
+    worker = asyncio.create_task(asyncio.to_thread(call))
+    try:
+        await asyncio.wait((worker,))
+        return worker.result()
+    except asyncio.CancelledError:
+        # ``asyncio.wait`` does not cancel its input.  Provisioning may have created a bundle or
+        # opened a writer before the caller's deadline, so do not release the route/gate while
+        # that worker can still mutate the same path.  Preserve the caller's cancellation after
+        # the worker has been joined, recording a bounded identity if the worker failed late.
+        while not worker.done():
+            try:
+                await asyncio.wait((worker,))
+            except asyncio.CancelledError:
+                # A second deadline/caller cancellation must not release the route while the
+                # side-effecting worker is still active. Keep joining until it reaches a terminal
+                # state, then propagate the original cancellation below.
+                continue
+        try:
+            worker.result()
+        except BaseException as worker_error:
+            if not isinstance(worker_error, asyncio.CancelledError):
+                record_unexpected_exception_without_raising(
+                    worker_error,
+                    component="service.ready_composition",
+                    operation=operation,
+                )
+        raise
 
 
 def _install_sqlite_support_policy() -> None:
@@ -775,6 +952,18 @@ def _admitted_writers_for_session(
     return writers
 
 
+def _admitted_writers_for_session_from_path(
+    catalog_path: Path, task_id: str, session_id: str
+) -> frozenset[str]:
+    """Read session writer admission through a short-lived private inspection connection."""
+
+    catalog_db = open_read_only(catalog_path)
+    try:
+        return _admitted_writers_for_session(catalog_db, task_id, session_id)
+    finally:
+        _close_db(catalog_db)
+
+
 def _inspect_common(
     *,
     catalog_path: Path,
@@ -819,7 +1008,6 @@ def build_runtime_adapter_factories(
     clock: ClockPort,
     ids: IdPort,
     secret_memory: object,
-    catalog_db: apsw.Connection,
 ) -> RuntimeAdapterFactories:
     """Build durable local runtime adapter callbacks for one ready generation."""
 
@@ -833,44 +1021,54 @@ def build_runtime_adapter_factories(
     async def inspect_route(route: object, access: RouteAccess) -> object:
         del access
         session_id = cast(str, getattr(route, "session_id"))
-        return _inspect_common(
-            catalog_path=catalog_path,
-            bundle_base=paths.bundle,
-            route=route,
-            admitted_writer_ids=_admitted_writers_for_session(
-                catalog_db, cast(str, getattr(route, "task_id")), session_id
-            ),
-            fresh_allocation=False,
-        )
+
+        def inspect() -> object:
+            # Catalog and recovery inspection are synchronous APSW/file operations. Keep the
+            # entire route snapshot off the control event loop; runtime.route() already exposes
+            # this seam as async, so callers retain their normal deadline/cancellation contract.
+            return _inspect_common(
+                catalog_path=catalog_path,
+                bundle_base=paths.bundle,
+                route=route,
+                admitted_writer_ids=_admitted_writers_for_session_from_path(
+                    catalog_path, cast(str, getattr(route, "task_id")), session_id
+                ),
+                fresh_allocation=False,
+            )
+
+        return await asyncio.to_thread(inspect)
 
     async def inspect_provision(command: object) -> object:
-        route = TaskRoute(
-            task_id=cast(str, getattr(command, "task_id")),
-            session_id=cast(str, getattr(command, "session_id")),
-            bundle_relpath=cast(str, getattr(command, "bundle_relpath")),
-            route_generation=cast(int, getattr(command, "route_generation")),
-            route_identity_digest=cast(str, getattr(command, "route_identity_digest")),
-            state=TaskRouteState.ACTIVE,
-        )
-        bundle_root = _safe_bundle_root(
-            paths.bundle,
-            cast(str, getattr(command, "bundle_relpath")),
-            cast(str, getattr(command, "task_id")),
-        )
-        ledger_path = bundle_root / _LEDGER_NAME
-        fresh = not ledger_path.exists()
-        if fresh:
-            bundle_root.mkdir(mode=0o700, parents=True, exist_ok=False)
-            bundle_root.chmod(0o700)
-            _initialize_fresh_bundle(ledger_path, command=command, clock=clock)
-        writer_id = cast(str, getattr(command, "writer_id"))
-        return _inspect_common(
-            catalog_path=catalog_path,
-            bundle_base=paths.bundle,
-            route=route,
-            admitted_writer_ids=frozenset({writer_id}),
-            fresh_allocation=fresh,
-        )
+        def inspect() -> object:
+            route = TaskRoute(
+                task_id=cast(str, getattr(command, "task_id")),
+                session_id=cast(str, getattr(command, "session_id")),
+                bundle_relpath=cast(str, getattr(command, "bundle_relpath")),
+                route_generation=cast(int, getattr(command, "route_generation")),
+                route_identity_digest=cast(str, getattr(command, "route_identity_digest")),
+                state=TaskRouteState.ACTIVE,
+            )
+            bundle_root = _safe_bundle_root(
+                paths.bundle,
+                cast(str, getattr(command, "bundle_relpath")),
+                cast(str, getattr(command, "task_id")),
+            )
+            ledger_path = bundle_root / _LEDGER_NAME
+            fresh = not ledger_path.exists()
+            if fresh:
+                bundle_root.mkdir(mode=0o700, parents=True, exist_ok=False)
+                bundle_root.chmod(0o700)
+                _initialize_fresh_bundle(ledger_path, command=command, clock=clock)
+            writer_id = cast(str, getattr(command, "writer_id"))
+            return _inspect_common(
+                catalog_path=catalog_path,
+                bundle_base=paths.bundle,
+                route=route,
+                admitted_writer_ids=frozenset({writer_id}),
+                fresh_allocation=fresh,
+            )
+
+        return await _run_blocking_joined(inspect, operation="runtime_inspect_provision_failed")
 
     async def acquire_fence(inspection: object, write: bool) -> OwnershipFence:
         if type(inspection) is not _BundleInspection:
@@ -887,10 +1085,11 @@ def build_runtime_adapter_factories(
                 Callable[[Path, OwnershipFence], None],
                 getattr(connection_module, "_register_active_fence"),
             )
-            registrar(inspection.ledger_path, fence)
+            await asyncio.to_thread(registrar, inspection.ledger_path, fence)
             return fence
         try:
-            return recovery_module.acquire_bundle_ownership(
+            return await asyncio.to_thread(
+                recovery_module.acquire_bundle_ownership,
                 cast(recovery_module.RecoveryState, inspection.recovery_state),
                 cast(recovery_module.RecoveryTailVerdict, inspection.recovery_verdict),
                 service_instance_id=service_instance_id,
@@ -911,10 +1110,11 @@ def build_runtime_adapter_factories(
     async def validate_fence(inspection: object, fence: OwnershipFence) -> None:
         if type(inspection) is not _BundleInspection:
             raise ValueError("runtime_inspection_invalid")
-        cast(_RecoveryPersistence, recovery_module._backend()).verify_fence(  # pyright: ignore[reportPrivateUsage]
-            inspection.recovery_state,
-            fence,
+        backend = cast(
+            _RecoveryPersistence,
+            recovery_module._backend(),  # pyright: ignore[reportPrivateUsage]
         )
+        await asyncio.to_thread(backend.verify_fence, inspection.recovery_state, fence)
 
     async def open_objects(
         inspection: object,
@@ -925,7 +1125,10 @@ def build_runtime_adapter_factories(
         del fence, access
         if type(inspection) is not _BundleInspection or keys is None:
             raise ValueError("runtime_object_store_invalid")
-        db = open_read_only(inspection.ledger_path)
+        # ``LocalBundleRuntime._open_entry`` shields this opening task and waits for it during
+        # generation teardown, so the returned connection remains owned even if the requesting
+        # control call is cancelled while the worker performs schema verification.
+        db = await asyncio.to_thread(open_read_only, inspection.ledger_path)
         try:
             store = EncryptedFilesObjectStore(
                 bundle_root=inspection.bundle_root,
@@ -949,7 +1152,9 @@ def build_runtime_adapter_factories(
         del access
         if type(inspection) is not _BundleInspection:
             raise ValueError("runtime_ledger_invalid")
-        db = open_writer(inspection.ledger_path)
+        # The opening task is shielded by LocalBundleRuntime and joined by close(); this keeps the
+        # writer and its fence lifetime paired when the caller's deadline expires.
+        db = await asyncio.to_thread(open_writer, inspection.ledger_path)
         try:
             ledger = SqliteLedger(
                 db=db,
@@ -982,7 +1187,9 @@ def build_runtime_adapter_factories(
             clock=clock,
             ids=ids,
         )
-        writer = SqliteWriterThread(inspection.ledger_path)
+        # SqliteWriterThread is likewise created inside the shielded opening task; teardown waits
+        # for that task before closing the returned entry.
+        writer = await asyncio.to_thread(SqliteWriterThread, inspection.ledger_path)
         try:
             importer = SqliteImporter(
                 task_id=cast(str, getattr(route, "task_id")),
@@ -1722,6 +1929,11 @@ def _map_egress_to_final(
                 ),
             ),
         )
+    if type(result) is SemanticEgressAttemptUnknown:
+        return FinalSemanticEvaluation(
+            SemanticStatus.UNAVAILABLE,
+            SemanticReason.OUTCOME_UNKNOWN,
+        )
     if type(result) is SemanticEgressBlocked:
         return _map_blocked(result.outcome, result.reason)
     if type(result) is SemanticEgressProviderOutcome:
@@ -2171,6 +2383,364 @@ async def _recover_response_evaluation(
     return FinalSemanticEvaluation(status, reason, judgment=judgment, provenance=provenance)
 
 
+def _observation_workspace_for_runtime(runtime: TaskRuntime) -> str | None:
+    """Resolve the task's observation workspace through its durable session route.
+
+    ``TaskRoute.repository_privacy_commitment`` authorizes egress and is deliberately a
+    different commitment domain from the observation store's workspace key.  The latter is
+    selected only by the durable session route, then checked against the exact runtime task
+    before it is handed to the local consent fence.  An unavailable or contradictory route is
+    an observation-content gap, never a reason to try the privacy commitment as a fallback.
+    """
+
+    observation = runtime.observation
+    if observation is None:
+        return None
+    workspace_lookup = getattr(observation, "workspace_for_yoetz_session", None)
+    route_lookup = getattr(observation, "observation_route_for_session", None)
+    if not callable(workspace_lookup) or not callable(route_lookup):
+        return None
+    try:
+        workspace = workspace_lookup(runtime.session_id)
+    except Exception:
+        return None
+    if type(workspace) is not str:
+        return None
+    try:
+        validate_commitment(workspace)
+    except TypeError, ValueError:
+        return None
+    try:
+        route = route_lookup(workspace=workspace, yoetz_session_id=runtime.session_id)
+    except Exception:
+        return None
+    if type(route) is not tuple:
+        return None
+    route_values = cast(tuple[object, ...], route)
+    if (
+        len(route_values) != 3
+        or type(route_values[0]) is not str
+        or type(route_values[1]) is not str
+        or type(route_values[2]) is not bool
+        or route_values[1] != runtime.task_id
+    ):
+        return None
+    try:
+        validate_commitment(route_values[0])
+    except TypeError, ValueError:
+        return None
+    return workspace
+
+
+async def _run_capture_inventory_joined[ResultT](
+    call: Callable[[], ResultT], *, operation: str
+) -> ResultT:
+    """Keep the executor future owned until metadata/publication actually settles.
+
+    READY teardown may cancel all Tasks, including a to_thread intermediary.
+    Await the executor Future directly so that cancellation of such a Task
+    cannot orphan an active proof mutation and release capture exclusion early.
+    """
+
+    worker = asyncio.get_running_loop().run_in_executor(
+        None, partial(contextvars.copy_context().run, call)
+    )
+    try:
+        await asyncio.wait((worker,))
+        return worker.result()
+    except asyncio.CancelledError:
+        while not worker.done():
+            try:
+                await asyncio.wait((worker,))
+            except asyncio.CancelledError:
+                continue
+        try:
+            worker.result()
+        except BaseException as worker_error:
+            if not isinstance(worker_error, asyncio.CancelledError):
+                record_unexpected_exception_without_raising(
+                    worker_error,
+                    component="service.ready_composition",
+                    operation=operation,
+                )
+        raise
+
+
+async def _bootstrap_capture_reservations(
+    workspace: str,
+    current_runtime: TaskRuntime,
+    current_store: TaskObservationPort,
+    *,
+    catalog: StartCatalogPort,
+    runtime: BundleRuntimePort,
+    local_observation: LocalObservationStore,
+    clock: ClockPort,
+    generation_is_current: Callable[[], bool],
+) -> bool:
+    """Read the complete catalog inventory before central admission.
+
+    The coordinator invokes this callback while its process-wide capture
+    lock is held.  The current route's repository commitment scopes the
+    inventory; matching routes are all accounted for, while an unreadable
+    or inactive route fails closed instead of being silently omitted.
+    """
+
+    try:
+        if not generation_is_current():
+            raise ValueError("capture_generation_changed")
+        current_route = await catalog.resolve_route(current_runtime.session_id)
+        if (
+            current_route is None
+            or current_route.state is not TaskRouteState.ACTIVE
+            or current_route.task_id != current_runtime.task_id
+            or current_route.repository_privacy_commitment is None
+        ):
+            raise ValueError("capture_current_route_unavailable")
+        repository = current_route.repository_privacy_commitment
+        recovery_routes = getattr(catalog, "recovery_routes", None)
+        if not callable(recovery_routes):
+            raise ValueError("capture_catalog_inventory_unavailable")
+        raw_routes = await cast(Callable[[], Awaitable[tuple[TaskRoute, ...]]], recovery_routes)()
+        if type(raw_routes) is not tuple:
+            raise ValueError("capture_catalog_inventory_invalid")
+        if any(type(route) is not TaskRoute for route in raw_routes):
+            raise ValueError("capture_catalog_inventory_invalid")
+        all_routes = raw_routes
+        if len({route.task_id for route in all_routes}) != len(all_routes):
+            raise ValueError("capture_catalog_inventory_duplicate")
+        routes = tuple(
+            route
+            for route in all_routes
+            if route.repository_privacy_commitment in {repository, None}
+        )
+        if not routes or len(routes) > 256:
+            raise ValueError("capture_catalog_inventory_incomplete")
+        if any(route.state is not TaskRouteState.ACTIVE for route in routes):
+            raise ValueError("capture_catalog_inventory_inactive")
+        if current_route.task_id not in {route.task_id for route in routes}:
+            raise ValueError("capture_catalog_inventory_incomplete")
+        inventory: dict[str, ObservationCaptureBacklog] = {}
+        ticket_ids_by_task: dict[str, tuple[str, ...]] = {}
+        for route in sorted(routes, key=lambda item: item.task_id.encode()):
+            task_runtime: TaskRuntime | None = None
+            release = False
+            try:
+                if route.task_id == current_runtime.task_id:
+                    task_runtime = current_runtime
+                    task_store = current_store
+                else:
+                    binding = await catalog.session_binding(route.session_id)
+                    if (
+                        binding is None
+                        or binding.task_id != route.task_id
+                        or binding.session_id != route.session_id
+                    ):
+                        raise ValueError("capture_route_binding_unavailable")
+                    task_runtime = await runtime.route(
+                        RouteCommand(
+                            session_id=route.session_id,
+                            writer_id=binding.writer_id,
+                            access=RouteAccess.WRITE,
+                            required_capabilities=frozenset({RuntimeCapability.WRITE}),
+                        )
+                    )
+                    release = True
+                    task_store = task_runtime.observation
+                if (
+                    task_runtime.task_id != route.task_id
+                    or task_runtime.session_id != route.session_id
+                ):
+                    raise ValueError("capture_task_route_changed")
+                if task_store is None:
+                    raise ValueError("capture_task_observation_unavailable")
+                reader = getattr(task_store, "capture_backlog", None)
+                if not callable(reader):
+                    raise ValueError("capture_task_backlog_unavailable")
+                # Task metadata adapters are synchronous and may encounter
+                # a SQLite busy wait. Keep that wait off the control loop,
+                # joining before releasing the runtime on cancellation.
+                backlog = await _run_capture_inventory_joined(
+                    partial(reader, workspace), operation="capture_inventory_backlog_read_failed"
+                )
+                if type(backlog) is not ObservationCaptureBacklog:
+                    raise ValueError("capture_task_backlog_invalid")
+                inventory[route.task_id] = backlog
+                list_pending = getattr(task_store, "list_pending_capture_tickets", None)
+                if callable(list_pending):
+                    raw_tickets = await _run_capture_inventory_joined(
+                        partial(list_pending, route.task_id),
+                        operation="capture_inventory_ticket_read_failed",
+                    )
+                    tickets = cast(tuple[object, ...], raw_tickets)
+                    if type(raw_tickets) is not tuple or any(
+                        type(ticket) is not ObservationCaptureTicket for ticket in tickets
+                    ):
+                        raise ValueError("capture_task_ticket_inventory_invalid")
+                    scoped_ids: list[str] = []
+                    typed_tickets = cast(tuple[ObservationCaptureTicket, ...], tickets)
+                    for ticket in typed_tickets:
+                        if ticket.task_id != route.task_id:
+                            raise ValueError("capture_task_ticket_owner_invalid")
+                        if ticket.workspace_commitment == workspace:
+                            ticket_id = observation_capture_ticket_id(ticket)
+                            if ticket_id in scoped_ids:
+                                raise ValueError("capture_task_ticket_duplicate")
+                            scoped_ids.append(ticket_id)
+                    if len(scoped_ids) == backlog.count and all(
+                        ticket.workspace_commitment == workspace for ticket in typed_tickets
+                    ):
+                        ticket_ids_by_task[route.task_id] = tuple(
+                            sorted(scoped_ids, key=str.encode)
+                        )
+            finally:
+                if release and task_runtime is not None:
+                    with contextlib.suppress(Exception):
+                        await runtime.release(task_runtime)
+        # Re-read the catalog after all bundle reads.  A route change while
+        # the inventory was in flight must not mint a proof for a stale set.
+        final_raw_routes = await cast(
+            Callable[[], Awaitable[tuple[TaskRoute, ...]]], recovery_routes
+        )()
+        if not generation_is_current():
+            raise ValueError("capture_generation_changed")
+        if final_raw_routes != raw_routes:
+            raise ValueError("capture_catalog_inventory_changed")
+        bootstrap = getattr(local_observation, "bootstrap_capture_reservations", None)
+        if not callable(bootstrap):
+            raise ValueError("capture_bootstrap_unavailable")
+        observed_at = timestamp_from_datetime(clock.now_utc())
+        return bool(
+            await _run_capture_inventory_joined(
+                partial(
+                    bootstrap,
+                    workspace,
+                    inventory,
+                    observed_at=observed_at,
+                    complete=True,
+                    proof_guard=generation_is_current,
+                    ticket_ids_by_task=ticket_ids_by_task or None,
+                ),
+                operation="observation_capture_inventory_publish",
+            )
+        )
+    except Exception:
+        mark_unknown = getattr(local_observation, "mark_capture_backlog_scope_unknown", None)
+        if callable(mark_unknown):
+            with contextlib.suppress(Exception):
+                await _run_capture_inventory_joined(
+                    partial(mark_unknown, workspace),
+                    operation="observation_capture_inventory_unknown",
+                )
+        return False
+
+
+async def _reconcile_observation_capture(
+    runtime: TaskRuntime,
+    local_observation: LocalObservationStore,
+    clock: ClockPort | None = None,
+) -> None:
+    """Retire stale native handoffs and publish the task backlog to local pressure state."""
+
+    store = runtime.observation
+    if store is None:
+        return
+    list_pending = getattr(store, "list_pending_capture_tickets", None)
+    tombstone = getattr(store, "tombstone_capture_ticket", None)
+    if not callable(list_pending) or not callable(tombstone):
+        return
+    tickets_raw = list_pending(runtime.task_id)
+    if type(tickets_raw) is not tuple:
+        raise PublicOperationError(
+            PublicErrorCode.STORAGE_CORRUPT,
+            "Observation capture ticket listing is invalid.",
+            retryable=False,
+        )
+    tickets = cast(tuple[object, ...], tickets_raw)
+    if any(type(ticket) is not ObservationCaptureTicket for ticket in tickets):
+        raise PublicOperationError(
+            PublicErrorCode.STORAGE_CORRUPT,
+            "Observation capture ticket listing is invalid.",
+            retryable=False,
+        )
+    authorities: dict[str, LocalContentCaptureAuthority | None] = {}
+    retired_ids: set[str] = set()
+    for ticket in cast(tuple[ObservationCaptureTicket, ...], tickets):
+        if ticket.task_id != runtime.task_id:
+            raise PublicOperationError(
+                PublicErrorCode.STORAGE_CORRUPT,
+                "Observation capture ticket task ownership is invalid.",
+                retryable=False,
+            )
+        if ticket.workspace_commitment not in authorities:
+            authorities[ticket.workspace_commitment] = local_observation.content_capture_authority(
+                ticket.workspace_commitment
+            )
+        authority = authorities[ticket.workspace_commitment]
+        if (
+            authority is None
+            or not authority.active
+            or not authority.runtime_enabled
+            or ticket.authority_generation != authority.generation
+            or (
+                ticket.content_capture_profile is not None
+                and ticket.content_capture_profile not in authority.profiles
+            )
+        ):
+            tombstone(ticket)
+            retired_ids.add(observation_capture_ticket_id(ticket))
+    reader = getattr(store, "capture_backlog", None)
+    updater = getattr(local_observation, "update_capture_backlog", None)
+    workspace = _observation_workspace_for_runtime(runtime)
+    if workspace is None and len(authorities) == 1:
+        workspace = next(iter(authorities))
+    if workspace is None:
+        return
+    reconcile = getattr(local_observation, "reconcile_capture_ticket_reservations", None)
+    if callable(reconcile):
+        with contextlib.suppress(Exception):
+            reconcile(
+                workspace,
+                runtime.task_id,
+                tuple(
+                    observation_capture_ticket_id(ticket)
+                    for ticket in cast(tuple[ObservationCaptureTicket, ...], tickets)
+                    if observation_capture_ticket_id(ticket) not in retired_ids
+                ),
+            )
+    if not callable(reader) or not callable(updater):
+        return
+    try:
+        if clock is None:
+            observed_at = local_observation._wall_timestamp()  # pyright: ignore[reportPrivateUsage]
+        else:
+            raw_now = cast(object, clock.now_utc())
+            observed_at = (
+                raw_now if type(raw_now) is Timestamp else timestamp_from_datetime(raw_now)
+            )
+    except Exception:
+        return
+    try:
+        backlog = reader(workspace)
+        count = getattr(backlog, "count")
+        byte_count = getattr(backlog, "byte_count")
+        oldest_receipt_time = getattr(backlog, "oldest_receipt_time")
+    except Exception:
+        # A task read failure must retain conservative unknown scope rather
+        # than make a zero-valued snapshot look complete.
+        with contextlib.suppress(Exception):
+            updater(workspace, 0, 0, None, observed_at)
+        return
+    with contextlib.suppress(Exception):
+        updater(
+            workspace,
+            count,
+            byte_count,
+            oldest_receipt_time,
+            observed_at,
+            route_id=runtime.task_id,
+        )
+
+
 def _privacy_gated_semantic_evaluator(
     privacy: PrivacyCoordinator,
     clock: ClockPort,
@@ -2222,6 +2792,7 @@ def _privacy_gated_semantic_evaluator(
         # an unbound name there would turn a reportable failure into a second one.
         withheld: tuple[str, ...] = ()
         over_item_limit = False
+        reference_scope_reduced = False
 
         def _on_lease_renewed(renewed: object) -> None:
             assert type(renewed) is _OpLease
@@ -2420,41 +2991,46 @@ def _privacy_gated_semantic_evaluator(
             captured_local_fence_generation: str | None = None
             captured_local_fence_profiles: tuple[str, ...] = ()
             captured_local_fence_required = False
+            captured_observation_workspace: str | None = None
             if (
                 runtime is not None
                 and "targeted_excerpts" in review_selection.sections
                 and review_selection.max_excerpts > 0
             ):
-                try:
-                    captured_resolution = await resolve_captured_semantic_content(
-                        runtime=runtime,
-                        frozen=FrozenCase(frozen.case, current_lease[0]),
-                        workspace_commitment=repository,
-                        local_observation=local_observation,
-                        max_parts=min(
-                            MAX_CAPTURED_SEMANTIC_CONTENT_PARTS,
-                            max(16, review_selection.max_excerpts * 16),
-                        ),
-                        max_total_bytes=MAX_CAPTURED_SEMANTIC_INPUT_BYTES,
-                    )
-                    captured_content = captured_resolution.content
-                    captured_content_scope = captured_resolution.scope
-                    captured_content_gaps = captured_resolution.gaps
-                    captured_local_fence_generation = captured_resolution.local_fence_generation
-                    captured_local_fence_profiles = captured_resolution.local_fence_profiles
-                    captured_local_fence_required = captured_resolution.local_fence_required
-                except Exception as exc:
-                    # Content is an additive evidence arm. A malformed or unavailable
-                    # retained object must leave the deterministic case usable while
-                    # carrying an explicit bounded coverage gap into the packet.
-                    record_unexpected_exception_without_raising(
-                        exc,
-                        component="semantic_composition",
-                        operation="semantic_content_resolution_failed",
-                        request_id=frozen.lease.operation_id,
-                    )
+                captured_observation_workspace = _observation_workspace_for_runtime(runtime)
+                if captured_observation_workspace is None:
                     captured_content_gaps = ("content_capture_unavailable",)
-                    captured_local_fence_required = False
+                else:
+                    try:
+                        captured_resolution = await resolve_captured_semantic_content(
+                            runtime=runtime,
+                            frozen=FrozenCase(frozen.case, current_lease[0]),
+                            workspace_commitment=captured_observation_workspace,
+                            local_observation=local_observation,
+                            max_parts=min(
+                                MAX_CAPTURED_SEMANTIC_CONTENT_PARTS,
+                                max(16, review_selection.max_excerpts * 16),
+                            ),
+                            max_total_bytes=MAX_CAPTURED_SEMANTIC_INPUT_BYTES,
+                        )
+                        captured_content = captured_resolution.content
+                        captured_content_scope = captured_resolution.scope
+                        captured_content_gaps = captured_resolution.gaps
+                        captured_local_fence_generation = captured_resolution.local_fence_generation
+                        captured_local_fence_profiles = captured_resolution.local_fence_profiles
+                        captured_local_fence_required = captured_resolution.local_fence_required
+                    except Exception as exc:
+                        # Content is an additive evidence arm. A malformed or unavailable
+                        # retained object must leave the deterministic case usable while
+                        # carrying an explicit bounded coverage gap into the packet.
+                        record_unexpected_exception_without_raising(
+                            exc,
+                            component="semantic_composition",
+                            operation="semantic_content_resolution_failed",
+                            request_id=frozen.lease.operation_id,
+                        )
+                        captured_content_gaps = ("content_capture_unavailable",)
+                        captured_local_fence_required = False
             semantic_case = build_semantic_case(
                 case_id=recovered_case_id or ids.new(IdKind.OUTBOUND_CASE),
                 frozen_case=frozen.case,
@@ -2481,6 +3057,7 @@ def _privacy_gated_semantic_evaluator(
                 )
             # The builder folds the gap into the packet coverage the reviewer sees; the check
             # result is a separate coverage fold, so carry the fact rather than re-deriving it.
+            reference_scope_reduced = semantic_case.omitted_reference_count > 0
             over_item_limit = (
                 SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP
                 in semantic_case.packet.coverage.known_gaps
@@ -2531,6 +3108,7 @@ def _privacy_gated_semantic_evaluator(
                 return replace(
                     _map_egress_to_final(result, ids),
                     case_content_over_item_limit=over_item_limit,
+                    case_reference_scope_reduced=reference_scope_reduced,
                 )
 
             # Build the packet before anything durable exists. A packet that cannot be built is a
@@ -2548,15 +3126,16 @@ def _privacy_gated_semantic_evaluator(
                 record_bounded_event_without_raising(
                     component="semantic_composition",
                     operation="semantic_not_dispatched_case_envelope_unbounded",
-                    reason=SemanticReason.COORDINATOR_FAILURE.value,
+                    reason=SemanticReason.CASE_CAPACITY_EXCEEDED.value,
                     request_id=frozen.lease.operation_id,
                 )
                 return FinalSemanticEvaluation(
                     SemanticStatus.FAILED,
-                    SemanticReason.COORDINATOR_FAILURE,
+                    SemanticReason.CASE_CAPACITY_EXCEEDED,
                     operation_lease=current_lease[0],
                     withheld_review_categories=withheld,
                     case_content_over_item_limit=over_item_limit,
+                    case_reference_scope_reduced=reference_scope_reduced,
                 )
 
             # One durable semantic job per check: create/recover after freeze, before dispatch.
@@ -2581,7 +3160,16 @@ def _privacy_gated_semantic_evaluator(
                 async def _captured_content_fence_current() -> bool:
                     if not captured_local_fence_required:
                         return True
-                    if captured_local_fence_generation is None or local_observation is None:
+                    if (
+                        captured_local_fence_generation is None
+                        or captured_observation_workspace is None
+                        or local_observation is None
+                    ):
+                        return False
+                    if (
+                        _observation_workspace_for_runtime(runtime)
+                        != captured_observation_workspace
+                    ):
                         return False
                     checker = getattr(
                         local_observation,
@@ -2593,7 +3181,7 @@ def _privacy_gated_semantic_evaluator(
                     try:
                         return (
                             checker(
-                                repository,
+                                captured_observation_workspace,
                                 captured_local_fence_generation,
                                 captured_local_fence_profiles,
                             )
@@ -2639,56 +3227,85 @@ def _privacy_gated_semantic_evaluator(
                     from yoetz.ports.ledger import SemanticAttemptHandle as _Handle
 
                     assert type(handle) is _Handle
-                    # The local observation store is the authority for retained
-                    # content. Its generation must still be current after all
-                    # object resolution and before candidate bytes can enter the
-                    # privacy coordinator's evaluate/resume path.
-                    if not await _captured_content_fence_current():
-                        return FinalSemanticEvaluation(
-                            SemanticStatus.BLOCKED_BY_POLICY,
-                            SemanticReason.SCOPE_NOT_AUTHORIZED,
+                    diagnostic_token = semantic_check_request.set(frozen.lease.operation_id)
+                    stage = "privacy_admission"
+                    try:
+                        # The local observation store is the authority for retained
+                        # content. Its generation must still be current after all
+                        # object resolution and before candidate bytes can enter the
+                        # privacy coordinator's evaluate/resume path.
+                        if not await _captured_content_fence_current():
+                            return FinalSemanticEvaluation(
+                                SemanticStatus.BLOCKED_BY_POLICY,
+                                SemanticReason.SCOPE_NOT_AUTHORIZED,
+                            )
+                        # A newly claimed attempt gets a fresh request identity. A reclaimed started
+                        # attempt deliberately keeps its original identity so the privacy audit can
+                        # prove whether it was pre-admission or already consumed before replay.
+                        candidate = semantic_case_to_candidate_context(
+                            semantic_case,
+                            request_id=handle.provider_request_id,
+                            scope=scope,
+                            provider_binding=binding,
                         )
-                    # Rebuilt per attempt for a fresh request identity so authorization cannot
-                    # be reused. The envelope itself is a pure function of the case, so the
-                    # bytes are identical to the ones validated above; only the request id — and,
-                    # for a fallback attempt, the exact destination — differs.
-                    candidate = semantic_case_to_candidate_context(
-                        semantic_case,
-                        request_id=handle.provider_request_id,
-                        scope=scope,
-                        provider_binding=binding,
-                    )
-                    wait = await runtime.ledger.load_disclosure_wait(
-                        handle.writer_id, handle.operation_id
-                    )
-                    if not await _captured_content_fence_current():
-                        return FinalSemanticEvaluation(
-                            SemanticStatus.BLOCKED_BY_POLICY,
-                            SemanticReason.SCOPE_NOT_AUTHORIZED,
+                        wait = await runtime.ledger.load_disclosure_wait(
+                            handle.writer_id, handle.operation_id
                         )
-                    if (
-                        wait is not None
-                        and wait.job_id == handle.job_id
-                        and wait.attempt_id == handle.attempt_id
-                        and wait.state == "awaiting"
-                    ):
-                        # Exact replay after a trusted local decision resumes the
-                        # already-prepared proposal. Starting the semantic pipeline again would
-                        # mint a replacement proposal and could never observe the decision
-                        # bound to this attempt.
-                        result = await _resume_with_fence(
-                            handle.provider_request_id,
-                            semantic_case.case_digest,
-                            attempt_deadline,
+                        if not await _captured_content_fence_current():
+                            return FinalSemanticEvaluation(
+                                SemanticStatus.BLOCKED_BY_POLICY,
+                                SemanticReason.SCOPE_NOT_AUTHORIZED,
+                            )
+                        stage = "privacy_dispatch_entered"
+                        if type(privacy) is PrivacyCoordinator:
+                            recovered = await privacy.recover_started_attempt(
+                                handle.provider_request_id,
+                                semantic_case.case_digest,
+                                attempt_deadline,
+                                dispatch_guard=_captured_content_fence_current,
+                            )
+                            if recovered is not None:
+                                stage = "response_mapping"
+                                return _map_egress_to_final(
+                                    recovered,
+                                    ids,
+                                    attempt_id=handle.attempt_id,
+                                    operation_request_id=frozen.lease.operation_id,
+                                )
+                        if (
+                            wait is not None
+                            and wait.job_id == handle.job_id
+                            and wait.attempt_id == handle.attempt_id
+                            and wait.state == "awaiting"
+                        ):
+                            # Exact replay after a trusted local decision resumes the
+                            # already-prepared proposal. Starting the semantic pipeline again would
+                            # mint a replacement proposal and could never observe the decision
+                            # bound to this attempt.
+                            result = await _resume_with_fence(
+                                handle.provider_request_id,
+                                semantic_case.case_digest,
+                                attempt_deadline,
+                            )
+                        else:
+                            result = await _evaluate_with_fence(candidate, attempt_deadline)
+                        stage = "response_mapping"
+                        return _map_egress_to_final(
+                            result,
+                            ids,
+                            attempt_id=handle.attempt_id,
+                            operation_request_id=frozen.lease.operation_id,
                         )
-                    else:
-                        result = await _evaluate_with_fence(candidate, attempt_deadline)
-                    return _map_egress_to_final(
-                        result,
-                        ids,
-                        attempt_id=handle.attempt_id,
-                        operation_request_id=frozen.lease.operation_id,
-                    )
+                    except BaseException as exc:
+                        record_unexpected_exception_without_raising(
+                            exc,
+                            component="semantic_composition",
+                            operation=f"semantic_attempt_{stage}_failed",
+                            request_id=frozen.lease.operation_id,
+                        )
+                        raise
+                    finally:
+                        semantic_check_request.reset(diagnostic_token)
 
                 return _dispatch
 
@@ -2783,6 +3400,7 @@ def _privacy_gated_semantic_evaluator(
                         operation_lease=current_lease[0],
                         withheld_review_categories=withheld,
                         case_content_over_item_limit=over_item_limit,
+                        case_reference_scope_reduced=reference_scope_reduced,
                     )
                 return FinalSemanticEvaluation(
                     status,
@@ -2793,6 +3411,7 @@ def _privacy_gated_semantic_evaluator(
                     operation_lease=current_lease[0],
                     withheld_review_categories=withheld,
                     case_content_over_item_limit=over_item_limit,
+                    case_reference_scope_reduced=reference_scope_reduced,
                     continuation=continuation,
                 )
 
@@ -2836,6 +3455,7 @@ def _privacy_gated_semantic_evaluator(
                 operation_lease=current_lease[0],
                 withheld_review_categories=withheld,
                 case_content_over_item_limit=over_item_limit,
+                case_reference_scope_reduced=reference_scope_reduced,
             )
 
     return _evaluate
@@ -2879,6 +3499,7 @@ async def provide_service_ready_context(
     clock: ClockPort,
     secret_memory: object,
     diagnostics: DiagnosticsPort | None = None,
+    observation_gate: asyncio.Lock | None = None,
 ) -> ServiceReadyContext:
     """Compose one generation-bound ready application context."""
 
@@ -2986,7 +3607,6 @@ async def provide_service_ready_context(
     # Repository authority is session-specific, so ready-time composition cannot activate a
     # provider binding or claim semantic readiness. Exact configured-credential presence is a
     # separate structural vault fact: it neither decrypts the record nor grants dispatch authority.
-    provider_binding: ProviderBinding | None = None
     provider_credential_connected = await configured_provider_credential_present()
     fallback_credential_connected = await configured_fallback_credential_present()
     semantic_ready = False
@@ -3047,7 +3667,6 @@ async def provide_service_ready_context(
         clock=clock,
         ids=ids,
         secret_memory=secret_memory,
-        catalog_db=cast(apsw.Connection, getattr(catalog, "_db")),
     )
     runtime = await open_local_bundle_runtime(
         runtime_context,
@@ -3104,6 +3723,40 @@ async def provide_service_ready_context(
     # retained bytes. The owner-private store is also the authoritative consent
     # fence while task-bundle propagation is still catching up.
     local_observation.set_runtime_enabled(config.observation.enabled)
+    require_capture_bootstrap = getattr(
+        local_observation, "set_capture_reservation_bootstrap_required", None
+    )
+    if callable(require_capture_bootstrap):
+        require_capture_bootstrap(True)
+
+    async def bootstrap_capture_reservations(
+        workspace: str,
+        current_runtime: TaskRuntime,
+        current_store: TaskObservationPort,
+    ) -> bool:
+        return await _bootstrap_capture_reservations(
+            workspace,
+            current_runtime,
+            current_store,
+            catalog=catalog,
+            runtime=runtime,
+            local_observation=local_observation,
+            clock=clock,
+            generation_is_current=lambda: generation_is_current(
+                service_generation, vault_generation
+            ),
+        )
+
+    async def reconcile_observation_capture(runtime: TaskRuntime) -> None:
+        store = runtime.observation
+        if store is None:
+            return
+        await _reconcile_observation_capture(
+            runtime,
+            local_observation,
+            clock,
+        )
+
     if not semantic_configured:
         semantic_evaluator = _semantic_not_configured
     elif not provider_endpoint_bound:
@@ -3128,108 +3781,109 @@ async def provide_service_ready_context(
             local_observation=local_observation,
         )
 
-    async def _semantic_review(
-        candidates: tuple[ObservationAdviceCandidate, ...],
-        basis: str,
-        gaps: tuple[str, ...],
-        yoetz_session_id: str | None,
-    ) -> ObservationAdviceSemanticAddon | None:
-        # Privacy-gated observation semantic path: authorize/dispatch through the coordinator.
-        # Provider failure or no-discrepancy leaves deterministic advice intact (no upgrade).
-        del gaps
-        if not semantic_ready or provider_binding is None or yoetz_session_id is None:
-            return None
-        packet = minimized_semantic_evidence_packet(
-            candidates,
-            basis,
-            coverage_gaps=(),
-            finding_summaries=tuple(str(item.rule_code) for item in candidates),
+    async def _dispatch_observation_advice_semantic(
+        attempt: ObservationAdviceSemanticAttempt,
+    ) -> ObservationAdviceSemanticOutcome:
+        """Privacy-gated provider attempt for one durable advice row, off the hook path (#619).
+
+        Repository authority and the provider binding are resolved here, at dispatch time,
+        never from the READY snapshot. The stored packet already carries the exact scoped
+        observation gaps; nothing is rebuilt from live state. Every non-success leaves a closed
+        failure reason and no finding, so the advice can only ever claim what a validated
+        provider answer supports.
+        """
+
+        route = await catalog.resolve_route(attempt.yoetz_session_id)
+        if (
+            route is None
+            or route.state is not TaskRouteState.ACTIVE
+            or route.repository_privacy_commitment is None
+        ):
+            return ObservationAdviceSemanticOutcome(
+                status="unavailable", failure_reason="authorization_missing"
+            )
+        repository_scope = AuthorizationScope(
+            AuthorizationScopeKind.TASK,
+            installation_id,
+            route.repository_privacy_commitment,
+            route.task_id,
         )
-        try:
-            payload = canonical_encode(cast(CanonicalJsonValue, dict(packet)))
-            subject = (
-                basis
-                if basis.startswith("sha256:")
-                else canonical_digest(cast(CanonicalJsonValue, {"basis": basis}))
+        if not await cast(PrivacyCoordinator, privacy).activate_repository(repository_scope):
+            return ObservationAdviceSemanticOutcome(
+                status="unavailable", failure_reason="authorization_missing"
             )
-            route = await catalog.resolve_route(yoetz_session_id)
-            if (
-                route is None
-                or route.state is not TaskRouteState.ACTIVE
-                or route.repository_privacy_commitment is None
-            ):
-                return None
-            repository_scope = AuthorizationScope(
-                AuthorizationScopeKind.TASK,
-                installation_id,
-                route.repository_privacy_commitment,
-                route.task_id,
+        binding = await resolve_provider_binding()
+        if binding is None:
+            return ObservationAdviceSemanticOutcome(
+                status="unavailable", failure_reason="provider_unavailable"
             )
-            if not await cast(PrivacyCoordinator, privacy).activate_repository(repository_scope):
-                return None
-            candidate = CandidateContext(
-                request_id=ids.new(IdKind.REQUEST),
-                channel=EgressChannel.LLM_INFERENCE,
-                local_sink=None,
-                purpose="semantic-review",
-                scope=repository_scope,
-                subject_digest=subject,
-                provider_binding=provider_binding,
-                items=(
-                    CandidateContextItem(
-                        "observation-advice-packet",
-                        DataCategory.BOUNDED_STRUCTURAL_METADATA,
-                        repository_scope,
-                        "/observation-advice",
-                        payload,
-                    ),
+        candidate = CandidateContext(
+            request_id=ids.new(IdKind.REQUEST),
+            channel=EgressChannel.LLM_INFERENCE,
+            local_sink=None,
+            purpose="semantic-review",
+            scope=repository_scope,
+            subject_digest=attempt.subject_digest,
+            provider_binding=binding,
+            items=(
+                CandidateContextItem(
+                    "observation-advice-packet",
+                    DataCategory.BOUNDED_STRUCTURAL_METADATA,
+                    repository_scope,
+                    "/observation-advice",
+                    attempt.packet_json,
                 ),
-            )
-            deadline = Deadline(clock.now_utc(), clock.monotonic_seconds() + 60.0)
-            result = await cast(PrivacyCoordinator, privacy).evaluate_semantic(candidate, deadline)
-        except Exception:
-            return None
+            ),
+        )
+        deadline = Deadline(clock.now_utc(), clock.monotonic_seconds() + 60.0)
+        result = await cast(PrivacyCoordinator, privacy).evaluate_semantic(candidate, deadline)
         if type(result) is not SemanticEgressSuccess:
-            return None
+            return ObservationAdviceSemanticOutcome(
+                status="failed",
+                failure_reason="provider_failed",
+                provider_identity=binding.provider_id,
+            )
+        receipt = result.privacy_receipt_id or result.authorization_id
         judgment = result.result.judgment
         if judgment.conclusion != "challenges_returned" or not judgment.challenges:
             # Honest attempt receipt without inventing additive findings.
-            return ObservationAdviceSemanticAddon(
-                finding_ids=(),
-                evidence_digest=basis,
-                next_action=None,
-                summaries=(),
-                details=(),
-                provider_identity=provider_binding.provider_id,
-                attempt_receipt=result.privacy_receipt_id or result.authorization_id,
-                failure_reason=None,
+            return ObservationAdviceSemanticOutcome(
+                status="succeeded",
+                attempt_receipt=receipt,
+                provider_identity=binding.provider_id,
+                evidence_digest=attempt.subject_digest,
             )
-        # Additive note only when the provider returned post-validated challenges.
         detail = f"challenges:{len(judgment.challenges)}"
         digest = canonical_digest(
             cast(
                 CanonicalJsonValue,
                 {
-                    "basis": basis,
+                    "basis": attempt.basis_digest,
                     "authorization_id": result.authorization_id,
                     "challenges": len(judgment.challenges),
                 },
             )
         )
         finding = stable_advice_finding_id("semantic_additive_review", detail, digest)
-        return ObservationAdviceSemanticAddon(
+        return ObservationAdviceSemanticOutcome(
+            status="succeeded",
+            attempt_receipt=receipt,
+            provider_identity=binding.provider_id,
             finding_ids=(finding,),
             evidence_digest=digest,
-            next_action=None,
             summaries=("Privacy-gated semantic observation review",),
             details=(
                 "Additive semantic note recorded after authorized provider attempt; "
                 "deterministic findings unchanged.",
             ),
-            provider_identity=provider_binding.provider_id,
-            attempt_receipt=result.privacy_receipt_id or result.authorization_id,
-            failure_reason=None,
         )
+
+    advice_semantic_supervisor = ObservationAdviceSemanticSupervisor(
+        service_generation=service_generation
+    )
+    advice_semantic_scheduler = ObservationAdviceSemanticScheduler(
+        now=lambda: timestamp_from_datetime(clock.now_utc()).wire
+    )
 
     verification_supervisor = ObservationVerificationSupervisor(
         service_generation=service_generation
@@ -3241,16 +3895,22 @@ async def provide_service_ready_context(
         ids=ids,
         advice_context_builder=ObservationAdviceContextBuilder(
             composition=observation_composition_fact,
-            semantic_review=_semantic_review if semantic_configured else None,
+            semantic_scheduler=advice_semantic_scheduler if semantic_configured else None,
         ),
         verification_supervisor=verification_supervisor,
+        advice_semantic_supervisor=advice_semantic_supervisor,
+        advice_semantic_dispatch=_dispatch_observation_advice_semantic,
         observation_enabled=config.observation.enabled,
+        capture_budget_bootstrap=bootstrap_capture_reservations,
     )
     observation_sweeper = ObservationOutboxSweeper(
         local_observation,
         observation_coordinator,
         budget_seconds=DEFAULT_OBSERVATION_SWEEP_BUDGET_SECONDS,
+        ingest_gate=observation_gate,
+        capture_recovery=observation_coordinator.recover_capture_inventory,
     )
+    legacy_spool_forwarder = _LegacyHookSpoolForwarder(paths.state)
 
     async def sweep_observation() -> ObservationDrainSummary:
         """Move fenced legacy-hook spool records into the normal durable outbox.
@@ -3260,23 +3920,11 @@ async def provide_service_ready_context(
         the ordinary service-owned outbox sweep forwards it.
         """
 
-        spool = HookSpool(_state=paths.state)
-        from yoetz.cli.observe_hooks import handle_observe
-
-        for workspace_commitment in spool.pending_workspaces():
-            with spool.claim(workspace_commitment) as records:
-                for record in records:
-                    handle_observe(
-                        event_name=record.event_name,
-                        stdin_bytes=canonical_encode(cast(DomainJsonValue, record.payload)),
-                        stdout=io.BytesIO(),
-                        _state=paths.state,
-                        skip_service=True,
-                        _workspace_commitment=workspace_commitment,
-                    )
+        await legacy_spool_forwarder.replay()
         return await observation_sweeper.sweep()
 
     def close_observation_maintenance() -> None:
+        legacy_spool_forwarder.close()
         observation_sweeper.close()
         observation_coordinator.close()
 
@@ -3327,13 +3975,21 @@ async def provide_service_ready_context(
         support_handlers=support_handlers,
         verification_supervisor=verification_supervisor,
         rediscover_pending_verification=observation_coordinator.rediscover_pending_verification,
+        advice_semantic_supervisor=advice_semantic_supervisor,
+        rediscover_pending_advice_semantic=(
+            observation_coordinator.rediscover_pending_advice_semantic
+        ),
         connected_provider_ids=connected_provider_ids,
         provider_credential_connected=provider_credential_connected,
         fallback_credential_connected=fallback_credential_connected,
         semantic_ready=semantic_ready,
-        observation_sweep=sweep_observation,
+        observation_sweep=_ReadyObservationSweep(
+            sweep_observation,
+            row_gate_bound=observation_gate is not None,
+        ),
         observation_sweep_close=close_observation_maintenance,
         ready_recommendation_refresh=refresh_ready_recommendations,
+        reconcile_observation_capture=reconcile_observation_capture,
     )
 
 
@@ -3346,6 +4002,7 @@ def build_ready_application_factory(
     clock: ClockPort,
     secret_memory: object,
     diagnostics: DiagnosticsPort | None = None,
+    observation_gate: asyncio.Lock | None = None,
 ) -> ReadyApplicationFactory:
     # Publish the loaded config gate before unlock/READY construction begins;
     # hooks then stop capture during a disabled service generation as well as
@@ -3362,5 +4019,6 @@ def build_ready_application_factory(
             clock=clock,
             secret_memory=secret_memory,
             diagnostics=diagnostics,
+            observation_gate=observation_gate,
         )
     )

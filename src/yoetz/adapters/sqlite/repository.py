@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final, Literal, cast
 
@@ -109,6 +109,15 @@ from yoetz.protocol.models import CheckScopeModel, SemanticReason, SemanticStatu
 __all__ = ["CheckpointReport", "SqliteLedger"]
 
 _GENESIS_DIGEST: Final = "genesis"
+_CAPTURE_TICKET_SCHEMA_VERSION: Final = 11
+
+
+@dataclass(frozen=True, slots=True)
+class _FreezeReservation:
+    """SQLite-local view of the memory oracle's transient acquisition barrier."""
+
+    session_id: str
+    expires_at: datetime
 
 
 def _public_error(
@@ -332,6 +341,57 @@ class SqliteLedger:
 
         return SqliteObservationStore(self._db)
 
+    def _pending_capture_ticket(self, task_id: str) -> tuple[object, ...] | None:
+        """Return one unfinished native handoff for this task.
+
+        The ticket table was added by bundle migration 0011.  Older bundles
+        intentionally retain the pre-handoff freeze behavior, but a current
+        schema must never silently bypass this barrier because a ticket query
+        failed for an unrelated SQLite reason.
+        """
+
+        try:
+            version_row = self._db.execute("PRAGMA user_version").fetchone()
+        except apsw.Error as exc:
+            raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
+        if version_row is None or type(version_row[0]) is not int:
+            raise _public_error(PublicErrorCode.STORAGE_CORRUPT)
+        if version_row[0] < _CAPTURE_TICKET_SCHEMA_VERSION:
+            return None
+        try:
+            pending = self._db.execute(
+                "SELECT workspace_commitment,logical_identity "
+                "FROM observation_capture_tickets "
+                "WHERE task_id=? AND state IN ('staging','pending') LIMIT 1",
+                (task_id,),
+            ).fetchone()
+        except apsw.Error as exc:
+            # A bundle claiming migration 0011 but missing its ticket table is
+            # corrupt.  Silently treating it like a legacy bundle would let a
+            # freeze outrun an encrypted handoff that the service can no
+            # longer inspect.
+            raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
+        if pending is None:
+            return None
+        if len(pending) != 2 or type(pending[0]) is not str or type(pending[1]) is not str:
+            raise _public_error(PublicErrorCode.STORAGE_CORRUPT)
+        try:
+            ticket = self.open_observation_store().load_capture_ticket(
+                workspace=pending[0],
+                logical_identity=pending[1],
+            )
+        except PublicOperationError:
+            raise
+        except apsw.Error as exc:
+            raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
+        if (
+            ticket is None
+            or ticket.task_id != task_id
+            or ticket.state not in {"staging", "pending"}
+        ):
+            raise _public_error(PublicErrorCode.STORAGE_CORRUPT)
+        return pending
+
     def _object_ref_from_inventory(self, object_id: str, task: str, media_type: str) -> ObjectRef:
         row = self._db.execute(
             "SELECT kind,plaintext_size,commitment,envelope_digest,encryption_format,key_slot,"
@@ -354,6 +414,51 @@ class SqliteLedger:
             )
         except (TypeError, ValueError) as exc:
             raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
+
+    async def _hydrate_artifact_ref(self, object_id: str, task: str) -> None:
+        """Restore one optional artifact from its authenticated object envelope.
+
+        The durable object inventory deliberately stores structural fields only; in particular it
+        does not store the media type.  Replaying an artifact therefore cannot reconstruct an
+        ``ObjectRef`` by guessing a media type from ``ObjectKind``.  Ask the object store to
+        authenticate the inventory-pinned envelope instead, then retain it only when the returned
+        header agrees with the task and every structural inventory column.  A missing, corrupt, or
+        mismatched optional artifact is left out of ``_state.object_refs`` so case-availability
+        reports the normal captured-content gap without treating the event ledger as corrupt.
+        """
+
+        if self._objects is None:
+            return
+        row = self._db.execute(
+            "SELECT kind,plaintext_size,commitment,envelope_digest,encryption_format,key_slot,state "
+            "FROM objects WHERE object_id=?",
+            (object_id,),
+        ).fetchone()
+        if row is None or len(row) != 7 or row[6] != "present":
+            return
+        try:
+            kind = ObjectKind(row[0])
+            expected_size = cast(int, row[1])
+            expected_commitment = cast(str, row[2])
+            expected_envelope_digest = cast(str, row[3])
+            expected_encryption_format = cast(Literal["yoetz-object/1"], row[4])
+            expected_key_slot = cast(str, row[5])
+            resolved = await self._objects.resolve_verified(object_id, expected_envelope_digest)
+            if (
+                type(resolved) is not ObjectRef
+                or resolved.object_id != object_id
+                or resolved.metadata.task_id != task
+                or resolved.metadata.kind is not kind
+                or resolved.plaintext_size != expected_size
+                or resolved.commitment != expected_commitment
+                or resolved.envelope_digest != expected_envelope_digest
+                or resolved.encryption_format != expected_encryption_format
+                or resolved.key_slot != expected_key_slot
+            ):
+                return
+        except KeyError, OSError, TypeError, ValueError:
+            return
+        self._state.object_refs[resolved.object_id] = resolved
 
     def _terminal_at(self) -> datetime:
         return self._clock.now_utc() if self._clock is not None else datetime.now(UTC)
@@ -504,6 +609,15 @@ class SqliteLedger:
                 payload_ref.object_id, cast(str, source["task_id"]), payload_ref.media_type
             )
             self._state.object_refs[ref.object_id] = ref
+            # Artifact objects are not event payloads.  Their durable inventory row is written
+            # before the event is published, so hydrate the exact authenticated descriptor on
+            # replay when the object is still present.  This includes captured observation and
+            # approved-check artifacts, whose media types are distinct despite sharing a captured
+            # object kind.
+            for artifact_value in cast(list[str] | tuple[str, ...], source["artifact_refs"]):
+                if artifact_value in self._state.object_refs:
+                    continue
+                await self._hydrate_artifact_ref(artifact_value, cast(str, source["task_id"]))
             payload = None
             if source["redaction"] == "present" and self._objects is not None:
                 try:
@@ -997,7 +1111,7 @@ class SqliteLedger:
                     case_ref = self._object_ref_from_inventory(
                         cast(str, case_object_id),
                         self._task_id,
-                        "application/vnd.yoetz.semantic-case+json",
+                        "application/json",
                     )
                     selected_ref = (
                         None
@@ -1005,7 +1119,7 @@ class SqliteLedger:
                         else self._object_ref_from_inventory(
                             cast(str, selected_result_object_id),
                             self._task_id,
-                            "application/vnd.yoetz.semantic-response+json",
+                            "application/json",
                         )
                     )
                     job = SemanticJobRecord(
@@ -1387,6 +1501,8 @@ class SqliteLedger:
         current = _head(self._db)
         if current != result.subject_frontier:
             raise _frontier_conflict(current)
+        for artifact_ref in command.artifact_object_refs:
+            self._inventory_object(artifact_ref)
         for record, entry in zip(records, command.entries, strict=True):
             ref = entry.payload_object
             existing = self._db.execute(
@@ -1768,13 +1884,13 @@ class SqliteLedger:
     ) -> AsyncIterator[LedgerRecord]:
         return self._load_events_recovered(session_id, after=after, through=through)
 
-    def _oracle(self) -> MemoryLedgerAdapter:
+    def _oracle(self, *, transaction_lock: asyncio.Lock | None = None) -> MemoryLedgerAdapter:
         return MemoryLedgerAdapter(
             task_id=self._task_id,
             ownership_fence=self._fence,
             state=self._state,
             import_state=_SqliteImportShim(),
-            transaction_lock=self._lock,
+            transaction_lock=self._lock if transaction_lock is None else transaction_lock,
             clock=self._clock,
             ids=self._ids,
             objects=self._objects,
@@ -1797,6 +1913,33 @@ class SqliteLedger:
             disclosure_waits=dict(self._state.disclosure_waits),
             object_refs=dict(self._state.object_refs),
             check_reservations=dict(self._state.check_reservations),
+        )
+
+    @staticmethod
+    def _freeze_state_snapshot(state: MemoryLedgerState) -> tuple[object, ...]:
+        """Capture every durable state component that a staged freeze could overwrite.
+
+        The acquisition lock is intentionally released while the resume object is staged.  A
+        records-only comparison is insufficient during that window: semantic lifecycle writes
+        can advance operations, jobs, attempts, or object inventory without adding a ledger
+        record.  Copy each mutable map so in-place mutations on the stable state object remain
+        visible to the final compare.  Transient check reservations are merged separately because
+        another acquisition may legitimately arm one while this case is staging.
+        """
+
+        return (
+            state.records,
+            dict(state.operations),
+            dict(state.writers),
+            state.projection,
+            dict(state.frozen_cases),
+            dict(state.check_results),
+            dict(state.check_errors),
+            dict(state.jobs),
+            dict(state.job_by_case),
+            dict(state.attempts),
+            dict(state.disclosure_waits),
+            dict(state.object_refs),
         )
 
     @staticmethod
@@ -1834,11 +1977,20 @@ class SqliteLedger:
         self._adopt_state(prior, clone)
         self._state = prior
 
-    def _sync_after_mutation_locked(self, new_records: tuple[LedgerRecord, ...] = ()) -> None:
+    def _sync_after_mutation_locked(
+        self,
+        new_records: tuple[LedgerRecord, ...] = (),
+        *,
+        pending_capture_task_id: str | None = None,
+    ) -> None:
         self._db.execute("BEGIN IMMEDIATE")
         try:
             self._db.execute("PRAGMA defer_foreign_keys=ON")
             self._verify_owner()
+            if pending_capture_task_id is not None:
+                pending_capture = self._pending_capture_ticket(pending_capture_task_id)
+                if pending_capture is not None:
+                    raise _public_error(PublicErrorCode.OPERATION_PENDING, retryable=True)
             self._persist_derived_records(new_records)
             self._sync_runtime_state()
             self._db.execute("COMMIT")
@@ -1847,9 +1999,17 @@ class SqliteLedger:
                 self._db.execute("ROLLBACK")
             raise
 
-    async def _sync_after_mutation(self, new_records: tuple[LedgerRecord, ...] = ()) -> None:
+    async def _sync_after_mutation(
+        self,
+        new_records: tuple[LedgerRecord, ...] = (),
+        *,
+        pending_capture_task_id: str | None = None,
+    ) -> None:
         async with self._lock:
-            self._sync_after_mutation_locked(new_records)
+            self._sync_after_mutation_locked(
+                new_records,
+                pending_capture_task_id=pending_capture_task_id,
+            )
 
     async def load_projection(
         self, session_id: str, view: ProjectionView
@@ -1889,10 +2049,23 @@ class SqliteLedger:
         self, writer_id: str, operation_id: str, request_digest: str
     ) -> OperationLease | PendingVerdict:
         await self._ensure_recovered()
-        result = await self._oracle().reclaim_operation(writer_id, operation_id, request_digest)
-        if type(result) is OperationLease:
-            await self._sync_after_mutation()
-        return result
+        async with self._lock:
+            prior = self._state
+            clone = self._clone_state()
+            oracle = MemoryLedgerAdapter(
+                task_id=self._task_id,
+                ownership_fence=self._fence,
+                state=clone,
+                import_state=_SqliteImportShim(),
+                transaction_lock=asyncio.Lock(),
+                clock=self._clock,
+                ids=self._ids,
+                objects=self._objects,
+            )
+            result = await oracle.reclaim_operation(writer_id, operation_id, request_digest)
+            if type(result) is OperationLease:
+                self._sync_clone_locked(prior, clone)
+            return result
 
     async def freeze_case(
         self,
@@ -1903,12 +2076,103 @@ class SqliteLedger:
         request_digest: str,
     ) -> FrozenCase | CheckCommitResult:
         await self._ensure_recovered()
-        result = await self._oracle().freeze_case(
-            session_id, writer_id, expected_frontier, request_id, request_digest
-        )
-        if type(result) is FrozenCase:
-            await self._sync_after_mutation()
-        return result
+        async with self._lock:
+            operation_key = (writer_id, request_id)
+            existing_operation = self._state.operations.get(operation_key)
+            new_freeze = existing_operation is None
+            prior = self._state
+            baseline = self._freeze_state_snapshot(prior)
+            clone = self._clone_state()
+            reservation: _FreezeReservation | None = None
+            if new_freeze:
+                pending_capture = self._pending_capture_ticket(self._task_id)
+                if pending_capture is not None:
+                    raise _public_error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+                now = self._terminal_at()
+                reservations = cast(dict[tuple[str, str], object], prior.check_reservations)
+                existing_reservation = reservations.get(operation_key)
+                if existing_reservation is not None and not isinstance(
+                    existing_reservation, _FreezeReservation
+                ):
+                    raise _public_error(PublicErrorCode.STORAGE_CORRUPT)
+                if existing_reservation is not None and existing_reservation.expires_at > now:
+                    raise _public_error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+
+                # Install the transient barrier in the live state before releasing the repository
+                # lock.  The clone deliberately precedes this write: the oracle must create its
+                # own reservation and later remove it, while concurrent append calls inspect the
+                # live reservation and either defer observation or advance the real frontier.
+                reservation = _FreezeReservation(session_id, now + timedelta(seconds=60))
+                reservations[operation_key] = reservation
+
+        try:
+            # Object staging is an awaitable boundary.  It must not retain the shared repository
+            # lock: observation append needs to see the reservation, and an agent append must be
+            # allowed to advance the frontier so final revalidation can return FRONTIER_CONFLICT.
+            oracle = MemoryLedgerAdapter(
+                task_id=self._task_id,
+                ownership_fence=self._fence,
+                state=clone,
+                import_state=_SqliteImportShim(),
+                transaction_lock=asyncio.Lock(),
+                clock=self._clock,
+                ids=self._ids,
+                objects=self._objects,
+            )
+            result = await oracle.freeze_case(
+                session_id, writer_id, expected_frontier, request_id, request_digest
+            )
+            async with self._lock:
+                current = self._state
+                reservations = cast(dict[tuple[str, str], object], current.check_reservations)
+                if reservation is not None and reservations.get(operation_key) is not reservation:
+                    raise _public_error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+
+                if self._freeze_state_snapshot(current) != baseline:
+                    if reservation is not None and reservations.get(operation_key) is reservation:
+                        reservations.pop(operation_key, None)
+                    # An append moved the ledger head, so retain the adapter-parity conflict
+                    # details. Other concurrent lifecycle mutations are retryable but do not
+                    # change the event frontier and must not be misreported as one.
+                    if current.records is not baseline[0]:
+                        raise _frontier_conflict(
+                            Frontier(current.projection.frontier, current.projection.head_digest)
+                        )
+                    raise _public_error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+
+                if type(result) is not FrozenCase:
+                    if reservation is not None and reservations.get(operation_key) is reservation:
+                        reservations.pop(operation_key, None)
+                    return result
+
+                # Keep reservations installed by another acquisition while adopting the durable
+                # clone. The local token is removed only by its owner, and this merge also avoids
+                # replacing a concurrently armed barrier with the clone's stale copy.
+                clone.check_reservations = cast(Any, dict(reservations))
+                if reservation is not None:
+                    clone.check_reservations.pop(operation_key, None)
+                try:
+                    self._state = clone
+                    self._sync_after_mutation_locked(
+                        pending_capture_task_id=self._task_id if new_freeze else None,
+                    )
+                except BaseException:
+                    if reservation is not None and reservations.get(operation_key) is reservation:
+                        reservations.pop(operation_key, None)
+                    self._state = current
+                    raise
+                self._adopt_state(current, clone)
+                self._state = current
+                return result
+        except BaseException:
+            if reservation is not None:
+                async with self._lock:
+                    reservations = cast(
+                        dict[tuple[str, str], object], self._state.check_reservations
+                    )
+                    if reservations.get(operation_key) is reservation:
+                        reservations.pop(operation_key, None)
+            raise
 
     async def advance_check_phase(
         self,
@@ -2013,9 +2277,22 @@ class SqliteLedger:
 
     async def renew_leases(self, lease: OperationLease) -> OperationLease:
         await self._ensure_recovered()
-        result = await self._oracle().renew_leases(lease)
-        await self._sync_after_mutation()
-        return result
+        async with self._lock:
+            prior = self._state
+            clone = self._clone_state()
+            oracle = MemoryLedgerAdapter(
+                task_id=self._task_id,
+                ownership_fence=self._fence,
+                state=clone,
+                import_state=_SqliteImportShim(),
+                transaction_lock=asyncio.Lock(),
+                clock=self._clock,
+                ids=self._ids,
+                objects=self._objects,
+            )
+            result = await oracle.renew_leases(lease)
+            self._sync_clone_locked(prior, clone)
+            return result
 
     async def commit_check_if_current(
         self,

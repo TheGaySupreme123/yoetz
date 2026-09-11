@@ -15,6 +15,11 @@ Semantic eligibility and the provenance gate stay in the
 [semantic dogfood runbook](semantic-dogfood.md) (#132). This runbook **consumes** that profile and
 gate; it does not redefine them.
 
+For the 0.2 multi-round workflow and recovery follow-up, use
+[native guidance-use acceptance](native-guidance-acceptance.md). It adds fresh/stale-memory variants,
+feedback scope, evidence reuse, repair qualification, safe recovery, and final-receipt agreement to
+each named host cell while keeping package delivery separate from actual guidance use.
+
 **Issue:** [#133](https://github.com/TheGaySupreme123/yoetz/issues/133).  
 **Design gate:** docs/test-only evaluation protocol — no public runtime behavior change.  
 **Out of scope here:** product fixes owned by #128–#132 (schema authorability, nested errors,

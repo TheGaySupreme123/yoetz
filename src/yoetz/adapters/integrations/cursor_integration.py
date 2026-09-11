@@ -161,7 +161,7 @@ _MARKER_NAME: Final = ".yoetz-cursor-plugin-install.json"
 _MARKER_SCHEMA_V1: Final = "yoetz.cursor-plugin-install/1"
 _MARKER_SCHEMA_V2: Final = "yoetz.cursor-plugin-install/2"
 _MARKER_SCHEMA_V3: Final = "yoetz.cursor-plugin-install/3"
-_RENDERER_VERSION: Final = "cursor-plugin/0.2.0"
+_RENDERER_VERSION: Final = "cursor-plugin/0.3.0"
 _ROLLBACK_NAME: Final = ".yoetz-cursor-plugin-rollback"
 _STAGE_PREFIX: Final = ".yoetz-cursor-plugin-stage-"
 _MAX_FILE_BYTES: Final = 262_144
@@ -175,6 +175,7 @@ _GUIDANCE_NAMES: Final = (
     "request-templates.md",
     "workflow.md",
 )
+_SKILL_PATH: Final = "skills/cursor/yoetz/SKILL.md"
 _DESCRIPTION: Final = (
     "Records material work in a local Yoetz ledger and checks completion claims "
     "against that record."
@@ -760,7 +761,7 @@ def _native_members(
     members: dict[str, bytes] = {
         ".cursor-plugin/plugin.json": canonical_encode(manifest),
         "hooks/hooks.json": canonical_encode(cast(JsonValue, {"hooks": hooks, "version": 1})),
-        "skills/yoetz/SKILL.md": source.read_bytes("skills/portable/yoetz/SKILL.md"),
+        "skills/yoetz/SKILL.md": source.read_bytes(_SKILL_PATH),
     }
     for name in _GUIDANCE_NAMES:
         members[f"skills/yoetz/references/{name}"] = source.read_bytes(f"guidance/{name}")
@@ -801,6 +802,7 @@ def render_cursor_plugin(
             mcp_ownership=mcp_ownership,
             mcp_route_profile=route_profile,
             resource_source=resources,
+            skill_host="cursor",
         )
         return CursorPluginArtifact(rendered.plan, dict(rendered.members), rendered.artifact_digest)
     resolved_yoetz_launcher = _resolve_yoetz_launcher(yoetz_launcher)
@@ -835,7 +837,7 @@ def render_cursor_plugin(
                     "guidance/publication-policy.md",
                     "guidance/request-templates.md",
                     "guidance/workflow.md",
-                    "skills/portable/yoetz/SKILL.md",
+                    _SKILL_PATH,
                 },
                 key=str.encode,
             )
@@ -1864,7 +1866,12 @@ def _root_binding_surfaces_match(artifact: CursorPluginArtifact, inspection: _In
         if artifact.isolation_root is None
         else f"{ISOLATED_ROOT_ENV}={shlex.quote(artifact.isolation_root)} "
     )
-    for event in CURSOR_HOOK_EVENTS:
+    hook_events = (
+        CURSOR_ORDINARY_HOOK_EVENTS
+        if artifact.plan.host_extension_profile == CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
+        else CURSOR_HOOK_EVENTS
+    )
+    for event in hook_events:
         expected_definition = expected_hook_map.get(event)
         current_definition = current_hook_map.get(event)
         if not isinstance(expected_definition, list) or not expected_definition:

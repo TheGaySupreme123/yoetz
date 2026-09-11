@@ -119,6 +119,9 @@ integrate_skill_app = typer.Typer(help="Manage the Yoetz harness skill.", no_arg
 integrate_mcp_app = typer.Typer(
     help="Manage the Yoetz MCP server registration.", no_args_is_help=True
 )
+integrate_project_mcp_app = typer.Typer(
+    help="Manage Cursor's project-scoped Yoetz MCP registration.", no_args_is_help=True
+)
 integrate_plugin_app = typer.Typer(
     help=(
         "Manage an explicit host plugin artifact. Claude Code supports the full lifecycle plus "
@@ -200,6 +203,7 @@ app.add_typer(state_app, name="state")
 app.add_typer(integrate_app, name="integrate")
 integrate_app.add_typer(integrate_skill_app, name="skill")
 integrate_app.add_typer(integrate_mcp_app, name="mcp")
+integrate_app.add_typer(integrate_project_mcp_app, name="project-mcp")
 integrate_app.add_typer(integrate_plugin_app, name="plugin")
 integrate_app.add_typer(integrate_admission_app, name="admission")
 app.add_typer(setup_app, name="setup")
@@ -1022,6 +1026,196 @@ def observe_content_status_cmd(
     )
 
 
+@observe_app.command("selection-status")
+def observe_selection_status_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+    session_id: Annotated[
+        str | None,
+        typer.Option(
+            "--session-id",
+            help="Optional current host session token; status stores only its commitment.",
+        ),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Show selected/effective observation detail and capacity."""
+
+    _finish(
+        _observe_operation("observation_selection_status")(
+            workspace=workspace,
+            session_id=session_id,
+            json_output=json_output,
+        )
+    )
+
+
+@observe_app.command("selection-preview")
+def observe_selection_preview_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+    detail: Annotated[
+        str,
+        typer.Option("--detail", help="focused or detailed"),
+    ],
+    capacity: Annotated[
+        str,
+        typer.Option("--capacity", help="standard, larger, or largest (512/2048/8192)"),
+    ],
+    session_id: Annotated[str | None, typer.Option("--session-id")] = None,
+    persist: Annotated[
+        bool,
+        typer.Option(
+            "--persist",
+            help="Preview an explicit workspace default instead of a session override.",
+        ),
+    ] = False,
+    expires_at: Annotated[
+        str | None,
+        typer.Option("--expires-at", help="RFC3339 UTC expiry (optional)."),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Preview a detail/capacity choice before owner apply."""
+
+    _finish(
+        _observe_operation("observation_selection_preview")(
+            workspace=workspace,
+            detail=detail,
+            capacity=capacity,
+            session_id=session_id,
+            persist=persist,
+            expires_at=expires_at,
+            json_output=json_output,
+        )
+    )
+
+
+@observe_app.command("selection-apply")
+def observe_selection_apply_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+    detail: Annotated[str, typer.Option("--detail", help="focused or detailed")],
+    capacity: Annotated[
+        str,
+        typer.Option("--capacity", help="standard, larger, or largest (512/2048/8192)"),
+    ],
+    session_id: Annotated[str | None, typer.Option("--session-id")] = None,
+    persist: Annotated[
+        bool,
+        typer.Option(
+            "--persist",
+            help="Persist for the workspace; without it the setting is session-scoped.",
+        ),
+    ] = False,
+    expires_at: Annotated[
+        str | None,
+        typer.Option("--expires-at", help="RFC3339 UTC expiry (optional)."),
+    ] = None,
+    accept: Annotated[
+        bool,
+        typer.Option(
+            "--accept",
+            help="Accept the exact selection preview shown by --preview-digest.",
+        ),
+    ] = False,
+    preview_digest: Annotated[
+        str | None,
+        typer.Option("--preview-digest", help="Exact digest returned by selection-preview."),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Apply an exact owner-selected detail/capacity preview."""
+
+    _finish(
+        _observe_operation("set_observation_selection")(
+            workspace=workspace,
+            detail=detail,
+            capacity=capacity,
+            session_id=session_id,
+            persist=persist,
+            expires_at=expires_at,
+            accept=accept,
+            preview_digest=preview_digest,
+            json_output=json_output,
+        )
+    )
+
+
+@observe_app.command("selection-revoke")
+def observe_selection_revoke_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+    session_id: Annotated[str | None, typer.Option("--session-id")] = None,
+    persist: Annotated[
+        bool,
+        typer.Option("--persist", help="Revoke the persisted workspace default."),
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Revoke a session/workspace selection and restore the safe fallback."""
+
+    _finish(
+        _observe_operation("revoke_observation_selection")(
+            workspace=workspace,
+            session_id=session_id,
+            persist=persist,
+            json_output=json_output,
+        )
+    )
+
+
+@observe_app.command("protect-read")
+def observe_protect_read_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+    session_id: Annotated[str, typer.Option("--session-id")],
+    reference: Annotated[
+        str,
+        typer.Option(
+            "--reference",
+            help="Existing obligation, claim, finding, or verification reference.",
+        ),
+    ],
+    count: Annotated[int, typer.Option("--count", min=1, max=32)] = 1,
+    expires_at: Annotated[
+        str | None,
+        typer.Option("--expires-at", help="RFC3339 UTC expiry (optional)."),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Protect the next bounded session reads within existing authority."""
+
+    _finish(
+        _observe_operation("protect_observation_read")(
+            workspace=workspace,
+            session_id=session_id,
+            reference=reference,
+            count=count,
+            expires_at=expires_at,
+            json_output=json_output,
+        )
+    )
+
+
+@observe_app.command("promote")
+def observe_promote_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+    source_identity: Annotated[
+        str,
+        typer.Option(
+            "--source-identity",
+            help="Exact retained observation source identity to promote.",
+        ),
+    ],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Promote a still-retained observation identity without new capture."""
+
+    _finish(
+        _observe_operation("promote_observation")(
+            workspace=workspace,
+            source_identity=source_identity,
+            json_output=json_output,
+        )
+    )
+
+
 @observe_app.command("pause")
 def observe_pause_cmd(
     workspace: Annotated[str, typer.Option("--workspace")],
@@ -1145,6 +1339,54 @@ app.command("check")(_workflow_command("check", CheckRequest))
 app.command("respond")(_workflow_command("respond", RespondRequest))
 app.command("status")(_workflow_command("status", StatusRequest))
 app.command("receipt")(_workflow_command("receipt", ReceiptRequest))
+
+
+@app.command("closure-prepare")
+def closure_prepare_command(
+    session_id: Annotated[str, typer.Option("--session-id")],
+    writer_id: Annotated[str, typer.Option("--writer-id")],
+    input_path: _INPUT = None,
+) -> None:
+    """Read closure inventory or prepare one explicitly selected phase; never publish."""
+
+    from yoetz.cli.closure import PREPARATION_REMEDIATIONS, Selection, prepare_closure
+
+    async def prepare() -> None:
+        selection = (
+            Selection()
+            if input_path is None
+            else cast(Selection, _request_model(Selection, input_path, None))
+        )
+        client = await build_service_client()
+        try:
+            result = await prepare_closure(client.status, session_id, writer_id, selection)
+        finally:
+            await client.close()
+        _stdout_json(result)
+
+    try:
+        run_async(prepare)
+    except OSError, ProtocolValueError, ValidationError:
+        _finish(_usage_failure())
+    except ValueError as error:
+        reason = str(error)
+        remediation = PREPARATION_REMEDIATIONS.get(reason)
+        if remediation is None:
+            _finish(_usage_failure())
+        else:
+            _stderr(f"{reason}: {remediation}")
+            _finish(2)
+    except ControlError as error:
+        _finish(_control_failure(error))
+
+
+@app.command("closure-schema")
+def closure_schema_command() -> None:
+    """Print the closed selection-input schema for closure-prepare."""
+
+    from yoetz.cli.closure import Selection
+
+    _stdout_json(cast(JsonValue, Selection.model_json_schema()))
 
 
 @cache
@@ -1600,12 +1842,16 @@ def instance_dispose(
 @service_app.command("diagnostics")
 def service_diagnostics(
     correlation_id: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--correlation-id",
             help="Exact err_… correlation id from a public error or reduced accept envelope.",
         ),
-    ],
+    ] = None,
+    request_id: Annotated[
+        str | None,
+        typer.Option("--request-id", help="Exact check request ID for joined failure stages."),
+    ] = None,
     json_output: _JSON = False,
 ) -> None:
     """Resolve one durable owner-only diagnostic record by correlation id."""
@@ -1614,12 +1860,14 @@ def service_diagnostics(
         from yoetz.observability.diagnostics import lookup_diagnostic_records
         from yoetz.protocol.ids import IdKind, validate_id
 
-        validate_id(IdKind.CORRELATION, correlation_id)
-        records = lookup_diagnostic_records(correlation_id)
+        if correlation_id is not None:
+            validate_id(IdKind.CORRELATION, correlation_id)
+        records = lookup_diagnostic_records(correlation_id, request_id=request_id)
         output = cast(
             JsonValue,
             {
                 "correlation_id": correlation_id,
+                **({"request_id": request_id} if request_id is not None else {}),
                 "count": len(records),
                 "records": [dict(item) for item in records],
             },
@@ -1646,12 +1894,22 @@ def mcp_serve(
             help="MCP serving identity for the exact local host; generic leaves host unknown.",
         ),
     ] = "generic",
+    project_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--project-root",
+            help=(
+                "Cursor only: expanded project selector from the host's ${workspaceFolder}; "
+                "it must also be present in MCP roots/list."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Run the MCP stdio bridge."""
 
     module = importlib.import_module("yoetz.mcp.server")
     mcp_main = cast(Callable[..., None], getattr(module, "main"))
-    mcp_main(semantic=semantic, host=host)
+    mcp_main(semantic=semantic, host=host, project_root=project_root)
 
 
 @state_app.command("capture")
@@ -1815,6 +2073,52 @@ def _integration_mcp_command(action: str) -> Callable[..., None]:
 
 for _mcp_action in ("preview", "preview-remove", "install", "status", "remove"):
     integrate_mcp_app.command(_mcp_action)(_integration_mcp_command(_mcp_action))
+
+
+def _cursor_project_mcp_command(action: str) -> Callable[..., None]:
+    def command(
+        context: typer.Context,
+        project_root: Annotated[
+            Path,
+            typer.Option(
+                "--project-root", help="Exact trusted project containing .cursor/mcp.json."
+            ),
+        ],
+        cursor_config_root: Annotated[
+            Path,
+            typer.Option("--cursor-config-root", help="Exact Cursor user configuration root."),
+        ],
+        route_profile: _ROUTE_PROFILE = None,
+        accept: _ACCEPT = False,
+        preview_digest: Annotated[
+            str | None,
+            typer.Option("--preview-digest", help="Exact reviewed project MCP preview digest."),
+        ] = None,
+        json_output: _JSON = False,
+    ) -> None:
+        harness = cast(str, context.find_root().find_object(str) or context.obj)
+        module = importlib.import_module("yoetz.cli.cursor_project_mcp")
+        operation = cast(Callable[..., int], getattr(module, "run_cursor_project_mcp_command"))
+        _finish(
+            operation(
+                action,
+                harness,
+                project_root=project_root,
+                cursor_config_root=cursor_config_root,
+                route_profile=_validated_route_profile(route_profile),
+                accept=accept,
+                preview_digest=preview_digest,
+                json_output=json_output,
+            )
+        )
+
+    return command
+
+
+for _project_mcp_action in ("preview", "preview-remove", "install", "status", "remove"):
+    integrate_project_mcp_app.command(_project_mcp_action)(
+        _cursor_project_mcp_command(_project_mcp_action)
+    )
 
 
 # The per-host plugin command surface (issue #465). Codex activation is the

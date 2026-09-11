@@ -174,7 +174,8 @@ def test_render_plugin_tree_wires_observation_and_compat_hooks() -> None:
     hooks = tree["hooks/hooks.json"].decode("utf-8")
     assert "yoetz hooks user-prompt-submit --workspace ." in hooks
     assert "yoetz hooks post-tool-use" in hooks
-    assert "yoetz hooks session-start" in hooks
+    # The re-ground probe names its workspace like every other rendered hook (#659).
+    assert "yoetz hooks session-start --workspace ." in hooks
     assert "yoetz hooks observe --workspace . --event SessionStart" in hooks
     assert "yoetz hooks spool --workspace . --event PreToolUse" in hooks
     assert "yoetz hooks spool --workspace . --event PermissionRequest" in hooks

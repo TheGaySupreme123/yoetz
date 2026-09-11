@@ -8,16 +8,19 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
+import apsw
 import pytest
 
 from yoetz.adapters.integrations.codex_lifecycle import LifecycleMapping
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
-from yoetz.adapters.sqlite.migrations import initialize_bundle
+from yoetz.adapters.sqlite import connection as connection_module
+from yoetz.adapters.sqlite.migrations import initialize_bundle as initialize_schema
 from yoetz.adapters.sqlite.observation import SqliteObservationStore
 from yoetz.application.observation_control import build_observation_support_handlers
 from yoetz.application.observation_coordinator import ObservationCoordinator
@@ -54,10 +57,18 @@ from yoetz.domain.observation import (
 from yoetz.domain.observation_profiles import CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
 from yoetz.domain.values import Frontier, JsonObject, Timestamp, finding_id
 from yoetz.ports.ledger import CheckPhase, OperationKind, OperationRecord, OperationState
+from yoetz.ports.observation import TaskObservationPort
 from yoetz.ports.runtime import TaskRuntime
 from yoetz.protocol.canonical import canonical_digest, canonical_encode
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
+
+
+def initialize_bundle(db: apsw.Connection, seed: Mapping[str, str]) -> None:
+    """Stage a fixture schema, then enforce the production writer SQL policy (#616)."""
+
+    initialize_schema(db, seed)
+    db.set_authorizer(connection_module._writer_authorizer)  # pyright: ignore[reportPrivateUsage]
 
 
 def _task_id() -> str:
@@ -273,7 +284,7 @@ def test_materialize_post_only_profiles_never_invent_a_pre_pair() -> None:
         assert "Codex hook" not in native_action.description
 
 
-def test_successful_routine_reads_stay_observation_only_but_failures_materialize() -> None:
+def test_individually_admitted_routine_reads_materialize_but_summaries_do_not() -> None:
     task = _task_id()
     session = f"hmac-sha256:{'ed' * 32}"
     pre = _envelope(session=session, kind="PreToolUse", identity="hook:read-pre")
@@ -281,8 +292,8 @@ def test_successful_routine_reads_stay_observation_only_but_failures_materialize
     deferred = materialize_observation_envelope(
         replace(pre, structural_payload=pre_structural), task_id=task
     )
-    assert deferred.drafts == ()
-    assert deferred.skip_reason == "routine_read_deferred"
+    assert deferred.skip_reason is None
+    assert [item.draft.schema.name for item in deferred.drafts] == ["action_recorded"]
 
     post = _envelope(
         session=session,
@@ -294,8 +305,11 @@ def test_successful_routine_reads_stay_observation_only_but_failures_materialize
     coalesced = materialize_observation_envelope(
         replace(post, structural_payload=post_structural), task_id=task
     )
-    assert coalesced.drafts == ()
-    assert coalesced.skip_reason == "routine_read_coalesced"
+    assert coalesced.skip_reason is None
+    assert [item.draft.schema.name for item in coalesced.drafts] == [
+        "action_recorded",
+        "result_recorded",
+    ]
 
     failed = materialize_observation_envelope(
         replace(
@@ -1575,7 +1589,7 @@ def test_local_outbox_v1_compatibility_and_v2_attempt_round_trip(tmp_path: Path)
     assert durable.last_attempt_at == attempted_at
     assert durable.consecutive_reason_attempts == 1
     assert json.loads(state_path.read_text(encoding="utf-8"))["schema"] == (
-        "yoetz.observation-local/13"
+        "yoetz.observation-local/15"
     )
 
     raw = json.loads(state_path.read_text(encoding="utf-8"))
@@ -1714,7 +1728,7 @@ def test_enqueue_refuses_projected_oversize_without_losing_consent(
     )
 
 
-def test_size_compaction_accounts_for_distinct_same_source_rows(
+def test_size_save_preserves_distinct_same_source_rows_when_bound_cannot_fit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import yoetz.adapters.integrations.observation_local as local_mod
@@ -1729,23 +1743,27 @@ def test_size_compaction_accounts_for_distinct_same_source_rows(
             "sess-compact",
             _envelope(session=session, identity="hook:same", ordinal=ordinal),
         )
+    state_path = next((tmp_path / "observation" / "workspaces").glob("*.json"))
+    before = state_path.read_bytes()
+    state = store._load(workspace)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    assert state.stream_partials is not None
+    state.stream_partials[session] = b"x" * 128
     # /11 persists pairing-history provenance, adding a small fixed envelope to
-    # the compacted authority state. Keep the bound tight while allowing that
-    # required marker to fit after both outbox rows are accounted for.
+    # the authority state. Keep the bound tight enough that the accepted rows
+    # cannot fit after optional cache shedding. The save must fail closed,
+    # leaving both the prior file and the caller's mutable state untouched.
     monkeypatch.setattr(local_mod, "_MAX_STATE_BYTES", 2_400)
 
-    store.note_coverage_gap(workspace, ObservationGapCode.SERVICE_UNAVAILABLE.value)
+    with pytest.raises(PublicOperationError) as raised:
+        store._save(workspace, state)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    assert raised.value.code is PublicErrorCode.STORAGE_UNSAFE
+    assert state_path.read_bytes() == before
+    assert state.stream_partials == {session: b"x" * 128}
+    assert len(state.pending_outbox or ()) == 2
 
     reopened = LocalObservationStore(_state=tmp_path)
-    state_path = next((tmp_path / "observation" / "workspaces").glob("*.json"))
-    persisted = json.loads(state_path.read_text(encoding="utf-8"))
-    accounted = (
-        reopened.pending_outbox_count(workspace)
-        + reopened.quarantined_count(workspace)
-        + int(persisted["quarantine_evicted_count"])
-    )
-    assert accounted == 2
-    assert state_path.stat().st_size <= 2_400
+    assert reopened.pending_outbox_count(workspace) == 2
+    assert reopened.quarantined_count(workspace) == 0
 
 
 def test_monotonic_samples_fenced_across_simulated_reboot(tmp_path: Path) -> None:
@@ -2160,6 +2178,11 @@ async def test_ledger_event_invalid_is_terminal_not_service_unavailable(tmp_path
     local, _workspace, session, mapping = _mapped_local(tmp_path, "ledger-event-invalid")
 
     class _Store:
+        def load_capture_ticket(self, *, workspace: str, logical_identity: str) -> None:
+            # This structural-only fixture has no staged native capture to recover.
+            del workspace, logical_identity
+            return None
+
         def grant_consent(self, *args: object, **kwargs: object) -> None:
             del args, kwargs
 
@@ -2299,7 +2322,9 @@ async def test_storage_corrupt_blocks_session_for_coordinator_generation(tmp_pat
 
 
 @pytest.mark.anyio
-async def test_coordinator_rejects_disabled_before_mapping_or_runtime(tmp_path: Path) -> None:
+async def test_coordinator_rejects_disabled_stream_before_mapping_or_runtime(
+    tmp_path: Path,
+) -> None:
     class _NoRuntime:
         async def route(self, command: object) -> object:
             raise AssertionError("disabled observation must not route")
@@ -2330,7 +2355,9 @@ async def test_coordinator_rejects_disabled_before_mapping_or_runtime(tmp_path: 
     result = await coordinator.ingest_request(
         ObservationIngestRequest(
             codex_session_id="disabled-sess",
-            envelope=_envelope(session=session),
+            envelope=replace(
+                _envelope(session=session), source=ObservationSource.CODEX_SESSION_STREAM
+            ),
         )
     )
     assert result.disposition is ObservationIngestDisposition.REJECTED
@@ -3245,6 +3272,11 @@ async def test_duplicate_ingest_reconciles_ledger_instead_of_early_return(tmp_pa
     calls = {"append": 0, "advice": 0}
 
     class _DuplicateStore:
+        def load_capture_ticket(self, *, workspace: str, logical_identity: str) -> None:
+            # This structural-only fixture has no staged native capture to recover.
+            del workspace, logical_identity
+            return None
+
         def grant_consent(self, *args: object) -> None:
             return None
 
@@ -3363,6 +3395,11 @@ async def test_check_barrier_deferral_is_designed_backpressure(
     local, _workspace, session, mapping = _mapped_local(tmp_path, f"barrier-{code.value.lower()}")
 
     class _BarrierStore:
+        def load_capture_ticket(self, *, workspace: str, logical_identity: str) -> None:
+            # This structural-only fixture has no staged native capture to recover.
+            del workspace, logical_identity
+            return None
+
         def grant_consent(self, *args: object, **kwargs: object) -> None:
             del args, kwargs
 
@@ -3722,14 +3759,29 @@ async def test_native_content_requires_matching_local_and_task_profile_grants(
         async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
             del args, kwargs
 
+    class _Clock:
+        def now_utc(self) -> datetime:
+            return datetime(2026, 1, 1, tzinfo=UTC)
+
+    async def bootstrap(workspace: str, runtime: TaskRuntime, store: TaskObservationPort) -> bool:
+        # This fixture owns exactly one task bundle. Capture authority still
+        # needs a complete budget inventory independently of its profile grant.
+        assert runtime.task_id == mapping.yoetz_task_id
+        assert store is task_store
+        return local.bootstrap_capture_reservations(
+            workspace,
+            {runtime.task_id: store.capture_backlog(workspace)},
+        )
+
     runtime_port = _RuntimePort()
     coordinator = _Coordinator(
         runtime=runtime_port,  # type: ignore[arg-type]
         local=local,
-        clock=object(),  # type: ignore[arg-type]
+        clock=_Clock(),  # type: ignore[arg-type]
         ids=object(),  # type: ignore[arg-type]
         state_root=tmp_path,
         mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+        capture_budget_bootstrap=bootstrap,
     )
     chunk = ObservationContentChunk(
         content_kind=ObservationContentKind.TOOL_OUTPUT,
@@ -3753,6 +3805,7 @@ async def test_native_content_requires_matching_local_and_task_profile_grants(
                 identity=identity,
                 ordinal=len(captured) + 1,
                 source=ObservationSource.CLAUDE_HOOK,
+                corr=identity,
             ),
             content_chunks=(chunk,),
             content_capture_profile=profile,
@@ -4091,6 +4144,9 @@ async def test_post_only_replay_includes_historical_unpaired_role_set(tmp_path: 
     replay_sets: list[tuple[tuple[str, ...], ...]] = []
 
     class _Store:
+        def load_capture_ticket(self, **kwargs: object) -> None:
+            del kwargs
+
         def grant_consent(self, *args: object, **kwargs: object) -> None:
             del args, kwargs
 
@@ -4521,6 +4577,11 @@ async def test_identity_claim_conflict_rejects_one_envelope_without_latching(
     ingested: list[str] = []
 
     class _ConflictStore:
+        def load_capture_ticket(self, *, workspace: str, logical_identity: str) -> None:
+            # This structural-only fixture has no staged native capture to recover.
+            del workspace, logical_identity
+            return None
+
         def grant_consent(self, *args: object, **kwargs: object) -> None:
             del args, kwargs
 
@@ -4780,8 +4841,6 @@ async def test_host_hook_row_refused_by_ledger_schema_quarantines_then_delivers_
     projected as retryable service_unavailable, so the FIFO head was retried forever while
     the service reported ready. After the bundle migrates, the identical envelope delivers.
     """
-
-    import apsw
 
     from yoetz.adapters.sqlite.migrations import BUNDLE_MIGRATIONS, run_migrations
 

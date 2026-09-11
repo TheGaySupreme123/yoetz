@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import os
 import re
-import shlex
 import sys
 import time
 from collections.abc import Awaitable, Callable, Generator, Mapping
@@ -29,10 +28,10 @@ from yoetz.adapters.integrations.codex_lifecycle import (
     validate_codex_session_id,
 )
 from yoetz.adapters.integrations.hook_spool import HookSpool
+from yoetz.adapters.integrations.observation_admission import build_routine_read_summary
 from yoetz.adapters.integrations.observation_local import (
     HOOK_MAPPING_VERSION,
     YOETZ_OWNED_TOOL_NAMES,
-    YOETZ_TOOL_NAMES,
     AdviceDelivery,
     FrontierMotionNotice,
     LocalObservationConsent,
@@ -60,6 +59,7 @@ from yoetz.cli.hook_io import (
     stderr_line as _stderr_line,
 )
 from yoetz.domain.observation import (
+    OBSERVATION_CONTENT_CAPTURE_PENDING_REASON,
     ObservationContentChunk,
     ObservationContentKind,
     ObservationCursor,
@@ -73,12 +73,21 @@ from yoetz.domain.observation import (
     observation_ingest_request_to_json,
     observation_ingest_result_from_json,
 )
+from yoetz.domain.observation_budget import ModeLimits, ObservationMode, mode_limits
 from yoetz.domain.observation_profiles import (
     CLAUDE_CODE_ORDINARY_HOOK_MAPPING_VERSION,
     CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
     CURSOR_ORDINARY_HOOK_MAPPING_VERSION,
     CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
     content_capture_profile_matches_source,
+)
+from yoetz.domain.observation_selection import (
+    SHELL_TOOLS as _SHELL_TOOLS,
+)
+from yoetz.domain.observation_selection import (
+    ObservationClassification,
+    classify_observation,
+    is_routine_read_candidate,
 )
 from yoetz.domain.values import (
     JsonObject,
@@ -149,10 +158,16 @@ _MAX_CONTENT_CHUNK: Final = 256 * 1024
 # is never silently dropped as if committed.
 _HOOK_DRAIN_BUDGET_SECONDS: Final = 0.20
 _HOOK_DRAIN_ROW_LIMIT: Final = 4
-# Codex hard-clamps SessionEnd hooks to 3 seconds. The default drain budget
-# plus ingest/encode overhead measured within ~0.5s of that ceiling on a
-# realistic store, so SessionEnd drains under a tighter budget: an undrained
-# row is retried on the next session's hooks, a SIGKILLed hook drains nothing.
+# Native Claude/Cursor ordinary-profile content is transient by design: it cannot
+# be copied to the structural outbox. Give every ordinary-profile pass a bounded
+# chance to drain its structural RPC, and give content-bearing passes enough time
+# to deliver the current event after its same-session prefix; bulk work remains
+# the service sweeper's responsibility.
+_NATIVE_CONTENT_DRAIN_BUDGET_SECONDS: Final = 1.0
+_NATIVE_CONTENT_ROW_LIMIT: Final = 16
+# Codex hard-clamps SessionEnd hooks to 3 seconds. Teardown records its local
+# lifecycle/outbox intent and defers service delivery to the next hook or
+# sweeper, so a cold service preflight cannot consume that host window.
 _SESSION_END_DRAIN_BUDGET_SECONDS: Final = 0.15
 # A run of consecutive service_unavailable rejections means the service is
 # struggling now; yield the pass and let a later hook retry rather than
@@ -168,9 +183,10 @@ _HOOK_CONNECT_PREFLIGHT_SECONDS: Final = 1.0
 # demand and may miss a session's opening moments; without a later re-attempt an
 # unmapped session stayed unmapped for its whole life and its outbox retried as
 # mapping_missing forever (#275). Low-frequency, once-per-turn events only --
-# never the PreToolUse/PostToolUse storm -- under a budget that keeps even the
-# Codex 3s SessionEnd clamp honest (attach 1.0 + connect preflight 1.0 + drain).
-_AUTO_ATTACH_RETRY_EVENTS: Final = frozenset({"UserPromptSubmit", "Stop", "SessionEnd"})
+# never the PreToolUse/PostToolUse storm. SessionEnd is teardown-only and has a
+# three-second host clamp, so it records the lifecycle intent and defers pending
+# rows but never spends the extra attach retry budget.
+_AUTO_ATTACH_RETRY_EVENTS: Final = frozenset({"UserPromptSubmit", "Stop"})
 _AUTO_ATTACH_RETRY_BUDGET_SECONDS: Final = 1.0
 _AUTO_ATTACH_START_DEADLINE_MS: Final = 5_000
 # End-to-end observability contract for one hook pass, process start included.
@@ -186,25 +202,10 @@ _HOOK_TOTAL_BUDGET_SECONDS: Final = (
     + _HOOK_LOCAL_STAGE_ALLOWANCE_SECONDS
 )
 _TIMING_REPORT_EVENTS: Final = frozenset({"SessionStart", "Stop", "SessionEnd"})
-# The stages that partition one pass end to end, in order. 'advice' is nested
-# inside 'store' and every 'store_*' accumulator spans the whole pass, so
-# neither belongs in a sum against the total.
-_PASS_PARTITION_STAGES: Final = ("import", "resolve", "store", "drain", "deliver")
-_ROUTINE_READ_TOOLS: Final = frozenset(
-    {
-        "glob",
-        "grep",
-        "list_files",
-        "read",
-        "read_file",
-        "search",
-        "view_file",
-    }
-)
-_SHELL_TOOLS: Final = frozenset(
-    {"bash", "command", "exec", "exec_command", "local_shell", "run_terminal_cmd", "shell"}
-)
-_READ_ONLY_COMMANDS: Final = frozenset({"head", "ls", "pwd", "rg", "tail", "wc"})
+# The stages that partition one pass end to end, in order. Advice refresh is
+# deliberately outside the local capture batch, so it is accounted for as its
+# own stage rather than being hidden in the store duration.
+_PASS_PARTITION_STAGES: Final = ("import", "resolve", "store", "advice", "drain", "deliver")
 _STRUCTURAL_ALLOW: Final = frozenset(
     {
         "tool_name",
@@ -522,60 +523,25 @@ def _resolve_cursor_workspace(
 
 
 def _routine_read_action(payload: Mapping[str, JsonValue]) -> bool:
-    """Recognize a deliberately narrow, side-effect-free tool invocation.
+    """Return the adapter-owned routine candidate bit.
 
-    The returned bit is structural only; command text remains visible-content input and is never
-    copied into the observation envelope. Ambiguous shell syntax fails closed to ordinary
-    materialization. This is a rate policy, not a general shell-effect analyzer.
+    Classification rules live in the domain module so every host adapter uses
+    the same closed read set and shell safety checks.  Outcome facts are
+    intentionally ignored here: a failed read is still a read-shaped attempt
+    and must remain protected by the full classifier.
     """
 
-    tool = _token_or_none(payload.get("tool_name"))
-    if tool is None:
-        return False
-    lowered = tool.lower()
-    if lowered in _ROUTINE_READ_TOOLS:
-        return True
-    if lowered not in _SHELL_TOOLS:
-        return False
-    tool_input = payload.get("tool_input")
-    if not isinstance(tool_input, Mapping):
-        return False
-    nested = cast(Mapping[str, JsonValue], tool_input)
-    raw = nested.get("cmd") or nested.get("command")
-    if type(raw) is not str or not raw or len(raw) > 16_384:
-        return False
-    # Multiple commands, redirection, substitution, and pipelines require a real shell parser.
-    # They remain ordinary observations rather than being optimistically labelled read-only.
-    if any(marker in raw for marker in ("\n", "\r", ";", "&", "|", ">", "<", "`", "$(")):
-        return False
-    try:
-        argv = shlex.split(raw, posix=True)
-    except ValueError:
-        return False
-    if not argv:
-        return False
-    command = argv[0]
-    if "/" in command or "\\" in command:
-        # Path-qualified names are not the closed basename set; a local `./ls`
-        # or `/tmp/head` is an arbitrary executable, not a trusted read tool.
-        return False
-    if command == "rg" and any(arg == "--pre" or arg.startswith("--pre=") for arg in argv[1:]):
-        # ripgrep's preprocessor is an arbitrary executable, not a read primitive.
-        return False
-    if command in _READ_ONLY_COMMANDS:
-        return True
-    if command == "git" and len(argv) >= 2:
-        if any(
-            arg == "--ext-diff" or arg == "--output" or arg.startswith("--output=")
-            for arg in argv[1:]
-        ):
-            # `--output` writes a file; `--ext-diff` runs an external helper.
-            return False
-        return argv[1] in {"diff", "log", "rev-parse", "show", "status"}
-    return False
+    return is_routine_read_candidate(payload)
 
 
-def _extract_structural(payload: Mapping[str, JsonValue], event_name: str) -> JsonObject:
+def _extract_structural(
+    payload: Mapping[str, JsonValue],
+    event_name: str,
+    *,
+    classification: ObservationClassification | None = None,
+) -> JsonObject:
+    """Extract bounded structural fields and apply the typed selection result."""
+
     fields: dict[str, JsonValue] = {"hook_name": event_name}
     tool_name = _token_or_none(payload.get("tool_name"))
     if tool_name is not None:
@@ -602,6 +568,10 @@ def _extract_structural(payload: Mapping[str, JsonValue], event_name: str) -> Js
         "generation_id",
     ):
         token = _token_or_none(payload.get(key))
+        if key == "action" and token is not None and token.casefold() == "routine_read":
+            # ``routine_read`` is a service-owned marker.  A host or nested
+            # tool payload cannot inject it into an envelope.
+            continue
         if token is not None and key in _STRUCTURAL_ALLOW:
             fields[key] = token
     # Codex names the host tool-call id ``tool_use_id``. Normalize it to the
@@ -620,22 +590,19 @@ def _extract_structural(payload: Mapping[str, JsonValue], event_name: str) -> Js
         nested = cast(Mapping[str, JsonValue], tool_input)
         for key in ("tool_name", "permission_kind", "claim_kind", "action", "mapping_hint"):
             token = _token_or_none(nested.get(key))
+            if key == "action" and token is not None and token.casefold() == "routine_read":
+                continue
             if token is not None and key not in fields:
                 fields[key] = token
         digest = _token_or_none(nested.get("changed_paths_digest"))
         if digest is not None and "changed_paths_digest" not in fields:
             fields["changed_paths_digest"] = digest
-    success = _bool_or_none(payload.get("success"))
-    denied = _bool_or_none(payload.get("denied"))
-    if (
-        event_name in {"PreToolUse", "PostToolUse"}
-        and _routine_read_action(payload)
-        and success is not False
-        and denied is not True
+    selected = classification or classify_observation(payload, event_name)
+    if selected.routine_candidate and (
+        event_name in {"PreToolUse", "preToolUse"} or selected.proven_routine_success
     ):
-        # Service-owned classification overrides an untrusted host-supplied action token.
-        # Explicit failures and denials stay ordinary observations even when the
-        # tool name would otherwise be a routine read.
+        # The marker is emitted only from the typed classifier.  It is never
+        # copied from host ``action`` or ``tool_input.action`` text.
         fields["action"] = "routine_read"
     for key in ("exit_status", "duration_ms", "event_ordinal", "attempt"):
         number = _int_or_none(payload.get(key))
@@ -754,6 +721,7 @@ def map_hook_payload_to_envelope(
     source_generation: int = 1,
     gap_codes: tuple[str, ...] = (),
     source: ObservationSource = ObservationSource.CODEX_HOOK,
+    classification: ObservationClassification | None = None,
 ) -> ObservationEnvelope:
     """Map a bounded hook payload to a structural ObservationEnvelope."""
 
@@ -780,7 +748,7 @@ def map_hook_payload_to_envelope(
             content_object_refs=(),
             gap_codes=gaps,
         )
-    structural = _extract_structural(payload, event_name)
+    structural = _extract_structural(payload, event_name, classification=classification)
     if "event_ordinal" not in structural:
         structural = JsonObject({**structural, "event_ordinal": event_ordinal})
     identity = _source_identity(event_name, payload, structural, event_ordinal=event_ordinal)
@@ -810,6 +778,7 @@ def _visible_content_chunks(
     *,
     envelope: ObservationEnvelope,
     workspace_locator: str | None,
+    optional_limits: ModeLimits | None = None,
 ) -> tuple[tuple[ObservationContentChunk, ...], bool]:
     """Extract only explicitly visible task content and redact it before transport.
 
@@ -859,7 +828,12 @@ def _visible_content_chunks(
             payload.get("message") or payload.get("output") or payload.get("content"),
         )
     elif event_name == "PreToolUse":
-        add(ObservationContentKind.TOOL_INPUT, "tool-input", payload.get("tool_input"))
+        # Codex input bytes have no capture consumer and are excluded from
+        # semantic selection. Keep the structural envelope/correlation, but
+        # avoid encrypting a second copy of command arguments. Ordinary native
+        # profiles retain their explicitly selected capture contract.
+        if envelope.source is not ObservationSource.CODEX_HOOK:
+            add(ObservationContentKind.TOOL_INPUT, "tool-input", payload.get("tool_input"))
     elif event_name == "PostToolUse":
         add(
             ObservationContentKind.TOOL_OUTPUT,
@@ -890,15 +864,21 @@ def _visible_content_chunks(
         add(ObservationContentKind.WORKSPACE_LOCATOR, "workspace", workspace_locator)
 
     chunks: list[ObservationContentChunk] = []
-    remaining = 680_000
+    remaining = 680_000 if optional_limits is None else optional_limits.max_optional_bytes
     truncated = False
     for selected_index, (kind, label, raw) in enumerate(selected):
         redacted, detected = redact_sensitive_content(raw)
         if not redacted:
             continue
-        if len(redacted) > remaining:
+        part_limit = remaining
+        if optional_limits is not None:
+            if kind is ObservationContentKind.TOOL_INPUT:
+                part_limit = min(part_limit, optional_limits.max_input_bytes)
+            elif kind is ObservationContentKind.TOOL_OUTPUT:
+                part_limit = min(part_limit, optional_limits.max_output_bytes)
+        if len(redacted) > part_limit:
             truncated = True
-        redacted = redacted[:remaining]
+        redacted = redacted[:part_limit]
         if not redacted:
             truncated = True
             break
@@ -940,18 +920,21 @@ def _elapsed_ms(started: float, finished: float) -> int:
     return max(0, int((finished - started) * 1000))
 
 
-def _hook_total_budget_seconds(event: str) -> float:
+def _hook_total_budget_seconds(event: str, *, native_content: bool = False) -> float:
     """Return the end-to-end budget for one pass of *event*.
 
     Events that may legitimately retry auto-attach (and SessionStart, the
     primary attach point) carry that enforced budget on top of the base sum;
-    the high-frequency PreToolUse/PostToolUse storm never attaches and keeps
-    the tighter contract (#288).
+    the high-frequency PreToolUse/PostToolUse storm and teardown SessionEnd
+    keep the tighter contract (#288, #616).
     """
 
+    total = _HOOK_TOTAL_BUDGET_SECONDS
+    if native_content:
+        total += _NATIVE_CONTENT_DRAIN_BUDGET_SECONDS - _HOOK_DRAIN_BUDGET_SECONDS
     if event == "SessionStart" or event in _AUTO_ATTACH_RETRY_EVENTS:
-        return _HOOK_TOTAL_BUDGET_SECONDS + _AUTO_ATTACH_RETRY_BUDGET_SECONDS
-    return _HOOK_TOTAL_BUDGET_SECONDS
+        total += _AUTO_ATTACH_RETRY_BUDGET_SECONDS
+    return total
 
 
 def _record_pass_timing(
@@ -961,6 +944,7 @@ def _record_pass_timing(
     stages: Mapping[str, int],
     monotonic: Callable[[], float],
     _state: Path | None,
+    native_content: bool = False,
 ) -> None:
     """Record the end-to-end hook budget.
 
@@ -972,7 +956,9 @@ def _record_pass_timing(
 
     with contextlib.suppress(BaseException):
         total_ms = _elapsed_ms(entry_started, monotonic())
-        over = total_ms > int(_hook_total_budget_seconds(event) * 1000)
+        over = total_ms > int(
+            _hook_total_budget_seconds(event, native_content=native_content) * 1000
+        )
         if not over and event not in _TIMING_REPORT_EVENTS:
             return
         if over:
@@ -1025,12 +1011,18 @@ async def _try_service_ingest(
     *,
     content_chunks: tuple[ObservationContentChunk, ...] = (),
     content_capture_profile: str | None = None,
+    capture_only: bool = False,
     deadline_ms: int,
 ) -> ObservationIngestResult:
     """Attempt one typed ingest through an already-open preflight client."""
 
+    from yoetz.application.observation_drain import (
+        ObservationControlFailure,
+        observation_control_failure,
+    )
     from yoetz.ports.control import ControlError
 
+    stage = "request_encode"
     try:
         body = observation_ingest_request_to_json(
             ObservationIngestRequest(
@@ -1038,28 +1030,37 @@ async def _try_service_ingest(
                 envelope=envelope,
                 content_chunks=content_chunks,
                 content_capture_profile=content_capture_profile,
+                capture_only=capture_only,
             )
         )
+        stage = "control"
         raw = await client.observation_ingest(body, deadline_ms=deadline_ms)
+        stage = "response_decode"
         try:
             return observation_ingest_result_from_json(raw)
         except ProtocolValueError, TypeError, ValueError:
-            return ObservationIngestResult(
+            return ObservationControlFailure(
                 ObservationIngestDisposition.REJECTED,
-                ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                "control_frame_invalid",
                 None,
+                "frame_invalid",
+                False,
+                None,
+                "response_decode",
             )
     except ControlError as error:
-        reason = (
-            ObservationGapCode.VAULT_LOCKED.value
-            if error.reason == "vault_locked"
-            else (
-                ObservationGapCode.SERVICE_UNAVAILABLE.value
-                if error.retryable
-                else ObservationGapCode.LEDGER_REJECTED.value
-            )
+        return observation_control_failure(error)
+    except ProtocolValueError, TypeError, ValueError:
+        reason = "invalid_request" if stage == "request_encode" else "frame_invalid"
+        return ObservationControlFailure(
+            ObservationIngestDisposition.REJECTED,
+            "control_" + reason,
+            None,
+            reason,
+            False,
+            None,
+            stage,
         )
-        return ObservationIngestResult(ObservationIngestDisposition.REJECTED, reason, None)
     except Exception:
         return ObservationIngestResult(
             ObservationIngestDisposition.REJECTED,
@@ -1079,8 +1080,10 @@ async def _drain_outbox(
     event_name: str = "drain",
     _state: Path | None = None,
     budget_seconds: float = _HOOK_DRAIN_BUDGET_SECONDS,
+    priority_source_identity: str | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     session_lock_owned: bool = False,
+    drain_lease_owned: bool = False,
 ) -> None:
     """Drain the workspace outbox under a nonblocking per-workspace lease.
 
@@ -1092,6 +1095,23 @@ async def _drain_outbox(
     exactly the diagnostic noise that buried genuine preflight/service faults.
     A crashed holder cannot wedge the lease; flock releases with its process.
     """
+
+    if drain_lease_owned:
+        await _drain_outbox_leased(
+            store,
+            workspace_commitment=workspace_commitment,
+            codex_session_id=codex_session_id,
+            content_by_source_identity=content_by_source_identity,
+            content_capture_profile=content_capture_profile,
+            connect=connect,
+            event_name=event_name,
+            _state=_state,
+            budget_seconds=budget_seconds,
+            priority_source_identity=priority_source_identity,
+            monotonic=monotonic,
+            session_lock_owned=session_lock_owned,
+        )
+        return
 
     with store.drain_lease(workspace_commitment) as owned:
         if not owned:
@@ -1115,6 +1135,7 @@ async def _drain_outbox(
             event_name=event_name,
             _state=_state,
             budget_seconds=budget_seconds,
+            priority_source_identity=priority_source_identity,
             monotonic=monotonic,
             session_lock_owned=session_lock_owned,
         )
@@ -1131,6 +1152,7 @@ async def _drain_outbox_leased(
     event_name: str = "drain",
     _state: Path | None = None,
     budget_seconds: float = _HOOK_DRAIN_BUDGET_SECONDS,
+    priority_source_identity: str | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     session_lock_owned: bool = False,
 ) -> None:
@@ -1147,11 +1169,13 @@ async def _drain_outbox_leased(
     from yoetz.application.observation_drain import (
         EXPECTED_OBSERVATION_BACKPRESSURE_REASONS,
         WORKSPACE_GLOBAL_OBSERVATION_STOP_REASONS,
+        ObservationControlFailure,
         ObservationDrainAction,
         route_observation_ingest,
     )
     from yoetz.ports.control import ControlClientKind
 
+    started = monotonic()
     all_pending = store.list_pending_outbox_rows(workspace_commitment)
     if not all_pending:
         if content_by_source_identity:
@@ -1163,9 +1187,19 @@ async def _drain_outbox_leased(
 
     connector = cast(HookDrainConnector, _connect_service()) if connect is None else connect
     client: _HookDrainClient
+    preflight_remaining = _HOOK_CONNECT_PREFLIGHT_SECONDS + budget_seconds - (monotonic() - started)
+    if preflight_remaining <= 0:
+        record_hook_diagnostic("drain_budget_exhausted", event_name, _state=_state)
+        if content_by_source_identity:
+            store.note_coverage_gap(
+                workspace_commitment,
+                ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+            )
+        return
     try:
         client = await asyncio.wait_for(
-            connector(ControlClientKind.CLI), timeout=_HOOK_CONNECT_PREFLIGHT_SECONDS
+            connector(ControlClientKind.CLI),
+            timeout=min(_HOOK_CONNECT_PREFLIGHT_SECONDS, preflight_remaining),
         )
     except Exception:
         record_hook_diagnostic("drain_preflight_failed", event_name, _state=_state)
@@ -1175,11 +1209,70 @@ async def _drain_outbox_leased(
                 ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
             )
         return
-    # The budget clock starts after the connect: the preflight bounds connect
-    # time on its own, and charging a slow-but-successful connect against the
-    # drain budget could exhaust the whole budget before the first row (the
-    # SessionEnd budget is smaller than the preflight by design).
-    started = monotonic()
+    # One elapsed budget includes snapshot hydration, connection preflight,
+    # service calls and the local commit after each returned decision.
+
+    # Stage native content through the already-open service connection before
+    # choosing a bounded FIFO prefix. The service returns the distinct pending
+    # reason only after encrypted manifests and the retry ticket are durable;
+    # capture_only never advances the cursor or ledger.
+    staged_content_sources: set[str] = set()
+    if content_by_source_identity:
+        for source_identity, chunks in content_by_source_identity.items():
+            if not chunks:
+                continue
+            source_row = next(
+                (row for row in all_pending if row.envelope.source_identity == source_identity),
+                None,
+            )
+            if source_row is None:
+                continue
+            source = source_row.envelope.source
+            codex_profileless = (
+                source is ObservationSource.CODEX_HOOK and content_capture_profile is None
+            )
+            profiled_native = (
+                source
+                in {
+                    ObservationSource.CLAUDE_HOOK,
+                    ObservationSource.CURSOR_HOOK,
+                }
+                and content_capture_profile is not None
+                and content_capture_profile_matches_source(source.value, content_capture_profile)
+            )
+            if not codex_profileless and not profiled_native:
+                continue
+            remaining = budget_seconds - (monotonic() - started)
+            if remaining <= 0:
+                break
+            try:
+                staged = await asyncio.wait_for(
+                    _try_service_ingest(
+                        client,
+                        source_row.codex_session_id,
+                        source_row.envelope,
+                        content_chunks=chunks,
+                        content_capture_profile=content_capture_profile,
+                        capture_only=True,
+                        deadline_ms=max(1, int(remaining * 1_000)),
+                    ),
+                    timeout=remaining,
+                )
+            except TimeoutError:
+                break
+            if isinstance(staged, ObservationControlFailure):
+                from yoetz.cli.hook_diagnostics import record_drain_failure
+
+                if not record_drain_failure(staged, source_row.envelope, "retry", _state=_state):
+                    store.note_coverage_gap(workspace_commitment, "drain_diagnostic_unavailable")
+                store.note_coverage_gap(
+                    workspace_commitment, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+                )
+                with contextlib.suppress(Exception):
+                    await client.close()
+                return
+            if staged.reason == OBSERVATION_CONTENT_CAPTURE_PENDING_REASON:
+                staged_content_sources.add(source_identity)
 
     grouped: dict[str, list[ObservationOutboxRow]] = {}
     for row in all_pending:
@@ -1189,7 +1282,46 @@ async def _drain_outbox_leased(
         session_order.remove(codex_session_id)
         session_order.insert(0, codex_session_id)
     pending: list[ObservationOutboxRow] = []
-    while grouped and len(pending) < _HOOK_DRAIN_ROW_LIMIT:
+    pending_limit = _HOOK_DRAIN_ROW_LIMIT
+    if priority_source_identity is not None:
+        # Native content is not replayable, so make the current content row's
+        # same-session prefix the first bounded work package. The prefix keeps
+        # cursor order intact; it never jumps over an older row to deliver
+        # plaintext out of order. A large or permanently blocked backlog is
+        # still reported as a content gap rather than extending the hook
+        # without bound.
+        priority_row = next(
+            (
+                row
+                for row in all_pending
+                if row.envelope.source_identity == priority_source_identity
+            ),
+            None,
+        )
+        if priority_row is not None:
+            priority_queue = grouped.get(priority_row.codex_session_id, [])
+            priority_index = next(
+                (
+                    index
+                    for index, row in enumerate(priority_queue)
+                    if row.envelope.source_identity == priority_source_identity
+                ),
+                None,
+            )
+            if priority_index is not None:
+                prefix_count = min(priority_index + 1, _NATIVE_CONTENT_ROW_LIMIT)
+                pending.extend(priority_queue[:prefix_count])
+                remaining_priority = priority_queue[prefix_count:]
+                if remaining_priority:
+                    grouped[priority_row.codex_session_id] = remaining_priority
+                else:
+                    grouped.pop(priority_row.codex_session_id, None)
+                if priority_row.codex_session_id in session_order:
+                    session_order.remove(priority_row.codex_session_id)
+                if remaining_priority:
+                    session_order.insert(0, priority_row.codex_session_id)
+                pending_limit = _NATIVE_CONTENT_ROW_LIMIT
+    while grouped and len(pending) < pending_limit:
         for session_id in tuple(session_order):
             queue = grouped.get(session_id)
             if not queue:
@@ -1198,7 +1330,7 @@ async def _drain_outbox_leased(
             pending.append(queue.pop(0))
             if not queue:
                 grouped.pop(session_id, None)
-            if len(pending) >= _HOOK_DRAIN_ROW_LIMIT:
+            if len(pending) >= pending_limit:
                 break
     # Retryable rejections split three ways by scope (the reason vocabulary is
     # RETRYABLE_OBSERVATION_REJECTIONS in application/observation_drain.py):
@@ -1217,15 +1349,17 @@ async def _drain_outbox_leased(
     # Re-attempting every row of a permanently-undeliverable backlog burned
     # the whole drain budget per hook forever — the recurrence tax of #211.
     skipped_sessions: set[str] = set()
+    delivered_content: set[str] = set()
     bound_sessions, pending_lifecycle_sessions = store.lifecycle_reconciliation_snapshot(
         workspace_commitment
     )
     consecutive_unavailable = 0
     # The hook owns a bounded slice; the service sweeper owns bulk delivery.
-    # Hitting the slice after moving backlog (acknowledged or quarantined rows)
-    # is a capacity yield, not a failed drain, so budget expiry records a
-    # diagnostic only when the pass made no progress at all (#351).
-    progressed = 0
+    # Hitting the slice after moving backlog or durably staging native content
+    # is a capacity yield, not a failed drain. Staging leaves the structural
+    # row pending, but it is useful progress: its transient bytes survived.
+    # Budget expiry records a diagnostic only when no progress occurred (#351).
+    progressed = len(staged_content_sources)
     try:
         for row in pending:
             if row.codex_session_id in skipped_sessions:
@@ -1251,6 +1385,7 @@ async def _drain_outbox_leased(
             chunks = (
                 ()
                 if content_by_source_identity is None
+                or row.envelope.source_identity in staged_content_sources
                 else content_by_source_identity.get(row.envelope.source_identity, ())
             )
             try:
@@ -1301,6 +1436,8 @@ async def _drain_outbox_leased(
                         progressed += 1
                     elif decision.action is ObservationDrainAction.ACKNOWLEDGE:
                         store.acknowledge_outbox_row(workspace_commitment, attempted)
+                        if chunks:
+                            delivered_content.add(row.envelope.source_identity)
                         progressed += 1
             if attempted is None:
                 if chunks:
@@ -1311,6 +1448,15 @@ async def _drain_outbox_leased(
                 continue
             if decision.reason is not None and not expected_backpressure:
                 record_hook_diagnostic(decision.reason, event_name, _state=_state)
+            if decision.reason is not None and not expected_backpressure:
+                from yoetz.cli.hook_diagnostics import record_drain_failure
+
+                if not record_drain_failure(
+                    result, row.envelope, decision.action.value, _state=_state
+                ):
+                    store.note_coverage_gap(workspace_commitment, "drain_diagnostic_unavailable")
+            if isinstance(result, ObservationControlFailure):
+                break
             if decision.action is ObservationDrainAction.RETRY:
                 if decision.reason in WORKSPACE_GLOBAL_OBSERVATION_STOP_REASONS:
                     break
@@ -1351,6 +1497,16 @@ async def _drain_outbox_leased(
                 continue
             consecutive_unavailable = 0
     finally:
+        if content_by_source_identity:
+            for source_identity in content_by_source_identity:
+                if source_identity in staged_content_sources:
+                    continue
+                if source_identity not in delivered_content:
+                    with contextlib.suppress(Exception):
+                        store.note_coverage_gap(
+                            workspace_commitment,
+                            ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                        )
         with contextlib.suppress(Exception):
             await client.close()
 
@@ -2116,7 +2272,37 @@ def handle_observe(
 
     entry_started = _monotonic() if _entry_monotonic is None else _entry_monotonic
     stages: dict[str, int] = {}
+
+    # Native content is carried only in this process. Reserve the workspace
+    # drain before entering the local store batch so a background sweeper cannot
+    # consume the newly enqueued structural row while the foreground hook is
+    # still preparing its transient chunks. The lease is deliberately entered
+    # manually: the batch and the later service pass live in separate scopes,
+    # while the outer finally must still release it on every early return or
+    # cancellation.
+    native_drain_lease: contextlib.AbstractContextManager[bool] | None = None
+    native_drain_lease_entered = False
+    native_drain_lease_owned = False
+
+    def _release_native_drain_lease() -> None:
+        nonlocal native_drain_lease, native_drain_lease_entered, native_drain_lease_owned
+        if not native_drain_lease_entered or native_drain_lease is None:
+            return
+        lease = native_drain_lease
+        native_drain_lease = None
+        native_drain_lease_entered = False
+        native_drain_lease_owned = False
+        with contextlib.suppress(BaseException):
+            lease.__exit__(None, None, None)
+
     try:
+        if source is ObservationSource.CODEX_HOOK:
+            # Cold imports are pure preparation. Importing this runtime inside
+            # the ingress batch serialized every new Codex process behind it.
+            from importlib import import_module
+
+            import_module("yoetz.adapters.integrations.codex_session_stream")
+
         store = LocalObservationStore(_state=_state)
         resolve_started = _monotonic()
         stages["import"] = _elapsed_ms(entry_started, resolve_started)
@@ -2269,11 +2455,6 @@ def handle_observe(
             else:
                 try:
                     workspace_commitment = store.workspace_commitment(workspace_locator)
-                    consent_probe = store.consent_for(workspace_commitment)
-                    if consent_probe is None or not consent_probe.active:
-                        binding_diagnostic = _consent_binding_diagnostic(consent_probe)
-                        workspace_commitment = None
-                        workspace_locator = None
                 except Exception:
                     workspace_commitment = None
                     workspace_locator = None
@@ -2295,6 +2476,40 @@ def handle_observe(
             return 0
 
         assert workspace_commitment is not None
+        native_content_reservation = (
+            not skip_service
+            and capture_authority_known
+            and (
+                (source is ObservationSource.CODEX_HOOK and _content_capture_profile is None)
+                or (
+                    source
+                    in {
+                        ObservationSource.CLAUDE_HOOK,
+                        ObservationSource.CURSOR_HOOK,
+                    }
+                    and _content_capture_profile is not None
+                    and content_capture_profile_matches_source(
+                        source.value, _content_capture_profile
+                    )
+                    and _content_capture_profile in consent.content_capture_profiles
+                )
+            )
+        )
+        if native_content_reservation:
+            try:
+                candidate_lease = store.drain_lease(workspace_commitment)
+                candidate_owned = candidate_lease.__enter__()
+            except Exception:
+                # The reservation is an optimization for transient content;
+                # if its lock file cannot be opened, retain the structural
+                # event and let the normal drain path report any content gap.
+                native_drain_lease = None
+                native_drain_lease_entered = False
+                native_drain_lease_owned = False
+            else:
+                native_drain_lease = candidate_lease
+                native_drain_lease_entered = True
+                native_drain_lease_owned = candidate_owned
         store_started = _monotonic()
         # Payload parse, runtime gate, workspace resolution and the consent
         # probe ran between 'import' and here, unwindowed. Three of those calls
@@ -2410,7 +2625,13 @@ def handle_observe(
                 gap_codes.append(ObservationGapCode.UNSUPPORTED_EVENT.value)
 
             tool_name = _token_or_none(payload.get("tool_name"))
-            skip_advice_loop = tool_name is not None and tool_name in YOETZ_TOOL_NAMES
+            # Every host spelling of a Yoetz-owned call must suppress the shared
+            # advice loop.  The older Codex-only set missed Claude's plugin
+            # scope and Cursor's server-qualified names, so those hosts could
+            # receive frontier advice from the hook observing the same call.
+            # This affects only advice delivery; explicit self-call failures
+            # still follow ``self_observation_deliverable`` and remain queued.
+            skip_advice_loop = tool_name is not None and tool_name in YOETZ_OWNED_TOOL_NAMES
 
             supplied_ordinal = _event_ordinal_from_payload(payload)
             event_ordinal = (
@@ -2419,6 +2640,34 @@ def handle_observe(
                 else store.allocate_hook_ordinal(workspace_commitment, session_commitment)
             )
 
+            classification_payload = dict(payload if _content_payload is None else _content_payload)
+            # Native adapters have already extracted outcome facts from their
+            # exact host contract. Keep those facts beside the original tool
+            # input for conservative classification, without persisting prose.
+            for outcome_key in ("success", "denied", "exit_status", "result_status"):
+                if outcome_key in payload:
+                    classification_payload[outcome_key] = payload[outcome_key]
+            classification = classify_observation(classification_payload, resolved_event)
+            pressure = store.update_selection_pressure(workspace_commitment, session_commitment)
+            selected_focused = pressure.effective_mode is ObservationMode.FOCUSED
+            if pressure.transition is not None and pressure.transition.notice in {
+                "downgrade",
+                "recovery",
+            }:
+                _stderr_line(
+                    "yoetz_observation_detail: "
+                    f"selected={pressure.selected_mode.value} effective={pressure.effective_mode.value} "
+                    f"transition={pressure.transition.notice} pressure={pressure.dimension.value}"
+                )
+            # A protected event is a conservative workspace subject-state
+            # boundary. Flush earlier accounts before its individual identity.
+            material_boundary = not classification.routine_candidate
+            flush_ok = store.flush_selected_admission(
+                workspace_commitment,
+                summary_builder=build_routine_read_summary,
+                force=material_boundary or resolved_event in {"SessionStart", "SessionEnd"},
+                material_boundary=material_boundary,
+            )
             envelope = map_hook_payload_to_envelope(
                 resolved_event,
                 payload,
@@ -2428,30 +2677,89 @@ def handle_observe(
                 source_generation=source_generation,
                 gap_codes=tuple(sorted(set(gap_codes), key=str.encode)),
                 source=source,
+                classification=classification,
             )
-            # Native host content requires both the explicit profile argument
-            # emitted by the rendered artifact and the matching user consent
-            # arm.  Old/native structural hooks therefore remain contentless;
-            # Codex's historical session-stream path keeps its prior behavior.
+            if not selected_focused and envelope.structural_payload.get("action") == "routine_read":
+                envelope = replace(
+                    envelope,
+                    structural_payload=JsonObject(
+                        {**envelope.structural_payload, "action": "routine_read_detailed"}
+                    ),
+                )
+            read_protected = classification.routine_candidate and store.read_is_protected(
+                workspace_commitment, session_commitment, envelope
+            )
+            if read_protected:
+                reference = store.read_protection_reference(
+                    workspace_commitment, session_commitment, envelope
+                )
+                protected_fields: dict[str, DomainJsonValue] = {
+                    **envelope.structural_payload,
+                    "action": "evidence_linked_read",
+                }
+                if reference is not None:
+                    protected_fields["protection_reference"] = reference
+                envelope = replace(envelope, structural_payload=JsonObject(protected_fields))
+            route = load_mapping(codex_session_id, _state=_state)
+            authority = store.content_capture_authority(workspace_commitment)
+            selection_fence = ""
+            if route is not None and authority is not None and authority.active:
+                envelope = replace(
+                    envelope,
+                    structural_payload=JsonObject(
+                        {
+                            **envelope.structural_payload,
+                            "selection_task_id": route.yoetz_task_id,
+                            "selection_session_id": route.yoetz_session_id,
+                            "selection_writer_id": route.yoetz_writer_id,
+                            "selection_authority_generation": authority.generation,
+                        }
+                    ),
+                )
+                selection_fence = canonical_digest(
+                    JsonObject(
+                        {
+                            "task": route.yoetz_task_id,
+                            "session": route.yoetz_session_id,
+                            "writer": route.yoetz_writer_id,
+                            "host_session": session_commitment,
+                            "source": source.value,
+                            "generation": source_generation,
+                            "authority": authority.generation,
+                            "epoch": store.selection_epoch(workspace_commitment),
+                            "delegate": envelope.structural_payload.get("subagent_id"),
+                            "parent_call": envelope.structural_payload.get("parent_tool_call_id"),
+                            "classification": classification.version,
+                            "mode": pressure.effective_mode.value,
+                        }
+                    )
+                )
+            gap_codes.extend(store.selection_history_gaps(workspace_commitment, envelope))
+            # Claude/Cursor native content requires the explicit profile emitted
+            # by the rendered artifact and its matching consent arm. Codex hook
+            # content is the profileless arm of the structural observation grant;
+            # Codex session-stream content keeps its historical behavior.
             native_content_source = source in {
                 ObservationSource.CLAUDE_HOOK,
+                ObservationSource.CODEX_HOOK,
                 ObservationSource.CURSOR_HOOK,
             }
             content_authorized = capture_authority_known and not native_content_source
             if native_content_source:
-                content_authorized = (
-                    capture_authority_known
-                    and _content_capture_profile is not None
-                    and content_capture_profile_matches_source(
-                        source.value, _content_capture_profile
+                if source is ObservationSource.CODEX_HOOK:
+                    content_authorized = (
+                        capture_authority_known and _content_capture_profile is None
                     )
-                    and _content_capture_profile in consent.content_capture_profiles
-                )
-                if (
-                    capture_authority_known
-                    and _content_capture_profile is not None
-                    and not content_authorized
-                ):
+                else:
+                    content_authorized = (
+                        capture_authority_known
+                        and _content_capture_profile is not None
+                        and content_capture_profile_matches_source(
+                            source.value, _content_capture_profile
+                        )
+                        and _content_capture_profile in consent.content_capture_profiles
+                    )
+                if capture_authority_known and not content_authorized:
                     gap_codes.append(ObservationGapCode.CONTENT_UNSELECTED.value)
             if not capture_authority_known:
                 gap_codes.append(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
@@ -2460,7 +2768,45 @@ def handle_observe(
                     envelope,
                     gap_codes=tuple(sorted(set(gap_codes), key=str.encode)),
                 )
-            if not content_authorized:
+            # Pair first, before extracting optional bytes. An orphan, failure
+            # or unknown outcome must remain individually observable.
+            local_result, envelope = store.ingest_with_pairing(
+                envelope,
+                workspace_commitment=workspace_commitment,
+                pairing_mode=pairing_mode,
+                correlation_id=correlation,
+                source=source,
+                session_commitment=session_commitment,
+                source_generation=source_generation,
+                is_pre_event=_is_pre_event(resolved_event),
+                is_post_event=_is_post_event(resolved_event),
+            )
+            optional_routine = (
+                not read_protected
+                and classification.routine_candidate
+                and (resolved_event == "PreToolUse" or classification.proven_routine_success)
+            )
+            summary_eligible = (
+                selected_focused
+                and bool(selection_fence)
+                and optional_routine
+                and all(
+                    gap in {"content_unselected", "observation_input_loss"}
+                    for gap in envelope.gap_codes
+                )
+                and flush_ok
+            )
+            omit_optional_content = optional_routine and (
+                summary_eligible or not pressure.content_allowed
+            )
+            if omit_optional_content and not summary_eligible:
+                envelope = replace(
+                    envelope,
+                    gap_codes=tuple(
+                        sorted({*envelope.gap_codes, "optional_observation_detail_omitted"})
+                    ),
+                )
+            if not content_authorized or omit_optional_content or not flush_ok:
                 content_chunks, content_truncated = (), False
             else:
                 content_chunks, content_truncated = _visible_content_chunks(
@@ -2468,6 +2814,9 @@ def handle_observe(
                     payload if _content_payload is None else _content_payload,
                     envelope=envelope,
                     workspace_locator=workspace_locator,
+                    optional_limits=(
+                        mode_limits(pressure.effective_mode) if optional_routine else None
+                    ),
                 )
             if content_truncated:
                 envelope = replace(
@@ -2481,21 +2830,45 @@ def handle_observe(
                 )
             content_map = {envelope.source_identity: content_chunks} if content_chunks else None
             service_content_profile = _content_capture_profile if content_authorized else None
-
-            # Local durable ingest and pairing admission share one store lock.
-            # The returned envelope is authoritative: a paired orphan's gap is
-            # present before any outbox row can be materialized.
-            local_result, envelope = store.ingest_with_pairing(
-                envelope,
-                workspace_commitment=workspace_commitment,
-                pairing_mode=pairing_mode,
-                correlation_id=correlation,
-                source=source,
-                session_commitment=session_commitment,
-                source_generation=source_generation,
-                is_pre_event=_is_pre_event(resolved_event),
-                is_post_event=_is_post_event(resolved_event),
+            native_content_priority = (
+                next(iter(content_map))
+                if content_map
+                and source
+                in {
+                    ObservationSource.CLAUDE_HOOK,
+                    ObservationSource.CODEX_HOOK,
+                    ObservationSource.CURSOR_HOOK,
+                }
+                else None
             )
+            # A contentless ordinary-native row has no transient bytes that need a foreground
+            # service handoff. Keep its local envelope/outbox intent and let a later hook or the
+            # sweeper deliver it; opening a fresh service connection here would add latency to
+            # self-observation and structural-only host events. Content-bearing native rows still
+            # use the longer foreground window and priority path.
+            native_profile_drain = native_content_source and (
+                (
+                    source is ObservationSource.CODEX_HOOK
+                    and _content_capture_profile is None
+                    and content_map is not None
+                )
+                or (
+                    source is not ObservationSource.CODEX_HOOK
+                    and _content_capture_profile is not None
+                    and content_capture_profile_matches_source(
+                        source.value, _content_capture_profile
+                    )
+                )
+            )
+            defer_contentless_native_drain = (
+                native_profile_drain and content_map is None and resolved_event != "SessionStart"
+            )
+            native_content_drain_budget = (
+                _NATIVE_CONTENT_DRAIN_BUDGET_SECONDS
+                if native_profile_drain
+                else _HOOK_DRAIN_BUDGET_SECONDS
+            )
+
             if content_chunks and local_result.disposition.value != "accepted":
                 # The plaintext chunks have no durable retry carrier. A local
                 # cursor/consent rejection therefore needs the same explicit
@@ -2510,15 +2883,41 @@ def handle_observe(
             if local_result.disposition.value == "accepted" and self_observation_deliverable(
                 resolved_event, envelope.structural_payload
             ):
-                overflow = store.enqueue_outbox(workspace_commitment, codex_session_id, envelope)
-                if overflow is not None:
+                plan = store.prepare_selected_admission(
+                    workspace_commitment,
+                    codex_session_id,
+                    envelope,
+                    fence=selection_fence,
+                    focused=summary_eligible,
+                    routine_candidate=classification.routine_candidate,
+                    proven_routine_success=classification.proven_routine_success,
+                    summary_builder=build_routine_read_summary,
+                )
+                admitted = flush_ok and store.commit_selected_admission(
+                    workspace_commitment,
+                    plan,
+                    incoming=envelope,
+                    newly_observed=True,
+                )
+                if not admitted:
+                    if not flush_ok:
+                        store.record_admission_loss(workspace_commitment, envelope)
                     if content_chunks:
                         store.note_coverage_gap(
                             workspace_commitment,
                             ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
                         )
-                    _stderr_line(f"hook_observe_degraded: {overflow}")
-                    record_hook_diagnostic("outbox_overflow", resolved_event, _state=_state)
+                    if store.consume_admission_loss_notice(workspace_commitment):
+                        _stderr_line(
+                            "hook_observe_degraded: outbox_overflow; loss accounted; see observe status"
+                        )
+                        record_hook_diagnostic("outbox_overflow", resolved_event, _state=_state)
+                elif read_protected and _is_post_event(resolved_event):
+                    store.consume_read_protection(
+                        workspace_commitment, session_commitment, envelope
+                    )
+            elif local_result.disposition.value == "accepted":
+                store.note_selection_omission(workspace_commitment)
 
             # Persist session end so lifecycle can report STOPPED once every bound
             # session has ended.
@@ -2559,13 +2958,48 @@ def handle_observe(
                             hook_provided_path=hook_path_token,
                         )
 
-            # Deterministic advice from retained envelopes (works with zero MCP publications).
-            advice_started = _monotonic()
+        stages["store"] = _elapsed_ms(store_started, _monotonic())
+
+        if (
+            resolved_event in {"PreToolUse", "PostToolUse", "PermissionRequest"}
+            and not content_map
+            and _monotonic() - entry_started >= _HOOK_LOCAL_STAGE_ALLOWANCE_SECONDS
+        ):
+            # Ingress is already durable. Yield expensive follow-up work to
+            # the service/next hook when contention spent the local allowance.
+            # Never defer transient native content through this structural lane.
+            record_hook_diagnostic("hook_followup_deferred", resolved_event, _state=_state)
+            _stdout_json({}, stdout)
+            for name, spent in store.stage_timings_ms.items():
+                stages[f"store_{name}"] = max(0, int(spent))
+            _record_pass_timing(
+                resolved_event,
+                entry_started=entry_started,
+                stages=stages,
+                monotonic=_monotonic,
+                _state=_state,
+            )
+            return 0
+
+        # Refresh deterministic advice only after the capture batch has
+        # closed.  The refresh can build and persist a comparatively large
+        # snapshot; keeping it outside the batch means a host cancellation
+        # cannot roll back the already-durable envelope, pairing, mapping, or
+        # outbox intent (#616).  Advice selection and its delivery lease remain
+        # below the service drain and stdout write, preserving commit-after-
+        # output semantics.
+        advice_started = _monotonic()
+        # Teardown cannot deliver advice to a closing host. Its structural end
+        # intent is already durable and the service refreshes advice when it
+        # drains that intent, so avoid cold advice construction inside the
+        # host's hard three-second SessionEnd window.
+        # PreToolUse adds an attempted action, not an outcome. Reuse the
+        # snapshot at its real frontier; post-result and lifecycle hooks plus
+        # service ingest own material advice refresh.
+        if resolved_event not in {"SessionEnd", "PreToolUse"}:
             with contextlib.suppress(Exception):
                 store.refresh_advice(workspace_commitment)
-            stages["advice"] = _elapsed_ms(advice_started, _monotonic())
-
-        stages["store"] = _elapsed_ms(store_started, _monotonic())
+        stages["advice"] = _elapsed_ms(advice_started, _monotonic())
 
         # SessionStart: auto-start/attach first, persist mapping, then drain outbox.
         # Every branch below that opens a service connection is gated on
@@ -2584,16 +3018,19 @@ def handle_observe(
                     _LOCKED_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _PRIVACY_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _RETRY_CONTEXT,  # pyright: ignore[reportPrivateUsage]
+                    _STARTUP_RECOVERY_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _STORAGE_CORRUPT_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _STORAGE_UNSAFE_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _UNAVAILABLE_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _WORKSPACE_MISMATCH_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _WORKSPACE_UNBOUND_CONTEXT,  # pyright: ignore[reportPrivateUsage]
+                    SessionWorkspace,
                     StatusOutcome,
                     _active_context,  # pyright: ignore[reportPrivateUsage]
                     _read_status,  # pyright: ignore[reportPrivateUsage]
                     _stale_mapping_context,  # pyright: ignore[reportPrivateUsage]
                     bound_connector,
+                    resolve_session_workspace,
                 )
 
                 session_lifecycle_lock = (
@@ -2630,14 +3067,29 @@ def handle_observe(
                                 additional = (
                                     "Yoetz observation is consented for this workspace; "
                                     "no ledger task is mapped yet (observation-derived binding "
-                                    "only). Call start to attach a task."
+                                    "only). After guidance reads, tool/schema discovery, and "
+                                    "necessary bootstrap clarification, call start to attach a task "
+                                    "before substantive material work. " + _STARTUP_RECOVERY_CONTEXT
                                 )
                                 attach_advisory_only = True
                             else:
                                 additional = _active_context(mapping, mapping.last_frontier)
                         elif mapping is not None and not skip_service:
                             active_mapping = mapping
-                            status_locator = workspace_locator
+                            # The consented locator when this hook named one. The legacy
+                            # bound-session lane recovers a commitment by session id and
+                            # leaves the locator unset, which probed the daemon bare and
+                            # was refused as `repository_identity_required` (issue #659);
+                            # derive the probe's locator from the host payload's cwd or the
+                            # hook cwd instead. The daemon still fences it against the
+                            # mapped task's route, so a wrong guess is a typed mismatch,
+                            # never access to another repository.
+                            selection = (
+                                SessionWorkspace(workspace_locator, "explicit")
+                                if workspace_locator is not None
+                                else resolve_session_workspace(None, payload)
+                            )
+                            status_locator = selection.locator
 
                             async def _status() -> StatusOutcome:
                                 # The read carries the consented locator exactly as the
@@ -2689,6 +3141,9 @@ def handle_observe(
                                     record_hook_diagnostic(
                                         f"status_{kind}", resolved_event, _state=_state
                                     )
+                                    record_hook_diagnostic(
+                                        selection.diagnostic_reason, resolved_event, _state=_state
+                                    )
                             elif kind == "locked":
                                 additional = _LOCKED_CONTEXT
                             elif kind == "retry":
@@ -2720,12 +3175,20 @@ def handle_observe(
                                     connect=cast(HookDrainConnector | None, connect),
                                     event_name=resolved_event,
                                     _state=_state,
+                                    budget_seconds=native_content_drain_budget,
+                                    priority_source_identity=native_content_priority,
                                     monotonic=_monotonic,
                                     session_lock_owned=_session_lock_owned,
+                                    drain_lease_owned=native_drain_lease_owned,
                                 )
 
                             with contextlib.suppress(Exception):
                                 _resolve_runner()(_drain)
+                            _release_native_drain_lease()
+
+            # A clear SessionStart has no service drain; the regular SessionStart
+            # path released its reservation immediately after the drain above.
+            _release_native_drain_lease()
 
         # Issue #537: no applied-vs-serving drift probe runs on this path. A hook process
         # has no serving route of its own, so the only comparison available here is a
@@ -2786,7 +3249,15 @@ def handle_observe(
                                 "auto_attach_retry_failed", resolved_event, _state=_state
                             )
 
-        if not skip_service and resolved_event != "SessionStart":
+        # SessionEnd is teardown-only: its lifecycle and outbox intent are already durable in the
+        # local store, while a cold service preflight can consume the host's entire hard window.
+        # Leave the row pending for the next SessionStart or the service sweeper rather than
+        # risking host cancellation after local capture has committed.
+        if (
+            not skip_service
+            and resolved_event not in {"SessionStart", "SessionEnd"}
+            and not defer_contentless_native_drain
+        ):
             # Every later mapped hook drains the complete session outbox, so the
             # current envelope plus any stream-recovered or previously-pending
             # entries all reconcile. Retryable rejections stay pending and
@@ -2805,14 +3276,17 @@ def handle_observe(
                     budget_seconds=(
                         _SESSION_END_DRAIN_BUDGET_SECONDS
                         if resolved_event == "SessionEnd"
-                        else _HOOK_DRAIN_BUDGET_SECONDS
+                        else native_content_drain_budget
                     ),
+                    priority_source_identity=native_content_priority,
                     monotonic=_monotonic,
                     session_lock_owned=_session_lock_owned,
+                    drain_lease_owned=native_drain_lease_owned,
                 )
 
             with contextlib.suppress(Exception):
                 _resolve_runner()(_drain_all)
+            _release_native_drain_lease()
 
         if content_chunks and skip_service:
             # Content is intentionally ephemeral. Without a ready mapped
@@ -2944,11 +3418,14 @@ def handle_observe(
             stages=stages,
             monotonic=_monotonic,
             _state=_state,
+            native_content=(
+                native_profile_drain and content_map is not None and resolved_event != "SessionEnd"
+            ),
         )
         return 0
     except BaseException:
         with contextlib.suppress(BaseException):
-            _stderr_line("hook_observe_degraded: observe")
+            _stderr_line("hook_observe_degraded: observe; observation durability unknown")
         with contextlib.suppress(BaseException):
             record_hook_diagnostic("observe", event_name or "observe", _state=_state)
         emitted = False
@@ -2960,6 +3437,8 @@ def handle_observe(
                     "stdout_write_failed", event_name or "observe", _state=_state
                 )
         return 0
+    finally:
+        _release_native_drain_lease()
 
 
 _CLAUDE_SESSION_PREFIX: Final = "claude:"
@@ -2997,6 +3476,27 @@ _NATIVE_OUTCOME_JSON_BYTES: Final = 65_536
 _NATIVE_SUCCESS_STATUSES: Final = frozenset(
     {"complete", "completed", "ok", "passed", "success", "succeeded"}
 )
+_CLAUDE_TOOL_RESPONSE_FACT_KEYS: Final = frozenset(
+    {
+        # Claude's built-in Bash result and documented MCP result boundary.
+        "interrupted",
+        "is_interrupted",
+        "is_interrupt",
+        "isInterrupted",
+        "cancelled",
+        "canceled",
+        "is_cancelled",
+        "isCanceled",
+        "is_error",
+        "isError",
+        "success",
+        "exit_code",
+        "exitCode",
+        "exit_status",
+        "exitStatus",
+    }
+)
+_MCP_RESULT_FACT_KEYS: Final = frozenset({"is_error", "isError"})
 _NATIVE_FAILURE_STATUS_MAP: Final = MappingProxyType(
     {
         "aborted": "aborted",
@@ -3055,13 +3555,34 @@ def _bounded_outcome_mapping(value: object) -> Mapping[str, JsonValue] | None:
 
 def _native_outcome_mappings(
     payload: Mapping[str, JsonValue],
+    *,
+    claude_tool_response_boundary: bool = False,
+    claude_mcp_tool_response_boundary: bool = False,
+    cursor_mcp_result_boundary: bool = False,
 ) -> tuple[Mapping[str, JsonValue], ...]:
-    """Collect top-level and one bounded layer of documented result wrappers."""
+    """Collect bounded host-result mappings without descending into domain output."""
 
     mappings: list[Mapping[str, JsonValue]] = [payload]
     for key in ("tool_response", "tool_output", "result", "result_json"):
         mapping = _bounded_outcome_mapping(payload.get(key))
         if mapping is None:
+            continue
+        if (
+            claude_tool_response_boundary
+            and key == "tool_response"
+            or cursor_mcp_result_boundary
+            and key in {"tool_output", "result_json"}
+        ):
+            # Claude and Cursor pass MCP structured content and arbitrary tool output through
+            # their result carriers. Only the protocol-level ``isError`` bit is a host fact for
+            # MCP; fields such as ``success``, ``exitCode``, ``outcome``, or ``status`` belong
+            # to the tool's domain and must not turn a successful delivery into a host failure.
+            fact_keys = (
+                _MCP_RESULT_FACT_KEYS
+                if claude_mcp_tool_response_boundary or cursor_mcp_result_boundary
+                else _CLAUDE_TOOL_RESPONSE_FACT_KEYS
+            )
+            mappings.append({field: mapping[field] for field in fact_keys if field in mapping})
             continue
         mappings.append(mapping)
         for nested_key in ("structuredContent", "structured_content", "data", "result"):
@@ -3077,13 +3598,19 @@ def _native_outcome_facts(
     force_failure: bool = False,
     force_denied: bool = False,
     require_process_exit: bool = False,
+    host_event_success: bool = False,
+    background_launch: bool = False,
+    claude_tool_response_boundary: bool = False,
+    claude_mcp_tool_response_boundary: bool = False,
+    cursor_mcp_result_boundary: bool = False,
 ) -> _NativeOutcomeFacts:
     """Extract closed native outcome facts without retaining host prose.
 
     Command-like tools require an explicit process exit when
-    ``require_process_exit`` is true. A host-level success flag or an
-    ``isError=false`` wrapper then proves tool delivery only, so the command
-    result stays unknown until an exit/status fact is present.
+    ``require_process_exit`` is true, unless the selected host contract says
+    that the event itself is an authoritative tool-level success signal. The
+    latter still never manufactures an exit status. A background launch is
+    only a partial result until the host supplies completion evidence.
     """
 
     success_true = False
@@ -3099,7 +3626,12 @@ def _native_outcome_facts(
     failure_status: str | None = "failure" if force_failure else None
     success_status = False
 
-    for mapping in _native_outcome_mappings(payload):
+    for mapping in _native_outcome_mappings(
+        payload,
+        claude_tool_response_boundary=claude_tool_response_boundary,
+        claude_mcp_tool_response_boundary=claude_mcp_tool_response_boundary,
+        cursor_mcp_result_boundary=cursor_mcp_result_boundary,
+    ):
         for key in ("denied", "is_denied", "permission_denied"):
             value = mapping.get(key)
             if type(value) is bool and value:
@@ -3201,9 +3733,16 @@ def _native_outcome_facts(
             valid_exits[0],
             "success" if all(value == 0 for value in valid_exits) else "nonzero_exit",
         )
-    if require_process_exit:
-        return _NativeOutcomeFacts(None, denied, None, "unknown")
     if unknown:
+        return _NativeOutcomeFacts(None, denied, None, "unknown")
+    if background_launch:
+        return _NativeOutcomeFacts(None, denied, None, "partial")
+    if host_event_success:
+        # Claude's PostToolUse event is the host's closed success fact. Keep
+        # exit_status absent: an event-level success proves the tool call, not
+        # an invented process-exit integer.
+        return _NativeOutcomeFacts(True, denied, None, "success")
+    if require_process_exit:
         return _NativeOutcomeFacts(None, denied, None, "unknown")
     if success_true or success_status or error_false:
         return _NativeOutcomeFacts(True, denied, None, "success")
@@ -3243,6 +3782,7 @@ def handle_claude_observe(
     run_async: AsyncRunner | None = None,
     skip_service: bool = False,
     observation_profile: str | None = None,
+    _entry_monotonic: float | None = None,
 ) -> int:
     """Normalize one Claude hook into bounded Yoetz observation.
 
@@ -3407,10 +3947,20 @@ def handle_claude_observe(
                 hook_io.stdout_json({}, stdout)
                 return 0
             if ordinary_profile:
+                tool_input = payload.get("tool_input")
+                background_launch = (
+                    isinstance(tool_input, Mapping)
+                    and type(tool_input.get("run_in_background")) is bool
+                    and tool_input.get("run_in_background") is True
+                )
                 outcome = _native_outcome_facts(
                     payload,
                     force_failure=raw_event == "PostToolUseFailure",
                     require_process_exit=(tool_token.lower() in _SHELL_TOOLS),
+                    host_event_success=raw_event == "PostToolUse",
+                    background_launch=background_launch,
+                    claude_tool_response_boundary=True,
+                    claude_mcp_tool_response_boundary=tool_token.lower().startswith("mcp__"),
                 )
                 structural["action"] = (
                     "claude_tool_success"
@@ -3492,6 +4042,7 @@ def handle_claude_observe(
             connect=connect,
             run_async=run_async,
             skip_service=skip_service,
+            _entry_monotonic=_entry_monotonic,
             source=ObservationSource.CLAUDE_HOOK,
             _output_event_name=raw_event,
             _content_capture_profile=(
@@ -3588,6 +4139,7 @@ def handle_cursor_observe(
     run_async: AsyncRunner | None = None,
     skip_service: bool = False,
     observation_profile: str | None = None,
+    _entry_monotonic: float | None = None,
 ) -> int:
     """Normalize one Cursor hook into bounded Yoetz observation.
 
@@ -3746,12 +4298,12 @@ def handle_cursor_observe(
         if duration is not None:
             structural["duration_ms"] = duration
         if ordinary_profile and raw_event in {"postToolUse", "postToolUseFailure"}:
+            cursor_tool_name = (_token_or_none(payload.get("tool_name")) or "").lower()
             outcome = _native_outcome_facts(
                 payload,
                 force_failure=raw_event == "postToolUseFailure",
-                require_process_exit=(
-                    (_token_or_none(payload.get("tool_name")) or "").lower() in _SHELL_TOOLS
-                ),
+                require_process_exit=(cursor_tool_name in _SHELL_TOOLS),
+                cursor_mcp_result_boundary=cursor_tool_name.startswith(("mcp:", "mcp__")),
             )
             structural["action"] = (
                 "cursor_tool_denied"
@@ -3802,6 +4354,7 @@ def handle_cursor_observe(
             connect=connect,
             run_async=run_async,
             skip_service=skip_service,
+            _entry_monotonic=_entry_monotonic,
             source=ObservationSource.CURSOR_HOOK,
             _output_event_name=raw_event,
             _content_capture_profile=(

@@ -322,6 +322,78 @@ async def test_workspace_ref_groups_sibling_tasks_and_pair_attaches() -> None:
 
 
 @pytest.mark.anyio
+async def test_pending_operation_recovery_preserves_workspace_before_explicit_sibling() -> None:
+    """Existing operation and workspace identity boundaries stay intact across recovery."""
+
+    harness = _Harness.create(850)
+    pending_request = await harness.command(851, mode=StartMode.CREATE_OR_ATTACH, refs="pending")
+    pending = await harness.catalog.reserve_or_resume(pending_request)
+    workspace = pending_request.identity_commitments.workspace_ref_commitment
+    assert workspace is not None
+
+    sibling_identity = StartIdentityInput(
+        "Repaired verification", "workspace-pending", "external-repaired"
+    )
+    sibling_commitments = await harness.catalog.commit_identity(sibling_identity)
+    sibling_digest = canonical_digest(
+        {
+            "external": sibling_commitments.external_ref_commitment,
+            "mode": StartMode.CREATE_OR_ATTACH.value,
+            "session_id": None,
+            "title": sibling_commitments.title_commitment,
+            "workspace": sibling_commitments.workspace_ref_commitment,
+        }
+    )
+    implicit_sibling = StartCommand(
+        _id(IdKind.REQUEST, 852),
+        sibling_digest,
+        StartMode.CREATE_OR_ATTACH,
+        sibling_identity,
+        sibling_commitments,
+        None,
+    )
+    with pytest.raises(PublicOperationError) as conflict:
+        await harness.catalog.reserve_or_resume(implicit_sibling)
+    assert conflict.value.code is PublicErrorCode.SESSION_CONFLICT
+    assert await harness.catalog.list_workspace_task_ids(workspace) == (pending.task_id,)
+
+    # Recover the pending operation with its exact request identity before advancing the original
+    # task. This test covers the existing state-preservation and mode/pair boundaries; it does not
+    # add temporal admission enforcement for an explicit mode=create request.
+    harness.clock.advance(61)
+    resumed = await harness.catalog.reserve_or_resume(pending_request)
+    assert resumed.outcome == "resumed"
+    assert resumed.task_id == pending.task_id
+    assert resumed.session_id == pending.session_id
+    await _complete(harness.catalog, resumed, 853)
+
+    # Once the original operation reaches a known terminal state, an explicitly declared sibling
+    # uses the existing mode=create path and receives its own task boundary.
+    explicit_sibling = StartCommand(
+        _id(IdKind.REQUEST, 854),
+        canonical_digest(
+            {
+                "external": sibling_commitments.external_ref_commitment,
+                "mode": StartMode.CREATE.value,
+                "session_id": None,
+                "title": sibling_commitments.title_commitment,
+                "workspace": sibling_commitments.workspace_ref_commitment,
+            }
+        ),
+        StartMode.CREATE,
+        sibling_identity,
+        sibling_commitments,
+        None,
+    )
+    sibling = await harness.catalog.reserve_or_resume(explicit_sibling)
+    assert sibling.task_id != pending.task_id
+    await _complete(harness.catalog, sibling, 855)
+    assert await harness.catalog.list_workspace_task_ids(workspace) == tuple(
+        sorted((pending.task_id, sibling.task_id))
+    )
+
+
+@pytest.mark.anyio
 async def test_expiry_and_stale_generation_reclaim() -> None:
     harness = _Harness.create(830)
     expired_request = await harness.command(831, refs="expired")

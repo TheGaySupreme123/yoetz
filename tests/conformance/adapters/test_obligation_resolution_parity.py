@@ -9,7 +9,10 @@ import pytest
 
 from builders.ledger_adapters import append_command, memory_adapter, sqlite_adapter
 from yoetz.domain.events import (
+    ActionKind,
+    ActionRecordedPayload,
     EventDraft,
+    EventPayload,
     EventSchema,
     ObligationPublishedPayload,
     ObligationStatus,
@@ -21,6 +24,7 @@ from yoetz.domain.events import (
 from yoetz.domain.values import (
     Actor,
     ActorType,
+    action_id,
     actor_id,
     event_id,
     evidence_id,
@@ -63,34 +67,38 @@ def _bad_resolution() -> ObligationPublishedPayload:
 
 async def _append_payload(
     ledger: LedgerPort,
-    payload: ObligationPublishedPayload,
+    payload: EventPayload,
     *,
     request_tail: int,
     event_tail: int,
+    family: str = "obligation_published",
+    observed: bool = False,
+    parent: int | None = None,
 ) -> None:
     author = Actor(
-        actor_id("agt_fixture"),
-        ActorType.LOGICAL_AGENT,
-        AuthorshipAssurance.SELF_ASSERTED,
+        actor_id("yoetz:observation-coordinator" if observed else "agt_fixture"),
+        ActorType.HARNESS if observed else ActorType.LOGICAL_AGENT,
+        AuthorshipAssurance.HARNESS_OBSERVED if observed else AuthorshipAssurance.SELF_ASSERTED,
     )
     draft = EventDraft(
         event_id(f"evt_00000000-0000-4000-8000-{event_tail:012d}"),
-        EventSchema("obligation_published", "1.0.0"),
+        EventSchema(family, "1.0.0"),
         timestamp_from_string("2026-07-19T12:00:00.000Z"),
-        (),
+        () if parent is None else (event_id(f"evt_00000000-0000-4000-8000-{parent:012d}"),),
         payload,
         (),
         (),
     )
     objects = cast(ObjectStorePort, getattr(ledger, "_objects"))
     seed = append_command()
-    media = media_type_for("obligation_published")
+    media = media_type_for(family)
     payload_bytes = canonical_encode(encode_payload(payload))
     staged = await objects.stage(
         ObjectSource(data=payload_bytes, declared_size=len(payload_bytes)),
         ObjectMetadata(ObjectKind.EVENT_PAYLOAD, media, seed.task_id, _NOW),
     )
     ref = await objects.finalize(staged)
+    channel = PublicationChannel.HOOK_OBSERVED if observed else PublicationChannel.LOCAL_CLI
     entry = AppendEntry(
         draft,
         author,
@@ -98,8 +106,8 @@ async def _append_payload(
         ref.commitment,
         media,
         ref.plaintext_size,
-        PublicationChannel.LOCAL_CLI,
-        coverage_for_channel(PublicationChannel.LOCAL_CLI),
+        channel,
+        coverage_for_channel(channel),
         "projected",
     )
     frontier = await ledger.load_frontier()
@@ -146,3 +154,49 @@ async def test_memory_and_sqlite_emit_identical_public_error_contract() -> None:
     assert failures[0].code is failures[1].code is PublicErrorCode.EVENT_INVALID
     assert dict(failures[0].safe_details) == dict(failures[1].safe_details)
     assert failures[0].message == failures[1].message
+
+
+async def test_command_reconciliation_status_has_memory_sqlite_parity() -> None:
+    from yoetz.ports.ledger import ProjectionView
+    from yoetz.protocol.models import StatusObligationItemModel
+
+    outputs: list[dict[str, object]] = []
+    for factory in (memory_adapter, sqlite_adapter):
+        seed = append_command()
+        ledger = factory(seed)
+        await _append_payload(ledger, _open_payload(), request_tail=821, event_tail=822)
+        observed = ActionRecordedPayload(
+            action_id("act_00000000-0000-4000-8000-000000000823"),
+            ActionKind.COMMAND,
+            "Synthetic observation",
+            command="pytest tests/other.py",
+        )
+        await _append_payload(
+            ledger,
+            observed,
+            request_tail=823,
+            event_tail=824,
+            family="action_recorded",
+            observed=True,
+        )
+        assertion = ActionRecordedPayload(
+            action_id("act_00000000-0000-4000-8000-000000000825"),
+            ActionKind.EDIT,
+            "Incorrectly copied requested command",
+            attempted_items=("pytest -q",),
+        )
+        await _append_payload(
+            ledger,
+            assertion,
+            request_tail=825,
+            event_tail=826,
+            family="action_recorded",
+            parent=824,
+        )
+        page = await ledger.load_projection(seed.session_id, ProjectionView.OBLIGATIONS)
+        assert page is not None
+        row = cast(tuple[StatusObligationItemModel, ...], page.state)[0]
+        assert row.unattempted_items == ()
+        assert row.command_attempts[0].relation == "asserted_observed_mismatch"
+        outputs.append(row.model_dump(mode="json"))
+    assert outputs[0] == outputs[1]

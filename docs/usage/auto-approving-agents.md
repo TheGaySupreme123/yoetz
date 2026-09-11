@@ -162,4 +162,7 @@ re-registration, not a silent mutation. A foreign entry named `yoetz` is never o
 
 Inspect the active route through MCP initialize instructions or `status(view=versions)`. Registration
 proves only the configured command; it does not prove that a host has launched it or that a provider
-is ready.
+is ready. On the policy route the initialize instructions also name the semantic review
+destination Yoetz read when the bridge started — the provider, endpoint profile, and host, or the
+Codex runtime class — together with the payload bound; that passage is a disclosure for the host's
+reviewer, not an approval, and it changes only when the host restarts the bridge.

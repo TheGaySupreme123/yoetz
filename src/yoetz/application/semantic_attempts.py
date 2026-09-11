@@ -38,7 +38,7 @@ from yoetz.ports.ledger import (
 from yoetz.ports.objects import ObjectRef
 from yoetz.ports.semantic import Deadline
 from yoetz.protocol.canonical import JsonValue
-from yoetz.protocol.errors import PublicOperationError
+from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.models import VALID_SEMANTIC_REASONS, SemanticReason, SemanticStatus
 
 __all__ = [
@@ -648,6 +648,7 @@ async def _resolve_disclosure_wait_after_terminal(
             exc,
             component="semantic_attempts",
             operation="semantic_disclosure_wait_load_after_terminal_failed",
+            request_id=lease.operation_id,
         )
         return
     if (
@@ -664,6 +665,7 @@ async def _resolve_disclosure_wait_after_terminal(
             exc,
             component="semantic_attempts",
             operation="semantic_disclosure_wait_resolve_after_terminal_failed",
+            request_id=lease.operation_id,
         )
 
 
@@ -802,6 +804,7 @@ async def _terminalize_after_failure(
             exc,
             component="semantic_attempts",
             operation="semantic_terminalize_renew_failed",
+            request_id=lease_holder().operation_id,
         )
     if handle is not None:
         try:
@@ -817,6 +820,7 @@ async def _terminalize_after_failure(
                 exc,
                 component="semantic_attempts",
                 operation="semantic_terminalize_attempt_failed",
+                request_id=lease_holder().operation_id,
             )
     else:
         try:
@@ -828,6 +832,7 @@ async def _terminalize_after_failure(
                 exc,
                 component="semantic_attempts",
                 operation="semantic_terminalize_job_failed",
+                request_id=lease_holder().operation_id,
             )
     await _resolve_disclosure_wait_after_terminal(
         ledger,
@@ -844,6 +849,7 @@ async def _terminalize_after_failure(
             exc,
             component="semantic_attempts",
             operation="semantic_terminalize_accounting_failed",
+            request_id=lease_holder().operation_id,
         )
         return attempt_accounting_from_rows(None, (), max_retries=max_retries, fallback=fallback)
 
@@ -937,8 +943,8 @@ async def run_durable_semantic_attempts(
     equal the primary's budget so the single-endpoint accounting stays the same function.
 
     Crash/replay after a terminal job row already exists recovers from durable state without
-    re-claiming. The check operation lease is renewed around each claim/select so a configured
-    ``timeout_seconds`` longer than the 60s lease TTL cannot expire mid-operation.
+    re-claiming. The check operation lease is renewed before each claim and after each provider
+    result; its bounded expiry is derived by the ledger from the frozen semantic execution.
     """
 
     if fallback is not None:
@@ -974,8 +980,44 @@ async def run_durable_semantic_attempts(
         )
 
     # Always refresh the check lease before recovery or the first claim so a long semantic
-    # deadline is not truncated by the 60-second operation-lease TTL.
-    await _renew()
+    # deadline is not truncated by the 60-second operation-lease TTL. Once the authenticated
+    # semantic execution bound has passed, a reclaimed operation may still have a short local
+    # lease for closing a started attempt. That lease is cleanup-only: the immutable provider
+    # deadline below remains expired and the dispatch branch refuses to send anything.
+    local_cleanup_only = False
+    try:
+        await _renew()
+    except PublicOperationError as exc:
+        if not (
+            exc.code is PublicErrorCode.OPERATION_PENDING
+            and deadline.expired(now_monotonic())
+            and job.state == "leased"
+            and job.active_attempt_id is not None
+        ):
+            raise
+        current_job = await ledger.load_semantic_job(
+            current_lease.writer_id, current_lease.operation_id
+        )
+        if (
+            current_job is None
+            or current_job.state != "leased"
+            or current_job.active_attempt_id is None
+        ):
+            raise exc
+        current_attempt = next(
+            (
+                row
+                for row in await ledger.list_semantic_attempts(current_job.job_id)
+                if row.attempt_id == current_job.active_attempt_id
+            ),
+            None,
+        )
+        if current_attempt is None or current_attempt.state not in {"started", "response_durable"}:
+            raise exc
+        # The caller's job snapshot may be stale after a concurrent terminalization. Use the
+        # durable row that justified cleanup so a queued replacement cannot be claimed here.
+        job = current_job
+        local_cleanup_only = True
 
     # Recover previously terminal jobs (crash after select_attempt / final FAILED before commit).
     if job.state in _TERMINAL_JOB_STATES:
@@ -1030,11 +1072,15 @@ async def run_durable_semantic_attempts(
             await _resolve_disclosure_wait_after_terminal(ledger, current_lease, job.job_id)
             return build_final(status, reason, last, await _accounting())
 
-        # Keep the operation lease alive across provider latency and backoff.
-        await _renew()
+        # Keep the operation lease alive across provider latency and backoff. A lease that was
+        # reclaimed after the provider deadline is usable only for the one local terminal write;
+        # renewing it would turn cleanup authority into a new provider lifetime.
+        if not local_cleanup_only:
+            await _renew()
         handle: SemanticAttemptHandle | None = None
         role: EndpointRole = "primary"
         codes_before: tuple[SemanticReason | None, ...] = ()
+        failure_stage = "claim"
         try:
             try:
                 handle = await ledger.claim_semantic_job(current_lease, job.job_id)
@@ -1049,6 +1095,47 @@ async def run_durable_semantic_attempts(
                     await sleep(min(0.05, remaining))
                 continue
             pending_claim_error = None
+            failure_stage = "attempt_recovery"
+            attempts = await ledger.list_semantic_attempts(job.job_id)
+            durable_response = next(
+                (
+                    row
+                    for row in attempts
+                    if row.attempt_id == handle.attempt_id and row.state == "response_durable"
+                ),
+                None,
+            )
+            if durable_response is not None:
+                if durable_response.result_object_ref is None:
+                    raise PublicOperationError(
+                        PublicErrorCode.STORAGE_CORRUPT,
+                        "semantic response durable row is missing its result object.",
+                        False,
+                    )
+                # The provider response was already authenticated and published before the
+                # crash. Select that exact object under the rebound lease and recover its
+                # judgment; no provider dispatch or new request identity is permitted here.
+                await ledger.select_attempt(
+                    current_lease, handle, durable_response.result_object_ref
+                )
+                recovered_job = await ledger.load_semantic_job(
+                    current_lease.writer_id, current_lease.operation_id
+                )
+                if recovered_job is None:
+                    raise PublicOperationError(
+                        PublicErrorCode.STORAGE_CORRUPT,
+                        "semantic job disappeared during response recovery.",
+                        False,
+                    )
+                return await _recover_terminal_job(
+                    ledger=ledger,
+                    lease=current_lease,
+                    job=recovered_job,
+                    max_retries=max_retries,
+                    fallback=fallback,
+                    recover_selected=recover_selected,
+                    build_final=build_final,
+                )
             if fallback is not None:
                 # The endpoint is a function of the rows before this ordinal, so a resumed
                 # ``started`` attempt goes back to the endpoint it was claimed for.
@@ -1094,19 +1181,12 @@ async def run_durable_semantic_attempts(
                 attempt_dispatch = dispatch_fallback
             if remaining <= 0.0:
                 # A resumed started attempt must not be sent after its frozen endpoint cutoff.
-                # Preserve uncertainty for a prior started attempt unless an exact disclosure
-                # wait proves it had not dispatched. A newly claimed attempt is a known timeout.
-                # Neither outcome licenses a fallback dispatch here.
-                wait = await ledger.load_disclosure_wait(
-                    current_lease.writer_id, current_lease.operation_id
-                )
-                known_undispatched = (
-                    wait is not None
-                    and getattr(wait, "job_id", None) == job.job_id
-                    and getattr(wait, "attempt_id", None) == job.active_attempt_id
-                    and getattr(wait, "state", None) == "awaiting"
-                )
-                uncertain = job.state == "leased" and last is None and not known_undispatched
+                # A task-local awaiting row may be stale after the independent privacy audit
+                # consumed admission. It cannot prove that a resumed started attempt never
+                # dispatched. Preserve uncertainty without re-entering provider authorization;
+                # only a newly claimed attempt is a known pre-admission timeout here.
+                # Neither outcome licenses a retry or fallback dispatch.
+                uncertain = job.state == "leased" and last is None
                 terminal_reason = (
                     SemanticReason.OUTCOME_UNKNOWN if uncertain else SemanticReason.PROVIDER_TIMEOUT
                 )
@@ -1122,8 +1202,15 @@ async def run_durable_semantic_attempts(
                     None,
                     await _accounting(),
                 )
+            failure_stage = "dispatch_entered"
             evaluation = await attempt_dispatch(handle, attempt_deadline)
         except BaseException as exc:
+            record_unexpected_exception_without_raising(
+                exc,
+                component="semantic_attempts",
+                operation=f"semantic_attempt_{failure_stage}_failed",
+                request_id=current_lease.operation_id,
+            )
             # A raise between claim and the terminal write used to unwind past every
             # terminalizing call, leaving the attempt "started" and the job "leased" forever —
             # and, because claim resumes the same attempt on replay, the operation could never
@@ -1153,135 +1240,149 @@ async def run_durable_semantic_attempts(
         attempts_completed = handle.attempt_ordinal
         last = evaluation
 
-        # Provider dispatch may consume most of a lease TTL; renew before ledger mutations.
-        await _renew()
+        final_stage = "dispatch_result_received"
+        try:
+            # Provider dispatch may consume most of a lease TTL; renew before ledger mutations.
+            await _renew()
 
-        if evaluation.status is SemanticStatus.SUCCEEDED:
-            response_ref = await publish_success_response(handle, evaluation)
-            await ledger.record_attempt_outcome(
-                handle, AttemptOutcome.RESPONSE_DURABLE, response_ref
-            )
-            await ledger.select_attempt(current_lease, handle, response_ref)
-            await _resolve_disclosure_wait_after_terminal(
-                ledger, current_lease, job.job_id, handle.attempt_id
-            )
-            return build_final(
-                evaluation.status, evaluation.reason, evaluation, await _accounting()
-            )
-
-        # awaiting_human is the one nonterminal dispatch outcome. It is not a failure and not a
-        # retry: no provider was reached, the case was never sent, and the same attempt must be
-        # resumable once the human answers. Falling through to the exhaustion path below would
-        # write the attempt FAILED, terminalize the job, and commit a terminal check result —
-        # leaving an approved decision with nothing left to resume.
-        if evaluation.status is SemanticStatus.AWAITING_HUMAN:
-            continuation = getattr(evaluation, "continuation", None)
-            if continuation is None:
-                # Without a pending id the caller cannot act and the job cannot be resumed;
-                # that is a coordinator failure, not a wait.
-                accounting = await _terminalize_after_failure(
-                    ledger=ledger,
-                    renew=_renew,
-                    lease_holder=lambda: current_lease,
-                    job_id=job.job_id,
-                    handle=handle,
-                    max_retries=max_retries,
-                    fallback=fallback,
+            if evaluation.status is SemanticStatus.SUCCEEDED:
+                final_stage = "response_persistence"
+                response_ref = await publish_success_response(handle, evaluation)
+                await ledger.record_attempt_outcome(
+                    handle, AttemptOutcome.RESPONSE_DURABLE, response_ref
+                )
+                final_stage = "result_commit"
+                await ledger.select_attempt(current_lease, handle, response_ref)
+                await _resolve_disclosure_wait_after_terminal(
+                    ledger, current_lease, job.job_id, handle.attempt_id
                 )
                 return build_final(
-                    SemanticStatus.FAILED,
-                    SemanticReason.COORDINATOR_FAILURE,
-                    None,
-                    accounting,
+                    evaluation.status, evaluation.reason, evaluation, await _accounting()
                 )
-            await ledger.record_disclosure_wait(
-                handle,
-                continuation.pending_id,
-                continuation.expires_at.as_datetime(),
-            )
-            # The attempt stays `started` and the job stays `leased` on purpose: this is the
-            # durable record that the check is open, not finished.
-            return build_final(
-                evaluation.status, evaluation.reason, evaluation, await _accounting()
-            )
 
-        # The repair cap is read from durable rows, not a local counter: after an
-        # ``awaiting_human`` replay this loop starts over with ``attempts_completed`` rebuilt
-        # from the claimed ordinal, and the one-repair rule has to survive that the same way.
-        repair_retries_used = repair_retries_from_rows(
-            await ledger.list_semantic_attempts(job.job_id)
-        )
-        deadline_expired = deadline.expired(now_monotonic())
-        codes_after = (*codes_before, evaluation.reason)
-        switching = False
-        if fallback is None:
-            can_retry = should_retry_after(
-                status=evaluation.status,
-                reason=evaluation.reason,
-                attempts_completed=attempts_completed,
-                max_retries=max_retries,
-                deadline_expired=deadline_expired,
-                repair_retries_used=repair_retries_used,
-            )
-        else:
-            walk_after = _walk_endpoints(codes_after, fallback)
-            switching = role == "primary" and walk_after.engaged
-            if switching:
-                # The primary just crossed the closed engagement rule. The fallback's own
-                # budget is untouched, so the only thing that can refuse it is the deadline.
-                can_retry = not deadline_expired
-            else:
-                role_attempts = (
-                    walk_after.primary_attempts
-                    if role == "primary"
-                    else walk_after.fallback_attempts
+            # awaiting_human is the one nonterminal dispatch outcome. It is not a failure and not a
+            # retry: no provider was reached, the case was never sent, and the same attempt must be
+            # resumable once the human answers. Falling through to the exhaustion path below would
+            # write the attempt FAILED, terminalize the job, and commit a terminal check result —
+            # leaving an approved decision with nothing left to resume.
+            if evaluation.status is SemanticStatus.AWAITING_HUMAN:
+                continuation = getattr(evaluation, "continuation", None)
+                if continuation is None:
+                    # Without a pending id the caller cannot act and the job cannot be resumed;
+                    # that is a coordinator failure, not a wait.
+                    accounting = await _terminalize_after_failure(
+                        ledger=ledger,
+                        renew=_renew,
+                        lease_holder=lambda: current_lease,
+                        job_id=job.job_id,
+                        handle=handle,
+                        max_retries=max_retries,
+                        fallback=fallback,
+                    )
+                    return build_final(
+                        SemanticStatus.FAILED,
+                        SemanticReason.COORDINATOR_FAILURE,
+                        None,
+                        accounting,
+                    )
+                await ledger.record_disclosure_wait(
+                    handle,
+                    continuation.pending_id,
+                    continuation.expires_at.as_datetime(),
                 )
+                # The attempt stays `started` and the job stays `leased` on purpose: this is the
+                # durable record that the check is open, not finished.
+                return build_final(
+                    evaluation.status, evaluation.reason, evaluation, await _accounting()
+                )
+
+            # The repair cap is read from durable rows, not a local counter: after an
+            # ``awaiting_human`` replay this loop starts over with ``attempts_completed`` rebuilt
+            # from the claimed ordinal, and the one-repair rule has to survive that the same way.
+            repair_retries_used = repair_retries_from_rows(
+                await ledger.list_semantic_attempts(job.job_id)
+            )
+            deadline_expired = deadline.expired(now_monotonic())
+            codes_after = (*codes_before, evaluation.reason)
+            switching = False
+            if fallback is None:
                 can_retry = should_retry_after(
                     status=evaluation.status,
                     reason=evaluation.reason,
-                    attempts_completed=role_attempts,
-                    max_retries=fallback.endpoint(role).max_retries,
-                    deadline_expired=deadline_expired or attempt_deadline.expired(now_monotonic()),
+                    attempts_completed=attempts_completed,
+                    max_retries=max_retries,
+                    deadline_expired=deadline_expired,
                     repair_retries_used=repair_retries_used,
                 )
-            budget = _total_budget(walk_after, fallback)
-        if can_retry:
-            # ``expired`` keeps the job claimable and leaves this attempt's terminal code in the
-            # row, so the repaired attempt stays visible in accounting next to its successor.
+            else:
+                walk_after = _walk_endpoints(codes_after, fallback)
+                switching = role == "primary" and walk_after.engaged
+                if switching:
+                    # The primary just crossed the closed engagement rule. The fallback's own
+                    # budget is untouched, so the only thing that can refuse it is the deadline.
+                    can_retry = not deadline_expired
+                else:
+                    role_attempts = (
+                        walk_after.primary_attempts
+                        if role == "primary"
+                        else walk_after.fallback_attempts
+                    )
+                    can_retry = should_retry_after(
+                        status=evaluation.status,
+                        reason=evaluation.reason,
+                        attempts_completed=role_attempts,
+                        max_retries=fallback.endpoint(role).max_retries,
+                        deadline_expired=deadline_expired
+                        or attempt_deadline.expired(now_monotonic()),
+                        repair_retries_used=repair_retries_used,
+                    )
+                budget = _total_budget(walk_after, fallback)
+            if can_retry:
+                # ``expired`` keeps the job claimable and leaves this attempt's terminal code in the
+                # row, so the repaired attempt stays visible in accounting next to its successor.
+                await ledger.record_attempt_outcome(
+                    handle,
+                    AttemptOutcome.EXPIRED,
+                    terminal_code=evaluation.reason,
+                )
+                await _resolve_disclosure_wait_after_terminal(
+                    ledger, current_lease, job.job_id, handle.attempt_id
+                )
+                # A repair is not waiting out a transport fault, and a fallback is a different
+                # endpoint: neither resubmits with backoff.
+                repair = is_repairable_semantic_outcome(evaluation.status, evaluation.reason)
+                delay = backoff_seconds(
+                    handle.attempt_ordinal, kind="none" if repair or switching else "transient"
+                )
+                if delay > 0.0 and not deadline.expired(now_monotonic() + delay):
+                    await sleep(delay)
+                continue
+
+            terminal_status, terminal_reason = _role_exhaustion(
+                evaluation.status,
+                evaluation.reason,
+                codes=codes_after if fallback is not None else (None,) * attempts_completed,
+                max_retries=max_retries,
+                fallback=fallback,
+            )
             await ledger.record_attempt_outcome(
                 handle,
-                AttemptOutcome.EXPIRED,
-                terminal_code=evaluation.reason,
+                AttemptOutcome.FAILED,
+                terminal_code=terminal_reason,
             )
             await _resolve_disclosure_wait_after_terminal(
                 ledger, current_lease, job.job_id, handle.attempt_id
             )
-            # A repair is not waiting out a transport fault, and a fallback is a different
-            # endpoint: neither resubmits with backoff.
-            repair = is_repairable_semantic_outcome(evaluation.status, evaluation.reason)
-            delay = backoff_seconds(
-                handle.attempt_ordinal, kind="none" if repair or switching else "transient"
-            )
-            if delay > 0.0 and not deadline.expired(now_monotonic() + delay):
-                await sleep(delay)
-            continue
+            return build_final(terminal_status, terminal_reason, evaluation, await _accounting())
 
-        terminal_status, terminal_reason = _role_exhaustion(
-            evaluation.status,
-            evaluation.reason,
-            codes=codes_after if fallback is not None else (None,) * attempts_completed,
-            max_retries=max_retries,
-            fallback=fallback,
-        )
-        await ledger.record_attempt_outcome(
-            handle,
-            AttemptOutcome.FAILED,
-            terminal_code=terminal_reason,
-        )
-        await _resolve_disclosure_wait_after_terminal(
-            ledger, current_lease, job.job_id, handle.attempt_id
-        )
-        return build_final(terminal_status, terminal_reason, evaluation, await _accounting())
+        except BaseException as exc:
+            record_unexpected_exception_without_raising(
+                exc,
+                component="semantic_attempts",
+                operation=f"semantic_attempt_{final_stage}_failed",
+                request_id=current_lease.operation_id,
+            )
+            raise
 
     if last is None:
         await ledger.fail_semantic_job(

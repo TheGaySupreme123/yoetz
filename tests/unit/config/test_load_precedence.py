@@ -191,3 +191,22 @@ def test_explicit_project_config_diagnostic_is_bounded(
     diagnostic = capsys.readouterr().err
     assert diagnostic == '{"reason":"explicit_project_config"}\n'
     assert str(tmp_path) not in diagnostic
+
+
+def test_new_defaults_preserve_omitted_existing_leaves_and_explicit_migration(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "settings.toml"
+    fresh = load_config({}, {}, path)
+    assert (fresh.verification.semantic, fresh.verification.max_findings) == ("required", 10)
+    path.write_text('schema_version = "1"\n', encoding="utf-8")
+    original = path.read_bytes()
+    old = load_config({}, {}, path)
+    assert (old.verification.semantic, old.verification.max_findings) == ("optional", 3)
+    assert path.read_bytes() == original
+    explicit = load_config(
+        {"verification.semantic": "required", "verification.max_findings": "10"}, {}, path
+    )
+    assert (explicit.verification.semantic, explicit.verification.max_findings) == ("required", 10)
+    assert path.read_bytes() == original
+    assert explicit.privacy == old.privacy == fresh.privacy

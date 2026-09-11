@@ -99,7 +99,7 @@ def test_content_fence_epoch_migrates_legacy_state_and_survives_reopen(tmp_path:
     after = _generation(migrated, workspace)
     assert after != before
     persisted = json.loads(state_path.read_text(encoding="utf-8"))
-    assert persisted["schema"] == "yoetz.observation-local/13"
+    assert persisted["schema"] == "yoetz.observation-local/15"
     assert isinstance(persisted["content_capture_epoch"], str)
     assert not migrated.content_capture_authority_is_current(workspace, before, (_PROFILE,))
 

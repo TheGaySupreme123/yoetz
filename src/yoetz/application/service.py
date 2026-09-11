@@ -12,6 +12,7 @@ from typing import Literal, Protocol, cast
 from pydantic import BaseModel
 
 from yoetz.application.egress import PrivacyCoordinator
+from yoetz.application.observation_advice_semantic import ObservationAdviceSemanticSupervisor
 from yoetz.application.observation_verification import ObservationVerificationSupervisor
 from yoetz.application.unit_of_work import run_publish_response_commit
 from yoetz.domain.events import RuntimeProfile
@@ -614,9 +615,20 @@ class Application:
     ready_recommendation_refresh: Callable[[], Awaitable[object]] | None = field(
         default=None, repr=False, compare=False
     )
+    # Off-hook observation-advice semantic attempts (#619); stopped with the verification
+    # supervisor so no provider attempt outlives this generation's privacy coordinator.
+    advice_semantic_supervisor: ObservationAdviceSemanticSupervisor | None = field(
+        default=None, repr=False, compare=False
+    )
     # The sweeper owns a worker pool of its own; this generation's close is the only place that
     # can release it, so it travels with the sweep it belongs to.
     observation_sweep_close: Callable[[], None] | None = field(
+        default=None, repr=False, compare=False
+    )
+    # One task-local admission hook runs after a new CHECK hits a retryable capture barrier and
+    # before its single freeze retry. It may retire unfinished native-content handoffs whose local
+    # authority has changed; it never touches captured history or the ledger projection.
+    reconcile_observation_capture: Callable[[TaskRuntime], Awaitable[None]] | None = field(
         default=None, repr=False, compare=False
     )
     enforce_repository_identity: bool = True
@@ -643,6 +655,10 @@ class Application:
             raise TypeError("ready_recommendation_refresh_invalid")
         if self.observation_sweep_close is not None and not callable(self.observation_sweep_close):
             raise TypeError("observation_sweep_close_invalid")
+        if self.reconcile_observation_capture is not None and not callable(
+            self.reconcile_observation_capture
+        ):
+            raise TypeError("reconcile_observation_capture_invalid")
         if type(self.enforce_repository_identity) is not bool:
             raise TypeError("repository_identity_enforcement_invalid")
         # Readiness may never outrun the resolved binding. A connected provider that is not the
@@ -1376,6 +1392,12 @@ class Application:
             if failure is None:
                 failure = exc
         try:
+            if self.advice_semantic_supervisor is not None:
+                await self.advice_semantic_supervisor.stop()
+        except BaseException as exc:
+            if failure is None:
+                failure = exc
+        try:
             await self.privacy.close()
         except BaseException as exc:
             if failure is None:
@@ -1421,6 +1443,8 @@ class ServiceReadyContext:
     )
     verification_supervisor: ObservationVerificationSupervisor | None = None
     rediscover_pending_verification: Callable[[], Awaitable[None]] | None = None
+    advice_semantic_supervisor: ObservationAdviceSemanticSupervisor | None = None
+    rediscover_pending_advice_semantic: Callable[[], Awaitable[None]] | None = None
     connected_provider_ids: tuple[str, ...] = ()
     provider_credential_connected: bool = False
     # Structural presence of the declared fallback endpoint's credential (#582); never readiness.
@@ -1433,6 +1457,9 @@ class ServiceReadyContext:
         default=None, repr=False, compare=False
     )
     observation_sweep_close: Callable[[], None] | None = field(
+        default=None, repr=False, compare=False
+    )
+    reconcile_observation_capture: Callable[[TaskRuntime], Awaitable[None]] | None = field(
         default=None, repr=False, compare=False
     )
 
@@ -1460,6 +1487,10 @@ class ServiceReadyContext:
             raise TypeError("ready_recommendation_refresh_invalid")
         if self.observation_sweep_close is not None and not callable(self.observation_sweep_close):
             raise TypeError("observation_sweep_close_invalid")
+        if self.reconcile_observation_capture is not None and not callable(
+            self.reconcile_observation_capture
+        ):
+            raise TypeError("reconcile_observation_capture_invalid")
         # Readiness may never outrun the resolved binding. A connected provider that is not the
         # configured one leaves dispatch on the credential-unavailable path, so a readiness flag
         # set without it would report ready while every check reports unavailable.
@@ -1521,12 +1552,18 @@ class ReadyApplicationFactory:
                 observation_sweep=context.observation_sweep,
                 ready_recommendation_refresh=context.ready_recommendation_refresh,
                 observation_sweep_close=context.observation_sweep_close,
+                reconcile_observation_capture=context.reconcile_observation_capture,
                 enforce_repository_identity=True,
+                advice_semantic_supervisor=context.advice_semantic_supervisor,
             )
             if context.verification_supervisor is not None:
                 await context.verification_supervisor.start()
             if context.rediscover_pending_verification is not None:
                 await context.rediscover_pending_verification()
+            if context.advice_semantic_supervisor is not None:
+                await context.advice_semantic_supervisor.start()
+            if context.rediscover_pending_advice_semantic is not None:
+                await context.rediscover_pending_advice_semantic()
             return application
         except BaseException:
             await _close_ready_context(context)
@@ -1545,6 +1582,12 @@ async def _close_ready_context(context: object) -> None:
     try:
         if context.verification_supervisor is not None:
             await context.verification_supervisor.stop()
+    except BaseException as exc:
+        if failure is None:
+            failure = exc
+    try:
+        if context.advice_semantic_supervisor is not None:
+            await context.advice_semantic_supervisor.stop()
     except BaseException as exc:
         if failure is None:
             failure = exc

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import platform
+import re
 import sys
 import sysconfig
 from collections.abc import Mapping
@@ -44,8 +45,12 @@ __all__ = [
     "ResourceIdentity",
     "ResourceIntegrityError",
     "SQLITE_APPLICATION_ID",
+    "STATUS_VERSION_STORAGE_SCHEMA",
+    "StatusVersionSliceFacts",
+    "UNAVAILABLE_RUNTIME_FACT",
     "VersionManifest",
     "WORK_INTEGRITY_POLICY_VERSION",
+    "build_status_version_slice_facts",
     "build_version_manifest",
     "read_verified_resource",
     "verify_resource_manifest",
@@ -62,6 +67,13 @@ PROJECTION_VERSION: Final = "yoetz/0.1.0"
 WORK_INTEGRITY_POLICY_VERSION: Final = "work-integrity/0.1.0"
 RESEARCH_EVIDENCE_POLICY_VERSION: Final = "research-evidence/0.1.0"
 OBJECT_FORMAT_VERSION: Final = "yoetz-object/1"
+# Static identity on the status versions slice. Distinct from catalog/bundle schema counters
+# and from live SQLite user_version. Not a probed runtime fact.
+STATUS_VERSION_STORAGE_SCHEMA: Final = "1"
+UNAVAILABLE_RUNTIME_FACT: Final = "unavailable"
+_VERSION_WIRE_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+/-]{0,63}$")
+_PROFILE_ID_WIRE_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,127}$")
+_ASCII_PRINTABLE_PATTERN: Final = re.compile(r"^[ -~]+$")
 CATALOG_SCHEMA_VERSION: Final = "4"
 BUNDLE_SCHEMA_VERSION: Final = "2"
 SQLITE_APPLICATION_ID: Final = "0x594F4554"
@@ -74,7 +86,7 @@ _RESOURCE_LIMIT: Final = 4_194_304
 # One independently reviewed cardinality tripwire guards the generated resource manifest. All
 # per-kind counts are derived from the manifest entries so adding a resource has exactly one
 # hand-authored count to review and the owning resource-ripple command can regenerate the rest.
-REVIEWED_RESOURCE_COUNT: Final = 173
+REVIEWED_RESOURCE_COUNT: Final = 188
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -94,10 +106,10 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("check-request", "1.0.0"),
     ("check-result", "1.1.0"),
     ("client-info", "1.0.0"),
-    ("control-hello", "2.4.0"),
-    ("control-hello-result", "2.4.0"),
-    ("control-request", "2.4.0"),
-    ("control-result", "2.4.0"),
+    ("control-hello", "2.6.0"),
+    ("control-hello-result", "2.6.0"),
+    ("control-request", "2.6.0"),
+    ("control-result", "2.6.0"),
     ("coverage", "1.0.0"),
     ("egress-receipt", "1.0.0"),
     ("finding", "1.1.0"),
@@ -119,6 +131,7 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("respond-request", "1.0.0"),
     ("respond-result", "1.0.0"),
     ("review-result", "6.0.0"),
+    ("routine-read-summary", "1.0.0"),
     ("runtime-attempt-evidence", "1.0.0"),
     ("semantic-provenance", "1.1.0"),
     ("service-status", "1.0.0"),
@@ -247,6 +260,28 @@ class VersionManifest:
     build_identity: str
     support_status: str
     limitations: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class StatusVersionSliceFacts:
+    """Live and static facts for MCP/CLI ``status view=versions``.
+
+    Runtime-probed values come from the same producer as ``version --json``.
+    Contract identities are package constants. ``provider_profiles`` is the
+    packaged support-catalog inventory, not live semantic-evaluator presence.
+    """
+
+    protocol_version: str
+    engine_version: str
+    projection_version: str
+    object_format: str
+    storage_schema: str
+    python_version: str
+    apsw_version: str
+    sqlite_version: str
+    sqlite_source_id: str
+    policy_packs: tuple[str, ...]
+    provider_profiles: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -527,6 +562,49 @@ def _component(*, value: str | None, field: str) -> Component:
     return MappingProxyType({"status": "present", field: value})
 
 
+def _wire_version(value: str) -> str:
+    if type(value) is not str or _VERSION_WIRE_PATTERN.fullmatch(value) is None:
+        return UNAVAILABLE_RUNTIME_FACT
+    return value
+
+
+def _wire_component(
+    component: Component,
+    *,
+    field: str,
+    max_length: int,
+    ascii_printable: bool = False,
+) -> str:
+    if component.get("status") != "present":
+        return UNAVAILABLE_RUNTIME_FACT
+    value = component.get(field)
+    if type(value) is not str or not value or len(value) > max_length:
+        return UNAVAILABLE_RUNTIME_FACT
+    if ascii_printable:
+        if _ASCII_PRINTABLE_PATTERN.fullmatch(value) is None:
+            return UNAVAILABLE_RUNTIME_FACT
+        return value
+    return _wire_version(value)
+
+
+def _support_provider_profile_ids(raw: JsonValue) -> tuple[str, ...]:
+    if type(raw) is not list:
+        raise ResourceIntegrityError("support_shape_invalid")
+    profiles: list[str] = []
+    for item in raw:
+        if (
+            type(item) is not str
+            or len(item) > 128
+            or _PROFILE_ID_WIRE_PATTERN.fullmatch(item) is None
+        ):
+            raise ResourceIntegrityError("support_shape_invalid")
+        profiles.append(item)
+    ordered = tuple(sorted(set(profiles), key=str.encode))
+    if len(ordered) > 16:
+        raise ResourceIntegrityError("support_shape_invalid")
+    return ordered
+
+
 def _distribution_version(name: str) -> str | None:
     try:
         return importlib.metadata.version(name)
@@ -660,6 +738,35 @@ def build_version_manifest(*, include_optional_probes: bool = False) -> VersionM
         build_identity="development-unavailable",
         support_status="development_unverified",
         limitations=limitations,
+    )
+
+
+def build_status_version_slice_facts(
+    *, manifest: VersionManifest | None = None
+) -> StatusVersionSliceFacts:
+    """Project ``version --json`` runtime facts onto the status versions slice."""
+
+    resolved = build_version_manifest() if manifest is None else manifest
+    if type(resolved) is not VersionManifest:
+        raise TypeError("manifest_must_be_version_manifest")
+    support = _load_support(_load_resource_manifest())
+    return StatusVersionSliceFacts(
+        protocol_version=PROTOCOL_VERSION,
+        engine_version=ENGINE_VERSION,
+        projection_version=PROJECTION_VERSION,
+        object_format=OBJECT_FORMAT_VERSION,
+        storage_schema=STATUS_VERSION_STORAGE_SCHEMA,
+        python_version=_wire_version(resolved.python_version),
+        apsw_version=_wire_component(resolved.apsw_version, field="version", max_length=64),
+        sqlite_version=_wire_component(resolved.sqlite_version, field="version", max_length=64),
+        sqlite_source_id=_wire_component(
+            resolved.sqlite_source_id,
+            field="source_id",
+            max_length=160,
+            ascii_printable=True,
+        ),
+        policy_packs=(RESEARCH_EVIDENCE_POLICY_VERSION, WORK_INTEGRITY_POLICY_VERSION),
+        provider_profiles=_support_provider_profile_ids(support["provider_profiles"]),
     )
 
 

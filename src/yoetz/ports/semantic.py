@@ -1015,8 +1015,14 @@ class SemanticCase:
     items: tuple[SemanticCaseItem, ...]
     question_set: tuple[str, ...]
     case_digest: str
+    omitted_reference_count: int = 0
 
     def __post_init__(self) -> None:
+        if (
+            type(self.omitted_reference_count) is not int
+            or not 0 <= self.omitted_reference_count <= _MAX_SAFE_INTEGER
+        ):
+            raise _invalid_case()
         try:
             case_id = validate_id(IdKind.OUTBOUND_CASE, self.case_id)
         except ProtocolValueError as exc:

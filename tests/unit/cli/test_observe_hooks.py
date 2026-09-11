@@ -8,7 +8,7 @@ import json
 import os
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal, cast
@@ -394,6 +394,45 @@ def test_post_tool_hook_delivers_pending_frontier_motion_once(tmp_path: Path) ->
     assert "observation writer appended 2 ledger record(s)" in advanced_context
 
 
+@pytest.mark.parametrize("tool_name", ["start", "mcp__yoetz__publish_work"])
+def test_codex_owned_tool_does_not_lease_frontier_advice(tmp_path: Path, tool_name: str) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = "codex:self-advice"
+    store.bind_codex_session(workspace, session)
+    store.note_frontier_motion(
+        workspace,
+        session,
+        from_sequence=1,
+        to_sequence=2,
+        head_digest="sha256:" + "5" * 64,
+        observation_record_count=1,
+        task_id="tsk-codex-self-advice",
+    )
+    stdout = io.BytesIO()
+
+    assert (
+        handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=json.dumps(
+                {
+                    "session_id": session,
+                    "tool_name": tool_name,
+                    "exit_status": 0,
+                }
+            ).encode(),
+            stdout=stdout,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    assert stdout.getvalue() == b"{}\n"
+    assert store.peek_frontier_motion(workspace, session) is not None
+
+
 def test_stdout_teardown_failure_exits_zero_and_records_diagnostic(tmp_path: Path) -> None:
     class _ClosedStdout(io.BytesIO):
         def write(self, data: object) -> int:
@@ -627,6 +666,83 @@ def test_service_unavailable_never_spools_visible_plaintext(tmp_path: Path) -> N
     assert canary.encode() not in persisted
     status = store.status(ObservationStatusQuery(workspace))
     assert ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value in status.gaps
+
+
+def test_advice_refresh_runs_after_local_capture_batch_closes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    original_refresh = LocalObservationStore.refresh_advice
+    batch_states: list[bool] = []
+
+    def refresh_outside_batch(self: LocalObservationStore, commitment: str, **kwargs: object):
+        batch_states.append(commitment in self._batch)  # pyright: ignore[reportPrivateUsage]
+        return original_refresh(self, commitment, **kwargs)  # pyright: ignore[reportArgumentType]
+
+    monkeypatch.setattr(LocalObservationStore, "refresh_advice", refresh_outside_batch)
+    assert (
+        handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=json.dumps(
+                {
+                    "session_id": "advice-after-capture",
+                    "tool_name": "shell",
+                    "tool_call_id": "tool-1",
+                    "exit_status": 0,
+                }
+            ).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    assert batch_states == [False]
+    assert store.list_envelopes(workspace)
+    assert store.list_pending_outbox_rows(workspace)
+
+
+def test_service_failure_leaves_structural_capture_and_pairing_pending(
+    tmp_path: Path,
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+
+    async def unavailable_connect(_kind: object) -> object:
+        raise ConnectionError("test service unavailable")
+
+    def run_async(coro: object) -> object:
+        return asyncio.run(coro)  # type: ignore[arg-type]
+
+    assert (
+        handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=json.dumps(
+                {
+                    "session_id": "capture-before-drain",
+                    "tool_name": "shell",
+                    "tool_call_id": "tool-1",
+                    "exit_status": 0,
+                }
+            ).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            connect=unavailable_connect,  # type: ignore[arg-type]
+            run_async=run_async,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+
+    envelopes = store.list_envelopes(workspace)
+    pending = store.list_pending_outbox_rows(workspace)
+    assert len(envelopes) == 1
+    assert len(pending) == 1
+    assert pending[0].envelope.source_identity == envelopes[0].source_identity
 
 
 def test_observe_ingests_when_consented_and_pairs_pre_post(tmp_path: Path) -> None:
@@ -1078,7 +1194,7 @@ def test_pairing_history_fence_survives_a_pre11_writer_round_trip(tmp_path: Path
     )
     reopened.note_coverage_gap(workspace, ObservationGapCode.SERVICE_UNAVAILABLE.value)
     persisted = json.loads(state_path.read_text(encoding="utf-8"))
-    assert persisted["schema"] == "yoetz.observation-local/13"
+    assert persisted["schema"] == "yoetz.observation-local/15"
     assert persisted["pairing_state_unknown"] is True
     assert (
         ObservationGapCode.UNPAIRED_EVENT.value
@@ -1684,6 +1800,87 @@ def test_session_start_status_read_carries_the_consented_locator(
     assert not diagnostics_path.exists() or "mapping_stale" not in diagnostics_path.read_text()
 
 
+def test_legacy_bound_session_probe_carries_the_host_payload_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #659: the shared mapped SessionStart without an explicit workspace recovers its
+    commitment from the legacy session binding, and the status probe now carries a locator derived
+    from the host payload's cwd instead of connecting bare."""
+
+    from yoetz.adapters.integrations.codex_lifecycle import (
+        load_mapping,
+        mapping_from_start_ids,
+        store_mapping,
+    )
+    from yoetz.ports.control import WorkspaceLocator
+    from yoetz.protocol.ids import IdKind, new_id
+
+    project = tmp_path / "project"
+    project.mkdir()
+    project.chmod(0o700)
+    (project / ".git").mkdir()
+    (project / "src").mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    elsewhere.chmod(0o700)
+    monkeypatch.chdir(elsewhere)
+    state = tmp_path / "state"
+    store = LocalObservationStore(_state=state)
+    locator = str(project)
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "codex:legacy-compact-1")
+    task_id, session_id, writer_id = (
+        new_id(IdKind.TASK),
+        new_id(IdKind.SESSION),
+        new_id(IdKind.WRITER),
+    )
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id="codex:legacy-compact-1",
+            yoetz_task_id=task_id,
+            yoetz_session_id=session_id,
+            yoetz_writer_id=writer_id,
+            last_frontier="0:genesis",
+        ),
+        _state=state,
+    )
+    captured: list[WorkspaceLocator | None] = []
+    client = _status_active_client(task_id, session_id, writer_id)
+
+    async def connect(_kind: object, *, workspace_locator: WorkspaceLocator | None = None):
+        captured.append(workspace_locator)
+        return client
+
+    monkeypatch.setattr(observe_hooks_module, "connect_service", connect, raising=False)
+
+    out = io.BytesIO()
+    code = handle_observe(
+        event_name="SessionStart",
+        stdin_bytes=json.dumps(
+            {
+                "session_id": "codex:legacy-compact-1",
+                "hook_event_name": "SessionStart",
+                "source": "compact",
+                "cwd": str(project / "src"),
+            }
+        ).encode(),
+        stdout=out,
+        workspace=None,
+        _state=state,
+    )
+    assert code == 0
+    # The subdirectory cwd resolved to the repository root the mapping was consented under.
+    assert captured and captured[0] == WorkspaceLocator(locator)
+    context = json.loads(out.getvalue().decode())["hookSpecificOutput"]["additionalContext"]
+    assert f"session_id {session_id} and writer_id {writer_id}" in context
+    refreshed = load_mapping("codex:legacy-compact-1", _state=state)
+    assert refreshed is not None
+    assert (refreshed.yoetz_session_id, refreshed.yoetz_writer_id) == (session_id, writer_id)
+    diagnostics_path = state / "observation" / "hook-diagnostics.jsonl"
+    assert not diagnostics_path.exists() or "status_workspace" not in (diagnostics_path.read_text())
+
+
 @pytest.mark.parametrize(
     ("reason_code", "kind"),
     [
@@ -1778,6 +1975,9 @@ def test_session_start_repository_fence_refusal_is_a_distinct_diagnostic(
     assert load_mapping(f"fence-{kind}", _state=tmp_path) is not None
     diagnostics = (tmp_path / "observation" / "hook-diagnostics.jsonl").read_text()
     assert f'"reason":"status_{kind}"' in diagnostics
+    # The companion row names the probe's locator source (#659): this hook passed an explicit
+    # consented workspace, so the refusal is the daemon's, not a missing locator.
+    assert '"reason":"locator_source_explicit"' in diagnostics
     assert "mapping_stale" not in diagnostics
 
 
@@ -1885,9 +2085,9 @@ async def test_drain_quarantines_terminal_head_and_delivers_next_row(
 @pytest.mark.parametrize(
     ("control_reason", "retryable", "expected"),
     [
-        ("frame_invalid", False, ObservationGapCode.LEDGER_REJECTED.value),
-        ("service_unavailable", True, ObservationGapCode.SERVICE_UNAVAILABLE.value),
-        ("vault_locked", False, ObservationGapCode.VAULT_LOCKED.value),
+        ("frame_invalid", False, "control_frame_invalid"),
+        ("service_unavailable", True, "control_service_unavailable"),
+        ("vault_locked", False, "control_vault_locked"),
     ],
 )
 async def test_service_ingest_preserves_control_error_retryability(
@@ -2107,6 +2307,84 @@ async def test_drain_timeout_after_commit_replays_and_acknowledges_pending_row(
     )
     assert calls == 2
     assert store.list_pending_outbox_rows(workspace) == ()
+
+
+@pytest.mark.anyio
+async def test_native_content_priority_drains_fresh_row_after_same_session_prefix(
+    tmp_path: Path,
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session_id = "native-content-priority"
+    store.bind_codex_session(workspace, session_id)
+    other_session_id = "native-content-other"
+    store.bind_codex_session(workspace, other_session_id)
+    prefix = [
+        _drain_envelope(store, session_id, f"hook:prefix-{index}", index) for index in range(1, 5)
+    ]
+    target = _drain_envelope(store, session_id, "hook:native-target", 5)
+    tail = _drain_envelope(store, session_id, "hook:tail", 6)
+    other = _drain_envelope(store, other_session_id, "hook:other", 1)
+    for envelope in (*prefix, target, tail):
+        store.enqueue_outbox(workspace, session_id, envelope)
+    # The older session's row is deliberately appended through its own lane.
+    store.enqueue_outbox(workspace, other_session_id, other)
+    seen: list[object] = []
+
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del deadline_ms
+            seen.append(body)
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(ObservationIngestDisposition.DUPLICATE, None, None)
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object) -> Client:
+        return Client()
+
+    chunk = ObservationContentChunk(
+        ObservationContentKind.TOOL_OUTPUT,
+        "hook:native-target:tool-output",
+        target.cursor.last_source_commitment,
+        "text/plain",
+        0,
+        1,
+        b"authorized native output",
+    )
+    await observe_hooks_module._drain_outbox(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id=session_id,
+        connect=connect,  # type: ignore[arg-type]
+        content_by_source_identity={target.source_identity: (chunk,)},
+        content_capture_profile="claude-code-ordinary-observation-v1",
+        priority_source_identity=target.source_identity,
+        budget_seconds=1.0,
+        _state=tmp_path,
+    )
+
+    assert len(seen) == 7
+    delivered_sources = [
+        cast(Mapping[str, object], cast(Mapping[str, object], body)["envelope"])["source_identity"]
+        for body in seen
+    ]
+    assert delivered_sources[:5] == [item.source_identity for item in (*prefix, target)]
+    assert set(delivered_sources[5:]) == {tail.source_identity, other.source_identity}
+    target_body = next(
+        cast(Mapping[str, object], body)
+        for body in seen
+        if cast(Mapping[str, object], body).get("content_chunks")
+    )
+    assert target_body["content_chunks"]
+    assert store.list_pending_outbox_rows(workspace) == ()
+    assert (
+        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+        not in store.status(ObservationStatusQuery(workspace)).gaps
+    )
 
 
 @pytest.mark.anyio
@@ -2467,16 +2745,10 @@ async def test_drain_service_unavailable_retires_its_session_but_not_the_workspa
 
 
 @pytest.mark.anyio
-async def test_slow_successful_connect_is_not_charged_to_the_drain_budget(
+async def test_slow_connect_consumes_the_shared_drain_budget(
     tmp_path: Path,
 ) -> None:
-    """The preflight bounds connect time; the budget bounds drain work.
-
-    Before the clock moved after the connect, a 0.9s connect against the
-    0.75s SessionEnd budget entered the row loop with remaining <= 0 and
-    drained nothing while recording drain_budget_exhausted — a diagnostic
-    blaming the budget for time the connect spent.
-    """
+    """#689: a successful connect cannot reset an exhausted elapsed budget."""
 
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
@@ -2499,12 +2771,10 @@ async def test_slow_successful_connect_is_not_charged_to_the_drain_budget(
         budget_seconds=0.75,
         monotonic=lambda: clock["now"],
     )
-    assert store.pending_outbox_count(workspace) == 0, (
-        "a slow but successful connect must leave the whole budget for draining"
-    )
+    assert store.pending_outbox_count(workspace) == 1
     diagnostics_path = tmp_path / "observation/hook-diagnostics.jsonl"
     if diagnostics_path.exists():
-        assert '"reason":"drain_budget_exhausted"' not in diagnostics_path.read_text()
+        assert '"reason":"drain_budget_exhausted"' in diagnostics_path.read_text()
 
 
 @pytest.mark.anyio
@@ -4181,6 +4451,12 @@ def test_session_start_auto_attaches_maps_and_drains_for_every_host(
     rendered = out.getvalue().decode()
     assert _START_IDS["task_id"] in rendered
     assert "no ledger task is mapped yet" not in rendered
+    assert "after guidance reads and tool/schema discovery" in rendered
+    assert "before substantive material work" in rendered
+    assert rendered.index("call start with mode=attach") < rendered.index("Then call status")
+    assert "Then call status with the returned session/writer ids" in rendered
+    assert "same-request recovery first" in rendered
+    assert "ask the user for intro and guidance" in rendered
     diagnostics_path = tmp_path / "observation/hook-diagnostics.jsonl"
     if diagnostics_path.exists():
         assert "auto_attach" not in diagnostics_path.read_text()
@@ -4256,7 +4532,13 @@ def test_fresh_session_reattaches_the_ended_workspace_task_and_drains_without_ma
         assert '"reason":"mapping_missing"' not in diagnostics
 
 
-def test_session_start_records_the_typed_cause_when_auto_attach_fails(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "source",
+    [ObservationSource.CODEX_HOOK, ObservationSource.CLAUDE_HOOK, ObservationSource.CURSOR_HOOK],
+)
+def test_session_start_records_the_typed_cause_when_auto_attach_fails(
+    tmp_path: Path, source: ObservationSource
+) -> None:
     from yoetz.ports.control import ControlError
 
     store = LocalObservationStore(_state=tmp_path)
@@ -4277,12 +4559,18 @@ def test_session_start_records_the_typed_cause_when_auto_attach_fails(tmp_path: 
         workspace=locator,
         _state=tmp_path,
         connect=connect,  # type: ignore[arg-type]
-        source=ObservationSource.CLAUDE_HOOK,
+        source=source,
+        _output_event_name="sessionStart" if source is ObservationSource.CURSOR_HOOK else None,
     )
 
     assert code == 0
     assert observe_hooks_module.load_mapping("claude:locked", _state=tmp_path) is None
     assert "no ledger task is mapped yet" in out.getvalue().decode()
+    rendered = out.getvalue().decode()
+    assert "After guidance reads, tool/schema discovery" in rendered
+    assert "call start to attach a task before substantive material work" in rendered
+    assert "same-request recovery first" in rendered
+    assert "ask the user for intro and guidance" in rendered
     diagnostics = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
     assert '"reason":"vault_locked"' in diagnostics
     assert '"event":"SessionStart"' in diagnostics
@@ -4498,10 +4786,11 @@ def test_hook_invocation_writes_the_state_file_once_not_fourteen_times(
     # Exact accounting, so a regression cannot hide inside a loose ceiling:
     #   1 local-pass batch flush
     # + 1 per drained outbox row, bounded by _HOOK_DRAIN_ROW_LIMIT (4 here)
+    # + 1 advice-snapshot persistence now that oversized advice projects safely
     # + 1 advice-delivery commit, and only when advice actually reached stdout.
     # Seventeen were measured before the write batch. Nothing else writes: the
     # advice sidecar and the async-pair sample are gone.
-    assert _suffix_counts(written) == {".json": 5 + int(delivered)}, written
+    assert _suffix_counts(written) == {".json": 6 + int(delivered)}, written
 
 
 def test_refresh_advice_does_not_rewrite_state_when_the_snapshot_is_unchanged(
@@ -4752,7 +5041,7 @@ def test_timing_rows_partition_the_whole_pass(tmp_path: Path) -> None:
     )
     # The formerly unwindowed regions, plus lock queueing wherever it happened.
     assert {"resolve", "deliver", "store_lock_wait", "unattributed"} <= set(stages)
-    partition = ("import", "resolve", "store", "drain", "deliver")
+    partition = ("import", "resolve", "store", "advice", "drain", "deliver")
     total = stages["total"]
     assert sum(stages[name] for name in partition) + stages["unattributed"] >= total - 5
     # Nothing is left unexplained on an uncontended local pass.
@@ -4785,6 +5074,13 @@ def test_hook_total_budget_covers_the_budgets_nested_inside_one_pass() -> None:
     # Events that may legitimately retry auto-attach carry that budget too.
     for event in (*attach_events, "SessionStart"):
         assert budget_for(event) >= total + attach
+    assert "SessionEnd" not in attach_events
+    assert budget_for("SessionEnd") == total
+    assert budget_for("PostToolUse", native_content=True) == (
+        total
+        + observe_hooks_module._NATIVE_CONTENT_DRAIN_BUDGET_SECONDS  # pyright: ignore[reportPrivateUsage]
+        - drain
+    )
     for event in ("PreToolUse", "PostToolUse"):
         assert budget_for(event) == total
 
@@ -4960,3 +5256,222 @@ def test_mapping_rotation_keeps_hook_ordinals_and_generation_monotonic(tmp_path:
     assert ordinals == [1, 2, 3]
     assert store.bind_codex_session(workspace, codex_id) == session
     assert store.current_session_generation(workspace, session) == generation
+
+
+def test_retention_stress_matches_linear_removal_with_bounded_encodes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#689: the 700/176/700 shape preserves the reference removal outcome."""
+    from yoetz.adapters.integrations import observation_local as local
+
+    store = LocalObservationStore(_state=tmp_path, _wall=lambda: 1_788_998_400.0)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "retention")
+    original_save = store._save  # pyright: ignore[reportPrivateUsage]
+    original_encode = store._encode_state  # pyright: ignore[reportPrivateUsage]
+    initial: list[local._WorkspaceState] = []  # pyright: ignore[reportPrivateUsage]
+    encodes = 0
+
+    def save(
+        workspace: str,
+        state: local._WorkspaceState,  # pyright: ignore[reportPrivateUsage]
+        *,
+        projected: bytes | None = None,
+    ) -> None:  # pyright: ignore[reportPrivateUsage]
+        initial.append(local._copy_state(state))  # pyright: ignore[reportPrivateUsage]
+        return original_save(workspace, state, projected=projected)
+
+    def encode(workspace: str, state: local._WorkspaceState) -> bytes:  # pyright: ignore[reportPrivateUsage]
+        nonlocal encodes
+        encodes += 1
+        return original_encode(workspace, state)
+
+    monkeypatch.setattr(store, "_save", save)
+    monkeypatch.setattr(store, "_encode_state", encode)
+    _populate_realistic_store(
+        store, workspace, "retention", envelopes=700, pending=176, quarantined=700
+    )
+    assert encodes <= 16
+    path = store._workspace_path(workspace)  # pyright: ignore[reportPrivateUsage]
+    optimized = path.read_bytes()
+    assert len(store.list_pending_outbox_rows(workspace)) == 176
+
+    def linear(
+        workspace: str,
+        state: local._WorkspaceState,  # pyright: ignore[reportPrivateUsage]
+        count: int,
+        limit: int,
+        remove: Callable[[local._WorkspaceState, int], None],  # pyright: ignore[reportPrivateUsage]
+    ) -> bytes:  # pyright: ignore[reportPrivateUsage]
+        payload = b""
+        for _ in range(count):
+            remove(state, 1)
+            payload = original_encode(workspace, state)
+            if len(payload) <= limit:
+                return payload
+        return payload
+
+    monkeypatch.setattr(store, "_trim_retained_prefix", linear)
+    original_save(workspace, initial[0])
+    assert path.read_bytes() == optimized
+    reopened = LocalObservationStore(_state=tmp_path, _wall=lambda: 1_788_998_400.0)
+    assert len(reopened.list_pending_outbox_rows(workspace)) == 176
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("source", list(ObservationSource))
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "frame_invalid",
+        "frame_too_large",
+        "method_forbidden",
+        "protocol_mismatch",
+        "service_unavailable",
+    ],
+)
+async def test_control_failure_stops_batch_without_fabricating_other_row_refusals(
+    tmp_path: Path, source: ObservationSource, reason: str
+) -> None:
+    from dataclasses import replace
+
+    from yoetz.cli.hook_diagnostics import hook_diagnostic_summary
+    from yoetz.ports.control import ControlError
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    for index in range(5):
+        session = f"control-lane-{index}"
+        store.bind_codex_session(workspace, session)
+        envelope = replace(_drain_envelope(store, session, f"hook:{index}", 1), source=source)
+        assert store.enqueue_outbox(workspace, session, envelope) is None
+    calls = 0
+    closed = False
+    correlation = "err_c7c1c39f-1249-491c-ae43-6bbd23f6e047"
+
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            nonlocal calls
+            calls += 1
+            raise ControlError(
+                reason, retryable=reason == "service_unavailable", correlation_id=correlation
+            )
+
+        async def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    async def connect(_kind: object):
+        return Client()
+
+    await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id="control-lane-0",
+        connect=connect,  # type: ignore[arg-type]
+        _state=tmp_path,
+    )
+    assert calls == 1
+    assert closed
+    terminal = reason == "frame_too_large"
+    rows = store.list_pending_outbox_rows(workspace)
+    assert len(rows) == 5 - terminal
+    assert store.quarantined_count(workspace) == terminal
+    assert sum(row.attempts for row in rows) == (0 if terminal else 1)
+    assert "ledger_rejected" not in store.status(ObservationStatusQuery(workspace)).gaps
+    diagnostics = hook_diagnostic_summary(_state=tmp_path)
+    (failure,) = cast(tuple[Mapping[str, object], ...], diagnostics["drain_failures"])
+    assert failure["control_reason"] == reason
+    assert failure["correlation_id"] == correlation
+    assert failure["disposition"] == ("quarantine" if terminal else "retry")
+    assert failure["source"] == source.value
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("hydration_seconds", [0.0, 1.1, 1.3])
+async def test_preflight_uses_remaining_combined_allowance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hydration_seconds: float
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "allowance")
+    store.enqueue_outbox(workspace, "allowance", _drain_envelope(store, "allowance", "x", 1))
+    clock = {"now": 0.0}
+    original_list = store.list_pending_outbox_rows
+
+    def hydrated(commitment: str):
+        rows = original_list(commitment)
+        clock["now"] += hydration_seconds
+        return rows
+
+    monkeypatch.setattr(store, "list_pending_outbox_rows", hydrated)
+    timeouts: list[float] = []
+    original_wait = asyncio.wait_for
+
+    async def measured_wait[T](awaitable: Awaitable[T], timeout: float) -> T:
+        timeouts.append(timeout)
+        return await original_wait(awaitable, timeout=timeout)
+
+    monkeypatch.setattr(asyncio, "wait_for", measured_wait)
+
+    async def connect(_kind: object):
+        clock["now"] += 0.3
+        return _InstantAckClient()
+
+    await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id="allowance",
+        connect=connect,  # type: ignore[arg-type]
+        _state=tmp_path,
+        budget_seconds=0.2,
+        monotonic=lambda: clock["now"],
+    )
+    if hydration_seconds >= 1.2:
+        assert timeouts == []
+    else:
+        assert timeouts == [pytest.approx(min(1.0, 1.2 - hydration_seconds))]
+    assert store.pending_outbox_count(workspace) == 1
+    diagnostic = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
+    assert '"reason":"drain_budget_exhausted"' in diagnostic
+    assert "drain_preflight_failed" not in diagnostic
+
+
+def test_deferred_followup_records_stdout_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yoetz.cli import hook_io
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = str(tmp_path.resolve())
+    store.grant_consent(store.workspace_commitment(workspace))
+    clock = {"now": 0.0}
+
+    def advancing_clock() -> float:
+        clock["now"] += 1.0
+        return clock["now"]
+
+    def failed_write(*args: object, **kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(hook_io, "stdout_json", failed_write)
+    assert (
+        handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=json.dumps(
+                {"session_id": "deferred", "tool_name": "shell", "exit_status": 0}
+            ).encode(),
+            stdout=io.BytesIO(),
+            workspace=workspace,
+            _state=tmp_path,
+            skip_service=True,
+            _monotonic=advancing_clock,
+        )
+        == 0
+    )
+    diagnostic = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
+    assert '"reason":"hook_followup_deferred"' in diagnostic
+    assert '"reason":"stdout_write_failed"' in diagnostic

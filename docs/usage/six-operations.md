@@ -77,13 +77,24 @@ coverage vector. `mode` selects how much:
 
 | Mode | Use it when |
 |---|---|
-| `semantic_if_configured` | Most material implementation or review claims. Runs semantic review if it is available; degrades honestly if not. |
-| `semantic_required` | Completion depends on qualitative correctness, design conformance, security or privacy reasoning, interoperability, or whether the code satisfies the ask. |
-| `deterministic_only` | Explicitly local or structural checks, semantic-disabled policy, or a deliberate no-egress choice — and the limitation gets disclosed. |
+| Omitted | You intend to use the configured verification default. |
+| `semantic_if_configured` | Review is known to be optional. Runs semantic review if it is available; degrades honestly if not. |
+| `semantic_required` | The user, effective verification policy, or a named acceptance criterion requires independent semantic review. Preserve this choice for subsequent final checks. |
+| `deterministic_only` | Explicitly local or structural checks, or a user-authorized deliberate no-egress choice. Disclose `semantic_review_not_requested` and any unmet required review. |
+
+The configured `verification.semantic` default applies only when `mode` is omitted. An explicit
+mode is honored by the runtime; the default is not a persistent task-level enforcement rule.
+Do not choose a weaker mode to shorten a repair check. Qualitative work alone does not make
+optional review mandatory, and none of these modes widens durable privacy authority.
 
 `semantic_required` never erases deterministic truth. If the provider is absent, denied by policy,
 refuses, times out, or returns stale or invalid output, you get the deterministic findings back with
 verdict `incomplete_check`, an explicit reason, and no semantic findings.
+
+An unavailable required review remains an unmet requirement. Report completed implementation and
+tests separately; do not silently replace required semantic review with deterministic coverage.
+Optional terminal review gaps may be disclosed while continuing the task. Pending approvals must
+follow their exact continuation.
 
 #### Approved workspace checks
 
@@ -173,7 +184,7 @@ See [Receipts and coverage](receipts-and-coverage.md) for how to read one.
 
 | Operation | How often |
 | --- | --- |
-| `start` | Once per task, before substantive work. On resume, attach to the existing task instead of starting a second one. |
+| `start` | Once per task, before substantive work. In a new session, read guidance and discover tool schemas first, then call `start` before other workflow operations. On failure, follow exact continuations and same-request recovery, including a named one-time repair; if startup remains blocked without an applicable recovery path, ask for intro and guidance. On resume, attach to the existing task instead of starting a second one. |
 | `publish_work` | One batch per material transition, roughly one to eight events. A normal session is a handful of batches, never one per file, tool call, or message. |
 | `status` | After resume, compaction, or delegate handoff, and before any completion claim. Not between routine tool calls. |
 | `check` | After publishing the completion claim and its evidence, and again after any material edit or new evidence. A readable response to a finding returned by that check needs no recheck; a redacted or unreadable response does. A check with no new events since the last one adds nothing. |

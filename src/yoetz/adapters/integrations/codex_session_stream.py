@@ -22,6 +22,12 @@ from yoetz.adapters.importers.codex_rollout_jsonl import (
     parse_codex_rollout_jsonl_from_offset,
     profile_for_rollout_id,
     profile_for_rollout_version,
+    rollout_admission_provenance,
+)
+from yoetz.adapters.integrations.codex_lifecycle import load_mapping
+from yoetz.adapters.integrations.observation_admission import (
+    AdmissionPlan,
+    build_routine_read_summary,
 )
 from yoetz.adapters.integrations.observation_local import (
     STREAM_MAPPING_VERSION,
@@ -36,11 +42,20 @@ from yoetz.domain.observation import (
     ObservationSource,
     stream_line_commitment,
 )
+from yoetz.domain.observation_budget import ObservationMode
+from yoetz.domain.observation_selection import (
+    OBSERVATION_CLASSIFICATION_VERSION,
+    ObservationClassification,
+    ObservationContentRole,
+    classify_observation,
+)
 from yoetz.domain.values import JsonObject, JsonValue, Timestamp, timestamp_from_datetime
 from yoetz.ports.importer import ImportLineStatus
-from yoetz.protocol.canonical import canonical_digest, canonical_encode
+from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
+from yoetz.protocol.errors import ProtocolValueError
 
 __all__ = [
+    "STREAM_ADMISSION_STATES",
     "CodexSessionStreamLocator",
     "PERIODIC_RECONCILE_SECONDS",
     "SessionStreamAdvance",
@@ -50,9 +65,37 @@ __all__ = [
     "reconcile_session_stream",
     "resolve_codex_home",
     "should_trigger_stream_reconcile",
+    "stream_admission",
     "stream_profile_from_id",
     "structural_from_stream_record",
 ]
+
+# Closed stream-admission states (issue #656). ``structurally_supported`` is an exact certified
+# profile with every read line understood; ``partially_understood`` is the compatibility profile
+# or any admitted profile with unknown/incompatible lines; ``incompatible`` is a refused header
+# or a surface the hook pass cannot read; ``unadmitted`` is a stream whose header has not been
+# read yet. None of these is host support: parser admission certifies nothing about hooks or MCP.
+STREAM_ADMISSION_STATES: Final = (
+    "incompatible",
+    "partially_understood",
+    "structurally_supported",
+    "unadmitted",
+)
+# Closed per-line reason tokens the reader surfaces beside the admission state so a partial
+# stream names the affected family (wrapper vs. nested item vs. shape) without echoing the
+# unknown type text itself.
+_ADMISSION_REASON_TOKENS: Final = frozenset(
+    {
+        "json_profile_unsupported",
+        "line_oversized",
+        "malformed_line",
+        "truncated_final_line",
+        "unknown_item_type",
+        "unknown_wrapper_type",
+        "unsupported_codex_profile",
+        "wrapper_shape_unsupported",
+    }
+)
 
 _MAX_READ_CHUNK: Final = 262_144
 _EMPTY_COMMITMENT: Final = "hmac-sha256:" + ("0" * 64)
@@ -86,6 +129,18 @@ _ROLLOUT_WRAPPER_TYPES: Final = frozenset(
 _OVERSIZED_PARTIAL_PREFIX: Final = b"\x00yoetz-oversized-line/v1\x00"
 _OVERSIZED_PARTIAL_DOMAIN: Final = b"yoetz/observation-stream-oversized-state/v1\x00"
 _OVERSIZED_LINE_DOMAIN: Final = b"yoetz/observation-stream-oversized-line/v1\x00"
+# The local stream call map predates selection and stores only tool names.  A
+# candidate marker is kept in the same generation-fenced map so a shell call
+# classified from its pre-event arguments can be paired with a later output
+# without persisting the command itself.  The separator cannot occur in a
+# token accepted by this adapter and is decoded before the value reaches an
+# observation envelope.
+_CALL_SELECTION_SEPARATOR: Final = "\x1f"
+_CALL_SELECTION_MARKER: Final = "routine"
+_ROUTINE_OUTCOME_FAILURE_REASONS: Final = frozenset(
+    {"failure", "denied", "cancelled", "partial", "unknown"}
+)
+_OBSERVATION_GAP_CODES: Final = frozenset(code.value for code in ObservationGapCode)
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,7 +260,7 @@ def default_stream_profile() -> CodexCapabilityProfile:
 
 
 def stream_profile_from_id(profile_id: str | None) -> CodexCapabilityProfile | None:
-    """Resolve a persisted profile id to its exact profile; unknown ids resolve to ``None``."""
+    """Resolve a persisted profile id (exact or compatible); unknown ids resolve to ``None``."""
 
     if profile_id is None:
         return None
@@ -439,6 +494,289 @@ def _structural_body(record: CodexParsedRecord) -> JsonObject | None:
     return None
 
 
+def _decode_stream_call_tool(value: object) -> tuple[str | None, bool]:
+    """Decode a bounded call-map value and its service-derived candidate bit.
+
+    Older state files contain a plain tool name.  Such values remain usable,
+    but cannot prove that a shell call was read-only because the original
+    arguments were intentionally never retained.  Only the marker written by
+    this adapter can carry that fact across reconcile passes.
+    """
+
+    if type(value) is not str or not value:
+        return None, False
+    if _CALL_SELECTION_SEPARATOR not in value:
+        return (value if _token(value) is not None else None), False
+    tool_name, marker = value.rsplit(_CALL_SELECTION_SEPARATOR, 1)
+    if marker != _CALL_SELECTION_MARKER or _token(tool_name) is None:
+        return None, False
+    return tool_name, True
+
+
+def _encode_stream_call_tool(tool_name: str, *, routine_candidate: bool) -> str:
+    """Encode a tool name plus a non-content selection fact for the call map."""
+
+    if _token(tool_name) is None:
+        raise ValueError("stream_call_tool_invalid")
+    if not routine_candidate:
+        return tool_name
+    return f"{tool_name}{_CALL_SELECTION_SEPARATOR}{_CALL_SELECTION_MARKER}"
+
+
+def _stream_classification_payload(
+    record: CodexParsedRecord, structural: Mapping[str, JsonValue]
+) -> Mapping[str, JsonValue]:
+    """Build the ephemeral classifier input for one parsed stream record.
+
+    Rollout arguments/results are already redacted by the importer.  Arguments
+    are parsed only for the closed routine-read classifier and never copied to
+    a structural envelope, state file, outbox row, or summary member.
+    """
+
+    payload: dict[str, JsonValue] = dict(structural)
+    tool_name = structural.get("tool_name")
+    if type(tool_name) is str:
+        payload["tool_name"] = tool_name
+    body = _structural_body(record)
+    if body is None or structural.get("action") not in {"function_call", "custom_tool_call"}:
+        return payload
+
+    raw_arguments: object = body.get("arguments")
+    if raw_arguments is None:
+        raw_arguments = body.get("input")
+    if raw_arguments is None:
+        raw_arguments = body.get("tool_input")
+    if type(raw_arguments) is str:
+        try:
+            parsed = strict_json_parse(raw_arguments.encode("utf-8"))
+        except ProtocolValueError, TypeError, ValueError, UnicodeError:
+            parsed = None
+        if isinstance(parsed, Mapping):
+            payload["tool_input"] = cast(JsonObject, parsed)
+    elif isinstance(raw_arguments, Mapping):
+        payload["tool_input"] = raw_arguments
+    return payload
+
+
+def _stream_record_classification(
+    record: CodexParsedRecord, structural: Mapping[str, JsonValue]
+) -> ObservationClassification | None:
+    """Classify only tool-call phases; lifecycle/visible rows stay protected."""
+
+    phase = _stream_phase(structural)
+    if phase not in {"PreToolUse", "PostToolUse"}:
+        return None
+    return classify_observation(_stream_classification_payload(record, structural), phase)
+
+
+def _carry_stream_candidate(
+    classification: ObservationClassification,
+    *,
+    routine_candidate: bool,
+) -> ObservationClassification:
+    """Carry a pre-event candidate to a later output after pairing.
+
+    The post classifier still owns outcome truth.  The persisted candidate is
+    only the result of an earlier classifier call bound to this call id and
+    source generation; it cannot turn a failure, partial, denial, or unknown
+    output into a successful summary.
+    """
+
+    if not routine_candidate or classification.routine_candidate:
+        return classification
+    reasons = list(classification.reason_tokens)
+    if "routine_candidate" not in reasons:
+        reasons.append("routine_candidate")
+    proven = "success" in reasons and not set(reasons).intersection(
+        _ROUTINE_OUTCOME_FAILURE_REASONS
+    )
+    if proven and "routine_success" not in reasons:
+        reasons.append("routine_success")
+    return ObservationClassification(
+        protected=not proven,
+        routine_candidate=True,
+        proven_routine_success=proven,
+        content_role=(ObservationContentRole.NONE if proven else ObservationContentRole.BOTH),
+        reason_tokens=tuple(reasons),
+        version=OBSERVATION_CLASSIFICATION_VERSION,
+    )
+
+
+def _selection_envelope(
+    envelope: ObservationEnvelope,
+    classification: ObservationClassification | None,
+    *,
+    focused: bool,
+    routed: bool,
+) -> ObservationEnvelope:
+    """Adapt a stream tool row to the hook-shaped summary phase contract."""
+
+    if not routed or classification is None or not classification.routine_candidate:
+        return envelope
+    structural = cast(Mapping[str, JsonValue], envelope.structural_payload)
+    action = structural.get("action")
+    if action in {"function_call", "custom_tool_call"}:
+        if envelope.event_kind in {"response_item", "event_msg"}:
+            return replace(
+                envelope,
+                event_kind="PreToolUse",
+                structural_payload=JsonObject(
+                    {
+                        **dict(structural),
+                        "action": "routine_read" if focused else "function_call",
+                    }
+                ),
+            )
+    if (
+        action in {"function_call_output", "custom_tool_call_output"}
+        and classification.proven_routine_success
+        and envelope.event_kind in {"response_item", "event_msg"}
+    ):
+        return replace(
+            envelope,
+            event_kind="PostToolUse",
+            structural_payload=JsonObject(
+                {
+                    **dict(structural),
+                    "action": "routine_read" if focused else "function_call_output",
+                }
+            ),
+        )
+    return envelope
+
+
+def _stream_read_protection_envelope(
+    envelope: ObservationEnvelope,
+    classification: ObservationClassification | None,
+) -> ObservationEnvelope:
+    """Normalize a candidate to the read-protection API's phase contract.
+
+    Protection is independent of Focused/Detailed selection and of a live
+    route.  The local store recognizes shell reads only through its
+    service-owned ``routine_read`` marker, so failed and unknown outputs must
+    use the same normalized probe before they are admitted individually.
+    """
+
+    if classification is None or not classification.routine_candidate:
+        return envelope
+    structural = cast(Mapping[str, JsonValue], envelope.structural_payload)
+    action = structural.get("action")
+    if action in {"function_call", "custom_tool_call"} and envelope.event_kind in {
+        "response_item",
+        "event_msg",
+        "PreToolUse",
+    }:
+        return replace(
+            envelope,
+            event_kind="PreToolUse",
+            structural_payload=JsonObject({**dict(structural), "action": "routine_read"}),
+        )
+    if action in {"function_call_output", "custom_tool_call_output"} and envelope.event_kind in {
+        "response_item",
+        "event_msg",
+        "PostToolUse",
+        "PostToolUseFailure",
+    }:
+        return replace(
+            envelope,
+            event_kind="PostToolUse",
+            structural_payload=JsonObject({**dict(structural), "action": "routine_read"}),
+        )
+    return envelope
+
+
+def _stream_read_protection_probe(
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    session_commitment: str,
+    envelope: ObservationEnvelope,
+    classification: ObservationClassification | None,
+) -> tuple[ObservationEnvelope | None, str | None]:
+    """Reserve an explicitly protected logical read, if one matches.
+
+    The probe remains separate from the stamped delivery envelope because the
+    local store validates the service-owned ``routine_read`` marker while
+    ``evidence_linked_read`` is the materialization marker.
+    """
+
+    probe = _stream_read_protection_envelope(envelope, classification)
+    if probe is envelope:
+        return None, None
+    reader = getattr(store, "read_is_protected", None)
+    if not callable(reader):
+        return None, None
+    try:
+        protected = reader(workspace_commitment, session_commitment, probe)
+    except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
+        return None, None
+    if protected is not True:
+        return None, None
+    reference_reader = getattr(store, "read_protection_reference", None)
+    if not callable(reference_reader):
+        return probe, None
+    try:
+        reference = reference_reader(workspace_commitment, session_commitment, probe)
+    except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
+        reference = None
+    return probe, reference if type(reference) is str else None
+
+
+def _stamp_stream_read_protection(
+    envelope: ObservationEnvelope,
+    reference: str | None,
+) -> ObservationEnvelope:
+    """Mark a protected stream phase as individually retained evidence."""
+
+    fields: dict[str, JsonValue] = {
+        **dict(cast(Mapping[str, JsonValue], envelope.structural_payload)),
+        "action": "evidence_linked_read",
+    }
+    if reference is not None:
+        fields["protection_reference"] = reference
+    return replace(envelope, structural_payload=JsonObject(fields))
+
+
+def _restore_stream_individual(envelope: ObservationEnvelope) -> ObservationEnvelope:
+    """Restore a selected stream row when it is delivered individually."""
+
+    structural = cast(Mapping[str, JsonValue], envelope.structural_payload)
+    action = structural.get("action")
+    if action == "routine_read":
+        if envelope.event_kind == "PostToolUse":
+            return replace(
+                envelope,
+                structural_payload=JsonObject(
+                    {**dict(structural), "action": "function_call_output"}
+                ),
+            )
+        if envelope.event_kind in {"response_item", "event_msg", "PreToolUse"}:
+            return replace(
+                envelope,
+                event_kind="PreToolUse",
+                structural_payload=JsonObject({**dict(structural), "action": "function_call"}),
+            )
+        return envelope
+    if action not in {"function_call", "custom_tool_call"}:
+        return envelope
+    if envelope.event_kind not in {"response_item", "event_msg", "PreToolUse"}:
+        return envelope
+    return replace(envelope, event_kind="PreToolUse")
+
+
+def _restore_stream_individual_deliveries(plan: AdmissionPlan) -> AdmissionPlan:
+    """Keep failed/incomplete stream attempts individually materializable."""
+
+    if not plan.deliveries:
+        return plan
+    return replace(
+        plan,
+        deliveries=tuple(
+            (host_session, _restore_stream_individual(envelope))
+            for host_session, envelope in plan.deliveries
+        ),
+    )
+
+
 def structural_from_stream_record(
     record: CodexParsedRecord,
     *,
@@ -576,6 +914,33 @@ class SessionStreamAdvance:
     restarted: bool
     truncated: bool
     rotated: bool
+    # Closed parser reason tokens for the terminated lines this advance did not map (sorted,
+    # unique). Never the offending type text: a partial stream names its affected family only.
+    reason_codes: tuple[str, ...] = ()
+    # Per-envelope classifier results are ephemeral adapter facts.  They are
+    # kept parallel to ``envelopes`` so a function-call's original arguments
+    # can be classified before structural mapping discards them.
+    classifications: tuple[ObservationClassification | None, ...] = ()
+
+
+def stream_admission(
+    profile: CodexCapabilityProfile | None,
+    gaps: tuple[str, ...],
+    reason_codes: tuple[str, ...],
+) -> str:
+    """Classify one stream's admission from its profile and bounded gaps (issue #656)."""
+
+    if ObservationGapCode.UNSUPPORTED_FORMAT.value in gaps:
+        return "incompatible"
+    if profile is None:
+        return "unadmitted"
+    if (
+        rollout_admission_provenance(profile) == "structural"
+        or ObservationGapCode.UNSUPPORTED_EVENT.value in gaps
+        or any(token in _ADMISSION_REASON_TOKENS for token in reason_codes)
+    ):
+        return "partially_understood"
+    return "structurally_supported"
 
 
 @dataclass
@@ -837,6 +1202,7 @@ class SessionStreamReader:
                 restarted,
                 truncated,
                 rotated,
+                classifications=tuple(None for _ in oversized_envelopes),
             )
 
         if b"\n" not in data and len(data) > ROLLOUT_MAX_LINE_BYTES:
@@ -908,6 +1274,8 @@ class SessionStreamReader:
             self.profile = parsed.profile
         consumed = 0
         envelopes: list[ObservationEnvelope] = []
+        classifications: list[ObservationClassification | None] = []
+        reason_codes: set[str] = set()
         hold = b""
         for index, line in enumerate(parsed.lines):
             if not line.terminated:
@@ -924,6 +1292,8 @@ class SessionStreamReader:
             if record is None:
                 reason = parsed.reason_codes[index] if index < len(parsed.reason_codes) else None
                 status = parsed.statuses[index] if index < len(parsed.statuses) else None
+                if reason in _ADMISSION_REASON_TOKENS:
+                    reason_codes.add(reason)
                 if reason == "unsupported_codex_profile" or (
                     require_admission
                     and index == 0
@@ -950,6 +1320,7 @@ class SessionStreamReader:
                             ),
                         )
                     )
+                    classifications.append(None)
                 continue
             event_position += 1
             abs_cursor = ObservationCursor(
@@ -976,6 +1347,10 @@ class SessionStreamReader:
                     profile=self.profile,
                 )
             )
+            structural, _structural_gaps = structural_from_stream_record(
+                record, profile=self.profile
+            )
+            classifications.append(_stream_record_classification(record, structural))
 
         if "unsupported_codex_profile" in parsed.stream_gaps and consumed > 0:
             # A refused chunk holds no tail: the durable refused state is exactly
@@ -1005,6 +1380,8 @@ class SessionStreamReader:
             restarted,
             truncated,
             rotated,
+            tuple(sorted(reason_codes, key=str.encode)),
+            tuple(classifications),
         )
 
 
@@ -1041,7 +1418,10 @@ def _stream_phase(structural: Mapping[str, JsonValue]) -> str:
 
 
 def _pair_stream_tool_name(
-    envelope: ObservationEnvelope, call_tools: dict[str, str]
+    envelope: ObservationEnvelope,
+    call_tools: dict[str, str],
+    *,
+    routine_candidate: bool = False,
 ) -> ObservationEnvelope:
     structural = cast(Mapping[str, JsonValue], envelope.structural_payload)
     action = structural.get("action")
@@ -1052,11 +1432,13 @@ def _pair_stream_tool_name(
     if action in {"function_call", "custom_tool_call"} and tool_name is not None:
         if call_id not in call_tools and len(call_tools) >= 256:
             call_tools.pop(next(iter(call_tools)))
-        call_tools[call_id] = tool_name
+        call_tools[call_id] = _encode_stream_call_tool(
+            tool_name, routine_candidate=routine_candidate
+        )
         return envelope
     if action not in {"function_call_output", "custom_tool_call_output"}:
         return envelope
-    paired = call_tools.get(call_id)
+    paired, _candidate = _decode_stream_call_tool(call_tools.get(call_id))
     if paired is None:
         return replace(
             envelope,
@@ -1075,6 +1457,112 @@ def _pair_stream_tool_name(
         structural_payload=JsonObject({**dict(structural), "tool_name": paired}),
         gap_codes=tuple(sorted(gaps, key=str.encode)),
     )
+
+
+def _stream_selection_context(
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    codex_session_id: str,
+    envelope: ObservationEnvelope,
+    *,
+    mode: ObservationMode,
+    classification: ObservationClassification,
+) -> tuple[ObservationEnvelope, str]:
+    """Attach route-bound selection metadata when the local authority is real.
+
+    A stream may be readable before a Codex session has an active Yoetz route.
+    In that case the caller must use individual admission.  Empty fences are
+    deliberately not synthesized from workspace/session values.
+    """
+
+    try:
+        state_root = getattr(store, "_state_root", None)
+        mapping = load_mapping(codex_session_id, _state=state_root)
+        authority = store.content_capture_authority(workspace_commitment)
+        if mapping is None or authority is None or not authority.active:
+            return envelope, ""
+        epoch = store.selection_epoch(workspace_commitment)
+    except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
+        return envelope, ""
+    structural = cast(Mapping[str, JsonValue], envelope.structural_payload)
+    annotated = JsonObject(
+        {
+            **dict(structural),
+            "selection_task_id": mapping.yoetz_task_id,
+            "selection_session_id": mapping.yoetz_session_id,
+            "selection_writer_id": mapping.yoetz_writer_id,
+            "selection_authority_generation": authority.generation,
+        }
+    )
+    delegate = structural.get("subagent_id")
+    parent_call = structural.get("parent_tool_call_id")
+    fence = canonical_digest(
+        JsonObject(
+            {
+                "route": mapping.yoetz_task_id,
+                "task": mapping.yoetz_task_id,
+                "session": mapping.yoetz_session_id,
+                "writer": mapping.yoetz_writer_id,
+                "host_session": envelope.session_commitment,
+                "source": envelope.source.value,
+                "generation": envelope.cursor.source_generation,
+                "authority": authority.generation,
+                "epoch": epoch,
+                "delegate": delegate,
+                "parent_call": parent_call,
+                "policy": classification.version,
+                "classification": classification.version,
+                "mode": mode.value,
+            }
+        )
+    )
+    return replace(envelope, structural_payload=annotated), fence
+
+
+def _stream_selection_pressure(
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    session_commitment: str,
+) -> object | None:
+    """Read the store's pressure decision without making it a stream dependency.
+
+    Older local stores have no pressure projection.  They retain the historic
+    individual stream path; once the selection-aware store is present, any
+    failed pressure read is treated as a closed safety failure by the caller.
+    """
+
+    updater = getattr(store, "update_selection_pressure", None)
+    if not callable(updater):
+        return None
+    try:
+        return updater(workspace_commitment, session_commitment)
+    except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
+        return False
+
+
+def _stream_selection_history_gaps(
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    envelope: ObservationEnvelope,
+) -> tuple[str, ...]:
+    """Return exact-lane selection loss that must travel with this admission.
+
+    The store can only attribute a prior non-replayable loss after the current
+    envelope has the authenticated route fields attached.  Keep this lookup
+    optional for older stores and fail closed to the envelope's own gaps when
+    the projection is unavailable or malformed.
+    """
+
+    lookup = getattr(store, "selection_history_gaps", None)
+    if not callable(lookup):
+        return ()
+    try:
+        inherited = cast(tuple[object, ...], lookup(workspace_commitment, envelope))
+    except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
+        return ()
+    if type(inherited) is not tuple:
+        return ()
+    return tuple(gap for gap in inherited if type(gap) is str and gap in _OBSERVATION_GAP_CODES)
 
 
 def reconcile_session_stream(
@@ -1113,6 +1601,26 @@ def reconcile_session_stream_path(
     codex_session_id: str,
     path: Path,
 ) -> dict[str, JsonValue]:
+    """Reconcile one path under one durable local-store batch."""
+
+    with store.batched(workspace_commitment):
+        return _reconcile_session_stream_path(
+            store,
+            workspace_commitment=workspace_commitment,
+            session_commitment=session_commitment,
+            codex_session_id=codex_session_id,
+            path=path,
+        )
+
+
+def _reconcile_session_stream_path(
+    store: LocalObservationStore,
+    *,
+    workspace_commitment: str,
+    session_commitment: str,
+    codex_session_id: str,
+    path: Path,
+) -> dict[str, JsonValue]:
     """Reconcile a locally selected path with the same durable frontier on every entry point."""
 
     if path.name.lower().endswith(".jsonl.zst"):
@@ -1125,6 +1633,9 @@ def reconcile_session_stream_path(
             "byte_position": 0,
             "event_position": 0,
             "generation": 1,
+            "admission": "incompatible",
+            "admission_provenance": None,
+            "admission_reasons": (),
             "rotated": False,
             "truncated": False,
             "resolved": True,
@@ -1181,29 +1692,226 @@ def reconcile_session_stream_path(
     overflow = False
     delivery_blocked = False
     committed_cursor = existing
-    for unpaired_envelope in advance.envelopes:
+    # Source rotation/truncation starts a new selection lane.  Flush the old
+    # lane before any new-generation envelope can move the stream frontier.
+    if advance.rotated or advance.truncated or advance.restarted:
+        try:
+            boundary_ok = store.flush_selected_admission(
+                workspace_commitment,
+                summary_builder=build_routine_read_summary,
+                force=True,
+                material_boundary=True,
+            )
+        except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
+            boundary_ok = False
+        if not boundary_ok:
+            delivery_blocked = True
+
+    advance_classifications = advance.classifications
+    for index, unpaired_envelope in enumerate(advance.envelopes):
+        if delivery_blocked:
+            break
+        base_classification = (
+            advance_classifications[index] if index < len(advance_classifications) else None
+        )
         candidate_call_tools = dict(call_tools)
-        envelope = _pair_stream_tool_name(unpaired_envelope, candidate_call_tools)
+        structural = cast(Mapping[str, JsonValue], unpaired_envelope.structural_payload)
+        call_id = _token(structural.get("tool_call_id"))
+        _, paired_candidate = _decode_stream_call_tool(
+            candidate_call_tools.get(call_id) if call_id is not None else None
+        )
+        envelope = _pair_stream_tool_name(
+            unpaired_envelope,
+            candidate_call_tools,
+            routine_candidate=(
+                False if base_classification is None else base_classification.routine_candidate
+            ),
+        )
+        classification = base_classification
+        action = envelope.structural_payload.get("action")
+        if action in {"function_call_output", "custom_tool_call_output"}:
+            # Pairing is authoritative for both the tool family and the
+            # conservative pre-event candidate.  A conflicting or unpaired
+            # output must not select itself into a routine summary merely by
+            # carrying a read-looking name in its own payload.
+            output_structural = dict(envelope.structural_payload)
+            if not paired_candidate:
+                output_structural.pop("tool_name", None)
+            classification = classify_observation(output_structural, "PostToolUse")
+            classification = _carry_stream_candidate(
+                classification,
+                routine_candidate=paired_candidate,
+            )
+
+        # A protected input is a subject-state boundary.  Flush any earlier
+        # summary before attempting its individual delivery.  Routine pre
+        # events are pending identities and remain in the shared buffer.
+        # Keep every candidate in the planner until its paired post result is
+        # handled.  A failed/unknown post is still a protected individual
+        # outcome, but letting the planner flush it preserves the original
+        # pending call instead of exposing the summary marker as a pre row.
+        optional_routine = classification is not None and classification.routine_candidate
+        try:
+            flush_ok = store.flush_selected_admission(
+                workspace_commitment,
+                summary_builder=build_routine_read_summary,
+                force=not optional_routine,
+                material_boundary=not optional_routine,
+            )
+        except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
+            flush_ok = False
+        if not flush_ok:
+            delivery_blocked = True
+            break
+
         result = store.ingest(envelope)
         if result.disposition.value not in {"accepted", "duplicate"}:
             delivery_blocked = True
             break
-        # Enqueue duplicates too: the local observation row may have committed
-        # immediately before an earlier enqueue overflow/crash. This closes the
-        # retry hole without growing the outbox because enqueue is idempotent.
-        # A Yoetz-owned call the stream recorded is the same self-observation
-        # the hook already classified: retained locally, delivered only when it
-        # is distinct evidence (#564). The cursor still advances past it.
-        if (
-            self_observation_deliverable(
-                _stream_phase(envelope.structural_payload), envelope.structural_payload
+        # Re-read pressure after every committed input: one stream pass can
+        # contain enough routine calls to cross a profile boundary.
+        current_pressure = _stream_selection_pressure(
+            store, workspace_commitment, session_commitment
+        )
+        if current_pressure is False:
+            effective_focused = False
+            effective_mode = ObservationMode.FOCUSED
+        elif current_pressure is None:
+            effective_focused = True
+            effective_mode = ObservationMode.FOCUSED
+        else:
+            raw_mode = getattr(current_pressure, "effective_mode", None)
+            effective_mode = (
+                raw_mode if isinstance(raw_mode, ObservationMode) else ObservationMode.FOCUSED
             )
-            and store.enqueue_outbox(workspace_commitment, codex_session_id, envelope)
-            == ObservationGapCode.OUTBOX_OVERFLOW.value
-        ):
-            overflow = True
-            break
+            effective_focused = effective_mode is ObservationMode.FOCUSED
+
+        selection_envelope = envelope
+        selection_fence = ""
+        read_protection_probe: ObservationEnvelope | None = None
+        read_protected = False
+        admitted = False
+        if classification is not None and classification.routine_candidate:
+            selection_envelope, selection_fence = _stream_selection_context(
+                store,
+                workspace_commitment,
+                codex_session_id,
+                envelope,
+                mode=effective_mode,
+                classification=classification,
+            )
+            if selection_fence:
+                inherited_gaps = _stream_selection_history_gaps(
+                    store,
+                    workspace_commitment,
+                    selection_envelope,
+                )
+                if inherited_gaps:
+                    selection_envelope = replace(
+                        selection_envelope,
+                        gap_codes=tuple(
+                            sorted(
+                                {*selection_envelope.gap_codes, *inherited_gaps},
+                                key=str.encode,
+                            )
+                        ),
+                    )
+            # Read protection is an explicit retention request and therefore
+            # outranks Focused/Detailed selection.  Its attempt identity is
+            # source-scoped by the store, so a native hook copy and this
+            # session-stream copy intentionally reserve independent slots.
+            read_protection_probe, protection_reference = _stream_read_protection_probe(
+                store,
+                workspace_commitment,
+                session_commitment,
+                selection_envelope,
+                classification,
+            )
+            read_protected = read_protection_probe is not None
+            if read_protected:
+                assert read_protection_probe is not None
+                selection_envelope = _stamp_stream_read_protection(
+                    read_protection_probe,
+                    protection_reference,
+                )
+            # ``routine_read`` is a service-owned summary marker. Keep the
+            # original stream shape when the route is absent or Detailed mode
+            # is active so individual materialization still produces action and
+            # result records without captured content.
+            if not read_protected:
+                selection_envelope = _selection_envelope(
+                    selection_envelope,
+                    classification,
+                    focused=effective_focused,
+                    routed=bool(selection_fence),
+                )
+
+        deliverable = self_observation_deliverable(
+            _stream_phase(envelope.structural_payload), envelope.structural_payload
+        )
+        if deliverable:
+            try:
+                plan = store.prepare_selected_admission(
+                    workspace_commitment,
+                    codex_session_id,
+                    selection_envelope,
+                    fence=selection_fence,
+                    focused=effective_focused and not read_protected,
+                    routine_candidate=(
+                        False if classification is None else classification.routine_candidate
+                    ),
+                    proven_routine_success=(
+                        False if classification is None else classification.proven_routine_success
+                    ),
+                    summary_builder=build_routine_read_summary,
+                )
+                plan = _restore_stream_individual_deliveries(plan)
+                admitted = store.commit_selected_admission(
+                    workspace_commitment,
+                    plan,
+                    incoming=envelope,
+                    newly_observed=result.disposition.value == "accepted",
+                    replayable=True,
+                )
+            except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
+                admitted = False
+            if not admitted:
+                # The local envelope is retained, but its source position is
+                # replayed until either its individual row or its summary
+                # account is durably admitted.
+                overflow = True
+                delivery_blocked = True
+                break
+            if (
+                admitted
+                and read_protected
+                and read_protection_probe is not None
+                and action in {"function_call_output", "custom_tool_call_output"}
+            ):
+                consume = getattr(store, "consume_read_protection", None)
+                if callable(consume):
+                    try:
+                        consume(workspace_commitment, session_commitment, read_protection_probe)
+                    except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
+                        pass
+        elif result.disposition.value == "accepted":
+            # Self-observation suppression is intentional selection, not a
+            # missing observation.  Count each accepted stream input once so
+            # status/check accounting can distinguish it from queue loss.
+            note_omission = getattr(store, "note_selection_omission", None)
+            if callable(note_omission):
+                try:
+                    note_omission(workspace_commitment)
+                except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
+                    # The source cursor must not pass an accepted input when
+                    # its intentional-omission accounting could not commit.
+                    delivery_blocked = True
+                    break
+        # Pairing provenance is needed even for Yoetz-owned calls that stay
+        # local-only. It is committed with the same stream cursor below.
         call_tools = candidate_call_tools
+        # Yoetz-owned calls remain local-only where the self-observation policy
+        # says the service already has the authoritative record.
         committed_cursor = envelope.cursor
         if result.disposition.value == "accepted":
             accepted += 1
@@ -1257,6 +1965,7 @@ def reconcile_session_stream_path(
             store.note_coverage_gap(workspace_commitment, durable_gap)
     if overflow and ObservationGapCode.OUTBOX_OVERFLOW.value not in gaps:
         gaps = (*gaps, ObservationGapCode.OUTBOX_OVERFLOW.value)
+    admitted_profile = stream_profile_from_id(persisted_profile_id)
     return {
         "accepted": accepted,
         "duplicates": duplicates,
@@ -1265,6 +1974,12 @@ def reconcile_session_stream_path(
         "event_position": committed_cursor.event_position,
         "generation": committed_cursor.source_generation,
         "profile_id": persisted_profile_id,
+        # Structural admission is a parser fact about this pass, never host support (#656).
+        "admission": stream_admission(admitted_profile, gaps, advance.reason_codes),
+        "admission_provenance": (
+            None if admitted_profile is None else rollout_admission_provenance(admitted_profile)
+        ),
+        "admission_reasons": advance.reason_codes,
         "rotated": advance.rotated,
         "truncated": advance.truncated,
         "resolved": True,

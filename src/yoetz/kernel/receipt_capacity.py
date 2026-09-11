@@ -17,7 +17,11 @@ from yoetz.kernel.deterministic_checks import (
 )
 from yoetz.kernel.finding_resolution import finding_is_resolved, issue_key
 from yoetz.kernel.projections import ProjectionState
-from yoetz.kernel.reducers import invalidates_recorded_check, is_material_event_family
+from yoetz.kernel.reducers import (
+    ReplayIndex,
+    invalidates_recorded_check,
+    is_material_event_family,
+)
 from yoetz.protocol.coverage import MAX_KNOWN_GAPS
 
 __all__ = [
@@ -85,10 +89,51 @@ def receipt_gap_codes(
 ) -> tuple[str, ...]:
     """Return the exact healthy-storage gap union a receipt would need for this state."""
 
+    return _receipt_gap_codes(projection, records, projection_validated=False)
+
+
+def _receipt_gap_codes_validated(
+    projection: ProjectionState,
+    records: tuple[LedgerRecord, ...],
+    *,
+    replay_index: ReplayIndex | None = None,
+) -> tuple[str, ...]:
+    """Return receipt gaps when the caller already replayed the exact record tuple.
+
+    This internal adapter seam skips only the duplicate genesis replay. It retains deterministic
+    case construction, reverse-index, availability, history, and coverage validation.
+    """
+
+    return _receipt_gap_codes(
+        projection,
+        records,
+        projection_validated=True,
+        replay_index=replay_index,
+    )
+
+
+def _receipt_gap_codes(
+    projection: ProjectionState,
+    records: tuple[LedgerRecord, ...],
+    *,
+    projection_validated: bool,
+    replay_index: ReplayIndex | None = None,
+) -> tuple[str, ...]:
+    """Build receipt gaps, optionally reusing an append-time replay result.
+
+    The validated branch is private to ledger append admission. Its caller has just replayed the
+    exact ``records`` tuple and supplies that projection; the deterministic case still performs
+    all shape, index, availability, history, and coverage checks below.
+    """
+
     if type(projection) is not ProjectionState or type(records) is not tuple:
         raise ValueError("receipt_coverage_capacity_invalid")
     case = build_deterministic_case(
-        projection, records, healthy_storage_availability(projection, records)
+        projection,
+        records,
+        healthy_storage_availability(projection, records, _replay_index=replay_index),
+        _projection_validated=projection_validated,
+        _replay_index=replay_index,
     )
     codes = {gap.code for gap in case.gaps}
     for coverage in case.coverage_by_ref.values():
@@ -144,5 +189,26 @@ def validate_receipt_coverage_capacity(
     """Reject a proposed state whose exact healthy receipt union exceeds the wire bound."""
 
     codes = receipt_gap_codes(projection, records)
+    if len(codes) > MAX_KNOWN_GAPS:
+        raise ReceiptCoverageCapacityExceeded(len(codes))
+
+
+def _validate_receipt_coverage_capacity_validated(  # pyright: ignore[reportUnusedFunction]
+    projection: ProjectionState,
+    records: tuple[LedgerRecord, ...],
+    *,
+    replay_index: ReplayIndex | None = None,
+) -> None:
+    """Validate append capacity after the caller has replayed ``records`` exactly once.
+
+    This is an internal adapter seam; callers must pass the exact immutable tuple used to produce
+    ``projection``. Public callers should use :func:`validate_receipt_coverage_capacity`.
+    """
+
+    codes = _receipt_gap_codes_validated(
+        projection,
+        records,
+        replay_index=replay_index,
+    )
     if len(codes) > MAX_KNOWN_GAPS:
         raise ReceiptCoverageCapacityExceeded(len(codes))

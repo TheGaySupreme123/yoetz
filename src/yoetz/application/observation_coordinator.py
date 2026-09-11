@@ -34,10 +34,19 @@ from yoetz.adapters.integrations.observation_local import (
 )
 from yoetz.adapters.workspace_inspect import LocalWorkspaceInspectAdapter
 from yoetz.application.observation_advice import (
+    ADVICE_SEMANTIC_PENDING_GAP,
     ObservationAdviceContextBuilder,
     scoped_session_envelopes,
 )
+from yoetz.application.observation_advice_semantic import (
+    AdviceSemanticDispatch,
+    AdviceSemanticDrainHandle,
+    ObservationAdviceSemanticRepository,
+    ObservationAdviceSemanticSupervisor,
+    ObservationAdviceSemanticWorker,
+)
 from yoetz.application.observation_check_policy import load_observation_check_policy
+from yoetz.application.observation_drain import ObservationCaptureRecoveryOutcome
 from yoetz.application.observation_materialize import (
     MATERIALIZATION_LEGACY_MAPPING_VERSIONS,
     MATERIALIZATION_MAPPING_VERSION,
@@ -98,7 +107,10 @@ from yoetz.domain.findings import (
 )
 from yoetz.domain.observation import (
     OBSERVATION_BACKPRESSURE_REASON,
+    OBSERVATION_CONTENT_CAPTURE_PENDING_REASON,
     AdviceItem,
+    ObservationCapturePart,
+    ObservationCaptureTicket,
     ObservationContentChunk,
     ObservationContentKind,
     ObservationContentManifest,
@@ -113,13 +125,19 @@ from yoetz.domain.observation import (
     ObservationSource,
     ObservationStatus,
     ObservationStatusQuery,
+    observation_capture_part_descriptors,
+    observation_capture_ticket_id,
+    observation_content_binding_matches,
     observation_envelope_to_json,
+    observation_selection_route,
+    observation_source_qualified_content_binding_matches,
 )
 from yoetz.domain.observation_profiles import content_capture_profile_matches_source
 from yoetz.domain.values import (
     Frontier,
     JsonObject,
     SubjectStateRef,
+    Timestamp,
     action_id,
     event_id,
     evidence_id,
@@ -175,6 +193,43 @@ _ADVICE_FINDING_KIND_BY_RULE: Final = MappingProxyType(
 )
 
 _LEGACY_UNPAIRED_REPLAY_PROFILE: Final = "legacy-paired-replay"
+_CAPTURED_CONTENT_MEDIA_TYPE: Final = "application/vnd.yoetz.observation-content+json"
+# This is the coordinator-side upper-bound guard for the central local-store
+# reservation. Keep it equal to the local capture fence: the reservation is
+# acquired before object staging, while the task SQLite store repeats the
+# actual manifest-byte check at its durable boundary.
+_MAX_CAPTURE_CONTENT_BYTES: Final = 128 * 1024 * 1024
+_MAX_CAPTURE_BOOTSTRAP_WORKSPACES: Final = 256
+_CAPTURE_TICKET_RETRYABLE_REJECTION_REASONS: Final = frozenset(
+    {
+        OBSERVATION_BACKPRESSURE_REASON,
+        OBSERVATION_CONTENT_CAPTURE_PENDING_REASON,
+        ObservationGapCode.SERVICE_UNAVAILABLE.value,
+        ObservationGapCode.VAULT_LOCKED.value,
+        ObservationGapCode.MAPPING_MISSING.value,
+        "observation_disabled",
+        "paused",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _NativeCaptureContext:
+    native_source: bool
+    requested_content_profile: str | None
+    content_identity: str | None
+    pending_capture_ticket: ObservationCaptureTicket | None
+    content_authorized: bool
+    content_authorization_missing: bool
+    content_capture_blocked: bool
+    capture_ticket_revoked: bool
+    native_content_requested: bool
+    capture_fence: Callable[[], Awaitable[bool]] | None
+    fence_generation: str | None
+    capture_staging_ticket: ObservationCaptureTicket | None
+    staged_ticket: ObservationCaptureTicket | None
+    expected_capture_parts: tuple[ObservationCapturePart, ...] | None
+    rejection_reason: str | None
 
 
 def _legacy_unpaired_replay_envelope(
@@ -496,6 +551,14 @@ class ObservationAdviceHook(Protocol):
     ) -> Awaitable[None] | None: ...
 
 
+class CaptureBudgetBootstrapHook(Protocol):
+    """Ready-owned complete task inventory for native capture admission."""
+
+    def __call__(
+        self, workspace: str, runtime: TaskRuntime, store: TaskObservationPort, /
+    ) -> Awaitable[bool]: ...
+
+
 def _reject(reason: str, cursor: object | None = None) -> ObservationIngestResult:
     return ObservationIngestResult(
         ObservationIngestDisposition.REJECTED,
@@ -504,11 +567,43 @@ def _reject(reason: str, cursor: object | None = None) -> ObservationIngestResul
     )
 
 
+def _selection_route_is_current(
+    route: tuple[str, str, str, str],
+    runtime: TaskRuntime,
+    legacy_writer_routes: Sequence[tuple[str, str]],
+    *,
+    authority_generation: str | None,
+    authority_active: bool,
+) -> bool:
+    """Keep a selected row bound to its task, route lineage, and authority.
+
+    The host session commitment authenticates the native source, but it does
+    not distinguish a durable row buffered before a session/task rebind.  A
+    selected row therefore carries its Yoetz route explicitly.  Historical
+    session/writer pairs remain valid for same-task replay; a different task
+    or authority generation is rejected before store ingest advances a cursor.
+    """
+
+    selected_task, selected_session, selected_writer, selected_generation = route
+    if selected_task != runtime.task_id or not authority_active:
+        return False
+    if authority_generation != selected_generation:
+        return False
+    admitted_routes = set(legacy_writer_routes)
+    if runtime.writer_id is not None:
+        admitted_routes.add((runtime.session_id, runtime.writer_id))
+    return (selected_session, selected_writer) in admitted_routes
+
+
 def _empty_advice_event_ref_cache() -> dict[tuple[str, str], tuple[str, ...]]:
     return {}
 
 
 def _empty_storage_corrupt_sessions() -> set[str]:
+    return set()
+
+
+def _empty_capture_bootstrap_workspaces() -> set[str]:
     return set()
 
 
@@ -528,7 +623,12 @@ class ObservationCoordinator:
         default_factory=ObservationAdviceContextBuilder
     )
     verification_supervisor: ObservationVerificationSupervisor | None = None
+    # Off-hook semantic advice (#619): the build only enqueues a durable row; this supervisor
+    # drains it through ``advice_semantic_dispatch`` and re-runs advice when it finishes.
+    advice_semantic_supervisor: ObservationAdviceSemanticSupervisor | None = None
+    advice_semantic_dispatch: AdviceSemanticDispatch | None = None
     observation_enabled: bool = True
+    capture_budget_bootstrap: CaptureBudgetBootstrapHook | None = None
     _advice_event_ref_cache: dict[tuple[str, str], tuple[str, ...]] = field(
         default_factory=_empty_advice_event_ref_cache, init=False, repr=False
     )
@@ -536,6 +636,17 @@ class ObservationCoordinator:
         default_factory=_empty_storage_corrupt_sessions, init=False, repr=False
     )
     _local_executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
+    _capture_budget_exhausted: bool = field(default=False, init=False, repr=False)
+    # A persisted root proof belongs to an older service generation until the
+    # current coordinator has revalidated its route scope under the capture
+    # lock.  Keep this fence process-local so restart/upgrade cannot reuse an
+    # old proof without a fresh authoritative read.
+    _capture_recovery_sessions: dict[str, str] = field(
+        default_factory=lambda: dict[str, str](), init=False, repr=False
+    )
+    _capture_bootstrap_verified_workspaces: set[str] = field(
+        default_factory=_empty_capture_bootstrap_workspaces, init=False, repr=False
+    )
 
     async def _local[ResultT](self, call: Callable[[], ResultT]) -> ResultT:
         """Run one blocking local-store call off the service event loop.
@@ -553,6 +664,411 @@ class ObservationCoordinator:
             self._local_executor = executor
         return await asyncio.get_running_loop().run_in_executor(executor, call)
 
+    async def _publish_capture_backlog(
+        self,
+        workspace: str,
+        runtime: TaskRuntime,
+        store: TaskObservationPort,
+    ) -> None:
+        """Publish bounded task-local capture pressure after a store mutation.
+
+        The SQLite read happens only after its caller's transaction has
+        returned. The local update then takes the owner-private store lock in
+        its own worker hop, so no SQLite/local lock inversion can be created.
+        This is feedback only: an unavailable read records an unknown route
+        when possible and never turns a failed cache update into a ledger
+        failure.
+        """
+
+        updater = getattr(self.local, "update_capture_backlog", None)
+        if not callable(updater):
+            return
+        reader = getattr(store, "capture_backlog", None)
+        if not callable(reader):
+            reader = getattr(store, "capture_ticket_backlog", None)
+        try:
+            raw_now = cast(object, self.clock.now_utc())
+            observed_at = (
+                raw_now if type(raw_now) is Timestamp else timestamp_from_datetime(raw_now)
+            )
+        except Exception:
+            # Reference coordinators may omit a service clock. Feedback is
+            # optional and must never turn a durable ingest into a failure.
+            return
+        backlog = None
+        count = 0
+        byte_count = 0
+        oldest_receipt_time: Timestamp | None = None
+        if callable(reader):
+            try:
+                backlog = reader(workspace)
+                count = getattr(backlog, "count")
+                byte_count = getattr(backlog, "byte_count")
+                oldest_receipt_time = getattr(backlog, "oldest_receipt_time")
+                if (
+                    type(count) is not int
+                    or isinstance(count, bool)
+                    or count < 0
+                    or type(byte_count) is not int
+                    or isinstance(byte_count, bool)
+                    or byte_count < 0
+                    or (
+                        oldest_receipt_time is not None
+                        and type(oldest_receipt_time) is not Timestamp
+                    )
+                ):
+                    raise TypeError("capture_backlog_shape_invalid")
+            except Exception:
+                # A stale/failed task read must not look like an empty global
+                # backlog. Preserve the conservative unknown scope below.
+                backlog = None
+        if backlog is None:
+            route_id = None
+        else:
+            route_id = runtime.task_id
+        try:
+            await self._local(
+                partial(
+                    updater,
+                    workspace,
+                    count,
+                    byte_count,
+                    oldest_receipt_time,
+                    observed_at,
+                    route_id=route_id,
+                )
+            )
+        except TypeError:
+            # Small reference adapters may still expose the pre-route form of
+            # this private feedback hook. Keep those adapters conservative by
+            # retrying without a route identity, which latches unknown scope.
+            try:
+                await self._local(
+                    partial(
+                        updater,
+                        workspace,
+                        count,
+                        byte_count,
+                        oldest_receipt_time,
+                        observed_at,
+                    )
+                )
+            except Exception:
+                return
+        except Exception:
+            return
+        await self._reconcile_capture_ticket_reservations(workspace, runtime, store)
+
+    def _remember_capture_bootstrap(self, workspace: str) -> None:
+        """Cache only a successfully validated inventory for this service generation."""
+
+        if (
+            workspace not in self._capture_bootstrap_verified_workspaces
+            and len(self._capture_bootstrap_verified_workspaces)
+            >= _MAX_CAPTURE_BOOTSTRAP_WORKSPACES
+        ):
+            self._capture_bootstrap_verified_workspaces.clear()
+        self._capture_bootstrap_verified_workspaces.add(workspace)
+
+    async def recover_capture_inventory(
+        self, workspace: str
+    ) -> ObservationCaptureRecoveryOutcome | None:
+        """Repair unknown inventory without requiring a newly admitted observation.
+
+        The service sweep invokes this metadata-only path. It uses existing,
+        unambiguous lifecycle mappings, not a synthetic envelope or a new grant.
+        Eight mapping candidates per turn and a bounded rotating cursor keep
+        missing parent/worker mappings from starving a usable route. The sweep
+        owns the elapsed deadline; the authoritative bootstrap joins its local
+        publication worker before cancellation can release the capture lock.
+        """
+
+        if not await self._local(partial(self.local.capture_inventory_recovery_needed, workspace)):
+            return None
+        if not self.observation_enabled or not await self._local(self.local.runtime_enabled):
+            return ObservationCaptureRecoveryOutcome.DISABLED
+        bootstrap = self.capture_budget_bootstrap
+        if bootstrap is None:
+            return ObservationCaptureRecoveryOutcome.INVENTORY_UNKNOWN
+        if self._capture_lock.locked():
+            return ObservationCaptureRecoveryOutcome.BUSY
+        sessions = await self._local(
+            partial(self.local.unambiguous_codex_sessions_for_workspace, workspace)
+        )
+        after = self._capture_recovery_sessions.get(workspace)
+        if after is not None:
+            sessions = tuple(item for item in sessions if item > after) + tuple(
+                item for item in sessions if item <= after
+            )
+        outcome = ObservationCaptureRecoveryOutcome.MAPPING_MISSING
+        for host_session in sessions[:8]:
+            if (
+                workspace not in self._capture_recovery_sessions
+                and len(self._capture_recovery_sessions) >= _MAX_CAPTURE_BOOTSTRAP_WORKSPACES
+            ):
+                # Forgetting an old hint never publishes an inventory proof.
+                self._capture_recovery_sessions.pop(next(iter(self._capture_recovery_sessions)))
+            self._capture_recovery_sessions[workspace] = host_session
+            current_runtime: TaskRuntime | None = None
+            try:
+                mapping = await self._local(
+                    partial(self.mapping_loader, host_session, _state=self.state_root)
+                )
+                if mapping is None:
+                    continue
+                current_runtime, _ = await self._route_observation_mapping(
+                    mapping, required_capabilities=frozenset({RuntimeCapability.WRITE})
+                )
+                store = self._observation_store(current_runtime)
+                # Do not queue behind another capture or hold the general
+                # workflow gate across a catalog/bundle inventory scan.
+                if self._capture_lock.locked():
+                    return ObservationCaptureRecoveryOutcome.BUSY
+                async with self._capture_lock:
+                    if not await self._local(
+                        partial(self.local.capture_inventory_recovery_needed, workspace)
+                    ):
+                        return None
+                    if await bootstrap(workspace, current_runtime, store):
+                        self._remember_capture_bootstrap(workspace)
+                        return ObservationCaptureRecoveryOutcome.RECOVERED
+                    self._capture_bootstrap_verified_workspaces.discard(workspace)
+                    # One complete-inventory attempt per workspace turn. A
+                    # sibling mapping cannot repair the same unreadable catalog.
+                    return ObservationCaptureRecoveryOutcome.INVENTORY_UNKNOWN
+            except Exception:
+                self._capture_bootstrap_verified_workspaces.discard(workspace)
+                outcome = ObservationCaptureRecoveryOutcome.ROUTE_UNAVAILABLE
+            finally:
+                if current_runtime is not None:
+                    await self.runtime.release(current_runtime)
+        return outcome
+
+    async def _reserve_capture_ticket(
+        self,
+        workspace: str,
+        runtime: TaskRuntime,
+        store: TaskObservationPort,
+        ticket: ObservationCaptureTicket,
+        byte_count: int,
+    ) -> None:
+        """Reserve global count/bytes before any encrypted object is staged."""
+
+        ready = getattr(self.local, "capture_reservation_bootstrap_ready", None)
+        if callable(ready):
+            try:
+                locally_ready = await self._local(partial(ready, workspace, runtime.task_id))
+                if (
+                    not locally_ready
+                    or workspace not in self._capture_bootstrap_verified_workspaces
+                ):
+                    if self.capture_budget_bootstrap is None or not (
+                        await self.capture_budget_bootstrap(workspace, runtime, store)
+                    ):
+                        mark_unknown = getattr(
+                            self.local, "mark_capture_backlog_scope_unknown", None
+                        )
+                        if callable(mark_unknown):
+                            await self._local(partial(mark_unknown, workspace))
+                        raise PublicOperationError(
+                            PublicErrorCode.LIMIT_EXCEEDED,
+                            "Observation capture budget scope is unknown.",
+                            retryable=False,
+                        )
+                    self._remember_capture_bootstrap(workspace)
+            except PublicOperationError:
+                self._capture_bootstrap_verified_workspaces.discard(workspace)
+                raise
+            except Exception as exc:
+                self._capture_bootstrap_verified_workspaces.discard(workspace)
+                mark_unknown = getattr(self.local, "mark_capture_backlog_scope_unknown", None)
+                if callable(mark_unknown):
+                    await self._local(partial(mark_unknown, workspace))
+                raise PublicOperationError(
+                    PublicErrorCode.LIMIT_EXCEEDED,
+                    "Observation capture budget scope is unknown.",
+                    retryable=False,
+                ) from exc
+        reserve = getattr(self.local, "reserve_capture_ticket", None)
+        if not callable(reserve):
+            return
+        await self._local(
+            partial(
+                reserve,
+                workspace,
+                observation_capture_ticket_id(ticket),
+                runtime.task_id,
+                byte_count,
+            )
+        )
+
+    @staticmethod
+    def _capture_part_identity(
+        chunk: ObservationContentChunk | ObservationContentManifest,
+    ) -> tuple[str, str | None, str | None, int]:
+        """Return the durable identity used to deduplicate one capture part."""
+
+        return (
+            chunk.content_kind.value,
+            chunk.correlation_identity,
+            chunk.source_commitment,
+            chunk.part_index,
+        )
+
+    @classmethod
+    def _capture_ticket_reservation_bytes(
+        cls,
+        store: TaskObservationPort,
+        *,
+        workspace: str,
+        ticket: ObservationCaptureTicket,
+        chunks: tuple[ObservationContentChunk, ...],
+    ) -> int:
+        """Compute a conservative ticket byte upper bound before object staging.
+
+        A retry may contain a mixture of already durable parts and new parts.
+        Charge the retained manifest bytes once, then add only request parts
+        whose trusted part identity is not already present. Historical rows
+        without byte metadata are treated as occupying the complete budget so
+        that missing accounting can never open a path around the central fence.
+        """
+
+        requested_by_part = {
+            cls._capture_part_identity(chunk): len(chunk.content) for chunk in chunks
+        }
+        manifests = store.content_manifests_for_logical_identity(
+            workspace=workspace,
+            logical_identity=ticket.logical_identity,
+        )
+        retained_by_part: dict[tuple[str, str | None, str | None, int], int | None] = {}
+        retained_object_ids: set[str] = set()
+        for manifest in manifests:
+            part = cls._capture_part_identity(manifest)
+            retained_object_ids.add(manifest.object_id)
+            if part in retained_by_part:
+                if retained_by_part[part] != manifest.content_bytes:
+                    raise PublicOperationError(
+                        PublicErrorCode.STORAGE_CORRUPT,
+                        "Observation content manifest conflicts.",
+                        retryable=False,
+                    )
+                continue
+            retained_by_part[part] = manifest.content_bytes
+
+        retained_bytes = 0
+        for part, content_bytes in retained_by_part.items():
+            if content_bytes is None:
+                # A current retry can supply a safe upper bound for this
+                # legacy row. Without that part in the request, no bounded
+                # estimate exists, so force the reservation to the fence.
+                content_bytes = requested_by_part.get(part, _MAX_CAPTURE_CONTENT_BYTES)
+            retained_bytes += content_bytes
+
+        # A pending ticket's object list is authenticated ticket metadata. If
+        # a manifest has disappeared from the lookup, keep its occupancy
+        # conservative instead of allowing a retry to replace it uncharged.
+        if any(object_id not in retained_object_ids for object_id in ticket.object_ids):
+            retained_bytes = _MAX_CAPTURE_CONTENT_BYTES
+
+        requested_new_bytes = sum(
+            byte_count
+            for part, byte_count in requested_by_part.items()
+            if part not in retained_by_part
+        )
+        total = retained_bytes + requested_new_bytes
+        if total > _MAX_CAPTURE_CONTENT_BYTES:
+            raise PublicOperationError(
+                PublicErrorCode.LIMIT_EXCEEDED,
+                "Observation captured-content byte budget is exhausted.",
+                retryable=False,
+            )
+        return total
+
+    async def _confirm_capture_ticket_reservation(
+        self,
+        workspace: str,
+        runtime: TaskRuntime,
+        ticket: ObservationCaptureTicket,
+    ) -> None:
+        """Clear the crash-reconciliation fence after the ticket row is durable."""
+
+        confirm = getattr(self.local, "confirm_capture_ticket_reservation", None)
+        if not callable(confirm):
+            return
+        try:
+            await self._local(
+                partial(
+                    confirm,
+                    workspace,
+                    observation_capture_ticket_id(ticket),
+                    runtime.task_id,
+                )
+            )
+        except Exception:
+            # A reservation that remains marked for reconciliation is safe:
+            # pressure stays conservative until READY can inspect the ticket.
+            return
+
+    async def _release_capture_ticket_reservation(
+        self,
+        workspace: str,
+        runtime: TaskRuntime,
+        ticket: ObservationCaptureTicket,
+    ) -> None:
+        """Release global capacity only after durable ticket retirement."""
+
+        release = getattr(self.local, "release_capture_ticket_reservation", None)
+        if not callable(release):
+            return
+        try:
+            await self._local(
+                partial(
+                    release,
+                    workspace,
+                    observation_capture_ticket_id(ticket),
+                    runtime.task_id,
+                )
+            )
+        except Exception:
+            # The reservation remains conservative and is removed by the next
+            # successful READY reconciliation.
+            return
+
+    async def _reconcile_capture_ticket_reservations(
+        self,
+        workspace: str,
+        runtime: TaskRuntime,
+        store: TaskObservationPort,
+    ) -> None:
+        """Reconcile central reservations against one task's durable ticket rows."""
+
+        reconcile = getattr(self.local, "reconcile_capture_ticket_reservations", None)
+        list_pending = getattr(store, "list_pending_capture_tickets", None)
+        if not callable(reconcile) or not callable(list_pending):
+            return
+        try:
+            rows = cast(tuple[object, ...], list_pending(runtime.task_id))
+            if type(rows) is not tuple:
+                return
+            ticket_ids_list: list[str] = []
+            for row in rows:
+                if type(row) is not ObservationCaptureTicket:
+                    return
+                ticket_ids_list.append(observation_capture_ticket_id(row))
+            ticket_ids = tuple(ticket_ids_list)
+            await self._local(
+                partial(
+                    reconcile,
+                    workspace,
+                    runtime.task_id,
+                    ticket_ids,
+                )
+            )
+        except Exception:
+            # Preserve ``needs_reconcile`` or unknown scope on any read error;
+            # this path never weakens capture admission.
+            return
+
     def close(self) -> None:
         """Stop accepting local-store work; bounded lock waits let running workers retire."""
 
@@ -562,6 +1078,7 @@ class ObservationCoordinator:
 
     def __post_init__(self) -> None:
         self._lock = asyncio.Lock()
+        self._capture_lock = asyncio.Lock()
         if type(self.observation_enabled) is not bool:
             raise TypeError("observation_enabled_invalid")
         if self.verification_supervisor is None:
@@ -683,13 +1200,439 @@ class ObservationCoordinator:
                     if release is not None:
                         await release(runtime)
 
+    async def _native_capture_context(
+        self,
+        runtime: TaskRuntime,
+        store: TaskObservationPort,
+        *,
+        workspace: str,
+        request: ObservationIngestRequest,
+        consent: Any,
+        admitted_ticket_session_ids: frozenset[str] | None = None,
+    ) -> _NativeCaptureContext:
+        """Resolve the native capture fence and durable handoff before object capture."""
+
+        if admitted_ticket_session_ids is None:
+            admitted_ticket_session_ids = frozenset({runtime.session_id})
+        profiled_native_source = request.envelope.source in {
+            ObservationSource.CLAUDE_HOOK,
+            ObservationSource.CURSOR_HOOK,
+        }
+        profileless_codex_source = request.envelope.source is ObservationSource.CODEX_HOOK
+        # A Codex structural request with inline chunks retains the historical
+        # capture path. It enters the ticketed lane only when the hook has
+        # explicitly requested capture-only staging or a prior handoff is
+        # being recovered below.
+        native_source = profiled_native_source
+        requested_profile = request.content_capture_profile
+        content_identity = (
+            observation_content_identity(request.envelope)
+            if profiled_native_source or profileless_codex_source
+            else None
+        )
+        pending_ticket: ObservationCaptureTicket | None = None
+        ticket_revoked = False
+        rejection_reason: str | None = None
+        requested_capture_parts = observation_capture_part_descriptors(request.content_chunks)
+        ticket_schema_available = True
+        ticket_schema_probe = getattr(store, "capture_ticket_schema_available", None)
+        if callable(ticket_schema_probe):
+            ticket_schema_available = bool(ticket_schema_probe())
+        if content_identity is not None:
+            if ticket_schema_available:
+                pending_ticket = store.load_capture_ticket(
+                    workspace=workspace,
+                    logical_identity=content_identity,
+                )
+            if pending_ticket is not None:
+                if (
+                    pending_ticket.session_commitment != request.envelope.session_commitment
+                    or pending_ticket.yoetz_session_id not in admitted_ticket_session_ids
+                    or pending_ticket.task_id != runtime.task_id
+                    or pending_ticket.source is not request.envelope.source
+                    or pending_ticket.source_identity != request.envelope.source_identity
+                    or pending_ticket.cursor != request.envelope.cursor
+                ):
+                    rejection_reason = ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+                elif requested_profile is None:
+                    requested_profile = pending_ticket.content_capture_profile
+                ticket_revoked = pending_ticket.state == "revoked"
+        if profileless_codex_source and (
+            request.capture_only
+            or pending_ticket is not None
+            or bool(request.envelope.content_object_refs)
+        ):
+            native_source = True
+        expected_capture_parts: tuple[ObservationCapturePart, ...] | None = None
+        if ticket_schema_available and (pending_ticket is not None or request.content_chunks):
+            expected_capture_parts = requested_capture_parts
+            if pending_ticket is not None:
+                if not set(requested_capture_parts).issubset(pending_ticket.expected_parts):
+                    rejection_reason = ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+                expected_capture_parts = pending_ticket.expected_parts
+        profile_source_mismatch = (
+            rejection_reason is None
+            and requested_profile is not None
+            and (
+                not profiled_native_source
+                or not content_capture_profile_matches_source(
+                    request.envelope.source.value, requested_profile
+                )
+            )
+        )
+        profile_consent_missing = (
+            rejection_reason is None
+            and not profile_source_mismatch
+            and requested_profile is not None
+            and requested_profile not in consent.content_capture_profiles
+        )
+        if profile_source_mismatch or profile_consent_missing:
+            # A profile that was explicitly disabled/revoked fences the
+            # matching durable handoff. A source/profile metadata mismatch is
+            # left for the ticket metadata owner to diagnose instead of being
+            # silently mutated here.
+            if profile_consent_missing and pending_ticket is not None:
+                self._tombstone_capture_tickets(
+                    store,
+                    workspace,
+                    pending_ticket.content_capture_profile,
+                )
+                await self._release_capture_ticket_reservation(workspace, runtime, pending_ticket)
+            rejection_reason = ObservationGapCode.CONTENT_CAPTURE_PROFILE_MISMATCH.value
+
+        content_authorized = not native_source
+        content_authorization_missing = False
+        content_blocked = ticket_revoked
+        capture_fence: Callable[[], Awaitable[bool]] | None = None
+        native_requested = native_source and bool(
+            request.content_chunks
+            or request.envelope.content_object_refs
+            or pending_ticket is not None
+        )
+        fence_generation: str | None = None
+        fence_profiles: tuple[str, ...] = ()
+        if native_requested:
+            authority = await self._local(partial(self.local.content_capture_authority, workspace))
+            if (
+                authority is None
+                or not authority.active
+                or not authority.runtime_enabled
+                or (profiled_native_source and not authority.profiles)
+            ):
+                content_blocked = True
+            else:
+                fence_generation = authority.generation
+                fence_profiles = authority.profiles
+                if (
+                    pending_ticket is not None
+                    and pending_ticket.authority_generation != fence_generation
+                ):
+                    await self._retire_capture_ticket(workspace, runtime, store, pending_ticket)
+                    ticket_revoked = True
+                    content_blocked = True
+
+                async def current_capture_fence() -> bool:
+                    assert fence_generation is not None
+                    return await self._local(
+                        partial(
+                            self.local.content_capture_authority_is_current,
+                            workspace,
+                            fence_generation,
+                            fence_profiles,
+                        )
+                    )
+
+                capture_fence = current_capture_fence
+        if native_source and (request.content_chunks or pending_ticket is not None):
+            stored_profiles = store.content_capture_profiles(workspace)
+            if profileless_codex_source:
+                # Codex hook content uses the existing structural observation
+                # grant as its authority arm. There is intentionally no Codex
+                # profile in the public profile vocabulary.
+                content_authorized = requested_profile is None
+            else:
+                content_authorized = (
+                    requested_profile is not None
+                    and requested_profile in stored_profiles
+                    and requested_profile in fence_profiles
+                    and content_capture_profile_matches_source(
+                        request.envelope.source.value, requested_profile
+                    )
+                )
+            content_authorization_missing = not content_authorized
+        if native_requested and not content_blocked:
+            assert capture_fence is not None
+            if not await capture_fence():
+                content_blocked = True
+                content_authorized = False
+                content_authorization_missing = True
+
+        staging_ticket: ObservationCaptureTicket | None = None
+        staged_ticket: ObservationCaptureTicket | None = None
+        if (
+            native_requested
+            and not content_blocked
+            and content_authorized
+            and content_identity is not None
+            and fence_generation is not None
+        ):
+            if pending_ticket is not None:
+                if pending_ticket.state == "staging":
+                    staging_ticket = pending_ticket
+                    await self._reserve_capture_ticket(
+                        workspace,
+                        runtime,
+                        store,
+                        pending_ticket,
+                        self._capture_ticket_reservation_bytes(
+                            store,
+                            workspace=workspace,
+                            ticket=pending_ticket,
+                            chunks=request.content_chunks,
+                        ),
+                    )
+                    await self._confirm_capture_ticket_reservation(
+                        workspace, runtime, pending_ticket
+                    )
+                elif pending_ticket.state == "pending":
+                    staged_ticket = pending_ticket
+                    await self._reserve_capture_ticket(
+                        workspace,
+                        runtime,
+                        store,
+                        pending_ticket,
+                        self._capture_ticket_reservation_bytes(
+                            store,
+                            workspace=workspace,
+                            ticket=pending_ticket,
+                            chunks=request.content_chunks,
+                        ),
+                    )
+                    await self._confirm_capture_ticket_reservation(
+                        workspace, runtime, pending_ticket
+                    )
+            elif request.content_chunks and ticket_schema_available:
+                staging_ticket = ObservationCaptureTicket(
+                    workspace_commitment=workspace,
+                    task_id=runtime.task_id,
+                    yoetz_session_id=runtime.session_id,
+                    session_commitment=request.envelope.session_commitment,
+                    source=request.envelope.source,
+                    source_identity=request.envelope.source_identity,
+                    cursor=request.envelope.cursor,
+                    logical_identity=content_identity,
+                    content_capture_profile=requested_profile,
+                    authority_generation=fence_generation,
+                    object_ids=(),
+                    captured_at=timestamp_from_datetime(self.clock.now_utc()),
+                    state="staging",
+                    expected_parts=expected_capture_parts or (),
+                )
+                try:
+                    await self._reserve_capture_ticket(
+                        workspace,
+                        runtime,
+                        store,
+                        staging_ticket,
+                        self._capture_ticket_reservation_bytes(
+                            store,
+                            workspace=workspace,
+                            ticket=staging_ticket,
+                            chunks=request.content_chunks,
+                        ),
+                    )
+                    store.record_capture_ticket(staging_ticket)
+                except Exception:
+                    await self._release_capture_ticket_reservation(
+                        workspace, runtime, staging_ticket
+                    )
+                    raise
+                await self._confirm_capture_ticket_reservation(workspace, runtime, staging_ticket)
+        return _NativeCaptureContext(
+            native_source=native_source,
+            requested_content_profile=requested_profile,
+            content_identity=content_identity,
+            pending_capture_ticket=pending_ticket,
+            content_authorized=content_authorized,
+            content_authorization_missing=content_authorization_missing,
+            content_capture_blocked=content_blocked,
+            capture_ticket_revoked=ticket_revoked,
+            native_content_requested=native_requested,
+            capture_fence=capture_fence,
+            fence_generation=fence_generation,
+            capture_staging_ticket=staging_ticket,
+            staged_ticket=staged_ticket,
+            expected_capture_parts=expected_capture_parts,
+            rejection_reason=rejection_reason,
+        )
+
+    @staticmethod
+    def _tombstone_capture_ticket(
+        store: TaskObservationPort, ticket: ObservationCaptureTicket
+    ) -> None:
+        store.tombstone_capture_ticket(ticket)
+
+    async def _retire_capture_ticket(
+        self,
+        workspace: str,
+        runtime: TaskRuntime,
+        store: TaskObservationPort,
+        ticket: ObservationCaptureTicket,
+        *,
+        delete: bool = False,
+    ) -> None:
+        """Retire one durable ticket, then release its global reservation."""
+
+        if delete:
+            store.delete_capture_ticket(ticket)
+        else:
+            self._tombstone_capture_ticket(store, ticket)
+        await self._release_capture_ticket_reservation(workspace, runtime, ticket)
+
+    @staticmethod
+    def _tombstone_capture_tickets(
+        store: TaskObservationPort, workspace: str, profile: str | None = None
+    ) -> None:
+        """Fence durable handoffs without treating optional content as corrupt."""
+
+        cleanup = getattr(store, "tombstone_capture_tickets", None)
+        if callable(cleanup):
+            cleanup(workspace, profile)
+
+    async def _tombstone_capture_tickets_for_mapping(
+        self,
+        mapping: LifecycleMapping,
+        workspace: str,
+        profile: str | None = None,
+    ) -> None:
+        """Apply consent revocation to the mapped task before rejecting a hook."""
+
+        runtime: TaskRuntime | None = None
+        try:
+            runtime, _ = await self._route_observation_mapping(
+                mapping,
+                required_capabilities=frozenset({RuntimeCapability.WRITE}),
+            )
+            store = self._observation_store(runtime)
+            self._tombstone_capture_tickets(store, workspace, profile)
+            await self._publish_capture_backlog(workspace, runtime, store)
+        finally:
+            if runtime is not None:
+                await self.runtime.release(runtime)
+
+    async def _tombstone_capture_ticket_for_request(
+        self,
+        mapping: LifecycleMapping,
+        workspace: str,
+        request: ObservationIngestRequest,
+    ) -> None:
+        """Fence only the native handoff proved by this authenticated hook row."""
+
+        runtime: TaskRuntime | None = None
+        try:
+            runtime, _ = await self._route_observation_mapping(
+                mapping,
+                required_capabilities=frozenset({RuntimeCapability.WRITE}),
+            )
+            store = self._observation_store(runtime)
+            logical_identity = observation_content_identity(request.envelope)
+            ticket = store.load_capture_ticket(
+                workspace=workspace,
+                logical_identity=logical_identity,
+            )
+            if ticket is None or ticket.state not in {"staging", "pending"}:
+                return
+            # A valid Codex-session commitment alone is insufficient to retire
+            # a durable handoff.  Match the task and the immutable native row
+            # identity before changing ticket state; a stale/superseded row
+            # must remain available for its own recovery path.
+            if (
+                ticket.task_id != runtime.task_id
+                or ticket.session_commitment != request.envelope.session_commitment
+                or ticket.source is not request.envelope.source
+                or ticket.source_identity != request.envelope.source_identity
+                or ticket.cursor != request.envelope.cursor
+                or (
+                    request.content_capture_profile is not None
+                    and ticket.content_capture_profile != request.content_capture_profile
+                )
+            ):
+                return
+            await self._retire_capture_ticket(workspace, runtime, store, ticket)
+            await self._publish_capture_backlog(workspace, runtime, store)
+        finally:
+            if runtime is not None:
+                await self.runtime.release(runtime)
+
+    async def _capture_budget_refusal_context(
+        self,
+        workspace: str,
+        runtime: TaskRuntime,
+        store: TaskObservationPort,
+        request: ObservationIngestRequest,
+    ) -> _NativeCaptureContext:
+        """Retire only this failed handoff and continue its structural evidence."""
+
+        identity = observation_content_identity(request.envelope)
+        loader = getattr(store, "load_capture_ticket", None)
+        if callable(loader):
+            ticket = loader(workspace=workspace, logical_identity=identity)
+            if (
+                type(ticket) is ObservationCaptureTicket
+                and ticket.task_id == runtime.task_id
+                and ticket.source is request.envelope.source
+                and ticket.session_commitment == request.envelope.session_commitment
+                and ticket.source_identity == request.envelope.source_identity
+                and ticket.cursor == request.envelope.cursor
+                and ticket.state in {"staging", "pending"}
+            ):
+                await self._retire_capture_ticket(workspace, runtime, store, ticket)
+        return _NativeCaptureContext(
+            native_source=request.envelope.source
+            in {
+                ObservationSource.CODEX_HOOK,
+                ObservationSource.CLAUDE_HOOK,
+                ObservationSource.CURSOR_HOOK,
+            },
+            requested_content_profile=request.content_capture_profile,
+            content_identity=identity,
+            pending_capture_ticket=None,
+            content_authorized=False,
+            content_authorization_missing=False,
+            content_capture_blocked=True,
+            capture_ticket_revoked=False,
+            native_content_requested=bool(request.content_chunks),
+            capture_fence=None,
+            fence_generation=None,
+            capture_staging_ticket=None,
+            staged_ticket=None,
+            expected_capture_parts=None,
+            rejection_reason=None,
+        )
+
     async def ingest_request(self, request: ObservationIngestRequest) -> ObservationIngestResult:
         """Coordinator ingest path used by ordinary-control ``observation_ingest``."""
 
         if not self.observation_enabled:
-            return _reject("observation_disabled")
+            if type(request) is not ObservationIngestRequest:
+                return _reject("observation_disabled")
+            if request.envelope.source not in {
+                ObservationSource.CODEX_HOOK,
+                ObservationSource.CLAUDE_HOOK,
+                ObservationSource.CURSOR_HOOK,
+            }:
+                # Session-stream envelopes cannot carry capture tickets. Keep
+                # their disabled path inert before resolving any task route.
+                return _reject("observation_disabled")
         if type(request) is not ObservationIngestRequest:
             return _reject(ObservationGapCode.CONSENT_MISSING.value)
+        try:
+            selection_route = observation_selection_route(request.envelope.structural_payload)
+        except ProtocolValueError:
+            return _reject(
+                ObservationGapCode.SELECTION_ROUTE_CHANGED.value,
+                request.envelope.cursor,
+            )
         try:
             codex_session_id = validate_codex_session_id(request.codex_session_id)
         except ProtocolValueError:
@@ -714,6 +1657,28 @@ class ObservationCoordinator:
         if workspace is None:
             return _reject(ObservationGapCode.CONSENT_MISSING.value)
         consent = await self._local(partial(self.local.consent_for, workspace))
+        if not self.observation_enabled:
+            # A native capture ticket can outlive the runtime admission switch:
+            # the READY sweeper still replays its structural row after the
+            # switch is disabled.  Validate the session commitment, mapping,
+            # and workspace above before fencing the mapped task's unfinished
+            # handoffs.  Restrict this maintenance to native envelopes so a
+            # structurally valid non-native request cannot revoke unrelated
+            # native tickets merely by sharing the session commitment.
+            if request.envelope.source in {
+                ObservationSource.CODEX_HOOK,
+                ObservationSource.CLAUDE_HOOK,
+                ObservationSource.CURSOR_HOOK,
+            }:
+                try:
+                    await self._tombstone_capture_ticket_for_request(mapping, workspace, request)
+                except PublicOperationError as exc:
+                    if exc.code is PublicErrorCode.STORAGE_CORRUPT:
+                        return _reject(ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value)
+                    return _reject(ObservationGapCode.SERVICE_UNAVAILABLE.value)
+                except Exception:
+                    return _reject(ObservationGapCode.SERVICE_UNAVAILABLE.value)
+            return _reject("observation_disabled")
         if consent is None or not consent.active:
             reason = (
                 ObservationGapCode.CONSENT_REVOKED.value
@@ -724,12 +1689,27 @@ class ObservationCoordinator:
                     else ObservationGapCode.CONSENT_MISSING.value
                 )
             )
+            try:
+                await self._tombstone_capture_tickets_for_mapping(mapping, workspace)
+            except PublicOperationError as exc:
+                if exc.code is PublicErrorCode.STORAGE_CORRUPT:
+                    return _reject(ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value)
+                return _reject(ObservationGapCode.SERVICE_UNAVAILABLE.value)
+            except Exception:
+                return _reject(ObservationGapCode.SERVICE_UNAVAILABLE.value)
             return _reject(reason)
 
-        async with self._lock:
+        # Native capture-only requests are a short, durable handoff lane. They
+        # must be able to stage content while an older structural row is still
+        # in ledger replay/advice, but all object/manifest writes remain
+        # serialized by ``_capture_lock`` below. Structural requests retain
+        # the existing coordinator lock for their full ledger path.
+        request_lock = self._capture_lock if request.capture_only else self._lock
+        async with request_lock:
             if codex_session_id in self._storage_corrupt_sessions:
                 return _reject(ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value)
             runtime: TaskRuntime | None = None
+            store: TaskObservationPort | None = None
             route_history: list[LifecycleMapping] = []
             stage = "runtime_route"
             try:
@@ -760,123 +1740,216 @@ class ObservationCoordinator:
                         )
                     except TypeError:
                         store.grant_consent(workspace, consent.granted_at)
-                store.bind_session(workspace, request.envelope.session_commitment)
-                native_content_source = request.envelope.source in {
-                    ObservationSource.CLAUDE_HOOK,
-                    ObservationSource.CURSOR_HOOK,
-                }
-                requested_content_profile = request.content_capture_profile
-                if requested_content_profile is not None and (
-                    not native_content_source
-                    or not content_capture_profile_matches_source(
-                        request.envelope.source.value, requested_content_profile
-                    )
-                    or requested_content_profile not in consent.content_capture_profiles
-                ):
-                    # A client-supplied profile is an authorization assertion,
-                    # not a hint.  Refuse a source/profile or consent mismatch
-                    # before any content object can be staged.
-                    return _reject(ObservationGapCode.CONTENT_CAPTURE_PROFILE_MISMATCH.value)
-                content_authorized = not native_content_source
-                content_authorization_missing = False
-                content_capture_blocked = False
-                capture_fence: Callable[[], Awaitable[bool]] | None = None
-                native_content_requested = native_content_source and bool(
-                    request.content_chunks or request.envelope.content_object_refs
-                )
-                fence_generation: str | None = None
-                fence_profiles: tuple[str, ...] = ()
-                if native_content_requested:
-                    # The initial consent read above admits the structural
-                    # event, but native plaintext capture needs the latest
-                    # owner-private authority.  This closes the queueing gap
-                    # where a runtime disable or profile change lands after
-                    # the request entered the coordinator.
+                if selection_route is not None:
                     authority = await self._local(
                         partial(self.local.content_capture_authority, workspace)
                     )
-                    if (
-                        authority is None
-                        or not authority.active
-                        or not authority.runtime_enabled
-                        or not authority.profiles
+                    if not _selection_route_is_current(
+                        selection_route,
+                        runtime,
+                        legacy_writer_routes,
+                        authority_generation=(
+                            authority.generation if authority is not None else None
+                        ),
+                        authority_active=bool(authority is not None and authority.active),
                     ):
-                        content_capture_blocked = True
-                    else:
-                        fence_generation = authority.generation
-                        fence_profiles = authority.profiles
-                        assert fence_generation is not None
-
-                        async def current_capture_fence() -> bool:
-                            return await self._local(
-                                partial(
-                                    self.local.content_capture_authority_is_current,
-                                    workspace,
-                                    fence_generation,
-                                    fence_profiles,
-                                )
-                            )
-
-                        capture_fence = current_capture_fence
-                if native_content_source and request.content_chunks:
-                    stored_profiles = store.content_capture_profiles(workspace)
-                    content_authorized = (
-                        requested_content_profile is not None
-                        and requested_content_profile in stored_profiles
-                        and requested_content_profile in fence_profiles
-                        and content_capture_profile_matches_source(
-                            request.envelope.source.value, requested_content_profile
+                        return _reject(
+                            ObservationGapCode.SELECTION_ROUTE_CHANGED.value,
+                            request.envelope.cursor,
                         )
-                    )
-                    content_authorization_missing = not content_authorized
-                if native_content_requested and not content_capture_blocked:
-                    assert capture_fence is not None
-                    if not await capture_fence():
-                        content_capture_blocked = True
-                        content_authorized = False
-                        content_authorization_missing = True
-                if content_capture_blocked:
-                    # Keep the structural envelope admissible, but never let a
-                    # stale queued request reopen or stage captured plaintext.
-                    captured_content = ()
-                    replay_content_candidates = ()
-                    content_redacted = False
-                    content_unavailable = True
-                else:
-                    capture_chunks = request.content_chunks if content_authorized else ()
-                    if capture_fence is None:
-                        (
-                            captured_content,
-                            replay_content_candidates,
-                            content_redacted,
-                            content_unavailable,
-                        ) = await self._capture_content(
+                store.bind_session(workspace, request.envelope.session_commitment)
+                capture_lock_owned = request.capture_only
+                if not capture_lock_owned:
+                    await self._capture_lock.acquire()
+                try:
+                    self._capture_budget_exhausted = False
+                    try:
+                        capture = await self._native_capture_context(
                             runtime,
                             store,
                             workspace=workspace,
-                            envelope=request.envelope,
-                            chunks=capture_chunks,
+                            request=request,
+                            consent=consent,
+                            admitted_ticket_session_ids=frozenset(
+                                {runtime.session_id}
+                                | {session_id for session_id, _writer_id in legacy_writer_routes}
+                            ),
                         )
+                    except PublicOperationError as exc:
+                        if exc.code is not PublicErrorCode.LIMIT_EXCEEDED:
+                            raise
+                        self._capture_budget_exhausted = True
+                        for code in (
+                            ObservationGapCode.CAPTURE_BUDGET_EXHAUSTED.value,
+                            ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                        ):
+                            await self._local(
+                                partial(self.local.note_coverage_gap, workspace, code)
+                            )
+                        capture = await self._capture_budget_refusal_context(
+                            workspace, runtime, store, request
+                        )
+                        if request.capture_only:
+                            return _reject(ObservationGapCode.CAPTURE_BUDGET_EXHAUSTED.value)
+                    if capture.rejection_reason is not None:
+                        return _reject(capture.rejection_reason)
+                    native_content_source = capture.native_source
+                    content_identity = capture.content_identity
+                    content_authorized = capture.content_authorized
+                    content_authorization_missing = capture.content_authorization_missing
+                    content_capture_blocked = capture.content_capture_blocked
+                    capture_ticket_revoked = capture.capture_ticket_revoked
+                    capture_fence = capture.capture_fence
+                    fence_generation = capture.fence_generation
+                    capture_staging_ticket = capture.capture_staging_ticket
+                    staged_ticket = capture.staged_ticket
+                    expected_capture_parts = capture.expected_capture_parts
+                    if content_capture_blocked or capture_ticket_revoked:
+                        captured_content = ()
+                        replay_content_candidates = ()
+                        content_redacted = False
+                        content_unavailable = True
                     else:
-                        (
-                            captured_content,
-                            replay_content_candidates,
-                            content_redacted,
-                            content_unavailable,
-                        ) = await self._capture_content(
+                        capture_chunks = request.content_chunks if content_authorized else ()
+                        capture_result = await self._capture_content(
                             runtime,
                             store,
                             workspace=workspace,
                             envelope=request.envelope,
                             chunks=capture_chunks,
                             capture_fence=capture_fence,
+                            expected_capture_parts=expected_capture_parts,
+                            allow_incomplete_recovery=capture_staging_ticket is not None,
+                            source_qualified_capture=(
+                                request.capture_only
+                                or capture_staging_ticket is not None
+                                or staged_ticket is not None
+                            ),
                         )
+                        (
+                            captured_content,
+                            replay_content_candidates,
+                            content_redacted,
+                            content_unavailable,
+                        ) = capture_result
+                    capture_budget_exhausted = self._capture_budget_exhausted
+                    if (
+                        captured_content
+                        and not content_unavailable
+                        and capture_fence is not None
+                        and not await capture_fence()
+                    ):
+                        captured_content = ()
+                        content_unavailable = True
+                        capture_ticket_revoked = True
+                        if staged_ticket is not None:
+                            await self._retire_capture_ticket(
+                                workspace, runtime, store, staged_ticket
+                            )
+                            staged_ticket = None
+                    if capture_staging_ticket is not None and (
+                        not captured_content or content_unavailable
+                    ):
+                        await self._retire_capture_ticket(
+                            workspace, runtime, store, capture_staging_ticket
+                        )
+                        capture_ticket_revoked = True
+                    if (
+                        native_content_source
+                        and content_identity is not None
+                        and fence_generation is not None
+                        and captured_content
+                        and not content_unavailable
+                    ):
+                        complete_ticket = (
+                            replace(
+                                capture_staging_ticket,
+                                object_ids=tuple(item.object_id for item in captured_content),
+                                state="pending",
+                                expected_parts=expected_capture_parts or (),
+                            )
+                            if capture_staging_ticket is not None
+                            else None
+                        )
+                        if complete_ticket is not None:
+                            assert capture_staging_ticket is not None
+                            try:
+                                store.finalize_capture_ticket(
+                                    capture_staging_ticket, complete_ticket
+                                )
+                            except PublicOperationError as exc:
+                                if exc.code is not PublicErrorCode.LIMIT_EXCEEDED:
+                                    raise
+                                # A legacy or hand-written manifest set may
+                                # have crossed the object boundary without a
+                                # current budget admission. Retire the
+                                # staging fence and continue with an honest
+                                # content-unavailable structural observation.
+                                await self._retire_capture_ticket(
+                                    workspace, runtime, store, capture_staging_ticket
+                                )
+                                capture_staging_ticket = None
+                                captured_content = ()
+                                content_unavailable = True
+                                capture_ticket_revoked = True
+                                self._capture_budget_exhausted = True
+                                await self._local(
+                                    partial(
+                                        self.local.note_coverage_gap,
+                                        workspace,
+                                        ObservationGapCode.CAPTURE_BUDGET_EXHAUSTED.value,
+                                    )
+                                )
+                                await self._local(
+                                    partial(
+                                        self.local.note_coverage_gap,
+                                        workspace,
+                                        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                                    )
+                                )
+                            else:
+                                staged_ticket = complete_ticket
+                                if capture_fence is not None and not await capture_fence():
+                                    await self._retire_capture_ticket(
+                                        workspace, runtime, store, staged_ticket
+                                    )
+                                    staged_ticket = None
+                                    captured_content = ()
+                                    content_unavailable = True
+                                    capture_ticket_revoked = True
+                        elif staged_ticket is None:
+                            raise PublicOperationError(
+                                PublicErrorCode.STORAGE_CORRUPT,
+                                "Observation capture ticket is unavailable.",
+                                retryable=False,
+                            )
+                    if request.capture_only:
+                        if staged_ticket is None:
+                            return _reject(
+                                ObservationGapCode.CAPTURE_BUDGET_EXHAUSTED.value
+                                if capture_budget_exhausted
+                                else ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+                            )
+                        return _reject(OBSERVATION_CONTENT_CAPTURE_PENDING_REASON)
+                finally:
+                    if not capture_lock_owned:
+                        self._capture_lock.release()
+                if capture_fence is not None and not await capture_fence():
+                    if staged_ticket is not None:
+                        await self._retire_capture_ticket(workspace, runtime, store, staged_ticket)
+                        staged_ticket = None
+                    captured_content = ()
+                    content_unavailable = True
+                    capture_ticket_revoked = True
                 gaps = set(request.envelope.gap_codes)
                 if content_redacted:
                     gaps.add(ObservationGapCode.CONTENT_REDACTED.value)
                 if content_unavailable:
                     gaps.add(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
                 if content_authorization_missing:
+                    gaps.add(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
+                if capture_budget_exhausted:
+                    gaps.add(ObservationGapCode.CAPTURE_BUDGET_EXHAUSTED.value)
                     gaps.add(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
                 envelope = replace(
                     request.envelope,
@@ -894,6 +1967,16 @@ class ObservationCoordinator:
                 stage = "store_ingest"
                 result = await store.ingest(envelope)
                 if result.disposition is ObservationIngestDisposition.REJECTED:
+                    if result.reason not in _CAPTURE_TICKET_RETRYABLE_REJECTION_REASONS:
+                        # A terminal store refusal retires this handoff. Leaving a pending
+                        # ticket behind after a stale/consent/schema rejection would make the
+                        # structural outbox terminal while every later freeze remains blocked
+                        # by an unconsumable capture ticket. Restrict cleanup to the exact ticket
+                        # admitted for this envelope; retryable coordination keeps it durable.
+                        for ticket in (staged_ticket, capture_staging_ticket):
+                            if ticket is not None and ticket.state in {"staging", "pending"}:
+                                await self._retire_capture_ticket(workspace, runtime, store, ticket)
+                                break
                     return result
 
                 # ACCEPTED and DUPLICATE both reconcile the durable ledger before
@@ -1009,23 +2092,37 @@ class ObservationCoordinator:
                                 if claim is not None:
                                     replay_claims.append((claim, candidate_roles))
                     stage = "ledger_append"
-                    claim = await self._append_materialized(
-                        runtime,
-                        envelope,
-                        batch,
-                        legacy_session_id=predecessor_session_id,
-                        legacy_writer_id=predecessor_writer_id,
-                        legacy_writer_routes=legacy_writer_routes,
-                        replay_required=(
-                            route_history_truncated
-                            and (
-                                result.disposition is ObservationIngestDisposition.DUPLICATE
-                                or bool(replay_claims)
-                            )
-                        ),
-                        replay_claims=tuple(replay_claims),
-                        replay_draft_role_sets=tuple(replay_role_sets),
+                    replay_required = route_history_truncated and (
+                        result.disposition is ObservationIngestDisposition.DUPLICATE
+                        or bool(replay_claims)
                     )
+                    if captured_content:
+                        claim = await self._append_materialized(
+                            runtime,
+                            envelope,
+                            batch,
+                            captured_content=captured_content,
+                            legacy_session_id=predecessor_session_id,
+                            legacy_writer_id=predecessor_writer_id,
+                            legacy_writer_routes=legacy_writer_routes,
+                            replay_required=replay_required,
+                            replay_claims=tuple(replay_claims),
+                            replay_draft_role_sets=tuple(replay_role_sets),
+                        )
+                    else:
+                        # Keep the structural-only override seam compatible with
+                        # older in-process coordinators and test doubles.
+                        claim = await self._append_materialized(
+                            runtime,
+                            envelope,
+                            batch,
+                            legacy_session_id=predecessor_session_id,
+                            legacy_writer_id=predecessor_writer_id,
+                            legacy_writer_routes=legacy_writer_routes,
+                            replay_required=replay_required,
+                            replay_claims=tuple(replay_claims),
+                            replay_draft_role_sets=tuple(replay_role_sets),
+                        )
                     if claim is not None:
                         (
                             operation_id,
@@ -1266,6 +2363,15 @@ class ObservationCoordinator:
                     legacy_writer_id=predecessor_writer_id,
                     session_commitment=envelope.session_commitment,
                 )
+                if staged_ticket is not None:
+                    # The ledger/materialization path above has completed. A
+                    # retry ticket is no longer needed, and deleting it now
+                    # keeps a committed phase from being mistaken for a
+                    # still-pending handoff. Any exception before this point
+                    # leaves the ticket durable for restart/retry.
+                    await self._retire_capture_ticket(
+                        workspace, runtime, store, staged_ticket, delete=True
+                    )
                 return result
             except PublicOperationError as exc:
                 if exc.retryable and exc.code in {
@@ -1331,6 +2437,8 @@ class ObservationCoordinator:
                 return _reject(ObservationGapCode.SERVICE_UNAVAILABLE.value)
             finally:
                 if runtime is not None:
+                    if store is not None:
+                        await self._publish_capture_backlog(workspace, runtime, store)
                     with_context = getattr(self.runtime, "release", None)
                     if with_context is not None:
                         await with_context(runtime)
@@ -1369,7 +2477,9 @@ class ObservationCoordinator:
                     mapping,
                     required_capabilities=frozenset({RuntimeCapability.WRITE}),
                 )
-                await self._observation_store(runtime).revoke(command)
+                store = self._observation_store(runtime)
+                await store.revoke(command)
+                await self._publish_capture_backlog(command.workspace_commitment, runtime, store)
                 seen_tasks.add(mapping.yoetz_task_id)
             except Exception:
                 await self._local(
@@ -1533,6 +2643,7 @@ class ObservationCoordinator:
         envelope: ObservationEnvelope,
         batch: MaterializedObservationBatch,
         *,
+        captured_content: tuple[ObservationContentManifest, ...] = (),
         legacy_session_id: str | None = None,
         legacy_writer_id: str | None = None,
         legacy_writer_routes: tuple[tuple[str, str], ...] = (),
@@ -1697,6 +2808,29 @@ class ObservationCoordinator:
         )
         operation_id = self._stable_operation_id(digest)
 
+        artifact_ids = {str(ref) for item in batch.drafts for ref in item.draft.artifact_refs}
+        artifact_object_refs: list[ObjectRef] = []
+        for manifest in captured_content:
+            if manifest.object_id not in artifact_ids:
+                continue
+            if manifest.envelope_digest is None:
+                raise ValueError("captured_object_unavailable")
+            ref = await runtime.objects.resolve_verified(
+                manifest.object_id, manifest.envelope_digest
+            )
+            if (
+                ref.metadata.task_id != runtime.task_id
+                or ref.metadata.kind is not ObjectKind.CAPTURED_CONTENT
+                or ref.metadata.media_type != _CAPTURED_CONTENT_MEDIA_TYPE
+            ):
+                raise ValueError("captured_object_invalid")
+            artifact_object_refs.append(ref)
+        if {ref.object_id for ref in artifact_object_refs} != artifact_ids:
+            raise ValueError("captured_object_unavailable")
+        artifact_object_refs_tuple = tuple(
+            sorted(artifact_object_refs, key=lambda ref: ref.object_id.encode("ascii"))
+        )
+
         author = observation_author()
         refs: list[ObjectRef] = []
         entries: list[AppendEntry] = []
@@ -1747,6 +2881,7 @@ class ObservationCoordinator:
                 digest,
                 None,
                 tuple(entries),
+                artifact_object_refs=artifact_object_refs_tuple,
             )
             mutation = PreparedMutation(
                 command.writer_id,
@@ -2152,6 +3287,7 @@ class ObservationCoordinator:
                 operation_digest,
                 None,
                 tuple(entries),
+                artifact_object_refs=(receipt_ref,),
             )
             mutation = PreparedMutation(
                 command.writer_id,
@@ -2191,6 +3327,9 @@ class ObservationCoordinator:
         envelope: ObservationEnvelope,
         chunks: tuple[ObservationContentChunk, ...],
         capture_fence: Callable[[], Awaitable[bool]] | None = None,
+        expected_capture_parts: tuple[ObservationCapturePart, ...] | None = None,
+        allow_incomplete_recovery: bool = False,
+        source_qualified_capture: bool = False,
     ) -> tuple[
         tuple[ObservationContentManifest, ...],
         tuple[tuple[ObservationContentManifest, ...], ...],
@@ -2205,6 +3344,7 @@ class ObservationCoordinator:
         coverage to a new append.
         """
 
+        self._capture_budget_exhausted = False
         logical_identity = canonical_logical_identity(envelope)
         content_identity = observation_content_identity(envelope)
         legacy_logical_identities = tuple(
@@ -2219,6 +3359,30 @@ class ObservationCoordinator:
         replay_candidates: list[tuple[ObservationContentManifest, ...]] = []
         any_redacted = False
         any_unavailable = False
+
+        def content_binding_matches(
+            content_kind: ObservationContentKind,
+            correlation_identity: str | None,
+            source_commitment: str | None,
+        ) -> bool:
+            """Select the binding contract after request admission.
+
+            ``source_qualified_capture`` is derived only from the already
+            validated capture-only request arm. Direct legacy coordinator
+            calls retain their historical Codex materialization behavior.
+            """
+
+            checker = (
+                observation_source_qualified_content_binding_matches
+                if source_qualified_capture
+                else observation_content_binding_matches
+            )
+            return checker(
+                envelope,
+                content_kind=content_kind,
+                correlation_identity=correlation_identity,
+                source_commitment=source_commitment,
+            )
 
         async def capture_fence_current() -> bool:
             """Check the native capture fence before any persisted plaintext boundary."""
@@ -2293,6 +3457,12 @@ class ObservationCoordinator:
                     correlation_identity=cast(str, parsed["correlation_identity"]),
                     source_commitment=cast(str, parsed["source_commitment"]),
                 )
+                if not content_binding_matches(
+                    verified.content_kind,
+                    verified.correlation_identity,
+                    verified.source_commitment,
+                ):
+                    return loaded, False, False
                 return verified, True, verified == loaded
             except Exception:
                 return loaded, False, False
@@ -2305,6 +3475,16 @@ class ObservationCoordinator:
                     ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
                 )
             )
+
+        async def note_budget_exhausted() -> None:
+            await self._local(
+                partial(
+                    self.local.note_coverage_gap,
+                    workspace,
+                    ObservationGapCode.CAPTURE_BUDGET_EXHAUSTED.value,
+                )
+            )
+            await note_unavailable()
 
         def manifests_complete(candidate: tuple[ObservationContentManifest, ...]) -> bool:
             parts: dict[
@@ -2432,8 +3612,16 @@ class ObservationCoordinator:
         # frozen. Equivalent hook/stream copies may carry fresh ephemeral
         # chunks, but adding those roles after a commit would change the stable
         # operation identity. The existing set remains authoritative.
-        freeze_roles = bool(primary_recovered)
+        freeze_roles = bool(primary_recovered) and not allow_incomplete_recovery
         for chunk in chunks:
+            if not content_binding_matches(
+                chunk.content_kind,
+                chunk.correlation_identity,
+                chunk.source_commitment,
+            ):
+                any_unavailable = True
+                await note_unavailable()
+                continue
             if chunk.media_type != "text/plain":
                 any_unavailable = True
                 await note_unavailable()
@@ -2546,15 +3734,38 @@ class ObservationCoordinator:
                         )
                     )
                     continue
-            store.record_content_manifest(
-                workspace=workspace,
-                logical_identity=content_identity,
-                chunk=stored_chunk,
-                ref=ref,
-                content_digest="sha256:" + hashlib.sha256(safe_content).hexdigest(),
-                content_bytes=len(safe_content),
-                recorded_at=timestamp_from_datetime(self.clock.now_utc()),
-            )
+            # The object has crossed the durable boundary. Recheck the
+            # authority before binding its manifest to this phase; a revoke
+            # racing object finalization must leave only an unreferenced
+            # encrypted object, never captured evidence for the old fence.
+            if not await capture_fence_current():
+                any_unavailable = True
+                await note_unavailable()
+                continue
+            try:
+                store.record_content_manifest(
+                    workspace=workspace,
+                    logical_identity=content_identity,
+                    chunk=stored_chunk,
+                    ref=ref,
+                    content_digest="sha256:" + hashlib.sha256(safe_content).hexdigest(),
+                    content_bytes=len(safe_content),
+                    recorded_at=timestamp_from_datetime(self.clock.now_utc()),
+                )
+            except PublicOperationError as exc:
+                if exc.code is not PublicErrorCode.LIMIT_EXCEEDED:
+                    raise
+                # The object may already be durable, but the manifest did not
+                # cross the ticket fence. Keep the structural row honest and
+                # let the caller revoke any staging ticket instead of leaving
+                # a permanently retrying handoff behind.
+                any_unavailable = True
+                self._capture_budget_exhausted = True
+                await note_budget_exhausted()
+                # The ticket reservation is for the complete request. Once
+                # one part cannot cross the durable budget fence, do not stage
+                # later parts that cannot become part of this ticket either.
+                break
             if stored_chunk.content_kind is ObservationContentKind.WORKSPACE_LOCATOR:
                 store.bind_workspace_locator(
                     workspace=workspace,
@@ -2577,6 +3788,23 @@ class ObservationCoordinator:
         usable_manifests = tuple(
             sorted(manifests.values(), key=lambda item: item.object_id.encode())
         )
+        if expected_capture_parts is not None:
+            recovered_parts = tuple(
+                sorted(
+                    (
+                        item.content_kind.value,
+                        cast(str, item.correlation_identity),
+                        cast(str, item.source_commitment),
+                        item.part_index,
+                        item.part_count,
+                    )
+                    for item in usable_manifests
+                )
+            )
+            if recovered_parts != expected_capture_parts:
+                usable_manifests = ()
+                any_unavailable = True
+                await note_unavailable()
         if usable_manifests and not manifests_complete(usable_manifests):
             # The first ingest can itself carry only a prefix of a multipart
             # value. Persisting that prefix helps a later exact retry, but it
@@ -2699,6 +3927,23 @@ class ObservationCoordinator:
             envelope.event_kind, envelope.structural_payload
         ):
             return None
+        # Bind the service-owned task/session route before any optional verification setup.
+        # Policy loading and subject inspection are allowed to decline this event (for example
+        # when the workspace has no approved-check policy), but semantic captured-content
+        # selection still needs this durable task fence.  Recording it here keeps the route
+        # coupled to the accepted PostToolUse envelope instead of making content visibility
+        # depend on verification policy availability.
+        route_recorder = getattr(store, "record_workspace_session_route", None)
+        if callable(route_recorder) and type(runtime.writer_id) is str:
+            now = timestamp_from_datetime(self.clock.now_utc())
+            route_recorder(
+                workspace=workspace,
+                yoetz_session_id=runtime.session_id,
+                yoetz_task_id=runtime.task_id,
+                yoetz_writer_id=runtime.writer_id,
+                codex_session_commitment=envelope.session_commitment,
+                bound_at=now,
+            )
         required = (
             "workspace_locator_descriptor",
             "verification_repository",
@@ -2743,6 +3988,7 @@ class ObservationCoordinator:
                 )
             )
             return None
+        now = timestamp_from_datetime(self.clock.now_utc())
         if not await self._local(
             partial(self.local.policy_digest_is_trusted, workspace, policy.raw_digest)
         ):
@@ -2754,7 +4000,6 @@ class ObservationCoordinator:
                 )
             )
             return None
-        now = timestamp_from_datetime(self.clock.now_utc())
         if not store.policy_digest_is_trusted(workspace, policy.raw_digest):
             trust_payload = canonical_encode(
                 JsonObject(
@@ -2829,17 +4074,8 @@ class ObservationCoordinator:
             previous_subject_state_digest=store.latest_verification_subject_digest(workspace),
             subject_state_digest=current_digest,
         )
-        # Persist inspection snapshot + session route when their durable helpers exist.
-        route_recorder = getattr(store, "record_workspace_session_route", None)
-        if callable(route_recorder):
-            route_recorder(
-                workspace=workspace,
-                yoetz_session_id=runtime.session_id,
-                yoetz_task_id=runtime.task_id,
-                yoetz_writer_id=runtime.writer_id,
-                codex_session_commitment=envelope.session_commitment,
-                bound_at=now,
-            )
+        # Persist inspection snapshot after verification setup.  The session route is bound
+        # above, before policy loading, because policy setup is optional for content selection.
         inspect_recorder = getattr(store, "record_inspection_snapshot", None)
         inspect_loader = getattr(store, "load_inspection_snapshot", None)
         inspection_snapshot: ObservationInspectionSnapshot | None = None
@@ -3244,6 +4480,16 @@ class ObservationCoordinator:
                         snapshot=snapshot,
                     )
                 )
+            if (
+                ADVICE_SEMANTIC_PENDING_GAP in snapshot.confidence_coverage.known_gaps
+                and not isinstance(runtime, str)
+            ):
+                await self._register_advice_semantic_drain(
+                    workspace,
+                    runtime,
+                    legacy_writer_id=legacy_writer_id,
+                    session_commitment=session_commitment,
+                )
         if self.advice_hook is not None:
             result = self.advice_hook(
                 workspace_commitment=workspace,
@@ -3254,6 +4500,153 @@ class ObservationCoordinator:
             )
             if asyncio.iscoroutine(result) or isinstance(result, Awaitable):
                 await cast(Awaitable[None], result)
+
+    async def rediscover_pending_advice_semantic(self) -> None:
+        """Re-register drains for workspaces whose semantic advice rows are still pending.
+
+        Runs once after the ready-lifecycle supervisor starts. A row left ``running`` by a
+        previous service generation is reclaimed by ``claim_next`` and re-attempted; it is never
+        reported as a success (#619).
+        """
+
+        supervisor = self.advice_semantic_supervisor
+        if supervisor is None or self.advice_semantic_dispatch is None:
+            return
+        for workspace in await self._local(self.local.list_consented_workspaces):
+            await self._rediscover_workspace_pending_advice_semantic(supervisor, workspace)
+        supervisor.notify()
+
+    async def _rediscover_workspace_pending_advice_semantic(
+        self,
+        supervisor: ObservationAdviceSemanticSupervisor,
+        workspace: str,
+    ) -> None:
+        if supervisor.closed or supervisor.has_handle(workspace):
+            return
+        consent = await self._local(partial(self.local.consent_for, workspace))
+        if consent is None or not consent.active:
+            return
+        sessions = await self._local(partial(self.local.codex_sessions_for_workspace, workspace))
+        for codex_session_id in sessions:
+            if supervisor.closed or supervisor.has_handle(workspace):
+                return
+            mapping = self.mapping_loader(codex_session_id, _state=self.state_root)
+            if mapping is None:
+                continue
+            predecessor_writer_id = mapping.yoetz_writer_id
+            runtime: TaskRuntime | None = None
+            try:
+                runtime, mapping = await self._route_observation_mapping(mapping)
+                store = self._observation_store(runtime)
+                repository = self._advice_semantic_repository(store)
+                if repository is None or workspace not in repository.list_pending_workspaces():
+                    continue
+                if await self._register_advice_semantic_drain(
+                    workspace,
+                    runtime,
+                    legacy_writer_id=predecessor_writer_id,
+                    deferred_runtime=runtime,
+                ):
+                    runtime = None
+                return
+            except Exception:
+                continue
+            finally:
+                if runtime is not None:
+                    release = getattr(self.runtime, "release", None)
+                    if release is not None:
+                        await release(runtime)
+
+    def _advice_semantic_repository(
+        self, store: object
+    ) -> ObservationAdviceSemanticRepository | None:
+        factory = getattr(store, "advice_semantic_repository", None)
+        if not callable(factory):
+            return None
+        repository = factory()
+        return None if repository is None else cast(ObservationAdviceSemanticRepository, repository)
+
+    async def _register_advice_semantic_drain(
+        self,
+        workspace: str,
+        runtime: TaskRuntime,
+        *,
+        legacy_writer_id: str | None = None,
+        session_commitment: str | None = None,
+        deferred_runtime: TaskRuntime | None = None,
+    ) -> bool:
+        """Register (or wake) the workspace's semantic advice drain; never dispatch inline.
+
+        Returns True when a new handle now owns ``deferred_runtime`` (or a freshly routed one)
+        and will release it on idle. Without a supervisor or dispatch the pending row simply
+        stays pending and its coverage gap remains visible.
+        """
+
+        supervisor = self.advice_semantic_supervisor
+        dispatch = self.advice_semantic_dispatch
+        if supervisor is None or dispatch is None or supervisor.closed:
+            return False
+        if supervisor.has_handle(workspace):
+            supervisor.notify(workspace)
+            return False
+        owned = deferred_runtime
+        if owned is None:
+            owned = await self._route_observation_runtime(runtime.task_id, runtime.session_id)
+        try:
+            owned_store = self._observation_store(owned)
+            repository = self._advice_semantic_repository(owned_store)
+            if repository is None:
+                if deferred_runtime is None:
+                    await self.runtime.release(owned)
+                return False
+
+            def now_wire() -> str:
+                return timestamp_from_datetime(self.clock.now_utc()).wire
+
+            def lease_expiry() -> str:
+                return timestamp_from_datetime(self.clock.now_utc() + timedelta(minutes=2)).wire
+
+            worker = ObservationAdviceSemanticWorker(
+                repository=repository,
+                dispatch=dispatch,
+                service_generation=owned.fence.service_generation,
+                lease_owner=owned.fence.service_instance_id,
+                now=now_wire,
+                lease_expires_at=lease_expiry,
+            )
+            bound_runtime = owned
+
+            async def _after() -> None:
+                await self._run_advice(
+                    workspace,
+                    bound_runtime,
+                    owned_store,
+                    legacy_writer_id=legacy_writer_id,
+                    session_commitment=session_commitment,
+                )
+
+            async def _release() -> None:
+                await self.runtime.release(bound_runtime)
+
+            registered = supervisor.register(
+                AdviceSemanticDrainHandle(
+                    workspace_commitment=workspace,
+                    worker=worker,
+                    after_complete=_after,
+                    on_idle=_release,
+                )
+            )
+            if not registered:
+                if deferred_runtime is None:
+                    await self.runtime.release(owned)
+                supervisor.notify(workspace)
+                return False
+        except BaseException:
+            if deferred_runtime is None:
+                await self.runtime.release(owned)
+            raise
+        supervisor.notify(workspace)
+        return True
 
     def _materialized_event_refs(
         self,

@@ -158,7 +158,7 @@ def test_defaults_are_frozen_and_all_disclosure_is_denied() -> None:
     assert config.schema_version == "1"
     assert config.profile == "strict-local"
     assert config.storage == StorageConfig(data_dir=None, durability="full")
-    assert config.verification == VerificationConfig(semantic="optional", max_findings=3)
+    assert config.verification == VerificationConfig(semantic="required", max_findings=10)
     assert config.observation == ObservationConfig(enabled=True)
     assert config.logging == LoggingConfig(level="info", payloads=False)
     assert config.privacy == safe_privacy_bootstrap()

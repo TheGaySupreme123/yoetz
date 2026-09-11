@@ -456,8 +456,8 @@ async def test_drain_quarantines_setup_probe_and_routes_other_rows(tmp_path: Pat
 
 
 @pytest.mark.anyio
-async def test_manual_drain_quarantines_nonretryable_control_error(tmp_path: Path) -> None:
-    """#540: the manual drain honors ControlError.retryable like hook drains."""
+async def test_manual_drain_retains_protocol_failure_for_reconnect(tmp_path: Path) -> None:
+    """#691: a failed protocol response is not a typed ledger refusal."""
 
     from yoetz.ports.control import ControlError
 
@@ -493,11 +493,11 @@ async def test_manual_drain_quarantines_nonretryable_control_error(tmp_path: Pat
     )
 
     assert code == 0
-    assert summary["quarantined"] == 1
-    assert summary["retry_pending"] == 0
-    assert summary["reasons"] == {ObservationGapCode.LEDGER_REJECTED.value: 1}
-    assert store.list_pending_outbox_rows(workspace) == ()
-    assert store.list_quarantine(workspace)[0][2] == ObservationGapCode.LEDGER_REJECTED.value
+    assert summary["quarantined"] == 0
+    assert summary["retry_pending"] == 1
+    assert summary["reasons"] == {"control_frame_invalid": 1}
+    assert len(store.list_pending_outbox_rows(workspace)) == 1
+    assert store.list_quarantine(workspace) == ()
 
 
 @pytest.mark.anyio

@@ -84,8 +84,10 @@ def _synthetic_checkout(root: Path, *, inventory_count: int, reviewed_count: int
         "    raise SystemExit(1)\n",
     )
     _write(root, "scripts/sync_service_status_schema.py", "")
+    _write(root, "scripts/sync_semantic_capacity_schemas.py", "")
     _write(root, "scripts/sync_repository_authority_schemas.py", "")
     _write(root, "scripts/sync_committed_agent_trees.py", "")
+    _write(root, "scripts/sync_mcp_descriptor_digests.py", "")
     _write(root, "schemas/state.txt", "stale\n")
     _write(root, "src/yoetz/resources/manifest.json", "{}\n")
     _write(root, "skills/codex/yoetz/manifest.json", "{}\n")

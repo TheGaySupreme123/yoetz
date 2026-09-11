@@ -154,3 +154,14 @@ Recovery, on a local terminal, using the everyday install by absolute path:
 Then make sure host registrations name the everyday launcher by absolute path, and provision test
 runtimes with `--bind-runtime` (the script always does) so they can never resolve ambient state
 again.
+
+
+### Capability subprocess environments (#673)
+
+Capability raw JSON-RPC, MCP SDK and direct cancellation/EOF children use
+`tests/capability/child_environment.py`. Their private per-test HOME lives outside shared temp;
+`YOETZ_ISOLATED_ROOT` is replaced explicitly and HOME/XDG paths are rebased together. Test teardown
+removes only that test tree. `YOETZ_CANDIDATE_PYTHON` still chooses the exact candidate interpreter;
+a conflicting runtime pin refuses the test root instead of falling back to its original instance.
+For installed service tests, provision the candidate at the helper's exact root and use its
+absolute interpreter. No ambient vault or credentials are copied.

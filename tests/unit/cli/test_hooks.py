@@ -305,7 +305,9 @@ def test_session_start_active_with_fake_service(tmp_path: Path) -> None:
     # session/writer for `status`, and `mode=attach` by session id to continue.
     assert session_id in text
     assert writer_id in text
-    assert "Call status with these ids before further material work" in text
+    assert "Then call status with the returned session/writer ids" in text
+    assert text.index("call start with mode=attach") < text.index("Then call status")
+    assert "For compaction in an already-started host session" in text
     assert f"mode=attach and session_id {session_id}" in text
     assert "create_or_attach" in text
     assert "3:sha256:" in text
@@ -369,6 +371,8 @@ def _session_start_context_for_failure(
     tmp_path: Path,
     codex_session_id: str,
     result: _FakeStatusResult | Exception,
+    *,
+    workspace: str | None = None,
 ) -> str:
     task_id, session_id, writer_id = _task_ids()
     store_mapping(
@@ -401,6 +405,7 @@ def _session_start_context_for_failure(
         stdout=stdout,
         _state=tmp_path,
         connect=connect,  # pyright: ignore[reportArgumentType]
+        workspace=workspace,
     )
     assert code == 0
     context = json.loads(stdout.getvalue().decode("utf-8"))["hookSpecificOutput"][
@@ -536,11 +541,11 @@ def test_session_start_storage_codes_carry_distinct_retryability(tmp_path: Path)
 
 def test_control_error_class_table_is_exhaustive() -> None:
     from yoetz.ports.control import (
-        _CONTROL_ERROR_REASONS,  # pyright: ignore[reportPrivateUsage]
+        CONTROL_ERROR_REASONS,
     )
 
     table = hooks_module._CONTROL_ERROR_CLASSES  # pyright: ignore[reportPrivateUsage]
-    assert set(table) == _CONTROL_ERROR_REASONS
+    assert set(table) == CONTROL_ERROR_REASONS
     assert set(table.values()) <= {"locked", "retry", "privacy", "unavailable"}
 
 
@@ -831,6 +836,120 @@ def test_session_start_status_read_binds_the_workspace_locator(
     assert "mapping_stale" not in _diagnostics_text(tmp_path)
 
 
+def _git_root(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    path.chmod(0o700)
+    (path / ".git").mkdir(exist_ok=True)
+    (path / ".git").chmod(0o700)
+    return path
+
+
+def test_resolve_session_workspace_orders_explicit_host_payload_then_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #659: the probe binds the project the host named even when the hook cwd is not it.
+
+    Order is explicit project path, then the host payload's session cwd, then the hook cwd. The
+    rendered bare `.` is the hook cwd, so a host cwd outranks it; a subdirectory cwd resolves to
+    the repository root; an explicit path that cannot be canonicalized never falls through.
+    """
+
+    from yoetz.cli.hooks import resolve_session_workspace
+
+    project = _git_root(tmp_path / "project")
+    elsewhere = _git_root(tmp_path / "elsewhere")
+    monkeypatch.chdir(elsewhere)
+
+    # Explicit project path wins over both the payload cwd and the hook cwd.
+    chosen = resolve_session_workspace(str(project), {"cwd": str(elsewhere)})
+    assert (chosen.locator, chosen.source) == (str(project), "explicit")
+
+    # The bare `.` is the hook cwd; the host payload's cwd outranks it.
+    chosen = resolve_session_workspace(".", {"cwd": str(project)})
+    assert (chosen.locator, chosen.source) == (str(project), "host_payload")
+    # A subdirectory cwd from the host resolves to the same repository root.
+    subdirectory = project / "src" / "pkg"
+    subdirectory.mkdir(parents=True)
+    chosen = resolve_session_workspace(".", {"cwd": str(subdirectory)})
+    assert (chosen.locator, chosen.source) == (str(project), "host_payload")
+
+    # No host cwd: the hook cwd is the ordinary repository-bound default.
+    chosen = resolve_session_workspace(".", {})
+    assert (chosen.locator, chosen.source) == (str(elsewhere), "cwd")
+    chosen = resolve_session_workspace(None, None)
+    assert (chosen.locator, chosen.source) == (str(elsewhere), "cwd")
+
+    # An unresolvable host cwd falls back to the hook cwd, and a non-string one is ignored.
+    chosen = resolve_session_workspace(".", {"cwd": str(tmp_path / "missing")})
+    assert (chosen.locator, chosen.source) == (str(elsewhere), "cwd")
+    chosen = resolve_session_workspace(".", {"cwd": 7})
+    assert (chosen.locator, chosen.source) == (str(elsewhere), "cwd")
+
+    # An explicit project path that fails canonicalization is terminal: no fallback to the
+    # payload cwd or the hook cwd may bind a different repository.
+    chosen = resolve_session_workspace(str(tmp_path / "missing"), {"cwd": str(project)})
+    assert (chosen.locator, chosen.source) == (None, "unresolvable")
+    assert chosen.diagnostic_reason == "locator_unresolvable"
+
+    # Nothing at all: the hook cwd is refused (home/root) and the selection stays absent.
+    monkeypatch.setenv("HOME", str(elsewhere))
+    chosen = resolve_session_workspace(None, None)
+    assert (chosen.locator, chosen.source) == (None, "absent")
+    assert chosen.diagnostic_reason == "locator_absent"
+
+
+def test_session_start_probe_binds_the_host_payload_cwd_over_the_hook_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #659: a compaction hook launched outside the project still validates the mapping
+    from the host's own session cwd, keeping the same task/session/writer."""
+
+    from yoetz.ports.control import WorkspaceLocator
+
+    project = _git_root(tmp_path / "project")
+    elsewhere = _git_root(tmp_path / "elsewhere")
+    monkeypatch.chdir(elsewhere)
+    task_id, session_id, writer_id = _task_ids()
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id="codex-compact-cwd",
+            yoetz_task_id=task_id,
+            yoetz_session_id=session_id,
+            yoetz_writer_id=writer_id,
+            last_frontier="0:genesis",
+        ),
+        _state=tmp_path / "state",
+    )
+    client = _FakeClient()
+    client.task_id, client.session_id, client.writer_id = task_id, session_id, writer_id
+    captured: list[WorkspaceLocator | None] = []
+
+    async def connect(
+        _kind: ControlClientKind, *, workspace_locator: WorkspaceLocator | None = None
+    ) -> _FakeClient:
+        captured.append(workspace_locator)
+        return client
+
+    monkeypatch.setattr(hooks_module, "connect_service", connect)
+    stdout = io.BytesIO()
+    code = handle_session_start(
+        stdin_bytes=json.dumps(
+            {"session_id": "codex-compact-cwd", "source": "compact", "cwd": str(project)}
+        ).encode(),
+        stdout=stdout,
+        _state=tmp_path / "state",
+        workspace=".",
+    )
+    assert code == 0
+    assert captured[0] == WorkspaceLocator(str(project))
+    text = json.loads(stdout.getvalue().decode("utf-8"))["hookSpecificOutput"]["additionalContext"]
+    assert session_id in text and writer_id in text
+    refreshed = load_mapping("codex-compact-cwd", _state=tmp_path / "state")
+    assert refreshed is not None
+    assert (refreshed.yoetz_session_id, refreshed.yoetz_writer_id) == (session_id, writer_id)
+    assert "status_workspace" not in _diagnostics_text(tmp_path / "state")
+
+
 @pytest.mark.parametrize(
     ("reason_code", "kind"),
     [
@@ -839,10 +958,11 @@ def test_session_start_status_read_binds_the_workspace_locator(
     ],
 )
 def test_session_start_repository_fence_conflict_is_not_reported_stale(
-    tmp_path: Path, reason_code: str, kind: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason_code: str, kind: str
 ) -> None:
     """A fence refusal is a live mapping the daemon could not bind, never `mapping_stale` (#578)."""
 
+    monkeypatch.chdir(_git_root(tmp_path / "project"))
     text = _session_start_context_for_failure(
         tmp_path,
         f"codex-fence-{kind}",
@@ -862,6 +982,46 @@ def test_session_start_repository_fence_conflict_is_not_reported_stale(
     assert load_mapping(f"codex-fence-{kind}", _state=tmp_path) is not None
     diagnostics = _diagnostics_text(tmp_path)
     assert diagnostics.count(f'"reason":"status_{kind}"') == 1
+    # The companion row names the probe's locator source (#659): the helper passes no
+    # workspace and no host cwd, so the hook cwd was the source.
+    assert diagnostics.count('"reason":"locator_source_cwd"') == 1
+    assert "mapping_stale" not in diagnostics
+
+
+def test_session_start_fence_refusal_names_an_absent_or_unresolvable_locator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #659: an absent context and a supplied context that failed to resolve are
+    distinguishable in the diagnostics, and neither rotates the mapping or advises re-attach."""
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    text = _session_start_context_for_failure(
+        tmp_path,
+        "codex-fence-absent",
+        _failure_result(
+            PublicErrorCode.SESSION_CONFLICT,
+            safe_details={"reason_code": "repository_identity_required"},
+        ),
+    )
+    assert text == hooks_module._WORKSPACE_UNBOUND_CONTEXT  # pyright: ignore[reportPrivateUsage]
+    assert load_mapping("codex-fence-absent", _state=tmp_path) is not None
+    diagnostics = _diagnostics_text(tmp_path)
+    assert diagnostics.count('"reason":"locator_absent"') == 1
+
+    text = _session_start_context_for_failure(
+        tmp_path,
+        "codex-fence-unresolvable",
+        _failure_result(
+            PublicErrorCode.SESSION_CONFLICT,
+            safe_details={"reason_code": "repository_identity_required"},
+        ),
+        workspace=str(tmp_path / "missing"),
+    )
+    assert text == hooks_module._WORKSPACE_UNBOUND_CONTEXT  # pyright: ignore[reportPrivateUsage]
+    assert load_mapping("codex-fence-unresolvable", _state=tmp_path) is not None
+    diagnostics = _diagnostics_text(tmp_path)
+    assert diagnostics.count('"reason":"locator_unresolvable"') == 1
     assert "mapping_stale" not in diagnostics
 
 

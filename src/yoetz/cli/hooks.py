@@ -110,8 +110,16 @@ _INTAKE_CUE_BYTES: Final = 512
 YOETZ_START_TOOL_NAMES: Final = frozenset(
     {"start", "mcp__yoetz__start", "mcp__plugin_yoetz_yoetz__start"}
 )
+_STARTUP_RECOVERY_CONTEXT: Final = (
+    "If start fails, follow exact continuations and same-request recovery first, including a "
+    "named one-time repair. If startup remains blocked without an applicable recovery path, "
+    "ask the user for intro and guidance; do not invent a workflow or continue without a ledger "
+    "task outside the documented optional-service fallback."
+)
 INACTIVE_CONTEXT: Final = (
-    "No Yoetz task is mapped to this session; call start before substantive material work."
+    "No Yoetz task is mapped to this session; call start before substantive material work. "
+    "Guidance reads, tool/schema discovery, and necessary bootstrap clarification come first. "
+    + _STARTUP_RECOVERY_CONTEXT
 )
 _UNAVAILABLE_CONTEXT: Final = (
     "Yoetz service is unavailable for this mapped session; no live receipt can be promised."
@@ -299,6 +307,7 @@ _CONTROL_ERROR_CLASSES: Final[Mapping[str, str]] = MappingProxyType(
         "protocol_mismatch": "unavailable",
         "frame_invalid": "unavailable",
         "frame_too_large": "unavailable",
+        "invalid_request": "unavailable",
         "request_cancelled": "unavailable",
         "method_forbidden": "unavailable",
         "internal_error": "unavailable",
@@ -572,8 +581,8 @@ def _active_context(mapping: LifecycleMapping, frontier: str | None) -> str:
 
     A bare ``task_id`` is not an attach or status selector, and the hook's own
     ``workspace_ref``/``external_ref`` pair is never what an agent would guess, so
-    the context carries the mapped session and writer ids and says how to
-    continue the same task instead of creating a sibling.
+    the context carries the mapping snapshot and the attach selector. New
+    sessions attach before status; compaction keeps the held cooperative route.
     """
 
     token = frontier if frontier is not None else mapping.last_frontier
@@ -581,11 +590,13 @@ def _active_context(mapping: LifecycleMapping, frontier: str | None) -> str:
     return (
         f"Yoetz task {mapping.yoetz_task_id} is mapped to this session at frontier "
         f"{frontier_text} as session_id {mapping.yoetz_session_id} and writer_id "
-        f"{mapping.yoetz_writer_id}. Call status with these ids before further material work. "
-        "To continue this task from your own tools, call start with mode=attach and "
-        f"session_id {mapping.yoetz_session_id}; do not call start with "
+        f"{mapping.yoetz_writer_id}. For a new host session, after guidance reads and tool/schema "
+        "discovery, call start with mode=attach and "
+        f"session_id {mapping.yoetz_session_id} before substantive material work. "
+        "Then call status with the returned session/writer ids. For compaction in an "
+        "already-started host session, use your held current ids for status. Do not call start with "
         "mode=create_or_attach and a new workspace_ref/external_ref pair, which creates a "
-        "sibling task."
+        "sibling task. " + _STARTUP_RECOVERY_CONTEXT
     )
 
 
@@ -643,18 +654,89 @@ def bound_connector(
     return connect
 
 
-def session_workspace_locator(workspace: str | None) -> str | None:
-    """Canonical locator for a hook that names its workspace, else the hook's own cwd.
+type LocatorSource = Literal["explicit", "host_payload", "cwd", "absent", "unresolvable"]
 
-    Ordinary CLI work is repository-bound from the process cwd; a host runs its
-    lifecycle hooks in the session's working directory, so the same default
-    applies when the rendered hook command carries no `--workspace`.
-    """
+# Closed diagnostic tokens naming where a mapped-session status probe got its repository
+# locator (issue #659). Recorded only beside a fence refusal so the retained diagnostic window
+# is not spent on every healthy SessionStart; never a path, never a host payload.
+_LOCATOR_SOURCE_REASONS: Final[Mapping[LocatorSource, str]] = MappingProxyType(
+    {
+        "explicit": "locator_source_explicit",
+        "host_payload": "locator_source_host_payload",
+        "cwd": "locator_source_cwd",
+        "absent": "locator_absent",
+        "unresolvable": "locator_unresolvable",
+    }
+)
 
+
+@dataclass(frozen=True, slots=True)
+class SessionWorkspace:
+    """One bounded locator selection for a mapped-session status probe."""
+
+    locator: str | None
+    source: LocatorSource
+
+    @property
+    def diagnostic_reason(self) -> str:
+        return _LOCATOR_SOURCE_REASONS[self.source]
+
+
+def _canonical_or_none(candidate: str) -> str | None:
     try:
-        return canonical_workspace_locator("." if workspace is None else workspace)
+        return canonical_workspace_locator(candidate)
     except Exception:
         return None
+
+
+def host_payload_cwd(payload: Mapping[str, JsonValue] | None) -> str | None:
+    """The host's own session working directory from the hook payload, if it names one."""
+
+    if payload is None:
+        return None
+    value = payload.get("cwd")
+    return value if type(value) is str and value else None
+
+
+def resolve_session_workspace(
+    workspace: str | None,
+    payload: Mapping[str, JsonValue] | None = None,
+) -> SessionWorkspace:
+    """Select the repository locator a mapped-session status probe carries (issue #659).
+
+    Order: an explicit project path from the rendered command (anything but the bare ``.``),
+    then the host payload's session ``cwd``, then the hook's own working directory. The bare
+    ``.`` is the hook cwd, not host evidence, so a host-supplied cwd outranks it: Codex and
+    Cursor hook working directories are not stable across surfaces, and a hook launched outside
+    the project must still bind the project the host named. An explicit project path that fails
+    canonicalization is terminal — it never falls through to a different repository — and a
+    fully absent context stays absent rather than inheriting a broader fallback. Only the closed
+    source token is ever recorded; the path never is.
+    """
+
+    if workspace is not None and workspace not in {"", "."}:
+        locator = _canonical_or_none(workspace)
+        return SessionWorkspace(locator, "explicit" if locator is not None else "unresolvable")
+    cwd = host_payload_cwd(payload)
+    if cwd is not None:
+        locator = _canonical_or_none(cwd)
+        if locator is not None:
+            return SessionWorkspace(locator, "host_payload")
+    if workspace is None and cwd is None:
+        # No rendered locator and no host cwd: the hook's own cwd is the ordinary
+        # repository-bound CLI default, exactly as before this resolver existed.
+        locator = _canonical_or_none(".")
+        return SessionWorkspace(locator, "cwd" if locator is not None else "absent")
+    locator = _canonical_or_none(".")
+    if locator is not None:
+        return SessionWorkspace(locator, "cwd")
+    return SessionWorkspace(None, "unresolvable")
+
+
+def session_workspace_locator(workspace: str | None) -> str | None:
+    """Canonical locator for a hook that names its workspace, else the hook's own cwd."""
+
+    return resolve_session_workspace(workspace).locator
 
 
 async def _read_status(
@@ -877,11 +959,13 @@ def handle_session_start(
                 _stdout_json(_context_output("SessionStart", INACTIVE_CONTEXT), stdout)
                 return 0
 
+            selection = resolve_session_workspace(workspace, payload)
+
             async def _run() -> StatusOutcome:
                 return await _read_status(
                     mapping,
                     connect=connect,
-                    workspace_locator=session_workspace_locator(workspace),
+                    workspace_locator=selection.locator,
                 )
 
             outcome = cast(StatusOutcome, runner(_run))
@@ -927,8 +1011,14 @@ def handle_session_start(
 
                 # The daemon refused to bind this read to a repository; the mapping
                 # is kept untouched and is deliberately not reported as stale (#578).
+                # The companion row names where the probe's locator came from, so an
+                # absent locator, a supplied one that failed to canonicalize, and a
+                # resolved one the daemon still refused are distinguishable (#659).
                 with contextlib.suppress(Exception):
                     record_hook_diagnostic(f"status_{kind}", "SessionStart", _state=_state)
+                    record_hook_diagnostic(
+                        selection.diagnostic_reason, "SessionStart", _state=_state
+                    )
                 _stdout_json(
                     _context_output(
                         "SessionStart",

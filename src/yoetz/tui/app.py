@@ -19,9 +19,9 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, ClassVar, Final, Literal
+from typing import Any, ClassVar, Final, Literal, cast
 
 from textual import events, on
 from textual.app import App, ComposeResult, SuspendNotSupported
@@ -345,6 +345,7 @@ class YoetzTui(App[int]):
     async def _dispatch(self, name: str) -> None:
         handlers: dict[str, Callable[[], Awaitable[None]]] = {
             "status": self.command_status,
+            "observe": self.command_observe,
             "work": self.command_work,
             "check": self.command_check,
             "receipt": self.command_receipt,
@@ -1042,6 +1043,50 @@ class YoetzTui(App[int]):
             details=render_layers(snapshot.layers, self.body_width),
         )
         await self._refresh_header()
+
+    async def command_observe(self) -> None:
+        """Show observation selection separately from privacy and readiness."""
+
+        self.say(Level.ACTIVE, "Observation selection")
+        status = await self.runtime.observation_selection_status()
+        selected = status.get("selected")
+        effective = status.get("effective")
+        selected_map: Mapping[str, object] = (
+            cast(Mapping[str, object], selected) if isinstance(selected, Mapping) else {}
+        )
+        effective_map: Mapping[str, object] = (
+            cast(Mapping[str, object], effective) if isinstance(effective, Mapping) else {}
+        )
+        accounting = status.get("accounting")
+        accounting_map: Mapping[str, object] = (
+            cast(Mapping[str, object], accounting) if isinstance(accounting, Mapping) else {}
+        )
+
+        def counter(name: str) -> str:
+            value = accounting_map.get(name)
+            return str(value) if type(value) is int else "unknown"
+
+        body = (
+            "selected: "
+            f"{selected_map.get('mode', 'unknown')} / "
+            f"{selected_map.get('capacity_profile', 'unknown')}",
+            "effective: "
+            f"{effective_map.get('mode', 'unknown')} / "
+            f"{effective_map.get('capacity_profile', 'unknown')}",
+            f"origin: {selected_map.get('origin', 'unknown')}",
+            f"scope: {'session' if status.get('session_scope') is True else 'workspace/default'}; "
+            f"expires: {selected_map.get('expires_at', 'none') or 'none'}",
+            f"reason: {status.get('effective_reason', 'unknown')}",
+            "accounting: "
+            f"observed={counter('observed_count')}; "
+            f"admitted={counter('admitted_input_count')}; "
+            f"delivered={counter('delivered_input_count')}; "
+            f"summarized={counter('summarized_input_count')}; "
+            f"omitted={counter('intentionally_omitted_input_count')}; "
+            f"unrecoverable={counter('unrecoverable_input_count')}",
+            "detail and capacity do not change content or privacy authority",
+        )
+        self.settle(Level.ACTIVE, "Observation selection", body)
 
     async def command_doctor(self) -> None:
         self.say(Level.ACTIVE, "Checking this installation")

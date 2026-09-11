@@ -1,5 +1,55 @@
 # Cursor local integration runbook
 
+## Conditional agent guidance
+
+The skill keeps its activation boundary, core workflow, and safety floor in the entrypoint.
+Read workflow guidance before `start`, publication policy before `publish_work`, and coverage
+and receipts before `check`. Setup/consent, vault/credential operations, transcript import, and
+recommendation decisions route to the corresponding sections of request templates only when
+needed. Already-read guidance need not be fetched again while present in context.
+
+Use `semantic_if_configured` only when semantic review is known to be optional; omit `mode` when
+relying on the configured default. Select `semantic_required` for an explicit user requirement,
+effective policy, or named acceptance criterion requiring independent semantic judgment. Preserve
+required review and all host/disclosure approval boundaries. Installed guidance bytes alone prove
+neither activation nor semantic dispatch.
+
+Both Cursor renderers select `skills/cursor/yoetz/SKILL.md`; the standalone generic portable export
+retains its neutral entrypoint. Cursor's entrypoint respects the active Plan/Ask/Agent mode, separates
+a Cursor plan from a published Yoetz plan, and names distinct IDE and CLI tool-discovery surfaces.
+Full application restart remains conditional on the documented activation mismatch, without
+changing privacy authority.
+
+A new Cursor session reads guidance and discovers tool schemas before calling MCP `start` as
+its first workflow operation, before substantive research, commands, edits, or delegation.
+Guidance reads (including `read_guidance`), discovery commands, and necessary bootstrap clarification
+remain permitted. Hook auto-attachment is a cue, not proof of a current-scope plan: mapped
+SessionStart context directs cooperative `start mode=attach` before `status` with the returned
+ids; unmapped context directs `start` before material work. Same-session compaction uses held
+current ids for `status`. Both startup messages route failures through exact continuations,
+same-request recovery, and a named one-time repair before a blocked-startup user handoff.
+A first non-retryable failure alone does not permit continuing without Yoetz; see
+[startup failure precedence](../../guidance/coverage-and-receipts.md#startup-failure-precedence).
+Cursor has no demonstrated equivalent of Claude's PreToolUse deny gate in this integration;
+instruction delivery is not enforcement (#692).
+
+Design basis, checked 2026-09-09: Cursor's [skills guidance](https://cursor.com/docs/skills)
+uses descriptions for relevance and loads references progressively. Yoetz therefore keeps the
+material-work trigger in metadata and the long procedures in shared references. Cursor's
+[customization guidance](https://cursor.com/docs/customize-cursor) distinguishes skills for
+specialized workflows from persistent rules; no always-on rule or new plan-approval step is added.
+The [CLI mode guidance](https://cursor.com/docs/cli/using) informs the active-mode boundary;
+the [MCP guide](https://cursor.com/docs/mcp) informs tool discovery and host approval. These design
+choices do not promote an untested IDE/CLI version or establish native behavioral acceptance.
+
+Cursor's own [create-learning-path skill](https://github.com/cursor/plugins/blob/main/teaching/skills/create-learning-path/SKILL.md)
+and [compatibility skill](https://github.com/cursor/plugins/blob/main/agent-compatibility/skills/check-agent-compatibility/SKILL.md)
+in its official plugin repository use direct triggers, short workflows, relevant guardrails, and
+an explicit output contract. The Cursor Yoetz skill follows that structure. It keeps automatic
+selection enabled; examples of explicitly invoked orchestration skills do not justify making
+ordinary Yoetz activation manual-only.
+
+
 This runbook covers the current local Cursor IDE and Agent CLI implementation rows from issue #153. Operational
 TypeScript/Python SDK support is deferred; the SDK package/bridge fixtures remain metadata-only
 experimental scaffolding and do not define current capability cells. Cursor Cloud and Cloud Agents are out
@@ -22,6 +72,14 @@ source. The retained `@cursor/sdk==1.0.23`, `cursor-sdk==1.0.24`, and bridge `sd
 metadata-only fixture pins for future design work; they are not supported compatibility cells.
 Cursor's Python package deliberately has no `1.0.23` release; it aligned with the shared SDK
 release line at `1.0.24`. Nearby versions are untested, not implicitly compatible.
+
+Untested is not disabled (issue #656). Hook ingress maps only the IDE cell `3.17.8` to its
+reviewed profile; a supplied unknown version — including the Agent CLI build — is admitted as
+`untested` and its compatible events ingest under the conservative paired contract, while an
+omitted version takes the legacy post-only carrier. Neither branch is promoted to the reviewed
+profile, and neither loses ordinary hook observation. This decision was recorded without a new
+live Cursor upgrade run; distinguishing the IDE from the Agent CLI capability scope in a
+disposable instance remains the acceptance evidence for a promotion.
 
 A pinned test instance (ADR-028, issue #604) adds a second guard beneath the artifact binding:
 when the native MCP entry and hook commands name the absolute launcher of a runtime created with
@@ -49,6 +107,10 @@ its native plugin projection: when `YOETZ_ISOLATED_ROOT` is set, the exact valid
 rendered into the plugin-managed `mcp.json` environment and every native hook command, and is
 bound by that artifact's preview and marker digests. Cursor uses its own
 `isolation_binding` status field; it does not consume the Codex `mcp add --env` path.
+The status comparison selects the hook set from the installed profile: ordinary artifacts use
+`postToolUse`, `postToolUseFailure`, and `preToolUse` alongside lifecycle hooks, while structural
+artifacts use `afterFileEdit` and `afterMCPExecution`. An exact MCP binding alone is insufficient;
+a root drift in any expected hook surface reports `isolation_binding: different`.
 
 ```text
 yoetz integrate cursor plugin preview \
@@ -94,8 +156,10 @@ Cursor configuration root. File install is not live MCP runtime. `Developer: Rel
 leave a shared `mcp-process` helper on the previous route; fully quit that exact Cursor app, verify
 its processes exited, and relaunch with the same isolated profile. `yoetz integrate cursor plugin
 status` reports `mcp.runtime.activation` as `matched` or `full_restart_required` when a live scan
-is available. That is activation work, not installation proof. For CLI use the exact installed tree with `--plugin-dir`. Do not copy
-the skill to `.cursor/skills`, add a rule, or rely on `.agents/skills` as fallback evidence.
+is available. That is activation work, not installation proof. For CLI use the exact installed tree
+with `--plugin-dir`. Cursor also supports `.cursor/skills`, `.agents/skills`, and compatible host
+skill directories. Those are separate delivery paths: a copy or a project rule cannot serve as
+evidence that this plugin was discovered. Record the actual loaded source before claiming delivery.
 
 The current Cursor desktop host can still discover a user-local plugin under the regular shared
 `~/.cursor/plugins/local/yoetz` when launched with another user-data directory. Treat that as a
@@ -105,9 +169,65 @@ separate proof facets; a clean cell must verify which plugin directory Cursor ac
 
 ## MCP ownership and source precedence
 
-Cursor keeps its native carrier and installed-marker launcher identity. The installed-RECORD
-proof added for Codex external registration in #654 does not classify Cursor sources or establish
-Cursor activation; use the source-precedence and runtime facets below.
+### Project registration and root selection
+
+A user-local plugin can be discovered and its MCP tools can be connected while a workspace
+operation returns `SESSION_CONFLICT` with `repository_identity_required`. The reviewed Cursor
+implementation can emit absolute filesystem paths in `roots/list.uri` and include multiple open
+projects in the shared MCP process's root inventory. Yoetz accepts that strict local path shape
+through its Cursor adapter and safely canonicalizes every root. An explicit project registration
+selects the intended repository from the host's inventory. Hook `workspace_roots` and an agent's
+terminal working directory remain separate facts and cannot replace the MCP client's roots.
+
+For this host behavior, use an explicit project registration and an external-registration plugin
+for the skill and hooks. First remove the existing plugin-managed artifact through its normal
+preview, consent, and authenticated remove lifecycle. There must be only one `yoetz` MCP owner.
+Then invoke the exact intended Yoetz launcher to preview and install the project entry:
+
+```text
+/absolute/yoetz integrate cursor project-mcp preview \
+  --project-root /exact/project --cursor-config-root /exact/cursor/config \
+  --route-profile policy --json
+/absolute/yoetz integrate cursor project-mcp install \
+  --project-root /exact/project --cursor-config-root /exact/cursor/config \
+  --route-profile policy --accept --preview-digest <preview_digest> --json
+```
+
+Install the native plugin with `--mcp-ownership external-registration` through the authenticated
+plugin lifecycle. Its launcher and isolated root must match the project entry. The project entry
+is `.cursor/mcp.json`, has the pinned launcher plus
+`mcp serve --host cursor --project-root ${workspaceFolder}`, and carries
+only the validated `YOETZ_ISOLATED_ROOT` environment binding when isolated. Strict mode appends
+`--semantic off`; omitting `--route-profile` preserves an existing owned route. The project
+registration command never launches a service and never grants semantic egress or host trust.
+The startup selector is validated against the exact owned project entry, launcher, route, and
+directory/configuration identity. It must match a repository in the active client's validated
+root inventory; empty or unsupported roots, malformed responses, timeouts, and mismatches still
+fail. A changed registration or selected repository retires the MCP session. Use the existing
+project admission commands for an authorized policy route.
+
+`project-mcp status` reports configuration ownership separately from unknown host trust and
+unobserved runtime binding. Open that project in Cursor, activate the changed server through
+Cursor's MCP controls, and use a fresh agent conversation. After changing the entry, disable and
+enable its project source to create a new connection, then verify the active command: Reload can
+retain an older process or cached definition. Verify a model-controlled `start`, native hook
+evidence, captured content, and authorized semantic dispatch separately. Multiple distinct roots
+still require a validated selector that matches one host-reported repository. Codex and Claude
+Code retain their own existing registration paths.
+
+Reverse the registration with `project-mcp preview-remove`, then `project-mcp remove` using the
+exact preview digest and `--accept`. Removal and strict registration sweep only Yoetz-owned
+project admission entries and report that result, including an already-absent registration.
+Unrelated MCP servers and top-level JSON values are preserved; changed files are serialized as
+canonical JSON. Foreign, duplicate, malformed, oversized, hard-linked, or symlinked configuration
+is refused. This explicit writer currently requires POSIX descriptor-relative filesystem APIs.
+
+The preview binds both target directories, all three known source preimages, the launcher, the
+isolated root, and the before/after project configuration digests. Apply rereads those facts and
+atomically replaces the project file through a pinned directory. Cursor does not share a lock
+with this writer, so `host_config_not_compare_and_swap` discloses the remaining cross-process
+race; this is not a multi-file transaction. After a lost result, inspect `status` and obtain a
+fresh preview before retrying. No automatic migration or overwrite of another source occurs.
 
 Ownership mode is exactly `external_registration` or `plugin_managed`. Observed state is exactly
 `absent|external|plugin|dual|foreign|ambiguous`. Configuration source is plugin, project, user,
@@ -190,7 +310,9 @@ a security boundary" (`cursor.com/docs/agent/security/run-modes`, `/reference/pe
 `/cli/reference/permissions`, re-read 2026-08-30). The levers are `mcpAllowlist` (`server:tool`,
 case-insensitive, `~/.cursor/permissions.json` and `<workspace>/.cursor/permissions.json`
 concatenate; no deny list exists) and the Agent CLI's `permissions.allow` `Mcp(server:tool)` in
-`<project>/.cursor/cli.json` (deny wins over allow).
+`<project>/.cursor/cli.json` (deny wins over allow). Cursor does not document whether the
+classifier sees MCP initialize `instructions`, so the policy-route destination disclosure of
+issue #479 is not relied on on this host; `mcpAllowlist` remains the lever.
 
 Host admission (issue #467) writes both project-scoped entries for exactly `check`:
 
@@ -316,9 +438,17 @@ The ordinary `postToolUse` path emits queued advice through the documented
 [`additional_context` output](https://cursor.com/docs/hooks#posttooluse), including when a
 command's exit is unknown or nonzero. Advice is marked delivered only after successful stdout
 emission. `postToolUseFailure` has no consumable output, so its advice remains pending for a later
-supported event. Legacy edit/MCP hooks keep their existing output behavior, and automatic Stop
-follow-up messages remain disabled. Hook success never substitutes for an explicit command/test
-exit fact.
+supported event. The rendered ordinary hooks use a lightweight entrypoint that avoids loading the
+full CLI application graph. Ordinary events have a five-second budget, `sessionStart` and `stop`
+ten seconds, and `sessionEnd` three seconds. Local structural capture, pairing, and the outbox
+intent close before the bounded service drain; advice-bearing events remain synchronous so
+`additional_context` stays on the current hook response. Legacy edit/MCP hooks keep their existing
+output behavior, and automatic Stop follow-up messages remain disabled. Hook success never
+substitutes for an explicit command/test exit fact.
+For ordinary MCP tool events, `tool_output` contains tool-domain data. Only the outer MCP
+`isError`/`is_error` signal contributes execution status; nested `status`, `outcome`, `success`,
+and exit-like fields do not describe the host execution. Built-in shell outcomes retain their
+separate exit-status handling.
 
 Select these hooks with `--observation-profile ordinary` on the existing native Cursor plugin
 preview/install/status commands. Repeat the same profile when applying an exact preview. To
@@ -342,11 +472,89 @@ yoetz observe content-disable --workspace /exact/project \
 
 The service accepts Cursor chunks only when that exact profile is active in local consent and in
 the mapped task grant. A missing or mismatched profile drops plaintext chunks and records
-`content_capture_unavailable`; chunks are not written to the structural outbox. The installed
-Cursor IDE `3.19.7` fact is a candidate local host observation while this runbook's pinned
-compatibility cells remain unchanged; it cannot certify the ordinary profile without an exact
-isolated fixture and receipt evidence for native hook delivery, accepted content, semantic
-selection, and influence.
+`content_capture_unavailable`; chunks are not written to the structural outbox. Authorized native
+hooks reserve the workspace drain before enqueueing the structural row, keeping a background sweep
+from consuming it before the foreground content attempt. The nonblocking reservation is released
+on cancellation or after the bounded drain; contention can still leave a content gap.
+Content-bearing ordinary-profile native passes have a one-second drain window. Contentless
+structural rows, including Yoetz-owned MCP mutations whose result is already durable elsewhere,
+defer service delivery. When chunks exist, the pass prioritizes the current event after its
+same-session FIFO prefix, within that one-second drain and sixteen-row bound. Teardown
+keeps its host-clamped three-second hook, records local lifecycle/outbox intent, and defers service
+delivery to a later hook or the sweeper (a ready service's idle sweep interval is 60 seconds);
+it skips local advice construction because the closing host
+cannot receive it. A stale or blocked
+backlog produces the explicit gap when the hook completes.
+A hard process kill or service failure before authenticated service-side staging completes may
+lose transient content without a durable gap marker; there is no plaintext local spool or offline
+acceptance guarantee. For this ordinary Cursor profile, the capture-only service request can commit
+encrypted objects, manifests, and a metadata-only capture ticket before the structural FIFO ingest.
+After that boundary, a retry revalidates the original host/source and content-authority generations,
+requires the complete expected group/part set, and reuses the ticket rather than reminting content.
+The bounded staging handoff can therefore survive a service restart, while a revoked or incomplete
+ticket remains an honest content gap. The installed Cursor IDE `3.19.7` fact is a candidate local
+host observation while this runbook's pinned compatibility cells remain unchanged; it cannot
+certify the ordinary profile without an exact isolated fixture and receipt evidence for native hook
+delivery, accepted content, semantic selection, and influence.
+Native semantic selection uses the accepted tool event's durable session route and does not
+require an approved-check policy. Local capture consent and repository disclosure permission
+remain separate requirements.
+
+### Smart observation selection (issue #687)
+
+Cursor's shared hook ingress applies the selector to the generic tool stream only when the exact
+ordinary profile `cursor-ordinary-observation-v1` is installed and rendered. The structural
+profile remains its existing post-only/native event contract; selecting a retention mode does not
+widen it. With the ordinary profile, **Focused/standard (512)** is the default. A paired, proven
+successful routine read, search, or inventory call may be represented by a bounded summary in
+Focused mode. Detailed keeps eligible routine calls as individual records while pressure is
+healthy. Capacity is independent of detail: `standard` (512), `larger` (2,048), and `largest`
+(8,192) can each be selected with either mode. The larger profiles have finite provisional budgets
+and do not certify an IDE cell or improve sustained throughput.
+
+Failures, denials, cancellation, interruption, partial, unknown or conflicting outcomes, edits and side
+effects, declared checks/negative verification, and reads protected for an obligation, claim, or
+finding remain individual records in both modes. A pre-event keeps its native tool identity until
+a post event proves success. Ambiguous shell composition and caller-supplied routine labels do not
+make an event eligible for summarization. Cursor's `afterMCPExecution` binding event remains
+binding-only for the ordinary profile; the structural profile's `afterFileEdit` remains edit
+evidence. Neither path is turned into a routine read by selection.
+
+Apply an owner choice from an exact preview:
+
+```text
+yoetz observe selection-preview --workspace /exact/project \
+  --detail detailed --capacity larger --session-id <cursor-session-id> --json
+yoetz observe selection-apply --workspace /exact/project \
+  --detail detailed --capacity larger --session-id <cursor-session-id> \
+  --accept --preview-digest <preview-digest> --json
+```
+
+This is a temporary session override unless `--persist` is supplied on both preview and apply
+without `--session-id`; `--persist` is the explicit workspace choice. An optional RFC3339 UTC
+`--expires-at` bounds either setting. `selection-status` reports selected and effective mode and
+capacity; `selection-revoke` restores the safe fallback at the matching scope. These controls
+affect future retention only. They do not rewrite accepted rows, extend Cursor's ten-second
+session/stop, five-second ordinary event, or three-second teardown budgets, or change content,
+privacy, provider, or network authority. Pressure can make a selected Detailed session effectively
+Focused until the bounded recovery policy returns it to its still-valid selection.
+
+Use `protect-read` before an upcoming read when a later claim needs its individual identity. The
+reference must be an `obl_`, `clm_`, or `fnd_` identifier; at most 32 logical reads are outstanding,
+and the protection expires after ten minutes by default (an explicit expiry cannot exceed that
+bound). It narrows retention under existing observation consent and grants no content or
+disclosure authority. `promote` can only promote an exact native identity while it remains in the
+bounded buffer. After delivery it reports `promotion_window_closed` and `not_retained`; rerun the
+current read as a new observation if historical bytes are required, and do not use that rerun to
+prove the earlier state.
+
+Cursor ordinary content capture remains a separate consent arm selected by the exact profile. Its
+workspace-wide capture lane allows at most 512 staging/pending tickets and 128 MiB of captured
+content, independently of structural capacity. The one-second native content drain window and
+host hook deadlines still apply. A timeout, cancellation, incomplete content group, or service
+failure leaves partial/unknown coverage or `content_capture_unavailable` where the boundary
+permits; it is never silently converted to a successful routine summary. Capture status proves
+configuration only, not accepted bytes, semantic selection, or receipt coverage.
 
 Cursor has no `codex exec --json` import surface. Issue #301's bounded import authorization makes
 no Cursor adapter change; Cursor evidence continues through cooperative MCP and native
@@ -431,9 +639,11 @@ can erase a deferred intent when it saves.
 
 The native Cursor MCP bridge has a separate workspace binding. It does not use the helper's process
 CWD, because a Cursor MCP child can be launched from the user home directory. On the first workflow
-tool call, the `--host cursor` bridge asks the active MCP client for `roots/list` and accepts only
-safe local `file:` roots that canonicalize to one repository. An unavailable, remote, malformed, or
-multi-repository response returns `SESSION_CONFLICT` with
+tool call, the `--host cursor` bridge asks the active MCP client for `roots/list`. Its Cursor adapter
+accepts safe local file URIs and strict absolute local paths. They must canonicalize to one repository,
+or the validated owned project selector must match one repository in the returned inventory.
+An unavailable, remote, malformed, nonmatching, or unresolved multi-repository response returns
+`SESSION_CONFLICT` with
 `safe_details.reason_code: repository_identity_required` before any local-service call. The bridge
 retains and revalidates that binding before each workflow call; a changed or unusable root result
 retires the session and its local client. A `notifications/roots/list_changed` message does the same,
@@ -452,7 +662,11 @@ root as its repository locator, so a live mapping answers `active` and the `addi
 names the task, frontier, mapped `session_id` and `writer_id`, and the `start mode=attach`
 continuation by that session id (issues #578, #580). A daemon fence refusal records
 `status_workspace_unbound` / `status_workspace_mismatch` and keeps the mapping; only a replaced
-session records `mapping_stale`.
+session records `mapping_stale`. Cursor resolves its root from the host payload's
+`workspace_roots` before the rendered `--workspace .`, so the Codex-specific issue #659 failure
+(a probe with no usable repository context) does not reproduce here; an unresolvable root is the
+typed `workspace_unresolvable` failure before any probe, and a fence refusal records the companion
+`locator_source_explicit` diagnostic row.
 
 A successful explicit Yoetz `start` now binds the canonical Cursor session before normal
 observation handling (issue #661). The adapter transiently decodes `result_json` on
@@ -522,7 +736,10 @@ is repaired by restarting a service that already reports ready.
 not enqueued for delivery, while `start`, `publish_work`, `check`, and `respond` enqueue one row
 each. Cursor's hook payload states no outcome fact for MCP executions, so a failed Yoetz call is
 indistinguishable from a successful one at this ingress; the service's own record of the call is
-the authority on its outcome. Cursor reports `duration` as a finite decimal number of milliseconds
+the authority on its outcome. The shared advice guard recognizes both Cursor server spellings, so
+a self-owned hook does not lease pending frontier or recommendation context for the call being
+observed; this does not change local retention or explicit failure delivery. Cursor reports
+`duration` as a finite decimal number of milliseconds
 for MCP executions, while the canonical structural field is the bounded integer `duration_ms`.
 Cursor ingress truncates that vendor value to whole milliseconds before structural filtering; the canonical parser
 continues to reject floats on every ledger and non-Cursor host surface. Decimal values in discarded
@@ -656,3 +873,116 @@ Fallback endpoint pairing (issue #582) is host-independent: whether the evaluato
 API provider serves a given attempt is a service-side dispatch decision recorded in provenance
 (`fallback_from`), with no Cursor-specific behaviour, plugin, or route input — the route ceiling
 applies to dispatch authority regardless of which endpoint serves.
+
+
+### Large tasks and semantic failure recovery (#674–#676)
+
+This host uses the shared service status snapshot cache and bounded semantic reference selection.
+A reduced reference scope reports `semantic_reference_scope_reduced`; it is not full-task semantic
+coverage. `failed/case_capacity_exceeded` and `semantic_case_capacity_exceeded` mean the required
+packet could not fit before any provider attempt. Select a smaller claim/obligation scope for a new
+check. Shorter prose alone need not fix structural capacity.
+
+For `coordinator_failure`, use the check's original request ID with
+`yoetz service diagnostics --request-id req_…` to read bounded failure stages. Dispatch entry can
+have an unknown outcome, even with null provenance. A missing record is a diagnostic coverage gap,
+not proof of non-dispatch. Preserve the original request/attempt identity and existing retry rules.
+These shared-path regressions do not certify a fresh installed native-host session.
+
+
+### Evidence-first closure
+
+The shared guidance instructs this host to paginate `status view=evidence` before publishing
+replacement evidence, match state and source identity, and reuse only suitable observed IDs.
+Digest-only, unavailable, unselected and clipped items remain separate limits. Evidence discovery
+and reuse do not prove native capture coverage or command success. Read `command_attempts` on
+obligation rows: this profile may omit command text, in which case reconciliation is `unknown`.
+Only service-stamped, explicitly linked observations can support a match or mismatch. The optional
+CLI closure composer uses the same projected status inputs; it does not grant capture or egress.
+These shared regressions are synthetic contract evidence, not live-host certification.
+
+### Bounded workflow recovery examples (#613)
+
+These examples use the existing MCP operations on the pinned local Cursor IDE or Agent CLI cell.
+Replace placeholders with values returned by the current call or `sessionStart` context; do not
+reconstruct them from memory, a remote URL, or the live store.
+
+- **Read retry.** If a `status`, diagnostics, or `status view=operation` read times out, repeat the
+  same read intent with a new read `request_id`. Preserve its view, operation filter, cursor, and
+  limit. An unreadable read does not establish that an operation or task is absent.
+- **Ambiguous write.** If a `start` response is lost before session/writer IDs are returned,
+  replay the exact original `start` body once with the same request ID. Otherwise read
+  `status view=operation` with `filter.operation_request_id` set to the original write ID:
+  replay only `absent`; use stored `complete`; follow an exact typed continuation and required
+  approval before replaying `pending`. Retain and report pending without a continuation,
+  `quarantined`, or unknown. Never invent session/writer IDs or create a task to escape a write.
+- **Exact-session attach.** When `sessionStart` or recovery context provides a held `session_id`,
+  use that exact value as the `mode=attach` selector. Cursor's canonical workspace fence comes
+  from `workspace_roots`/`CURSOR_PROJECT_DIR`, not the plugin directory in `$PWD`; if the request
+  carries identity refs, include the canonical `workspace_ref` + `external_ref` pair together,
+  never `workspace_ref` alone. Use the returned successor `session_id` and `writer_id`, read
+  `status`, and continue only from that binding. A bare `task_id` is not an attach selector.
+- **Same-pair fresh conversation.** With no held session, call `start mode=create_or_attach` using
+  the exact canonical project root as `workspace_ref` and the same stable `external_ref` pair, with
+  no `session_id`. A remote URL is not a workspace identity, and a fresh Cursor conversation is
+  not an implicit second task.
+- **Explicit sibling handoff.** Use `start mode=create` only after same-task pair/session recovery
+  is exhausted, every earlier write has a known terminal outcome, the Cursor binding is healthy and
+  authorized, and the user has declared one bounded remaining or repaired verification scope. Keep
+  the canonical project root as `workspace_ref`, choose a different stable `external_ref` such as
+  `<work-item>-recovery-v1`, and bind the native mapping from the exact returned `start` result via
+  `afterMCPExecution`/`postToolUse`. Verify `mapping_present` and the returned task/session/writer,
+  then publish fresh plan, evidence, checks, and receipt for that scope. State that the predecessor
+  receipt, findings, obligations, evidence IDs, and unresolved status remain separate; the sibling
+  cannot make the predecessor look resolved. If no new scope exists, keep the old receipt and stop
+  instead of creating another sibling.
+
+
+## Observation recovery diagnostics
+
+Cursor uses the shared selected-admission and outbox store. New native input obeys current hard
+pressure and the complete projected buffer/outbox size; accepted replay work remains drainable.
+Hard pressure can recover to high before optional detail recovers. A generation-fenced session
+end retires pressure scheduling without deleting pending work or historical losses.
+
+Unknown capture inventory can reject new input even when the outbox is empty. The READY
+service now schedules a bounded inventory recovery pass independently of the next hook (#695),
+using an existing unambiguous mapping and the authoritative catalog/bundle inventory. An unreadable
+route or missing mapping stays blocked rather than being assumed empty; recovery retries after
+it becomes readable without requiring a fresh event. Do not reset local state, enlarge capacity,
+or toggle consent to manufacture a healthy status. Real hard limits continue to apply after
+inventory recovery, and previous loss counts and identities remain unchanged.
+
+Recovery emits fixed `capture_inventory_*` reason counts in its internal maintenance summary;
+these are not ledger receipts or a new hook diagnostic format. Historical local selection losses
+still need a separately attributed task/check propagation path when no later envelope is admitted.
+Host-shaped regression tests, including interleaved parent/worker routes and encrypted readback,
+are not a version-pinned acceptance run inside the installed vendor application.
+
+Hook and manual drain control failures have `control_` reasons. A protocol error is not a
+`ledger_rejected` result. A control failure stops further calls on that connection; the next
+hook, manual drain or service sweep can attempt the retained identity. Oversized or locally
+invalid requests are terminal. Transport/protocol retries are bounded to 128 consecutive
+same-cause attempts; owner-action conditions such as a forbidden method or incompatible
+protocol stay pending until corrected. Retrying does not establish whether an earlier request
+committed; exact source/cursor identity supplies replay deduplication.
+
+`yoetz observe status --workspace . --json` includes `hook_diagnostics.drain_failures`: up to
+32 retained causal records with source/session commitments, generation and position, original
+control reason and retryability, adapter stage, final disposition and correlation ID when supplied.
+A `control` stage does not identify which side of the socket failed; `request_encode` and
+`response_decode` identify locally observed boundaries. Missing correlation remains null. Typed ingest refusals have stage
+`typed_ingest` and null control fields.
+Diagnostic files rotate at 64 KiB with one backup; this is explicitly incomplete retained history.
+A failed diagnostic append records `drain_diagnostic_unavailable` when store bookkeeping succeeds.
+No command, prompt, path, raw session ID or raw source ID is included. Existing quarantine is
+not automatically replayed or reclaimed, and new diagnostics cannot explain old entries.
+
+Pre-tool hooks reuse advice at its recorded frontier; outcome hooks, lifecycle hooks and service
+ingest refresh it. Once structural ingress is durable, ordinary hooks that spent the local
+one-second allowance defer optional follow-up with `hook_followup_deferred`. Transient native
+content and lifecycle hooks do not take that deferral. Drain snapshot, connect, RPC and local
+bookkeeping share one elapsed drain budget; synchronous local writes cannot be interrupted safely.
+
+For shared-store measurements and the remaining native-host coverage boundary, see
+[the performance runbook](observation-selection-performance.md).

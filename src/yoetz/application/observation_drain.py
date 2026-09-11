@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import heapq
+import math
 from asyncio import Future
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -20,17 +21,20 @@ from yoetz.adapters.integrations.observation_local import (
 )
 from yoetz.domain.observation import (
     OBSERVATION_BACKPRESSURE_REASON,
+    OBSERVATION_CONTENT_CAPTURE_PENDING_REASON,
     ObservationGapCode,
     ObservationIngestDisposition,
     ObservationIngestRequest,
     ObservationIngestResult,
 )
+from yoetz.ports.control import ControlError
 
 __all__ = [
     "DEFAULT_OBSERVATION_SWEEP_BUDGET_SECONDS",
     "DEFAULT_OBSERVATION_SWEEP_LIMIT",
     "EXPECTED_OBSERVATION_BACKPRESSURE_REASONS",
     "MAX_CONSECUTIVE_OBSERVATION_REJECTIONS",
+    "ObservationCaptureRecoveryOutcome",
     "ObservationDrainAction",
     "ObservationDrainDecision",
     "ObservationDrainSummary",
@@ -55,13 +59,16 @@ _SWEEP_EXECUTOR_WORKERS: Final = 4
 # Designed coordination, not delivery failure (#351): the row stays pending and
 # retries, but the reason never becomes a coverage gap or a failure-shaped hook
 # diagnostic. ADR-022's check barrier is the canonical producer.
-EXPECTED_OBSERVATION_BACKPRESSURE_REASONS: Final = frozenset({OBSERVATION_BACKPRESSURE_REASON})
+EXPECTED_OBSERVATION_BACKPRESSURE_REASONS: Final = frozenset(
+    {OBSERVATION_BACKPRESSURE_REASON, OBSERVATION_CONTENT_CAPTURE_PENDING_REASON}
+)
 RETRYABLE_OBSERVATION_REJECTIONS: Final = frozenset(
     {
         ObservationGapCode.SERVICE_UNAVAILABLE.value,
         ObservationGapCode.VAULT_LOCKED.value,
         ObservationGapCode.MAPPING_MISSING.value,
         OBSERVATION_BACKPRESSURE_REASON,
+        OBSERVATION_CONTENT_CAPTURE_PENDING_REASON,
         "observation_disabled",
         "paused",
     }
@@ -78,6 +85,18 @@ SAFE_OBSERVATION_REJECTION_REASONS: Final = frozenset(
 )
 
 
+class ObservationCaptureRecoveryOutcome(str, Enum):  # noqa: UP042 - stable internal value
+    """Payload-free maintenance outcomes, never ledger or input-loss dispositions."""
+
+    RECOVERED = "capture_inventory_recovered"
+    MAPPING_MISSING = "capture_inventory_mapping_missing"
+    ROUTE_UNAVAILABLE = "capture_inventory_route_unavailable"
+    INVENTORY_UNKNOWN = "capture_inventory_unknown"
+    DISABLED = "capture_inventory_disabled"
+    BUSY = "capture_inventory_busy"
+    TIMEOUT = "capture_inventory_timeout"
+
+
 class ObservationDrainAction(str, Enum):  # noqa: UP042 - stable internal value
     ACKNOWLEDGE = "acknowledge"
     RETRY = "retry"
@@ -88,6 +107,27 @@ class ObservationDrainAction(str, Enum):  # noqa: UP042 - stable internal value
 class ObservationDrainDecision:
     action: ObservationDrainAction
     reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationControlFailure(ObservationIngestResult):
+    """Adapter failure, with no assertion that the ledger refused an input."""
+
+    control_reason: str
+    control_retryable: bool
+    correlation_id: str | None
+    failure_stage: str = "control"
+
+
+def observation_control_failure(error: ControlError) -> ObservationControlFailure:
+    return ObservationControlFailure(
+        ObservationIngestDisposition.REJECTED,
+        "control_" + error.reason,
+        None,
+        error.reason,
+        error.retryable,
+        error.correlation_id,
+    )
 
 
 def route_observation_ingest(
@@ -102,6 +142,28 @@ def route_observation_ingest(
         ObservationIngestDisposition.DUPLICATE,
     }:
         return ObservationDrainDecision(ObservationDrainAction.ACKNOWLEDGE, None)
+    if isinstance(result, ObservationControlFailure):
+        # Invalid/oversized requests cannot heal by reconnecting. Protocol
+        # failures can occur before or after admission: retain exact replay
+        # identity and stop using that connection, never forge ledger refusal.
+        terminal = result.control_reason in {"frame_too_large", "invalid_request"}
+        if row is not None and result.control_reason not in {
+            "vault_locked",
+            "method_forbidden",
+            "protocol_mismatch",
+            "service_incompatible",
+            "peer_untrusted",
+            "endpoint_unsafe",
+            "privacy_projection_blocked",
+        }:
+            attempts = (
+                row.consecutive_reason_attempts + 1 if row.last_reason == result.reason else 1
+            )
+            terminal = terminal or attempts >= MAX_CONSECUTIVE_OBSERVATION_REJECTIONS
+        return ObservationDrainDecision(
+            ObservationDrainAction.QUARANTINE if terminal else ObservationDrainAction.RETRY,
+            result.reason,
+        )
     supplied_reason = result.reason
     reason = (
         supplied_reason
@@ -167,7 +229,25 @@ class ObservationOutboxSweeper:
     # yields on time. Checked between rows, so one slow ingest can still overrun
     # it: the caller's deadline remains the hard bound.
     budget_seconds: float | None = None
+    # Production ready composition supplies the installation maintenance gate here. It is held
+    # only across one coordinator ingest, so a long backlog cannot keep ordinary workflow control
+    # behind the entire 20-second sweep. Local outbox bookkeeping stays outside the gate and is
+    # already fenced by the per-workspace lease.
+    ingest_gate: asyncio.Lock | None = None
+    # Recovery owns no hook output and no observation row. It runs outside the
+    # control/ingest gate, under the coordinator's capture lock instead.
+    capture_recovery: (
+        Callable[[str], Awaitable[ObservationCaptureRecoveryOutcome | None]] | None
+    ) = None
+    capture_recovery_budget_seconds: float = 5.0
+    _capture_recovery_after: str | None = field(default=None, init=False, repr=False)
+    # Tests may provide a monotonic source so budget boundaries can be exercised without wall
+    # clock sleeps. Production leaves this unset and uses the running loop's monotonic clock.
+    _monotonic: Callable[[], float] | None = field(default=None, repr=False)
     _executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
+    _selection_seen_workspaces: set[str] = field(
+        default_factory=lambda: set[str](), init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         if type(self.limit) is not int or isinstance(self.limit, bool) or self.limit < 1:
@@ -176,6 +256,58 @@ class ObservationOutboxSweeper:
             type(self.budget_seconds) is not float or not self.budget_seconds > 0.0
         ):
             raise ValueError("observation_sweep_budget_invalid")
+
+        if (
+            type(self.capture_recovery_budget_seconds) is not float
+            or not math.isfinite(self.capture_recovery_budget_seconds)
+            or self.capture_recovery_budget_seconds <= 0.0
+        ):
+            raise ValueError("observation_capture_recovery_budget_invalid")
+
+    async def _recover_capture_inventory(
+        self, workspaces: tuple[str, ...], *, remaining: float | None
+    ) -> tuple[ObservationCaptureRecoveryOutcome, ...]:
+        """Give at most four workspace lanes a fair, bounded maintenance turn.
+
+        Neither an empty outbox nor native admission pressure can suppress this
+        turn. An exhausted deadline rotates the next pass past the slow lane.
+        The callback must join side-effecting workers before cancellation returns.
+        """
+
+        recover = self.capture_recovery
+        if recover is None or not workspaces:
+            return ()
+        budget = self.capture_recovery_budget_seconds
+        if remaining is not None:
+            budget = min(budget, remaining)
+        if budget <= 0.0:
+            return ()
+        ordered = sorted(set(workspaces), key=str.encode)
+        after = self._capture_recovery_after
+        if after is not None:
+            ordered = [item for item in ordered if item > after] + [
+                item for item in ordered if item <= after
+            ]
+        deadline = asyncio.get_running_loop().time() + budget
+        outcomes: list[ObservationCaptureRecoveryOutcome] = []
+        for workspace in ordered[:4]:
+            available = deadline - asyncio.get_running_loop().time()
+            if available <= 0.0:
+                break
+            self._capture_recovery_after = workspace
+            try:
+                async with asyncio.timeout(available):
+                    result = await recover(workspace)
+            except TimeoutError:
+                result = ObservationCaptureRecoveryOutcome.TIMEOUT
+            except Exception:
+                # Do not copy exception text, paths, or payloads into diagnostics.
+                result = ObservationCaptureRecoveryOutcome.INVENTORY_UNKNOWN
+            if result is not None:
+                if type(result) is not ObservationCaptureRecoveryOutcome:
+                    result = ObservationCaptureRecoveryOutcome.INVENTORY_UNKNOWN
+                outcomes.append(result)
+        return tuple(outcomes)
 
     def _off_loop[ResultT](self, call: Callable[[], ResultT]) -> Future[ResultT]:
         """Run one blocking local-store call off the caller's event loop.
@@ -212,11 +344,19 @@ class ObservationOutboxSweeper:
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
 
+    async def _ingest(self, request: ObservationIngestRequest) -> ObservationIngestResult:
+        gate = self.ingest_gate
+        if gate is None:
+            return await self.coordinator.ingest_request(request)
+        async with gate:
+            return await self.coordinator.ingest_request(request)
+
     async def sweep(self) -> ObservationDrainSummary:
         loop = asyncio.get_running_loop()
-        deadline = None if self.budget_seconds is None else loop.time() + self.budget_seconds
+        monotonic = loop.time if self._monotonic is None else self._monotonic
+        deadline = None if self.budget_seconds is None else monotonic() + self.budget_seconds
         rows, lifecycle_workspaces = await self._off_loop(
-            self._fair_pending_rows_and_lifecycle_workspaces
+            self._prepare_pending_rows_and_lifecycle_workspaces
         )
         attempted = 0
         acknowledged = 0
@@ -228,8 +368,11 @@ class ObservationOutboxSweeper:
         workspaces = tuple(
             dict.fromkeys((*lifecycle_workspaces, *(workspace for workspace, _row in rows)))
         )
+        remaining = None if deadline is None else deadline - monotonic()
+        for outcome in await self._recover_capture_inventory(workspaces, remaining=remaining):
+            reasons[outcome.value] = reasons.get(outcome.value, 0) + 1
         for workspace in workspaces:
-            if deadline is not None and loop.time() >= deadline:
+            if deadline is not None and monotonic() >= deadline:
                 # Budget spent: return what this pass resolved so far. The rows
                 # left are still pending and the next pass selects them fairly.
                 break
@@ -282,7 +425,7 @@ class ObservationOutboxSweeper:
                 for selected_workspace, row in rows:
                     if selected_workspace != workspace:
                         continue
-                    if deadline is not None and loop.time() >= deadline:
+                    if deadline is not None and monotonic() >= deadline:
                         break
                     session_key = (workspace, row.codex_session_id)
                     if session_key in retired_sessions:
@@ -310,7 +453,7 @@ class ObservationOutboxSweeper:
                         envelope=row.envelope,
                     )
                     try:
-                        result = await self.coordinator.ingest_request(request)
+                        result = await self._ingest(request)
                     except Exception:
                         result = ObservationIngestResult(
                             ObservationIngestDisposition.REJECTED,
@@ -421,6 +564,27 @@ class ObservationOutboxSweeper:
 
     def _fair_pending_rows(self) -> tuple[tuple[str, ObservationOutboxRow], ...]:
         return self._fair_pending_rows_and_lifecycle_workspaces()[0]
+
+    def _prepare_pending_rows_and_lifecycle_workspaces(
+        self,
+    ) -> tuple[
+        tuple[tuple[str, ObservationOutboxRow], ...],
+        tuple[str, ...],
+    ]:
+        for workspace in self.local.pending_workspaces():
+            # A fresh service flushes accounts from the preceding runtime
+            # before extending them. Later sweeps observe due deadlines and
+            # recovery dwell even when the host emits no further hook.
+            self.local.maintain_selected_admission(
+                workspace,
+                force=workspace not in self._selection_seen_workspaces,
+            )
+            self._selection_seen_workspaces.add(workspace)
+            if len(self._selection_seen_workspaces) > 256:
+                # Forgetting an entry only forces a conservative flush next
+                # time; it never acknowledges or discards accepted inputs.
+                self._selection_seen_workspaces.remove(min(self._selection_seen_workspaces))
+        return self._fair_pending_rows_and_lifecycle_workspaces()
 
     def _fair_pending_rows_and_lifecycle_workspaces(
         self,

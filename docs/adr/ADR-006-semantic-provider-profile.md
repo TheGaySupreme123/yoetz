@@ -327,6 +327,15 @@ configuration; swapping the primary keeps both bindings and both approvals.
    expiry records `provider_timeout`. If provider-result provenance is unavailable on recovery,
    the public result uses `receipt_persistence_unknown` while retaining the original durable reason.
    Retained provider-result objects are recovered when their status and reason match that row.
+   **Lease/recovery amendment, 2026-09-07 (#616, #620):** live semantic operation and job leases
+   use the authenticated execution snapshot's total expiry plus five seconds for local cleanup,
+   rather than a renewable heartbeat. The current two-endpoint maximum makes that live bound
+   at most 605 seconds; a crash can consequently delay reclaim until that bound. Claim/reclaim
+   retains an existing `started` or `response_durable` attempt and its physical request identity.
+   A saved response is selected and recovered before any new attempt is considered. After the
+   execution bound, an already reclaimed ordinary operation lease may perform bounded local
+   terminal recovery; it cannot renew semantic execution or dispatch after the immutable provider
+   deadline. Provider deadlines and human approval expiry remain separate from lease ownership.
 4. **Every fallback attempt is a fresh physical attempt** under ADR-009: its own privacy
    evaluation against the exact fallback binding, authorization, dispatch identity, credential
    handle or `ExternalRuntimeAuthority`, and privacy receipt. Under `confirm_every_request` it
@@ -356,3 +365,21 @@ upstream no-training claim. A fallback whose factory cannot be built or whose
 credential is absent is reported unavailable on its own row without fencing the primary. No live
 interoperability of a paired dispatch is claimed until authorized evidence records the exact
 request, response, route, and receipt for the endpoint that served.
+
+
+## Amendment: bounded reference scope and exceptional exits (#675, #676)
+
+The semantic packet selects a deterministic dependency closure from the frozen allowlist. Retained
+packet relations, canonical payload dependencies, recorded findings and source-event identities
+remain connected. Unrelated frontier IDs are counted as omitted, bound into the case digest, and
+reported through partial `semantic_reference_scope_reduced` coverage. The deterministic case is
+not reduced. The existing envelope byte limit and independent disclosure policy remain in force.
+Irreducible required structure fails before job/attempt creation with `case_capacity_exceeded` and
+`semantic_case_capacity_exceeded` coverage. Narrowing scope creates new work; it does not replay a
+terminal check or imply that the reduced packet reviewed the whole task.
+
+Exceptional attempts retain a request-joined stage/category before cleanup. Dispatch entry is an
+uncertain execution boundary; null provenance and missing diagnostics are not non-dispatch proof.
+Provider-return, mapping and persistence faults remain distinct. Diagnostics cannot change retry
+eligibility, durable-response recovery, cancellation or lease fencing. See `docs/INTERFACES.md` for
+the public reason, coverage and owner diagnostic lookup contracts.

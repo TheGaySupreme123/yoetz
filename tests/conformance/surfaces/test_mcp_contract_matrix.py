@@ -38,6 +38,11 @@ from yoetz.mcp.resources import (
     list_resources,
     read_resource,
 )
+from yoetz.mcp.semantic_destination import (
+    DISCLOSURE_PREFIX,
+    MAX_DISCLOSURE_ENCODED_BYTES,
+    SemanticDestinationDisclosure,
+)
 from yoetz.mcp.summaries import render_safe_compact_summary
 from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.errors import SAFE_DETAIL_KEYS, PublicErrorCode
@@ -284,8 +289,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:de1d9f9bd2f821bbf0cdf2ff64616213b2def4ad9d6952fbd1a485508700706c",
-        "strict": "sha256:1910d370ae257ff094984bf98ec5390added1cce159d5f045f10a7eafe44dcce",
+        "policy": "sha256:11517493c1f0bbfe6c4b2a9a285ce993dbbc1d8516bcbb2fde6e7e6e62e67933",
+        "strict": "sha256:f9a479b4e0f9e771b4c29f93f6a7e7da4f4e066b02a1dab5dcc42c89b39acf6f",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -294,11 +299,11 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
         assert "yoetz://guidance/" in descriptor_for(name).description
     # The check descriptor carries the full mode decision rule, including semantic_required.
     check_description = descriptor_for("check").description
-    assert "semantic_if_configured for most material implementation" in check_description
-    assert "semantic_required when the claim depends on qualitative correctness" in (
+    assert "semantic_if_configured only when review is known to be optional" in check_description
+    assert "semantic_required when the user, effective policy or acceptance requires it" in (
         check_description
     )
-    assert "Omitting mode resolves through the configured verification policy" in check_description
+    assert "Omit mode to preserve the configured default" in check_description
     respond_description = descriptor_for("respond").description
     assert "result frontier of the check that returned it" in respond_description
     assert "not its subject_frontier" in respond_description
@@ -307,13 +312,15 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
         assert "does not publish to GitHub" in local_description
         assert "run a semantic evaluation" in local_description
     assert descriptor_for("start").description.startswith(
-        "Call for material multi-step, delegated, resumable, or verification-heavy work"
+        "First read yoetz://guidance/workflow.md."
     )
     # The two argument conventions a first-time caller cannot infer from prose alone. Both cost a
     # rejected start call in the 2026-07-30 dogfood before the descriptor named them.
     start_description = descriptor_for("start").description
     assert "fresh req_ prefixed random UUID" in start_description
     assert "workspace_ref and external_ref are admitted only as a pair" in start_description
+    assert "A new session's first workflow operation is this call" in start_description
+    assert "for intro and guidance" in start_description
     assert (
         "unique and already in ascending ASCII order" in descriptor_for("publish_work").description
     )
@@ -389,6 +396,18 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     strict_instructions = server_instructions("strict")
     assert "Route profile: strict." in strict_instructions
     assert "This route will not request external semantic review" in strict_instructions
+    # #479: the bridge appends the startup-read semantic destination disclosure to the policy
+    # tail only; the strict tail is byte-identical with or without one, and the packaged text
+    # never carries the passage on its own.
+    disclosure = SemanticDestinationDisclosure("unknown", DISCLOSURE_PREFIX + "unknown.")
+    assert server_instructions("policy", semantic_destination=disclosure) == (
+        f"{base_instructions.rstrip()}\n\nRoute profile: policy. "
+        "External semantic review follows the configured policy. "
+        f"{disclosure.sentence}\n"
+    )
+    assert server_instructions("strict", semantic_destination=disclosure) == strict_instructions
+    assert DISCLOSURE_PREFIX not in server_instructions()
+    assert DISCLOSURE_PREFIX not in strict_instructions
 
     with pytest.raises(KeyError, match="unregistered_tool_descriptor") as captured:
         descriptor_for("secret-tool")
@@ -802,9 +821,26 @@ def test_advertised_surface_honors_instructions_and_aggregate_budgets() -> None:
     advertised tool, so an unbounded edit here is multiplied, not merely added."""
 
     profiles: tuple[McpRouteProfile, ...] = ("policy", "strict")
+    # #479: the policy route appends a runtime-composed destination disclosure of at most
+    # MAX_DISCLOSURE_ENCODED_BYTES. The packaged text is held to the original bound on its own,
+    # and the longest admissible disclosure is charged against the widened bound.
+    longest = SemanticDestinationDisclosure(
+        "external",
+        DISCLOSURE_PREFIX + "x" * (MAX_DISCLOSURE_ENCODED_BYTES - len(DISCLOSURE_PREFIX)),
+    )
+    assert len(longest.sentence.encode("utf-8")) == MAX_DISCLOSURE_ENCODED_BYTES
     for profile in profiles:
         metrics = advertised_surface_metrics(profile)
         assert metrics["tool_count"] == len(_EXPECTED_TOOL_NAMES)
+        assert (
+            metrics["instructions_encoded_bytes"]
+            <= (SERVER_INSTRUCTIONS_BUDGET["packaged_max_encoded_bytes"])
+        ), f"{profile} packaged initialize instructions exceed their reviewed budget"
+        assert (
+            metrics["replicated_encoded_bytes"]
+            <= (ADVERTISED_SURFACE_BUDGET["packaged_max_encoded_bytes"])
+        ), f"{profile} packaged advertised surface exceeds its reviewed budget"
+        metrics = advertised_surface_metrics(profile, semantic_destination=longest)
         assert (
             metrics["instructions_encoded_bytes"] <= SERVER_INSTRUCTIONS_BUDGET["max_encoded_bytes"]
         ), f"{profile} initialize instructions exceed their reviewed budget"
