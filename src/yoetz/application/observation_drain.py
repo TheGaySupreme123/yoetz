@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import heapq
+import math
 from asyncio import Future
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -33,6 +34,7 @@ __all__ = [
     "DEFAULT_OBSERVATION_SWEEP_LIMIT",
     "EXPECTED_OBSERVATION_BACKPRESSURE_REASONS",
     "MAX_CONSECUTIVE_OBSERVATION_REJECTIONS",
+    "ObservationCaptureRecoveryOutcome",
     "ObservationDrainAction",
     "ObservationDrainDecision",
     "ObservationDrainSummary",
@@ -81,6 +83,18 @@ WORKSPACE_GLOBAL_OBSERVATION_STOP_REASONS: Final = frozenset(
 SAFE_OBSERVATION_REJECTION_REASONS: Final = frozenset(
     {item.value for item in ObservationGapCode} | RETRYABLE_OBSERVATION_REJECTIONS | {"duplicate"}
 )
+
+
+class ObservationCaptureRecoveryOutcome(str, Enum):  # noqa: UP042 - stable internal value
+    """Payload-free maintenance outcomes, never ledger or input-loss dispositions."""
+
+    RECOVERED = "capture_inventory_recovered"
+    MAPPING_MISSING = "capture_inventory_mapping_missing"
+    ROUTE_UNAVAILABLE = "capture_inventory_route_unavailable"
+    INVENTORY_UNKNOWN = "capture_inventory_unknown"
+    DISABLED = "capture_inventory_disabled"
+    BUSY = "capture_inventory_busy"
+    TIMEOUT = "capture_inventory_timeout"
 
 
 class ObservationDrainAction(str, Enum):  # noqa: UP042 - stable internal value
@@ -220,6 +234,13 @@ class ObservationOutboxSweeper:
     # behind the entire 20-second sweep. Local outbox bookkeeping stays outside the gate and is
     # already fenced by the per-workspace lease.
     ingest_gate: asyncio.Lock | None = None
+    # Recovery owns no hook output and no observation row. It runs outside the
+    # control/ingest gate, under the coordinator's capture lock instead.
+    capture_recovery: (
+        Callable[[str], Awaitable[ObservationCaptureRecoveryOutcome | None]] | None
+    ) = None
+    capture_recovery_budget_seconds: float = 5.0
+    _capture_recovery_after: str | None = field(default=None, init=False, repr=False)
     # Tests may provide a monotonic source so budget boundaries can be exercised without wall
     # clock sleeps. Production leaves this unset and uses the running loop's monotonic clock.
     _monotonic: Callable[[], float] | None = field(default=None, repr=False)
@@ -235,6 +256,58 @@ class ObservationOutboxSweeper:
             type(self.budget_seconds) is not float or not self.budget_seconds > 0.0
         ):
             raise ValueError("observation_sweep_budget_invalid")
+
+        if (
+            type(self.capture_recovery_budget_seconds) is not float
+            or not math.isfinite(self.capture_recovery_budget_seconds)
+            or self.capture_recovery_budget_seconds <= 0.0
+        ):
+            raise ValueError("observation_capture_recovery_budget_invalid")
+
+    async def _recover_capture_inventory(
+        self, workspaces: tuple[str, ...], *, remaining: float | None
+    ) -> tuple[ObservationCaptureRecoveryOutcome, ...]:
+        """Give at most four workspace lanes a fair, bounded maintenance turn.
+
+        Neither an empty outbox nor native admission pressure can suppress this
+        turn. An exhausted deadline rotates the next pass past the slow lane.
+        The callback must join side-effecting workers before cancellation returns.
+        """
+
+        recover = self.capture_recovery
+        if recover is None or not workspaces:
+            return ()
+        budget = self.capture_recovery_budget_seconds
+        if remaining is not None:
+            budget = min(budget, remaining)
+        if budget <= 0.0:
+            return ()
+        ordered = sorted(set(workspaces), key=str.encode)
+        after = self._capture_recovery_after
+        if after is not None:
+            ordered = [item for item in ordered if item > after] + [
+                item for item in ordered if item <= after
+            ]
+        deadline = asyncio.get_running_loop().time() + budget
+        outcomes: list[ObservationCaptureRecoveryOutcome] = []
+        for workspace in ordered[:4]:
+            available = deadline - asyncio.get_running_loop().time()
+            if available <= 0.0:
+                break
+            self._capture_recovery_after = workspace
+            try:
+                async with asyncio.timeout(available):
+                    result = await recover(workspace)
+            except TimeoutError:
+                result = ObservationCaptureRecoveryOutcome.TIMEOUT
+            except Exception:
+                # Do not copy exception text, paths, or payloads into diagnostics.
+                result = ObservationCaptureRecoveryOutcome.INVENTORY_UNKNOWN
+            if result is not None:
+                if type(result) is not ObservationCaptureRecoveryOutcome:
+                    result = ObservationCaptureRecoveryOutcome.INVENTORY_UNKNOWN
+                outcomes.append(result)
+        return tuple(outcomes)
 
     def _off_loop[ResultT](self, call: Callable[[], ResultT]) -> Future[ResultT]:
         """Run one blocking local-store call off the caller's event loop.
@@ -295,6 +368,9 @@ class ObservationOutboxSweeper:
         workspaces = tuple(
             dict.fromkeys((*lifecycle_workspaces, *(workspace for workspace, _row in rows)))
         )
+        remaining = None if deadline is None else deadline - monotonic()
+        for outcome in await self._recover_capture_inventory(workspaces, remaining=remaining):
+            reasons[outcome.value] = reasons.get(outcome.value, 0) + 1
         for workspace in workspaces:
             if deadline is not None and monotonic() >= deadline:
                 # Budget spent: return what this pass resolved so far. The rows

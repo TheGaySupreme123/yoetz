@@ -99,6 +99,34 @@ When older state lacks those bindings, pressure uses a conservative upper bound 
 subtracting bytes that might belong to another ticket. Content refusal preserves the structural
 observation and records both capture-budget and content-unavailable gaps.
 
+Unknown capture inventory is also durable service-maintenance demand, even when the outbox
+and selected buffer are empty. The READY observation sweep can reconcile that demand before any
+new native input is admitted (#695). It uses an existing unambiguous lifecycle mapping and the
+same authoritative catalog/bundle inventory as capture reservation; it does not invent a source
+event, a task binding, or a zero-backlog proof. Missing mappings and unreadable or inactive relevant
+routes remain unknown and are retried without requiring another hook. A healthy proven workspace
+does not request another recovery scan.
+
+A sweep rotates through at most four workspace candidates with a shared five-second cooperative
+recovery budget inside its ordinary sweep budget. A workspace turn rotates through at most eight
+existing session candidates, then performs at most one complete inventory bootstrap. Session
+cursor hints are bounded to 256 workspaces; eviction loses a hint, not accounting or authority.
+Recovery does not hold the general workflow/control gate or an outbox drain lease. Publication
+uses the same capture lock as reservation. Synchronous task metadata reads and local publication
+run off the service event loop; cancellation joins started worker operations before releasing
+the lock or runtime. These joins can exceed the cooperative deadline. The deadline is not a hard
+promise about a contended storage operation's elapsed time. Every opened runtime must match
+its catalog task/session identity. The service/vault generation is checked before inventory reads,
+after the final catalog reread, and under the local publication lock, so an obsolete READY
+instance cannot mint a replacement proof after waiting for that lock. Partial ticket enumeration
+cannot authorize releasing a reservation merely because its identity was not returned.
+
+A recovered inventory proves accounting, not spare capacity: real count, byte, pending-pair and
+capture ceilings still govern admission. Recovery neither deletes loss/quarantine history nor
+creates task coverage. Independently propagating correctly attributed local selection losses to
+task/check coverage without a later admitted envelope remains a separate #695 implementation
+slice; a recovered/empty queue is not evidence that earlier losses were absent.
+
 Detailed and larger capacity default to a current-session override. Workspace persistence is an
 explicit owner choice. A preview precedes non-default authority and describes scope, expiry,
 finite budgets, and increased storage and processing costs. Expiry, revoke, reset, and lowering a
