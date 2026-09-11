@@ -5475,3 +5475,47 @@ def test_deferred_followup_records_stdout_failure(
     diagnostic = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
     assert '"reason":"hook_followup_deferred"' in diagnostic
     assert '"reason":"stdout_write_failed"' in diagnostic
+
+
+@pytest.mark.parametrize(
+    "source",
+    [ObservationSource.CODEX_HOOK, ObservationSource.CLAUDE_HOOK, ObservationSource.CURSOR_HOOK],
+)
+def test_session_start_update_advice_without_observation_consent(
+    tmp_path: Path, source: ObservationSource
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    store.set_runtime_enabled(True)
+    store_recommendation_state(
+        RecommendationState(
+            last_evaluated_version="0.2.0",
+            pending=("package-update",),
+            pending_package_version="0.3.0",
+        ),
+        root=tmp_path,
+    )
+    stdout = io.BytesIO()
+    assert (
+        handle_observe(
+            event_name="SessionStart",
+            stdin_bytes=json.dumps({"session_id": "no-consent"}).encode(),
+            stdout=stdout,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+            source=source,
+            _output_event_name="sessionStart"
+            if source is ObservationSource.CURSOR_HOOK
+            else "SessionStart",
+        )
+        == 0
+    )
+    payload = json.loads(stdout.getvalue())
+    context = (
+        payload["additional_context"]
+        if source is ObservationSource.CURSOR_HOOK
+        else payload["hookSpecificOutput"]["additionalContext"]
+    )
+    assert "Update Yoetz to 0.3.0" in context
+    assert "decline package-update --release-version 0.3.0" in context
+    assert not store.pending_workspaces()

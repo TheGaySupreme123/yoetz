@@ -276,3 +276,10 @@ def test_store_and_load_cache_roundtrip(tmp_path: Path) -> None:
     assert loaded is not None
     assert loaded.latest_version == "1.0.0"
     assert loaded.ttl_seconds == 12 * 3600
+
+
+def test_update_tip_includes_complete_upgrade_guide() -> None:
+    advisory = build_package_update_advisory(
+        installed_version="0.2.0", latest_version="0.3.0", source="cache"
+    )
+    assert any("yoetz upgrade" in line for line in advisory.tip_lines())

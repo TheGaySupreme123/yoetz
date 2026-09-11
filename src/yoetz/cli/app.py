@@ -261,6 +261,9 @@ def recommend_list_cmd(
 @recommend_app.command("accept")
 def recommend_accept_cmd(
     recommendation_id: Annotated[str, typer.Argument(help="Exact recommendation id.")],
+    release_version: Annotated[
+        str | None, typer.Option("--release-version", help="Exact advertised package release.")
+    ] = None,
     codex_path: Annotated[
         Path | None,
         typer.Option(
@@ -277,6 +280,7 @@ def recommend_accept_cmd(
 
     _recommend_operation("recommend_accept")(
         recommendation_id,
+        release_version=release_version,
         codex_path=codex_path,
         codex_home=codex_home,
     )
@@ -285,6 +289,9 @@ def recommend_accept_cmd(
 @recommend_app.command("decline")
 def recommend_decline_cmd(
     recommendation_id: Annotated[str, typer.Argument(help="Exact recommendation id.")],
+    release_version: Annotated[
+        str | None, typer.Option("--release-version", help="Exact advertised package release.")
+    ] = None,
     codex_path: Annotated[
         Path | None,
         typer.Option(
@@ -303,8 +310,104 @@ def recommend_decline_cmd(
 
     _recommend_operation("recommend_decline")(
         recommendation_id,
+        release_version=release_version,
         codex_path=codex_path,
         codex_home=codex_home,
+    )
+
+
+@app.command("upgrade")
+def upgrade_cmd(
+    host: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--host", help="Existing host: codex, claude, cursor; repeat for multiple hosts."
+        ),
+    ] = None,
+    accept: Annotated[
+        bool,
+        typer.Option(
+            "--accept", help="Run only the fixed uv package upgrade; other stages stay explicit."
+        ),
+    ] = False,
+    writers_stopped: Annotated[
+        bool,
+        typer.Option(
+            "--writers-stopped",
+            help="Confirm old hosts/hooks and service have been quiesced before package replacement.",
+        ),
+    ] = False,
+    project_root: Annotated[
+        str | None,
+        typer.Option("--project-root", help="Exact existing project-root; never inferred."),
+    ] = None,
+    codex_path: Annotated[
+        str | None, typer.Option("--codex-path", help="Exact existing codex-path; never inferred.")
+    ] = None,
+    codex_home: Annotated[
+        str | None, typer.Option("--codex-home", help="Exact existing codex-home; never inferred.")
+    ] = None,
+    claude_path: Annotated[
+        str | None,
+        typer.Option("--claude-path", help="Exact existing claude-path; never inferred."),
+    ] = None,
+    claude_config_root: Annotated[
+        str | None,
+        typer.Option(
+            "--claude-config-root", help="Exact existing claude-config-root; never inferred."
+        ),
+    ] = None,
+    cache_root: Annotated[
+        str | None, typer.Option("--cache-root", help="Exact existing cache-root; never inferred.")
+    ] = None,
+    marketplace_root: Annotated[
+        str | None,
+        typer.Option("--marketplace-root", help="Exact existing marketplace-root; never inferred."),
+    ] = None,
+    cursor_config_root: Annotated[
+        str | None,
+        typer.Option(
+            "--cursor-config-root", help="Exact existing cursor-config-root; never inferred."
+        ),
+    ] = None,
+    mcp_ownership: Annotated[
+        str | None,
+        typer.Option("--mcp-ownership", help="Exact existing mcp-ownership; never inferred."),
+    ] = None,
+    route_profile: Annotated[
+        str | None,
+        typer.Option("--route-profile", help="Exact existing route-profile; never inferred."),
+    ] = None,
+    observation_profile: Annotated[
+        str | None,
+        typer.Option(
+            "--observation-profile", help="Exact existing observation-profile; never inferred."
+        ),
+    ] = None,
+) -> None:
+    """Plan a complete upgrade while preserving settings; optionally replace this uv tool."""
+    module = importlib.import_module("yoetz.cli.upgrade")
+    operation = cast(Callable[..., int], module.run_upgrade)
+    options = {
+        "project-root": project_root,
+        "codex-path": codex_path,
+        "codex-home": codex_home,
+        "claude-path": claude_path,
+        "claude-config-root": claude_config_root,
+        "cache-root": cache_root,
+        "marketplace-root": marketplace_root,
+        "cursor-config-root": cursor_config_root,
+        "mcp-ownership": mcp_ownership,
+        "route-profile": route_profile,
+        "observation-profile": observation_profile,
+    }
+    _finish(
+        operation(
+            hosts=host,
+            options={key: value for key, value in options.items() if value is not None},
+            accept=accept,
+            writers_stopped=writers_stopped,
+        )
     )
 
 

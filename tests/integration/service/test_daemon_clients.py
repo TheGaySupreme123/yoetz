@@ -3098,3 +3098,115 @@ async def test_human_connection_cancels_secret_phase_when_terminal_disconnects()
 
     assert service.cancelled == [ceremony_id]
     assert stream.closed
+
+
+@pytest.mark.anyio
+async def test_ready_recommendations_refresh_again_without_service_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    two_refreshes = asyncio.Event()
+
+    class Application(_Application):
+        ready_recommendation_refresh: object
+        observation_sweep: object
+
+        async def close(self) -> None:
+            events.append("application_close")
+            await super().close()
+
+    class Vault(_Vault):
+        async def lock(self) -> None:
+            events.append("vault_lock")
+            await super().lock()
+
+    application = Application()
+
+    async def refresh() -> object:
+        events.append("recommendation_refresh")
+        if events.count("recommendation_refresh") == 2:
+            two_refreshes.set()
+        return object()
+
+    async def sweep() -> ObservationDrainSummary:
+        events.append("sweep")
+        if events.count("sweep") == 1:
+            asyncio.get_running_loop().call_soon(events.append, "control_turn")
+        return ObservationDrainSummary(
+            attempted=1,
+            acknowledged=1,
+            retry_pending=0,
+            quarantined=0,
+            reasons=(),
+        )
+
+    application.ready_recommendation_refresh = refresh
+    application.observation_sweep = sweep
+    vault = Vault()
+    vault.ready = False
+    lifecycle = ServiceLifecycle(
+        _Clock(),
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "2" * 64,
+        instance_id=_INSTANCE_ID,
+        singleton_lock_path=tmp_path / "service.lock",
+    )
+
+    async def factory(_service_generation: int, _vault_generation: int) -> _Application:
+        return application
+
+    daemon = ServiceDaemon(
+        _composition=ServiceComposition(
+            lifecycle=lifecycle,
+            control_listener=_Listener(),  # pyright: ignore[reportArgumentType]
+            secret_ingress_listener=None,
+            human_control_listener=None,
+            human_control_service=None,
+            session_monitor=None,
+            vault=vault,
+            ready_application_factory=factory,
+        )
+    )
+    monkeypatch.setattr(daemon_module, "_OBSERVATION_SWEEP_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(daemon_module, "_READY_RECOMMENDATION_REFRESH_INTERVAL_SECONDS", 0.0)
+    await daemon.start()
+    await daemon.composition.lifecycle.transition(ServiceState.UNLOCKING)
+    vault.ready = True
+    await daemon.activate_ready_application(7, 3)
+
+    await asyncio.wait_for(two_refreshes.wait(), timeout=1)
+    assert events[:4] == ["sweep", "recommendation_refresh", "control_turn", "sweep"]
+    await daemon.lock()
+    count_after_lock = events.count("sweep")
+    assert events.count("sweep") == count_after_lock
+    assert events.count("recommendation_refresh") >= 2
+    assert events.index("application_close") < events.index("vault_lock")
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_recommendation_deadline_includes_maintenance_gate_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    daemon, _application, _vault, _listener = _daemon()
+    composition = daemon.composition
+    await composition.maintenance_gate.acquire()
+    called = False
+
+    async def refresh() -> object:
+        nonlocal called
+        called = True
+        return None
+
+    monkeypatch.setattr(daemon_module, "_READY_RECOMMENDATION_REFRESH_DEADLINE_SECONDS", 0.01)
+    try:
+        await asyncio.wait_for(
+            daemon._refresh_ready_recommendations(refresh),  # pyright: ignore[reportPrivateUsage]
+            timeout=1,
+        )
+        assert not called
+        assert composition.maintenance_gate.locked()
+        assert not composition.observation_gate.locked()
+    finally:
+        composition.maintenance_gate.release()
+        await daemon.close()

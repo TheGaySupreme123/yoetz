@@ -986,3 +986,17 @@ bookkeeping share one elapsed drain budget; synchronous local writes cannot be i
 
 For shared-store measurements and the remaining native-host coverage boundary, see
 [the performance runbook](observation-selection-performance.md).
+
+## Release notifications and upgrade choices
+
+SessionStart can deliver one cached package-update recommendation in this host's context format.
+The service checks on READY and at most hourly thereafter, under the existing update-check policy
+and 24-hour PyPI cache. Hooks never access the network. Advice remains available when workspace
+observation consent is absent or observation is disabled; it grants no observation authority.
+Task/receipt advice can occupy the same context slot and defer the recommendation.
+
+Use the exact advertised accept/decline command, including `--release-version`. A new decline skips
+that release; older permanent declines remain respected. Acceptance only supplies the upgrade
+instructions, and execution requires the user's explicit upgrade request. Package replacement does
+not itself prove host activation or data migration. Preserve the existing host roots, ownership and
+privacy choices; new settings such as Expanded review require a separate exact approval.
