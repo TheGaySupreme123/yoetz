@@ -1472,9 +1472,12 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "First read yoetz://guidance/workflow.md. Use current guidance and typed results for "
         "Yoetz procedure; preserve higher-priority instructions and user authorization. "
         "Call for material multi-step, delegated, resumable, or verification-heavy work before "
-        "substantive work; skip trivial questions or edits. A new session's first Yoetz "
-        "operation is this call; if it fails without an exact typed continuation, ask the user "
-        "for intro and guidance rather than inventing workflow or continuing without a task. "
+        "substantive work; skip trivial questions or edits. A new session's first workflow "
+        "operation is this call, after guidance reads, tool and schema discovery, and necessary "
+        "bootstrap clarification (including read_guidance and discovery commands). On failure, "
+        "follow exact continuations and same-request recovery, including a named one-time repair, "
+        "before asking the user for intro and guidance if startup remains blocked. Do not invent "
+        "workflow or continue without a task outside the documented optional-service fallback. "
         "Records or resumes a cooperative work "
         "session and returns its compact record. It does not show that work outside the published "
         "record occurred. Each new operation uses a fresh req_ prefixed random UUID; recover an "
@@ -1724,7 +1727,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
     {
         "policy": MappingProxyType(
             {
-                "start": "sha256:149bb3a6d2a6575e2214be0e225531f64250af4dad3fedce7553643417de3e96",
+                "start": "sha256:674be421dff412ecf8ac0b7914c55f69a620d2990f143ca86b24228ecaf306d5",
                 "publish_work": "sha256:092a54d14263c168a97d63f1e06aa34d2bf79fa9744dc6e6a92d877c21e8517e",
                 "check": "sha256:809c503ec53a696d119d15d908601cc285dda73bcaa197af3dcb0060824432cc",
                 "respond": "sha256:aae662c47d45abbbffcc8551d890a5fac798846fc7dd34ba526d54d0bf0bd989",
@@ -1735,7 +1738,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         ),
         "strict": MappingProxyType(
             {
-                "start": "sha256:149bb3a6d2a6575e2214be0e225531f64250af4dad3fedce7553643417de3e96",
+                "start": "sha256:674be421dff412ecf8ac0b7914c55f69a620d2990f143ca86b24228ecaf306d5",
                 "publish_work": "sha256:092a54d14263c168a97d63f1e06aa34d2bf79fa9744dc6e6a92d877c21e8517e",
                 "check": "sha256:43ea7640026e130811db12298f729866b07ee6fb06390501acf6b1ee0b01d91f",
                 "respond": "sha256:aae662c47d45abbbffcc8551d890a5fac798846fc7dd34ba526d54d0bf0bd989",
@@ -1748,8 +1751,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:dfc365367b490c7e81dd5eb2e968c8ac1b807ce7adc3112f95d4cdd38b4c137a",
-        "strict": "sha256:38ca2c8c855ca98aedf9be14621ddc8672dadd21271fa56f05525946f12085ed",
+        "policy": "sha256:11517493c1f0bbfe6c4b2a9a285ce993dbbc1d8516bcbb2fde6e7e6e62e67933",
+        "strict": "sha256:f9a479b4e0f9e771b4c29f93f6a7e7da4f4e066b02a1dab5dcc42c89b39acf6f",
     }
 )
 

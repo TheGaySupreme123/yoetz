@@ -3018,6 +3018,7 @@ def handle_observe(
                     _LOCKED_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _PRIVACY_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _RETRY_CONTEXT,  # pyright: ignore[reportPrivateUsage]
+                    _STARTUP_RECOVERY_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _STORAGE_CORRUPT_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _STORAGE_UNSAFE_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _UNAVAILABLE_CONTEXT,  # pyright: ignore[reportPrivateUsage]
@@ -3066,7 +3067,9 @@ def handle_observe(
                                 additional = (
                                     "Yoetz observation is consented for this workspace; "
                                     "no ledger task is mapped yet (observation-derived binding "
-                                    "only). Call start to attach a task."
+                                    "only). After guidance reads, tool/schema discovery, and "
+                                    "necessary bootstrap clarification, call start to attach a task "
+                                    "before substantive material work. " + _STARTUP_RECOVERY_CONTEXT
                                 )
                                 attach_advisory_only = True
                             else:

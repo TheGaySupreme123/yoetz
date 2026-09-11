@@ -1,16 +1,22 @@
 ---
 name: yoetz
-description: Use for material multi-step, resumable, delegated, or verification-heavy work. In a new session call start before research, commands, edits, or delegation; if start fails, ask for intro and guidance.
+description: Use for material multi-step, resumable, delegated, or verification-heavy work. In a new session read guidance and discover schemas, then call start before substantive work; follow recovery on failure and ask for intro and guidance if startup remains blocked.
 ---
 
 # Yoetz cooperative workflow
 
-Use Yoetz for material multi-step, resumable, delegated, or verification-heavy work. A new
-session's first Yoetz operation is `start` (create or attach) before research, commands, edits,
-or delegation. If `start` fails without an exact typed continuation, ask the user for intro and
-guidance to get Yoetz working; do not invent a substitute workflow, skip Yoetz, or continue that
-material session without a ledger task. It is a
-local work ledger and deterministic checker: it records only what participants publish and does
+Use Yoetz for material multi-step, resumable, delegated, or verification-heavy work.
+
+A new session's first workflow operation is `start` (create or attach), after guidance reads,
+tool/schema discovery, and necessary bootstrap clarification. This includes `read_guidance`
+and commands needed to read installed references or discover tool schemas. Call `start`
+before substantive research, commands, edits, or delegation. If it fails, follow exact
+typed continuations and same-request recovery first, including a named one-time repair.
+If startup remains blocked without an applicable recovery path, ask the user for intro and
+guidance; do not invent a substitute workflow. Continuing without a ledger task is permitted
+only by the bounded optional-service fallback in
+[startup failure precedence](references/coverage-and-receipts.md#startup-failure-precedence).
+It is a local work ledger and deterministic checker: it records only what participants publish and does
 not observe the workspace, enforce a process, authenticate authorship, or prove correctness.
 
 Before the first `start`, read [workflow.md](references/workflow.md). Before the first `check`,

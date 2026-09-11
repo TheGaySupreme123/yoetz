@@ -478,11 +478,11 @@ def test_cursor_real_ingress_uses_bounded_profile_and_privacy_canaries(
     emitted = json.loads(stdout.getvalue())
     assert set(emitted) == {"additional_context"}
     assert "no ledger task is mapped yet" in emitted["additional_context"]
-    assert stdout.getvalue() == (
-        b'{"additional_context":"Yoetz observation is consented for this workspace; '
-        b"no ledger task is mapped yet (observation-derived binding only). Call start to attach "
-        b'a task."}\n'
-    )
+    context = emitted["additional_context"]
+    assert "After guidance reads, tool/schema discovery" in context
+    assert "call start to attach a task before substantive material work" in context
+    assert "same-request recovery first" in context
+    assert "ask the user for intro and guidance" in context
 
     envelopes = store.list_envelopes(commitment)
     assert len(envelopes) == 1

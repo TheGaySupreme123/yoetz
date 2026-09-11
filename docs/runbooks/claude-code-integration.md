@@ -20,12 +20,19 @@ Yoetz status after Claude resume or compaction. `SessionStart` additional contex
 replayed session context does not establish the current ledger frontier. Plugin replacement uses
 Claude's documented `/reload-plugins` or a new session, followed by loaded-root and digest checks.
 
-A new Claude session's first Yoetz operation is MCP `start` before research, commands, edits, or
-delegation. Hook auto-attachment and `SessionStart` additional context are cues, not proof of a
-current-scope plan. If `start` fails without an exact typed continuation, the agent must ask the
-user for intro and guidance rather than inventing a workflow. Claude documents PreToolUse
-`permissionDecision: deny` and exit 2, but this integration does not ship an owner-selected
-required-startup deny gate; instruction delivery is not enforcement (#692 remaining acceptance).
+A new Claude session reads guidance and discovers tool schemas before calling MCP `start` as
+its first workflow operation, before substantive research, commands, edits, or delegation.
+Guidance reads (including `read_guidance`), discovery commands, and necessary bootstrap clarification
+remain permitted. Hook auto-attachment is a cue, not proof of a current-scope plan: mapped
+SessionStart context directs cooperative `start mode=attach` before `status` with the returned
+ids; unmapped context directs `start` before material work. Same-session compaction uses held
+current ids for `status`. Both startup messages route failures through exact continuations,
+same-request recovery, and a named one-time repair before a blocked-startup user handoff.
+A first non-retryable failure alone does not permit continuing without Yoetz; see
+[startup failure precedence](../../guidance/coverage-and-receipts.md#startup-failure-precedence).
+Claude documents PreToolUse `permissionDecision: deny` and exit 2, but this integration does not
+ship an owner-selected required-startup deny gate; instruction delivery is not enforcement
+(#692 remaining acceptance).
 
 Design basis, checked 2026-09-09: Claude's [skills guidance](https://code.claude.com/docs/en/skills)
 recommends a use-case-first description and concise instructions with supporting references.

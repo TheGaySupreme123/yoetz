@@ -23,15 +23,13 @@ _INTAKE_WINDOW = 512
 _MATERIAL_TRIGGER = (
     b"Use Yoetz for material multi-step, delegated, resumable, or verification-heavy work."
 )
-_START_CUE = b"Call `start` before substantive work."
-_NEW_SESSION_CUE = b"New session: `start` first."
+_START_CUE = b"then `start` before substantive work."
+_NEW_SESSION_CUE = b"New session: read guidance/discover schemas"
 _START_FAIL_CUE = (
-    b"If `start` fails, ask for intro and guidance; do not invent workflow or continue without a task."
+    b"If startup fails, follow recovery first; if still blocked, ask for intro and guidance."
 )
-_TRIVIAL_EXCLUSION = (
-    b"Skip Yoetz for trivial questions or edits where the ceremony exceeds the integrity benefit."
-)
-_CADENCE_CUE = b"Cadence: `start` once, `publish_work` once per material transition"
+_TRIVIAL_EXCLUSION = b"Skip trivial questions or edits; never invent a ledger task."
+_CADENCE_CUE = b"Cadence: `start` once, `publish_work` per material transition; `receipt` last."
 _NO_FALSE_ACTIVATION = b"Never claim Yoetz is active until `start` returns."
 _CUE_SENTENCES: Final = (
     _MATERIAL_TRIGGER,

@@ -1,6 +1,6 @@
 ---
 name: yoetz
-description: Use for material multi-step, resumable, delegated, or verification-heavy work. In a new session call start before research, commands, edits, or delegation; if start fails, ask for intro and guidance.
+description: Use for material multi-step, resumable, delegated, or verification-heavy work. In a new session read guidance and discover schemas, then call start before substantive work; follow recovery on failure and ask for intro and guidance if startup remains blocked.
 metadata:
   short-description: Local work ledger and bounded completion checks
 ---
@@ -11,10 +11,15 @@ Yoetz is a local work ledger and deterministic checker of participant-published 
 enforcement system, observer, authorship proof, transcript recorder, or orchestrator. A clean
 check does not prove the underlying work correct.
 
-A new session's first Yoetz operation is `start` (create or attach) before research, commands,
-edits, or delegation. If `start` fails without an exact typed continuation, ask the user for
-intro and guidance to get Yoetz working; do not invent a substitute workflow, skip Yoetz, or
-continue that material session without a ledger task.
+A new session's first workflow operation is `start` (create or attach), after guidance reads,
+tool/schema discovery, and necessary bootstrap clarification. This includes `read_guidance`
+and commands needed to read installed references or discover tool schemas. Call `start`
+before substantive research, commands, edits, or delegation. If it fails, follow exact
+typed continuations and same-request recovery first, including a named one-time repair.
+If startup remains blocked without an applicable recovery path, ask the user for intro and
+guidance; do not invent a substitute workflow. Continuing without a ledger task is permitted
+only by the bounded optional-service fallback in
+[startup failure precedence](references/coverage-and-receipts.md#startup-failure-precedence).
 
 ## Load guidance for the current operation
 
@@ -84,11 +89,13 @@ transcripts, credentials, whole files/repositories, or unrelated source. Use onl
 material, state-bound excerpt. Follow terminal errors and typed continuations rather than probing;
 inherited `terminal_unavailable` means delegates make no calls.
 
-If the first `start` fails without an exact typed continuation, ask the user for intro and
-guidance to get Yoetz working; do not invent a substitute workflow or continue without a
-ledger task. If optional Yoetz remains unavailable after its named one-time repair, continue
-authorized work and disclose missing ledger or receipt coverage. Required review remains an unmet
-requirement. Separate completed implementation/tests
+Follow [startup failure precedence](references/coverage-and-receipts.md#startup-failure-precedence)
+before applying the optional-service fallback. Exact continuations, same-request recovery, and a
+named one-time repair come first. If startup remains blocked without an applicable recovery path,
+ask the user for intro and guidance; do not continue without a ledger task. Only a successful
+startup or a named repair/retry ending in terminal unavailability permits optional-service
+continue-and-disclose, when the user/host allows it and no write or approval is pending.
+Required review remains an unmet requirement. Separate completed implementation/tests
 from that requirement, and local ledger writes from product-file edits. Final wording must be no
 stronger than the receipt's weakest material coverage.
 

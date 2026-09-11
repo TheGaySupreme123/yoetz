@@ -8,13 +8,14 @@ reverse-chronological released versions.
 
 ### Changed
 
-- New Codex, Claude Code, and Cursor sessions are instructed to call Yoetz `start` before
-  research, commands, edits, or delegation. If that call fails without an exact typed
-  continuation, they must ask the user for intro and guidance rather than inventing a workflow
-  or continuing without a ledger task. The rule is in the 512-byte intake cue, MCP initialize
-  instructions, each host skill catalog description and body, SessionStart inactive context, and
-  the `start` tool description. It is instruction delivery, not a PreToolUse deny gate (issue
-  #692 instruction slice).
+- New Codex, Claude Code, and Cursor sessions read guidance and discover tool schemas, then
+  call Yoetz `start` before substantive research, commands, edits, or delegation. Failed starts
+  follow exact continuations and same-request recovery, including a named one-time repair,
+  before asking for intro and guidance if startup remains blocked. A first non-retryable failure
+  alone does not permit continuing without a task. The rule is in the 512-byte intake cue,
+  MCP initialize instructions, host skills, mapped and unmapped SessionStart context, and the
+  `start` tool description. Compaction in an already-started session retains status recovery.
+  It is instruction delivery, not a PreToolUse deny gate (issue #692 instruction slice).
 
 ### Added
 
