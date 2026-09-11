@@ -22,8 +22,11 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Literal, cast
 
+from packaging.version import Version
+
 from yoetz.application.package_update import (
     PackageUpdateAdvisory,
+    build_package_update_advisory,
     installed_package_version,
     resolve_package_update_advisory,
 )
@@ -331,8 +334,6 @@ def _release_version(value: object) -> str | None:
         return None
     if type(value) is not str or re.fullmatch(r"[0-9][a-zA-Z0-9.!+_-]{0,127}", value) is None:
         raise ValueError("recommendation_release_invalid")
-    from packaging.version import Version
-
     Version(value)
     return value
 
@@ -725,6 +726,26 @@ async def refresh_pending(
     with _state_lock(root):
         current = load_recommendation_state(root=root)
         advisory = resolved.package_update
+        if advisory is not None and advisory.outcome in {"newer_available", "up_to_date"}:
+            # Context resolution happens outside the lock. A slower earlier result must not
+            # regress a newer pending release or resurrect an older release after a decision.
+            decision = current.decisions.get("package-update")
+            candidates = [
+                value
+                for value in (
+                    current.pending_package_version,
+                    None if decision is None else decision.release_version,
+                    _release_version(advisory.latest_version),
+                )
+                if value is not None
+            ]
+            if candidates:
+                advisory = build_package_update_advisory(
+                    installed_version=advisory.installed_version,
+                    latest_version=max(candidates, key=Version),
+                    source=advisory.source,
+                )
+                resolved = replace(resolved, package_update=advisory)
         release_version = (
             _release_version(advisory.latest_version)
             if advisory is not None and advisory.is_newer

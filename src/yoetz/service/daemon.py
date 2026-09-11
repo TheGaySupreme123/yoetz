@@ -1691,20 +1691,17 @@ class ServiceDaemon:
         self, recommendation_refresh: Callable[[], Awaitable[object]]
     ) -> None:
         try:
-            observation_gate = getattr(self._composition, "observation_gate", None)
-            if isinstance(observation_gate, asyncio.Lock):
-                async with observation_gate:
+            # Include both gate waits in the budget: holding observation while maintenance
+            # is contended must not strand structural requests beyond the refresh deadline.
+            async with asyncio.timeout(_READY_RECOMMENDATION_REFRESH_DEADLINE_SECONDS):
+                observation_gate = getattr(self._composition, "observation_gate", None)
+                if isinstance(observation_gate, asyncio.Lock):
+                    async with observation_gate:
+                        async with self._composition.maintenance_gate:
+                            await recommendation_refresh()
+                else:
                     async with self._composition.maintenance_gate:
-                        await asyncio.wait_for(
-                            recommendation_refresh(),
-                            timeout=_READY_RECOMMENDATION_REFRESH_DEADLINE_SECONDS,
-                        )
-            else:
-                async with self._composition.maintenance_gate:
-                    await asyncio.wait_for(
-                        recommendation_refresh(),
-                        timeout=_READY_RECOMMENDATION_REFRESH_DEADLINE_SECONDS,
-                    )
+                        await recommendation_refresh()
         except Exception:
             # Recommendations are advisory and must never unpublish READY.
             pass

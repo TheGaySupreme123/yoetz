@@ -3182,3 +3182,31 @@ async def test_ready_recommendations_refresh_again_without_service_restart(
     assert events.count("recommendation_refresh") >= 2
     assert events.index("application_close") < events.index("vault_lock")
     await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_recommendation_deadline_includes_maintenance_gate_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    daemon, _application, _vault, _listener = _daemon()
+    composition = daemon.composition
+    await composition.maintenance_gate.acquire()
+    called = False
+
+    async def refresh() -> object:
+        nonlocal called
+        called = True
+        return None
+
+    monkeypatch.setattr(daemon_module, "_READY_RECOMMENDATION_REFRESH_DEADLINE_SECONDS", 0.01)
+    try:
+        await asyncio.wait_for(
+            daemon._refresh_ready_recommendations(refresh),  # pyright: ignore[reportPrivateUsage]
+            timeout=1,
+        )
+        assert not called
+        assert composition.maintenance_gate.locked()
+        assert not composition.observation_gate.locked()
+    finally:
+        composition.maintenance_gate.release()
+        await daemon.close()

@@ -168,8 +168,9 @@ metadata belongs to development tooling and is not a user-install update source.
 The maintainer requested this scoped repair and upgrade workflow before 0.2. Advice is delivered on
 a later eligible host SessionStart after discovery, not an OS notification or a guarantee that the
 very first session after publication sees it. A cached up-to-date PyPI result may take up to its
-24-hour TTL plus the hourly READY interval to refresh. No READY service, policy refusal, offline
-transport, or occupied task-advice context can delay delivery without authorizing more networking.
+24-hour TTL plus the hourly READY interval to refresh. A service that is not READY, a policy refusal, an offline transport, or an occupied task-advice
+context can delay delivery. These conditions do not authorize broader networking; refresh remains
+subject to the existing `update_checks` policy and bounded cache.
 Older recommendation writers must be retired before the new schema is written; unknown future
 schemas still fail closed.
 
@@ -185,3 +186,9 @@ outcome unknown. A successful command still reports host refresh/migration/activ
 a fresh invocation is required to continue from the new package. It never automatically approves
 host trust, changes privacy settings, migrates ledgers, or claims a complete upgrade from exit zero.
 See [Upgrading](../usage/upgrading.md) for the user workflow.
+
+Concurrent refresh results retain the newer validated release from the pending projection or
+most recent package decision under the store lock. An older response, including one that called
+the older installation up to date, cannot regress that known release or resurrect dismissed older
+advice. Once the installed version catches up, the pending update clears. The READY refresh
+deadline includes both gate acquisition and evaluation, preserving gate order and cancellation.

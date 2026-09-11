@@ -533,12 +533,12 @@ async def test_performed_up_to_date_advisory_clears_pending(tmp_path: Path) -> N
     )
 
     up_to_date = build_package_update_advisory(
-        installed_version="0.1.0", latest_version="0.1.0", source="network"
+        installed_version="0.2.0", latest_version="0.2.0", source="network"
     )
     cleared = await refresh_pending(
         context=RecommendationContext(package_update=up_to_date),
         root=tmp_path,
-        version="0.1.0",
+        version="0.2.0",
     )
 
     assert up_to_date.outcome == "up_to_date"
@@ -672,3 +672,53 @@ async def test_legacy_permanent_package_opt_out_is_preserved(tmp_path: Path, sch
     )
     assert not result.pending
     assert json.loads(path.read_text())["schema"] == "yoetz.recommendations/3"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("older_latest", ["0.1.0", "0.2.0"])
+@pytest.mark.parametrize("decision", ["pending", "accepted", "declined"])
+async def test_slow_older_refresh_cannot_regress_newer_release(
+    tmp_path: Path, older_latest: str, decision: str
+) -> None:
+    import asyncio
+
+    resolving = asyncio.Event()
+    release = asyncio.Event()
+
+    def context(latest: str) -> RecommendationContext:
+        return RecommendationContext(
+            package_update=build_package_update_advisory(
+                installed_version="0.1.0", latest_version=latest, source="cache"
+            )
+        )
+
+    async def slow_context() -> RecommendationContext:
+        resolving.set()
+        await release.wait()
+        return context(older_latest)
+
+    slow = asyncio.create_task(
+        refresh_pending(context_factory=slow_context, root=tmp_path, version="0.1.0", force=True)
+    )
+    try:
+        await asyncio.wait_for(resolving.wait(), timeout=1)
+        await refresh_pending(context=context("0.3.0"), root=tmp_path, version="0.1.0")
+        if decision == "accepted":
+            record_recommendation_decision(
+                "package-update", "accepted", root=tmp_path, release_version="0.3.0"
+            )
+        elif decision == "declined":
+            decline_cached_recommendation("package-update", root=tmp_path, release_version="0.3.0")
+        release.set()
+        result = await asyncio.wait_for(slow, timeout=1)
+        if decision == "pending":
+            assert result.pending_package_version == "0.3.0"
+            assert result.pending == ("package-update",)
+        else:
+            assert result.pending == ()
+            assert result.decisions["package-update"].release_version == "0.3.0"
+    finally:
+        release.set()
+        if not slow.done():
+            slow.cancel()
+        await asyncio.gather(slow, return_exceptions=True)
