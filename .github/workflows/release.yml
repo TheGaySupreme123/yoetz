@@ -159,11 +159,25 @@ jobs:
           set -euo pipefail
           prev_tag=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -v "^${{ steps.version.outputs.tag }}$" | head -n1 || true)
           if [ -n "$prev_tag" ]; then
-            removed=$(git diff --diff-filter=DMR --name-only "refs/tags/${prev_tag}" -- migrations schemas fixtures/canonical || true)
+            removed=$(git diff --diff-filter=DMR --name-only "refs/tags/${prev_tag}" -- migrations schemas fixtures/canonical \
+                ':(exclude)schemas/manifest.json' || true)
             if [ -n "$removed" ]; then
               echo "::error::non-append-only change against ${prev_tag}: $removed"
               exit 1
             fi
+          fi
+          if [ -n "$prev_tag" ]; then
+            PREVIOUS_RELEASE="$prev_tag" uv run --locked python - <<'PYTHON'
+          import json, os, pathlib, subprocess
+          old = json.loads(subprocess.check_output([
+              "git", "show", f"refs/tags/{os.environ['PREVIOUS_RELEASE']}:schemas/manifest.json"
+          ]))
+          new = json.loads(pathlib.Path("schemas/manifest.json").read_bytes())
+          current = {member["path"]: member for member in new["members"]}
+          for member in old["members"]:
+              if current.get(member["path"]) != member:
+                  raise SystemExit("released schema manifest entry changed: " + member["path"])
+          PYTHON
           fi
 
       - name: Verify changelog/security/license/contributor metadata is complete

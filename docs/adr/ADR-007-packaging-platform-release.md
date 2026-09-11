@@ -73,7 +73,9 @@ manifests, the packaging/capability suites, and the release workflows under `.gi
 11. **Public schema hosting without runtime coupling:** the checked-in `schemas/` tree is mounted
     byte-for-byte at `https://schemas.yoetz.dev/0.1/`; each `$id` is the direct URL formed by
     appending its exact relative file path. Released versioned schema paths are immutable. The
-    manifest advances atomically with digest/ETag binding. PR/release gates resolve all refs from
+    manifest advances atomically with digest/ETag binding. The release comparison permits new
+    manifest members while requiring every previous member to remain identical; released schema,
+    migration, and canonical-vector files remain byte-immutable (release #702). PR/release gates resolve all refs from
     the local manifest with network denied, and installed Yoetz always uses packaged mirrors;
     hosted availability is independently verified release evidence, never an operational
     dependency.

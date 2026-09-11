@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final
 
+import pytest
+
 _ROOT: Final = Path(__file__).resolve().parents[2]
 _WORKFLOW: Final = _ROOT / ".github" / "workflows" / "release.yml"
 _REUSABLE_WORKFLOWS: Final = (
@@ -274,3 +276,31 @@ def test_generated_evidence_uses_evidence_scanner_mode() -> None:
         1,
     )[1].split("\n      - name:", 1)[0]
     assert "if-no-files-found" not in download
+
+
+def test_release_manifest_comparison_allows_only_new_members(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Execute the workflow guard against additive, changed, and removed index entries."""
+    import json
+    import subprocess
+    import textwrap
+
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+    script = textwrap.dedent(workflow.split("<<'PYTHON'\n", 1)[1].split("\n          PYTHON", 1)[0])
+    original = {"path": "events/released.schema.json", "sha256": "released-digest"}
+    monkeypatch.setenv("PREVIOUS_RELEASE", "v0.1.0")
+    monkeypatch.chdir(tmp_path)
+
+    def previous_manifest(_args: list[str]) -> bytes:
+        return json.dumps({"members": [original]}).encode()
+
+    monkeypatch.setattr(subprocess, "check_output", previous_manifest)
+    (tmp_path / "schemas").mkdir()
+    manifest = tmp_path / "schemas/manifest.json"
+    manifest.write_text(json.dumps({"members": [original, {"path": "new.schema.json"}]}))
+    exec(script, {})
+    for members in ([], [{**original, "sha256": "changed-digest"}]):
+        manifest.write_text(json.dumps({"members": members}))
+        with pytest.raises(SystemExit, match="released schema manifest entry changed"):
+            exec(script, {})

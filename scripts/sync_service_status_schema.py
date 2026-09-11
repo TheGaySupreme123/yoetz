@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tomllib
 from pathlib import Path
 from typing import cast
 
@@ -35,6 +36,9 @@ def _sync_runtime_support(root: Path) -> None:
 
     support_path = root / "support/runtime-support.json"
     support = _load(support_path)
+    support["release_version"] = tomllib.loads((root / "pyproject.toml").read_text())["project"][
+        "version"
+    ]
     support["resource_set_digest"] = resource_set_digest
     without_digest = {key: value for key, value in support.items() if key != "manifest_digest"}
     support["manifest_digest"] = canonical_digest(without_digest)

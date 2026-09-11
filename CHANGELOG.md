@@ -6,6 +6,11 @@ reverse-chronological released versions.
 
 ## Unreleased
 
+## 0.2.0 — 2026-09-11
+
+Official public-alpha package release. See [complete release notes](docs/releases/v0.2.0.md)
+for host integration, observation selection and recovery, upgrade guidance, and known limitations.
+
 ### Changed
 
 - New Codex, Claude Code, and Cursor sessions read guidance and discover tool schemas, then
