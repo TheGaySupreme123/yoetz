@@ -18,6 +18,18 @@ The Codex skill routes to the existing five MCP guidance URIs with installed ref
 The server initializes only the safety floor. Consumer source-inspection restrictions do not
 prohibit developing or debugging Yoetz itself against isolated test state.
 
+A new Codex session reads guidance and discovers tool schemas before calling MCP `start` as
+its first workflow operation, before substantive research, commands, edits, or delegation.
+Guidance reads (including `read_guidance`), discovery commands, and necessary bootstrap clarification
+remain permitted. Hook auto-attachment is a cue, not proof of a current-scope plan: mapped
+SessionStart context directs cooperative `start mode=attach` before `status` with the returned
+ids; unmapped context directs `start` before material work. Same-session compaction uses held
+current ids for `status`. Both startup messages route failures through exact continuations,
+same-request recovery, and a named one-time repair before a blocked-startup user handoff.
+A first non-retryable failure alone does not permit continuing without Yoetz; see
+[startup failure precedence](../../guidance/coverage-and-receipts.md#startup-failure-precedence).
+Codex has no demonstrated PreToolUse deny gate; instruction delivery is not enforcement (#692).
+
 The Codex entrypoint is written directly for Codex and selected by its installer. The other native
 installers select their own skills. Keep installed-source evidence separate from compatibility
 directory discovery; a project skill discovered elsewhere is not proof of this integration.

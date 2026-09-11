@@ -1,12 +1,23 @@
 ---
 name: yoetz
-description: Use for material multi-step, resumable, delegated, or verification-heavy Claude Code work; record it in Yoetz's local ledger and close it with bounded evidence.
+description: Use for material multi-step, resumable, delegated, or verification-heavy Claude Code work. In a new session read guidance and discover schemas, then call start before substantive work; follow recovery on failure and ask for intro and guidance if startup remains blocked.
 ---
 
 # Yoetz for Claude Code
 
 Use this skill when the Claude Code task is material, multi-step, resumable, delegated, or
-verification-heavy. Yoetz records participant-published facts in a local ledger and checks claims
+verification-heavy.
+
+A new session's first workflow operation is `start` (create or attach), after guidance reads,
+tool/schema discovery, and necessary bootstrap clarification. This includes `read_guidance`
+and commands needed to read installed references or discover tool schemas. Call `start`
+before substantive research, commands, edits, or delegation. If it fails, follow exact
+typed continuations and same-request recovery first, including a named one-time repair.
+If startup remains blocked without an applicable recovery path, ask the user for intro and
+guidance; do not invent a substitute workflow. Continuing without a ledger task is permitted
+only by the bounded optional-service fallback in
+[startup failure precedence](references/coverage-and-receipts.md#startup-failure-precedence).
+Yoetz records participant-published facts in a local ledger and checks claims
 against that record. It does not observe the workspace, enforce a process, authenticate authorship,
 or prove correctness. A clean receipt is bounded by its recorded evidence and coverage.
 

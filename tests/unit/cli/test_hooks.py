@@ -305,7 +305,9 @@ def test_session_start_active_with_fake_service(tmp_path: Path) -> None:
     # session/writer for `status`, and `mode=attach` by session id to continue.
     assert session_id in text
     assert writer_id in text
-    assert "Call status with these ids before further material work" in text
+    assert "Then call status with the returned session/writer ids" in text
+    assert text.index("call start with mode=attach") < text.index("Then call status")
+    assert "For compaction in an already-started host session" in text
     assert f"mode=attach and session_id {session_id}" in text
     assert "create_or_attach" in text
     assert "3:sha256:" in text

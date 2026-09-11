@@ -1,6 +1,6 @@
 # When to use Yoetz
 
-Use Yoetz for material multi-step, delegated, resumable, or verification-heavy work. Call `start` before substantive work. Skip Yoetz for trivial questions or edits where the ceremony exceeds the integrity benefit. Current served guidance and typed results outrank memory; verify `yoetz://guidance/workflow.md` before trusting memory again. Cadence: `start` once, `publish_work` once per material transition; `receipt` last. Never claim Yoetz is active until `start` returns.
+Use Yoetz for material multi-step, delegated, resumable, or verification-heavy work. New session: read guidance/discover schemas, then `start` before substantive work. If startup fails, follow recovery first; if still blocked, ask for intro and guidance. Skip trivial questions or edits; never invent a ledger task. Cadence: `start` once, `publish_work` per material transition; `receipt` last. Never claim Yoetz is active until `start` returns. `yoetz://guidance/workflow.md`.
 
 # What Yoetz is
 
@@ -54,8 +54,13 @@ may inspect source and isolated tests; this grants no live-storage authority.
 On `retryable: false`, do not probe or mint a new request; follow only the exact typed continuation.
 An inherited `terminal_unavailable` means delegates make no calls. Read recovery guidance for the
 one permitted coordinator repair. Never run service lifecycle commands for `INTERNAL_ERROR` or a
-result that did not name that command. If optional Yoetz is unavailable, continue authorized work
-and disclose missing ledger/check/receipt coverage; invent no state.
+result that did not name that command. Follow exact continuations and same-request recovery
+before a failed-start handoff. If startup remains blocked without an applicable recovery path,
+ask the user for intro and guidance; do not invent a substitute workflow or continue without a
+ledger task. Optional-service continue-and-disclose applies only after successful startup or a
+named repair/retry ending in terminal unavailability, with no pending write or approval and only
+when the user/host permits it. A first non-retryable failure alone does not qualify. Follow
+[startup failure precedence](coverage-and-receipts.md#startup-failure-precedence); invent no state.
 
 Before material evidence or a completion claim, read `status` and paginate
 `view=evidence` at one frontier. Preserve the filter and original `limit` with every cursor; reuse

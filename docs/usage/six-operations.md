@@ -184,7 +184,7 @@ See [Receipts and coverage](receipts-and-coverage.md) for how to read one.
 
 | Operation | How often |
 | --- | --- |
-| `start` | Once per task, before substantive work. On resume, attach to the existing task instead of starting a second one. |
+| `start` | Once per task, before substantive work. In a new session, read guidance and discover tool schemas first, then call `start` before other workflow operations. On failure, follow exact continuations and same-request recovery, including a named one-time repair; if startup remains blocked without an applicable recovery path, ask for intro and guidance. On resume, attach to the existing task instead of starting a second one. |
 | `publish_work` | One batch per material transition, roughly one to eight events. A normal session is a handful of batches, never one per file, tool call, or message. |
 | `status` | After resume, compaction, or delegate handoff, and before any completion claim. Not between routine tool calls. |
 | `check` | After publishing the completion claim and its evidence, and again after any material edit or new evidence. A readable response to a finding returned by that check needs no recheck; a redacted or unreadable response does. A check with no new events since the last one adds nothing. |

@@ -20,6 +20,19 @@ a Cursor plan from a published Yoetz plan, and names distinct IDE and CLI tool-d
 Full application restart remains conditional on the documented activation mismatch, without
 changing privacy authority.
 
+A new Cursor session reads guidance and discovers tool schemas before calling MCP `start` as
+its first workflow operation, before substantive research, commands, edits, or delegation.
+Guidance reads (including `read_guidance`), discovery commands, and necessary bootstrap clarification
+remain permitted. Hook auto-attachment is a cue, not proof of a current-scope plan: mapped
+SessionStart context directs cooperative `start mode=attach` before `status` with the returned
+ids; unmapped context directs `start` before material work. Same-session compaction uses held
+current ids for `status`. Both startup messages route failures through exact continuations,
+same-request recovery, and a named one-time repair before a blocked-startup user handoff.
+A first non-retryable failure alone does not permit continuing without Yoetz; see
+[startup failure precedence](../../guidance/coverage-and-receipts.md#startup-failure-precedence).
+Cursor has no demonstrated equivalent of Claude's PreToolUse deny gate in this integration;
+instruction delivery is not enforcement (#692).
+
 Design basis, checked 2026-09-09: Cursor's [skills guidance](https://cursor.com/docs/skills)
 uses descriptions for relevance and loads references progressively. Yoetz therefore keeps the
 material-work trigger in metadata and the long procedures in shared references. Cursor's

@@ -289,8 +289,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:b1d39059ca2bac107287d243756e86a33fb1c4526ab64e51326aeeb9a6998b00",
-        "strict": "sha256:1cb4e2208fc5dc0b3579ed6187955788352cf4f7c68ffbb4884b1141347084ec",
+        "policy": "sha256:11517493c1f0bbfe6c4b2a9a285ce993dbbc1d8516bcbb2fde6e7e6e62e67933",
+        "strict": "sha256:f9a479b4e0f9e771b4c29f93f6a7e7da4f4e066b02a1dab5dcc42c89b39acf6f",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -319,6 +319,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     start_description = descriptor_for("start").description
     assert "fresh req_ prefixed random UUID" in start_description
     assert "workspace_ref and external_ref are admitted only as a pair" in start_description
+    assert "A new session's first workflow operation is this call" in start_description
+    assert "for intro and guidance" in start_description
     assert (
         "unique and already in ascending ASCII order" in descriptor_for("publish_work").description
     )

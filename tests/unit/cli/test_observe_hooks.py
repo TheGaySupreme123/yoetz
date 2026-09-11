@@ -4451,6 +4451,12 @@ def test_session_start_auto_attaches_maps_and_drains_for_every_host(
     rendered = out.getvalue().decode()
     assert _START_IDS["task_id"] in rendered
     assert "no ledger task is mapped yet" not in rendered
+    assert "after guidance reads and tool/schema discovery" in rendered
+    assert "before substantive material work" in rendered
+    assert rendered.index("call start with mode=attach") < rendered.index("Then call status")
+    assert "Then call status with the returned session/writer ids" in rendered
+    assert "same-request recovery first" in rendered
+    assert "ask the user for intro and guidance" in rendered
     diagnostics_path = tmp_path / "observation/hook-diagnostics.jsonl"
     if diagnostics_path.exists():
         assert "auto_attach" not in diagnostics_path.read_text()
@@ -4526,7 +4532,13 @@ def test_fresh_session_reattaches_the_ended_workspace_task_and_drains_without_ma
         assert '"reason":"mapping_missing"' not in diagnostics
 
 
-def test_session_start_records_the_typed_cause_when_auto_attach_fails(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "source",
+    [ObservationSource.CODEX_HOOK, ObservationSource.CLAUDE_HOOK, ObservationSource.CURSOR_HOOK],
+)
+def test_session_start_records_the_typed_cause_when_auto_attach_fails(
+    tmp_path: Path, source: ObservationSource
+) -> None:
     from yoetz.ports.control import ControlError
 
     store = LocalObservationStore(_state=tmp_path)
@@ -4547,12 +4559,18 @@ def test_session_start_records_the_typed_cause_when_auto_attach_fails(tmp_path: 
         workspace=locator,
         _state=tmp_path,
         connect=connect,  # type: ignore[arg-type]
-        source=ObservationSource.CLAUDE_HOOK,
+        source=source,
+        _output_event_name="sessionStart" if source is ObservationSource.CURSOR_HOOK else None,
     )
 
     assert code == 0
     assert observe_hooks_module.load_mapping("claude:locked", _state=tmp_path) is None
     assert "no ledger task is mapped yet" in out.getvalue().decode()
+    rendered = out.getvalue().decode()
+    assert "After guidance reads, tool/schema discovery" in rendered
+    assert "call start to attach a task before substantive material work" in rendered
+    assert "same-request recovery first" in rendered
+    assert "ask the user for intro and guidance" in rendered
     diagnostics = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
     assert '"reason":"vault_locked"' in diagnostics
     assert '"event":"SessionStart"' in diagnostics

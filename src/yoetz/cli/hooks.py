@@ -110,8 +110,16 @@ _INTAKE_CUE_BYTES: Final = 512
 YOETZ_START_TOOL_NAMES: Final = frozenset(
     {"start", "mcp__yoetz__start", "mcp__plugin_yoetz_yoetz__start"}
 )
+_STARTUP_RECOVERY_CONTEXT: Final = (
+    "If start fails, follow exact continuations and same-request recovery first, including a "
+    "named one-time repair. If startup remains blocked without an applicable recovery path, "
+    "ask the user for intro and guidance; do not invent a workflow or continue without a ledger "
+    "task outside the documented optional-service fallback."
+)
 INACTIVE_CONTEXT: Final = (
-    "No Yoetz task is mapped to this session; call start before substantive material work."
+    "No Yoetz task is mapped to this session; call start before substantive material work. "
+    "Guidance reads, tool/schema discovery, and necessary bootstrap clarification come first. "
+    + _STARTUP_RECOVERY_CONTEXT
 )
 _UNAVAILABLE_CONTEXT: Final = (
     "Yoetz service is unavailable for this mapped session; no live receipt can be promised."
@@ -573,8 +581,8 @@ def _active_context(mapping: LifecycleMapping, frontier: str | None) -> str:
 
     A bare ``task_id`` is not an attach or status selector, and the hook's own
     ``workspace_ref``/``external_ref`` pair is never what an agent would guess, so
-    the context carries the mapped session and writer ids and says how to
-    continue the same task instead of creating a sibling.
+    the context carries the mapping snapshot and the attach selector. New
+    sessions attach before status; compaction keeps the held cooperative route.
     """
 
     token = frontier if frontier is not None else mapping.last_frontier
@@ -582,11 +590,13 @@ def _active_context(mapping: LifecycleMapping, frontier: str | None) -> str:
     return (
         f"Yoetz task {mapping.yoetz_task_id} is mapped to this session at frontier "
         f"{frontier_text} as session_id {mapping.yoetz_session_id} and writer_id "
-        f"{mapping.yoetz_writer_id}. Call status with these ids before further material work. "
-        "To continue this task from your own tools, call start with mode=attach and "
-        f"session_id {mapping.yoetz_session_id}; do not call start with "
+        f"{mapping.yoetz_writer_id}. For a new host session, after guidance reads and tool/schema "
+        "discovery, call start with mode=attach and "
+        f"session_id {mapping.yoetz_session_id} before substantive material work. "
+        "Then call status with the returned session/writer ids. For compaction in an "
+        "already-started host session, use your held current ids for status. Do not call start with "
         "mode=create_or_attach and a new workspace_ref/external_ref pair, which creates a "
-        "sibling task."
+        "sibling task. " + _STARTUP_RECOVERY_CONTEXT
     )
 
 

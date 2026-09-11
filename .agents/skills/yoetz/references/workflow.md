@@ -11,6 +11,20 @@ part of installation or recovery.
 
 ## Start and resume
 
+A new session's first workflow operation is `start` (create or attach), after guidance reads,
+tool/schema discovery, and necessary bootstrap clarification. This includes `read_guidance`
+and commands needed to read installed references or discover tool schemas. Call `start`
+before substantive research, commands, edits, or delegation. If it fails, follow exact
+typed continuations and same-request recovery first, including a named one-time repair.
+If startup remains blocked without an applicable recovery path, ask the user for intro and
+guidance; do not invent a substitute workflow. Continuing without a ledger task is permitted
+only by the bounded optional-service fallback in startup failure precedence.
+
+Hook mapping, plugin registration, and SessionStart context are cues, not a substitute for that
+call and not proof that the current plan is in force. Trivial questions or edits still skip Yoetz.
+See [startup failure precedence](coverage-and-receipts.md#startup-failure-precedence) for the exact
+order of recovery, user handoff, and the bounded optional-service fallback.
+
 `start` resumes by one of two selectors (never by bare `task_id`):
 
 1. `session_id` — continue the exact session you already hold.
@@ -44,7 +58,8 @@ result or a typed boundary.
 | The same-task pair/session cannot be recovered, every prior write has a known terminal outcome, and the user declares a bounded remaining or repaired verification scope | Start one intentional sibling with `mode=create`, the same canonical workspace, and a different stable `external_ref`. Give it a fresh plan, evidence, checks, and native binding; begin with a bounded handoff note that the predecessor receipt remains separate and unresolved. | Silently replace the task, inherit findings/obligations/evidence, reuse cross-task IDs without an existing contract, or invent lineage. |
 | Recovery is exhausted but no new scope is declared, or a sibling would only make the old receipt look clean | Keep the old receipt and limitations, report the bounded failure, and wait for a supported continuation decision. | Loop through new siblings, move unresolved findings out of view, or present the latest sibling as whole-work closure. |
 | The ledger has immutable proof limits, writes are terminal, and a fresh review of the repaired/current state is wanted | Use one explicitly scoped verification sibling on a healthy authorized binding. Publish its current-state plan and obligations, collect new admissible evidence/checks, verify native mapping, and disclose the old receipt's limits. | Repeat work only to obtain a smaller finding count, drop outstanding acceptance criteria, or present the sibling as proof that the old task was resolved. |
-| Yoetz remains unavailable after its named one-time repair/retry, or returns a non-retryable error | Continue ordinary work only when the user/host permits it and disclose which subsequent work lacks Yoetz proof. Once healthy, use the sibling row only when a tracked continuation is still wanted and no write is ambiguous. | Claim a live task, finding, verdict, or receipt, or reset old findings by switching tasks. |
+| The first `start` fails | Follow exact continuations and same-request recovery first, including a named one-time repair. Outside the fallback below, if startup remains blocked without an applicable recovery path, ask the user for intro and guidance and pause material work. | Invent a substitute workflow, skip recovery, keep working without a ledger task, or treat hook mapping as activation. |
+| After successful startup Yoetz becomes unavailable, or a named one-time repair/retry ends in terminal unavailability | Continue ordinary work only when Yoetz is optional, the user/host permits it, and no write or approval remains pending; disclose which subsequent work lacks Yoetz proof. A first non-retryable `start` failure alone does not qualify. Once healthy, use the sibling row only when a tracked continuation is still wanted and no write is ambiguous. | Claim a live task, finding, verdict, or receipt, bypass startup handoff, or reset old findings by switching tasks. |
 
 An explicit sibling is a new ledger boundary. Its receipt covers only its newly declared scope and
 newly observed work. The predecessor's receipt, actionable findings, feedback obligations, and
@@ -57,9 +72,10 @@ have committed, its operation-recovery row always wins over the sibling row.
 “Not give up” means using this one bounded, explicit verification handoff after the known terminal
 boundary. It does not mean creating tasks until a receipt looks clean.
 
-Tell the user that Yoetz is being used, and claim activation only after `start` returns. If the
-optional service is unavailable, continue the task unless the user or host requires it; disclose
-which ledger, check, or receipt is missing. Never invent state.
+Tell the user that Yoetz is being used, and claim activation only after `start` returns. Apply
+[startup failure precedence](coverage-and-receipts.md#startup-failure-precedence) before any
+continue-and-disclose fallback. A first non-retryable failure does not itself permit material work
+without a task. Never invent ledger, check, or receipt coverage.
 
 ## Material work
 

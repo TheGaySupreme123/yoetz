@@ -362,7 +362,8 @@ query.
 | Same-task pair/session recovery is exhausted, every prior write has a known terminal outcome, and the user declares a remaining or repaired verification scope | On one healthy, authorized binding, start one intentional sibling with `mode=create`, the same canonical workspace, and a different stable `external_ref`. Give it a fresh plan naming only that scope and establish its native host mapping from the returned session/task. | Silently replacing the task, inheriting old findings/obligations/evidence, reusing cross-task evidence IDs without a contract, or inventing lineage fields. |
 | Recovery is exhausted but no new scope is declared, or a sibling would only make the old receipt look clean | Keep the old receipt, findings, obligations, and limitations; report the bounded failure and wait for a supported continuation decision. | Creating an unbounded task sequence or presenting a sibling as whole-work closure. |
 | The current ledger has immutable proof limits and a fresh review of repaired/current state is wanted | Use one explicitly scoped verification sibling only after known outcomes and on a healthy authorized binding. Publish its current-state plan, new evidence, and checks; disclose the predecessor receipt's unresolved limits. | Repeating work only to obtain a smaller count, dropping acceptance criteria, or claiming the sibling resolved the predecessor. |
-| Yoetz remains unavailable after the documented one-time repair/retry, or returns a non-retryable error | Continue ordinary authorized work and disclose the work lacking Yoetz proof. Use the sibling row only later, once service and binding are healthy and a tracked continuation is still wanted. | Claiming a live task, finding, verdict, or receipt, or resetting old findings by switching tasks. |
+| The first `start` fails | Follow exact continuations and same-request recovery first, including a named one-time repair. Outside the fallback below, if startup remains blocked without an applicable recovery path, ask the user for intro and guidance and pause material work. | Skipping recovery, inventing a substitute workflow, or continuing without a ledger task. |
+| After successful startup Yoetz becomes unavailable, or a named one-time repair/retry ends in terminal unavailability | Continue ordinary work only when Yoetz is optional, the user/host permits it, and no write or approval remains pending; disclose the work lacking Yoetz proof. A first non-retryable `start` failure alone does not qualify. Use the sibling row only later, once service and binding are healthy and a tracked continuation is still wanted. | Claiming a live task, finding, verdict, or receipt, bypassing startup handoff, or resetting old findings by switching tasks. |
 
 An explicit sibling is a new ledger boundary. Its receipt covers only its newly declared scope and
 newly observed work. The predecessor's receipt, actionable findings, feedback obligations, evidence,
@@ -375,11 +376,39 @@ boundary, not repeated task creation until a receipt looks clean.
 
 ## Degraded and unavailable behavior
 
-Never invent success. State the unavailable or degraded boundary, continue ordinary work when allowed, and do not claim a live task, finding, verdict, or receipt. If the host requires Yoetz, stop at that host-owned requirement.
+Never invent success. State the unavailable or degraded boundary and do not claim a live task,
+finding, verdict, or receipt. If the host requires Yoetz, stop at that host-owned requirement.
 
-Read `retryable` on every error before acting. A `retryable: false` error is terminal for that call: do not repeat it with a new `request_id`, do not probe with other Yoetz operations to "confirm", and do not rewrite state to work around it. Record the `correlation_id`; if a shell is available, run `yoetz service diagnostics --correlation-id <id>` once and report its bounded record, then continue without Yoetz. A `SERVICE_UNAVAILABLE` error whose message names a repair command (for example `yoetz service restart` when the running service belongs to a different Yoetz installation) is the one case where a single repair is appropriate: run exactly that command if the host allows shell use, then retry the original call once with the same `request_id`. If it fails again, treat Yoetz as unavailable for the rest of the task and say so. Lifecycle commands (`yoetz service stop`, `service run`, `service restart`) are never a response to `INTERNAL_ERROR` or to any message that did not name that exact command.
+### Startup failure precedence
 
-One typed exception: an error carrying `safe_details.continuation: vault_initialization_required` is a bounded first-run handoff, not an ordinary terminal error. The vault was never initialized, nothing was written, and no unlock or recovery path applies. Suspend the original request, read [Setup and consent](request-templates.md#setup-and-consent), and follow the continuation exactly once: run the carried `prepare_command`, present the returned pending's danger text and digests to the user, and wait for their exact decision; if a pending consent action already exists, read it with `yoetz consent status` instead of preparing another. Yoetz generates and stores the initialization secret locally — never request, receive, or transmit a secret or recovery material. Relaying an approval through the carried `authorize_command` is valid only for an allowlisted first-party agent-chat client acting on an explicit current-chat instruction; every other host directs the user to run the carried `review_command` on a local terminal and waits. When the ceremony reports ready, replay the exact original `request_id` and body once (`replay_request_id` names it) and continue normally; on denial or expiry, do not prepare again in the same task — state the boundary and continue without Yoetz. Never create a replacement `start`, and never treat chat assent as authority.
+Apply these rules in order; a first-start failure does not bypass recovery or automatically permit
+continuing without Yoetz:
+
+1. Follow an exact typed continuation, including `vault_initialization_required`, with its existing
+   consent and request identity. A pending approval remains pending; do not turn it into an outage
+   fallback. Guidance reads, tool/schema discovery, and necessary bootstrap clarification are
+   permitted before `start` and during recovery.
+2. Recover an unknown or pending write through the same-request rules above. A lost `start`
+   response without session/writer ids permits one replay of the exact original body and request
+   ID. Retain and report any remaining pending, quarantined, or unknown outcome; do not create a
+   sibling or continue as if it failed.
+3. If the result names a permitted one-time service repair, perform that exact repair when the
+   host allows it, then retry the original request once with the same request ID. A repair command
+   in the typed error message qualifies; it need not be a `safe_details.continuation` value.
+4. If startup still has no ledger task and no applicable recovery path, ask the user for intro and
+   guidance and pause material work. This includes a first non-retryable `start` error without a
+   named repair, or a denied/expired initialization decision. One bounded diagnostic read does not
+   satisfy the repair exception. Do not invent a substitute workflow.
+5. The exception to that handoff is optional Yoetz remaining unavailable after the named
+   repair/retry reaches a terminal outcome. Only then, or after a previously successful startup,
+   may ordinary authorized work continue with missing coverage disclosed, provided the user/host
+   permits it and no write or approval remains pending. Required review remains unmet.
+
+These rules take precedence over general outage fallback language below.
+
+Read `retryable` on every error before acting. A `retryable: false` error is terminal for that call: do not repeat it with a new `request_id`, do not probe with other Yoetz operations to "confirm", and do not rewrite state to work around it. Record the `correlation_id`; if a shell is available, run `yoetz service diagnostics --correlation-id <id>` once and report its bounded record, then apply startup failure precedence before continuing any material work. A `SERVICE_UNAVAILABLE` error whose message names a repair command (for example `yoetz service restart` when the running service belongs to a different Yoetz installation) is the one case where a single repair is appropriate: run exactly that command if the host allows shell use, then retry the original call once with the same `request_id`. If it fails again, treat Yoetz as unavailable for the rest of the task and say so. Lifecycle commands (`yoetz service stop`, `service run`, `service restart`) are never a response to `INTERNAL_ERROR` or to any message that did not name that exact command.
+
+One typed exception: an error carrying `safe_details.continuation: vault_initialization_required` is a bounded first-run handoff, not an ordinary terminal error. The vault was never initialized, nothing was written, and no unlock or recovery path applies. Suspend the original request, read [Setup and consent](request-templates.md#setup-and-consent), and follow the continuation exactly once: run the carried `prepare_command`, present the returned pending's danger text and digests to the user, and wait for their exact decision; if a pending consent action already exists, read it with `yoetz consent status` instead of preparing another. Yoetz generates and stores the initialization secret locally — never request, receive, or transmit a secret or recovery material. Relaying an approval through the carried `authorize_command` is valid only for an allowlisted first-party agent-chat client acting on an explicit current-chat instruction; every other host directs the user to run the carried `review_command` on a local terminal and waits. When the ceremony reports ready, replay the exact original `request_id` and body once (`replay_request_id` names it) and continue normally; on denial or expiry, do not prepare again in the same task — state the boundary and apply startup failure precedence. Never create a replacement `start`, and never treat chat assent as authority.
 
 ### Inherited unavailability and delegation
 
