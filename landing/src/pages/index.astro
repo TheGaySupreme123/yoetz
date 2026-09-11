@@ -8,6 +8,8 @@ const GITHUB = "https://github.com/TheGaySupreme123/yoetz";
 const PYPI = "https://pypi.org/project/yoetz/";
 const NPM = "https://www.npmjs.com/package/yoetz";
 const VERSION = landingPackage.version;
+const RELEASES = `${GITHUB}/releases`;
+const ROADMAP = `${GITHUB}/issues`;
 const INSTALL_COMMAND = `uv tool install --managed-python --python 3.14.6 "yoetz==${VERSION}"`;
 const AGENT_PROMPT = `I want to install Yoetz (${GITHUB}). Start by fetching its agent install guide and follow it exactly:
 
@@ -16,7 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/TheGaySupreme123/yoetz/main/docs/us
 It tells you what to run yourself, what to ask me, and where to hand me the terminal. Then help me through the CLI: setup's questions are mine to answer in my own terminal, and show me any proposed change before it is applied.`;
 const TITLE = "Yoetz: honest completion checks for AI coding agents";
 const DESCRIPTION =
-  "Yoetz is a local-first, open-source work ledger for AI coding agents. An agent publishes what it did; Yoetz checks the record and issues a receipt that states what was verified, at what coverage, and what is still open.";
+  "Yoetz is a local-first, open-source work ledger for AI coding agents. An agent publishes what it did; Yoetz checks the record and issues a receipt that states what was verified, at what coverage, and what is still open. First-party for Codex, Claude Code, and Cursor.";
 const structuredData = {
   "@context": "https://schema.org",
   "@type": "SoftwareSourceCode",
@@ -41,6 +43,15 @@ const amber = "#fbbf24";
 const amberDeep = "#f59e0b";
 const amberSoft = "#fcd34d";
 
+// Host dressing for the terminal replay: each script plays as its own CLI.
+type HostKey = "codex" | "claude" | "cursor";
+type Host = { name: string; logo: string; prompt: string; accent: string; think: string; dark: boolean };
+const hosts: Record<HostKey, Host> = {
+  codex: { name: "Codex", logo: "/assets/openai.svg", prompt: "›", accent: "#7dd3fc", think: "•", dark: true },
+  claude: { name: "Claude Code", logo: "/assets/claude.svg", prompt: ">", accent: "#f4a58a", think: "⏺", dark: false },
+  cursor: { name: "Cursor", logo: "/assets/cursor.svg", prompt: "❯", accent: "#e2e8f0", think: "◆", dark: true },
+};
+
 type TermLine = {
   pre?: string;
   preC?: string;
@@ -52,15 +63,16 @@ type TermLine = {
   d?: number;
 };
 
-type TermScript = { title: string; lines: TermLine[] };
+type TermScript = { host: HostKey; title: string; lines: TermLine[]; hostName?: string; logo?: string; dark?: boolean };
 
-// Four replays, one per visit. Every finding shown maps to a real
-// deterministic rule (work-integrity/0.1.0) or a semantic reviewer
+// Four replays, one per visit, one per host. Every finding shown maps to a
+// real deterministic rule (work-integrity/0.1.0) or a semantic reviewer
 // challenge, and every receipt conclusion is a real one.
 const termScripts: TermScript[] = [
   {
     // stale_evidence_for_changed_state + requested_item_never_attempted
-    title: "codex · ~/packetforge",
+    host: "codex",
+    title: "~/packetforge",
     lines: [
       { pre: "$", preC: glow, rest: "codex", restC: bright, d: 260 },
       { pre: "›", preC: "#7dd3fc", rest: "Refactor the rate limiter. Keep the /limits response shape and make sure tests pass.", restC: light, ts: 8, d: 300 },
@@ -84,16 +96,19 @@ const termScripts: TermScript[] = [
     ],
   },
   {
-    // failed_work_omitted
-    title: "codex · ~/checkout-api",
+    // failed_work_omitted, caught through Claude Code hook observation
+    host: "claude",
+    title: "~/checkout-api",
     lines: [
-      { pre: "$", preC: glow, rest: "codex", restC: bright, d: 260 },
+      { pre: "$", preC: glow, rest: "claude", restC: bright, d: 260 },
       { pre: "›", preC: "#7dd3fc", rest: "Move session storage to Redis. Logins must keep working across deploys.", restC: light, ts: 8, d: 300 },
       { d: 90 },
-      { pre: "•", preC: faint, rest: "Opening a yoetz task so the whole run stays on the record.", restC: soft, ts: 9, d: 200 },
-      { pre: "⚙", preC: teal, op: "yoetz", rest: "start · publish_work · plan, 2 obligations", restC: dim, d: 300 },
+      { pre: "⚙", preC: teal, op: "yoetz", rest: "SessionStart hook · attached to task issue-204", restC: dim, d: 240 },
+      { pre: "•", preC: faint, rest: "Yoetz is already on this task. Recording the plan.", restC: soft, ts: 9, d: 200 },
+      { pre: "⚙", preC: teal, op: "yoetz", rest: "publish_work · plan, 2 obligations", restC: dim, d: 300 },
       { pre: "⚡", preC: amber, rest: "Edited src/sessions.py  (+96 −41)", restC: dim, d: 200 },
       { pre: "⚡", preC: amber, rest: "Ran pytest · 2 failed · 38 passed", restC: dim, d: 240 },
+      { pre: "⚙", preC: teal, op: "yoetz", rest: "publish_work · result_recorded · failure · exit 1", restC: dim, d: 240 },
       { pre: "⚡", preC: amber, rest: "Fixed TTL rounding · Ran pytest · 40 passed", restC: dim, d: 360 },
       { d: 90 },
       { pre: "•", preC: faint, rest: "Green now. Claiming done, citing the passing run.", restC: soft, ts: 9, d: 220 },
@@ -109,10 +124,11 @@ const termScripts: TermScript[] = [
     ],
   },
   {
-    // completion_with_open_obligations
-    title: "codex · ~/imgproxy",
+    // completion_with_open_obligations, in Cursor
+    host: "cursor",
+    title: "~/imgproxy",
     lines: [
-      { pre: "$", preC: glow, rest: "codex", restC: bright, d: 260 },
+      { pre: "$", preC: glow, rest: "cursor-agent", restC: bright, d: 260 },
       { pre: "›", preC: "#7dd3fc", rest: "Add WebP output to the image pipeline. Keep peak memory where it is.", restC: light, ts: 8, d: 300 },
       { d: 90 },
       { pre: "•", preC: faint, rest: "Two asks, so two obligations on the ledger before I touch code.", restC: soft, ts: 9, d: 200 },
@@ -135,9 +151,10 @@ const termScripts: TermScript[] = [
   },
   {
     // semantic reviewer challenge; deterministically clean receipt
-    title: "codex · ~/authsvc",
+    host: "claude",
+    title: "~/authsvc",
     lines: [
-      { pre: "$", preC: glow, rest: "codex", restC: bright, d: 260 },
+      { pre: "$", preC: glow, rest: "claude", restC: bright, d: 260 },
       { pre: "›", preC: "#7dd3fc", rest: "Rotate the JWT signing key. No one gets logged out mid-session.", restC: light, ts: 8, d: 300 },
       { d: 90 },
       { pre: "•", preC: faint, rest: "Recording the plan. This one deserves semantic review at the end.", restC: soft, ts: 9, d: 200 },
@@ -146,7 +163,7 @@ const termScripts: TermScript[] = [
       { pre: "⚡", preC: amber, rest: "Ran pytest · 47 passed", restC: dim, d: 360 },
       { d: 90 },
       { pre: "•", preC: faint, rest: "Claiming done, and asking for the full check, reviewer included.", restC: soft, ts: 9, d: 220 },
-      { pre: "⚙", preC: teal, op: "yoetz", rest: "publish_work · claim_recorded · check · semantic_required", restC: dim, d: 300 },
+      { pre: "⚙", preC: teal, op: "yoetz", rest: "publish_work · claim_recorded · check · semantic review · ChatGPT plan", restC: dim, d: 300 },
       { pre: "✗", preC: amberDeep, rest: "reviewer: tokens signed by the old key are never verified during the grace window", restC: amberSoft, finding: true, d: 400 },
       { d: 90 },
       { pre: "•", preC: faint, rest: "The reviewer is right — I tested new-key issuance, not old-key acceptance.", restC: soft, ts: 9, d: 220 },
@@ -158,99 +175,63 @@ const termScripts: TermScript[] = [
     ],
   },
 ];
+for (const sc of termScripts) {
+  const h = hosts[sc.host];
+  sc.hostName = h.name;
+  sc.logo = h.logo;
+  sc.dark = h.dark;
+  for (const ln of sc.lines) {
+    if (ln.pre === "›") { ln.pre = h.prompt; ln.preC = h.accent; }
+    else if (ln.pre === "•") ln.pre = h.think;
+  }
+}
 const termLines = termScripts[0].lines;
+const firstHost = hosts[termScripts[0].host];
 
-// Full session: one task, start to receipt, grouped into six phases.
-type SessLine = {
-  who: "user" | "agent" | "tool" | "yoetz" | "finding" | "receipt" | "review";
-  op?: string;
-  text: string;
-  note?: string;
-};
-type Phase = { title: string; ops: string; catch?: boolean; open?: boolean; lines: SessLine[] };
+// How it works: four nodes, one sentence each.
+const flow = [
+  { key: "publish", title: "Publish", ops: "start · publish_work", text: "The agent writes its plan, work, results, and claims to the ledger." },
+  { key: "ledger", title: "Ledger", ops: "append-only · local", text: "On your machine. Nothing is inferred from your repository." },
+  { key: "check", title: "Check", ops: "check · respond", text: "Rules catch gaps in the record. An optional reviewer model challenges the work." },
+  { key: "receipt", title: "Receipt", ops: "receipt", text: "What was checked, at what coverage, and what is still open." },
+];
 
-const phases: Phase[] = [
+// Three looping scenes: what Yoetz does while the agent works.
+const scenes = [
+  { key: "records", title: "Takes in both", text: "What the agent says it did, and what it actually did." },
+  { key: "checks", title: "Checks the claim", text: "When the record disagrees, that is a finding." },
+  { key: "assists", title: "Stays until done", text: "Fix, recheck, receipt." },
+];
+
+// What's new. Every line is bounded by the release notes.
+const features = [
   {
-    title: "The agent opens a task and declares what done means",
-    ops: "start · publish_work",
-    lines: [
-      { who: "user", text: "webhook_client.py does a single POST with no retry, so a downstream blip during checkout drops the notification silently. Add exponential backoff, cap it at 5 attempts, and test both the retry path and the exhausted path." },
-      { who: "agent", text: "This is delivery-critical code with two separate verification paths, so I'll track it through yoetz rather than edit and report back." },
-      { who: "tool", op: "start", text: 'yoetz start {"mode":"create_or_attach","task_title":"Add backoff retry to webhook_client","external_ref":"issue-482", …}', note: "create_or_attach on the (workspace, issue) pair: creates on first use, attaches on any later conversation about the same issue." },
-      { who: "yoetz", op: "start", text: '{"task_id":"tsk_9c2e1b40","session_id":"ses_9c2e1b40-01","writer_id":"wri_9c2e1b40-01","expected_frontier":{"sequence":"0","head_digest":"genesis"}}', note: "Opens the task and issues a session plus a distinct logical writer identity." },
-      { who: "tool", op: "publish_work", text: 'plan_published{summary:"Add capped exponential-backoff retry, cover retry and exhausted-retry paths"} + obligation_published×2: obl-01 "implement backoff retry, cap 5" · obl-02 "full suite still green"', note: "The plan makes completion scope inspectable; Yoetz never infers obligations from source or prompt." },
-      { who: "yoetz", op: "publish_work", text: 'accepted: 3 events, frontier {sequence:"3"}' },
-    ],
+    key: "hooks",
+    title: "Hooks that attach themselves",
+    text: "Observed work lands on the right task, survives reattach, and records why when it cannot.",
   },
   {
-    title: "The agent records the work, and a test that failed",
-    ops: "publish_work",
-    lines: [
-      { who: "agent", text: "Implementing the retry loop: exponential backoff (base 0.5s, ×2 per attempt), hard cap of 5 attempts. Writing test_retry_backoff and test_retry_exhausted." },
-      { who: "agent", text: "New tests: 2 passed. Then the full suite: 1 failed, 41 passed. test_webhook_client_default_timeout broke, because the retry loop re-resolves the timeout to the library default on every attempt." },
-      { who: "tool", op: "publish_work", text: 'batch: action_recorded{act-01 "pytest -q"} + result_recorded{res-fail-01, outcome:"failure", exit_status:1} + evidence_recorded{evd-fail-01 "full-suite output, 1 failed / 41 passed"} + result_recorded{res-new-01, outcome:"success"} + evidence_recorded{evd-new-01 "new retry tests, 2 passed"}', note: "The failing result gets recorded too; Yoetz does not watch the workspace; if a fact is not published it does not exist on the ledger." },
-      { who: "yoetz", op: "publish_work", text: 'accepted: 5 events, frontier {sequence:"8"}' },
-    ],
+    key: "consent",
+    title: "Consent in conversation",
+    text: "Your agent shows one before/after privacy preview and relays your one approval. Drift fails closed. Some hosts finish the approval in your terminal.",
   },
   {
-    title: "The agent claims done, citing only the passing tests",
-    ops: "status · publish_work",
-    lines: [
-      { who: "tool", op: "status", text: 'status {view:"compact"}', note: "Counters and blocking conditions, not a verdict; status never says “ready to close.”" },
-      { who: "yoetz", op: "status", text: '{"closure_readiness":{"declared_obligation_count":2,"open_obligation_count":2,"unanswered_finding_count":0,"receipt_blocking_finding_count":0,"blocking_conditions":["obligations_open"]}}' },
-      { who: "agent", text: "Done: added exponential backoff (5-attempt cap), new tests cover both paths. Publishing the completion claim now.", note: "status just reported obligations_open. It is a counter, not a gate, and the agent proceeds anyway." },
-      { who: "tool", op: "publish_work", text: 'claim_recorded{clm-01, claim_kind:"completion", statement:"Retry implemented per issue-482; new tests pass.", supporting_refs:["evd-new-01"]}', note: "supporting_refs cites only the passing evidence; the failing result is on the ledger but not linked from the claim." },
-      { who: "yoetz", op: "publish_work", text: 'accepted: 1 event, frontier {sequence:"9"}' },
-    ],
+    key: "correct",
+    title: "Correct a claim, don't stack one",
+    text: "A revised completion claim names what it replaces and what fell short.",
   },
   {
-    title: "Yoetz checks the record and catches what was missed",
-    ops: "check",
-    catch: true,
-    open: true,
-    lines: [
-      { who: "tool", op: "check", text: 'check {mode:"semantic_if_configured", max_findings:"3"}' },
-      { who: "yoetz", op: "check", text: '{"verdict":"action_required","semantic_status":"succeeded","checked_frontier":{"sequence":"9"}}', note: "Both engines ran: deterministic policy packs first, then the semantic reviewer over a bounded packet built from the ledger." },
-      { who: "finding", text: 'finding fnd-01 · failed_work_omitted · policy work-integrity/0.1.0 · priority 1 · origin deterministic: "Recorded failed work is omitted from the published account. Disclose the failed work or revise the account."', note: "Three published facts, checked against each other. No model, no repository access, no interpretation." },
-      { who: "review", text: 'reviewer challenge · origin semantic_model_derived · advisory: "The exhausted-retries path still drops the notification with no durable record. issue-482 exists because silent drops hurt checkout. Evidence a dead-letter write, or revise the plan to say drops are acceptable."', note: "The catch rules can't make: the reviewer model reads the ledger packet, never your repository, and challenges the work like a second agent." },
-      { who: "agent", text: "Both catches are real. I ran the full suite, saw the timeout test fail, and still wrote the claim around only the new tests. And the reviewer is right: after five failed attempts the notification just vanishes. Fixing both before I say done again." },
-    ],
-  },
-  {
-    title: "The agent fixes both and revises its claim",
-    ops: "publish_work · respond",
-    lines: [
-      { who: "agent", text: "Fix one: thread the caller-configured timeout through every retry attempt. Fix two: on exhaustion, write the payload to a dead-letter table before raising, with a test for it. pytest -q → 44 passed, 0 failed." },
-      { who: "tool", op: "publish_work", text: 'batch: action_recorded{act-02 "preserve caller-configured timeout"} + action_recorded{act-03 "dead-letter write on exhaustion"} + result_recorded{res-fix-01, outcome:"success"} + evidence_recorded{evd-fix-01 "full-suite output, 44 passed / 0 failed"}' },
-      { who: "tool", op: "respond", text: 'respond {finding_id:"fnd-01", finding_frontier:{sequence:"9"}, disposition:"acknowledged", reason:"Regression fixed and disclosed; reviewer challenge answered with a dead-letter write. See act-02, act-03, evd-fix-01."}', note: "A response records a disposition. It clears the unanswered count and stops the next check minting a duplicate, but it never erases the finding or the receipt-blocking set." },
-      { who: "tool", op: "publish_work", text: 'claim_recorded{clm-02, statement:"Retry implemented per issue-482, with a dead-letter write on exhaustion. Full-suite regression from the first pass is fixed; full suite passes.", obligation_refs:["obl-01","obl-02"], supporting_refs:["evd-new-01","evd-fail-01","evd-fix-01"]}', note: "The revised claim links the earlier failure alongside the fix instead of omitting it, and answers both obligations via obligation_refs." },
-      { who: "yoetz", op: "publish_work", text: 'accepted: 1 event, frontier {sequence:"17"}' },
-    ],
-  },
-  {
-    title: "Yoetz rechecks, and the receipt still carries the finding",
-    ops: "check · receipt",
-    lines: [
-      { who: "tool", op: "check", text: 'check {mode:"semantic_if_configured"}', note: "Recheck required: the fix records and the revised claim are new material events. A response on its own would not have required one." },
-      { who: "yoetz", op: "check", text: '{"verdict":"no_issue_detected","findings":[],"semantic_status":"succeeded","checked_frontier":{"sequence":"17"}}', note: "Clean at this frontier, and the reviewer raised no new challenge. That still does not retroactively clear fnd-01." },
-      { who: "tool", op: "receipt", text: 'receipt {format:"markdown", include:"standard"}' },
-      { who: "receipt", text: "Yoetz receipt at frontier 17: unresolved findings remain. One actionable finding was recorded earlier in this task (failed_work_omitted, frontier 9): a completion claim's supporting evidence omitted a recorded failing result. Disposition: acknowledged, with the fix and a passing full-suite result attached. It remains in the receipt-blocking set per policy.", note: "No disposition resolves a finding, so a later clean check cannot produce a clean receipt." },
-      { who: "receipt", text: "Coverage · publication_channels: [cooperative_mcp] · artifact_observation: published_only · check_types: [deterministic, semantic_model_derived] · ledger_freshness: current. Nothing observed the artifacts; only the published record was checked. Not proof of correctness." },
-      { who: "agent", text: "Summary for the user: retry with a 5-attempt cap is implemented, exhausted retries land in a dead-letter table, full suite green (44/0). My first claim omitted a failure I had already recorded; the deterministic check caught it, and the reviewer pushed me to stop silent drops. Both fixed, and the receipt still reads unresolved_findings_remain, by design.", note: "The final answer stays no stronger than the receipt." },
-    ],
+    key: "recheck",
+    title: "Findings clear only by recheck",
+    text: "A response records a disposition. Only a later qualifying check resolves the finding.",
   },
 ];
-// What's next: simple coming-soon items.
-const coming = [
-  { title: "Claude Code support", blurb: "First-party support for Claude Code is next in line.", badge: "very soon", icon: "/assets/claude.svg" },
-  {
-    title: "Cursor and more harnesses",
-    blurb: "More first-party integrations for the agents you already use. Any MCP-capable agent works today.",
-    badge: "coming",
-    logos: ["/assets/cursor.svg", "/assets/opencode.svg", "/assets/grok.png", "/assets/githubcopilot.svg"],
-  },
-  { title: "Deeper Codex support", blurb: "Codex already gets live observation of what the agent actually does. We are making that integration even better.", badge: "in progress" },
-  { title: "Hosted Yoetz and more", blurb: "A hosted option, more than one agent on a task, sessions you can pick back up, and more powerful checks.", badge: "in the works" },
+
+// Coming soon.
+const next = [
+  { key: "delegate", title: "Delegate", text: "A parent mints a child task with an expiring handle. The child publishes, checks, and gets its own receipt." },
+  { key: "rollup", title: "Roll up", text: "Parent receipts carry child findings one level up. A clean child receipt never proves integration." },
+  { key: "coordinate", title: "Coordinate", text: "Two live tasks in one repository get grouped. With consent on both sides, each is told the other declared the same path." },
 ];
 ---
 
@@ -279,8 +260,7 @@ const coming = [
     <script type="application/ld+json" set:html={JSON.stringify(structuredData)} />
     <noscript>
       <style>
-        html .fl-phase { opacity: 1; transform: none; }
-        .term-body .tl[hidden] { display: block; }
+        .term-body .tl[hidden] { display: flex; }
       </style>
     </noscript>
   </head>
@@ -302,52 +282,32 @@ const coming = [
             <span class="line">Agents claim they're done.</span>
             <span class="line grad">Yoetz checks if they actually did.</span>
           </h1>
-          <p class="ds-lead" style="margin-top: 20px;">
-            An open-source ledger where your agent records its work, and an
-            independent check on the claims it makes there. It runs on your
-            machine today; a hosted option is coming.
-          </p>
+          <div class="hero-hosts" aria-label="Supported agents">
+            <span class="hero-hosts-label">Supported</span>
+            <span class="host-pill"><img src="/assets/openai.svg" alt="" /> Codex</span>
+            <span class="host-pill"><img src="/assets/claude.svg" alt="" /> Claude Code <em class="new">new</em></span>
+            <span class="host-pill"><img src="/assets/cursor.svg" alt="" /> Cursor <em class="new">new</em></span>
+          </div>
+
           <div class="hero-installers">
             <div class="inst-tabs" role="group" aria-label="Install options">
-              <button class="inst-tab active" type="button" data-key="pypi" aria-pressed="true">Install with PyPI</button>
-              <button class="inst-tab" type="button" data-key="npm" aria-pressed="false">Install with npm</button>
+              <button class="inst-tab" type="button" data-key="pypi" data-command={INSTALL_COMMAND}>Install with PyPI</button>
+              <button class="inst-tab" type="button" data-key="npm" data-command="npx yoetz">Install with npm</button>
               <button class="inst-tab agent" type="button" id="agent-copy" data-command={AGENT_PROMPT}>
                 <span id="agent-copy-label" role="status" aria-live="polite">Set up with your agent</span> <span class="rec">recommended</span>
               </button>
             </div>
 
-            <div class="inst-panel active" data-key="pypi">
-              <button class="inst-cmd" type="button" data-command={INSTALL_COMMAND}>
-                <span class="prompt">$</span>
-                <span class="cmd-text">{INSTALL_COMMAND}</span>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg>
-                <span class="copy-note" role="status" aria-live="polite"></span>
-              </button>
-              <p class="inst-note">
-                Once installed, just write <code>yoetz</code> in your terminal: a full-screen,
-                guided setup opens and walks you through everything with approvals.
-              </p>
-            </div>
-
-            <div class="inst-panel" data-key="npm">
-              <button class="inst-cmd" type="button" data-command="npx yoetz">
-                <span class="prompt">$</span>
-                <span class="cmd-text">npx yoetz</span>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg>
-                <span class="copy-note" role="status" aria-live="polite"></span>
-              </button>
-              <p class="inst-note">
-                Needs <a href="https://docs.astral.sh/uv/" target="_blank" rel="noopener">uv</a>{" "}
-                installed first. <code>npx yoetz</code> runs the exact same Yoetz from PyPI — no
-                separate <code>npm install</code> step, and it adds nothing of its own.
-              </p>
+            <div class="copy-toast" id="copy-toast" role="status" aria-live="polite" hidden>
+              <span class="ct-check" aria-hidden="true">✓</span>
+              <span class="ct-body">
+                <span class="ct-title">Copied to your clipboard</span>
+                <code class="ct-cmd" id="copy-toast-cmd"></code>
+              </span>
             </div>
 
             <p class="inst-note agent-note">
-              Tap to copy a setup prompt, then paste it into your coding agent: it fetches the
-              install guide and walks you through setup, showing you every change first. Prefer a
-              terminal? The <a href={GITHUB} target="_blank" rel="noopener">README</a> has the
-              install command.
+              Copies a prompt. Paste it into your agent: it installs Yoetz and shows you every change first.
             </p>
           </div>
         </div>
@@ -357,7 +317,8 @@ const coming = [
           <div class="term-card">
           <div class="term-head">
             <div class="term-dots"><span></span><span></span><span></span></div>
-            <span class="term-title">{termScripts[0].title}</span>
+            <img class={`term-host${firstHost.dark ? " invert" : ""}`} src={firstHost.logo} alt="" />
+            <span class="term-title">{firstHost.name} · {termScripts[0].title}</span>
             <span class="term-pill">yoetz · local</span>
           </div>
           <div class="term-body" id="term" aria-hidden="true">
@@ -394,180 +355,385 @@ const coming = [
       </div>
     </section>
 
-    <!-- Status: the honest alpha section -->
-    <section id="status" class="status-section">
-      <div class="status-inner">
-        <span class="ds-kicker">Status</span>
-        <h2 class="ds-h2">It's an alpha. It's early, and it already does a lot.</h2>
-        <p class="ds-lead" style="max-width: 720px;">
-          Deterministic checks, findings, and receipts work today, out of the box, with nothing
-          configured. Pair them with semantic review — an LLM-powered reviewer agent that reads the
-          ledger and challenges the work like a second pair of eyes — to catch even more.
-        </p>
-
-        <div class="status-cols">
-          <div class="status-card is">
-            <div class="label">What it already does</div>
-            <p>
-              Records your agent's plan, work, and claims into a ledger, checks the record
-              deterministically, and issues coverage-bounded receipts, with no provider, no
-              account, and no network needed.
-            </p>
-          </div>
-          <div class="status-card isnot">
-            <div class="label">Where it's early</div>
-            <p>
-              It is not mature yet: expect rough edges, and treat it as an alpha. Every claim we
-              publish is tracked openly in the repository.
-            </p>
-          </div>
-        </div>
-
-        <div class="harness-wrap">
-          <p class="harness-line">
-            Any MCP-capable agent can use Yoetz today — and more harness support is coming soon.
-          </p>
-          <div class="harness-chips">
-            <span class="harness-chip first">
-              <img src="/assets/openai.svg" alt="" /> Codex <em>today</em>
-            </span>
-            <span class="harness-chip soon">
-              <img src="/assets/claude.svg" alt="" /> Claude Code <em>soon</em>
-            </span>
-            <span class="harness-chip soon">
-              <img src="/assets/cursor.svg" alt="" /> Cursor <em>soon</em>
-            </span>
-            <span class="harness-chip soon">
-              <img src="/assets/opencode.svg" alt="" /> opencode <em>soon</em>
-            </span>
-            <span class="harness-chip soon">
-              <img src="/assets/grok.png" alt="" /> Grok <em>soon</em>
-            </span>
-            <span class="harness-chip soon">
-              <img src="/assets/githubcopilot.svg" alt="" /> Copilot <em>soon</em>
-            </span>
-            <span class="harness-chip more">and more</span>
-          </div>
-        </div>
-
-        <p class="status-help">
-          Help us secure and improve Yoetz: <a href={`${GITHUB}/issues/new`} target="_blank" rel="noopener">file an issue</a>{" "}
-          for anything you hit, and send security issues privately via{" "}
-          <a href={`${GITHUB}/blob/main/SECURITY.md`} target="_blank" rel="noopener">GitHub</a> or{" "}
-          <a href="mailto:support@yoetz.dev">email</a>.
-        </p>
-      </div>
-    </section>
-
-    <!-- How it works: one task, start to receipt -->
+    <!-- How it works: four nodes, one line each -->
     <section id="how" class="ds-section">
       <div class="ds-section-head">
-        <span class="ds-kicker">How it works</span>
-        <h2 class="ds-h2">An independent ledger between your agent and “done”</h2>
-        <p class="ds-lead" style="margin-left: auto; margin-right: auto;">
-          One task, from the ask to the receipt<span class="desktop-only">, with the operations
-          and payload shapes it really uses</span> — semantic review
-          included.<span class="desktop-only"> Keep scrolling and the session unfolds phase by
-          phase; click any phase to explore at your own pace.</span><span class="mobile-only">
-          Here is the session phase by phase.</span>
-        </p>
+        <h2 class="ds-h2">A ledger between your agent and “done”</h2>
       </div>
 
       <div class="flow" id="flow">
-        {phases.map((ph, i) => (
-          <details class={`fl-phase${ph.catch ? " catch" : ""}`} open={ph.open}>
-            <summary>
-              <span class="fl-mark">{String(i + 1).padStart(2, "0")}</span>
-              <span class="fl-card">
-                <span class="fl-title">{ph.title}</span>
-                <span class="fl-ops">{ph.ops}</span>
-                <span class="fl-toggle"><span class="expand-label">expand</span><span class="collapse-label">collapse</span></span>
-              </span>
-            </summary>
-            <div class="fl-body">
-              {ph.lines.map((l) => (
-                <div class={`sl sl-${l.who}`}>
-                  <span class="sl-pre">
-                    {l.who === "yoetz" || l.who === "receipt" ? (
-                      <img src="/assets/yoetz-mark.png" alt="yoetz" />
-                    ) : l.who === "user" ? ("›") : l.who === "agent" ? ("•") : l.who === "finding" ? ("✗") : l.who === "review" ? ("»") : ("⚙")}
-                  </span>
-                  <div class="sl-body">
-                    <div class="sl-text">
-                      {l.op && <span class="op-tag">{l.op}</span>}{l.text}
-                    </div>
-                    {l.note && <div class="sl-note">{l.note}</div>}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </details>
-        ))}
-        <div class="fl-phase done">
-          <span class="fl-mark ok">✓</span>
-          <span class="fl-card">
-            <span class="fl-title">The receipt says what was checked, at what coverage, and what is still open.</span>
-          </span>
-        </div>
-      </div>
-
-      <p class="mode-bridge">Two ways to run the checks.<span class="desktop-only"> The session above used both.</span></p>
-
-      <div class="mode-cards">
-        <div class="status-card is">
-          <div class="label">Semantic review, recommended</div>
-          <p>
-            The setup we recommend. A reviewer model acts like a mini agent alongside yours: it
-            reads a bounded packet built from the ledger, never your repository, challenges the
-            work, and your agent answers with evidence. Deterministic checks still run underneath
-            and are never erased.<span class="desktop-only"> That is the reviewer you see
-            challenging the agent in the session above.</span>
-          </p>
-        </div>
-        <div class="status-card sem">
-          <div class="label">Deterministic only, if you prefer</div>
-          <p>
-            Works with nothing configured and nothing leaving your machine: versioned policy packs
-            check the recorded ledger and return findings with an exact coverage vector. Less
-            thorough than semantic review, since it can only catch what rules can catch. It runs
-            first in every check, whichever mode you pick.
-          </p>
-        </div>
-      </div>
-    </section>
-
-    <!-- What's next -->
-    <section id="next" class="next-section">
-      <div class="ds-section-head">
-        <span class="ds-kicker">What's next</span>
-        <h2 class="ds-h2">Coming soon</h2>
-        <p class="ds-lead" style="margin-left: auto; margin-right: auto;">
-          We are actively improving Yoetz: more harness support, deeper Codex support, a hosted
-          option, and more powerful features.
-        </p>
-      </div>
-
-      <div class="coming-grid">
-        {coming.map((c) => (
-          <div class="coming-card">
-            <div class="coming-head">
-              {c.icon && <img src={c.icon} alt="" />}
-              {c.logos && (
-                <span class="coming-logos">
-                  {c.logos.map((src) => <img src={src} alt="" />)}
-                </span>
+        {flow.map((n) => (
+          <div class={`fnode fnode-${n.key}`}>
+            <div class="fnode-icon" aria-hidden="true">
+              {n.key === "publish" && (
+                <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="9" y="6" width="30" height="36" rx="4" />
+                  <path d="M16 16h16M16 23h16M16 30h9" />
+                  <path class="fn-accent" d="M31 38l4-4 8 8" />
+                  <circle class="fn-accent" cx="36" cy="33" r="0" />
+                  <path class="fn-accent" d="M28 31l7-7M35 24v6M35 24h-6" />
+                </svg>
               )}
-              <h3>{c.title}</h3>
+              {n.key === "ledger" && (
+                <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="7" y="8" width="34" height="8" rx="2" />
+                  <rect x="7" y="20" width="34" height="8" rx="2" />
+                  <rect x="7" y="32" width="34" height="8" rx="2" />
+                  <path class="fn-accent" d="M13 12h3M13 24h3M13 36h3" />
+                  <path class="fn-accent" d="M35 16v4M35 28v4" stroke-dasharray="1 2" />
+                  <path class="fn-accent" d="M28 12h7M28 24h7M28 36h7" stroke-width="1.5" opacity="0.6" />
+                </svg>
+              )}
+              {n.key === "check" && (
+                <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M24 5l15 6v11c0 9-6 16-15 20-9-4-15-11-15-20V11z" />
+                  <path class="fn-accent" d="M17 24l5 5 10-11" />
+                  <path class="fn-accent" d="M40 30l1.5 3 3 1.5-3 1.5-1.5 3-1.5-3-3-1.5 3-1.5z" stroke-width="1.5" fill="currentColor" />
+                </svg>
+              )}
+              {n.key === "receipt" && (
+                <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M10 6h28v34l-4-3-4 3-4-3-4 3-4-3-4 3-4-3z" />
+                  <path d="M16 15h16M16 22h16" />
+                  <path class="fn-accent" d="M16 29h9" />
+                  <path class="fn-accent" d="M28 29h4" stroke-dasharray="1.5 2" />
+                </svg>
+              )}
             </div>
-            <p>{c.blurb}</p>
-            <span class="ds-badge ds-badge-running">{c.badge}</span>
+            <div class="fnode-title">{n.title}</div>
+            <div class="fnode-ops">{n.ops}</div>
+            <p class="fnode-text">{n.text}</p>
           </div>
         ))}
       </div>
 
-      <p class="next-closing">
-        <a href={`${GITHUB}/issues`} target="_blank" rel="noopener">See the roadmap in the issues →</a>
+      <div class="scenes">
+        {scenes.map((sc) => (
+          <div class={`scene scene-${sc.key}`}>
+            <div class="scene-art" aria-hidden="true">
+              {sc.key === "records" && (
+                <svg viewBox="0 0 280 150" class="sc sc-a">
+                  <rect x="8" y="50" width="64" height="50" rx="10" class="sc-box" />
+                  <text x="40" y="70" class="sc-txt strong" text-anchor="middle">agent</text>
+                  <rect class="sc-bar b1" x="20" y="80" width="40" height="3" rx="1.5" />
+                  <rect class="sc-bar b2" x="20" y="87" width="26" height="3" rx="1.5" />
+                  <rect class="sc-bar b3" x="20" y="94" width="34" height="3" rx="1.5" />
+                  <rect x="186" y="22" width="86" height="106" rx="10" class="sc-box" />
+                  <text x="229" y="38" class="sc-tag" text-anchor="middle">ledger</text>
+                  <rect class="sc-row r1" x="196" y="48" width="66" height="14" rx="4" />
+                  <rect class="sc-row still" x="196" y="68" width="66" height="14" rx="4" />
+                  <rect class="sc-row still" x="196" y="88" width="66" height="14" rx="4" />
+                  <rect class="sc-row r4" x="196" y="108" width="66" height="14" rx="4" />
+                  <text x="124" y="30" class="sc-tag" text-anchor="middle">what it says</text>
+                  <g class="sc-chip c1"><rect x="76" y="40" width="96" height="18" rx="9" class="sc-chip-box claim" /><text x="124" y="52" class="sc-chip-txt" text-anchor="middle">claim · done</text></g>
+                  <g class="sc-chip c2"><rect x="76" y="92" width="96" height="18" rx="9" class="sc-chip-box work" /><text x="124" y="104" class="sc-chip-txt" text-anchor="middle">pytest · failed</text></g>
+                  <text x="124" y="126" class="sc-tag" text-anchor="middle">what it did</text>
+                </svg>
+              )}
+              {sc.key === "checks" && (
+                <svg viewBox="0 0 280 150" class="sc sc-b">
+                  <rect x="8" y="30" width="116" height="46" rx="10" class="sc-box" />
+                  <text x="66" y="49" class="sc-txt strong" text-anchor="middle">claim · done ✓</text>
+                  <text x="66" y="65" class="sc-tag" text-anchor="middle">cites: 40 passed</text>
+                  <path d="M124 53h60" class="sc-link" />
+                  <rect x="186" y="22" width="86" height="106" rx="10" class="sc-box" />
+                  <text x="229" y="38" class="sc-tag" text-anchor="middle">ledger</text>
+                  <rect class="sc-row still" x="196" y="48" width="66" height="14" rx="4" />
+                  <rect class="sc-row still" x="196" y="68" width="66" height="14" rx="4" />
+                  <rect class="sc-row warn r3" x="196" y="88" width="66" height="14" rx="4" />
+                  <text x="229" y="98" class="sc-row-txt" text-anchor="middle">1 failed</text>
+                  <rect class="sc-row still" x="196" y="108" width="66" height="14" rx="4" />
+                  <rect class="sc-scan" x="190" y="44" width="78" height="3" rx="1.5" />
+                  <g class="sc-finding"><rect x="8" y="98" width="158" height="24" rx="12" /><text x="87" y="114" text-anchor="middle">✗ failed_work_omitted</text></g>
+                </svg>
+              )}
+              {sc.key === "assists" && (
+                <svg viewBox="0 0 280 150" class="sc sc-c">
+                  <rect x="8" y="30" width="64" height="46" rx="10" class="sc-box" />
+                  <text x="40" y="49" class="sc-txt strong" text-anchor="middle">agent</text>
+                  <text x="40" y="64" class="sc-tag" text-anchor="middle">fixes it</text>
+                  <rect x="186" y="14" width="86" height="80" rx="10" class="sc-box" />
+                  <rect class="sc-row still" x="196" y="26" width="66" height="14" rx="4" />
+                  <rect class="sc-row ok r3" x="196" y="46" width="66" height="14" rx="4" />
+                  <text x="229" y="56" class="sc-row-txt" text-anchor="middle">41 passed</text>
+                  <rect class="sc-row still" x="196" y="66" width="66" height="14" rx="4" />
+                  <g class="sc-chip fixchip"><rect x="82" y="44" width="92" height="18" rx="9" class="sc-chip-box work" /><text x="128" y="56" class="sc-chip-txt" text-anchor="middle">fix · rerun</text></g>
+                  <g class="sc-receipt"><rect x="24" y="104" width="232" height="32" rx="9" /><text x="140" y="124" text-anchor="middle">receipt ✓ · coverage-bounded</text></g>
+                </svg>
+              )}
+            </div>
+            <h3>{sc.title}</h3>
+            <p>{sc.text}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+
+    <!-- Semantic review on the ChatGPT plan -->
+    <section id="review" class="review-band">
+      <div class="review-inner">
+        <div class="review-copy">
+          <span class="ds-kicker">Semantic review</span>
+          <h2 class="ds-h2">A reviewer model. Your key, or the plan you already have.</h2>
+          <p class="ds-lead">A reviewer reads a bounded packet built from the ledger and challenges the work. Bring your own API key, or use the ChatGPT subscription you already pay for. Either way it runs from your machine. Nothing goes through us.</p>
+          <ul class="review-points">
+            <li><b>Always on underneath.</b> Deterministic checks run first, offline, with nothing configured.</li>
+            <li><b>Your repository stays home.</b> The reviewer sees the ledger packet, never your files.</li>
+            <li><b>No account with us.</b> Yoetz has no servers. Your key or your login never leaves your machine.</li>
+          </ul>
+        </div>
+        <div class="review-art" aria-hidden="true">
+          <svg viewBox="0 0 360 210" fill="none" stroke-linecap="round" stroke-linejoin="round">
+            <text x="70" y="16" class="art-tag" text-anchor="middle">pick one</text>
+            <rect x="6" y="24" width="132" height="34" rx="9" class="art-box on" />
+            <text x="72" y="45" class="art-txt on" text-anchor="middle">your own API key</text>
+            <text x="72" y="76" class="art-tag" text-anchor="middle">or</text>
+            <rect x="6" y="86" width="132" height="34" rx="9" class="art-box on" />
+            <text x="72" y="107" class="art-txt on" text-anchor="middle">your ChatGPT plan</text>
+
+            <path d="M138 41 C 164 41, 164 72, 190 72" class="art-line on" />
+            <path d="M138 103 C 164 103, 164 72, 190 72" class="art-line on" />
+
+            <rect x="192" y="50" width="88" height="44" rx="10" class="art-box on solid" />
+            <text x="236" y="69" class="art-txt inv" text-anchor="middle">reviewer</text>
+            <text x="236" y="84" class="art-txt inv" text-anchor="middle" opacity="0.85">challenges</text>
+
+            <rect x="192" y="118" width="88" height="46" rx="10" class="art-box" />
+            <text x="236" y="134" class="art-tag" text-anchor="middle">ledger packet</text>
+            <rect x="202" y="141" width="68" height="5" rx="2.5" fill="#cbd5e1" />
+            <rect x="202" y="150" width="50" height="5" rx="2.5" fill="#cbd5e1" />
+            <path d="M236 118v-24" class="art-line on" />
+            <text x="244" y="110" class="art-tag on">reads</text>
+
+            <rect x="290" y="30" width="62" height="84" rx="10" class="art-box" stroke-dasharray="4 3" />
+            <text x="321" y="52" class="art-txt sub" text-anchor="middle">your</text>
+            <text x="321" y="66" class="art-txt sub" text-anchor="middle">machine</text>
+            <text x="321" y="90" class="art-txt sub" text-anchor="middle">nothing</text>
+            <text x="321" y="103" class="art-txt sub" text-anchor="middle">via us</text>
+
+            <rect x="14" y="176" width="332" height="30" rx="10" class="art-box warn" />
+            <text x="180" y="195" class="art-txt warn" text-anchor="middle">» old-key tokens: grace window never tested</text>
+          </svg>
+        </div>
+      </div>
+    </section>
+
+    <!-- What's new -->
+    <section id="new" class="new-section">
+      <div class="ds-section-head">
+        <span class="ds-kicker">What's new</span>
+        <h2 class="ds-h2">Now on Claude Code and Cursor, with hooks that finish the job.</h2>
+      </div>
+
+      <div class="feat-grid">
+        <div class="feat hosts">
+          <div class="hosts-row">
+            <div class="host-big">
+              <img src="/assets/openai.svg" alt="" />
+              <span>Codex</span>
+            </div>
+            <div class="host-big">
+              <img src="/assets/claude.svg" alt="" />
+              <span>Claude Code</span>
+              <em class="new">new</em>
+            </div>
+            <div class="host-big">
+              <img src="/assets/cursor.svg" alt="" />
+              <span>Cursor</span>
+              <em class="new">new</em>
+            </div>
+          </div>
+          <h3>Three hosts, first-party</h3>
+          <p>Each host gets its own plugin, hooks, and runbook of what is and is not supported. Any MCP agent still works with nothing installed.</p>
+        </div>
+
+        {features.map((f) => (
+          <div class={`feat feat-${f.key}`}>
+            <div class="feat-art" aria-hidden="true">
+              {f.key === "hooks" && (
+                <svg viewBox="0 0 240 96" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                  <g class="art-row was">
+                    <text x="0" y="28" class="art-tag">0.1</text>
+                    <rect x="34" y="16" width="44" height="22" rx="6" class="art-box" />
+                    <text x="56" y="31" class="art-txt" text-anchor="middle">hook</text>
+                    <path d="M80 27h28" class="art-line" />
+                    <rect x="110" y="16" width="52" height="22" rx="6" class="art-box" />
+                    <text x="136" y="31" class="art-txt" text-anchor="middle">service</text>
+                    <path d="M164 27h22" class="art-line broken" stroke-dasharray="3 4" />
+                    <text x="187" y="31" class="art-x">✗</text>
+                    <rect x="196" y="16" width="44" height="22" rx="6" class="art-box faded" />
+                  </g>
+                  <g class="art-row now">
+                    <text x="0" y="76" class="art-tag on">0.2</text>
+                    <rect x="34" y="64" width="44" height="22" rx="6" class="art-box on" />
+                    <text x="56" y="79" class="art-txt on" text-anchor="middle">hook</text>
+                    <path d="M80 75h28" class="art-line on" />
+                    <rect x="110" y="64" width="52" height="22" rx="6" class="art-box on" />
+                    <text x="136" y="79" class="art-txt on" text-anchor="middle">service</text>
+                    <path d="M164 75h30" class="art-line on" />
+                    <rect x="196" y="64" width="44" height="22" rx="6" class="art-box on solid" />
+                    <text x="218" y="79" class="art-txt inv" text-anchor="middle">ledger</text>
+                  </g>
+                </svg>
+              )}
+              {f.key === "subscription" && (
+                <svg viewBox="0 0 240 96" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="4" y="30" width="64" height="36" rx="8" class="art-box on" />
+                  <text x="36" y="45" class="art-txt on" text-anchor="middle">check</text>
+                  <text x="36" y="58" class="art-txt sub" text-anchor="middle">semantic</text>
+                  <path d="M70 40 C 100 40, 100 22, 130 22" class="art-line on" />
+                  <path d="M70 56 C 100 56, 100 74, 130 74" class="art-line" stroke-dasharray="3 4" />
+                  <rect x="132" y="8" width="104" height="28" rx="7" class="art-box on solid" />
+                  <text x="184" y="26" class="art-txt inv" text-anchor="middle">ChatGPT plan</text>
+                  <rect x="132" y="60" width="104" height="28" rx="7" class="art-box" />
+                  <text x="184" y="78" class="art-txt" text-anchor="middle">API fallback</text>
+                  <text x="72" y="76" class="art-tag" text-anchor="middle">only if primary</text>
+                  <text x="72" y="88" class="art-tag" text-anchor="middle">can't serve</text>
+                </svg>
+              )}
+              {f.key === "consent" && (
+                <svg viewBox="0 0 240 96" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M8 14h118a8 8 0 0 1 8 8v22a8 8 0 0 1-8 8H40l-14 12v-12h-18a8 8 0 0 1-8-8V22a8 8 0 0 1 8-8z" class="art-box on" />
+                  <text x="20" y="32" class="art-txt on">Expanded review?</text>
+                  <text x="20" y="45" class="art-txt sub">before → after</text>
+                  <rect x="150" y="18" width="84" height="26" rx="13" class="art-box on solid" />
+                  <text x="192" y="35" class="art-txt inv" text-anchor="middle">approve once</text>
+                  <text x="192" y="60" class="art-tag" text-anchor="middle">drift → fails closed</text>
+                  <path d="M16 76l6 6 12-12" class="art-line on" stroke-width="2.5" />
+                  <text x="42" y="84" class="art-txt sub">you keep the choice</text>
+                </svg>
+              )}
+              {f.key === "correct" && (
+                <svg viewBox="0 0 240 96" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="8" y="10" width="100" height="26" rx="6" class="art-box faded" />
+                  <text x="58" y="27" class="art-txt faded" text-anchor="middle">claim v1</text>
+                  <path d="M20 23h76" class="art-line strike" />
+                  <rect x="8" y="58" width="100" height="26" rx="6" class="art-box on solid" />
+                  <text x="58" y="75" class="art-txt inv" text-anchor="middle">claim v2</text>
+                  <path d="M58 36v22" class="art-line on" />
+                  <path d="M54 52l4 6 4-6" class="art-line on" />
+                  <text x="130" y="27" class="art-txt sub">supersedes → v1</text>
+                  <text x="130" y="48" class="art-txt sub">supporting → evidence</text>
+                  <text x="130" y="75" class="art-txt warn">limitations → failed run</text>
+                </svg>
+              )}
+              {f.key === "recheck" && (
+                <svg viewBox="0 0 240 96" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="6" y="34" width="60" height="28" rx="7" class="art-box warn" />
+                  <text x="36" y="52" class="art-txt warn" text-anchor="middle">finding</text>
+                  <path d="M68 48h26" class="art-line" />
+                  <rect x="96" y="34" width="60" height="28" rx="7" class="art-box" />
+                  <text x="126" y="52" class="art-txt" text-anchor="middle">respond</text>
+                  <path d="M158 48h26" class="art-line" stroke-dasharray="3 4" />
+                  <text x="171" y="74" class="art-tag" text-anchor="middle">not yet</text>
+                  <rect x="186" y="34" width="50" height="28" rx="7" class="art-box on solid" />
+                  <text x="211" y="52" class="art-txt inv" text-anchor="middle">check</text>
+                  <path d="M211 32 C 211 12, 60 12, 42 30" class="art-line on" />
+                  <path d="M38 24l4 6 6-3" class="art-line on" />
+                  <text x="126" y="14" class="art-tag on" text-anchor="middle">resolves</text>
+                  <text x="126" y="86" class="art-tag" text-anchor="middle">records a disposition</text>
+                </svg>
+              )}
+            </div>
+            <h3>{f.title}</h3>
+            <p>{f.text}</p>
+          </div>
+        ))}
+      </div>
+
+      <p class="section-link">
+        <a href={RELEASES} target="_blank" rel="noopener">Read the release notes</a>
       </p>
+    </section>
+
+    <!-- Coming soon -->
+    <section id="next" class="ds-cta-dark">
+      <div class="ds-cta-glow"></div>
+      <div class="next-inner">
+        <div class="ds-section-head">
+          <span class="ds-kicker ds-kicker-on-dark">Coming soon</span>
+          <h2 class="ds-h2 ds-on-dark">More than one agent on a task.</h2>
+          <p class="ds-lead on-dark">Task lineage and project coordination. <code>/lineage</code> and <code>/project</code> in the terminal.</p>
+        </div>
+
+        <div class="next-art" aria-hidden="true">
+          <svg class="na-lineage" viewBox="0 0 360 226" fill="none" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="120" y="14" width="120" height="36" rx="9" class="na-box parent" />
+            <text x="180" y="30" class="na-txt" text-anchor="middle">parent task</text>
+            <text x="180" y="43" class="na-sub" text-anchor="middle">tsk_9c2e · open</text>
+
+            <path d="M180 50v22" class="na-line" />
+            <path d="M180 72H90v18M180 72h90v18" class="na-line" />
+            <text x="180" y="66" class="na-tag" text-anchor="middle">delegate</text>
+
+            <rect x="28" y="90" width="124" height="36" rx="9" class="na-box child" />
+            <text x="90" y="106" class="na-txt" text-anchor="middle">child · tests</text>
+            <text x="90" y="119" class="na-sub" text-anchor="middle">receipt · clean</text>
+
+            <rect x="208" y="90" width="124" height="36" rx="9" class="na-box child warn" />
+            <text x="270" y="106" class="na-txt" text-anchor="middle">child · migration</text>
+            <text x="270" y="119" class="na-sub warn" text-anchor="middle">1 finding · open</text>
+
+            <path d="M90 126v20h90M270 126v20h-90" class="na-line" />
+            <path d="M180 146v18" class="na-line on" />
+            <path d="M175 158l5 6 5-6" class="na-line on" />
+            <text x="180" y="142" class="na-tag on" text-anchor="middle" dy="-2">rolls up</text>
+
+            <rect x="84" y="166" width="192" height="52" rx="9" class="na-box receipt" />
+            <text x="180" y="182" class="na-txt on" text-anchor="middle">parent receipt</text>
+            <text x="180" y="196" class="na-sub warn" text-anchor="middle">child finding open</text>
+            <text x="180" y="209" class="na-sub" text-anchor="middle">integration still unproven</text>
+          </svg>
+
+          <svg class="na-project" viewBox="0 0 260 226" fill="none" stroke-linecap="round" stroke-linejoin="round">
+            <text x="130" y="30" class="na-tag" text-anchor="middle">project · one repository</text>
+            <rect x="36" y="46" width="90" height="34" rx="9" class="na-box child" />
+            <text x="81" y="61" class="na-txt" text-anchor="middle">task A</text>
+            <text x="81" y="73" class="na-sub" text-anchor="middle">wt/feature</text>
+            <rect x="134" y="46" width="90" height="34" rx="9" class="na-box child" />
+            <text x="179" y="61" class="na-txt" text-anchor="middle">task B</text>
+            <text x="179" y="73" class="na-sub" text-anchor="middle">wt/hotfix</text>
+
+            <path d="M81 80v24M179 80v24" class="na-line" />
+            <path d="M81 104h98" class="na-line" />
+            <path d="M130 104v18" class="na-line warn" />
+
+            <rect x="48" y="122" width="164" height="30" rx="8" class="na-box warn" />
+            <text x="130" y="141" class="na-txt warn" text-anchor="middle">src/sessions.py</text>
+            <text x="130" y="172" class="na-tag warn" text-anchor="middle">overlap detected · disclosed under consent</text>
+            <text x="130" y="196" class="na-sub" text-anchor="middle">/lineage · /project in the terminal</text>
+          </svg>
+        </div>
+
+        <div class="next-grid">
+          {next.map((n) => (
+            <div class="next-item">
+              <h3>{n.title}</h3>
+              <p>{n.text}</p>
+            </div>
+          ))}
+        </div>
+
+        <p class="section-link on-dark">
+          <a href={ROADMAP} target="_blank" rel="noopener">Follow along on GitHub</a>
+        </p>
+      </div>
+    </section>
+
+    <!-- Alpha, briefly -->
+    <section id="status" class="alpha-strip">
+      <div class="alpha-inner">
+        <span class="ds-badge ds-badge-next">alpha</span>
+        <p>
+          Works out of the box with no account and no network. Expect rough edges; every claim we
+          make is tracked in the repository.
+        </p>
+        <div class="alpha-links">
+          <a href={`${GITHUB}/issues/new`} target="_blank" rel="noopener">File an issue</a>
+          <span class="ds-footer-dot"></span>
+          <a href={`${GITHUB}/blob/main/SECURITY.md`} target="_blank" rel="noopener">Report a security issue</a>
+        </div>
+      </div>
     </section>
 
     <!-- Footer -->
@@ -612,17 +778,30 @@ const coming = [
 
     <script>
       const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      const hasIO = typeof IntersectionObserver !== "undefined";
 
-      // --- Install tabs ---
+      // --- Install tabs: a click copies the command and confirms it ---
       const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>(".inst-tab:not(.agent)"));
-      const panels = Array.from(document.querySelectorAll<HTMLElement>(".inst-panel"));
+      const toast = document.getElementById("copy-toast");
+      const toastCmd = document.getElementById("copy-toast-cmd");
+      let toastTimer: ReturnType<typeof setTimeout>;
       for (const tab of tabs) {
-        tab.addEventListener("click", () => {
-          for (const t of tabs) {
-            t.classList.toggle("active", t === tab);
-            t.setAttribute("aria-pressed", t === tab ? "true" : "false");
+        tab.addEventListener("click", async () => {
+          const cmd = tab.dataset.command ?? "";
+          if (!navigator.clipboard || !cmd) return;
+          try {
+            await navigator.clipboard.writeText(cmd);
+          } catch {
+            return;
           }
-          for (const p of panels) p.classList.toggle("active", p.dataset.key === tab.dataset.key);
+          if (toast && toastCmd) {
+            toastCmd.textContent = cmd;
+            toast.hidden = false;
+            clearTimeout(toastTimer);
+            toastTimer = setTimeout(() => {
+              toast.hidden = true;
+            }, 3200);
+          }
         });
       }
 
@@ -647,25 +826,6 @@ const coming = [
         }, 2000);
       });
 
-      // --- Copy: install commands ---
-      for (const btn of document.querySelectorAll<HTMLButtonElement>(".inst-cmd")) {
-        const note = btn.querySelector<HTMLElement>(".copy-note");
-        let t: ReturnType<typeof setTimeout>;
-        btn.addEventListener("click", async () => {
-          if (!navigator.clipboard) return;
-          try {
-            await navigator.clipboard.writeText(btn.dataset.command ?? "");
-          } catch {
-            return;
-          }
-          if (note) note.textContent = "copied";
-          clearTimeout(t);
-          t = setTimeout(() => {
-            if (note) note.textContent = "";
-          }, 1600);
-        });
-      }
-
       // --- Terminal replay ---
       const term = document.getElementById("term");
       const cursor = document.getElementById("term-cursor");
@@ -673,8 +833,12 @@ const coming = [
         let lines = Array.from(term.querySelectorAll<HTMLElement>(".tl"));
         const card = term.closest<HTMLElement>(".term-card");
         const titleEl = card?.querySelector<HTMLElement>(".term-title");
+        const logoEl = card?.querySelector<HTMLImageElement>(".term-host");
         type TermScriptData = {
           title: string;
+          hostName?: string;
+          logo?: string;
+          dark?: boolean;
           lines: { pre?: string; preC?: string; op?: string; rest?: string; restC?: string; finding?: boolean; ts?: number; d?: number }[];
         };
         let scripts: TermScriptData[] = [];
@@ -721,9 +885,13 @@ const coming = [
           }
           term.insertBefore(frag, cursor);
           lines = Array.from(term.querySelectorAll<HTMLElement>(".tl"));
-          if (titleEl) titleEl.textContent = s.title;
+          if (titleEl) titleEl.textContent = `${s.hostName ?? ""} · ${s.title}`;
+          if (logoEl && s.logo) {
+            logoEl.src = s.logo;
+            logoEl.classList.toggle("invert", Boolean(s.dark));
+          }
         };
-        if (reduced) {
+        if (reduced || !hasIO) {
           for (const l of lines) l.hidden = false;
           cursor.hidden = false;
         } else {
@@ -759,7 +927,6 @@ const coming = [
           };
           // Replay from the top only when the visitor has actually left the
           // terminal and comes back after it has been idle for a while.
-          // Lines already on screen are never rewritten in place.
           const REPLAY_AFTER_MS = 10000;
           let playing = false;
           let finishedAt = 0;
@@ -837,91 +1004,6 @@ const coming = [
         setInterval(update, 1000);
       }
 
-      // --- Flow staggered reveal ---
-      const flow = document.getElementById("flow");
-      if (flow) {
-        const steps = Array.from(flow.querySelectorAll<HTMLElement>(".fl-phase"));
-        if (reduced) {
-          for (const s of steps) s.classList.add("shown");
-        } else {
-          const io = new IntersectionObserver(
-            (entries) => {
-              if (entries.some((e) => e.isIntersecting)) {
-                io.disconnect();
-                steps.forEach((s, i) => {
-                  setTimeout(() => s.classList.add("shown"), 200 + i * 140);
-                });
-              }
-            },
-            { threshold: 0.08 }
-          );
-          io.observe(flow);
-        }
-
-        // Scroll-driven accordion: the phase nearest the viewport focus
-        // opens, and closes again as the reader moves past. Any manual
-        // click hands control back for good. On mobile the flow is a
-        // plain timeline (bodies hidden in CSS), so skip it entirely.
-        const mobileFlow = window.matchMedia("(max-width: 720px)").matches;
-        if (mobileFlow) {
-          for (const summary of flow.querySelectorAll("details.fl-phase > summary")) {
-            summary.setAttribute("tabindex", "-1");
-          }
-        }
-        if (!reduced && !mobileFlow) {
-          const details = Array.from(flow.querySelectorAll<HTMLDetailsElement>("details.fl-phase"));
-          let manual = false;
-          let pendingClose: ReturnType<typeof setTimeout> | undefined;
-          for (const d of details) {
-            d.querySelector("summary")?.addEventListener("click", () => {
-              manual = true;
-              if (pendingClose) {
-                clearTimeout(pendingClose);
-                pendingClose = undefined;
-              }
-            });
-            d.open = false;
-          }
-          let queued = false;
-          const autoOpen = () => {
-            queued = false;
-            if (manual) return;
-            const vh = window.innerHeight;
-            const focus = vh * 0.45;
-            let best = -1;
-            let bestDist = Infinity;
-            details.forEach((d, i) => {
-              const r = d.getBoundingClientRect();
-              if (r.bottom < -80 || r.top > vh + 80) return;
-              const dist = Math.abs((r.top + r.bottom) / 2 - focus);
-              if (dist < bestDist) {
-                bestDist = dist;
-                best = i;
-              }
-            });
-            if (best >= 0 && !details[best].open) details[best].open = true;
-            // Leave the outgoing phase open for a moment so the swap
-            // doesn't feel like a jarring close-and-open.
-            if (details.some((d, i) => i !== best && d.open)) {
-              if (pendingClose) clearTimeout(pendingClose);
-              pendingClose = setTimeout(() => {
-                pendingClose = undefined;
-                details.forEach((d, i) => {
-                  if (i !== best && d.open) d.open = false;
-                });
-              }, 2500);
-            }
-          };
-          const onScroll = () => {
-            if (!queued) {
-              queued = true;
-              requestAnimationFrame(autoOpen);
-            }
-          };
-          autoOpen();
-          window.addEventListener("scroll", onScroll, { passive: true });
-        }
-      }
     </script>
   </body>
 </html>
