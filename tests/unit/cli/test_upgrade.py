@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 from typer.testing import CliRunner
 
+from yoetz.adapters import package_upgrade as package_adapter
 from yoetz.application import upgrade
 from yoetz.cli.app import app
 
@@ -121,8 +122,8 @@ def test_isolated_runtime_cannot_upgrade_ambient_tool(
     def unexpected(*args: object, **kwargs: object) -> object:
         raise AssertionError("uv must not run from isolated runtime")
 
-    monkeypatch.setattr(upgrade.subprocess, "run", unexpected)
-    assert upgrade.execute_package_upgrade() == "refused_isolated_runtime"
+    monkeypatch.setattr(package_adapter.subprocess, "run", unexpected)
+    assert package_adapter.execute_package_upgrade() == "refused_isolated_runtime"
 
 
 @pytest.mark.parametrize("matched", [False, True])
@@ -132,7 +133,7 @@ def test_package_execution_binds_invoking_uv_tool(
     root = tmp_path / "tools"
     monkeypatch.setattr("yoetz.config.paths.isolated_root", lambda: None)
     monkeypatch.setattr(
-        upgrade.sys, "prefix", str(root / "yoetz" if matched else tmp_path / "source")
+        package_adapter.sys, "prefix", str(root / "yoetz" if matched else tmp_path / "source")
     )
     calls: list[tuple[str, ...]] = []
 
@@ -145,8 +146,8 @@ def test_package_execution_binds_invoking_uv_tool(
         assert kwargs["stdout"] == subprocess.DEVNULL
         return SimpleNamespace(returncode=0)
 
-    monkeypatch.setattr(upgrade.subprocess, "run", run)
-    assert upgrade.execute_package_upgrade() == (
+    monkeypatch.setattr(package_adapter.subprocess, "run", run)
+    assert package_adapter.execute_package_upgrade() == (
         "package_command_succeeded" if matched else "refused_non_uv_tool_runtime"
     )
     assert len(calls) == (2 if matched else 1)
@@ -156,7 +157,7 @@ def test_package_timeout_reports_unknown_without_retry(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr("yoetz.config.paths.isolated_root", lambda: None)
-    monkeypatch.setattr(upgrade.sys, "prefix", str(tmp_path / "yoetz"))
+    monkeypatch.setattr(package_adapter.sys, "prefix", str(tmp_path / "yoetz"))
     calls: list[tuple[str, ...]] = []
 
     def run(argv: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
@@ -165,6 +166,6 @@ def test_package_timeout_reports_unknown_without_retry(
             return SimpleNamespace(returncode=0, stdout=str(tmp_path).encode())
         raise subprocess.TimeoutExpired(argv, 120)
 
-    monkeypatch.setattr(upgrade.subprocess, "run", run)
-    assert upgrade.execute_package_upgrade() == "outcome_unknown"
+    monkeypatch.setattr(package_adapter.subprocess, "run", run)
+    assert package_adapter.execute_package_upgrade() == "outcome_unknown"
     assert calls == [("uv", "tool", "dir"), upgrade.PACKAGE_UPGRADE_ARGV]

@@ -7,7 +7,8 @@ from collections.abc import Mapping, Sequence
 
 import typer
 
-from yoetz.application.upgrade import HOSTS, build_upgrade_plan, execute_package_upgrade
+from yoetz.adapters.package_upgrade import execute_package_upgrade
+from yoetz.application.upgrade import HOSTS, build_upgrade_plan
 
 
 def run_upgrade(
