@@ -805,7 +805,7 @@ def test_package_update_decline_succeeds_after_policyless_list(
     declined = _RUNNER.invoke(app, ["recommend", "decline", "package-update"])
 
     assert declined.exit_code == 0, declined.output
-    assert "will not be shown again" in declined.stdout
+    assert "later releases may be recommended" in declined.stdout
     state = load_recommendation_state(root=tmp_path)
     assert "package-update" not in state.pending
     assert state.decisions["package-update"].decision == "declined"
@@ -855,3 +855,21 @@ def test_decline_requires_cached_pending(tmp_path: Path, monkeypatch: object) ->
 
     assert result.exit_code == 2
     assert "recommendation_not_pending" in result.output
+
+
+def test_package_decline_rejects_old_hook_release(tmp_path: Path, monkeypatch: object) -> None:
+    _patch_state_root(monkeypatch, tmp_path)
+    _patch_pending_context(monkeypatch, "package-update")
+    assert _RUNNER.invoke(app, ["recommend", "list"]).exit_code == 0
+    declined = _RUNNER.invoke(
+        app, ["recommend", "decline", "package-update", "--release-version", "0.1.9"]
+    )
+    assert declined.exit_code == 2
+    assert "recommendation_release_changed" in declined.output
+    assert load_recommendation_state(root=tmp_path).pending_package_version == "0.2.0"
+    accepted = _RUNNER.invoke(
+        app, ["recommend", "accept", "package-update", "--release-version", "0.1.9"]
+    )
+    assert accepted.exit_code == 2
+    assert "uv tool upgrade" not in accepted.output
+    assert "package-update" in load_recommendation_state(root=tmp_path).pending

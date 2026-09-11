@@ -987,10 +987,11 @@ def _cached_recommendation_context(*, _state: Path | None) -> str:
     if not pending:
         return ""
     item = pending[0]
+    suffix = f" --release-version {item.release_version}" if item.release_version else ""
     return (
         f"Yoetz recommends: {item.title}. {item.summary} Explain this to the user and ask "
-        f"for approval; if approved run 'yoetz recommend accept {item.id}', "
-        f"otherwise 'yoetz recommend decline {item.id}'."
+        f"for approval; if approved run 'yoetz recommend accept {item.id}{suffix}', "
+        f"otherwise 'yoetz recommend decline {item.id}{suffix}'."
     )[:_MAX_ADVICE_CONTEXT]
 
 
@@ -2472,7 +2473,15 @@ def handle_observe(
                 binding_diagnostic = _consent_binding_diagnostic(consent)
             with contextlib.suppress(Exception):
                 record_hook_diagnostic(binding_diagnostic, resolved_event, _state=_state)
-            _stdout_json({}, stdout)
+            # Update advice consumes only the precomputed cache, independently of observation
+            # consent. Never ingest or spool this event on the no-consent path.
+            additional = ""
+            if resolved_event == "SessionStart" and (
+                source is not ObservationSource.CURSOR_HOOK or _output_event_name == "sessionStart"
+            ):
+                with contextlib.suppress(Exception):
+                    additional = _cached_recommendation_context(_state=_state)
+            _stdout_json(_render_context(additional) if additional else {}, stdout)
             return 0
 
         assert workspace_commitment is not None

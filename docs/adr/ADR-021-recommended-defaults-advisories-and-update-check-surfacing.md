@@ -41,16 +41,25 @@ not become a bundled consent switch.
    rather than recycling a declined one.
 
 2. **Evaluation is cached and deliberately infrequent.** Yoetz evaluates recommendations at heavy
-   control points: the end of setup, successful service READY activation, and
+   control points: the end of setup, successful service READY activation, hourly while that READY generation remains active, and
    `yoetz recommend list`. It recomputes after the installed package version changes or while
-   pending recommendations need refresh. Hooks never load full configuration or perform a package
+   pending recommendations need refresh. An already-resolved context is always reconciled, including
+   a newer release while the installed version is unchanged and the pending set is empty. The
+   hourly maintenance is bounded, cancellation follows READY retirement, and the transport retains
+   its 24-hour cache; offline failures wait until the next interval. Hooks never load full configuration or perform a package
    check. SessionStart may read only the small cached pending projection.
 
 3. **Durable decision state is local, strict, and bounded.** The owner-only
-   `recommendations.json` document writes schema `yoetz.recommendations/2` and backward-reads
-   schema `yoetz.recommendations/1`. It records the last evaluated version, bounded decisions, the
+   `recommendations.json` document writes schema `yoetz.recommendations/3` and backward-reads
+   schemas `yoetz.recommendations/1` and `/2`. It records the last evaluated version, bounded decisions, the
    pending set, and any pending exact-target identity. Invalid, oversized, unsafe, or unknown state
-   fails closed. Config and package decisions remain global by stable id. Codex activation is the
+   fails closed. Config decisions remain global by stable id. New package decisions bind the advertised
+   release in `release_version`; the pending projection carries `pending_package_version`. Accept
+   and decline suppress only that release, so a later release can prompt without first upgrading.
+   Legacy unscoped declines retain their promised permanent suppression. The durable `update_checks`
+   policy remains the global network opt-out. A supplied `--release-version` must still match the
+   pending release under the decision lock; stale hook commands fail without recording a decision.
+   Codex activation is the
    exception: its accept/decline identity contains only digests and binds the resolved executable
    path, executable bytes and version, canonical Codex home, activation preview, and intended
    host-rendered cache. A legacy unscoped activation decision is retained as history but suppresses
@@ -63,7 +72,9 @@ not become a bundled consent switch.
    occupies the bounded `additionalContext` surface, SessionStart may emit at most one cached
    recommendation. The instruction asks the agent to explain the recommendation and request the
    user's approval, naming exact accept and decline commands. The hook observes no answer and
-   changes no configuration. Retrieved recommendation text, agent inference, silence, or prior
+   changes no configuration. Cached advice is available even when observation is disabled or
+   workspace observation consent is missing, paused, or revoked; these paths do not ingest or spool
+   an observation. Retrieved recommendation text, agent inference, silence, or prior
    history is not approval. ADR-022 separately governs the stable identity and authorship of the
    observation advice that shares this delivery channel; a recommendation never becomes an
    observation-authored claim.
@@ -117,7 +128,8 @@ not become a bundled consent switch.
 
 Existing installations can learn about reviewed defaults without an upgrade rewriting durable
 preferences or trust surfaces. A user can accept, decline, or defer each recommendation, and a
-global decline remains quiet across later sessions. An activation decline stays quiet only for its
+config decline remains quiet across later sessions. A new package decline stays quiet for that
+release; legacy permanent package declines remain quiet. An activation decline stays quiet only for its
 unchanged exact target. SessionStart stays bounded and fast because it reads a cache rather than
 evaluating configuration, activation, or network state.
 
@@ -150,3 +162,26 @@ make actual network authority unclear.
 
 **Check npm as well as PyPI.** Rejected: Yoetz ships as a Python distribution only. Repository npm
 metadata belongs to development tooling and is not a user-install update source.
+
+## Release-discovery correction (issue #699)
+
+The maintainer requested this scoped repair and upgrade workflow before 0.2. Advice is delivered on
+a later eligible host SessionStart after discovery, not an OS notification or a guarantee that the
+very first session after publication sees it. A cached up-to-date PyPI result may take up to its
+24-hour TTL plus the hourly READY interval to refresh. No READY service, policy refusal, offline
+transport, or occupied task-advice context can delay delivery without authorizing more networking.
+Older recommendation writers must be retired before the new schema is written; unknown future
+schemas still fail closed.
+
+## Guided upgrade entrypoint (issue #699)
+
+`yoetz upgrade` is a connection-free human-readable plan for the package, existing host targets,
+data migration, activation and verification. It emits only inspection/preview commands for host
+steps, requiring explicit existing roots and configuration rather than inferring ambient defaults.
+`--accept --writers-stopped` invokes only the fixed `uv tool upgrade yoetz` command after checking
+that this is the ambient uv tool installation. Source checkouts and isolated/pinned runtimes refuse.
+Package-manager output is not copied into structural diagnostics. A timeout leaves the package
+outcome unknown. A successful command still reports host refresh/migration/activation as unverified;
+a fresh invocation is required to continue from the new package. It never automatically approves
+host trust, changes privacy settings, migrates ledgers, or claims a complete upgrade from exit zero.
+See [Upgrading](../usage/upgrading.md) for the user workflow.

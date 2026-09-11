@@ -226,6 +226,7 @@ _OBSERVATION_SWEEP_DEADLINE_SECONDS: Final = 30.0
 # when the next pass may take a cross-process store lock a hook process also wants.
 _OBSERVATION_SWEEP_PROGRESS_DELAY_SECONDS: Final = 0.05
 _READY_RECOMMENDATION_REFRESH_DEADLINE_SECONDS: Final = 10.0
+_READY_RECOMMENDATION_REFRESH_INTERVAL_SECONDS: Final = 3600.0
 # Soft locks may re-apply the same scoped auto-unlock / keyring load the service already uses at
 # restart. Explicit human lock and hard unlock failures stay locked until a trusted ceremony.
 #
@@ -1654,28 +1655,18 @@ class ServiceDaemon:
             if observation_sweep is not None:
                 summary = await self._bounded_observation_sweep(observation_sweep)
                 await self._note_sweep_liveness(summary)
-            if recommendation_refresh is not None:
-                try:
-                    observation_gate = getattr(self._composition, "observation_gate", None)
-                    if isinstance(observation_gate, asyncio.Lock):
-                        async with observation_gate:
-                            async with self._composition.maintenance_gate:
-                                await asyncio.wait_for(
-                                    recommendation_refresh(),
-                                    timeout=_READY_RECOMMENDATION_REFRESH_DEADLINE_SECONDS,
-                                )
-                    else:
-                        async with self._composition.maintenance_gate:
-                            await asyncio.wait_for(
-                                recommendation_refresh(),
-                                timeout=_READY_RECOMMENDATION_REFRESH_DEADLINE_SECONDS,
-                            )
-                except Exception:
-                    # Recommendations are advisory and must never unpublish READY.
-                    pass
+            next_recommendation_refresh = 0.0
             while self._ready_generation_is_current(
                 application, service_generation, vault_generation
             ):
+                if recommendation_refresh is not None and (
+                    asyncio.get_running_loop().time() >= next_recommendation_refresh
+                ):
+                    await self._refresh_ready_recommendations(recommendation_refresh)
+                    next_recommendation_refresh = (
+                        asyncio.get_running_loop().time()
+                        + _READY_RECOMMENDATION_REFRESH_INTERVAL_SECONDS
+                    )
                 if observation_sweep is None:
                     await asyncio.sleep(_OBSERVATION_SWEEP_INTERVAL_SECONDS)
                     continue
@@ -1695,6 +1686,28 @@ class ServiceDaemon:
                 await self._note_sweep_liveness(summary)
         except asyncio.CancelledError:
             raise
+
+    async def _refresh_ready_recommendations(
+        self, recommendation_refresh: Callable[[], Awaitable[object]]
+    ) -> None:
+        try:
+            observation_gate = getattr(self._composition, "observation_gate", None)
+            if isinstance(observation_gate, asyncio.Lock):
+                async with observation_gate:
+                    async with self._composition.maintenance_gate:
+                        await asyncio.wait_for(
+                            recommendation_refresh(),
+                            timeout=_READY_RECOMMENDATION_REFRESH_DEADLINE_SECONDS,
+                        )
+            else:
+                async with self._composition.maintenance_gate:
+                    await asyncio.wait_for(
+                        recommendation_refresh(),
+                        timeout=_READY_RECOMMENDATION_REFRESH_DEADLINE_SECONDS,
+                    )
+        except Exception:
+            # Recommendations are advisory and must never unpublish READY.
+            pass
 
     async def _note_sweep_liveness(self, summary: ObservationDrainSummary | None) -> None:
         """Count resolved outbox rows as activity for the idle relock clock.

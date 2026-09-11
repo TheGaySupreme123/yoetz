@@ -352,7 +352,7 @@ async def test_legacy_global_activation_decision_never_suppresses_exact_target(
 
     assert refreshed.pending == ("codex-plugin-activation",)
     assert refreshed.pending_targets["codex-plugin-activation"] == target
-    assert json.loads(path.read_text(encoding="utf-8"))["schema"] == "yoetz.recommendations/2"
+    assert json.loads(path.read_text(encoding="utf-8"))["schema"] == "yoetz.recommendations/3"
 
 
 @pytest.mark.anyio
@@ -371,7 +371,7 @@ async def test_acceptance_suppresses_only_the_same_release_frontier(tmp_path: Pa
 
 
 @pytest.mark.anyio
-async def test_empty_cache_recomputes_only_when_version_changes(tmp_path: Path) -> None:
+async def test_supplied_context_reconciles_even_without_version_change(tmp_path: Path) -> None:
     satisfied = RecommendationContext(observation_enabled=True, codex_activation_state="active")
     first = await refresh_pending(context=satisfied, root=tmp_path, version="0.1.0")
     assert first.pending == ()
@@ -387,7 +387,7 @@ async def test_empty_cache_recomputes_only_when_version_changes(tmp_path: Path) 
         version="0.2.0",
     )
 
-    assert stale_same_version.pending == ()
+    assert stale_same_version.pending == ("observation-enabled",)
     assert changed_version.pending == ("observation-enabled",)
 
 
@@ -600,3 +600,75 @@ async def test_context_resolution_reuses_package_update_advisory(
             "allow_network": False,
         }
     ]
+
+
+@pytest.mark.anyio
+async def test_new_release_is_discovered_without_installed_version_change(tmp_path: Path) -> None:
+    def context(latest: str) -> RecommendationContext:
+        return RecommendationContext(
+            package_update=build_package_update_advisory(
+                installed_version="0.2.0", latest_version=latest, source="cache"
+            )
+        )
+
+    assert not (
+        await refresh_pending(context=context("0.2.0"), root=tmp_path, version="0.2.0")
+    ).pending
+    discovered = await refresh_pending(context=context("0.3.0"), root=tmp_path, version="0.2.0")
+    assert discovered.pending == ("package-update",)
+    assert discovered.pending_package_version == "0.3.0"
+    assert cached_pending_recommendations(root=tmp_path)[0].release_version == "0.3.0"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("decision", ["accepted", "declined"])
+async def test_package_decision_only_suppresses_advertised_release(
+    tmp_path: Path, decision: str
+) -> None:
+    context = RecommendationContext(package_update=_newer())
+    await refresh_pending(context=context, root=tmp_path, version="0.1.0")
+    if decision == "declined":
+        decline_cached_recommendation("package-update", root=tmp_path, release_version="0.2.0")
+    else:
+        record_recommendation_decision(
+            "package-update", "accepted", root=tmp_path, release_version="0.2.0"
+        )
+    assert not (await refresh_pending(context=context, root=tmp_path, version="0.1.0")).pending
+    later = RecommendationContext(
+        package_update=build_package_update_advisory(
+            installed_version="0.1.0", latest_version="0.3.0", source="cache"
+        )
+    )
+    assert (await refresh_pending(context=later, root=tmp_path, version="0.1.0")).pending == (
+        "package-update",
+    )
+    with pytest.raises(ValueError, match="recommendation_release_changed"):
+        decline_cached_recommendation("package-update", root=tmp_path, release_version="0.2.0")
+    assert load_recommendation_state(root=tmp_path).pending_package_version == "0.3.0"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("schema", ["yoetz.recommendations/1", "yoetz.recommendations/2"])
+async def test_legacy_permanent_package_opt_out_is_preserved(tmp_path: Path, schema: str) -> None:
+    decision: dict[str, object] = {
+        "decision": "declined",
+        "decided_at": "2026-08-12T09:30:00Z",
+        "version": "0.1.0",
+    }
+    document: dict[str, object] = {
+        "schema": schema,
+        "last_evaluated_version": "0.1.0",
+        "decisions": {"package-update": decision},
+        "pending": [],
+    }
+    if schema.endswith("/2"):
+        document["pending_targets"] = {}
+        decision.update(recommendation_id="package-update", target=None)
+    path = tmp_path / "recommendations.json"
+    path.write_text(json.dumps(document))
+    path.chmod(0o600)
+    result = await refresh_pending(
+        context=RecommendationContext(package_update=_newer()), root=tmp_path, version="0.2.0"
+    )
+    assert not result.pending
+    assert json.loads(path.read_text())["schema"] == "yoetz.recommendations/3"

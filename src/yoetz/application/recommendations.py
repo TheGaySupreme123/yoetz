@@ -16,7 +16,7 @@ import stat
 import tempfile
 from collections.abc import Awaitable, Callable, Generator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -53,7 +53,8 @@ type RecommendationKind = Literal["config_flip", "activation", "package_update"]
 type RecommendationDecisionValue = Literal["accepted", "declined"]
 type RecommendationContextFactory = Callable[[], Awaitable["RecommendationContext"]]
 
-_SCHEMA: Final = "yoetz.recommendations/2"
+_SCHEMA: Final = "yoetz.recommendations/3"
+_TARGET_SCHEMA: Final = "yoetz.recommendations/2"
 _LEGACY_SCHEMA: Final = "yoetz.recommendations/1"
 _STORE_NAME: Final = "recommendations.json"
 _LOCK_NAME: Final = "recommendations.lock"
@@ -100,6 +101,7 @@ class RecommendedDefault:
     summary: str
     kind: RecommendationKind
     is_satisfied: Callable[[RecommendationContext], bool] = field(repr=False, compare=False)
+    release_version: str | None = None
 
     def __post_init__(self) -> None:
         if _ID.fullmatch(self.id) is None:
@@ -116,6 +118,7 @@ class RecommendationDecision:
     version: str
     recommendation_id: str = ""
     target: RecommendationTarget | None = None
+    release_version: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +172,7 @@ class RecommendationState:
         default_factory=lambda: MappingProxyType({})
     )
     pending: tuple[str, ...] = ()
+    pending_package_version: str | None = None
     pending_targets: Mapping[str, RecommendationTarget] = field(
         default_factory=lambda: MappingProxyType({})
     )
@@ -321,6 +325,18 @@ def _decision_key(recommendation_id: str, target: RecommendationTarget | None) -
     return f"{recommendation_id}@{target.target_digest.removeprefix('sha256:')}"
 
 
+def _release_version(value: object) -> str | None:
+    # Values appear in hook command arguments; admit only bounded version tokens, never shell text.
+    if value is None:
+        return None
+    if type(value) is not str or re.fullmatch(r"[0-9][a-zA-Z0-9.!+_-]{0,127}", value) is None:
+        raise ValueError("recommendation_release_invalid")
+    from packaging.version import Version
+
+    Version(value)
+    return value
+
+
 def _parse_state(parsed: object) -> RecommendationState:
     if type(parsed) is not dict:
         raise ValueError("document_invalid")
@@ -337,9 +353,11 @@ def _parse_state(parsed: object) -> RecommendationState:
             "pending_targets",
         }
     )
+    if schema == _SCHEMA:
+        expected_keys.add("pending_package_version")
     if set(document) != expected_keys:
         raise ValueError("document_keys_invalid")
-    if schema not in {_SCHEMA, _LEGACY_SCHEMA}:
+    if schema not in {_SCHEMA, _TARGET_SCHEMA, _LEGACY_SCHEMA}:
         raise ValueError("schema_invalid")
     version = document["last_evaluated_version"]
     if version is not None and (
@@ -362,6 +380,8 @@ def _parse_state(parsed: object) -> RecommendationState:
             if schema == _LEGACY_SCHEMA
             else {"decision", "decided_at", "version", "recommendation_id", "target"}
         )
+        if schema == _SCHEMA:
+            row_keys.add("release_version")
         if set(row) != row_keys:
             raise ValueError("decision_keys_invalid")
         decision = row["decision"]
@@ -388,12 +408,16 @@ def _parse_state(parsed: object) -> RecommendationState:
             raise ValueError("decision_target_invalid")
         if key != _decision_key(recommendation_id, target):
             raise ValueError("decision_key_invalid")
+        release_version = _release_version(row.get("release_version"))
+        if release_version is not None and recommendation_id != "package-update":
+            raise ValueError("decision_release_invalid")
         decisions[key] = RecommendationDecision(
             decision=cast(RecommendationDecisionValue, decision),
             decided_at=_parse_timestamp(row["decided_at"]),
             version=decided_version,
             recommendation_id=recommendation_id,
             target=target,
+            release_version=release_version,
         )
     raw_pending = document["pending"]
     if type(raw_pending) is not list:
@@ -411,7 +435,7 @@ def _parse_state(parsed: object) -> RecommendationState:
             continue
         pending.append(item)
     pending_targets: dict[str, RecommendationTarget] = {}
-    if schema == _SCHEMA:
+    if schema in {_SCHEMA, _TARGET_SCHEMA}:
         raw_targets = document["pending_targets"]
         if type(raw_targets) is not dict:
             raise ValueError("pending_targets_invalid")
@@ -419,7 +443,11 @@ def _parse_state(parsed: object) -> RecommendationState:
             if key != "codex-plugin-activation" or key not in pending:
                 raise ValueError("pending_target_key_invalid")
             pending_targets[cast(str, key)] = _parse_target(raw)
+    pending_package_version = _release_version(document.get("pending_package_version"))
+    if pending_package_version is not None and "package-update" not in pending:
+        raise ValueError("pending_release_invalid")
     return RecommendationState(
+        pending_package_version=pending_package_version,
         last_evaluated_version=version,
         decisions=MappingProxyType(decisions),
         pending=tuple(pending),
@@ -506,6 +534,7 @@ def _state_payload(state: RecommendationState) -> bytes:
         or len(set(state.pending)) != len(state.pending)
         or set(state.pending_targets) - set(state.pending)
         or set(state.pending_targets) - {"codex-plugin-activation"}
+        or (state.pending_package_version is not None and "package-update" not in state.pending)
     ):
         raise RecommendationStoreError("recommendation_store_write_failed")
     for key, row in state.decisions.items():
@@ -513,6 +542,7 @@ def _state_payload(state: RecommendationState) -> bytes:
         if (
             recommendation_id not in _BY_ID
             or (row.target is not None and recommendation_id != "codex-plugin-activation")
+            or (row.release_version is not None and recommendation_id != "package-update")
             or key != _decision_key(recommendation_id, row.target)
         ):
             raise RecommendationStoreError("recommendation_store_write_failed")
@@ -524,11 +554,13 @@ def _state_payload(state: RecommendationState) -> bytes:
                 "decision": row.decision,
                 "decided_at": _timestamp_text(row.decided_at),
                 "version": row.version,
+                "release_version": _release_version(row.release_version),
                 "recommendation_id": row.recommendation_id or key,
                 "target": None if row.target is None else _target_payload(row.target),
             }
             for key, row in sorted(state.decisions.items())
         },
+        "pending_package_version": _release_version(state.pending_package_version),
         "pending": list(state.pending),
         "pending_targets": {
             key: _target_payload(target) for key, target in sorted(state.pending_targets.items())
@@ -606,9 +638,13 @@ def _decision_suppresses(
     decision: RecommendationDecision | None,
     *,
     installed_version: str,
+    release_version: str | None = None,
 ) -> bool:
     if decision is None:
         return False
+    if recommendation_id == "package-update" and decision.release_version is not None:
+        return decision.release_version == release_version
+    # Preserve legacy global declines: those users were promised a permanent opt-out.
     if decision.decision == "declined":
         return True
     if recommendation_id == "codex-plugin-activation":
@@ -674,7 +710,12 @@ async def refresh_pending(
     if type(current_version) is not str or not current_version:
         raise ValueError("recommendation_version_invalid")
     snapshot = load_recommendation_state(root=root)
-    if snapshot.last_evaluated_version == current_version and not snapshot.pending and not force:
+    if (
+        snapshot.last_evaluated_version == current_version
+        and not snapshot.pending
+        and not force
+        and context is None
+    ):
         return snapshot
     resolved = (
         await context_factory()
@@ -683,6 +724,12 @@ async def refresh_pending(
     )
     with _state_lock(root):
         current = load_recommendation_state(root=root)
+        advisory = resolved.package_update
+        release_version = (
+            _release_version(advisory.latest_version)
+            if advisory is not None and advisory.is_newer
+            else current.pending_package_version
+        )
         pending_ids: list[str] = []
         pending_targets: dict[str, RecommendationTarget] = {}
         for item in RECOMMENDED_DEFAULTS:
@@ -693,6 +740,7 @@ async def refresh_pending(
                 item.id,
                 current.decisions.get(_decision_key(item.id, target)),
                 installed_version=current_version,
+                release_version=release_version,
             ):
                 continue
             if not _fact_is_known(item, resolved):
@@ -713,10 +761,21 @@ async def refresh_pending(
             last_evaluated_version=current_version,
             decisions=current.decisions,
             pending=pending,
+            pending_package_version=release_version if "package-update" in pending else None,
             pending_targets=MappingProxyType(pending_targets),
         )
         store_recommendation_state(updated, root=root)
         return updated
+
+
+def _decision_release(
+    state: RecommendationState, recommendation_id: str, requested: str | None
+) -> str | None:
+    if requested is not None and (
+        recommendation_id != "package-update" or requested != state.pending_package_version
+    ):
+        raise ValueError("recommendation_release_changed")
+    return state.pending_package_version if recommendation_id == "package-update" else None
 
 
 def record_recommendation_decision(
@@ -727,6 +786,7 @@ def record_recommendation_decision(
     version: str | None = None,
     now: datetime | None = None,
     target: RecommendationTarget | None = None,
+    release_version: str | None = None,
 ) -> RecommendationState:
     """Record an explicit accept/decline and remove it from cached pending advice."""
 
@@ -741,6 +801,7 @@ def record_recommendation_decision(
         raise ValueError("recommendation_version_invalid")
     with _state_lock(root):
         current = load_recommendation_state(root=root)
+        selected_release = _decision_release(current, recommendation_id, release_version)
         decisions = dict(current.decisions)
         key = _decision_key(recommendation_id, target)
         decisions[key] = RecommendationDecision(
@@ -749,6 +810,7 @@ def record_recommendation_decision(
             version=current_version,
             recommendation_id=recommendation_id,
             target=target,
+            release_version=selected_release,
         )
         if recommendation_id == "codex-plugin-activation":
             _compact_activation_decisions(decisions, current_key=key)
@@ -758,6 +820,9 @@ def record_recommendation_decision(
             last_evaluated_version=current.last_evaluated_version or current_version,
             decisions=MappingProxyType(decisions),
             pending=tuple(item for item in current.pending if item != recommendation_id),
+            pending_package_version=(
+                None if recommendation_id == "package-update" else current.pending_package_version
+            ),
             pending_targets=MappingProxyType(
                 {
                     key: value
@@ -776,6 +841,7 @@ def decline_cached_recommendation(
     root: Path | None = None,
     version: str | None = None,
     now: datetime | None = None,
+    release_version: str | None = None,
 ) -> RecommendationState:
     """Durably decline one cached pending recommendation without re-evaluating any facts.
 
@@ -796,6 +862,7 @@ def decline_cached_recommendation(
         target = current.pending_targets.get(recommendation_id)
         if recommendation_id == "codex-plugin-activation" and target is None:
             raise ValueError("recommendation_target_unknown")
+        selected_release = _decision_release(current, recommendation_id, release_version)
         decisions = dict(current.decisions)
         key = _decision_key(recommendation_id, target)
         decisions[key] = RecommendationDecision(
@@ -804,6 +871,7 @@ def decline_cached_recommendation(
             version=current_version,
             recommendation_id=recommendation_id,
             target=target,
+            release_version=selected_release,
         )
         if recommendation_id == "codex-plugin-activation":
             _compact_activation_decisions(decisions, current_key=key)
@@ -811,6 +879,9 @@ def decline_cached_recommendation(
             last_evaluated_version=current.last_evaluated_version or current_version,
             decisions=MappingProxyType(decisions),
             pending=tuple(item for item in current.pending if item != recommendation_id),
+            pending_package_version=(
+                None if recommendation_id == "package-update" else current.pending_package_version
+            ),
             pending_targets=MappingProxyType(
                 {
                     key: value
@@ -831,5 +902,14 @@ def cached_pending_recommendations(
     if limit is not None and (type(limit) is not int or limit < 0):
         raise ValueError("recommendation_limit_invalid")
     state = load_recommendation_state(root=root)
-    pending = tuple(_BY_ID[item] for item in state.pending)
+    pending = tuple(
+        replace(
+            _BY_ID[item],
+            title=f"Update Yoetz to {state.pending_package_version}",
+            release_version=state.pending_package_version,
+        )
+        if item == "package-update" and state.pending_package_version is not None
+        else _BY_ID[item]
+        for item in state.pending
+    )
     return pending if limit is None else pending[:limit]
