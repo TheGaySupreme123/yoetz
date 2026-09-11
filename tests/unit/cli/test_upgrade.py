@@ -64,10 +64,10 @@ def test_native_plan_preserves_explicit_paths_and_profiles(host: str) -> None:
     options = {
         "project-root": "/project with spaces",
         "claude-path": "/bin/claude",
-        "claude-config-root": "/home/claude",
+        "claude-config-root": "/fixture/claude-home",
         "cache-root": "/cache/claude",
         "marketplace-root": "/market/claude",
-        "cursor-config-root": "/home/cursor",
+        "cursor-config-root": "/fixture/cursor-home",
         "mcp-ownership": "plugin-managed",
         "route-profile": "strict",
         "observation-profile": "ordinary",
@@ -92,15 +92,15 @@ def test_codex_plan_has_no_invented_plugin_update_or_general_setup() -> None:
         {
             "project-root": "/project",
             "codex-path": "/bin/codex",
-            "codex-home": "/home/codex",
+            "codex-home": "/fixture/codex-home",
         },
     )
     stage = next(step for step in steps if step.title.startswith("codex: refresh"))
     assert stage.environment == (
-        ("CODEX_HOME", "/home/codex"),
-        ("CODEX_TESTING_HOME", "/home/codex"),
+        ("CODEX_HOME", "/fixture/codex-home"),
+        ("CODEX_TESTING_HOME", "/fixture/codex-home"),
     )
-    assert stage.commands[-1][-2:] == ("--codex-home", "/home/codex")
+    assert stage.commands[-1][-2:] == ("--codex-home", "/fixture/codex-home")
     for command in stage.commands:
         assert "setup" not in command
         assert "update" not in command
