@@ -932,6 +932,20 @@ pressure and the complete projected buffer/outbox size; accepted replay work rem
 Hard pressure can recover to high before optional detail recovers. A generation-fenced session
 end retires pressure scheduling without deleting pending work or historical losses.
 
+Unknown capture inventory can reject new input even when the outbox is empty. The READY
+service now schedules a bounded inventory recovery pass independently of the next hook (#695),
+using an existing unambiguous mapping and the authoritative catalog/bundle inventory. An unreadable
+route or missing mapping stays blocked rather than being assumed empty; recovery retries after
+it becomes readable without requiring a fresh event. Do not reset local state, enlarge capacity,
+or toggle consent to manufacture a healthy status. Real hard limits continue to apply after
+inventory recovery, and previous loss counts and identities remain unchanged.
+
+Recovery emits fixed `capture_inventory_*` reason counts in its internal maintenance summary;
+these are not ledger receipts or a new hook diagnostic format. Historical local selection losses
+still need a separately attributed task/check propagation path when no later envelope is admitted.
+Host-shaped regression tests, including interleaved parent/worker routes and encrypted readback,
+are not a version-pinned acceptance run inside the installed vendor application.
+
 Hook and manual drain control failures have `control_` reasons. A protocol error is not a
 `ledger_rejected` result. A control failure stops further calls on that connection; the next
 hook, manual drain or service sweep can attempt the retained identity. Oversized or locally

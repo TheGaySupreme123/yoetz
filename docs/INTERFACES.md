@@ -3451,6 +3451,29 @@ egress: repository privacy selection and provider-attempt authorization remain i
 historical session-stream path is unchanged and excluded from this native ticket lane; shared
 replay, generation-fence, and teardown behavior applies across hosts.
 
+Admission-independent recovery (#695) uses private application methods, not a new RPC:
+`LocalObservationStore.capture_inventory_recovery_needed(workspace)` reports unknown scope or
+an unreconciled reservation. `pending_workspaces()` includes that durable demand even with an
+empty outbox. `ObservationCoordinator.recover_capture_inventory(workspace)` returns
+`ObservationCaptureRecoveryOutcome` or `None` when recovery is not needed. It routes only existing,
+unambiguous lifecycle mappings and invokes the same complete inventory callback under the shared
+capture lock. The READY `ObservationOutboxSweeper.capture_recovery` callback runs before per-workspace
+drain leases and outside the workflow-control gate. It rotates at most four workspace candidates
+per pass with a five-second cooperative budget, and tries at most eight mapping candidates per
+workspace before yielding. Started synchronous metadata/publication workers are joined on
+cancellation; a timed-out operation cannot publish after its capture lock has been released.
+The service callback verifies opened runtime task/session identities and supplies an internal
+`proof_guard` to `bootstrap_capture_reservations`; it rechecks the READY service/vault generation
+under the local-store publication lock. A false or failed guard leaves accounting unknown.
+
+The closed internal recovery outcomes are `capture_inventory_recovered`,
+`capture_inventory_mapping_missing`, `capture_inventory_route_unavailable`,
+`capture_inventory_unknown`, `capture_inventory_disabled`, `capture_inventory_busy`, and
+`capture_inventory_timeout`. They contribute only fixed reason counts to
+`ObservationDrainSummary.reasons`, not row delivery/attempt counts, coverage gaps, or raw
+exception text. No new diagnostic/RPC schema or task-loss event is introduced. A successful
+inventory does not clear loss identity/count history or bypass a real hard capacity limit.
+
 Outcome semantics and back-pressure vocabulary (ADR-022 decisions 12–13):
 
 - Paired `PostToolUse` materialization consumes `exit_status`, `denied`, boolean `success`, and a

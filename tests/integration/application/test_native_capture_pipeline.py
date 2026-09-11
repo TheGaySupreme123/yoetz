@@ -214,6 +214,7 @@ async def _pipeline(
     codex_session_id: str,
     profile: str | None,
     install_mapping: bool = True,
+    identity: tuple[str, str, str] | None = None,
 ) -> tuple[
     Path,
     str,
@@ -237,9 +238,11 @@ async def _pipeline(
         local.enable_content_capture(workspace, profile)
     session_commitment = local.bind_codex_session(workspace, codex_session_id)
 
-    task_id = _ids(IdKind.TASK, 1)
-    yoetz_session_id = _ids(IdKind.SESSION, 2)
-    writer_id = _ids(IdKind.WRITER, 3)
+    task_id, yoetz_session_id, writer_id = identity or (
+        _ids(IdKind.TASK, 1),
+        _ids(IdKind.SESSION, 2),
+        _ids(IdKind.WRITER, 3),
+    )
     if install_mapping:
         store_mapping(
             LifecycleMapping(
@@ -2221,3 +2224,95 @@ async def test_disabled_native_content_never_enters_service_request(tmp_path: Pa
     assert len(pending) == 1
     assert pending[0].envelope.event_kind == "PostToolUse"
     assert pending[0].envelope.content_object_refs == ()
+
+
+@pytest.mark.anyio
+async def test_service_recovers_unknown_inventory_without_a_fresh_native_event(
+    tmp_path: Path,
+) -> None:
+    """A rejected failed-command hook must not be the only path to inventory repair."""
+
+    from yoetz.application.observation_drain import ObservationOutboxSweeper
+    from yoetz.domain.observation import ObservationCaptureBacklog
+
+    profile = CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+    (
+        project,
+        workspace,
+        session,
+        local,
+        observation,
+        _ledger,
+        runtime,
+        coordinator,
+        client,
+        connect,
+    ) = await _pipeline(tmp_path, codex_session_id="claude:inventory-recovery", profile=profile)
+    run_hook = _claude_hook_runner(
+        project=project, state=tmp_path / "state", connect=connect, profile=profile
+    )
+    local.bootstrap_capture_reservations(
+        workspace, {runtime.task_id: ObservationCaptureBacklog(0, 0, None)}
+    )
+    local.mark_capture_backlog_scope_unknown(workspace)
+    callback = coordinator.capture_budget_bootstrap
+    assert callback is not None
+    bootstrap_calls: list[str] = []
+
+    async def bootstrap(workspace: str, current: TaskRuntime, store: TaskObservationPort) -> bool:
+        bootstrap_calls.append(workspace)
+        return await callback(workspace, current, store)
+
+    coordinator.capture_budget_bootstrap = bootstrap
+    assert (
+        await asyncio.to_thread(
+            run_hook,
+            "PostToolUseFailure",
+            {
+                "hook_event_name": "PostToolUseFailure",
+                "session_id": "inventory-recovery",
+                "tool_name": "Bash",
+                "tool_use_id": "rejected-before-recovery",
+                "error": "synthetic failed command",
+                "exit_status": 1,
+            },
+        )
+        == 0
+    )
+    assert local.pending_outbox_count(workspace) == 0
+    assert local.selection_accounting(workspace)["unrecoverable_input_count"] == 1
+    assert bootstrap_calls == []
+    assert client.requests == []
+
+    sweeper = ObservationOutboxSweeper(
+        local, coordinator, capture_recovery=coordinator.recover_capture_inventory
+    )
+    try:
+        summary = await sweeper.sweep()
+        assert summary.attempted == 0
+        assert bootstrap_calls == [workspace]
+        assert local.capture_reservation_bootstrap_ready(workspace, runtime.task_id)
+        assert local.selection_runtime_status(workspace, session)["admission_allowed"] is True
+        assert local.selection_accounting(workspace)["unrecoverable_input_count"] == 1
+        assert (
+            await asyncio.to_thread(
+                run_hook,
+                "PostToolUse",
+                {
+                    "hook_event_name": "PostToolUse",
+                    "session_id": "inventory-recovery",
+                    "tool_name": "Bash",
+                    "tool_use_id": "accepted-after-recovery",
+                    "tool_response": "capture-recovery-marker-695",
+                    "exit_status": 1,
+                },
+            )
+            == 0
+        )
+        assert any(request.capture_only for request in client.requests)
+        envelopes = observation.list_envelopes_for_session(workspace, session)
+        assert envelopes
+        assert local.selection_accounting(workspace)["unrecoverable_input_count"] == 1
+    finally:
+        sweeper.close()
+        coordinator.close()

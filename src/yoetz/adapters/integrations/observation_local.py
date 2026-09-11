@@ -5517,6 +5517,7 @@ class LocalObservationStore:
         *,
         observed_at: Timestamp | None = None,
         complete: bool = True,
+        proof_guard: Callable[[], bool] | None = None,
         ticket_ids_by_task: Mapping[str, tuple[str, ...]] | None = None,
     ) -> bool:
         """Account every task in a ready inventory before opening central admission.
@@ -5530,7 +5531,7 @@ class LocalObservationStore:
         """
 
         workspace = validate_commitment(workspace)
-        if type(complete) is not bool:
+        if type(complete) is not bool or (proof_guard is not None and not callable(proof_guard)):
             raise ProtocolValueError("invalid_event_value_type")
         stamp = self._wall_timestamp() if observed_at is None else observed_at
         if type(stamp) is not Timestamp:
@@ -5550,6 +5551,17 @@ class LocalObservationStore:
         )
         with self._lock:
             state = self._load(workspace)
+            # READY can change generation while this worker waits for flock.
+            # Revalidate under the store lock before replacing any accounting.
+            try:
+                current = proof_guard is None or proof_guard() is True
+            except Exception:
+                current = False
+            if not current:
+                state.capture_reservation_bootstrap = None
+                state.capture_backlog_scope_unknown = True
+                self._save(workspace, state)
+                return False
             state.capture_backlogs = snapshots
             state.capture_reservation_bootstrap = proof
             state.capture_backlog_scope_unknown = False
@@ -5573,6 +5585,21 @@ class LocalObservationStore:
                 state.capture_reservations = reconciled
             self._save(workspace, state)
         return True
+
+    @staticmethod
+    def _capture_inventory_recovery_pending(state: _WorkspaceState) -> bool:
+        """Use the same unknown dimensions as capture pressure, without summing occupancy."""
+
+        return state.capture_backlog_scope_unknown or any(
+            item.needs_reconcile for item in (state.capture_reservations or {}).values()
+        )
+
+    def capture_inventory_recovery_needed(self, workspace: str) -> bool:
+        """Read durable recovery demand independently of native-input admission."""
+
+        workspace = validate_commitment(workspace)
+        with self._lock:
+            return self._capture_inventory_recovery_pending(self._load(workspace))
 
     def capture_reservation_bootstrap_ready(
         self, workspace: str, task_id: str | None = None
@@ -6214,7 +6241,7 @@ class LocalObservationStore:
             )
 
     def pending_workspaces(self) -> tuple[str, ...]:
-        """Return opaque commitments with undelivered rows or lifecycle work."""
+        """Return opaque commitments with delivery, lifecycle, or capture recovery work."""
 
         with self._lock:
             pending: list[str] = []
@@ -6231,6 +6258,7 @@ class LocalObservationStore:
                     or state.pending_lifecycles
                     or state.admission_buffer.inputs
                     or pressure_active
+                    or self._capture_inventory_recovery_pending(state)
                 ):
                     pending.append(workspace)
             return tuple(sorted(pending, key=str.encode))
