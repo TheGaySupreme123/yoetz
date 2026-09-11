@@ -192,9 +192,10 @@ jobs:
           echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
           echo "YZCI_DENY_NETWORK=1" >> "$GITHUB_ENV"
           uv sync --locked --group dev
+          candidate_version=$(uv run --locked python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
           uv venv "${{ runner.temp }}/candidate-venv"
           uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" \
-            "${{ runner.temp }}/dist/yoetz-0.1.0-py3-none-any.whl"
+            "${{ runner.temp }}/dist/yoetz-${candidate_version}-py3-none-any.whl"
           candidate_origin=$("${{ runner.temp }}/candidate-venv/bin/python" -I -c \
             'import pathlib, yoetz; print(pathlib.Path(yoetz.__file__).resolve())')
           case "$candidate_origin" in
@@ -295,10 +296,11 @@ jobs:
           echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
           echo "YZCI_DENY_NETWORK=1" >> "$GITHUB_ENV"
           uv sync --locked --group dev
+          candidate_version=$(uv run --locked python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
           uv venv "${{ runner.temp }}/candidate-venv"
           uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" \
-            --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==0.1.0"
-          uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" "yoetz==0.1.0"
+            --no-index --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==${candidate_version}"
+          uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" "yoetz==${candidate_version}"
           echo "YOETZ_CANDIDATE_PYTHON=${{ runner.temp }}/candidate-venv/bin/python" >> "$GITHUB_ENV"
           "${{ runner.temp }}/candidate-venv/bin/python" -c "
           import apsw, platform, sys
@@ -371,10 +373,11 @@ jobs:
           echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
           echo "YZCI_DENY_NETWORK=1" >> "$GITHUB_ENV"
           uv sync --locked --all-extras --group dev
+          candidate_version=$(uv run --locked python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
           uv venv "${{ runner.temp }}/candidate-venv"
           uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" \
-            --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==0.1.0"
-          uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" "yoetz[semantic-openai]==0.1.0"
+            --no-index --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==${candidate_version}"
+          uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" "yoetz[semantic-openai]==${candidate_version}"
           echo "YOETZ_CANDIDATE_PYTHON=${{ runner.temp }}/candidate-venv/bin/python" >> "$GITHUB_ENV"
 
       - name: Fake provider cases — success/refusal/malformed/rate-limit/timeout/cancellation/late/stale
@@ -441,10 +444,11 @@ jobs:
           echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
           echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
           uv sync --locked --all-extras --group dev
+          candidate_version=$(uv run --locked python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
           uv venv "${{ runner.temp }}/candidate-venv"
           uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" \
-            --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==0.1.0"
-          uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" "yoetz[semantic-openai]==0.1.0"
+            --no-index --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==${candidate_version}"
+          uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" "yoetz[semantic-openai]==${candidate_version}"
           echo "YOETZ_CANDIDATE_PYTHON=${{ runner.temp }}/candidate-venv/bin/python" >> "$GITHUB_ENV"
 
       - name: Synthetic minimized live-provider case (hard request/token/spend/time caps; allowlisted network only)

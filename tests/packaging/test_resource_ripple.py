@@ -43,6 +43,8 @@ def _write(root: Path, relative_path: str, content: str) -> None:
 def _copy_checkout(destination: Path) -> None:
     """Copy the working-tree source and generated trees the ripple reads and writes."""
 
+    destination.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(_REPO_ROOT / "pyproject.toml", destination / "pyproject.toml")
     ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
     for relative in _CHECKOUT_TREES:
         shutil.copytree(_REPO_ROOT / relative, destination / relative, ignore=ignore)

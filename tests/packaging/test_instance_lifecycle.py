@@ -82,11 +82,14 @@ def _tool_install(dist_dir: Path, root: Path, home: Path) -> tuple[Path, dict[st
     bin_dir = root / "bin"
     env = {**_clean_env(home), "UV_TOOL_DIR": str(tool_dir), "UV_TOOL_BIN_DIR": str(bin_dir)}
 
+    wheels = sorted(dist_dir.glob("*.whl"))
+    assert len(wheels) == 1
+
     def _install(offline: bool) -> subprocess.CompletedProcess[bytes]:
         args = ["uv", "tool", "install", "--python", "3.14.6"]
         if offline:
             args.append("--offline")
-        args += ["--find-links", str(dist_dir), "yoetz==0.1.0"]
+        args += ["--find-links", str(dist_dir), str(wheels[0])]
         return subprocess.run(args, capture_output=True, timeout=180, env=env, check=False)
 
     result = _install(offline=True)

@@ -392,10 +392,11 @@ jobs:
           echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
           echo "XDG_RUNTIME_DIR=$iso/.runtime" >> "$GITHUB_ENV"
           echo "YZCI_DENY_NETWORK=1" >> "$GITHUB_ENV"
+          candidate_version=$(uv run --locked python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
           uv venv "${{ runner.temp }}/runtime-venv"
           uv pip install --python "${{ runner.temp }}/runtime-venv/bin/python" \
-            --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==0.1.0"
-          uv pip install --python "${{ runner.temp }}/runtime-venv/bin/python" "yoetz==0.1.0"
+            --no-index --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==${candidate_version}"
+          uv pip install --python "${{ runner.temp }}/runtime-venv/bin/python" "yoetz==${candidate_version}"
           echo "YOETZ_CANDIDATE_PYTHON=${{ runner.temp }}/runtime-venv/bin/python" >> "$GITHUB_ENV"
 
       - name: Prepare one exact per-run privacy canary and retained runtime root

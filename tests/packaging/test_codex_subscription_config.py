@@ -75,7 +75,9 @@ def _tool_install(dist_dir: Path, root: Path, home: Path) -> tuple[Path, dict[st
 
     tool_dir = root / "tool"
     bin_dir = root / "bin"
-    spec = "yoetz==0.1.0"
+    wheels = sorted(dist_dir.glob("*.whl"))
+    assert len(wheels) == 1
+    spec = str(wheels[0])
     env = {
         **os.environ,
         "HOME": str(home),
