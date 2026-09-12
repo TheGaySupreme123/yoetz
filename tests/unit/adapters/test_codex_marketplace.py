@@ -14,6 +14,7 @@ from typing import cast
 
 import pytest
 
+from yoetz import __version__
 from yoetz.adapters.integrations.codex_marketplace import (
     ActivationInspection,
     ActivationPreview,
@@ -105,7 +106,7 @@ class _FakeCodex:
         elif args == ("plugin", "list", "--marketplace", "yoetz", "--json"):
             body: object
             config = self.home / "config.toml"
-            cache = self.home / "plugins/cache/yoetz/yoetz/0.1.0"
+            cache = self.home / f"plugins/cache/yoetz/yoetz/{__version__}"
             if not config.exists() or "marketplaces.yoetz" not in config.read_text(
                 encoding="utf-8"
             ):
@@ -116,7 +117,7 @@ class _FakeCodex:
                     "pluginId": "yoetz@yoetz",
                     "name": "yoetz",
                     "marketplaceName": "yoetz",
-                    "version": "0.1.0",
+                    "version": __version__,
                     "installed": installed,
                     "enabled": True,
                     "source": {
@@ -132,18 +133,18 @@ class _FakeCodex:
                 body["available" if installed else "installed"] = []
         elif args == ("plugin", "add", "yoetz@yoetz", "--json"):
             source = self.project / ".agents/plugins/yoetz"
-            destination = self.home / "plugins/cache/yoetz/yoetz/0.1.0"
+            destination = self.home / f"plugins/cache/yoetz/yoetz/{__version__}"
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(source, destination)
             body = {
                 "pluginId": "yoetz@yoetz",
                 "name": "yoetz",
                 "marketplaceName": "yoetz",
-                "version": "0.1.0",
+                "version": __version__,
                 "installedPath": str(destination),
             }
         elif args == ("plugin", "remove", "yoetz@yoetz", "--json"):
-            destination = self.home / "plugins/cache/yoetz/yoetz/0.1.0"
+            destination = self.home / f"plugins/cache/yoetz/yoetz/{__version__}"
             if destination.is_dir():
                 shutil.rmtree(destination)
             body = {"pluginId": "yoetz@yoetz"}
@@ -292,7 +293,7 @@ def test_inspect_preview_and_apply_activation(tmp_path: Path) -> None:
     assert '[plugins."yoetz@yoetz"]' in preview.config_toml_block
     assert preview.plugin_source_digest.startswith("sha256:")
     assert preview.codex_home == home
-    assert preview.plugin_install_path == home / "plugins/cache/yoetz/yoetz/0.1.0"
+    assert preview.plugin_install_path == home / f"plugins/cache/yoetz/yoetz/{__version__}"
     assert preview.plugin_install_digest.startswith("sha256:")
     assert preview.probe_command == ("--version",)
     assert preview.inventory_command == ("plugin", "list", "--marketplace", "yoetz", "--json")
@@ -332,7 +333,7 @@ def test_stable_codex_activation_serves_required_hooks_synchronously(tmp_path: P
 
     assert result.state is ActivationState.ACTIVE
     installed_hooks = json.loads(
-        (home / "plugins/cache/yoetz/yoetz/0.1.0/hooks/hooks.json").read_bytes()
+        (home / f"plugins/cache/yoetz/yoetz/{__version__}/hooks/hooks.json").read_bytes()
     )
     for event in (
         "PreToolUse",
@@ -400,7 +401,7 @@ def test_canonical_source_activates_on_async_host_and_seeds_host_rendered_cache(
     assert b'"async":true' not in source_hooks
     # The cache carries the host-specific render: async ingress hooks present.
     cache_hooks = json.loads(
-        (home / "plugins/cache/yoetz/yoetz/0.1.0/hooks/hooks.json").read_bytes()
+        (home / f"plugins/cache/yoetz/yoetz/{__version__}/hooks/hooks.json").read_bytes()
     )
     handler = cache_hooks["hooks"]["PreToolUse"][0]["hooks"][0]
     assert handler.get("async") is True
@@ -461,7 +462,7 @@ def test_inventory_enabled_modified_source_never_reads_active(tmp_path: Path) ->
         f'source = "{project}"\n\n[plugins."yoetz@yoetz"]\nenabled = true\n',
         encoding="utf-8",
     )
-    (home / "plugins/cache/yoetz/yoetz/0.1.0").mkdir(parents=True, mode=0o700)
+    (home / f"plugins/cache/yoetz/yoetz/{__version__}").mkdir(parents=True, mode=0o700)
 
     inspection = inspect_activation(target, codex_home=home)
 
@@ -488,7 +489,7 @@ def test_same_version_cache_refresh_replaces_prior_managed_render(tmp_path: Path
         approved_digest=first.preview_digest,
         _run=runner,
     )
-    cache = home / "plugins/cache/yoetz/yoetz/0.1.0"
+    cache = home / f"plugins/cache/yoetz/yoetz/{__version__}"
     # Simulate content drift since the prior activation: overwrite the cache with
     # the other renderer variant, which is exactly a prior yoetz-managed render.
     shutil.rmtree(cache)
@@ -537,7 +538,7 @@ def test_cache_refresh_between_preview_and_apply_is_stale(tmp_path: Path) -> Non
         approved_digest=first.preview_digest,
         _run=runner,
     )
-    cache = home / "plugins/cache/yoetz/yoetz/0.1.0"
+    cache = home / f"plugins/cache/yoetz/yoetz/{__version__}"
     shutil.rmtree(cache)
     cache.mkdir(mode=0o700)
     for relative_path, payload in render_plugin_install_tree(codex_version=None).items():
@@ -584,7 +585,7 @@ def test_modified_or_foreign_cache_stays_destination_conflict(tmp_path: Path) ->
         approved_digest=first.preview_digest,
         _run=runner,
     )
-    cache = home / "plugins/cache/yoetz/yoetz/0.1.0"
+    cache = home / f"plugins/cache/yoetz/yoetz/{__version__}"
     hooks = cache / "hooks/hooks.json"
     hooks.write_bytes(hooks.read_bytes() + b"# modified\n")
 
@@ -746,7 +747,7 @@ def test_cache_replacement_refuses_ancestor_swap_after_validation(tmp_path: Path
     from yoetz.adapters.integrations.codex_plugin import render_plugin_install_tree
 
     home = tmp_path / "codex-home"
-    cache = home / "plugins/cache/yoetz/yoetz/0.1.0"
+    cache = home / f"plugins/cache/yoetz/yoetz/{__version__}"
     cache.mkdir(parents=True)
     module._validate_descendant_ancestors(  # pyright: ignore[reportPrivateUsage]
         home,
@@ -755,12 +756,12 @@ def test_cache_replacement_refuses_ancestor_swap_after_validation(tmp_path: Path
     outside = tmp_path / "outside-cache"
     (home / "plugins").rename(outside)
     (home / "plugins").symlink_to(outside, target_is_directory=True)
-    sentinel = outside / "cache/yoetz/yoetz/0.1.0/sentinel.txt"
+    sentinel = outside / f"cache/yoetz/yoetz/{__version__}/sentinel.txt"
     sentinel.write_bytes(b"outside")
 
     with pytest.raises(IntegrationError) as caught:
         module._replace_cache_tree(  # pyright: ignore[reportPrivateUsage]
-            home / "plugins/cache/yoetz/yoetz/0.1.0",
+            home / f"plugins/cache/yoetz/yoetz/{__version__}",
             render_plugin_install_tree(codex_version="0.148.0-alpha.6"),
             anchor_root=home,
         )
@@ -775,7 +776,7 @@ def test_removal_preview_refuses_cache_ancestor_swap_after_validation(tmp_path: 
 
     home = tmp_path / "codex-home"
     cache_root = home / "plugins/cache/yoetz/yoetz"
-    cache = cache_root / "0.1.0"
+    cache = cache_root / __version__
     cache.mkdir(parents=True)
     expected = render_plugin_install_tree(codex_version="0.148.0-alpha.6")
     for relative, payload in expected.items():
@@ -789,7 +790,7 @@ def test_removal_preview_refuses_cache_ancestor_swap_after_validation(tmp_path: 
     outside = tmp_path / "outside-cache"
     (home / "plugins").rename(outside)
     (home / "plugins").symlink_to(outside, target_is_directory=True)
-    sentinel = outside / "cache/yoetz/yoetz/0.1.0/sentinel.txt"
+    sentinel = outside / f"cache/yoetz/yoetz/{__version__}/sentinel.txt"
     sentinel.write_bytes(b"outside")
 
     with pytest.raises(IntegrationError) as caught:
@@ -904,7 +905,7 @@ def test_add_failure_after_copy_preserves_honest_partial_state_for_retry(
             _run=runner,
         )
     assert caught.value.reason is IntegrationReason.WRITE_FAILED
-    assert (home / "plugins/cache/yoetz/yoetz/0.1.0").exists()
+    assert (home / f"plugins/cache/yoetz/yoetz/{__version__}").exists()
     assert (project / ".agents/plugins/marketplace.json").read_bytes() == preview.marketplace_bytes
     assert (home / "config.toml").is_file()
 
@@ -1279,7 +1280,7 @@ def test_post_host_mutation_config_conflict_is_write_failed(tmp_path: Path) -> N
 
     assert caught.value.reason is IntegrationReason.WRITE_FAILED
     assert caught.value.safe_details["conflict"] == "config_plugin"
-    assert not (home / "plugins/cache/yoetz/yoetz/0.1.0").exists()
+    assert not (home / f"plugins/cache/yoetz/yoetz/{__version__}").exists()
 
 
 def test_post_host_mutation_marketplace_conflict_is_write_failed(tmp_path: Path) -> None:
@@ -1309,7 +1310,7 @@ def test_post_host_mutation_marketplace_conflict_is_write_failed(tmp_path: Path)
     assert caught.value.reason is IntegrationReason.WRITE_FAILED
     assert caught.value.safe_details["conflict"] == "repository_marketplace"
     assert marketplace.read_bytes() == b'{"name":"foreign"}\n'
-    assert not (home / "plugins/cache/yoetz/yoetz/0.1.0").exists()
+    assert not (home / f"plugins/cache/yoetz/yoetz/{__version__}").exists()
 
 
 def test_post_host_mutation_config_read_error_is_write_failed(
@@ -1328,7 +1329,7 @@ def test_post_host_mutation_config_read_error_is_write_failed(
         codex_home=home,
         _run=runner,
     )
-    cache = home / "plugins/cache/yoetz/yoetz/0.1.0"
+    cache = home / f"plugins/cache/yoetz/yoetz/{__version__}"
     config = home / "config.toml"
     real_current_bytes = module._current_bytes  # pyright: ignore[reportPrivateUsage]
 
@@ -1367,7 +1368,7 @@ def test_mutating_host_runner_error_is_write_failed(tmp_path: Path) -> None:
         codex_home=home,
         _run=runner,
     )
-    cache = home / "plugins/cache/yoetz/yoetz/0.1.0"
+    cache = home / f"plugins/cache/yoetz/yoetz/{__version__}"
     runner.error_after_mutation = module._error(  # pyright: ignore[reportPrivateUsage]
         IntegrationReason.TARGET_UNSAFE
     )
@@ -1394,7 +1395,7 @@ def test_mutating_host_malformed_json_is_write_failed(
     _install(target)
     activation = preview_activation(target, codex_home=home)
     apply_activation(target, codex_home=home, approved_digest=activation.preview_digest)
-    cache = home / "plugins/cache/yoetz/yoetz/0.1.0"
+    cache = home / f"plugins/cache/yoetz/yoetz/{__version__}"
     if host_surface == "marketplace":
         shutil.rmtree(cache)
     runner = _FakeCodex(target, home)
@@ -1692,7 +1693,7 @@ def test_cache_only_removal_preserves_write_failed_for_final_verification(
 
     target, project, home = _target(tmp_path)
     _install(target)
-    cache = home / "plugins/cache/yoetz/yoetz/0.1.0"
+    cache = home / f"plugins/cache/yoetz/yoetz/{__version__}"
     expected = render_plugin_install_tree(codex_version="0.148.0-alpha.6")
     for relative, payload in expected.items():
         destination = cache / relative
@@ -1705,7 +1706,7 @@ def test_cache_only_removal_preserves_write_failed_for_final_verification(
         codex_home=home,
         _run=runner,
     )
-    assert preview.cache_versions == ("0.1.0",)
+    assert preview.cache_versions == (__version__,)
     assert preview.plugin_remove_planned is False
     assert preview.marketplace_remove_planned is False
     original_inventory = module._plugin_inventory  # pyright: ignore[reportPrivateUsage]
@@ -1752,7 +1753,7 @@ def test_removal_preview_bounds_cache_members(tmp_path: Path, overflow: str) -> 
     _install(target)
     activation = preview_activation(target, codex_home=home)
     apply_activation(target, codex_home=home, approved_digest=activation.preview_digest)
-    cache = home / "plugins/cache/yoetz/yoetz/0.1.0"
+    cache = home / f"plugins/cache/yoetz/yoetz/{__version__}"
     if overflow == "member_bytes":
         os.truncate(cache / "hooks/hooks.json", _MAX_MANAGED_CACHE_MEMBER_BYTES + 1)
     elif overflow == "file_count":
@@ -1787,7 +1788,7 @@ def test_removal_preview_rejects_unrepresented_empty_cache_directory(tmp_path: P
     _install(target)
     activation = preview_activation(target, codex_home=home)
     apply_activation(target, codex_home=home, approved_digest=activation.preview_digest)
-    cache = home / "plugins/cache/yoetz/yoetz/0.1.0"
+    cache = home / f"plugins/cache/yoetz/yoetz/{__version__}"
     empty = cache / "owner-empty"
     empty.mkdir()
 
@@ -2405,7 +2406,7 @@ def test_purge_cache_deletes_other_managed_versions(tmp_path: Path) -> None:
     activation = preview_activation(target, codex_home=home)
     apply_activation(target, codex_home=home, approved_digest=activation.preview_digest)
     extra = home / "plugins/cache/yoetz/yoetz/0.0.1"
-    shutil.copytree(home / "plugins/cache/yoetz/yoetz/0.1.0", extra)
+    shutil.copytree(home / f"plugins/cache/yoetz/yoetz/{__version__}", extra)
     with pytest.raises(IntegrationError) as caught:
         preview_removal(target, codex_home=home)
     assert caught.value.reason is IntegrationReason.REMOVE_REFUSED
