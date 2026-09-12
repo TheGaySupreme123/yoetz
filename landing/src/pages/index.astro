@@ -302,7 +302,8 @@ const next = [
               <span class="ct-check" aria-hidden="true">✓</span>
               <span class="ct-body">
                 <span class="ct-title">Copied to your clipboard</span>
-                <span class="ct-detail ct-cmd" id="copy-toast-detail"></span>
+                <code class="ct-detail ct-cmd" id="copy-toast-cmd" hidden></code>
+                <span class="ct-detail" id="copy-toast-detail"></span>
               </span>
             </div>
 
@@ -783,17 +784,19 @@ const next = [
       // --- Install tabs: a click copies the command and confirms it ---
       const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>(".inst-tab:not(.agent)"));
       const toast = document.getElementById("copy-toast");
+      const toastCmd = document.getElementById("copy-toast-cmd");
       const toastDetail = document.getElementById("copy-toast-detail");
       let toastTimer: ReturnType<typeof setTimeout>;
-      function showCopyToast(detail: string, isCommand = true) {
-        if (!toast || !toastDetail) return;
+      function showCopyToast(detail: string, command?: string) {
+        if (!toast || !toastCmd || !toastDetail) return;
+        toastCmd.textContent = command ?? "";
+        toastCmd.hidden = !command;
         toastDetail.textContent = detail;
-        toastDetail.classList.toggle("ct-cmd", isCommand);
         toast.hidden = false;
         clearTimeout(toastTimer);
         toastTimer = setTimeout(() => {
           toast.hidden = true;
-        }, isCommand ? 3200 : 8000);
+        }, 8000);
       }
       for (const tab of tabs) {
         tab.addEventListener("click", async () => {
@@ -804,7 +807,7 @@ const next = [
           } catch {
             return;
           }
-          showCopyToast(cmd);
+          showCopyToast("Paste this command into your terminal, then press Enter.", cmd);
         });
       }
 
@@ -820,7 +823,7 @@ const next = [
         } catch {
           return;
         }
-        showCopyToast("Paste the instruction into your agent’s chat, then send it to start setup.", false);
+        showCopyToast("Paste the instruction into your agent’s chat, then send it to start setup.");
         if (agentLabel) agentLabel.textContent = "Copied to your clipboard";
         agentBtn.classList.add("copied");
         clearTimeout(agentTimer);
