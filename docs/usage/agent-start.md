@@ -20,7 +20,7 @@ you run it, and before the first decision read
 ## 0. Check the platform first — you do this
 
 Yoetz runs on macOS and Linux. Native Windows is not supported: the package installs, but every
-command except `yoetz version` and `--help` refuses with `unsupported_platform`. On Windows, Yoetz
+command except `yoetz version`, `--version`, and `--help` refuses with `unsupported_platform`. On Windows, Yoetz
 runs inside WSL 2 (Windows Subsystem for Linux), and so does everything else on this page.
 
 Find out where you are before installing anything: `uname -s` on macOS or Linux; on Windows, in
@@ -30,7 +30,8 @@ On Windows:
 
 1. **WSL is present** (a distribution such as Ubuntu is listed): run every command in this guide
    inside it. From PowerShell, `wsl -e bash -lc "<command>"` runs one command there; the user
-   opens the same environment by launching **Ubuntu** from the Start menu.
+   opens the same environment by launching the listed distribution (usually **Ubuntu**) from the
+   Start menu.
 2. **WSL is absent**: tell the user what WSL is in one sentence (a real Linux inside Windows, the
    way Microsoft supports Linux tools), then hand over the terminal: open **PowerShell as
    administrator**, run `wsl --install`, restart Windows when asked, then open **Ubuntu** from the
@@ -166,7 +167,8 @@ why the step needs their terminal rather than you.
 
 ### Host notes — what your own host does differently
 
-Checked against each host's official documentation in September 2026; a newer host may differ.
+Checked against Codex, Claude Code, and Cursor's official documentation in September 2026; a
+newer host may differ.
 Whatever the host, the rules above stand: the user decides, and a pending question pauses every
 consequential step — no install, no `setup run`, no registration until it is answered.
 
@@ -215,14 +217,12 @@ consequential step — no install, no `setup run`, no registration until it is a
   root and project, then `install` after approval. Cursor Cloud agents are not supported; install
   from a local Cursor.
 
-**Grok Build (xAI) and any other agent**
+**Any other agent**
 
-- No first-party integration. Grok Build has a structured question tool, a real `web_fetch`, and
-  native Windows binaries; the Windows rule for Yoetz is the same. Use Yoetz over MCP with no
-  integration: show the user the exact `yoetz mcp serve` entry for the host's own MCP
-  configuration before adding it, and never replace an existing entry named `yoetz`. Grok Build
-  also reads Claude Code and Cursor hook and MCP files, so a registration made for one of those
-  hosts may become visible to it; that path is untested and not claimed.
+- No first-party integration. Use Yoetz over MCP: show the user the exact `yoetz mcp serve` entry
+  for the host's own MCP configuration before adding it, and never replace an existing entry named
+  `yoetz`. The Windows rule is the same on every host. If the host has a question tool, check
+  whether it pauses the agent; if it does not, or there is none, ask in chat and wait.
 
 ## 3. Before recommending a semantic provider — inspect the installed catalog
 

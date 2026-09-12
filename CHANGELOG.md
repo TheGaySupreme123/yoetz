@@ -15,7 +15,7 @@ reverse-chronological released versions.
   instead of choosing, and hands the terminal over as if the user has never opened one.
   [Install and first run](docs/usage/install-and-first-run.md) gains the Windows section the CLI
   and README link to. Host notes checked against the September 2026 documentation of Codex,
-  Claude Code, Cursor, and Grok Build record what each does differently: where its question tool
+  Claude Code, and Cursor record what each does differently: where its question tool
   is unavailable or non-blocking, what blocks the guide fetch or the `uv` installer, and what
   native Windows means for it. The copied setup prompt now tells the agent to ask for approval
   or a pasted guide when its sandbox blocks the fetch (issue #709).

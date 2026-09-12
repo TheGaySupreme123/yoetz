@@ -48,8 +48,8 @@ Compatibility extras (the standard install already contains these exact dependen
 
 Yoetz runs on macOS and Linux. On Windows it runs inside WSL 2 (Windows Subsystem for Linux),
 Microsoft's supported way to run Linux programs on Windows. A native Windows install succeeds, but
-every command except `yoetz version` and `--help` then refuses with `unsupported_platform` and
-points here.
+every command except `yoetz version`, `--version`, and `--help` then refuses with
+`unsupported_platform` and points here.
 
 1. Open **PowerShell as administrator** and run `wsl --install`. Restart Windows when asked.
 2. Open **Ubuntu** from the Start menu. The first launch asks you to choose a Linux username and

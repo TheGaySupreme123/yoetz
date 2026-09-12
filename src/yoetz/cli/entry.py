@@ -236,6 +236,8 @@ def _unsupported_platform_exit(arguments: list[str], *, os_name: str | None = No
 
 
 def _run_full_cli() -> None:
+    """Load the typer graph and dispatch; split out so tests can prove it never loads on Windows."""
+
     from yoetz.cli.app import main as app_main
 
     app_main()

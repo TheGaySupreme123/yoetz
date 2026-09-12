@@ -101,7 +101,7 @@ def test_agent_start_host_notes_cover_every_first_party_host_and_the_generic_rou
         "**Codex**",
         "**Claude Code**",
         "**Cursor**",
-        "**Grok Build (xAI) and any other agent**",
+        "**Any other agent**",
     ):
         assert host in guide, host
     # The Cursor finding that started this: its question tool does not pause the agent.

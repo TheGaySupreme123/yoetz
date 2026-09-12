@@ -4871,7 +4871,7 @@ facade and are never MCP tools.
   cursor-observe|spool` fast paths without loading typer, then refuses native Windows
   (`os.name == "nt"`) with the fixed `unsupported_platform` line and exit 20 — the exit an absent
   service already carries, because no Yoetz service can be reached from that process — before the
-  full CLI loads; `version`, `--version`, and `--help` are exempt (issue #709). Everything else
+  full CLI loads; `version`, `--version`, `--help`, and `-h` are exempt (issue #709). Everything else
   falls through to `cli/app.py` unchanged.
 - `service/daemon.py`: sole application/runtime/vault/privacy/provider composition owner and
   ordinary-control dispatcher; starts into explicit `ready` or `locked`. Its private canonical
