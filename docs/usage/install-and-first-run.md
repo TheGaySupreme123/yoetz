@@ -14,6 +14,14 @@
 
 ## Install
 
+For guided setup, click **Set up with your agent** on [yoetz.dev](https://yoetz.dev).
+The popup confirms the instruction was copied. Paste it into your agent’s chat, then send it
+to start setup.
+The **Install with PyPI** and **Install with npm** buttons show the copied command in the popup:
+paste it into your terminal, then press Enter.
+After the PyPI installation finishes, run `yoetz` in your terminal to start setup.
+The npm command, `npx yoetz`, starts setup directly.
+
 The supported install path is Python via [`uv`](https://docs.astral.sh/uv/):
 
 ```text
