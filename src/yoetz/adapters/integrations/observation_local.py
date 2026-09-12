@@ -7805,8 +7805,19 @@ class LocalObservationStore:
             )
         paired = pairing_mode == "paired"
         pairing_pre_open = False
+        original_envelope = envelope
         with self._lock:
-            if paired and correlation_id is not None and is_pre_event:
+            # Generic host-call pairing covers the tool pre/post protocol only.
+            # Child/lifecycle events carry their own lineage identity; a
+            # parent tool id on a SubagentStart must not leave a synthetic
+            # open-pre entry waiting for SubagentStop (which is not a tool
+            # result and cannot consume that entry).
+            if (
+                paired
+                and correlation_id is not None
+                and is_pre_event
+                and envelope.event_kind == "PreToolUse"
+            ):
                 # Check the pending-attempt bound before ingesting the new
                 # envelope.  ``note_open_pre`` repeats the check after the
                 # envelope is durably retained, but the returned envelope
@@ -7873,9 +7884,25 @@ class LocalObservationStore:
 
             result = self.ingest(envelope, workspace_commitment=workspace_commitment)
             if result.disposition is not ObservationIngestDisposition.ACCEPTED:
-                return result, envelope
+                # Pairing is probed before admission so an accepted orphan can
+                # retain its diagnostic on the same envelope.  A duplicate
+                # must receive the canonical input instead: returning the
+                # probe's synthetic gap would make an idempotent replay look
+                # like a second retained orphan.
+                if result.disposition is ObservationIngestDisposition.DUPLICATE:
+                    state = self._load(workspace_commitment)
+                    duplicate_key = _dedup_key(workspace_commitment, original_envelope)
+                    for retained in reversed(state.envelopes or ()):
+                        if _dedup_key(workspace_commitment, retained) == duplicate_key:
+                            return result, retained
+                return result, original_envelope
 
-            if paired and correlation_id is not None and is_pre_event:
+            if (
+                paired
+                and correlation_id is not None
+                and is_pre_event
+                and envelope.event_kind == "PreToolUse"
+            ):
                 self.note_open_pre(
                     workspace_commitment,
                     correlation_id,

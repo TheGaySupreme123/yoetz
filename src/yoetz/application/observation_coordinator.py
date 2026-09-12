@@ -2484,7 +2484,11 @@ class ObservationCoordinator:
                     # opened is route retirement, not a missing mapping file
                     # and not a ledger content refusal (#577).
                     return _reject(ObservationGapCode.SESSION_SUPERSEDED.value)
-                if exc.code is PublicErrorCode.SESSION_CONFLICT and stage == "runtime_route":
+                if (
+                    exc.code is PublicErrorCode.SESSION_CONFLICT
+                    and not exc.retryable
+                    and stage == "runtime_route"
+                ):
                     # A route conflict means the cached lifecycle mapping cannot currently be
                     # used. Keep the observation pending so the next drain can recover a
                     # successor mapping. A conflict raised after routing remains terminal: it
@@ -2496,9 +2500,8 @@ class ObservationCoordinator:
                     # healthy daemon look down and left the FIFO head immortal
                     # because every drain path retried it (#540). That includes
                     # SESSION_NOT_FOUND without a followable binding and
-                    # SESSION_CONFLICT: every route, catalog, and ledger
-                    # authority raises both non-retryable, so neither has a
-                    # retryable rendering below (#554).
+                    # non-retryable SESSION_CONFLICT after the narrower route
+                    # recovery case above (#554).
                     return _reject(ObservationGapCode.LEDGER_REJECTED.value)
                 if exc.code is PublicErrorCode.VAULT_LOCKED:
                     return _reject(ObservationGapCode.VAULT_LOCKED.value)

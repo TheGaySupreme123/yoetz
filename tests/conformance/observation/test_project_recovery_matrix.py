@@ -133,6 +133,7 @@ class _RestartableReadyInstallation:
             generation_store=self.generations,
             process_start_identity_commitment="sha256:" + "a" * 64,
             instance_id=_INSTANCE_ID,
+            singleton_lock_path=self.root / "service.lock",
         )
         await lifecycle.acquire_singleton()
         await lifecycle.transition(ServiceState.LOCKED)

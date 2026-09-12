@@ -1211,19 +1211,21 @@ def test_session_start_resume_with_missing_mapping_runs_recovery_under_owned_loc
         async def start(self, request: object, *, deadline_ms: int | None = None) -> object:
             del deadline_ms
             self.requests.append(request)
+            if getattr(request, "mode", None) == "attach":
+                assert getattr(request, "session_id", None) == prior_session_id
+                return SimpleNamespace(
+                    ok=True,
+                    frontier=SimpleNamespace(sequence="3", head_digest="sha256:" + "a" * 64),
+                    task_id=task_id,
+                    session_id=successor_session_id,
+                    writer_id=successor_writer_id,
+                )
             if len(self.requests) == 1:
                 return _failure_result(
                     PublicErrorCode.SESSION_CONFLICT,
                     safe_details={"reason_code": "workspace_task_exists"},
                 ).root
-            assert getattr(request, "mode", None) == "attach"
-            return SimpleNamespace(
-                ok=True,
-                frontier=SimpleNamespace(sequence="3", head_digest="sha256:" + "a" * 64),
-                task_id=task_id,
-                session_id=successor_session_id,
-                writer_id=successor_writer_id,
-            )
+            raise AssertionError("unexpected recovery start request")
 
         async def close(self) -> None:
             return None
@@ -1248,10 +1250,7 @@ def test_session_start_resume_with_missing_mapping_runs_recovery_under_owned_loc
     assert mapping.yoetz_task_id == task_id
     assert mapping.yoetz_session_id == successor_session_id
     assert mapping.yoetz_writer_id == successor_writer_id
-    assert [getattr(request, "mode", None) for request in client.requests] == [
-        "create_or_attach",
-        "attach",
-    ]
+    assert [getattr(request, "mode", None) for request in client.requests] == ["attach"]
     assert task_id in stdout.getvalue().decode()
 
 

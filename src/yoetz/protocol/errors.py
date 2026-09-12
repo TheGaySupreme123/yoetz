@@ -94,6 +94,10 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "coordination_task_pair_invalid",
     "coordination_tasks_not_canonical",
     "cross_repository_lineage_requires_grant",
+    "cursor_mcp_route_invalid",
+    "cursor_project_mcp_command_invalid",
+    "cursor_project_mcp_invalid",
+    "cursor_project_mcp_preview_required",
     "dependency_changed",
     "duplicate_object_key",
     "duplicate_set_member",
@@ -252,6 +256,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "obligation_change_invalid",
     "obligation_resolution_invalid",
     "obligation_resolution_mismatch",
+    "observation_selection_session_limit",
     "operation_recovery_unavailable",
     "ownership_contended",
     "payload_redaction_mismatch",
@@ -330,7 +335,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 277
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 282
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)

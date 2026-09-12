@@ -137,6 +137,7 @@ async def multi_agent_service(
             generation_store=_Generations(),
             process_start_identity_commitment="sha256:" + "a" * 64,
             instance_id=INSTANCE_ID,
+            singleton_lock_path=root / "service.lock",
         )
         vault: VaultService | None = None
         app: Application | None = None

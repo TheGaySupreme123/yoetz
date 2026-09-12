@@ -3879,14 +3879,16 @@ save resolves its active flag only when that save evicts nothing and leaves one-
 budget free. Merely landing under the cap cannot clear the same loss it just recorded; the durable
 gap history remains after recovery, and renewed shedding reactivates it (issue #310).
 
-Public ingest failures use their `retryable` contract, not a spelling fallback. A non-retryable
-failure that is not already a narrower terminal class (`dedup_conflict` or
-`observation_storage_corrupt`) becomes `ledger_rejected`; drain and sweep quarantine that one row,
-record the reason once, and continue its lane. `SESSION_CONFLICT` and a `SESSION_NOT_FOUND` that
-carries no followable binding are in that class: every route, catalog, and ledger authority in this
-repository raises them non-retryable, so ingest keeps no separate `service_unavailable` or
-`mapping_missing` rendering for either code (issue #554). A retryable public failure outside the
-designed back-pressure set and `VAULT_LOCKED` is `service_unavailable`. `SESSION_NOT_FOUND` with
+Public ingest failures use their `retryable` contract and the stage that refused the request.
+A non-retryable `SESSION_CONFLICT` while acquiring the task runtime becomes `mapping_missing`:
+the envelope stays pending so a later drain can recover its lifecycle mapping, subject to the
+same route ownership checks. A non-retryable conflict after runtime acquisition, or a
+`SESSION_NOT_FOUND` without a followable binding, becomes `ledger_rejected`. Other non-retryable
+failures outside the narrower `dedup_conflict` and `observation_storage_corrupt` classes take
+that same terminal path: drain and sweep quarantine the row, record the reason once, and continue
+its lane (issue #554). A retryable public failure outside the designed back-pressure set and
+`VAULT_LOCKED`, including a retryable session-route conflict, is `service_unavailable` and stays
+pending. `SESSION_NOT_FOUND` with
 `reason_code: session_superseded` is not that class: ingest follows the current binding carried in
 `safe_details` (same task, successor session, observation writer derived for it), persists the
 updated lifecycle mapping on each hop only while holding the lifecycle lock and the stored
@@ -3972,18 +3974,20 @@ host failure or denial in either phase, or the post-event of `start`, `publish_w
 content. Codex hooks are the paired carrier: `tool_call_id` is scoped to source, session, and
 generation, and an orphan post retains `unpaired_event` until explicitly repaired. The currently
 installed Claude and Cursor native profiles are post-only carriers: their post observations never
-diagnose a missing pre-event, and they materialize metadata-only evidence rather than inventing an
-action/result pair. Cursor `generation_id` is retained as metadata only and never serves as a tool
-identity. A legacy false `unpaired_event` from a post-only profile may be retired from the current
-projection only when retained history is complete and contains no true paired orphan; its gap
+diagnose a missing pre-event. A post with an actual tool-call identity, such as Claude's
+`tool_use_id`, can materialize an observed action/result pair with a distinct post-only action
+identity; it does not assert that a pre-event was observed. A generation-only Cursor post
+materializes metadata-only evidence. Cursor `generation_id` is retained as metadata only and
+never serves as a tool identity. A legacy false `unpaired_event` from a post-only profile may be
+retired from the current projection only when retained history is complete and contains no true paired orphan; its gap
 history remains auditable.
 For Yoetz-owned calls, local pairing is unaffected, so a delivered post-event carries no
 `unpaired_event` gap and
 the service materializes its action from the post alone. No coverage gap is recorded: the service
 already holds the authoritative record of every Yoetz-owned call it served. The same complete
-host-spelling set gates advice delivery, so a Yoetz-owned hook does not lease pending frontier or
-recommendation context for the call that is being observed. This advice guard does not change
-local retention or the delivery of explicit self-call failures.
+host-spelling set gates advice delivery: without an explicit failure, a Yoetz-owned hook does not
+lease pending frontier or recommendation context for the call being observed. An explicit
+self-call failure remains eligible for pending advice as well as retention and delivery.
 
 The local observation state also owns a sparse, one-shot `FrontierMotionNotice` per Codex session:
 `from_sequence`, `to_sequence`, final `head_digest`, and exact accepted observation-record count.

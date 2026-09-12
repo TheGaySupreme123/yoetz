@@ -1942,7 +1942,7 @@ def test_duplicate_post_does_not_consume_orphan_pairing_state(tmp_path: Path) ->
     assert "unpaired_event" not in store.list_envelopes(workspace)[-1].gap_codes
     assert (
         ObservationGapCode.UNPAIRED_EVENT.value
-        in store.status(ObservationStatusQuery(workspace)).gaps
+        not in store.status(ObservationStatusQuery(workspace)).gaps
     )
 
 
@@ -2089,8 +2089,19 @@ def test_issue_607_post_only_materializes_evidence_without_a_fabricated_action(
     for envelope in (claude, cursor):
         batch = materialize_observation_envelope(envelope, task_id=task_id)
         assert batch.skip_reason is None
-        assert [item.draft.schema.name for item in batch.drafts] == ["evidence_recorded"]
-        assert all(item.role == "post_only_evidence" for item in batch.drafts)
+        if envelope.source is ObservationSource.CLAUDE_HOOK:
+            # Claude's post-only contract can carry a real tool-use id.  The
+            # post-only action/result mapping preserves that identity without
+            # claiming a missing pre-event; only Cursor's generation identity
+            # remains evidence-only.
+            assert [item.draft.schema.name for item in batch.drafts] == [
+                "action_recorded",
+                "result_recorded",
+            ]
+            assert [item.role for item in batch.drafts] == ["action", "result"]
+        else:
+            assert [item.draft.schema.name for item in batch.drafts] == ["evidence_recorded"]
+            assert all(item.role == "post_only_evidence" for item in batch.drafts)
         assert ObservationGapCode.UNPAIRED_EVENT.value not in batch.gaps
 
 
@@ -2148,6 +2159,21 @@ def test_codex_pairing_is_scoped_and_reordered_or_duplicate_posts_stay_honest(
     )
     assert ObservationGapCode.UNPAIRED_EVENT.value in reordered_post.gap_codes
     assert ObservationGapCode.UNPAIRED_EVENT.value not in reordered_pre.gap_codes
+
+    # Replaying the orphan after its late pre still returns the retained orphan; it cannot
+    # retroactively pair that history or consume the newly opened pre.
+    orphan_disposition, duplicate_orphan = admit(
+        "PostToolUse", session_id="codex-reorder", call_id="reordered", ordinal=1
+    )
+    assert orphan_disposition is ObservationIngestDisposition.DUPLICATE
+    assert duplicate_orphan == reordered_post
+    assert store.has_open_pre(
+        workspace,
+        "reordered",
+        source=ObservationSource.CODEX_HOOK,
+        session_commitment=store.session_commitment("codex-reorder"),
+        source_generation=1,
+    )
 
     # Duplicate delivery is idempotent and cannot consume or create a second
     # pairing transition.
@@ -4934,7 +4960,7 @@ def test_recovery_leaves_an_ambiguous_predecessor_mapping_untouched_for_all_host
             ),
             _state=tmp_path,
         )
-        _seed_legacy_cross_workspace_binding(store, foreign_workspace, ambiguous)
+    _seed_legacy_cross_workspace_binding(store, foreign_workspace, ambiguous)
     store.bind_codex_session(workspace, successor)
     client = _WorkspaceConflictThenAttachClient()
     client.created = True

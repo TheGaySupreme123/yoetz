@@ -3138,7 +3138,19 @@ def handle_observe(
             # receive frontier advice from the hook observing the same call.
             # This affects only advice delivery; explicit self-call failures
             # still follow ``self_observation_deliverable`` and remain queued.
-            skip_advice_loop = tool_name is not None and tool_name in YOETZ_OWNED_TOOL_NAMES
+            # A successful/unknown Yoetz call already has authoritative service-side evidence,
+            # so its own hook must not lease the shared advice channel. An explicit failure is
+            # new host evidence, however, and remains eligible to receive pending guidance. The
+            # all-owned-tool guard previously suppressed that failure path as well.
+            host_outcome = _native_outcome_facts(
+                payload,
+                force_failure=resolved_event == "PostToolUseFailure",
+            )
+            skip_advice_loop = (
+                tool_name is not None
+                and tool_name in YOETZ_OWNED_TOOL_NAMES
+                and host_outcome.success is not False
+            )
 
             supplied_ordinal = _event_ordinal_from_payload(payload)
             event_ordinal = (
@@ -3710,6 +3722,28 @@ def handle_observe(
                                     record_hook_diagnostic(kind, resolved_event, _state=_state)
                             else:
                                 additional = _UNAVAILABLE_CONTEXT
+            elif (
+                source is ObservationSource.CURSOR_HOOK
+                and mapping is None
+                and _token_or_none(payload.get("tool_name")) is None
+                and not pending_mapping_deferred
+            ):
+                # Cursor consumes the static startup guidance on its native ``sessionStart``
+                # channel even when the host marks the lifecycle as a clear. The clear fence
+                # remains local-only; this branch never opens a service connection or drains a
+                # mapping.
+                from yoetz.cli.hooks import (
+                    _STARTUP_RECOVERY_CONTEXT as startup_recovery_context,  # pyright: ignore[reportPrivateUsage]
+                )
+
+                additional = (
+                    "Yoetz observation is consented for this workspace; "
+                    "no ledger task is mapped yet (observation-derived binding "
+                    "only). After guidance reads, tool/schema discovery, and "
+                    "necessary bootstrap clarification, call start to attach a task "
+                    "before substantive material work. " + startup_recovery_context
+                )
+                attach_advisory_only = True
             if (
                 not child_attribution_gap
                 and not skip_service

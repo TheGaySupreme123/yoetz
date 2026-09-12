@@ -758,10 +758,11 @@ quarantined. A pending row from an ended host session whose task was recovered b
 session is delivered on the successor route (`session_superseded` is followed). A successor
 binding that cannot be followed quarantines that row as `session_superseded`, not
 `ledger_rejected` or `mapping_missing`.
-A `SESSION_CONFLICT` while acquiring the task runtime reports `mapping_missing`, keeping the
-envelope pending for a later drain after its lifecycle mapping is repaired. The route must still
+A non-retryable `SESSION_CONFLICT` while acquiring the task runtime reports `mapping_missing`,
+keeping the envelope pending for a later drain after its lifecycle mapping is repaired. The route must still
 pass its ownership checks. Non-retryable conflicts after runtime acquisition remain
-`ledger_rejected` and enter quarantine.
+`ledger_rejected` and enter quarantine. Retryable route conflicts report `service_unavailable`
+and stay pending.
 A row
 also enters quarantine after 128 consecutive rejections with the same retryable reason, except for
 designed back-pressure and workspace-global pause/vault/disabled gates. Both cases remain visible
@@ -777,8 +778,9 @@ not enqueued for delivery, while `start`, `publish_work`, `check`, and `respond`
 each. Cursor's hook payload states no outcome fact for MCP executions, so a failed Yoetz call is
 indistinguishable from a successful one at this ingress; the service's own record of the call is
 the authority on its outcome. The shared advice guard recognizes both Cursor server spellings, so
-a self-owned hook does not lease pending frontier or recommendation context for the call being
-observed; this does not change local retention or explicit failure delivery. Cursor reports
+a self-owned hook without an explicit failure does not lease pending frontier or recommendation
+context for the call being observed; explicit failures remain eligible for pending advice.
+This does not change local retention or explicit failure delivery. Cursor reports
 `duration` as a finite decimal number of milliseconds
 for MCP executions, while the canonical structural field is the bounded integer `duration_ms`.
 Cursor ingress truncates that vendor value to whole milliseconds before structural filtering; the canonical parser
@@ -795,9 +797,9 @@ gap. Their `generation_id` is retained as bounded host metadata and is never use
 identity; the materializer records metadata-only evidence instead of fabricating an action/result
 pair. Codex's paired hook profile keeps its source/session/generation-scoped orphan diagnostics.
 The historical 0.3 cell used control 2.5, which admits `pairing_mode`, `correlation_kind`, and
-`generation_id` on structural observation payloads. Current main's control 2.6 successor retains
-those fields and adds the bounded observation-selection projection; both peers must use the same
-current manifest after integration. An older development artifact omitted these fields from its
+`generation_id` on structural observation payloads. Current control 2.7 retains those fields and
+main's control 2.6 observation-selection projection alongside the 0.3 coordination surface; both
+peers must use the same current manifest. An older development artifact omitted these fields from its
 closed schema, so the client refused a valid Cursor-shaped frame before sending it and the hook
 layer reported `ledger_rejected`. The frozen control 2.4 schema remains available for historical
 validation; metadata is not stripped to disguise an incompatible contract.

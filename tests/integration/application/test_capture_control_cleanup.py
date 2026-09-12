@@ -190,7 +190,11 @@ async def test_global_disable_retires_profileless_codex_ticket_idempotently(
         assert retired.object_ids == pending.object_ids
 
     # A later generation cannot resurrect the retired handoff.
-    local.revoke(ObservationRevokeCommand(workspace))
+    # Consent revocation now crosses the coordinator's project-generation fence.  Exercise the
+    # public coordinator operation so the standalone pipeline can complete its local fence before
+    # the successor consent is granted; mutating the local store directly intentionally leaves
+    # that durable revocation ceremony pending.
+    await coordinator.revoke(ObservationRevokeCommand(workspace))
     local.grant_consent(workspace)
     coordinator.observation_enabled = True
     resumed = await coordinator.ingest_request(structural)

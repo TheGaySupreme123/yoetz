@@ -2132,7 +2132,11 @@ async def test_coordinator_rejects_without_mapping(tmp_path: Path) -> None:
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "code",
-    [code for code in PublicErrorCode if code is not PublicErrorCode.STORAGE_CORRUPT],
+    [
+        code
+        for code in PublicErrorCode
+        if code not in {PublicErrorCode.STORAGE_CORRUPT, PublicErrorCode.SESSION_CONFLICT}
+    ],
 )
 async def test_nonretryable_public_ingest_errors_are_terminal(
     tmp_path: Path, code: PublicErrorCode
@@ -3285,13 +3289,11 @@ async def test_rediscovery_drains_pending_repositories_for_every_bound_session(
     )
 
     await coordinator.rediscover_pending_verification()
-    first = supervisor._handles[workspace]  # pyright: ignore[reportPrivateUsage]
-    await supervisor._drain_once()  # pyright: ignore[reportPrivateUsage]
-    second = supervisor._handles[workspace]  # pyright: ignore[reportPrivateUsage]
-
-    assert second is not first
-    assert len(released) == 1
-
+    # Multi-task discovery keeps one supervisor lane per routed task.  Both sibling repositories
+    # must be visible before a drain round; the old workspace-only key would hide the second lane.
+    assert supervisor.has_handle(workspace, task_ids[0])
+    assert supervisor.has_handle(workspace, task_ids[1])
+    assert len(supervisor._handles) == 2  # pyright: ignore[reportPrivateUsage]
     await supervisor._drain_once()  # pyright: ignore[reportPrivateUsage]
     assert supervisor.has_handle(workspace) is False
     assert sorted(released) == sorted(session_ids)

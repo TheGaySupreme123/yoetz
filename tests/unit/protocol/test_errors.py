@@ -74,6 +74,10 @@ coordination_source_unavailable
 coordination_task_pair_invalid
 coordination_tasks_not_canonical
 cross_repository_lineage_requires_grant
+cursor_mcp_route_invalid
+cursor_project_mcp_command_invalid
+cursor_project_mcp_invalid
+cursor_project_mcp_preview_required
 dependency_changed
 duplicate_object_key
 duplicate_set_member
@@ -232,6 +236,7 @@ object_key_not_string
 obligation_change_invalid
 obligation_resolution_invalid
 obligation_resolution_mismatch
+observation_selection_session_limit
 operation_recovery_unavailable
 ownership_contended
 payload_redaction_mismatch
@@ -475,7 +480,7 @@ def test_public_error_code_membership() -> None:
 def test_protocol_reason_registry_is_exact_and_import_order_independent() -> None:
     source_values = cast(tuple[str, ...], getattr(errors_module, "_PROTOCOL_REASON_CODE_VALUES"))
     assert source_values == _EXPECTED_REASON_CODES
-    assert len(source_values) == 277
+    assert len(source_values) == 282
     assert source_values == tuple(sorted(source_values, key=str.encode))
     assert len(source_values) == len(set(source_values))
     assert PROTOCOL_REASON_CODES == frozenset(_EXPECTED_REASON_CODES)

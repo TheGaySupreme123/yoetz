@@ -544,10 +544,11 @@ quarantined. A pending row from an ended host session whose task was recovered b
 session is delivered on the successor route (`session_superseded` is followed). A successor
 binding that cannot be followed quarantines that row as `session_superseded`, not
 `ledger_rejected` or `mapping_missing`.
-A `SESSION_CONFLICT` while acquiring the task runtime reports `mapping_missing`, keeping the
-envelope pending for a later drain after its lifecycle mapping is repaired. The route must still
+A non-retryable `SESSION_CONFLICT` while acquiring the task runtime reports `mapping_missing`,
+keeping the envelope pending for a later drain after its lifecycle mapping is repaired. The route must still
 pass its ownership checks. Non-retryable conflicts after runtime acquisition remain
-`ledger_rejected` and enter quarantine.
+`ledger_rejected` and enter quarantine. Retryable route conflicts report `service_unavailable`
+and stay pending.
 A row
 also enters quarantine after 128 consecutive rejections with the same retryable reason, except for
 designed back-pressure and workspace-global pause/vault/disabled gates. Both cases remain visible
@@ -565,8 +566,9 @@ or `_respond` enqueues one row; every `PostToolUseFailure` enqueues one row. Cla
 pre-event to hold back. Its `tool_use_id`, when present, identifies the observed result; no
 missing-pre gap is created for a legacy post-only hook. The `PostToolUse` advice
 guard recognizes Claude's plugin spelling together with the other host spellings, so a self-owned
-hook does not lease pending frontier or recommendation context for the call being observed.
-Explicit self-call failures remain retained and enqueued. The manual
+hook without an explicit failure does not lease pending frontier or recommendation context for
+the call being observed. Explicit self-call failures remain retained, enqueued, and eligible for
+pending advice. The manual
 `yoetz observe drain --json` reports `terminal: drained` once nothing is pending.
 
 Grant observation separately for the exact project. Exercise every advertised event and inspect
