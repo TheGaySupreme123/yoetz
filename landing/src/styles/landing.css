@@ -452,7 +452,10 @@ em.new {
   .ds-hero { padding-bottom: 56px; }
   .term-body { height: 360px; }
   .ds-cta-dark, .ds-section, .see-section, .inside-section { padding: 72px 20px; }
-  .see-inner { grid-template-columns: 1fr; gap: 36px; }
+  .see-inner { grid-template-columns: 1fr; gap: 40px; }
+  .see-copy { max-width: 640px; margin: 0 auto; }
+  .see-copy .ds-lead, .see-note { max-width: none; }
+  .see-art { max-width: none; margin-top: 24px; }
   .next-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 1040px) {
