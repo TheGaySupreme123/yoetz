@@ -85,7 +85,8 @@ npx yoetz
 ```
 
 The npm package bundles no Python and no Yoetz code and never installs `uv` itself; it only
-launches the exact matching Python distribution.
+launches the exact matching Python distribution. Yoetz runs on macOS and Linux; on Windows, install
+it inside WSL 2 — see [Windows](docs/usage/install-and-first-run.md#windows).
 
 > [!TIP]
 > **Let your agent set it up.** Paste this into your coding agent and it walks you through

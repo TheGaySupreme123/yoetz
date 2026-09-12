@@ -13,16 +13,58 @@ Codex, Claude Code, and Cursor have first-party integrations — the first-run w
 while Claude Code and Cursor are connected afterwards through `yoetz integrate claude ...` and
 `yoetz integrate cursor ...` — and any agent can still use Yoetz over MCP with no integration.
 
+Assume the user may never have opened a terminal. Explain each step in one plain sentence before
+you run it, and before the first decision read
+[Ask in chat when you have no question tool](#ask-in-chat-when-you-have-no-question-tool).
+
+## 0. Check the platform first — you do this
+
+Yoetz runs on macOS and Linux. Native Windows is not supported: the package installs, but every
+command except `yoetz version` and `--help` refuses with `unsupported_platform`. On Windows, Yoetz
+runs inside WSL 2 (Windows Subsystem for Linux), and so does everything else on this page.
+
+Find out where you are before installing anything: `uname -s` on macOS or Linux; on Windows, in
+PowerShell, `wsl --status` (or `wsl -l -v`).
+
+On Windows:
+
+1. **WSL is present** (a distribution such as Ubuntu is listed): run every command in this guide
+   inside it. From PowerShell, `wsl -e bash -lc "<command>"` runs one command there; the user
+   opens the same environment by launching **Ubuntu** from the Start menu.
+2. **WSL is absent**: tell the user what WSL is in one sentence (a real Linux inside Windows, the
+   way Microsoft supports Linux tools), then hand over the terminal: open **PowerShell as
+   administrator**, run `wsl --install`, restart Windows when asked, then open **Ubuntu** from the
+   Start menu and choose a Linux username and password when it asks. You cannot do this for
+   them: it needs administrator elevation and a restart. Continue with item 1 afterwards.
+3. Install `uv` and Yoetz inside WSL (section 1), not on the Windows side. A `yoetz` already
+   installed on Windows is unusable but harmless; uninstall it only when the user asks
+   (`uv tool uninstall yoetz` in PowerShell).
+4. Connecting a Windows-native Codex, Claude Code, or Cursor to a Yoetz inside WSL is untested
+   and not claimed. Register a host only from the same WSL environment; a Windows-side agent can
+   still drive installation and local-only use through `wsl -e`.
+
 ## 1. Install — you do this
+
+If `uv` is missing (`uv --version` fails), install it first — the same line on macOS, Linux, and
+inside WSL:
+
+```text
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source "$HOME/.local/bin/env"
+```
+
+Then install Yoetz:
 
 ```text
 uv tool install --managed-python --python 3.14.6 "yoetz==0.1.0"
 yoetz version
 ```
 
-`uvx yoetz` works for a one-off run. With `uv` already installed, `npx yoetz` launches the same
-exact-version PyPI package and installs nothing itself. The compatibility extras are aliases the
-standard install already contains — do not add them.
+`uv tool install` places `yoetz` in `~/.local/bin`. If a new terminal cannot find it, run
+`uv tool update-shell` once and open another terminal. `uvx yoetz` works for a one-off run. With
+`uv` already installed, `npx yoetz` launches the same exact-version PyPI package and installs
+nothing itself. The compatibility extras are aliases the standard install already contains — do
+not add them.
 
 ## 2. Setup — guide it in the conversation
 
@@ -69,6 +111,58 @@ OAuth credential.
 If the host cannot attest the exact chat decision, tell the user to run **`yoetz`** or
 **`yoetz --privacy`** in their own terminal and continue after the terminal result. Do not change
 their selected recipe merely because the authority continuation moved to the terminal.
+
+### Ask in chat when you have no question tool
+
+Some hosts give you a structured question tool; others, Cursor's agent among them, do not. In a
+real install on Cursor the agent asked nothing and chose for the user. The absence of a tool never
+makes a choice yours:
+
+- Put the decision in a plain message: the question, the options, your recommendation and its
+  trade-off, in that order. Then end your turn and wait. One decision per message.
+- Continue only on an answer to that message. A reply that names an option, or explicitly takes
+  your recommendation, is an answer; silence, an unrelated message, or assent to something earlier
+  is not.
+- Never use `yoetz setup run --accept` or `--non-interactive` to get past a question you could not
+  ask. Skipping a step is itself a choice the user makes.
+
+#### The questions, ready to ask
+
+Ask these in this order, one per message, in your own words but with these options and
+recommendations. Each answer decides the next step; stop after each and wait.
+
+1. **Codex.** "I found Codex at `<path>` (or: I found no Codex). Connect Yoetz to it? Yes /
+   No / (if several) which one." Recommend yes when one is found; with none, say integration is
+   skipped and everything else still works.
+2. **Review mode.** "How should Yoetz review your work? (a) Local only: nothing leaves this
+   computer, no account or key needed, every deterministic check works. (b) Semantic review: an
+   AI model also reviews, which sends parts of your work to a provider you pick." Recommend local
+   only for a first install unless they already want model review; if they choose semantic,
+   recommend Expanded first and name Assisted as the lower-disclosure option.
+3. **The exact change.** Show the preview (project skill, plugin and hook sources, MCP
+   registration) and ask "Apply exactly this? Approve / Deny." No recommendation and no default:
+   this one is theirs.
+4. **Secret storage**, only if the wizard reports system secure storage unavailable: "Yoetz needs
+   a place for secrets. Use a passphrase you choose? You will type it in your terminal."
+5. **Provider and model**, only after semantic review: list the presets from
+   `yoetz provider catalog --json` with their suggested models and ask which one, or skip for
+   now. Recommend the preset whose retention terms match what they told you about privacy.
+6. **Privacy policy**, only after semantic review: name the five options, recommend one with its
+   reason and trade-off, and ask which. Their choice is applied only through the terminal
+   ceremony or the exact prepared chat grant.
+7. **Credential**: never a question. Hand over the terminal for `yoetz provider credential set`.
+
+When every answer is in, run the setup, verify (section 5), and report each layer separately.
+Setup is finished when the user's chosen mode is reached — local only is a finished state, not a
+fallback.
+
+### Hand over the terminal like it is their first
+
+Every hand-over says four things: which application to open (Terminal on macOS, **Ubuntu** from
+the Start menu on Windows, the distribution's terminal on Linux); the exact line to type, one at a
+time; what they will see (a full-screen setup, a hidden prompt that shows nothing while they paste
+a key, a request for their passphrase); and what to tell you when it is done. Say in one sentence
+why the step needs their terminal rather than you.
 
 ## 3. Before recommending a semantic provider — inspect the installed catalog
 
