@@ -188,45 +188,6 @@ for (const sc of termScripts) {
 const termLines = termScripts[0].lines;
 const firstHost = hosts[termScripts[0].host];
 
-// How it works: four nodes, one sentence each.
-const flow = [
-  { key: "publish", title: "Publish", ops: "start · publish_work", text: "The agent writes its plan, work, results, and claims to the ledger." },
-  { key: "ledger", title: "Ledger", ops: "append-only · local", text: "On your machine. Nothing is inferred from your repository." },
-  { key: "check", title: "Check", ops: "check · respond", text: "Rules catch gaps in the record. An optional reviewer model challenges the work." },
-  { key: "receipt", title: "Receipt", ops: "receipt", text: "What was checked, at what coverage, and what is still open." },
-];
-
-// Three looping scenes: what Yoetz does while the agent works.
-const scenes = [
-  { key: "records", title: "Takes in both", text: "What the agent says it did, and what it actually did." },
-  { key: "checks", title: "Checks the claim", text: "When the record disagrees, that is a finding." },
-  { key: "assists", title: "Stays until done", text: "Fix, recheck, receipt." },
-];
-
-// What's new. Every line is bounded by the release notes.
-const features = [
-  {
-    key: "hooks",
-    title: "Hooks that attach themselves",
-    text: "Observed work lands on the right task, survives reattach, and records why when it cannot.",
-  },
-  {
-    key: "consent",
-    title: "Consent in conversation",
-    text: "Your agent shows one before/after privacy preview and relays your one approval. Drift fails closed. Some hosts finish the approval in your terminal.",
-  },
-  {
-    key: "correct",
-    title: "Correct a claim, don't stack one",
-    text: "A revised completion claim names what it replaces and what fell short.",
-  },
-  {
-    key: "recheck",
-    title: "Findings clear only by recheck",
-    text: "A response records a disposition. Only a later qualifying check resolves the finding.",
-  },
-];
-
 // Coming soon.
 const next = [
   { key: "delegate", title: "Delegate", text: "A parent mints a child task with an expiring handle. The child publishes, checks, and gets its own receipt." },
@@ -267,44 +228,64 @@ const next = [
   <body>
     <!-- Hero -->
     <section id="top" class="ds-hero">
-      <div class="ds-hero-grid">
-        <div>
-          <div class="hero-top">
-            <div class="hero-brand-logo">
-              <img src="/assets/yoetz-logo.png" alt="Yoetz" />
-            </div>
-            <a class="hero-star" href={GITHUB} target="_blank" rel="noopener" aria-label="Star Yoetz on GitHub">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"></path></svg>
-              Star us on GitHub
-            </a>
-          </div>
+      <div class="hero-stack">
+        <div class="hero-copy">
           <h1 class="ds-h1">
             <span class="line">Agents claim they're done.</span>
-            <span class="line grad">Yoetz checks if they actually did.</span>
+            <span class="line grad"><img class="h1-logo" src="/assets/yoetz-logo.png" alt="Yoetz" /> checks if they're actually done.</span>
           </h1>
-          <div class="hero-hosts" aria-label="Supported agents">
-            <span class="hero-hosts-label">Supported</span>
-            <span class="host-pill"><img src="/assets/openai.svg" alt="" /> Codex</span>
-            <span class="host-pill"><img src="/assets/claude.svg" alt="" /> Claude Code <em class="new">new</em></span>
-            <span class="host-pill"><img src="/assets/cursor.svg" alt="" /> Cursor <em class="new">new</em></span>
+          <p class="sr-only">
+            Your agent claims it is done. Yoetz checks that claim against its own ledger of the work and
+            issues a receipt: what was verified, at what coverage, and what is still open.
+          </p>
+          <div class="hx" aria-hidden="true">
+            <div class="hx-card hx-agent">
+              <div class="hx-eyebrow">Agent says</div>
+              <div class="hx-row hx-say"><span class="hx-mark">›</span>Done. Refactored, tests pass.<span class="hx-caret"></span></div>
+            </div>
+            <div class="hx-link"><span class="hx-dot hx-dot1"></span></div>
+            <div class="hx-card hx-check">
+              <div class="hx-eyebrow">Yoetz checks the record</div>
+              <div class="hx-scan"></div>
+              <div class="hx-row hx-c1"><span class="hx-mark ok">✓</span>plan · 3 obligations</div>
+              <div class="hx-row hx-c2"><span class="hx-mark ok">✓</span>edited src/limiter.py</div>
+              <div class="hx-row hx-c3"><span class="hx-mark">·</span>tests pass · 41 passed</div>
+              <div class="hx-row hx-c4 flag"><span class="hx-mark">✗</span>that run predates the last edit</div>
+            </div>
+            <div class="hx-link"><span class="hx-dot hx-dot2"></span></div>
+            <div class="hx-card hx-receipt">
+              <div class="hx-eyebrow">You get a receipt<span class="hx-stamp">issued</span></div>
+              <div class="hx-row hx-r1"><span class="hx-k">verified</span>2 of 3 obligations</div>
+              <div class="hx-row hx-r2"><span class="hx-k">coverage</span><span class="hx-bar"><span class="hx-fill"></span></span></div>
+              <div class="hx-row hx-r3 flag"><span class="hx-k">open</span>1 finding · stale run</div>
+            </div>
           </div>
 
           <div class="hero-installers">
             <div class="inst-tabs" role="group" aria-label="Install options">
-              <button class="inst-tab" type="button" data-key="pypi" data-command={INSTALL_COMMAND}>Install with PyPI</button>
-              <button class="inst-tab" type="button" data-key="npm" data-command="npx yoetz">Install with npm</button>
               <button class="inst-tab agent" type="button" id="agent-copy" data-command={AGENT_PROMPT}>
                 <span id="agent-copy-label">Set up with your agent</span> <span class="rec">recommended</span>
               </button>
+              <button class="inst-tab manual" type="button" id="manual-toggle" aria-expanded="false" aria-controls="manual-panel">
+                Install manually
+                <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+              </button>
+            </div>
+            <div class="manual-panel" id="manual-panel" hidden>
+              <span class="manual-label">Copy a command</span>
+              <button class="inst-tab" type="button" data-key="pypi" data-command={INSTALL_COMMAND}>Install with PyPI</button>
+              <button class="inst-tab" type="button" data-key="npm" data-command="npx yoetz">Install with npm</button>
             </div>
 
-            <div class="copy-toast" id="copy-toast" role="status" aria-live="polite" hidden>
-              <span class="ct-check" aria-hidden="true">✓</span>
-              <span class="ct-body">
-                <span class="ct-title">Copied to your clipboard</span>
-                <code class="ct-detail ct-cmd" id="copy-toast-cmd" hidden></code>
-                <span class="ct-detail" id="copy-toast-detail"></span>
-              </span>
+            <div class="next-steps" id="copy-toast" role="status" aria-live="polite" hidden>
+              <div class="ns-head">
+                <span class="ns-check" aria-hidden="true">✓</span>
+                <span class="ns-title" id="ns-title"></span>
+                <button class="ns-close" id="ns-close" type="button" aria-label="Dismiss">×</button>
+              </div>
+              <code class="ns-cmd" id="copy-toast-cmd" hidden></code>
+              <ol class="ns-steps" id="ns-steps"></ol>
+              <p class="ns-foot" id="ns-foot" hidden></p>
             </div>
 
             <p class="inst-note agent-note">
@@ -314,339 +295,206 @@ const next = [
               macOS and Linux. On Windows, install inside <a href={`${GITHUB}/blob/main/docs/usage/install-and-first-run.md#windows`}>WSL 2</a>.
             </p>
           </div>
+          <div class="hero-hosts" aria-label="Officially supported agents">
+            <span class="hero-hosts-label">Officially supports</span>
+            <span class="host-pill"><img src="/assets/openai.svg" alt="" /> Codex</span>
+            <span class="host-pill"><img src="/assets/claude.svg" alt="" /> Claude Code <em class="new">new</em></span>
+            <span class="host-pill"><img src="/assets/cursor.svg" alt="" /> Cursor <em class="new">new</em></span>
+          </div>
+          <div class="hero-meta">
+              <a class="hero-star" href={GITHUB} target="_blank" rel="noopener" aria-label="Star Yoetz on GitHub">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"></path></svg>
+                Star us on GitHub
+              </a>
+              <a class="hero-license" href={`${GITHUB}/blob/main/LICENSE`} target="_blank" rel="noopener">
+                <span class="l">open source</span>
+                <span class="r">Apache-2.0</span>
+              </a>
+          </div>
         </div>
 
-        <!-- Mock terminal -->
+      </div>
+    </section>
+
+    <!-- Screen 2: what you see in the terminal -->
+    <section id="see" class="see-section">
+      <div class="see-inner">
+        <div class="see-copy">
+          <span class="ds-kicker">Working in the background</span>
+          <h2 class="ds-h2"><span class="brand">Yoetz</span> makes sure your agent never loses track.</h2>
+          <p class="ds-lead">By keeping two records: what the agent says it did, and what it actually did.</p>
+          <div class="see-art" aria-hidden="true">
+            <svg viewBox="0 0 400 200" fill="none" stroke-linecap="round" stroke-linejoin="round">
+              <text x="8" y="13" class="art-tag">what it says</text>
+              <rect x="8" y="20" width="154" height="48" rx="9" class="art-box on" />
+              <text x="18" y="40" class="art-txt on">claim · done ✓</text>
+              <text x="18" y="56" class="art-txt sub">“tests pass”</text>
+
+              <text x="8" y="111" class="art-tag">what it did</text>
+              <rect x="8" y="118" width="154" height="62" rx="9" class="art-box" />
+              <text x="18" y="138" class="art-txt">edited src/limiter.py</text>
+              <text x="18" y="154" class="art-txt">pytest · 41 passed</text>
+              <text x="18" y="170" class="art-txt warn">…run before the edit</text>
+
+              <path d="M162 44 C 184 44, 184 100, 206 100" class="art-line on" />
+              <path d="M162 149 C 184 149, 184 100, 206 100" class="art-line on" />
+
+              <rect x="206" y="78" width="84" height="44" rx="10" class="art-box on solid" />
+              <text x="248" y="97" class="art-txt inv" text-anchor="middle">yoetz</text>
+              <text x="248" y="112" class="art-txt inv" text-anchor="middle" opacity="0.85">compares</text>
+
+              <path d="M290 100 C 310 100, 310 52, 326 52" class="art-line warn" />
+              <path d="M290 100 C 310 100, 310 148, 326 148" class="art-line on" />
+              <rect x="326" y="34" width="72" height="36" rx="8" class="art-box warn" />
+              <text x="362" y="49" class="art-txt warn" text-anchor="middle">finding</text>
+              <text x="362" y="62" class="art-tag warn" text-anchor="middle">stale run</text>
+              <rect x="326" y="130" width="72" height="36" rx="8" class="art-box on" />
+              <text x="362" y="145" class="art-txt on" text-anchor="middle">receipt</text>
+              <text x="362" y="158" class="art-tag on" text-anchor="middle">what’s open</text>
+            </svg>
+          </div>
+          <p class="see-note">A disagreement is a finding. The agent fixes it, rechecks, and you get a receipt.</p>
+        </div>
+        <div class="see-demo">
+        <div class="hero-demo">
+            <div class="term-card">
+            <div class="term-head">
+              <div class="term-dots"><span></span><span></span><span></span></div>
+              <img class={`term-host${firstHost.dark ? " invert" : ""}`} src={firstHost.logo} alt="" />
+              <span class="term-title">{firstHost.name} · {termScripts[0].title}</span>
+              <span class="term-pill">yoetz · local</span>
+            </div>
+            <div class="term-body" id="term" aria-hidden="true">
+              {termLines.map((ln) =>
+                ln.pre || ln.op || ln.rest ? (
+                  <div
+                    class={`tl${ln.finding ? " tl-finding" : ""}`}
+                    hidden
+                    data-d={ln.d}
+                    data-ts={ln.ts}
+                  >
+                    <span class="tl-pre" style={`color: ${ln.preC ?? faint};`}>{ln.pre}</span>
+                    {ln.op && <span class="tl-op">{ln.op}</span>}
+                    <span class="tl-rest" style={`color: ${ln.restC ?? dim};`}>{ln.rest}</span>
+                  </div>
+                ) : (
+                  <div class="tl tl-gap" data-d={ln.d} hidden></div>
+                )
+              )}
+              <div class="term-cursor-line" id="term-cursor" hidden>
+                <span class="tl-pre">$</span>
+                <span class="dx-caret"></span>
+              </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <script is:inline type="application/json" id="term-scripts" set:html={JSON.stringify(termScripts)} />
+    </section>
+
+    <!-- Screen 3: under the hood -->
+    <section id="inside" class="inside-section">
+      <div class="ds-section-head">
+        <span class="ds-kicker">Under the hood</span>
+        <h2 class="ds-h2">Hooks and MCP, one local service.</h2>
+        <p class="ds-lead centered">The agent talks to Yoetz over MCP. The host reports through hooks. One service on your machine holds the record and checks it.</p>
+      </div>
+
+      <div class="arch" aria-hidden="true">
+        <svg viewBox="0 0 960 400" fill="none" stroke-linecap="round" stroke-linejoin="round">
+          <defs>
+            <marker id="arr-on" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 L9 5 L0 9 z" fill="#14b8a6" /></marker>
+            <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 L9 5 L0 9 z" fill="#94a3b8" /></marker>
+          </defs>
+
+          <!-- boundary -->
+          <rect x="8" y="30" width="944" height="362" rx="18" class="art-box" stroke-dasharray="5 5" />
+          <text x="26" y="52" class="art-tag">your machine · nothing leaves it</text>
+
+          <!-- agent -->
+          <rect x="24" y="96" width="160" height="208" rx="14" class="art-box" />
+          <text x="104" y="124" class="art-txt strong" text-anchor="middle">your agent</text>
+          <image href="/assets/openai.svg" x="52" y="140" width="22" height="22" />
+          <image href="/assets/claude.svg" x="93" y="140" width="22" height="22" />
+          <image href="/assets/cursor.svg" x="134" y="140" width="22" height="22" />
+          <text x="104" y="182" class="art-tag" text-anchor="middle">or any MCP host</text>
+          <text x="104" y="258" class="art-txt sub" text-anchor="middle">works as usual,</text>
+          <text x="104" y="272" class="art-txt sub" text-anchor="middle">nothing to run</text>
+
+          <!-- MCP channel -->
+          <text x="352" y="88" class="art-tag on" text-anchor="middle">MCP · what the agent says it did</text>
+          <path d="M184 140 H 518" class="art-line on" marker-end="url(#arr-on)" />
+          <g class="tool-pills">
+            <rect x="204" y="104" width="88" height="20" rx="10" class="art-box on" /><text x="248" y="118" class="art-txt on" text-anchor="middle">start</text>
+            <rect x="300" y="104" width="104" height="20" rx="10" class="art-box on" /><text x="352" y="118" class="art-txt on" text-anchor="middle">publish_work</text>
+            <rect x="412" y="104" width="88" height="20" rx="10" class="art-box on" /><text x="456" y="118" class="art-txt on" text-anchor="middle">check</text>
+            <rect x="204" y="156" width="88" height="20" rx="10" class="art-box on" /><text x="248" y="170" class="art-txt on" text-anchor="middle">respond</text>
+            <rect x="300" y="156" width="104" height="20" rx="10" class="art-box on" /><text x="352" y="170" class="art-txt on" text-anchor="middle">status</text>
+            <rect x="412" y="156" width="88" height="20" rx="10" class="art-box on" /><text x="456" y="170" class="art-txt on" text-anchor="middle">receipt</text>
+          </g>
+
+          <!-- hooks channel -->
+          <text x="352" y="218" class="art-tag" text-anchor="middle">hooks · what the host actually saw</text>
+          <path d="M184 240 H 518" class="art-line" marker-end="url(#arr)" />
+          <rect x="222" y="230" width="260" height="20" rx="10" class="art-box" />
+          <text x="352" y="244" class="art-txt sub" text-anchor="middle">sessions · tool calls · edits · results</text>
+
+          <!-- return -->
+          <path d="M518 286 H 184" class="art-line on" marker-end="url(#arr-on)" />
+          <text x="352" y="304" class="art-tag on" text-anchor="middle">findings and the receipt, back in the conversation</text>
+
+          <!-- service -->
+          <rect x="520" y="62" width="416" height="306" rx="16" class="art-box on" />
+          <text x="540" y="84" class="art-tag on">yoetz service · one local process</text>
+
+          <rect x="540" y="134" width="118" height="56" rx="10" class="art-box" />
+          <text x="599" y="157" class="art-txt strong" text-anchor="middle">ledger</text>
+          <text x="599" y="172" class="art-tag" text-anchor="middle">append-only</text>
+
+          <path d="M658 162 H 670" class="art-line on" marker-end="url(#arr-on)" />
+          <rect x="672" y="134" width="118" height="56" rx="10" class="art-box on" />
+          <text x="731" y="157" class="art-txt strong" text-anchor="middle">rules</text>
+          <text x="731" y="172" class="art-tag" text-anchor="middle">deterministic</text>
+
+          <path d="M790 162 H 802" class="art-line on" marker-end="url(#arr-on)" />
+          <rect x="804" y="134" width="118" height="56" rx="10" class="art-box on solid" />
+          <text x="863" y="157" class="art-txt inv" text-anchor="middle">receipt</text>
+          <text x="863" y="172" class="art-txt inv" text-anchor="middle" opacity="0.85">coverage-bounded</text>
+
+          <text x="599" y="214" class="art-txt sub" text-anchor="middle">SQLite · says vs. did,</text>
+          <text x="599" y="228" class="art-txt sub" text-anchor="middle">as events</text>
+          <text x="731" y="214" class="art-txt sub" text-anchor="middle">same inputs,</text>
+          <text x="731" y="228" class="art-txt sub" text-anchor="middle">same findings</text>
+          <text x="863" y="214" class="art-txt sub" text-anchor="middle">verified · coverage</text>
+          <text x="863" y="228" class="art-txt sub" text-anchor="middle">· still open</text>
+
+          <path d="M731 190 V 270" class="art-line" stroke-dasharray="3 4" />
+          <rect x="625" y="272" width="212" height="52" rx="10" class="art-box" stroke-dasharray="4 3" />
+          <text x="731" y="293" class="art-txt" text-anchor="middle">reviewer model · optional</text>
+          <text x="731" y="309" class="art-tag" text-anchor="middle">your API key or ChatGPT plan</text>
+          <text x="731" y="352" class="art-tag" text-anchor="middle">runs from here · nothing goes through us</text>
+        </svg>
+      </div>
+
+      <div class="arch-notes">
         <div>
-          <div class="term-card">
-          <div class="term-head">
-            <div class="term-dots"><span></span><span></span><span></span></div>
-            <img class={`term-host${firstHost.dark ? " invert" : ""}`} src={firstHost.logo} alt="" />
-            <span class="term-title">{firstHost.name} · {termScripts[0].title}</span>
-            <span class="term-pill">yoetz · local</span>
-          </div>
-          <div class="term-body" id="term" aria-hidden="true">
-            {termLines.map((ln) =>
-              ln.pre || ln.op || ln.rest ? (
-                <div
-                  class={`tl${ln.finding ? " tl-finding" : ""}`}
-                  hidden
-                  data-d={ln.d}
-                  data-ts={ln.ts}
-                >
-                  <span class="tl-pre" style={`color: ${ln.preC ?? faint};`}>{ln.pre}</span>
-                  {ln.op && <span class="tl-op">{ln.op}</span>}
-                  <span class="tl-rest" style={`color: ${ln.restC ?? dim};`}>{ln.rest}</span>
-                </div>
-              ) : (
-                <div class="tl tl-gap" data-d={ln.d} hidden></div>
-              )
-            )}
-            <div class="term-cursor-line" id="term-cursor" hidden>
-              <span class="tl-pre">$</span>
-              <span class="dx-caret"></span>
-            </div>
-            </div>
-          </div>
-          <div class="hero-under-term">
-            <a class="hero-license" href={`${GITHUB}/blob/main/LICENSE`} target="_blank" rel="noopener">
-              <span class="l">open source</span>
-              <span class="r">Apache-2.0</span>
-            </a>
-          </div>
+          <div class="arch-k">over MCP</div>
+          <p>The agent publishes its plan, work, claims, and evidence through six tools. Any MCP host can, with nothing installed.</p>
         </div>
-        <script is:inline type="application/json" id="term-scripts" set:html={JSON.stringify(termScripts)} />
-      </div>
-    </section>
-
-    <!-- How it works: four nodes, one line each -->
-    <section id="how" class="ds-section">
-      <div class="ds-section-head">
-        <h2 class="ds-h2">A ledger between your agent and “done”</h2>
-      </div>
-
-      <div class="flow" id="flow">
-        {flow.map((n) => (
-          <div class={`fnode fnode-${n.key}`}>
-            <div class="fnode-icon" aria-hidden="true">
-              {n.key === "publish" && (
-                <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <rect x="9" y="6" width="30" height="36" rx="4" />
-                  <path d="M16 16h16M16 23h16M16 30h9" />
-                  <path class="fn-accent" d="M31 38l4-4 8 8" />
-                  <circle class="fn-accent" cx="36" cy="33" r="0" />
-                  <path class="fn-accent" d="M28 31l7-7M35 24v6M35 24h-6" />
-                </svg>
-              )}
-              {n.key === "ledger" && (
-                <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <rect x="7" y="8" width="34" height="8" rx="2" />
-                  <rect x="7" y="20" width="34" height="8" rx="2" />
-                  <rect x="7" y="32" width="34" height="8" rx="2" />
-                  <path class="fn-accent" d="M13 12h3M13 24h3M13 36h3" />
-                  <path class="fn-accent" d="M35 16v4M35 28v4" stroke-dasharray="1 2" />
-                  <path class="fn-accent" d="M28 12h7M28 24h7M28 36h7" stroke-width="1.5" opacity="0.6" />
-                </svg>
-              )}
-              {n.key === "check" && (
-                <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M24 5l15 6v11c0 9-6 16-15 20-9-4-15-11-15-20V11z" />
-                  <path class="fn-accent" d="M17 24l5 5 10-11" />
-                  <path class="fn-accent" d="M40 30l1.5 3 3 1.5-3 1.5-1.5 3-1.5-3-3-1.5 3-1.5z" stroke-width="1.5" fill="currentColor" />
-                </svg>
-              )}
-              {n.key === "receipt" && (
-                <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M10 6h28v34l-4-3-4 3-4-3-4 3-4-3-4 3-4-3z" />
-                  <path d="M16 15h16M16 22h16" />
-                  <path class="fn-accent" d="M16 29h9" />
-                  <path class="fn-accent" d="M28 29h4" stroke-dasharray="1.5 2" />
-                </svg>
-              )}
-            </div>
-            <div class="fnode-title">{n.title}</div>
-            <div class="fnode-ops">{n.ops}</div>
-            <p class="fnode-text">{n.text}</p>
-          </div>
-        ))}
-      </div>
-
-      <div class="scenes">
-        {scenes.map((sc) => (
-          <div class={`scene scene-${sc.key}`}>
-            <div class="scene-art" aria-hidden="true">
-              {sc.key === "records" && (
-                <svg viewBox="0 0 280 150" class="sc sc-a">
-                  <rect x="8" y="50" width="64" height="50" rx="10" class="sc-box" />
-                  <text x="40" y="70" class="sc-txt strong" text-anchor="middle">agent</text>
-                  <rect class="sc-bar b1" x="20" y="80" width="40" height="3" rx="1.5" />
-                  <rect class="sc-bar b2" x="20" y="87" width="26" height="3" rx="1.5" />
-                  <rect class="sc-bar b3" x="20" y="94" width="34" height="3" rx="1.5" />
-                  <rect x="186" y="22" width="86" height="106" rx="10" class="sc-box" />
-                  <text x="229" y="38" class="sc-tag" text-anchor="middle">ledger</text>
-                  <rect class="sc-row r1" x="196" y="48" width="66" height="14" rx="4" />
-                  <rect class="sc-row still" x="196" y="68" width="66" height="14" rx="4" />
-                  <rect class="sc-row still" x="196" y="88" width="66" height="14" rx="4" />
-                  <rect class="sc-row r4" x="196" y="108" width="66" height="14" rx="4" />
-                  <text x="124" y="30" class="sc-tag" text-anchor="middle">what it says</text>
-                  <g class="sc-chip c1"><rect x="76" y="40" width="96" height="18" rx="9" class="sc-chip-box claim" /><text x="124" y="52" class="sc-chip-txt" text-anchor="middle">claim · done</text></g>
-                  <g class="sc-chip c2"><rect x="76" y="92" width="96" height="18" rx="9" class="sc-chip-box work" /><text x="124" y="104" class="sc-chip-txt" text-anchor="middle">pytest · failed</text></g>
-                  <text x="124" y="126" class="sc-tag" text-anchor="middle">what it did</text>
-                </svg>
-              )}
-              {sc.key === "checks" && (
-                <svg viewBox="0 0 280 150" class="sc sc-b">
-                  <rect x="8" y="30" width="116" height="46" rx="10" class="sc-box" />
-                  <text x="66" y="49" class="sc-txt strong" text-anchor="middle">claim · done ✓</text>
-                  <text x="66" y="65" class="sc-tag" text-anchor="middle">cites: 40 passed</text>
-                  <path d="M124 53h60" class="sc-link" />
-                  <rect x="186" y="22" width="86" height="106" rx="10" class="sc-box" />
-                  <text x="229" y="38" class="sc-tag" text-anchor="middle">ledger</text>
-                  <rect class="sc-row still" x="196" y="48" width="66" height="14" rx="4" />
-                  <rect class="sc-row still" x="196" y="68" width="66" height="14" rx="4" />
-                  <rect class="sc-row warn r3" x="196" y="88" width="66" height="14" rx="4" />
-                  <text x="229" y="98" class="sc-row-txt" text-anchor="middle">1 failed</text>
-                  <rect class="sc-row still" x="196" y="108" width="66" height="14" rx="4" />
-                  <rect class="sc-scan" x="190" y="44" width="78" height="3" rx="1.5" />
-                  <g class="sc-finding"><rect x="8" y="98" width="158" height="24" rx="12" /><text x="87" y="114" text-anchor="middle">✗ failed_work_omitted</text></g>
-                </svg>
-              )}
-              {sc.key === "assists" && (
-                <svg viewBox="0 0 280 150" class="sc sc-c">
-                  <rect x="8" y="30" width="64" height="46" rx="10" class="sc-box" />
-                  <text x="40" y="49" class="sc-txt strong" text-anchor="middle">agent</text>
-                  <text x="40" y="64" class="sc-tag" text-anchor="middle">fixes it</text>
-                  <rect x="186" y="14" width="86" height="80" rx="10" class="sc-box" />
-                  <rect class="sc-row still" x="196" y="26" width="66" height="14" rx="4" />
-                  <rect class="sc-row ok r3" x="196" y="46" width="66" height="14" rx="4" />
-                  <text x="229" y="56" class="sc-row-txt" text-anchor="middle">41 passed</text>
-                  <rect class="sc-row still" x="196" y="66" width="66" height="14" rx="4" />
-                  <g class="sc-chip fixchip"><rect x="82" y="44" width="92" height="18" rx="9" class="sc-chip-box work" /><text x="128" y="56" class="sc-chip-txt" text-anchor="middle">fix · rerun</text></g>
-                  <g class="sc-receipt"><rect x="24" y="104" width="232" height="32" rx="9" /><text x="140" y="124" text-anchor="middle">receipt ✓ · coverage-bounded</text></g>
-                </svg>
-              )}
-            </div>
-            <h3>{sc.title}</h3>
-            <p>{sc.text}</p>
-          </div>
-        ))}
-      </div>
-    </section>
-
-    <!-- Semantic review on the ChatGPT plan -->
-    <section id="review" class="review-band">
-      <div class="review-inner">
-        <div class="review-copy">
-          <span class="ds-kicker">Semantic review</span>
-          <h2 class="ds-h2">A reviewer model. Your key, or the plan you already have.</h2>
-          <p class="ds-lead">A reviewer reads a bounded packet built from the ledger and challenges the work. Bring your own API key, or use the ChatGPT subscription you already pay for. Either way it runs from your machine. Nothing goes through us.</p>
-          <ul class="review-points">
-            <li><b>Always on underneath.</b> Deterministic checks run first, offline, with nothing configured.</li>
-            <li><b>Your repository stays home.</b> The reviewer sees the ledger packet, never your files.</li>
-            <li><b>No account with us.</b> Yoetz has no servers. Your key or your login never leaves your machine.</li>
-          </ul>
+        <div>
+          <div class="arch-k">through hooks</div>
+          <p>Codex, Claude Code, and Cursor also report what actually happened: sessions, tool calls, edits. Structural facts, never your files.</p>
         </div>
-        <div class="review-art" aria-hidden="true">
-          <svg viewBox="0 0 360 210" fill="none" stroke-linecap="round" stroke-linejoin="round">
-            <text x="70" y="16" class="art-tag" text-anchor="middle">pick one</text>
-            <rect x="6" y="24" width="132" height="34" rx="9" class="art-box on" />
-            <text x="72" y="45" class="art-txt on" text-anchor="middle">your own API key</text>
-            <text x="72" y="76" class="art-tag" text-anchor="middle">or</text>
-            <rect x="6" y="86" width="132" height="34" rx="9" class="art-box on" />
-            <text x="72" y="107" class="art-txt on" text-anchor="middle">your ChatGPT plan</text>
-
-            <path d="M138 41 C 164 41, 164 72, 190 72" class="art-line on" />
-            <path d="M138 103 C 164 103, 164 72, 190 72" class="art-line on" />
-
-            <rect x="192" y="50" width="88" height="44" rx="10" class="art-box on solid" />
-            <text x="236" y="69" class="art-txt inv" text-anchor="middle">reviewer</text>
-            <text x="236" y="84" class="art-txt inv" text-anchor="middle" opacity="0.85">challenges</text>
-
-            <rect x="192" y="118" width="88" height="46" rx="10" class="art-box" />
-            <text x="236" y="134" class="art-tag" text-anchor="middle">ledger packet</text>
-            <rect x="202" y="141" width="68" height="5" rx="2.5" fill="#cbd5e1" />
-            <rect x="202" y="150" width="50" height="5" rx="2.5" fill="#cbd5e1" />
-            <path d="M236 118v-24" class="art-line on" />
-            <text x="244" y="110" class="art-tag on">reads</text>
-
-            <rect x="290" y="30" width="62" height="84" rx="10" class="art-box" stroke-dasharray="4 3" />
-            <text x="321" y="52" class="art-txt sub" text-anchor="middle">your</text>
-            <text x="321" y="66" class="art-txt sub" text-anchor="middle">machine</text>
-            <text x="321" y="90" class="art-txt sub" text-anchor="middle">nothing</text>
-            <text x="321" y="103" class="art-txt sub" text-anchor="middle">via us</text>
-
-            <rect x="14" y="176" width="332" height="30" rx="10" class="art-box warn" />
-            <text x="180" y="195" class="art-txt warn" text-anchor="middle">» old-key tokens: grace window never tested</text>
-          </svg>
+        <div>
+          <div class="arch-k">in one local service</div>
+          <p>Both records land in an append-only ledger. Deterministic rules compare them, and the receipt states exactly how far the check reached.</p>
         </div>
-      </div>
-    </section>
-
-    <!-- What's new -->
-    <section id="new" class="new-section">
-      <div class="ds-section-head">
-        <span class="ds-kicker">What's new</span>
-        <h2 class="ds-h2">Now on Claude Code and Cursor, with hooks that finish the job.</h2>
-      </div>
-
-      <div class="feat-grid">
-        <div class="feat hosts">
-          <div class="hosts-row">
-            <div class="host-big">
-              <img src="/assets/openai.svg" alt="" />
-              <span>Codex</span>
-            </div>
-            <div class="host-big">
-              <img src="/assets/claude.svg" alt="" />
-              <span>Claude Code</span>
-              <em class="new">new</em>
-            </div>
-            <div class="host-big">
-              <img src="/assets/cursor.svg" alt="" />
-              <span>Cursor</span>
-              <em class="new">new</em>
-            </div>
-          </div>
-          <h3>Three hosts, first-party</h3>
-          <p>Each host gets its own plugin, hooks, and runbook of what is and is not supported. Any MCP agent still works with nothing installed.</p>
-        </div>
-
-        {features.map((f) => (
-          <div class={`feat feat-${f.key}`}>
-            <div class="feat-art" aria-hidden="true">
-              {f.key === "hooks" && (
-                <svg viewBox="0 0 240 96" fill="none" stroke-linecap="round" stroke-linejoin="round">
-                  <g class="art-row was">
-                    <text x="0" y="28" class="art-tag">0.1</text>
-                    <rect x="34" y="16" width="44" height="22" rx="6" class="art-box" />
-                    <text x="56" y="31" class="art-txt" text-anchor="middle">hook</text>
-                    <path d="M80 27h28" class="art-line" />
-                    <rect x="110" y="16" width="52" height="22" rx="6" class="art-box" />
-                    <text x="136" y="31" class="art-txt" text-anchor="middle">service</text>
-                    <path d="M164 27h22" class="art-line broken" stroke-dasharray="3 4" />
-                    <text x="187" y="31" class="art-x">✗</text>
-                    <rect x="196" y="16" width="44" height="22" rx="6" class="art-box faded" />
-                  </g>
-                  <g class="art-row now">
-                    <text x="0" y="76" class="art-tag on">0.2</text>
-                    <rect x="34" y="64" width="44" height="22" rx="6" class="art-box on" />
-                    <text x="56" y="79" class="art-txt on" text-anchor="middle">hook</text>
-                    <path d="M80 75h28" class="art-line on" />
-                    <rect x="110" y="64" width="52" height="22" rx="6" class="art-box on" />
-                    <text x="136" y="79" class="art-txt on" text-anchor="middle">service</text>
-                    <path d="M164 75h30" class="art-line on" />
-                    <rect x="196" y="64" width="44" height="22" rx="6" class="art-box on solid" />
-                    <text x="218" y="79" class="art-txt inv" text-anchor="middle">ledger</text>
-                  </g>
-                </svg>
-              )}
-              {f.key === "subscription" && (
-                <svg viewBox="0 0 240 96" fill="none" stroke-linecap="round" stroke-linejoin="round">
-                  <rect x="4" y="30" width="64" height="36" rx="8" class="art-box on" />
-                  <text x="36" y="45" class="art-txt on" text-anchor="middle">check</text>
-                  <text x="36" y="58" class="art-txt sub" text-anchor="middle">semantic</text>
-                  <path d="M70 40 C 100 40, 100 22, 130 22" class="art-line on" />
-                  <path d="M70 56 C 100 56, 100 74, 130 74" class="art-line" stroke-dasharray="3 4" />
-                  <rect x="132" y="8" width="104" height="28" rx="7" class="art-box on solid" />
-                  <text x="184" y="26" class="art-txt inv" text-anchor="middle">ChatGPT plan</text>
-                  <rect x="132" y="60" width="104" height="28" rx="7" class="art-box" />
-                  <text x="184" y="78" class="art-txt" text-anchor="middle">API fallback</text>
-                  <text x="72" y="76" class="art-tag" text-anchor="middle">only if primary</text>
-                  <text x="72" y="88" class="art-tag" text-anchor="middle">can't serve</text>
-                </svg>
-              )}
-              {f.key === "consent" && (
-                <svg viewBox="0 0 240 96" fill="none" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M8 14h118a8 8 0 0 1 8 8v22a8 8 0 0 1-8 8H40l-14 12v-12h-18a8 8 0 0 1-8-8V22a8 8 0 0 1 8-8z" class="art-box on" />
-                  <text x="20" y="32" class="art-txt on">Expanded review?</text>
-                  <text x="20" y="45" class="art-txt sub">before → after</text>
-                  <rect x="150" y="18" width="84" height="26" rx="13" class="art-box on solid" />
-                  <text x="192" y="35" class="art-txt inv" text-anchor="middle">approve once</text>
-                  <text x="192" y="60" class="art-tag" text-anchor="middle">drift → fails closed</text>
-                  <path d="M16 76l6 6 12-12" class="art-line on" stroke-width="2.5" />
-                  <text x="42" y="84" class="art-txt sub">you keep the choice</text>
-                </svg>
-              )}
-              {f.key === "correct" && (
-                <svg viewBox="0 0 240 96" fill="none" stroke-linecap="round" stroke-linejoin="round">
-                  <rect x="8" y="10" width="100" height="26" rx="6" class="art-box faded" />
-                  <text x="58" y="27" class="art-txt faded" text-anchor="middle">claim v1</text>
-                  <path d="M20 23h76" class="art-line strike" />
-                  <rect x="8" y="58" width="100" height="26" rx="6" class="art-box on solid" />
-                  <text x="58" y="75" class="art-txt inv" text-anchor="middle">claim v2</text>
-                  <path d="M58 36v22" class="art-line on" />
-                  <path d="M54 52l4 6 4-6" class="art-line on" />
-                  <text x="130" y="27" class="art-txt sub">supersedes → v1</text>
-                  <text x="130" y="48" class="art-txt sub">supporting → evidence</text>
-                  <text x="130" y="75" class="art-txt warn">limitations → failed run</text>
-                </svg>
-              )}
-              {f.key === "recheck" && (
-                <svg viewBox="0 0 240 96" fill="none" stroke-linecap="round" stroke-linejoin="round">
-                  <rect x="6" y="34" width="60" height="28" rx="7" class="art-box warn" />
-                  <text x="36" y="52" class="art-txt warn" text-anchor="middle">finding</text>
-                  <path d="M68 48h26" class="art-line" />
-                  <rect x="96" y="34" width="60" height="28" rx="7" class="art-box" />
-                  <text x="126" y="52" class="art-txt" text-anchor="middle">respond</text>
-                  <path d="M158 48h26" class="art-line" stroke-dasharray="3 4" />
-                  <text x="171" y="74" class="art-tag" text-anchor="middle">not yet</text>
-                  <rect x="186" y="34" width="50" height="28" rx="7" class="art-box on solid" />
-                  <text x="211" y="52" class="art-txt inv" text-anchor="middle">check</text>
-                  <path d="M211 32 C 211 12, 60 12, 42 30" class="art-line on" />
-                  <path d="M38 24l4 6 6-3" class="art-line on" />
-                  <text x="126" y="14" class="art-tag on" text-anchor="middle">resolves</text>
-                  <text x="126" y="86" class="art-tag" text-anchor="middle">records a disposition</text>
-                </svg>
-              )}
-            </div>
-            <h3>{f.title}</h3>
-            <p>{f.text}</p>
-          </div>
-        ))}
       </div>
 
       <p class="section-link">
-        <a href={RELEASES} target="_blank" rel="noopener">Read the release notes</a>
+        <a href={`${GITHUB}/blob/main/docs/architecture.md`} target="_blank" rel="noopener">Read the architecture</a>
+        <a href={RELEASES} target="_blank" rel="noopener">Release notes</a>
       </p>
     </section>
 
@@ -660,53 +508,33 @@ const next = [
           <p class="ds-lead on-dark">Task lineage and project coordination. <code>/lineage</code> and <code>/project</code> in the terminal.</p>
         </div>
 
-        <div class="next-art" aria-hidden="true">
-          <svg class="na-lineage" viewBox="0 0 360 226" fill="none" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="120" y="14" width="120" height="36" rx="9" class="na-box parent" />
-            <text x="180" y="30" class="na-txt" text-anchor="middle">parent task</text>
-            <text x="180" y="43" class="na-sub" text-anchor="middle">tsk_9c2e · open</text>
-
-            <path d="M180 50v22" class="na-line" />
-            <path d="M180 72H90v18M180 72h90v18" class="na-line" />
-            <text x="180" y="66" class="na-tag" text-anchor="middle">delegate</text>
-
-            <rect x="28" y="90" width="124" height="36" rx="9" class="na-box child" />
-            <text x="90" y="106" class="na-txt" text-anchor="middle">child · tests</text>
-            <text x="90" y="119" class="na-sub" text-anchor="middle">receipt · clean</text>
-
-            <rect x="208" y="90" width="124" height="36" rx="9" class="na-box child warn" />
-            <text x="270" y="106" class="na-txt" text-anchor="middle">child · migration</text>
-            <text x="270" y="119" class="na-sub warn" text-anchor="middle">1 finding · open</text>
-
-            <path d="M90 126v20h90M270 126v20h-90" class="na-line" />
-            <path d="M180 146v18" class="na-line on" />
-            <path d="M175 158l5 6 5-6" class="na-line on" />
-            <text x="180" y="142" class="na-tag on" text-anchor="middle" dy="-2">rolls up</text>
-
-            <rect x="84" y="166" width="192" height="52" rx="9" class="na-box receipt" />
-            <text x="180" y="182" class="na-txt on" text-anchor="middle">parent receipt</text>
-            <text x="180" y="196" class="na-sub warn" text-anchor="middle">child finding open</text>
-            <text x="180" y="209" class="na-sub" text-anchor="middle">integration still unproven</text>
-          </svg>
-
-          <svg class="na-project" viewBox="0 0 260 226" fill="none" stroke-linecap="round" stroke-linejoin="round">
-            <text x="130" y="30" class="na-tag" text-anchor="middle">project · one repository</text>
-            <rect x="36" y="46" width="90" height="34" rx="9" class="na-box child" />
-            <text x="81" y="61" class="na-txt" text-anchor="middle">task A</text>
-            <text x="81" y="73" class="na-sub" text-anchor="middle">wt/feature</text>
-            <rect x="134" y="46" width="90" height="34" rx="9" class="na-box child" />
-            <text x="179" y="61" class="na-txt" text-anchor="middle">task B</text>
-            <text x="179" y="73" class="na-sub" text-anchor="middle">wt/hotfix</text>
-
-            <path d="M81 80v24M179 80v24" class="na-line" />
-            <path d="M81 104h98" class="na-line" />
-            <path d="M130 104v18" class="na-line warn" />
-
-            <rect x="48" y="122" width="164" height="30" rx="8" class="na-box warn" />
-            <text x="130" y="141" class="na-txt warn" text-anchor="middle">src/sessions.py</text>
-            <text x="130" y="172" class="na-tag warn" text-anchor="middle">overlap detected · disclosed under consent</text>
-            <text x="130" y="196" class="na-sub" text-anchor="middle">/lineage · /project in the terminal</text>
-          </svg>
+        <div class="nx" aria-hidden="true">
+          <div class="nx-card nx-a">
+            <div class="nx-eyebrow">Delegate</div>
+            <div class="nx-row nx-a1"><span class="nx-mark on">◆</span><span class="nx-id">tsk_9c2e</span>sessions → Redis · Codex</div>
+            <div class="nx-row nx-a2"><span class="nx-mark">└</span><span class="nx-id">tsk_c31a</span>child · tests · 30m handle</div>
+            <div class="nx-row nx-a3"><span class="nx-mark">└</span><span class="nx-id">tsk_c4f0</span>child · migration · 30m</div>
+            <div class="nx-row nx-a4"><span class="nx-mark ok">✓</span><span class="nx-id">c31a</span>check · receipt · clean</div>
+            <div class="nx-row nx-a5 flag"><span class="nx-mark">✗</span><span class="nx-id">c4f0</span>check · 1 finding · open</div>
+          </div>
+          <div class="nx-link"><span class="nx-dot nx-dot1"></span></div>
+          <div class="nx-card nx-b">
+            <div class="nx-eyebrow">Roll up</div>
+            <div class="nx-row nx-b1"><span class="nx-mark on">◆</span><span class="nx-id">tsk_9c2e</span>receipt · rolls up 2 children</div>
+            <div class="nx-row nx-b2"><span class="nx-mark ok">✓</span><span class="nx-id">c31a</span>clean · not integration</div>
+            <div class="nx-row nx-b3 flag"><span class="nx-mark">✗</span><span class="nx-id">c4f0</span>finding carried up · open</div>
+            <div class="nx-row nx-b4"><span class="nx-mark dim">·</span><span class="nx-id">parent</span>integration · unchecked</div>
+            <div class="nx-row nx-b5 on"><span class="nx-mark on">▸</span><span class="nx-id">receipt</span>unresolved_findings_remain</div>
+          </div>
+          <div class="nx-link"><span class="nx-dot nx-dot2"></span></div>
+          <div class="nx-card nx-c">
+            <div class="nx-eyebrow">Coordinate</div>
+            <div class="nx-row nx-c1"><span class="nx-mark dim">·</span><span class="nx-id">repo</span>checkout-api · 2 live tasks</div>
+            <div class="nx-row nx-c2"><span class="nx-mark on">◆</span><span class="nx-id">task A</span>wt/feature · Codex</div>
+            <div class="nx-row nx-c3"><span class="nx-mark on">◆</span><span class="nx-id">task B</span>wt/hotfix · Claude Code</div>
+            <div class="nx-row nx-c4 flag"><span class="nx-mark">!</span><span class="nx-id">overlap</span>both touch src/sessions.py</div>
+            <div class="nx-row nx-c5 on"><span class="nx-mark on">✓</span><span class="nx-id">consent</span>each told about the other</div>
+          </div>
         </div>
 
         <div class="next-grid">
@@ -727,15 +555,17 @@ const next = [
     <!-- Alpha, briefly -->
     <section id="status" class="alpha-strip">
       <div class="alpha-inner">
-        <span class="ds-badge ds-badge-next">alpha</span>
-        <p>
-          Works out of the box with no account and no network. Expect rough edges; every claim we
-          make is tracked in the repository.
-        </p>
+        <div class="alpha-copy">
+          <span class="alpha-badge"><span class="alpha-pulse"></span>alpha · {VERSION}</span>
+          <h3>New, rough in places, already useful.</h3>
+          <p>
+            Yoetz is fresh. It works today with no account and no network, and every claim on this
+            page is tracked in the repository. Expect edges; tell us where they are.
+          </p>
+        </div>
         <div class="alpha-links">
-          <a href={`${GITHUB}/issues/new`} target="_blank" rel="noopener">File an issue</a>
-          <span class="ds-footer-dot"></span>
-          <a href={`${GITHUB}/blob/main/SECURITY.md`} target="_blank" rel="noopener">Report a security issue</a>
+          <a class="alpha-btn primary" href={`${GITHUB}/issues/new`} target="_blank" rel="noopener">File an issue</a>
+          <a class="alpha-btn" href={`${GITHUB}/blob/main/SECURITY.md`} target="_blank" rel="noopener">Report a security issue</a>
         </div>
       </div>
     </section>
@@ -788,34 +618,84 @@ const next = [
       const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>(".inst-tab:not(.agent)"));
       const toast = document.getElementById("copy-toast");
       const toastCmd = document.getElementById("copy-toast-cmd");
-      const toastDetail = document.getElementById("copy-toast-detail");
-      let toastTimer: ReturnType<typeof setTimeout>;
-      function showCopyToast(detail: string, command?: string) {
-        if (!toast || !toastCmd || !toastDetail) return;
+      const nsTitle = document.getElementById("ns-title");
+      const nsSteps = document.getElementById("ns-steps");
+      const nsFoot = document.getElementById("ns-foot");
+      const nsClose = document.getElementById("ns-close");
+      const SETUP_TIME = "About two to three minutes.";
+      const HOST_NOTE =
+        "Setup connects Codex. For Claude Code or Cursor, run `yoetz integrate claude plugin preview` or `yoetz integrate cursor plugin preview` afterwards.";
+      // Steps may carry `code` spans marked with backticks; everything is built as text nodes.
+      function fillInline(el: HTMLElement, text: string) {
+        el.replaceChildren();
+        text.split("`").forEach((part, i) => {
+          if (!part) return;
+          if (i % 2 === 1) {
+            const code = document.createElement("code");
+            code.textContent = part;
+            el.appendChild(code);
+          } else {
+            el.appendChild(document.createTextNode(part));
+          }
+        });
+      }
+      async function copyText(text: string): Promise<boolean> {
+        if (!text) return false;
+        try {
+          await navigator.clipboard.writeText(text);
+          return true;
+        } catch {
+          return false;
+        }
+      }
+      function showNextSteps(title: string, steps: string[], command?: string, foot?: string) {
+        if (!toast || !toastCmd || !nsTitle || !nsSteps || !nsFoot) return;
+        nsTitle.textContent = title;
         toastCmd.textContent = command ?? "";
         toastCmd.hidden = !command;
-        toastDetail.textContent = detail;
+        nsSteps.replaceChildren();
+        for (const step of steps) {
+          const li = document.createElement("li");
+          fillInline(li, step);
+          nsSteps.appendChild(li);
+        }
+        if (foot) fillInline(nsFoot, foot);
+        nsFoot.hidden = !foot;
         toast.hidden = false;
-        clearTimeout(toastTimer);
-        toastTimer = setTimeout(() => {
-          toast.hidden = true;
-        }, 8000);
       }
+      nsClose?.addEventListener("click", () => {
+        if (toast) toast.hidden = true;
+      });
       for (const tab of tabs) {
         tab.addEventListener("click", async () => {
           const cmd = tab.dataset.command ?? "";
-          if (!navigator.clipboard || !cmd) return;
-          try {
-            await navigator.clipboard.writeText(cmd);
-          } catch {
-            return;
-          }
-          const nextStep = tab.dataset.key === "pypi"
-            ? "Paste this command into your terminal and press Enter. Once installed, run yoetz in your terminal to start setup."
-            : "Paste this command into your terminal and press Enter to start setup.";
-          showCopyToast(nextStep, cmd);
+          if (!cmd) return;
+          const copied = await copyText(cmd);
+          const steps = tab.dataset.key === "pypi"
+            ? [
+                "Paste the command into your terminal and press Enter to install.",
+                `Run \`yoetz\` to start setup, and answer its questions. ${SETUP_TIME}`,
+                HOST_NOTE,
+              ]
+            : [
+                "Paste the command into your terminal and press Enter. `npx yoetz` installs Yoetz and starts setup.",
+                `Answer setup’s questions in your terminal. ${SETUP_TIME}`,
+                HOST_NOTE,
+              ];
+          showNextSteps(copied ? "Copied. Run it in your terminal." : "Copy this command, then run it in your terminal.", steps, cmd);
         });
       }
+
+      // --- Manual install disclosure ---
+      const manualToggle = document.getElementById("manual-toggle");
+      const manualPanel = document.getElementById("manual-panel");
+      manualToggle?.addEventListener("click", () => {
+        if (!manualPanel) return;
+        const open = manualPanel.hidden;
+        manualPanel.hidden = !open;
+        manualToggle.setAttribute("aria-expanded", String(open));
+        manualToggle.classList.toggle("open", open);
+      });
 
       // --- Copy: agent setup prompt ---
       const agentBtn = document.getElementById("agent-copy");
@@ -823,13 +703,19 @@ const next = [
       const agentDefaultLabel = agentLabel?.textContent ?? "";
       let agentTimer: ReturnType<typeof setTimeout>;
       agentBtn?.addEventListener("click", async () => {
-        if (!navigator.clipboard) return;
-        try {
-          await navigator.clipboard.writeText(agentBtn.dataset.command ?? "");
-        } catch {
-          return;
-        }
-        showCopyToast("Paste the instruction into your agent’s chat, then send it to start setup.");
+        const prompt = agentBtn.dataset.command ?? "";
+        const copied = await copyText(prompt);
+        showNextSteps(
+          copied ? "Copied. Now paste it into your agent." : "Copy this prompt, then paste it into your agent.",
+          [
+            "Open Codex, Claude Code, or Cursor and paste the prompt into the chat. Send it.",
+            "Your agent installs Yoetz and hands you the terminal for setup’s questions.",
+            `Answer them in your terminal. ${SETUP_TIME}`,
+          ],
+          copied ? undefined : prompt,
+          "Any other MCP agent works too, with nothing else installed."
+        );
+        if (!copied) return;
         if (agentLabel) agentLabel.textContent = "Copied to your clipboard";
         agentBtn.classList.add("copied");
         clearTimeout(agentTimer);
