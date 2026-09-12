@@ -126,8 +126,13 @@ def _frontier(value: Frontier | FrontierModel) -> JsonValue:
     return cast(JsonValue, value.model_dump(mode="json"))
 
 
-async def _semantic_forbidden(frozen: object, findings: object) -> object:
-    del frozen, findings
+async def _semantic_forbidden(
+    frozen: object,
+    findings: object,
+    runtime: object | None = None,
+    lineage_evaluation: object | None = None,
+) -> object:
+    del frozen, findings, runtime, lineage_evaluation
     raise AssertionError("resume capability cell must never invoke the semantic evaluator")
 
 

@@ -117,9 +117,13 @@ class _Objects:
         del kind
         return "hmac-sha256:" + hashlib.sha256(data).hexdigest()
 
-    async def stage(self, source: ObjectSource, metadata: ObjectMetadata) -> StagedObject:
+    async def stage(
+        self, source: ObjectSource, metadata: ObjectMetadata, *, object_id: str | None = None
+    ) -> StagedObject:
         assert source.data is not None
-        object_id = self._ids.new(IdKind.OBJECT)
+        object_id = object_id if object_id is not None else self._ids.new(IdKind.OBJECT)
+        if object_id in self._data and self._data[object_id] != source.data:
+            raise ValueError("object_identity_conflict")
         commitment = await self.commitment_for(source.data, metadata.kind)
         self._data[object_id] = source.data
         return StagedObject(
@@ -608,11 +612,13 @@ class _GatedObjects(_Objects):
         self.freeze_entered = asyncio.Event()
         self.release_freeze = asyncio.Event()
 
-    async def stage(self, source: ObjectSource, metadata: ObjectMetadata) -> StagedObject:
+    async def stage(
+        self, source: ObjectSource, metadata: ObjectMetadata, *, object_id: str | None = None
+    ) -> StagedObject:
         if metadata.kind is ObjectKind.CHECK_RESUME:
             self.freeze_entered.set()
             await self.release_freeze.wait()
-        return await super().stage(source, metadata)
+        return await super().stage(source, metadata, object_id=object_id)
 
 
 @pytest.mark.anyio

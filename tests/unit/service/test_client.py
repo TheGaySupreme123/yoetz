@@ -31,10 +31,12 @@ from yoetz.protocol.models import ReceiptRequest
 from yoetz.service.client import (
     GetPrivacyReceiptRequest,
     ListPrivacyReceiptsRequest,
+    PreparedProjectRequest,
     PrivacyReceiptFound,
     PrivacyReceiptNotFound,
     ServiceClient,
     connect_service_on_demand,
+    prepare_project_request,
 )
 from yoetz.service.control_protocol import (
     ControlSession,
@@ -144,6 +146,118 @@ async def _wait_for_sent(stream: _FakeStream, count: int) -> None:
             return
         await asyncio.sleep(0)
     raise AssertionError("client did not write expected frame")
+
+
+@pytest.mark.anyio
+async def test_project_preserves_supplied_request_id_on_the_control_wire() -> None:
+    stream = _FakeStream()
+    client = _client(stream)
+    supplied = "req_00000000-0000-4000-8000-000000000101"
+    task = asyncio.create_task(
+        client.project(
+            JsonObject(
+                {
+                    "schema_version": "1.0.0",
+                    "operation": "create",
+                    "owner_task_id": "tsk_00000000-0000-4000-8000-000000000102",
+                    "title": "project",
+                    "request_id": supplied,
+                }
+            )
+        )
+    )
+    await _wait_for_sent(stream, 1)
+    request = decode_control_frame(stream.sent[0])
+    body = cast(dict[str, object], request["body"])
+    assert body["request_id"] == supplied
+    assert client.last_project_request == PreparedProjectRequest(JsonObject(body), supplied)
+    await stream.feed(
+        encode_control_frame(
+            ControlResult(
+                protocol_version="1.0",
+                rpc_id=cast(str, request["rpc_id"]),
+                service_instance_id=_SERVICE_ID,
+                service_generation="1",
+                method=ControlMethod.PROJECT,
+                outcome="error",
+                body=ControlError("project_not_found"),
+            )
+        )
+    )
+    with pytest.raises(ControlError, match="project_not_found"):
+        await task
+    await client.close()
+
+
+@pytest.mark.anyio
+async def test_project_generated_request_id_is_exposed_and_reusable_for_recovery() -> None:
+    stream = _FakeStream()
+    client = _client(stream)
+    original = JsonObject(
+        {
+            "schema_version": "1.0.0",
+            "operation": "create",
+            "owner_task_id": "tsk_00000000-0000-4000-8000-000000000103",
+            "title": "project",
+        }
+    )
+    first_task = asyncio.create_task(client.project(original))
+    await _wait_for_sent(stream, 1)
+    first = decode_control_frame(stream.sent[0])
+    first_body = cast(dict[str, object], first["body"])
+    prepared = client.last_project_request
+    assert prepared is not None
+    assert prepared.body is not original
+    assert prepared.body["request_id"] == prepared.request_id
+    assert first_body["request_id"] == prepared.request_id
+    assert "request_id" not in original
+    await stream.feed(
+        encode_control_frame(
+            ControlResult(
+                protocol_version="1.0",
+                rpc_id=cast(str, first["rpc_id"]),
+                service_instance_id=_SERVICE_ID,
+                service_generation="1",
+                method=ControlMethod.PROJECT,
+                outcome="error",
+                body=ControlError("project_not_found"),
+            )
+        )
+    )
+    with pytest.raises(ControlError, match="project_not_found"):
+        await first_task
+
+    retry_task = asyncio.create_task(client.project(prepared.body))
+    await _wait_for_sent(stream, 2)
+    retry = decode_control_frame(stream.sent[1])
+    assert retry["body"] == first["body"]
+    await stream.feed(
+        encode_control_frame(
+            ControlResult(
+                protocol_version="1.0",
+                rpc_id=cast(str, retry["rpc_id"]),
+                service_instance_id=_SERVICE_ID,
+                service_generation="1",
+                method=ControlMethod.PROJECT,
+                outcome="error",
+                body=ControlError("project_not_found"),
+            )
+        )
+    )
+    with pytest.raises(ControlError, match="project_not_found"):
+        await retry_task
+    await client.close()
+
+
+def test_prepare_project_request_uses_matching_explicit_identity() -> None:
+    supplied = "req_00000000-0000-4000-8000-000000000104"
+    prepared = prepare_project_request(
+        JsonObject({"schema_version": "1.0.0", "operation": "opt_in"}),
+        request_id=supplied,
+    )
+    assert prepared.request_id == supplied
+    assert prepared.body["request_id"] == supplied
+    assert prepared.request == prepared.body
 
 
 @pytest.mark.anyio

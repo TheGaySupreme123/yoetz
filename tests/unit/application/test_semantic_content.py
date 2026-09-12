@@ -458,6 +458,146 @@ def _multipart_fixture() -> tuple[FrozenCase, TaskRuntime, _Objects]:
     return FrozenCase(case, base_frozen.lease), runtime, multi_objects
 
 
+def _lexical_boundary_multipart_fixture() -> tuple[FrozenCase, TaskRuntime, _Objects, _Observation]:
+    """Build a valid two-part group whose second ID falls outside the metadata prefix."""
+
+    base_frozen, base_runtime, objects, observation, envelope = _fixture(
+        content=b"boundary-part-0",
+    )
+    first_id = observation.manifest.object_id
+    second_id = object_id("obj_00000000-0000-4000-8000-000000000303")
+    first_content = b"boundary-part-0"
+    second_content = b"boundary-part-1"
+
+    def _manifest_and_wrapper(
+        object_value: str,
+        content: bytes,
+        *,
+        part_index: int,
+        envelope_digest: str,
+    ) -> tuple[ObservationContentManifest, bytes]:
+        digest = "sha256:" + hashlib.sha256(content).hexdigest()
+        manifest = replace(
+            observation.manifest,
+            object_id=object_value,
+            envelope_digest=envelope_digest,
+            part_index=part_index,
+            part_count=2,
+            content_digest=digest,
+            content_bytes=len(content),
+        )
+        wrapper = canonical_encode(
+            JsonObject(
+                {
+                    "format": "yoetz.observation-content/1",
+                    "content_kind": manifest.content_kind.value,
+                    "correlation_identity": cast(str, manifest.correlation_identity),
+                    "source_commitment": cast(str, manifest.source_commitment),
+                    "media_type": "text/plain",
+                    "part_index": manifest.part_index,
+                    "part_count": manifest.part_count,
+                    "redacted": manifest.redacted,
+                    "content_b64": base64.b64encode(content).decode("ascii"),
+                }
+            )
+        )
+        return manifest, wrapper
+
+    first_manifest, first_wrapper = _manifest_and_wrapper(
+        first_id,
+        first_content,
+        part_index=0,
+        envelope_digest="sha256:" + "7" * 64,
+    )
+    second_manifest, second_wrapper = _manifest_and_wrapper(
+        second_id,
+        second_content,
+        part_index=1,
+        envelope_digest="sha256:" + "8" * 64,
+    )
+    observation.manifest = first_manifest
+    observation.manifests = {first_id: first_manifest, second_id: second_manifest}
+    observation.envelope = replace(envelope, content_object_refs=(first_id, second_id))
+
+    first_ref = replace(
+        objects.ref,
+        object_id=first_id,
+        plaintext_size=len(first_wrapper),
+        envelope_digest=first_manifest.envelope_digest,
+    )
+    second_ref = replace(
+        first_ref,
+        object_id=second_id,
+        plaintext_size=len(second_wrapper),
+        envelope_digest=second_manifest.envelope_digest,
+    )
+    objects.ref = first_ref
+    objects.wrapper = first_wrapper
+    objects.refs[first_id] = first_ref
+    objects.refs[second_id] = second_ref
+    objects.wrappers[first_id] = first_wrapper
+    objects.wrappers[second_id] = second_wrapper
+
+    base_record = base_frozen.case.projection.evidence[evd(1)]
+    base_payload = base_record.payload
+    assert type(base_payload) is EvidenceRecordedPayload
+    base_binding = base_payload.digest_binding
+    assert type(base_binding) is EvidenceDigestBinding
+
+    def _evidence_record(
+        evidence_value: EvidenceId,
+        object_value: str,
+        content: bytes,
+        *,
+        part_index: int,
+        frontier: int,
+    ) -> EvidenceProjectionRecord:
+        digest = "sha256:" + hashlib.sha256(content).hexdigest()
+        payload = replace(
+            base_payload,
+            evidence_id=evidence_value,
+            captured_object_id=object_value,
+            content_digest=digest,
+            description=(f"Observation-captured tool output bytes part={part_index + 1}/2"),
+            digest_binding=replace(base_binding, byte_count=len(content)),
+        )
+        expected_event = stable_observation_id(
+            kind=IdKind.EVENT,
+            task_id=_TASK,
+            source_identity=f"{envelope.source_identity}:captured:{object_value}",
+            mapping_version=MATERIALIZATION_MAPPING_VERSION,
+            role="captured_evidence_event",
+        )
+        return EvidenceProjectionRecord(
+            payload=payload,
+            payload_digest=canonical_digest(encode_payload(payload)),
+            redacted=False,
+            source_event_id=event_id(expected_event),
+            source_frontier=frontier,
+        )
+
+    evidence: dict[EvidenceId, EvidenceProjectionRecord] = {
+        evd(1): _evidence_record(evd(1), first_id, first_content, part_index=0, frontier=4),
+        evd(2): _evidence_record(evd(2), second_id, second_content, part_index=1, frontier=5),
+    }
+    # These 63 ordinary candidates sort before the two group members. They
+    # force the resolver's bounded metadata prefix to end after part zero while
+    # leaving the complete group durably represented by the envelope/evidence.
+    for index in range(63):
+        extra_id = object_id(f"obj_00000000-0000-4000-8000-{0x100 + index:012x}")
+        extra_evidence = evd(index + 3)
+        evidence[extra_evidence] = _evidence_record(
+            extra_evidence,
+            extra_id,
+            b"bounded filler",
+            part_index=0,
+            frontier=6 + index,
+        )
+
+    case = make_case(evidence=evidence, extra_refs=tuple(evidence))
+    return FrozenCase(case, base_frozen.lease), base_runtime, objects, observation
+
+
 @pytest.mark.anyio
 async def test_resolver_authenticates_content_and_binds_phase_before_builder() -> None:
     frozen, runtime, objects, _observation, _envelope = _fixture()
@@ -762,6 +902,26 @@ async def test_resolver_admits_multipart_groups_atomically_under_part_bound() ->
     assert len(objects.resolve_calls) == 2
     assert objects.open_calls == 2
     assert "content_unselected" in resolved.gaps
+
+
+@pytest.mark.anyio
+async def test_resolver_reports_capacity_for_multipart_group_crossing_metadata_cutoff() -> None:
+    frozen, runtime, objects, _observation = _lexical_boundary_multipart_fixture()
+
+    resolved = await resolve_captured_semantic_content(
+        runtime=runtime,
+        frozen=frozen,
+        workspace_commitment=_WORKSPACE,
+    )
+
+    # The bounded metadata prefix sees only part zero. It withholds the whole
+    # group and reports capacity, rather than mislabeling the retained group as
+    # unavailable or opening a fragment.
+    assert resolved.content == ()
+    assert "content_unselected" in resolved.gaps
+    assert "content_capture_unavailable" not in resolved.gaps
+    assert objects.resolve_calls == []
+    assert objects.open_calls == 0
 
 
 @pytest.mark.anyio

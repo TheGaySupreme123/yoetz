@@ -15,7 +15,14 @@ from typing import Literal, cast
 
 import pytest
 
-from yoetz.adapters.integrations.codex_lifecycle import LifecycleMapping, acquire_session_lock
+from yoetz.adapters.integrations.codex_lifecycle import (
+    LifecycleMapping,
+    acquire_session_lock,
+    is_scoped_child_session_id,
+    mapping_from_start_ids,
+    scoped_child_session_id,
+    store_mapping,
+)
 from yoetz.adapters.integrations.hook_spool import HookSpool
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.application.recommendations import RecommendationState, store_recommendation_state
@@ -72,6 +79,410 @@ def test_map_supported_hook_payloads_structural_only(tmp_path: Path) -> None:
         assert "prompt" not in envelope.structural_payload
         assert envelope.structural_payload.get("tool_name") == "shell"
         assert envelope.cursor.last_source_commitment.startswith("hmac-sha256:")
+
+
+def test_map_native_child_aliases_to_one_structural_identity(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    session = store.session_commitment("claude-child-parent")
+    envelope = map_hook_payload_to_envelope(
+        "SubagentStart",
+        {
+            "session_id": "claude-child-parent",
+            "agent_id": "agent-claude-1",
+            "agent_thread_id": "agent-claude-1",
+            "parent_tool_call_id": "tool-parent-1",
+            "tool_call_id": "tool-parent-1",
+            "prompt": "must not cross the boundary",
+            "transcript_path": "/private/transcript.jsonl",
+        },
+        session_commitment=session,
+        event_ordinal=1,
+        key_material=store.key_material(),
+    )
+
+    assert envelope.structural_payload == {
+        "event_ordinal": 1,
+        "hook_name": "SubagentStart",
+        "parent_tool_call_id": "tool-parent-1",
+        "subagent_id": "agent-claude-1",
+    }
+    assert "prompt" not in envelope.structural_payload
+    assert "transcript_path" not in envelope.structural_payload
+
+
+def test_map_actual_claude_child_hook_shape_without_parent_tool(tmp_path: Path) -> None:
+    """Claude's native child hooks carry child identity but no parent tool identifier."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    for event_name, extra in (
+        ("SubagentStart", {"transcript_path": "/private/transcript.jsonl"}),
+        (
+            "SubagentStop",
+            {
+                "agent_transcript_path": "/private/agent-transcript.jsonl",
+                "permission_mode": "dontAsk",
+            },
+        ),
+    ):
+        envelope = map_hook_payload_to_envelope(
+            event_name,
+            {
+                "hook_event_name": event_name,
+                "session_id": "claude-parent-session",
+                "agent_id": "claude-agent-1",
+                "agent_type": "general-purpose",
+                "cwd": "/private/project",
+                **extra,
+            },
+            session_commitment=store.session_commitment("claude-parent-session"),
+            event_ordinal=1,
+            key_material=store.key_material(),
+        )
+
+        assert envelope.structural_payload == {
+            "event_ordinal": 1,
+            "hook_name": event_name,
+            "subagent_id": "claude-agent-1",
+        }
+
+
+def test_map_conflicting_native_child_aliases_leave_an_attribution_gap(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    envelope = map_hook_payload_to_envelope(
+        "SubagentStop",
+        {
+            "session_id": "claude-child-parent",
+            "subagent_id": "child-a",
+            "agent_id": "child-b",
+            "parent_tool_call_id": "tool-parent-a",
+            "tool_call_id": "tool-parent-b",
+        },
+        session_commitment=store.session_commitment("claude-child-parent"),
+        event_ordinal=1,
+        key_material=store.key_material(),
+    )
+
+    assert "subagent_id" not in envelope.structural_payload
+    assert "parent_tool_call_id" not in envelope.structural_payload
+
+
+def test_observation_lane_requires_a_validated_child_mapping(tmp_path: Path) -> None:
+    parent_task, parent_session, parent_writer = (
+        "tsk_11111111-1111-4111-8111-111111111111",
+        "ses_22222222-2222-4222-8222-222222222222",
+        "wri_33333333-3333-4333-8333-333333333333",
+    )
+    child_task, child_session, child_writer = (
+        "tsk_44444444-4444-4444-8444-444444444444",
+        "ses_55555555-5555-4555-8555-555555555555",
+        "wri_66666666-6666-4666-8666-666666666666",
+    )
+    host_session = "codex-lane-parent"
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=host_session,
+            yoetz_task_id=parent_task,
+            yoetz_session_id=parent_session,
+            yoetz_writer_id=parent_writer,
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+    task_lane = scoped_child_session_id(
+        host_session,
+        host="codex",
+        identity=child_task,
+        identity_kind="task",
+    )
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=task_lane,
+            yoetz_task_id=child_task,
+            yoetz_session_id=child_session,
+            yoetz_writer_id=child_writer,
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+
+    lane = observe_hooks_module._resolve_observation_lane(  # pyright: ignore[reportPrivateUsage]
+        {
+            "session_id": host_session,
+            "tool_name": "mcp__yoetz__publish_work",
+            "tool_response": {
+                "structuredContent": {
+                    "ok": True,
+                    "task_id": child_task,
+                    "parent_task_id": parent_task,
+                }
+            },
+        },
+        event_name="PostToolUse",
+        source=ObservationSource.CODEX_HOOK,
+        _state=tmp_path,
+    )
+    assert lane.host_session_id == host_session
+    assert lane.effective_session_id == task_lane
+    assert lane.is_child is True
+    assert lane.attribution_gap is False
+    assert is_scoped_child_session_id(task_lane)
+
+
+def test_observation_lane_keeps_parent_but_marks_known_child_gap(tmp_path: Path) -> None:
+    parent_task, parent_session, parent_writer = (
+        "tsk_77777777-7777-4777-8777-777777777777",
+        "ses_88888888-8888-4888-8888-888888888888",
+        "wri_99999999-9999-4999-8999-999999999999",
+    )
+    child_task = "tsk_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    host_session = "codex-lane-gap"
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=host_session,
+            yoetz_task_id=parent_task,
+            yoetz_session_id=parent_session,
+            yoetz_writer_id=parent_writer,
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+    lane = observe_hooks_module._resolve_observation_lane(  # pyright: ignore[reportPrivateUsage]
+        {
+            "session_id": host_session,
+            "tool_name": "mcp__yoetz__publish_work",
+            "tool_response": {
+                "structuredContent": {
+                    "ok": True,
+                    "task_id": child_task,
+                    "parent_task_id": parent_task,
+                }
+            },
+        },
+        event_name="PostToolUse",
+        source=ObservationSource.CODEX_HOOK,
+        _state=tmp_path,
+    )
+    assert lane.effective_session_id == host_session
+    assert lane.is_child is False
+    assert lane.attribution_gap is True
+
+
+def test_observation_lane_does_not_use_stale_host_alias_for_foreign_result(
+    tmp_path: Path,
+) -> None:
+    """A host alias owned by one child cannot route a result for another child."""
+
+    parent_task, parent_session, parent_writer = (
+        "tsk_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "ses_bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "wri_cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    )
+    old_child_task, old_child_session, old_child_writer = (
+        "tsk_dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "ses_eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "wri_ffffffff-ffff-4fff-8fff-ffffffffffff",
+    )
+    foreign_child_task = "tsk_11111111-2222-4333-8444-555555555555"
+    host_session = "codex-stale-host-alias"
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=host_session,
+            yoetz_task_id=parent_task,
+            yoetz_session_id=parent_session,
+            yoetz_writer_id=parent_writer,
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+    host_lane = scoped_child_session_id(
+        host_session,
+        host="codex",
+        identity="native-child-a",
+        identity_kind="host",
+    )
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=host_lane,
+            yoetz_task_id=old_child_task,
+            yoetz_session_id=old_child_session,
+            yoetz_writer_id=old_child_writer,
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+
+    lane = observe_hooks_module._resolve_observation_lane(  # pyright: ignore[reportPrivateUsage]
+        {
+            "session_id": host_session,
+            "agent_id": "native-child-a",
+            "tool_name": "mcp__yoetz__publish_work",
+            "tool_response": {
+                "structuredContent": {
+                    "ok": True,
+                    "task_id": foreign_child_task,
+                    "parent_task_id": parent_task,
+                }
+            },
+        },
+        event_name="PostToolUse",
+        source=ObservationSource.CODEX_HOOK,
+        _state=tmp_path,
+    )
+    assert lane.effective_session_id == host_session
+    assert lane.is_child is False
+    assert lane.attribution_gap is True
+
+
+def test_observation_lane_routes_matching_result_through_task_alias_when_host_alias_is_stale(
+    tmp_path: Path,
+) -> None:
+    """A validated task alias can recover a callback when its host alias is stale."""
+
+    parent_task, parent_session, parent_writer = (
+        "tsk_12121212-1212-4121-8121-121212121212",
+        "ses_34343434-3434-4434-8434-343434343434",
+        "wri_56565656-5656-4565-8565-565656565656",
+    )
+    old_child_task, old_child_session, old_child_writer = (
+        "tsk_78787878-7878-4787-8787-787878787878",
+        "ses_90909090-9090-4909-8909-909090909090",
+        "wri_abababab-abab-4aba-8aba-abababababab",
+    )
+    current_child_task, current_child_session, current_child_writer = (
+        "tsk_cdcdcdcd-cdcd-4cdc-8cdc-cdcdcdcdcdcd",
+        "ses_efefefef-efef-4efe-8efe-efefefefefef",
+        "wri_01010101-0101-4010-8010-010101010101",
+    )
+    host_session = "codex-stale-host-alias-task-route"
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=host_session,
+            yoetz_task_id=parent_task,
+            yoetz_session_id=parent_session,
+            yoetz_writer_id=parent_writer,
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+    host_lane = scoped_child_session_id(
+        host_session,
+        host="codex",
+        identity="native-child-b",
+        identity_kind="host",
+    )
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=host_lane,
+            yoetz_task_id=old_child_task,
+            yoetz_session_id=old_child_session,
+            yoetz_writer_id=old_child_writer,
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+    task_lane = scoped_child_session_id(
+        host_session,
+        host="codex",
+        identity=current_child_task,
+        identity_kind="task",
+    )
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=task_lane,
+            yoetz_task_id=current_child_task,
+            yoetz_session_id=current_child_session,
+            yoetz_writer_id=current_child_writer,
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+
+    lane = observe_hooks_module._resolve_observation_lane(  # pyright: ignore[reportPrivateUsage]
+        {
+            "session_id": host_session,
+            "agent_id": "native-child-b",
+            "tool_name": "mcp__yoetz__publish_work",
+            "tool_response": {
+                "structuredContent": {
+                    "ok": True,
+                    "task_id": current_child_task,
+                    "parent_task_id": parent_task,
+                }
+            },
+        },
+        event_name="PostToolUse",
+        source=ObservationSource.CODEX_HOOK,
+        _state=tmp_path,
+    )
+    assert lane.effective_session_id == task_lane
+    assert lane.is_child is True
+    assert lane.attribution_gap is False
+
+
+def test_valid_child_identity_without_lane_is_an_attribution_gap(tmp_path: Path) -> None:
+    """A child-shaped identity with no owned lane cannot inherit the parent route."""
+
+    parent_task, parent_session, parent_writer = (
+        "tsk_23232323-2323-4232-8232-232323232323",
+        "ses_45454545-4545-4454-8454-454545454545",
+        "wri_67676767-6767-4676-8676-676767676767",
+    )
+    host_session = "codex-unbound-child-identity"
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=host_session,
+            yoetz_task_id=parent_task,
+            yoetz_session_id=parent_session,
+            yoetz_writer_id=parent_writer,
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+
+    lane = observe_hooks_module._resolve_observation_lane(  # pyright: ignore[reportPrivateUsage]
+        {
+            "session_id": host_session,
+            "agent_id": "native-child-without-lane",
+            "tool_name": "shell",
+        },
+        event_name="PostToolUse",
+        source=ObservationSource.CODEX_HOOK,
+        _state=tmp_path,
+    )
+    assert lane.effective_session_id == host_session
+    assert lane.is_child is False
+    assert lane.attribution_gap is True
+
+
+def test_reserved_child_lane_without_mapping_is_an_attribution_gap(tmp_path: Path) -> None:
+    """An opaque derived lane cannot be promoted to a fresh parent session."""
+
+    reserved_lane = scoped_child_session_id(
+        "codex-reserved-parent",
+        host="codex",
+        identity="native-child-reserved",
+        identity_kind="host",
+    )
+    lane = observe_hooks_module._resolve_observation_lane(  # pyright: ignore[reportPrivateUsage]
+        {"session_id": reserved_lane, "tool_name": "shell"},
+        event_name="PostToolUse",
+        source=ObservationSource.CODEX_HOOK,
+        _state=tmp_path,
+    )
+    assert lane.effective_session_id == reserved_lane
+    assert lane.is_child is False
+    assert lane.attribution_gap is True
+
+
+def test_subagent_lifecycle_events_stay_on_parent_lane(tmp_path: Path) -> None:
+    lane = observe_hooks_module._resolve_observation_lane(  # pyright: ignore[reportPrivateUsage]
+        {"session_id": "codex-lineage-parent", "subagent_id": "child-1"},
+        event_name="SubagentStart",
+        source=ObservationSource.CODEX_HOOK,
+        _state=tmp_path,
+    )
+    assert lane.effective_session_id == "codex-lineage-parent"
+    assert lane.is_child is False
 
 
 def test_unknown_future_hook_becomes_opaque_gap(tmp_path: Path) -> None:
@@ -865,6 +1276,91 @@ def test_unpaired_post_records_gap(tmp_path: Path) -> None:
     assert ObservationGapCode.UNPAIRED_EVENT.value in status.gaps
 
 
+def test_missing_codex_post_identity_is_retained_as_orphan_evidence(
+    tmp_path: Path,
+) -> None:
+    """A paired result without a host id agrees across local status and materialization."""
+
+    import uuid
+
+    from yoetz.application.observation_materialize import materialize_observation_envelope
+    from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+
+    assert (
+        handle_observe(
+            event_name=None,
+            stdin_bytes=json.dumps(
+                {
+                    "session_id": "no-id",
+                    "hook_event_name": "PostToolUse",
+                    "tool_name": "shell",
+                    "exit_status": 1,
+                }
+            ).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+
+    reopened = LocalObservationStore(_state=tmp_path)
+    retained = reopened.list_envelopes(workspace)
+    assert len(retained) == 1
+    envelope = retained[0]
+    assert ObservationGapCode.UNPAIRED_EVENT.value in envelope.gap_codes
+    assert (
+        ObservationGapCode.UNPAIRED_EVENT.value
+        in reopened.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+    task_id = PREFIX_BY_KIND[IdKind.TASK] + str(uuid.uuid4())
+    batch = materialize_observation_envelope(envelope, task_id=task_id)
+    assert ObservationGapCode.UNPAIRED_EVENT.value in batch.gaps
+    assert tuple(item.role for item in batch.drafts) == ("unpaired_evidence",)
+
+
+@pytest.mark.parametrize("event_name", ("PostCompact", "SubagentStop"))
+def test_missing_codex_lifecycle_identity_does_not_create_pairing_gap(
+    tmp_path: Path, event_name: str
+) -> None:
+    """Lifecycle and child stop events have identity semantics separate from tool pairing."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+
+    assert (
+        handle_observe(
+            event_name=None,
+            stdin_bytes=json.dumps(
+                {
+                    "session_id": "no-id",
+                    "hook_event_name": event_name,
+                }
+            ).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+
+    retained = store.list_envelopes(workspace)
+    assert len(retained) == 1
+    assert ObservationGapCode.UNPAIRED_EVENT.value not in retained[0].gap_codes
+    assert (
+        ObservationGapCode.UNPAIRED_EVENT.value
+        not in store.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+
 def _codex_0146_payload(event: str, tool_use_id: str, **extra: JsonValue) -> dict[str, JsonValue]:
     """A hook payload using only the field names the Codex 0.146.0 binary emits.
 
@@ -1446,7 +1942,430 @@ def test_duplicate_post_does_not_consume_orphan_pairing_state(tmp_path: Path) ->
     assert "unpaired_event" not in store.list_envelopes(workspace)[-1].gap_codes
     assert (
         ObservationGapCode.UNPAIRED_EVENT.value
-        not in store.status(ObservationStatusQuery(workspace)).gaps
+        in store.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+
+def test_issue_607_native_post_only_hooks_do_not_create_false_pairing_gaps(
+    tmp_path: Path,
+) -> None:
+    """Claude/Cursor post-only carriers stay evidence-only; Codex orphaning remains visible."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+
+    claude_payload = {
+        "hook_event_name": "PostToolUse",
+        "session_id": "claude-607",
+        "tool_name": "mcp__plugin_yoetz_yoetz__status",
+        "tool_use_id": "claude-call-607",
+    }
+    assert (
+        handle_claude_observe(
+            event_name="PostToolUse",
+            stdin_bytes=json.dumps(claude_payload).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    assert (
+        handle_claude_observe(
+            event_name="PostToolUseFailure",
+            stdin_bytes=json.dumps(
+                {**claude_payload, "hook_event_name": "PostToolUseFailure"}
+            ).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+
+    for event_name, conversation, generation in (
+        ("afterMCPExecution", "cursor-607-mcp", "generation-mcp"),
+        ("afterFileEdit", "cursor-607-edit", "generation-edit"),
+    ):
+        assert (
+            handle_cursor_observe(
+                event_name=event_name,
+                stdin_bytes=json.dumps(
+                    {
+                        "conversation_id": conversation,
+                        "hook_event_name": event_name,
+                        "generation_id": generation,
+                        "tool_name": "shell",
+                    }
+                ).encode(),
+                stdout=io.BytesIO(),
+                workspace=str(tmp_path),
+                _state=tmp_path,
+                skip_service=True,
+            )
+            == 0
+        )
+
+    for event_name in ("PreToolUse", "PostToolUse"):
+        handle_observe(
+            event_name=None,
+            stdin_bytes=json.dumps(_codex_0146_payload(event_name, "codex-paired-607")).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+
+    # The paired Codex profile still distinguishes a real orphan from the
+    # native post-only cases above.
+    handle_observe(
+        event_name=None,
+        stdin_bytes=json.dumps(_codex_0146_payload("PostToolUse", "codex-orphan-607")).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+
+    envelopes = store.list_envelopes(workspace)
+    assert len(envelopes) == 7
+    assert all(
+        ObservationGapCode.UNPAIRED_EVENT.value not in envelope.gap_codes
+        for envelope in envelopes[:4]
+    )
+    assert all(
+        ObservationGapCode.UNPAIRED_EVENT.value not in envelope.gap_codes
+        for envelope in envelopes[4:6]
+    )
+    assert ObservationGapCode.UNPAIRED_EVENT.value in envelopes[6].gap_codes
+    assert (
+        ObservationGapCode.UNPAIRED_EVENT.value
+        in store.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+
+def test_issue_607_post_only_materializes_evidence_without_a_fabricated_action(
+    tmp_path: Path,
+) -> None:
+    import uuid
+
+    from yoetz.application.observation_materialize import materialize_observation_envelope
+    from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
+
+    store = LocalObservationStore(_state=tmp_path)
+    task_id = PREFIX_BY_KIND[IdKind.TASK] + str(uuid.uuid4())
+    session = store.session_commitment("post-only-materialization")
+    claude = map_hook_payload_to_envelope(
+        "PostToolUse",
+        {
+            "tool_name": "shell",
+            "tool_use_id": "claude-call-materialize",
+            "capability_profile_id": "claude-code-cli-local-project-2.1.241",
+            "pairing_mode": "post_only",
+            "correlation_kind": "tool_call_id",
+        },
+        session_commitment=session,
+        event_ordinal=1,
+        key_material=store.key_material(),
+        source=ObservationSource.CLAUDE_HOOK,
+    )
+    cursor = map_hook_payload_to_envelope(
+        "PostToolUse",
+        {
+            "tool_name": "shell",
+            "generation_id": "cursor-generation-materialize",
+            "capability_profile_id": "cursor-ide-3.17.8",
+            "pairing_mode": "post_only",
+            "correlation_kind": "generation_id",
+        },
+        session_commitment=session,
+        event_ordinal=2,
+        key_material=store.key_material(),
+        source=ObservationSource.CURSOR_HOOK,
+    )
+    for envelope in (claude, cursor):
+        batch = materialize_observation_envelope(envelope, task_id=task_id)
+        assert batch.skip_reason is None
+        assert [item.draft.schema.name for item in batch.drafts] == ["evidence_recorded"]
+        assert all(item.role == "post_only_evidence" for item in batch.drafts)
+        assert ObservationGapCode.UNPAIRED_EVENT.value not in batch.gaps
+
+
+def test_codex_pairing_is_scoped_and_reordered_or_duplicate_posts_stay_honest(
+    tmp_path: Path,
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+
+    def admit(
+        event: str,
+        *,
+        session_id: str,
+        call_id: str,
+        ordinal: int,
+        generation: int = 1,
+    ) -> tuple[ObservationIngestDisposition, ObservationEnvelope]:
+        session = store.session_commitment(session_id)
+        envelope = map_hook_payload_to_envelope(
+            event,
+            _codex_0146_payload(event, call_id),
+            session_commitment=session,
+            event_ordinal=ordinal,
+            source_generation=generation,
+            key_material=store.key_material(),
+        )
+        result, retained = store.ingest_with_pairing(
+            envelope,
+            workspace_commitment=workspace,
+            pairing_mode="paired",
+            correlation_id=call_id,
+            source=ObservationSource.CODEX_HOOK,
+            session_commitment=session,
+            source_generation=generation,
+            is_pre_event=event == "PreToolUse",
+            is_post_event=event == "PostToolUse",
+        )
+        return result.disposition, retained
+
+    # Same call ids in different source sessions cannot consume one another's pre.
+    _, first_pre = admit("PreToolUse", session_id="codex-scope-a", call_id="same-call", ordinal=1)
+    _, foreign_post = admit(
+        "PostToolUse", session_id="codex-scope-b", call_id="same-call", ordinal=1
+    )
+    assert ObservationGapCode.UNPAIRED_EVENT.value not in first_pre.gap_codes
+    assert ObservationGapCode.UNPAIRED_EVENT.value in foreign_post.gap_codes
+
+    # A post arriving before its pre remains an orphan after the late pre.
+    _, reordered_post = admit(
+        "PostToolUse", session_id="codex-reorder", call_id="reordered", ordinal=1
+    )
+    _, reordered_pre = admit(
+        "PreToolUse", session_id="codex-reorder", call_id="reordered", ordinal=2
+    )
+    assert ObservationGapCode.UNPAIRED_EVENT.value in reordered_post.gap_codes
+    assert ObservationGapCode.UNPAIRED_EVENT.value not in reordered_pre.gap_codes
+
+    # Duplicate delivery is idempotent and cannot consume or create a second
+    # pairing transition.
+    admit("PreToolUse", session_id="codex-duplicate", call_id="duplicate", ordinal=1)
+    first_disposition, first_post = admit(
+        "PostToolUse", session_id="codex-duplicate", call_id="duplicate", ordinal=2
+    )
+    duplicate_disposition, duplicate_post = admit(
+        "PostToolUse", session_id="codex-duplicate", call_id="duplicate", ordinal=2
+    )
+    assert first_disposition is ObservationIngestDisposition.ACCEPTED
+    assert duplicate_disposition is ObservationIngestDisposition.DUPLICATE
+    assert ObservationGapCode.UNPAIRED_EVENT.value not in first_post.gap_codes
+    assert ObservationGapCode.UNPAIRED_EVENT.value not in duplicate_post.gap_codes
+    assert (
+        ObservationGapCode.UNPAIRED_EVENT.value
+        in store.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+
+@pytest.mark.parametrize("source", [ObservationSource.CLAUDE_HOOK, ObservationSource.CURSOR_HOOK])
+def test_legacy_post_only_gap_retires_current_projection_but_keeps_history(
+    tmp_path: Path, source: ObservationSource
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment(f"legacy-{source.value}")
+    profile = (
+        "claude-code-cli-local-project-2.1.241"
+        if source is ObservationSource.CLAUDE_HOOK
+        else "cursor-ide-3.17.8"
+    )
+    envelope = map_hook_payload_to_envelope(
+        "PostToolUse",
+        {
+            "capability_profile_id": profile,
+            "generation_id": "cursor-generation"
+            if source is ObservationSource.CURSOR_HOOK
+            else None,
+            "tool_name": "shell",
+            "tool_use_id": "claude-call" if source is ObservationSource.CLAUDE_HOOK else None,
+        },
+        session_commitment=session,
+        event_ordinal=1,
+        key_material=store.key_material(),
+        source=source,
+        gap_codes=(ObservationGapCode.UNPAIRED_EVENT.value,),
+    )
+    assert store.ingest(envelope, workspace_commitment=workspace).disposition is (
+        ObservationIngestDisposition.ACCEPTED
+    )
+    status = store.status(ObservationStatusQuery(workspace))
+    assert ObservationGapCode.UNPAIRED_EVENT.value not in status.gaps
+    state_path = next((tmp_path / "observation" / "workspaces").glob("*.json"))
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["gap_history"][ObservationGapCode.UNPAIRED_EVENT.value]["active"] is False
+    assert ObservationGapCode.UNPAIRED_EVENT.value in state["gaps"]
+
+    # A pre-/11 state has no occurrence/provenance count.  Even when the one
+    # retained candidate is post-only, an omitted historical occurrence must
+    # remain an active unknown rather than being cleared from absence.
+    state["schema"] = "yoetz.observation-local/10"
+    state.pop("pairing_history_complete", None)
+    state["gap_history"][ObservationGapCode.UNPAIRED_EVENT.value]["active"] = True
+    state["gaps"] = [ObservationGapCode.UNPAIRED_EVENT.value]
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    assert (
+        ObservationGapCode.UNPAIRED_EVENT.value
+        in LocalObservationStore(_state=tmp_path).status(ObservationStatusQuery(workspace)).gaps
+    )
+
+
+def test_pairing_transaction_rolls_back_an_admitted_pre_before_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment("pairing-fault-pre")
+    envelope = map_hook_payload_to_envelope(
+        "PreToolUse",
+        _codex_0146_payload("PreToolUse", "pairing-fault-pre"),
+        session_commitment=session,
+        event_ordinal=1,
+        key_material=store.key_material(),
+    )
+
+    def fail_after_ingest(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("fault after envelope append")
+
+    monkeypatch.setattr(LocalObservationStore, "note_open_pre", fail_after_ingest)
+    with store.batched(workspace):
+        with pytest.raises(RuntimeError, match="fault after envelope append"):
+            store.ingest_with_pairing(
+                envelope,
+                workspace_commitment=workspace,
+                pairing_mode="paired",
+                correlation_id="pairing-fault-pre",
+                source=ObservationSource.CODEX_HOOK,
+                session_commitment=session,
+                source_generation=1,
+                is_pre_event=True,
+                is_post_event=False,
+            )
+
+    reopened = LocalObservationStore(_state=tmp_path)
+    assert reopened.list_envelopes(workspace) == ()
+    assert not reopened.has_open_pre(
+        workspace,
+        "pairing-fault-pre",
+        source=ObservationSource.CODEX_HOOK,
+        session_commitment=session,
+        source_generation=1,
+    )
+
+    monkeypatch.undo()
+    result, _ = reopened.ingest_with_pairing(
+        envelope,
+        workspace_commitment=workspace,
+        pairing_mode="paired",
+        correlation_id="pairing-fault-pre",
+        source=ObservationSource.CODEX_HOOK,
+        session_commitment=session,
+        source_generation=1,
+        is_pre_event=True,
+        is_post_event=False,
+    )
+    assert result.disposition is ObservationIngestDisposition.ACCEPTED
+    assert reopened.has_open_pre(
+        workspace,
+        "pairing-fault-pre",
+        source=ObservationSource.CODEX_HOOK,
+        session_commitment=session,
+        source_generation=1,
+    )
+
+
+def test_pairing_transaction_rolls_back_an_admitted_post_before_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment("pairing-fault-post")
+
+    def envelope(event: str, ordinal: int) -> ObservationEnvelope:
+        return map_hook_payload_to_envelope(
+            event,
+            _codex_0146_payload(event, "pairing-fault-post"),
+            session_commitment=session,
+            event_ordinal=ordinal,
+            key_material=store.key_material(),
+        )
+
+    pre = envelope("PreToolUse", 1)
+    post = envelope("PostToolUse", 2)
+    pre_result, _ = store.ingest_with_pairing(
+        pre,
+        workspace_commitment=workspace,
+        pairing_mode="paired",
+        correlation_id="pairing-fault-post",
+        source=ObservationSource.CODEX_HOOK,
+        session_commitment=session,
+        source_generation=1,
+        is_pre_event=True,
+        is_post_event=False,
+    )
+    assert pre_result.disposition is ObservationIngestDisposition.ACCEPTED
+
+    def fail_after_post(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("fault after post append")
+
+    monkeypatch.setattr(LocalObservationStore, "consume_open_pre", fail_after_post)
+    with pytest.raises(RuntimeError, match="fault after post append"):
+        store.ingest_with_pairing(
+            post,
+            workspace_commitment=workspace,
+            pairing_mode="paired",
+            correlation_id="pairing-fault-post",
+            source=ObservationSource.CODEX_HOOK,
+            session_commitment=session,
+            source_generation=1,
+            is_pre_event=False,
+            is_post_event=True,
+        )
+
+    reopened = LocalObservationStore(_state=tmp_path)
+    assert len(reopened.list_envelopes(workspace)) == 1
+    assert reopened.has_open_pre(
+        workspace,
+        "pairing-fault-post",
+        source=ObservationSource.CODEX_HOOK,
+        session_commitment=session,
+        source_generation=1,
+    )
+
+    monkeypatch.undo()
+    post_result, admitted = reopened.ingest_with_pairing(
+        post,
+        workspace_commitment=workspace,
+        pairing_mode="paired",
+        correlation_id="pairing-fault-post",
+        source=ObservationSource.CODEX_HOOK,
+        session_commitment=session,
+        source_generation=1,
+        is_pre_event=False,
+        is_post_event=True,
+    )
+    assert post_result.disposition is ObservationIngestDisposition.ACCEPTED
+    assert ObservationGapCode.UNPAIRED_EVENT.value not in admitted.gap_codes
+    assert len(reopened.list_envelopes(workspace)) == 2
+    assert not reopened.has_open_pre(
+        workspace,
+        "pairing-fault-post",
+        source=ObservationSource.CODEX_HOOK,
+        session_commitment=session,
+        source_generation=1,
     )
 
 
@@ -2507,6 +3426,230 @@ async def test_drain_quarantines_mapping_missing_rows_of_an_ended_session(tmp_pa
     }
 
 
+def test_later_hook_recovers_pending_mapping_before_delivery(tmp_path: Path) -> None:
+    """A deferred start mapping is replayed before a later hook drains its lane (#509)."""
+
+    from yoetz.adapters.integrations.codex_lifecycle import (
+        load_mapping,
+        mapping_from_start_ids,
+        queue_mapping_store,
+    )
+    from yoetz.cli.hooks import recover_pending_start_mapping
+    from yoetz.domain.observation import ObservationSource
+    from yoetz.protocol.ids import IdKind, new_id
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    codex_session_id = "claude:pending-recovery"
+    mapping = mapping_from_start_ids(
+        codex_session_id=codex_session_id,
+        yoetz_task_id=new_id(IdKind.TASK),
+        yoetz_session_id=new_id(IdKind.SESSION),
+        yoetz_writer_id=new_id(IdKind.WRITER),
+        last_frontier=None,
+    )
+
+    # Model a cancelled/contended SessionStart: the valid result is queued
+    # while the lifecycle lock is held, but no mapping has been materialized.
+    with acquire_session_lock(codex_session_id, _state=tmp_path) as owned:
+        assert owned is True
+        queue_mapping_store(mapping, _state=tmp_path)
+        recovery = recover_pending_start_mapping(codex_session_id, _state=tmp_path)
+        assert recovery.applied is False
+        assert recovery.pending is True
+        assert load_mapping(codex_session_id, _state=tmp_path) is None
+
+    store.bind_codex_session(workspace, codex_session_id)
+    store.enqueue_outbox(
+        workspace,
+        codex_session_id,
+        _drain_envelope(store, codex_session_id, "hook:pending-recovery", 1),
+    )
+    delivered: list[str] = []
+
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del deadline_ms
+            session = str(body["codex_session_id"])  # type: ignore[index]
+            if load_mapping(session, _state=tmp_path) is None:
+                return observation_ingest_result_to_json(
+                    ObservationIngestResult(
+                        ObservationIngestDisposition.REJECTED,
+                        ObservationGapCode.MAPPING_MISSING.value,
+                        None,
+                    )
+                )
+            delivered.append(session)
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(ObservationIngestDisposition.DUPLICATE, None, None)
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return Client()
+
+    out = io.BytesIO()
+    assert (
+        handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=json.dumps(
+                {
+                    "session_id": codex_session_id,
+                    "hook_event_name": "PostToolUse",
+                    "tool_name": "shell",
+                }
+            ).encode(),
+            stdout=out,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            connect=connect,  # type: ignore[arg-type]
+            source=ObservationSource.CLAUDE_HOOK,
+        )
+        == 0
+    )
+
+    assert load_mapping(codex_session_id, _state=tmp_path) == mapping
+    assert delivered == [codex_session_id, codex_session_id]
+    assert store.list_pending_outbox_rows(workspace) == ()
+    assert store.list_quarantine(workspace) == ()
+    diagnostics_path = tmp_path / "observation" / "hook-diagnostics.jsonl"
+    if diagnostics_path.exists():
+        assert '"reason":"mapping_missing"' not in diagnostics_path.read_text()
+
+
+def test_later_hook_defers_delivery_while_pending_mapping_lock_is_busy(
+    tmp_path: Path,
+) -> None:
+    """A fenced pending mapping keeps the row local until its session lock clears (#509)."""
+
+    from yoetz.adapters.integrations.codex_lifecycle import (
+        load_mapping,
+        mapping_from_start_ids,
+        queue_mapping_store,
+    )
+    from yoetz.protocol.ids import IdKind, new_id
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    codex_session_id = "claude:busy-pending-recovery"
+    mapping = mapping_from_start_ids(
+        codex_session_id=codex_session_id,
+        yoetz_task_id=new_id(IdKind.TASK),
+        yoetz_session_id=new_id(IdKind.SESSION),
+        yoetz_writer_id=new_id(IdKind.WRITER),
+        last_frontier=None,
+    )
+    store.bind_codex_session(workspace, codex_session_id)
+    store.enqueue_outbox(
+        workspace,
+        codex_session_id,
+        _drain_envelope(store, codex_session_id, "hook:busy-pending", 1),
+    )
+    service_connects: list[str] = []
+
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del body, deadline_ms
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(ObservationIngestDisposition.DUPLICATE, None, None)
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        service_connects.append("connect")
+        return Client()
+
+    payload = json.dumps(
+        {
+            "session_id": codex_session_id,
+            "hook_event_name": "PostToolUse",
+            "tool_name": "shell",
+        }
+    ).encode()
+    with acquire_session_lock(codex_session_id, _state=tmp_path) as owned:
+        assert owned is True
+        queue_mapping_store(mapping, _state=tmp_path)
+        assert (
+            handle_observe(
+                event_name="PostToolUse",
+                stdin_bytes=payload,
+                stdout=io.BytesIO(),
+                workspace=str(tmp_path),
+                _state=tmp_path,
+                connect=connect,  # type: ignore[arg-type]
+                source=ObservationSource.CLAUDE_HOOK,
+            )
+            == 0
+        )
+        assert service_connects == []
+        assert load_mapping(codex_session_id, _state=tmp_path) is None
+        assert store.list_pending_outbox_rows(workspace)
+        assert store.list_quarantine(workspace) == ()
+
+    assert (
+        handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=payload,
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            connect=connect,  # type: ignore[arg-type]
+            source=ObservationSource.CLAUDE_HOOK,
+        )
+        == 0
+    )
+    assert service_connects == ["connect"]
+    assert load_mapping(codex_session_id, _state=tmp_path) == mapping
+    assert store.list_pending_outbox_rows(workspace) == ()
+    assert store.list_quarantine(workspace) == ()
+
+
+def test_pending_child_mapping_recovery_is_exact_session_scoped(tmp_path: Path) -> None:
+    """A child alias cannot overwrite its parent's route or frontier (#509)."""
+
+    from yoetz.adapters.integrations.codex_lifecycle import (
+        load_mapping,
+        mapping_from_start_ids,
+        queue_mapping_store,
+        store_mapping,
+    )
+    from yoetz.cli.hooks import recover_pending_start_mapping
+    from yoetz.protocol.ids import IdKind, new_id
+
+    parent_session = "claude:parent-alias"
+    child_session = "claude:parent-alias:child"
+    parent = mapping_from_start_ids(
+        codex_session_id=parent_session,
+        yoetz_task_id=new_id(IdKind.TASK),
+        yoetz_session_id=new_id(IdKind.SESSION),
+        yoetz_writer_id=new_id(IdKind.WRITER),
+        last_frontier="7:sha256:" + "a" * 64,
+    )
+    child = mapping_from_start_ids(
+        codex_session_id=child_session,
+        yoetz_task_id=new_id(IdKind.TASK),
+        yoetz_session_id=new_id(IdKind.SESSION),
+        yoetz_writer_id=new_id(IdKind.WRITER),
+        last_frontier="2:sha256:" + "b" * 64,
+    )
+    store_mapping(parent, _state=tmp_path)
+    with acquire_session_lock(child_session, _state=tmp_path) as owned:
+        assert owned is True
+        queue_mapping_store(child, _state=tmp_path)
+
+    recovery = recover_pending_start_mapping(child_session, _state=tmp_path)
+    assert recovery.applied is True
+    assert recovery.pending is False
+    assert load_mapping(child_session, _state=tmp_path) == child
+    assert load_mapping(parent_session, _state=tmp_path) == parent
+
+
 def test_unmapped_session_reattempts_auto_attach_on_turn_events_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2578,8 +3721,9 @@ def test_claude_session_start_auto_attach_preserves_the_harness_identity(
         workspace_locator: str | None,
         recovery_mapping: LifecycleMapping | None = None,
         connect: object = None,
+        _session_lock_owned: bool = False,
     ) -> object | None:
-        del _state, recovery_mapping, connect
+        del _state, recovery_mapping, connect, _session_lock_owned
         calls.append((codex_session_id, harness_id, workspace_locator))
         return observe_hooks_module.AutoAttachOutcome(None, "service_unavailable")
 
@@ -3065,6 +4209,26 @@ _SUCCESSOR_IDS = {
 }
 
 
+def _seed_legacy_cross_workspace_binding(
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    codex_session_id: str,
+) -> None:
+    """Model an already-persisted ambiguous route without weakening admission."""
+
+    with pytest.raises(PublicOperationError) as raised:
+        store.bind_codex_session(workspace_commitment, codex_session_id)
+    assert raised.value.code is PublicErrorCode.SESSION_CONFLICT
+
+    state = store._load(workspace_commitment)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    assert state.session_workspaces is not None
+    assert state.codex_session_bindings is not None
+    session_commitment = store.session_commitment(codex_session_id)
+    state.session_workspaces[session_commitment] = workspace_commitment
+    state.codex_session_bindings[codex_session_id] = session_commitment
+    store._save(workspace_commitment, state)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+
+
 class _StartOkClient(_InstantAckClient):
     """A start client that answers like the service and records the exact request."""
 
@@ -3248,10 +4412,10 @@ def test_auto_start_without_a_workspace_locator_stops_before_any_service_call(
     ("harness_id", "session"),
     [("claude", "claude:next-1"), ("codex", "codex-next-1"), ("cursor", "cursor:next-1")],
 )
-def test_auto_start_workspace_conflict_reattaches_with_a_known_local_selector(
+def test_auto_start_recovers_before_create_with_a_known_local_selector(
     tmp_path: Path, harness_id: str, session: str
 ) -> None:
-    """#535: the shared helper recovers without disclosing a route in the public error."""
+    """#497: recovery uses the persisted selector before admission can create work."""
 
     prior = observe_hooks_module.mapping_from_start_ids(
         codex_session_id=f"{harness_id}:ended-1",
@@ -3282,14 +4446,11 @@ def test_auto_start_workspace_conflict_reattaches_with_a_known_local_selector(
     assert rewritten.yoetz_session_id == _SUCCESSOR_IDS["session_id"]
     assert rewritten.yoetz_writer_id == _SUCCESSOR_IDS["writer_id"]
     assert rewritten.last_frontier == prior.last_frontier
-    first, second = client.requests
-    assert first.mode == "create_or_attach"
-    assert first.workspace_ref == str(tmp_path.resolve())
-    assert first.external_ref == f"{harness_id}-session:{session.removeprefix(harness_id + ':')}"
-    assert second.mode == "attach"
-    assert second.session_id == _START_IDS["session_id"]
-    assert second.workspace_ref == str(tmp_path.resolve())
-    assert second.external_ref == first.external_ref
+    (request,) = client.requests
+    assert request.mode == "attach"
+    assert request.session_id == _START_IDS["session_id"]
+    assert request.workspace_ref == str(tmp_path.resolve())
+    assert request.external_ref == f"{harness_id}-session:{session.removeprefix(harness_id + ':')}"
 
 
 def test_workspace_conflict_recovery_never_selects_a_live_host_session(tmp_path: Path) -> None:
@@ -3327,8 +4488,8 @@ def test_workspace_conflict_recovery_never_selects_a_live_host_session(tmp_path:
     assert recovered.codex_session_id == previous
 
 
-def test_auto_start_does_not_recover_an_unclassified_session_conflict(tmp_path: Path) -> None:
-    """Only the exact workspace-occupied reason admits the ended-session recovery."""
+def test_auto_start_does_not_create_after_recovery_is_refused(tmp_path: Path) -> None:
+    """A refused attach never falls back to creating a replacement task."""
 
     prior = observe_hooks_module.mapping_from_start_ids(
         codex_session_id="codex-ended-1",
@@ -3396,7 +4557,7 @@ def test_workspace_conflict_recovery_rejects_a_cross_workspace_session_binding(
     store.grant_consent(second_workspace)
     previous = "codex-cross-workspace"
     first_session_commitment = store.bind_codex_session(first_workspace, previous)
-    store.bind_codex_session(second_workspace, previous)
+    _seed_legacy_cross_workspace_binding(store, second_workspace, previous)
     store.note_session_end(first_workspace, first_session_commitment)
     observe_hooks_module.store_mapping(
         observe_hooks_module.mapping_from_start_ids(
@@ -3463,7 +4624,7 @@ def test_recovery_rejects_cross_workspace_binding_during_revalidation_for_all_ho
         ) -> tuple[tuple[str, bool], ...]:
             self.calls += 1
             if self.calls == 2:
-                self.bind_codex_session(second_workspace, previous)
+                _seed_legacy_cross_workspace_binding(self, second_workspace, previous)
             return super().codex_session_lifecycles_for_workspace(workspace_commitment)
 
     store = _AmbiguousOnRevalidation(_state=tmp_path)
@@ -3484,8 +4645,8 @@ def test_recovery_rejects_cross_workspace_binding_during_revalidation_for_all_ho
     )
 
     assert outcome.mapping is None
-    assert outcome.reason == "auto_attach_conflict"
-    assert [request.mode for request in client.requests] == ["create_or_attach"]
+    assert outcome.reason == "auto_attach_recovery_busy"
+    assert client.requests == []
     assert store.codex_sessions_for_workspace(second_workspace) == (previous,)
 
 
@@ -3558,8 +4719,8 @@ def test_recovery_rejects_a_changed_nonselected_candidate_for_all_hosts(
     )
 
     assert outcome.mapping is None
-    assert outcome.reason == "auto_attach_conflict"
-    assert [request.mode for request in client.requests] == ["create_or_attach"]
+    assert outcome.reason == "auto_attach_recovery_busy"
+    assert client.requests == []
     changed = observe_hooks_module.load_mapping(newer, _state=tmp_path)
     assert changed is not None and changed.yoetz_task_id == other_task
 
@@ -3669,8 +4830,8 @@ def test_workspace_recovery_does_not_attach_while_predecessor_lock_is_held(
         )
 
     assert outcome.mapping is None
-    assert outcome.reason == "auto_attach_conflict"
-    assert [request.mode for request in client.requests] == ["create_or_attach"]
+    assert outcome.reason == "auto_attach_recovery_busy"
+    assert client.requests == []
 
 
 @pytest.mark.parametrize(
@@ -3773,7 +4934,7 @@ def test_recovery_leaves_an_ambiguous_predecessor_mapping_untouched_for_all_host
             ),
             _state=tmp_path,
         )
-    store.bind_codex_session(foreign_workspace, ambiguous)
+        _seed_legacy_cross_workspace_binding(store, foreign_workspace, ambiguous)
     store.bind_codex_session(workspace, successor)
     client = _WorkspaceConflictThenAttachClient()
     client.created = True
@@ -3844,7 +5005,7 @@ def test_rewrite_skips_live_and_other_task_mappings(tmp_path: Path) -> None:
         assert untouched.yoetz_session_id == _START_IDS["session_id"]
 
 
-def test_create_or_attach_success_does_not_rewrite_predecessors(tmp_path: Path) -> None:
+def test_new_sibling_admission_does_not_rewrite_live_predecessors(tmp_path: Path) -> None:
     """Rewrite runs only after recovery attach of the same task, not a fresh create."""
 
     store = LocalObservationStore(_state=tmp_path)
@@ -3852,8 +5013,7 @@ def test_create_or_attach_success_does_not_rewrite_predecessors(tmp_path: Path) 
     workspace = store.workspace_commitment(locator)
     store.grant_consent(workspace)
     previous = "codex-ended-1"
-    commitment = store.bind_codex_session(workspace, previous)
-    store.note_session_end(workspace, commitment)
+    store.bind_codex_session(workspace, previous)
     observe_hooks_module.store_mapping(
         observe_hooks_module.mapping_from_start_ids(
             codex_session_id=previous,
@@ -3941,8 +5101,8 @@ def test_locked_nonselected_predecessor_blocks_recovery_until_its_state_is_stabl
         )
 
     assert outcome.mapping is None
-    assert outcome.reason == "auto_attach_conflict"
-    assert [request.mode for request in client.requests] == ["create_or_attach"]
+    assert outcome.reason == "auto_attach_recovery_busy"
+    assert client.requests == []
     for session_id in (older, newer):
         predecessor = observe_hooks_module.load_mapping(session_id, _state=tmp_path)
         assert predecessor is not None
@@ -4060,7 +5220,7 @@ def _recover(
 def test_recovery_scan_reads_each_predecessor_mapping_once_per_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#549/#605: one scan, one full revalidation, one rewrite read per predecessor."""
+    """#549/#605: bounded scan, rewrite, and durable-route verification."""
 
     store = LocalObservationStore(_state=tmp_path)
     locator = str(tmp_path.resolve())
@@ -4075,9 +5235,10 @@ def test_recovery_scan_reads_each_predecessor_mapping_once_per_pass(
     assert outcome.mapping is not None and outcome.recovered is True
     per_predecessor = {session_id: loads.count(session_id) for session_id in predecessors}
     # Scan once, revalidate every bounded candidate under its lock, then the
-    # #577 rewrite reads each ended predecessor once more.
-    assert sum(per_predecessor.values()) == 3 * len(predecessors)
-    assert set(per_predecessor.values()) == {3}
+    # #577 rewrite reads each ended predecessor once more, and the durable
+    # queue reconciliation verifies the exact route after that rewrite.
+    assert sum(per_predecessor.values()) == 4 * len(predecessors)
+    assert set(per_predecessor.values()) == {4}
     # Every consumed predecessor was drained, so only the live successor stays bound.
     assert store.codex_session_lifecycles_for_workspace(workspace) == (("codex-next-1", False),)
     for session_id in predecessors:
@@ -4108,7 +5269,7 @@ def test_recovery_scan_is_not_repeated_while_the_predecessor_lock_is_held(
         outcome = _recover(store, workspace, locator, "codex-next-1", _state=tmp_path)
 
     assert outcome.mapping is None
-    assert outcome.reason == "auto_attach_conflict"
+    assert outcome.reason == "auto_attach_recovery_busy"
     assert sorted(loads) == sorted(predecessors)
     # Nothing was consumed, so nothing was pruned.
     assert store.codex_session_lifecycles_for_workspace(workspace) == tuple(
@@ -4260,11 +5421,12 @@ def test_many_ended_bindings_cost_one_scan_and_then_nothing(
     first = _recover(store, workspace, locator, "codex-next-1", _state=tmp_path)
     assert first.mapping is not None and first.recovered is True
     # Retention trimmed the history to the cap before the scan, so the pass read
-    # each retained predecessor once for scan, once for full revalidation, and
-    # once for rewrite, never the whole history.
+    # each retained predecessor once for scan, once for full revalidation, once
+    # for rewrite, and once for durable-route verification, never the whole
+    # history.
     cap = observe_hooks_module._MAX_ENDED_SESSION_BINDINGS  # pyright: ignore[reportPrivateUsage]
-    assert len(loads) == 3 * cap
-    assert set(loads) == set(history[-cap:])
+    assert len(loads) == 4 * cap + 1
+    assert set(loads) - {"codex-next-1"} == set(history[-cap:])
     assert store.codex_session_lifecycles_for_workspace(workspace) == (("codex-next-1", False),)
 
     store.note_session_end(workspace, store.session_commitment("codex-next-1"))
@@ -4275,8 +5437,11 @@ def test_many_ended_bindings_cost_one_scan_and_then_nothing(
     rotated.created = True
     second = _recover(store, workspace, locator, "codex-next-2", _state=tmp_path, client=rotated)
     assert second.mapping is not None and second.recovered is True
-    # Scan the sole predecessor, revalidate it, rewrite it: three reads, not ~400.
-    assert loads == ["codex-next-1", "codex-next-1", "codex-next-1"]
+    # Scan the sole predecessor, revalidate it, rewrite it, and verify it: four
+    # predecessor reads plus one exact read of the new successor route, not ~400.
+    assert loads.count("codex-next-1") == 4
+    assert loads.count("codex-next-2") == 1
+    assert len(loads) == 5
     assert store.codex_session_lifecycles_for_workspace(workspace) == (("codex-next-2", False),)
 
 
@@ -4521,7 +5686,6 @@ def test_fresh_session_reattaches_the_ended_workspace_task_and_drains_without_ma
     assert store.list_pending_outbox_rows(workspace) == ()
     assert _START_IDS["task_id"] in rendered
     assert [request.mode for request in client.requests] == [
-        "create_or_attach",
         "create_or_attach",
         "attach",
     ]

@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import apsw
 
-from yoetz.adapters.sqlite.migrations import BUNDLE_MIGRATIONS, initialize_bundle, run_migrations
+from yoetz.adapters.sqlite.migrations import (
+    BUNDLE_MIGRATIONS,
+    current_schema_version,
+    initialize_bundle,
+    run_migrations,
+)
 from yoetz.adapters.sqlite.observation import SqliteObservationStore
 from yoetz.domain.observation import (
     ObservationCursor,
@@ -60,8 +65,12 @@ def test_forward_migrate_0001_to_0002_then_observation_ingest() -> None:
         "0010",
         "0011",
         "0012",
+        "0013",
     )
-    assert bundle.execute("PRAGMA user_version").fetchone() == (12,)
+    assert report.applied_versions == tuple(item.version for item in BUNDLE_MIGRATIONS[1:])
+    assert bundle.execute("PRAGMA user_version").fetchone() == (
+        current_schema_version(BUNDLE_MIGRATIONS),
+    )
     for table in (
         "observation_consent",
         "observation_cursors",
@@ -111,7 +120,9 @@ def test_forward_migrate_0001_to_0002_then_observation_ingest() -> None:
 def test_fresh_initialize_includes_0002_and_reads_empty_observation() -> None:
     bundle = apsw.Connection(":memory:")
     initialize_bundle(bundle, {"task_id": "fresh", "owner_generation": "1"})
-    assert bundle.execute("PRAGMA user_version").fetchone() == (12,)
+    assert bundle.execute("PRAGMA user_version").fetchone() == (
+        current_schema_version(BUNDLE_MIGRATIONS),
+    )
     store = SqliteObservationStore(bundle)
     import asyncio
 

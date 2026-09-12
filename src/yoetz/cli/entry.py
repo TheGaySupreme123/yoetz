@@ -1,15 +1,16 @@
-"""Console entry point that fast-paths the observe hook past the typer graph.
+"""Console entry point that fast-paths bounded commands past the typer graph.
 
-Loading ``yoetz.cli.app`` costs ~232 ms of typer/pydantic/protocol-schema
-imports that a Codex hook never uses (#242). Only ``hooks observe`` with the
-exact options it declares is fast-pathed; everything else falls through to the
-full CLI unchanged, so usage errors and ``--help`` stay byte-identical.
+Loading ``yoetz.cli.app`` costs a substantial typer/pydantic/protocol-schema import that a Codex
+hook never uses (#242). Only exact hook commands and the ordinary ``service status`` forms are
+fast-pathed; everything else falls through to the full CLI unchanged, so usage errors and
+``--help`` stay byte-identical.
 """
 
 from __future__ import annotations
 
 import sys
 import time
+from collections.abc import Callable
 from typing import Final
 
 # Sampled before any yoetz module resolves, so the hook can measure the import
@@ -18,6 +19,55 @@ from typing import Final
 _ENTRY_MONOTONIC: Final = time.monotonic()
 
 __all__ = ["main"]
+
+
+def _service_status_fast_path(arguments: list[str]) -> int | None:
+    """Connect before loading the full Typer command graph for exact status invocations."""
+
+    if arguments not in ([], ["--json"]):
+        return None
+
+    import asyncio
+
+    from yoetz.cli.bootstrap import connect_cli_service, control_failure, human_or_json, stderr
+    from yoetz.ports.control import ControlError
+
+    json_output = arguments == ["--json"]
+
+    async def _request() -> object:
+        client = await connect_cli_service()
+        try:
+            return await client.service_status()
+        finally:
+            await client.close()
+
+    def _render(callback: Callable[[], object]) -> int:
+        from typer import Exit as TyperExit
+
+        try:
+            result = callback()
+        except TyperExit as error:
+            return int(error.exit_code or 0)
+        except KeyboardInterrupt:
+            stderr("cancelled")
+            return 130
+        except Exception:
+            stderr("internal_error: the command could not be completed")
+            return 70
+        return result if type(result) is int else 0
+
+    try:
+        status = asyncio.run(_request())
+    except ControlError as error:
+        return _render(lambda error=error: control_failure(error, json_output=json_output))
+    except KeyboardInterrupt:
+        stderr("cancelled")
+        return 130
+    except Exception:
+        stderr("internal_error: the command could not be completed")
+        return 70
+
+    return _render(lambda: human_or_json(status, json_output=json_output))
 
 
 def _observe_fast_path(arguments: list[str]) -> int | None:
@@ -215,6 +265,10 @@ def main() -> None:
             raise SystemExit(code)
     if len(argv) >= 2 and argv[0] == "hooks" and argv[1] == "spool":
         code = _spool_fast_path(argv[2:])
+        if code is not None:
+            raise SystemExit(code)
+    if len(argv) >= 2 and argv[0] == "service" and argv[1] == "status":
+        code = _service_status_fast_path(argv[2:])
         if code is not None:
             raise SystemExit(code)
     from yoetz.cli.app import main as app_main

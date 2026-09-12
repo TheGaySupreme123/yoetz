@@ -43,7 +43,7 @@ from yoetz.kernel.projections import (
     empty_projection_state,
 )
 from yoetz.kernel.receipt_builder import ReceiptBuildContext, build_receipt
-from yoetz.protocol.canonical import canonical_digest
+from yoetz.protocol.canonical import canonical_digest, canonical_encode
 from yoetz.protocol.coverage import (
     ArtifactObservation,
     AuthorshipAssurance,
@@ -106,7 +106,7 @@ def _projection(summary: str) -> ProjectionState:
     )
 
 
-def _versions() -> ReceiptVersionSlice:
+def _versions(receipt_schema_version: str = "1.0.0") -> ReceiptVersionSlice:
     return ReceiptVersionSlice(
         package_name="yoetz",
         package_version="0.1.0",
@@ -120,7 +120,7 @@ def _versions() -> ReceiptVersionSlice:
             PolicyVersionEntry("research-evidence", "0.1.0"),
             PolicyVersionEntry("work-integrity", "0.1.0"),
         ),
-        schema_versions=(SchemaVersionEntry("receipts/receipt-document", "1.0.0"),),
+        schema_versions=(SchemaVersionEntry("receipts/receipt-document", receipt_schema_version),),
         resource_manifest_digest="sha256:" + "9" * 64,
     )
 
@@ -141,6 +141,8 @@ def _build(
     context: ReceiptBuildContext,
     profile: ReceiptRedactionProfile,
     include: ReceiptInclude,
+    *,
+    receipt_schema_version: str = "1.0.0",
 ) -> ReceiptDocument:
     return build_receipt(
         context,
@@ -148,10 +150,57 @@ def _build(
         task_id("tsk_00000000-0000-4000-8000-000000000001"),
         session_id("ses_00000000-0000-4000-8000-000000000001"),
         timestamp_from_string("2026-07-19T00:00:00.000Z"),
-        _versions(),
+        _versions(receipt_schema_version),
         profile,
         include,
     )
+
+
+def test_no_child_receipt_matches_frozen_pre_lineage_bytes() -> None:
+    """The additive 1.2 artifact preserves the frozen 1.1 no-child document byte-for-byte.
+
+    The digest is the independently recorded output of this fixed context from pre-lineage
+    commit ``95aa2065`` using the frozen child-free receipt-document 1.1 artifact.  The current
+    writer is allowed exactly two changes for the additive artifact: its schema-version entry and
+    an empty ``children`` object.
+    """
+
+    context = _context()
+    historical = receipt_document_to_json(
+        _build(
+            context,
+            ReceiptRedactionProfile.FULL_LOCAL,
+            ReceiptInclude.FULL,
+            receipt_schema_version="1.1.0",
+        )
+    )
+    assert canonical_digest(freeze_json(historical)) == (
+        "sha256:535dcc44a23541377baead27c6677772c2cc3088636cf869ac569d993a2c11c2"
+    )
+
+    current = receipt_document_to_json(
+        _build(
+            context,
+            ReceiptRedactionProfile.FULL_LOCAL,
+            ReceiptInclude.FULL,
+            receipt_schema_version="1.2.0",
+        )
+    )
+    assert current["children"] == {"children": []}
+
+    compatible = dict(current)
+    del compatible["children"]
+    versions = dict(cast(dict[str, object], compatible["versions"]))
+    schema_versions = [
+        dict(cast(dict[str, object], item))
+        for item in cast(list[object], versions["schema_versions"])
+    ]
+    for item in schema_versions:
+        if item["schema_id"] == "receipts/receipt-document":
+            item["schema_version"] = "1.1.0"
+    versions["schema_versions"] = schema_versions
+    compatible["versions"] = versions
+    assert canonical_encode(freeze_json(compatible)) == canonical_encode(freeze_json(historical))
 
 
 @given(st.sampled_from(tuple(ReceiptInclude)))

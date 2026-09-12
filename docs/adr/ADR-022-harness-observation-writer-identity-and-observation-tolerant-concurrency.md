@@ -1,7 +1,9 @@
 # ADR-022 — Harness observation writer identity and observation-tolerant optimistic concurrency
 
 **Status:** Accepted (2026-08-13), recorded for issues #214–#223 and acknowledged in issue #225.
-**Amended:** 2026-09-04 for issue #577 (pending observation rows follow a superseded session
+**Amended:** 2026-09-05 for issue #494 / ADR-027 (observation writer stays per task/session;
+only inventory-designated shared-mutable workspace routing or verification-job scheduling authority
+may become project-scoped once multiple live tasks share a repository); 2026-09-04 for issue #577 (pending observation rows follow a superseded session
 binding after ended-session recovery attach); 2026-09-04 for issue #560 (task-scoped operation identity across workflow
 reattach, decision 18); 2026-09-03 for issues #539 (content-bearing committed replay) and #540
 (terminal ingest rejection and retry ceiling); 2026-08-30 for issue #302 (captured observation ledger
@@ -28,7 +30,7 @@ selection fence.
 `src/yoetz/adapters/integrations/observation_local.py`.
 **Relates to:** ADR-009, ADR-010, ADR-020, and
 issues #214, #216, #217, #223, #224, #225, #226, #227, #244, #302, #320, #322, #326, #331,
-#445, #539, #540, #560, #577, and #607.
+#445, #494, #539, #540, #560, #577, and #607.
 
 **Proposed amendment for issue #231:** `provider_not_ready` remains bounded local advice, but the
 observation coordinator does not materialize it as an agent-facing finding. Provider readiness is a
@@ -345,13 +347,36 @@ unsupported claims and unbounded duplicate findings.
 same-host predecessor mapping for that task in the same pass it stores the successor mapping. The
 shared hook recovery path takes a nonblocking workspace reservation and ordered locks for every
 eligible ended same-host session through full candidate revalidation, the service RPC, authorized
-rewrites, and pruning; contention or changed state falls back to the ordinary request. A
+rewrites, and pruning; contention or changed state returns the closed `auto_attach_recovery_busy`
+boundary rather than issuing ordinary new admission while the selector is unstable. A
     row refused only because its route was retired is never `ledger_rejected`; a superseded payload
     that cannot be followed (missing or mismatched task/session/writer ids, a hop cycle, or a
     rotation after the route already opened) quarantines that row as `session_superseded`. That
     reason is not `mapping_missing`, so ended-unmapped drain terminalization and the status rule
     that hides `mapping_missing` while a mapping file exists cannot mislabel a mapped retirement.
     `ledger_rejected` remains the terminal class for content and identity refusals.
+
+## Amendment — multi-task workspace observation home (2026-09-05, issue #494 / ADR-027)
+
+Decision 1 is unchanged: the observation writer remains a pure function of task and session.
+Decision 14 is unchanged: a mapped session's advice snapshot is constructed from that session's
+own retained envelopes and is never silently fed a workspace-wide aggregate.
+
+ADR-027's bounded reversal of the #250/#352 no-cross-task-state posture does not create a shared
+writable ledger and does not let workspace-wide observation become a silent input to another
+task's advice snapshot. The #498 ownership inventory must classify each table before #496 moves
+anything. Only inventory-designated shared-mutable workspace routing may move to a catalog or
+project home; task-owned provenance remains in its task bundle. In the expected `0004` inventory,
+`observation_workspace_session_routes` is one expected shared-mutable candidate. The
+`observation_verification_jobs` per-workspace running-job uniqueness in `0003` is a separate
+expected scheduling-authority candidate. Job results, `observation_inspection_snapshots`, and
+`observation_session_advice` remain task-owned unless the inventory proves otherwise. In the dated
+Increment-A design, `workspace_task_exists` kept the store single-task-safe until the #497 decision
+table was ready. The current 0.3 candidate implements that replacement on automatic
+`create_or_attach`: validated ended-session bindings may recover a task, while explicit
+`mode=create` still reports the conflict for an identical identity pair. Recovery and migration
+compatibility follow ADR-003 and the storage/recovery runbooks; native host capability evidence and
+limits remain in the host integration runbooks.
 
 20. Workspace recovery and host lifecycle mutation share a nonblocking workspace reservation and
     ordered per-session locks. The recovery snapshot is revalidated against every eligible

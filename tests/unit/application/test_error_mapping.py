@@ -104,6 +104,10 @@ _MODULE_CODE_INVENTORY: dict[str, frozenset[PublicErrorCode]] = {
     "start.py": frozenset(
         {
             PublicErrorCode.INVALID_REQUEST,
+            PublicErrorCode.OPERATION_PENDING,
+            PublicErrorCode.SERVICE_UNAVAILABLE,
+            PublicErrorCode.SESSION_CONFLICT,
+            PublicErrorCode.SESSION_NOT_FOUND,
             PublicErrorCode.STORAGE_CORRUPT,
             PublicErrorCode.STORAGE_UNSAFE,
         }

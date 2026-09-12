@@ -117,6 +117,35 @@ def _schema_ten_with_observation_rows() -> apsw.Connection:
     return db
 
 
+def _legacy_development_schema_ten() -> apsw.Connection:
+    """Build the short-lived 0.3 v10 shape whose frontier collides with released v0.2."""
+
+    db = apsw.Connection(":memory:")
+    db.execute("PRAGMA foreign_keys = OFF")
+    db.execute("PRAGMA trusted_schema = OFF")
+    with db:
+        for migration in BUNDLE_MIGRATIONS[:9]:
+            db.execute(migration.ddl.decode())
+        # The historical branch rebuilt events as its 0010 and admitted lineage summaries,
+        # but never added the released v0.2 native-content consent column.  Keep only the
+        # schema evidence needed by the fail-closed upgrade guard; no user rows are fabricated.
+        db.execute("DROP TABLE events")
+        db.execute(
+            "CREATE TABLE events(summary_code TEXT NOT NULL "
+            "CHECK(summary_code IN ('delegation_declared'))) STRICT"
+        )
+        db.execute(
+            "INSERT INTO bundle_meta(key,value) VALUES"
+            "('task_id',?),('owner_generation','1'),"
+            "('storage_schema_version','10'),('protocol_version','0.1'),"
+            "('import_schema_version','1')",
+            (_TASK_ID,),
+        )
+        db.execute("PRAGMA user_version = 10")
+    db.execute("PRAGMA foreign_keys = ON")
+    return db
+
+
 def test_schema_ten_upgrade_preserves_rows_and_installs_capture_ticket_shape() -> None:
     db = _schema_ten_with_observation_rows()
     old_consent = db.execute(
@@ -147,13 +176,13 @@ def test_schema_ten_upgrade_preserves_rows_and_installs_capture_ticket_shape() -
 
     report = run_migrations(db, BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
     assert report.from_version == 10
-    assert report.to_version == 12
-    assert report.applied_versions == ("0011", "0012")
-    assert db.execute("PRAGMA user_version").fetchone() == (12,)
+    assert report.to_version == 13
+    assert report.applied_versions == ("0011", "0012", "0013")
+    assert db.execute("PRAGMA user_version").fetchone() == (13,)
     assert verify_schema_identity(db).state == "current"
     assert db.execute(
         "SELECT value FROM bundle_meta WHERE key='storage_schema_version'"
-    ).fetchone() == ("12",)
+    ).fetchone() == ("13",)
     assert db.execute("PRAGMA foreign_key_check").fetchall() == []
 
     assert (
@@ -252,7 +281,40 @@ def test_schema_ten_upgrade_preserves_rows_and_installs_capture_ticket_shape() -
     ).fetchone() == ("staging", b"[]")
 
     rerun = run_migrations(db, BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
-    assert rerun.from_version == 12
-    assert rerun.to_version == 12
+    assert rerun.from_version == 13
+    assert rerun.to_version == 13
     assert rerun.applied_versions == ()
     assert db.execute("SELECT count(*) FROM observation_capture_tickets").fetchone() == (1,)
+
+
+def test_legacy_development_v10_fails_closed_before_running_released_migrations() -> None:
+    db = _legacy_development_schema_ten()
+    assert db.execute("PRAGMA user_version").fetchone() == (10,)
+    assert tuple(row[1] for row in db.execute("PRAGMA table_info(observation_consent)")) == (
+        "workspace_commitment",
+        "granted_at",
+        "revoked_at",
+        "paused",
+    )
+    event_row = db.execute(
+        "SELECT sql FROM sqlite_schema WHERE type='table' AND name='events'"
+    ).fetchone()
+    assert event_row is not None
+    assert "delegation_declared" in event_row[0]
+
+    try:
+        run_migrations(db, BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
+        raise AssertionError("expected ambiguous v10 schema to fail closed")
+    except RuntimeError as exc:
+        assert str(exc) == "schema_upgrade_path_unknown"
+
+    assert db.execute("PRAGMA user_version").fetchone() == (10,)
+    assert (
+        db.execute(
+            "SELECT 1 FROM sqlite_schema WHERE name='observation_capture_tickets'"
+        ).fetchone()
+        is None
+    )
+    assert db.execute(
+        "SELECT value FROM bundle_meta WHERE key='storage_schema_version'"
+    ).fetchone() == ("10",)

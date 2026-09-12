@@ -1,0 +1,155 @@
+"""Lineage status preserves the difference between identity and recorded verification."""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from dataclasses import replace
+from datetime import UTC, datetime
+from types import SimpleNamespace
+from typing import cast
+from unittest.mock import AsyncMock, call
+
+import pytest
+
+from yoetz.application.task_views import lineage_status_page
+from yoetz.domain.coordination import LineageAcceptance, LineageOrigin, SessionHealth, WorkState
+from yoetz.domain.values import Frontier, Timestamp
+from yoetz.ports.host_lineage import HostLineageAnnotation, HostLineageRegistryPort
+from yoetz.ports.runtime import TaskRuntime
+from yoetz.ports.start_catalog import SessionState, StartCatalogPort, TaskLineage
+from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+
+pytestmark = pytest.mark.anyio
+_PARENT = "tsk_53000000-0000-4000-8000-000000000001"
+_CHILD = "tsk_53000000-0000-4000-8000-000000000002"
+_SESSION = "ses_53000000-0000-4000-8000-000000000001"
+_SESSION_COMMITMENT = "hmac-sha256:" + ("c" * 64)
+_DIGEST = "sha256:" + "a" * 64
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
+
+
+async def _no_records(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+    for record in ():
+        yield record
+
+
+@pytest.mark.parametrize(
+    ("acceptance", "state", "blockers"),
+    [
+        (LineageAcceptance.ACCEPTED, "unavailable", ("lineage_manifest_not_recorded",)),
+        (LineageAcceptance.PENDING, "annotation", ()),
+        (LineageAcceptance.REJECTED, "annotation", ()),
+    ],
+)
+async def test_catalog_child_without_a_manifest_is_never_verified(
+    acceptance: LineageAcceptance, state: str, blockers: tuple[str, ...]
+) -> None:
+    parent = TaskLineage(_PARENT, None, 0, _DIGEST, None, None, WorkState.OPEN)
+    child = TaskLineage(
+        _CHILD, _PARENT, 1, _DIGEST, LineageOrigin.SELF_REGISTERED, acceptance, WorkState.CLOSED
+    )
+    catalog = AsyncMock(spec=StartCatalogPort)
+    catalog.task_lineage.side_effect = [parent, child]
+    catalog.list_child_task_ids.return_value = (_CHILD,)
+    catalog.task_session_states.return_value = (
+        SessionState(_CHILD, _SESSION, SessionHealth.ENDED, datetime(2026, 9, 5, tzinfo=UTC)),
+    )
+    runtime = cast(
+        TaskRuntime,
+        SimpleNamespace(
+            task_id=_PARENT,
+            session_id=_SESSION,
+            ledger=SimpleNamespace(load_events=_no_records),
+        ),
+    )
+
+    page = await lineage_status_page(
+        cast(StartCatalogPort, catalog), runtime, Frontier(0, "genesis")
+    )
+
+    assert page.parent_task_id is None
+    (item,) = page.children
+    assert item.task_id == _CHILD
+    assert item.origin.value == "self_registered"
+    assert item.rollup_state.value == state
+    assert item.blocking_conditions == blockers
+
+
+@pytest.mark.parametrize("count", [1, 101, 200])
+async def test_lineage_status_reads_every_provisional_host_annotation(count: int) -> None:
+    parent = TaskLineage(_PARENT, None, 0, _DIGEST, None, None, WorkState.OPEN)
+    catalog = AsyncMock(spec=StartCatalogPort)
+    catalog.task_lineage.return_value = parent
+    catalog.list_child_task_ids.return_value = ()
+    runtime = cast(
+        TaskRuntime,
+        SimpleNamespace(
+            task_id=_PARENT,
+            session_id=_SESSION,
+            ledger=SimpleNamespace(load_events=_no_records),
+        ),
+    )
+    commitment = "hmac-sha256:" + ("b" * 64)
+    annotation = HostLineageAnnotation(
+        parent_task_id=_PARENT,
+        host_profile="codex",
+        correlation_id=commitment,
+        subagent_id=commitment,
+        parent_tool_call_id=commitment,
+        parent_conversation_id=None,
+        conversation_id=None,
+        origin="host_observed",
+        acceptance="pending",
+        observed_phases=("start",),
+        source_mask=1,
+        last_session_commitment=_SESSION_COMMITMENT,
+        first_observed_at=Timestamp("2026-09-05T00:00:00.000Z"),
+        last_observed_at=Timestamp("2026-09-05T00:00:00.000Z"),
+    )
+    annotations = tuple(
+        replace(annotation, correlation_id=f"hmac-sha256:{index:064x}") for index in range(count)
+    )
+    batches = [annotations[index : index + 100] for index in range(0, count, 100)]
+    if count % 100 == 0:
+        batches.append(())
+    registry = SimpleNamespace(list_provisional_annotations=AsyncMock(side_effect=batches))
+
+    page = await lineage_status_page(
+        cast(StartCatalogPort, catalog),
+        runtime,
+        Frontier(0, "genesis"),
+        host_lineage_registry=cast(HostLineageRegistryPort, registry),
+    )
+
+    registry.list_provisional_annotations.assert_has_awaits(
+        [
+            call(
+                _PARENT,
+                limit=100,
+                correlation_id=None,
+                after_correlation_id=None if index == 0 else annotations[index - 1].correlation_id,
+            )
+            for index in range(0, count + (1 if count % 100 == 0 else 0), 100)
+        ]
+    )
+    assert tuple(item.correlation_id for item in page.annotations) == tuple(
+        item.correlation_id for item in annotations
+    )
+    assert page.annotations[0].origin == "host_observed"
+    assert page.annotations[0].acceptance == "pending"
+
+    # A registry cannot expand the exact selector to a different observed child.
+    registry.list_provisional_annotations = AsyncMock(return_value=(annotation,))
+    with pytest.raises(PublicOperationError) as exc_info:
+        await lineage_status_page(
+            cast(StartCatalogPort, catalog),
+            runtime,
+            Frontier(0, "genesis"),
+            host_lineage_registry=cast(HostLineageRegistryPort, registry),
+            correlation_id="hmac-sha256:" + "d" * 64,
+        )
+    assert exc_info.value.code is PublicErrorCode.STORAGE_CORRUPT

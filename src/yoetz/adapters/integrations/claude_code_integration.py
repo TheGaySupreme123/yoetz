@@ -110,6 +110,8 @@ CLAUDE_CODE_HOOK_EVENTS: Final = (
     "SessionEnd",
     "SessionStart",
     "Stop",
+    "SubagentStart",
+    "SubagentStop",
 )
 CLAUDE_CODE_ORDINARY_HOOK_EVENTS: Final = (
     "PermissionDenied",
@@ -126,7 +128,8 @@ _CLAUDE_HOOK_PROFILE: Final = HarnessHookProfile(
     trigger_event="SessionStart",
     trigger_payload_profile_id=CLAUDE_CODE_HOOK_MAPPING_VERSION,
     evidence_case_ids=("claude-code-cli-native-project-2.1.241-macos-arm64",),
-    # The rendered artifact carries all five candidate hooks, but the recorded
+    # The rendered artifact carries the lifecycle, scoped MCP, and native child
+    # hook candidates, but the recorded
     # evidence case observed no accepted observation for any of them
     # (observation_evidence: not_observed). The capability hook cell stays
     # unpopulated until each event has installed-host delivery, privacy, and
@@ -756,6 +759,11 @@ def _hooks_json(
             {"hooks": [hook("SessionStart")], "matcher": "startup|resume|clear|compact|fork"}
         ],
         "Stop": [{"hooks": [hook("Stop")]}],
+        # Claude Code 2.1.261's native Agent tool delivers child identity through
+        # these hooks.  The ingress retains only the structural child id; parent
+        # tool context remains optional and service-stamped.
+        "SubagentStart": [{"hooks": [hook("SubagentStart")]}],
+        "SubagentStop": [{"hooks": [hook("SubagentStop")]}],
     }
     return canonical_encode(cast(JsonValue, {"hooks": hooks}))
 

@@ -39,7 +39,21 @@ __all__ = [
 # present and valid, or that a whole payload is wrong when one key inside it is.
 _SAFE_LOCATION_SEGMENTS: Final = frozenset(
     {
+        "context_digest",
+        "detection_id",
+        "membership_generation",
+        "recipient_task_id",
         "acceptance_criteria",
+        "attach_handle",
+        "child_task_id",
+        "correlation_id",
+        "expires_at",
+        "handle",
+        "parent_session_id",
+        "parent_tool_call_id",
+        "project_id",
+        "reason_code",
+        "subagent_id",
         "actor",
         "actor_id",
         "actor_type",
@@ -238,7 +252,7 @@ _MAX_HINT_FIELDS: Final = 3
 _MAX_HINT_ENUM_MEMBERS: Final = 8
 # Schema-name unions (ordinary publish families) are larger than payload enums; keep a separate
 # bound so `/event_drafts/N` can name admitted families without dumping unbounded oneOf lists.
-_MAX_HINT_SCHEMA_NAMES: Final = 16
+_MAX_HINT_SCHEMA_NAMES: Final = 18
 _MAX_HINT_PATTERN_CHARS: Final = 96
 _MAX_HINT_REF_HOPS: Final = 8
 _MAX_HINT_POINTER_SEGMENTS: Final = 8

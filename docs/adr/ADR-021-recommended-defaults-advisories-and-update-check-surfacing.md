@@ -182,9 +182,12 @@ steps, requiring explicit existing roots and configuration rather than inferring
 `--accept --writers-stopped` invokes only the fixed `uv tool upgrade yoetz` command after checking
 that this is the ambient uv tool installation. Source checkouts and isolated/pinned runtimes refuse.
 Package-manager output is not copied into structural diagnostics. A timeout leaves the package
-outcome unknown. A successful command still reports host refresh/migration/activation as unverified;
-a fresh invocation is required to continue from the new package. It never automatically approves
-host trust, changes privacy settings, migrates ledgers, or claims a complete upgrade from exit zero.
+outcome unknown. A successful command still reports host refresh and activation as unverified; a
+fresh invocation is required to continue from the new package. Compatible bundle migration is
+owned by that fresh service startup and runs backup-first before READY, without a per-task ceremony;
+unsupported or ambiguous migration remains a typed recovery boundary. The advisory never
+automatically approves host trust, changes privacy settings, or claims a complete upgrade from
+package exit zero.
 See [Upgrading](../usage/upgrading.md) for the user workflow.
 
 Concurrent refresh results retain the newer validated release from the pending projection or

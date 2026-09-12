@@ -8,14 +8,19 @@ from types import MappingProxyType
 from typing import Final, cast
 
 from yoetz.domain.events import (
+    LINEAGE_SERVICE_STAMPED_FAMILIES,
     AcceptedEvent,
     ActionRecordedPayload,
     AssignmentRecordedPayload,
     CheckRecordedPayload,
+    ChildDependenciesRecordedPayload,
     ClaimKind,
     ClaimRecordedPayload,
     ClaimRecordedPayloadV1_1,
     ClaimRevisionMismatch,
+    CoordinationContextRecordedPayload,
+    CoordinationDispositionRecordedPayload,
+    CoordinationObligationDeclaredPayload,
     DecisionRecordedPayload,
     EvidenceRecordedPayload,
     FindingRecordedPayload,
@@ -32,6 +37,7 @@ from yoetz.domain.events import (
     ResultRecordedPayload,
     UnknownEvent,
     encode_payload,
+    is_lineage_service_stamped,
     is_observation_authored,
     obligation_meaning_field_diffs,
 )
@@ -114,6 +120,28 @@ _MATERIAL_FAMILIES: Final = frozenset(
         "plan_revised",
         "response_recorded",
         "result_recorded",
+        # A child-dependency aggregate changes the parent-visible work facts.  It is retained as
+        # a structural event (the pure lineage evaluator owns its contents), but a later event
+        # still has to participate in the check/receipt freshness walk.
+        "child_dependencies_recorded",
+        "coordination_context_recorded",
+        "coordination_obligation_declared",
+        "coordination_disposition_recorded",
+    }
+)
+
+_LINEAGE_EVENT_FAMILIES: Final = frozenset(
+    {
+        "delegation_declared",
+        "delegation_cancelled",
+        "child_accepted",
+        "child_rejected",
+        "child_written_off",
+        "child_dependencies_recorded",
+        "work_closed",
+        "work_abandoned",
+        "work_cancelled",
+        "work_written_off",
     }
 )
 
@@ -137,6 +165,15 @@ def supersedes_recorded_check(
     """
 
     if not is_material_event_family(name):
+        return False
+    if (
+        name == "child_dependencies_recorded"
+        and type(payload) is ChildDependenciesRecordedPayload
+        and not payload.children
+    ):
+        # An observed empty inventory establishes the baseline but adds no child-derived work.
+        # It must not make an otherwise qualifying check stale when maintenance records that
+        # baseline after the check; a later non-empty replacement remains material.
         return False
     if name != "response_recorded":
         return True
@@ -745,6 +782,13 @@ def _redact_current_records(
     claims: dict[ClaimId, ClaimProjectionRecord],
     findings: dict[FindingId, FindingProjectionRecord],
     responses: dict[FindingId, ProjectionRecord[ResponseRecordedPayload]],
+    coordination_contexts: dict[EventId, ProjectionRecord[CoordinationContextRecordedPayload]],
+    coordination_declarations: dict[
+        EventId, ProjectionRecord[CoordinationObligationDeclaredPayload]
+    ],
+    coordination_dispositions: dict[
+        EventId, ProjectionRecord[CoordinationDispositionRecordedPayload]
+    ],
 ) -> None:
     targets = frozenset(target_event_ids)
     for key, record in tuple(plans.items()):
@@ -777,6 +821,15 @@ def _redact_current_records(
     for key, record in tuple(responses.items()):
         if record.source_event_id in targets:
             responses[key] = replace(record, payload=None, redacted=True)
+    for key, record in tuple(coordination_contexts.items()):
+        if record.source_event_id in targets:
+            coordination_contexts[key] = replace(record, payload=None, redacted=True)
+    for key, record in tuple(coordination_declarations.items()):
+        if record.source_event_id in targets:
+            coordination_declarations[key] = replace(record, payload=None, redacted=True)
+    for key, record in tuple(coordination_dispositions.items()):
+        if record.source_event_id in targets:
+            coordination_dispositions[key] = replace(record, payload=None, redacted=True)
 
 
 def _recompute_secondary_effects(
@@ -891,6 +944,9 @@ def _recompute_missing_gaps(
     claims: Mapping[ClaimId, ClaimProjectionRecord],
     findings: Mapping[FindingId, FindingProjectionRecord],
     responses: Mapping[FindingId, ProjectionRecord[ResponseRecordedPayload]],
+    coordination_dispositions: Mapping[
+        EventId, ProjectionRecord[CoordinationDispositionRecordedPayload]
+    ],
 ) -> tuple[str, ...]:
     gaps = {marker for marker in retained_gaps if not marker.startswith("missing_ref:")}
 
@@ -961,6 +1017,10 @@ def _recompute_missing_gaps(
             require(record.source_event_id, record.payload.finding_id)
             for target in record.payload.evidence_refs:
                 require(record.source_event_id, target)
+    for record in coordination_dispositions.values():
+        if record.payload is not None:
+            for target in record.payload.evidence_refs:
+                require(record.source_event_id, target)
     return tuple(sorted(gaps, key=_ascii_key))
 
 
@@ -1014,6 +1074,9 @@ def reduce_event(
     claims = dict(state.claims)
     findings = dict(state.findings)
     responses = dict(state.responses)
+    coordination_contexts = dict(state.coordination_contexts)
+    coordination_declarations = dict(state.coordination_declarations)
+    coordination_dispositions = dict(state.coordination_dispositions)
     contradictions = dict(state.contradictions)
     gaps = set(state.coverage_gaps)
     latest = state.latest_tested_state
@@ -1120,6 +1183,39 @@ def reduce_event(
                 if payload is None
                 else _projection_record(accepted, cast(ResponseRecordedPayload, payload))
             )
+        elif family == "coordination_context_recorded":
+            if accepted.event_id in coordination_contexts:
+                raise _corrupt()
+            coordination_contexts[accepted.event_id] = (
+                _tombstone(accepted, CoordinationContextRecordedPayload)
+                if payload is None
+                else _projection_record(
+                    accepted,
+                    cast(CoordinationContextRecordedPayload, payload),
+                )
+            )
+        elif family == "coordination_obligation_declared":
+            if accepted.event_id in coordination_declarations:
+                raise _corrupt()
+            coordination_declarations[accepted.event_id] = (
+                _tombstone(accepted, CoordinationObligationDeclaredPayload)
+                if payload is None
+                else _projection_record(
+                    accepted,
+                    cast(CoordinationObligationDeclaredPayload, payload),
+                )
+            )
+        elif family == "coordination_disposition_recorded":
+            if accepted.event_id in coordination_dispositions:
+                raise _corrupt()
+            coordination_dispositions[accepted.event_id] = (
+                _tombstone(accepted, CoordinationDispositionRecordedPayload)
+                if payload is None
+                else _projection_record(
+                    accepted,
+                    cast(CoordinationDispositionRecordedPayload, payload),
+                )
+            )
         elif family == "check_recorded":
             if payload is None:
                 latest = None
@@ -1161,6 +1257,9 @@ def reduce_event(
                 claims,
                 findings,
                 responses,
+                coordination_contexts,
+                coordination_declarations,
+                coordination_dispositions,
             )
             if latest is not None and latest.source_check_event_id in event_targets:
                 latest = None
@@ -1181,7 +1280,24 @@ def reduce_event(
                             object_available=False,
                             redacted_object_id=target_object,
                         )
-                gaps.add(f"redacted_object:{target_object}")
+                    gaps.add(f"redacted_object:{target_object}")
+        elif family in _LINEAGE_EVENT_FAMILIES:
+            # These events carry service-owned lifecycle/manifest facts.  Their projection is
+            # intentionally structural no-op: the catalog owns lifecycle state and the pure
+            # lineage evaluator consumes only the recorded aggregate.  A manifest (and the other
+            # service-only lineage families) must nevertheless retain the coordinator authorship
+            # stamp all the way through replay; a valid payload with caller/import authorship is
+            # a corrupt ledger record, never an acceptable child fact.
+            if family in LINEAGE_SERVICE_STAMPED_FAMILIES and not is_lineage_service_stamped(
+                accepted
+            ):
+                raise _corrupt()
+            if (
+                family == "child_dependencies_recorded"
+                and payload is not None
+                and type(payload) is not ChildDependenciesRecordedPayload
+            ):
+                raise _corrupt()
         else:
             raise _corrupt()
 
@@ -1203,6 +1319,7 @@ def reduce_event(
             claims,
             findings,
             responses,
+            coordination_dispositions,
         )
 
     frontier = event.ledger.ingestion_sequence
@@ -1226,6 +1343,9 @@ def reduce_event(
         contradictions=contradictions,
         findings=findings,
         responses=responses,
+        coordination_contexts=coordination_contexts,
+        coordination_declarations=coordination_declarations,
+        coordination_dispositions=coordination_dispositions,
         latest_tested_state=latest,
         freshness=freshness,
         unknown_event_count=unknown_count,

@@ -1,6 +1,6 @@
 # Yoetz request templates and exceptional operations
 
-These are complete request bodies for the six Yoetz operations and all nine ordinary
+These are complete request bodies for the six Yoetz operations and ordinary
 `publish_work` event families. Use them when a host preserves resource text but drops schema
 metadata. The operation input schema remains the field-shape authority; these templates are an
 authoring fallback, not a second protocol.
@@ -39,7 +39,7 @@ same work; `workspace_ref` is the canonical absolute repository root (never a re
 same value hook observation auto-attaches with. Alternatively, attach with a returned or
 host-context `session_id`; never use a bare `task_id` as an attach selector. A later identical-pair attach mints a new session: prefer the returned ids, and
 recover a prior `request_id` with `status view=operation` from the successor session. Intentional
-siblings use `mode=create` with a different `external_ref`.
+siblings use a different complete pair with `create_or_attach`, or explicit `mode=create`.
 
 ```json
 {
@@ -123,8 +123,8 @@ routine file mechanics into obligations. The requested outcome is not an `item_k
 }
 ```
 
-The two drafts above cover `plan_published` and `obligation_published`. The next seven requests
-show the remaining ordinary families. Replace the frontier in each; the genesis values only keep
+The two drafts above cover `plan_published` and `obligation_published`. The following requests
+show the other ordinary families, including separate lifecycle transitions below. Replace the frontier in each; the genesis values only keep
 each standalone example schema-valid.
 
 `requested_items` declares the material items the obligation asks for; each entry is an object
@@ -333,7 +333,7 @@ Use `claim_recorded/1.1.0` for new claims. Its payload keeps admissible evidence
 results, and resolved obligations in `supporting_refs`, while partial or failed results belong in
 `limitation_refs`. It also admits `claim_id`, `claim_kind`, `disputes_refs`, `obligation_refs`,
 `statement`, `subject_state`, and `supersedes_claim_refs` — never `attempted_items`, which lives on
-`action_recorded`. The current descriptor selects `publish-work-request/1.1.0`, but the public
+`action_recorded`. The current descriptor selects `publish-work-request/1.2.0`, but the public
 request body's `schema_version` remains `1.0.0` as shown below.
 
 ```json
@@ -570,6 +570,490 @@ never applies to semantic findings.
 }
 ```
 
+## `start`: delegate, child attach, and self-registration
+
+The parent sends the first request using its current session. Preserve that parent binding.
+The response identifies a separate accepted child and includes its complete attach handle.
+
+```json
+{
+  "protocol_version": "0.1",
+  "schema_version": "1.0.0",
+  "request_id": "req_00000000-0000-4000-8000-000000000030",
+  "mode": "delegate",
+  "task_title": "Replace with the bounded child assignment",
+  "requested_view": "compact",
+  "session_id": "ses_00000000-0000-4000-8000-000000000001",
+  "actor": {
+    "actor_id": "harness:mcp-template",
+    "actor_type": "harness"
+  },
+  "client": {
+    "kind": "cooperative_agent",
+    "version": "0.1.0",
+    "integration": "cooperative_mcp"
+  }
+}
+```
+
+The intended child sends this attach request with the **entire returned** `attach_handle` object.
+The example below is syntactically shaped but deliberately grants no capability: replace all
+three handle fields with the returned values together. Do not invent or reconstruct a handle.
+Do not combine the handle with another attach selector. After timeout, replay the exact request
+and request ID; a fresh attach request cannot reuse a consumed handle. Use the child's returned
+session and writer for its subsequent operations.
+
+```json
+{
+  "protocol_version": "0.1",
+  "schema_version": "1.0.0",
+  "request_id": "req_00000000-0000-4000-8000-000000000031",
+  "mode": "attach",
+  "task_title": "Replace with the bounded child assignment",
+  "requested_view": "compact",
+  "attach_handle": {
+    "handle": "illustrative-only-replace-with-returned-handle",
+    "child_task_id": "tsk_00000000-0000-4000-8000-000000000002",
+    "expires_at": "2026-01-01T00:10:00.000Z"
+  },
+  "actor": {
+    "actor_id": "harness:mcp-template",
+    "actor_type": "harness"
+  },
+  "client": {
+    "kind": "cooperative_agent",
+    "version": "0.1.0",
+    "integration": "cooperative_mcp"
+  }
+}
+```
+
+Without a parent-minted handle, a child may create its own ledger under a held parent session.
+This relationship is pending until the parent accepts it. It stays `self_registered` after
+acceptance. Use a stable child-specific pair, not the parent's pair.
+
+```json
+{
+  "protocol_version": "0.1",
+  "schema_version": "1.0.0",
+  "request_id": "req_00000000-0000-4000-8000-000000000032",
+  "mode": "create_or_attach",
+  "task_title": "Replace with the bounded child assignment",
+  "requested_view": "compact",
+  "parent_session_id": "ses_00000000-0000-4000-8000-000000000001",
+  "workspace_ref": "/workspace/project",
+  "external_ref": "issue-128-child-review",
+  "actor": {
+    "actor_id": "harness:mcp-template",
+    "actor_type": "harness"
+  },
+  "client": {
+    "kind": "cooperative_agent",
+    "version": "0.1.0",
+    "integration": "cooperative_mcp"
+  }
+}
+```
+
+## `publish_work`: child and work lifecycle
+
+Each request below is a separate alternative at a real current frontier. Parent events target
+a returned direct child ID; work events affect the publishing task. Accept and reject apply
+only to a pending child. An accepted child cannot be rejected later. Cancellation revokes the
+Yoetz capability without claiming to stop a host process. Write-off retains the incomplete
+dependency. `work_closed` records closure explicitly; a receipt never does.
+
+Do not publish service-owned `delegation_declared`, `work_abandoned`,
+`child_dependencies_recorded`, or `coordination_context_recorded`.
+
+### `child_accepted`
+
+```json
+{
+  "protocol_version": "0.1",
+  "schema_version": "1.0.0",
+  "request_id": "req_00000000-0000-4000-8000-000000000040",
+  "session_id": "ses_00000000-0000-4000-8000-000000000001",
+  "writer_id": "wri_00000000-0000-4000-8000-000000000001",
+  "expected_frontier": {
+    "sequence": "1",
+    "head_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "event_drafts": [
+    {
+      "event_id": "evt_00000000-0000-4000-8000-000000000040",
+      "schema": {
+        "name": "child_accepted",
+        "version": "1.0.0"
+      },
+      "occurred_at": "2026-01-01T00:00:00.000Z",
+      "causal_parents": [],
+      "payload": {
+        "child_task_id": "tsk_00000000-0000-4000-8000-000000000002"
+      },
+      "artifact_refs": [],
+      "evidence_refs": []
+    }
+  ],
+  "actor": {
+    "actor_id": "harness:mcp-template",
+    "actor_type": "harness"
+  },
+  "client": {
+    "kind": "cooperative_agent",
+    "version": "0.1.0",
+    "integration": "cooperative_mcp"
+  }
+}
+```
+
+### `child_rejected`
+
+```json
+{
+  "protocol_version": "0.1",
+  "schema_version": "1.0.0",
+  "request_id": "req_00000000-0000-4000-8000-000000000041",
+  "session_id": "ses_00000000-0000-4000-8000-000000000001",
+  "writer_id": "wri_00000000-0000-4000-8000-000000000001",
+  "expected_frontier": {
+    "sequence": "1",
+    "head_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "event_drafts": [
+    {
+      "event_id": "evt_00000000-0000-4000-8000-000000000041",
+      "schema": {
+        "name": "child_rejected",
+        "version": "1.0.0"
+      },
+      "occurred_at": "2026-01-01T00:00:00.000Z",
+      "causal_parents": [],
+      "payload": {
+        "child_task_id": "tsk_00000000-0000-4000-8000-000000000002"
+      },
+      "artifact_refs": [],
+      "evidence_refs": []
+    }
+  ],
+  "actor": {
+    "actor_id": "harness:mcp-template",
+    "actor_type": "harness"
+  },
+  "client": {
+    "kind": "cooperative_agent",
+    "version": "0.1.0",
+    "integration": "cooperative_mcp"
+  }
+}
+```
+
+### `child_written_off`
+
+```json
+{
+  "protocol_version": "0.1",
+  "schema_version": "1.0.0",
+  "request_id": "req_00000000-0000-4000-8000-000000000042",
+  "session_id": "ses_00000000-0000-4000-8000-000000000001",
+  "writer_id": "wri_00000000-0000-4000-8000-000000000001",
+  "expected_frontier": {
+    "sequence": "1",
+    "head_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "event_drafts": [
+    {
+      "event_id": "evt_00000000-0000-4000-8000-000000000042",
+      "schema": {
+        "name": "child_written_off",
+        "version": "1.0.0"
+      },
+      "occurred_at": "2026-01-01T00:00:00.000Z",
+      "causal_parents": [],
+      "payload": {
+        "child_task_id": "tsk_00000000-0000-4000-8000-000000000002"
+      },
+      "artifact_refs": [],
+      "evidence_refs": []
+    }
+  ],
+  "actor": {
+    "actor_id": "harness:mcp-template",
+    "actor_type": "harness"
+  },
+  "client": {
+    "kind": "cooperative_agent",
+    "version": "0.1.0",
+    "integration": "cooperative_mcp"
+  }
+}
+```
+
+### `delegation_cancelled`
+
+```json
+{
+  "protocol_version": "0.1",
+  "schema_version": "1.0.0",
+  "request_id": "req_00000000-0000-4000-8000-000000000043",
+  "session_id": "ses_00000000-0000-4000-8000-000000000001",
+  "writer_id": "wri_00000000-0000-4000-8000-000000000001",
+  "expected_frontier": {
+    "sequence": "1",
+    "head_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "event_drafts": [
+    {
+      "event_id": "evt_00000000-0000-4000-8000-000000000043",
+      "schema": {
+        "name": "delegation_cancelled",
+        "version": "1.0.0"
+      },
+      "occurred_at": "2026-01-01T00:00:00.000Z",
+      "causal_parents": [],
+      "payload": {
+        "child_task_id": "tsk_00000000-0000-4000-8000-000000000002"
+      },
+      "artifact_refs": [],
+      "evidence_refs": []
+    }
+  ],
+  "actor": {
+    "actor_id": "harness:mcp-template",
+    "actor_type": "harness"
+  },
+  "client": {
+    "kind": "cooperative_agent",
+    "version": "0.1.0",
+    "integration": "cooperative_mcp"
+  }
+}
+```
+
+### `work_closed`
+
+```json
+{
+  "protocol_version": "0.1",
+  "schema_version": "1.0.0",
+  "request_id": "req_00000000-0000-4000-8000-000000000044",
+  "session_id": "ses_00000000-0000-4000-8000-000000000001",
+  "writer_id": "wri_00000000-0000-4000-8000-000000000001",
+  "expected_frontier": {
+    "sequence": "1",
+    "head_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "event_drafts": [
+    {
+      "event_id": "evt_00000000-0000-4000-8000-000000000044",
+      "schema": {
+        "name": "work_closed",
+        "version": "1.0.0"
+      },
+      "occurred_at": "2026-01-01T00:00:00.000Z",
+      "causal_parents": [],
+      "payload": {},
+      "artifact_refs": [],
+      "evidence_refs": []
+    }
+  ],
+  "actor": {
+    "actor_id": "harness:mcp-template",
+    "actor_type": "harness"
+  },
+  "client": {
+    "kind": "cooperative_agent",
+    "version": "0.1.0",
+    "integration": "cooperative_mcp"
+  }
+}
+```
+
+### `work_cancelled`
+
+```json
+{
+  "protocol_version": "0.1",
+  "schema_version": "1.0.0",
+  "request_id": "req_00000000-0000-4000-8000-000000000045",
+  "session_id": "ses_00000000-0000-4000-8000-000000000001",
+  "writer_id": "wri_00000000-0000-4000-8000-000000000001",
+  "expected_frontier": {
+    "sequence": "1",
+    "head_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "event_drafts": [
+    {
+      "event_id": "evt_00000000-0000-4000-8000-000000000045",
+      "schema": {
+        "name": "work_cancelled",
+        "version": "1.0.0"
+      },
+      "occurred_at": "2026-01-01T00:00:00.000Z",
+      "causal_parents": [],
+      "payload": {},
+      "artifact_refs": [],
+      "evidence_refs": []
+    }
+  ],
+  "actor": {
+    "actor_id": "harness:mcp-template",
+    "actor_type": "harness"
+  },
+  "client": {
+    "kind": "cooperative_agent",
+    "version": "0.1.0",
+    "integration": "cooperative_mcp"
+  }
+}
+```
+
+### `work_written_off`
+
+```json
+{
+  "protocol_version": "0.1",
+  "schema_version": "1.0.0",
+  "request_id": "req_00000000-0000-4000-8000-000000000046",
+  "session_id": "ses_00000000-0000-4000-8000-000000000001",
+  "writer_id": "wri_00000000-0000-4000-8000-000000000001",
+  "expected_frontier": {
+    "sequence": "1",
+    "head_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "event_drafts": [
+    {
+      "event_id": "evt_00000000-0000-4000-8000-000000000046",
+      "schema": {
+        "name": "work_written_off",
+        "version": "1.0.0"
+      },
+      "occurred_at": "2026-01-01T00:00:00.000Z",
+      "causal_parents": [],
+      "payload": {},
+      "artifact_refs": [],
+      "evidence_refs": []
+    }
+  ],
+  "actor": {
+    "actor_id": "harness:mcp-template",
+    "actor_type": "harness"
+  },
+  "client": {
+    "kind": "cooperative_agent",
+    "version": "0.1.0",
+    "integration": "cooperative_mcp"
+  }
+}
+```
+
+## `publish_work`: declare coordination responsibility
+
+First publish an obligation describing the coordination outcome and its acceptance evidence.
+An ordinary file or source requested item identifies overlap but does not declare coordination
+responsibility. This explicit declaration binds an existing open obligation to one admitted
+detection and the current project generation. Replace every identifier with the returned values.
+
+```json
+{
+  "protocol_version": "0.1",
+  "schema_version": "1.0.0",
+  "request_id": "req_00000000-0000-4000-8000-000000000049",
+  "session_id": "ses_00000000-0000-4000-8000-000000000001",
+  "writer_id": "wri_00000000-0000-4000-8000-000000000001",
+  "expected_frontier": {
+    "sequence": "1",
+    "head_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "event_drafts": [
+    {
+      "event_id": "evt_00000000-0000-4000-8000-000000000048",
+      "schema": {
+        "name": "coordination_obligation_declared",
+        "version": "1.0.0"
+      },
+      "occurred_at": "2026-01-01T00:00:00.000Z",
+      "causal_parents": [],
+      "payload": {
+        "detection_id": "evt_00000000-0000-4000-8000-000000000049",
+        "project_id": "prj_00000000-0000-4000-8000-000000000001",
+        "membership_generation": "1",
+        "recipient_task_id": "tsk_00000000-0000-4000-8000-000000000001",
+        "obligation_id": "obl_00000000-0000-4000-8000-000000000001"
+      },
+      "artifact_refs": [],
+      "evidence_refs": []
+    }
+  ],
+  "actor": {
+    "actor_id": "harness:mcp-template",
+    "actor_type": "harness"
+  },
+  "client": {
+    "kind": "cooperative_agent",
+    "version": "0.1.0",
+    "integration": "cooperative_mcp"
+  }
+}
+```
+
+## `publish_work`: coordination disposition
+
+Publish only after an explicit coordination obligation exists. Read the admitted detection,
+project ID, current membership generation, recipient task, and obligation from status. Link
+real evidence or results that establish the agreement. The disposition is exactly one of
+`shared_work`, `sequencing`, or `scope_revision`; each is an alternative, not three sequential
+requirements. This addresses the obligation but does not resolve a recorded finding: recheck
+with the local coordination pack. A bare `respond` acknowledgement is insufficient.
+
+```json
+{
+  "protocol_version": "0.1",
+  "schema_version": "1.0.0",
+  "request_id": "req_00000000-0000-4000-8000-000000000050",
+  "session_id": "ses_00000000-0000-4000-8000-000000000001",
+  "writer_id": "wri_00000000-0000-4000-8000-000000000001",
+  "expected_frontier": {
+    "sequence": "1",
+    "head_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "event_drafts": [
+    {
+      "event_id": "evt_00000000-0000-4000-8000-000000000050",
+      "schema": {
+        "name": "coordination_disposition_recorded",
+        "version": "1.0.0"
+      },
+      "occurred_at": "2026-01-01T00:00:00.000Z",
+      "causal_parents": [],
+      "payload": {
+        "detection_id": "evt_00000000-0000-4000-8000-000000000049",
+        "project_id": "prj_00000000-0000-4000-8000-000000000001",
+        "membership_generation": "1",
+        "recipient_task_id": "tsk_00000000-0000-4000-8000-000000000001",
+        "obligation_id": "obl_00000000-0000-4000-8000-000000000001",
+        "disposition": "shared_work",
+        "evidence_refs": [
+          "evd_00000000-0000-4000-8000-000000000001"
+        ]
+      },
+      "artifact_refs": [],
+      "evidence_refs": [
+        "evd_00000000-0000-4000-8000-000000000001"
+      ]
+    }
+  ],
+  "actor": {
+    "actor_id": "harness:mcp-template",
+    "actor_type": "harness"
+  },
+  "client": {
+    "kind": "cooperative_agent",
+    "version": "0.1.0",
+    "integration": "cooperative_mcp"
+  }
+}
+```
 ## Guided closure and recovery
 
 Run `yoetz closure-prepare --session-id <returned-session> --writer-id <returned-writer>` to inspect
@@ -713,9 +1197,15 @@ do not execute an upgrade unless the user separately instructs you to do so.
 For an explicit upgrade request, run `yoetz upgrade` to read the staged workflow. Select only the
 existing hosts and preserve their exact roots, ownership, route, observation profile and settings.
 Quiesce old writers before accepting package replacement. Use the fresh launcher for the carried
-host preview/authorization/apply/status steps and any backup-first migration. Never report the
-whole upgrade complete from the package command alone. New defaults, including Expanded review,
-remain separate choices; an upgrade request grants no new privacy or provider authority.
+host preview/authorization/apply/status steps. After package replacement, a compatible 0.2-to-0.3
+bundle schema migration runs automatically during controlled service startup, backup-first and
+before READY; it preserves existing task data and needs no per-task ceremony. Never report the
+whole upgrade complete from the package command alone. If startup reports an unsupported layout,
+ambiguous migration, or rollback-required continuation, retain the exact operation and follow its
+supported recovery procedure; do not start a second migration or hand-edit storage. Explicit
+backup, restore, or ad-hoc migration remains its own reviewed action. New defaults, including
+Expanded review, remain separate choices; an upgrade request grants no new privacy or provider
+authority.
 
 Codex activation accept/decline decisions bind the exact executable, home, preview, and cache
 digests. An inactive target gets fresh advice unless its exact digest was declined. Acceptance does

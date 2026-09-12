@@ -12,7 +12,7 @@ import hashlib
 import os
 import stat
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -21,6 +21,7 @@ from typing import Literal, Protocol, cast
 import apsw
 
 from yoetz.adapters.sqlite.migrations import BUNDLE_MIGRATIONS, current_schema_version
+from yoetz.domain.coordination import ProjectTextRef
 from yoetz.domain.values import (
     Frontier,
     JsonObject,
@@ -212,7 +213,14 @@ class RestoredTargetEvidence:
             validate_sha256_digest(digest)
         if type(self.key_fingerprint) is not str or not self.key_fingerprint:
             raise ValueError("restored_target_evidence_invalid")
-        if not self.storage_version.isascii() or not self.storage_version.isdecimal():
+        if (
+            type(self.storage_version) is not str
+            or not self.storage_version.isascii()
+            or not self.storage_version.isdecimal()
+        ):
+            raise ValueError("restored_target_evidence_invalid")
+        parsed_storage_version = int(self.storage_version, 10)
+        if parsed_storage_version <= 0 or str(parsed_storage_version) != self.storage_version:
             raise ValueError("restored_target_evidence_invalid")
         if type(self.owner_generation) is not int or self.owner_generation <= 0:
             raise ValueError("restored_target_evidence_invalid")
@@ -228,14 +236,23 @@ class _RestoredTarget:
     privacy_reconciled: bool
 
     def __post_init__(self) -> None:
+        bundle_parts = self.bundle_relpath.split("/") if type(self.bundle_relpath) is str else ()
+        staging_name = bundle_parts[1] if len(bundle_parts) == 2 else ""
         if (
             type(self.evidence) is not RestoredTargetEvidence
             or type(self.result) is not RestoreResult
             or self.result.task_id != self.evidence.task_id
             or self.result.restored_frontier != self.evidence.frontier
+            or self.result.replay_digest != self.evidence.replay_digest
             or self.result.active_route_identity_digest != self.evidence.route_identity_digest
-            or type(self.bundle_relpath) is not str
-            or not self.bundle_relpath.startswith("tasks/restore-")
+            or bundle_parts[:1] != ["tasks"]
+            or len(bundle_parts) != 2
+            or not staging_name.startswith("restore-")
+            or not len("restore-") < len(staging_name) <= 128
+            or any(
+                character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+                for character in staging_name
+            )
             or type(self.privacy_reconciled) is not bool
         ):
             raise ValueError("restored_target_invalid")
@@ -373,7 +390,7 @@ def _safe_regular(path: Path, *, max_bytes: int | None = None) -> os.stat_result
     return facts
 
 
-def _safe_directory(path: Path) -> None:
+def _safe_directory(path: Path) -> os.stat_result:
     if not path.is_absolute():
         raise MaintenanceError(MaintenanceReason.SOURCE_INVALID, False, {})
     try:
@@ -387,6 +404,7 @@ def _safe_directory(path: Path) -> None:
         or (hasattr(os, "geteuid") and facts.st_uid != os.geteuid())
     ):
         raise MaintenanceError(MaintenanceReason.SOURCE_INVALID, False, {})
+    return facts
 
 
 def _read_bounded(path: Path, cap: int) -> bytes:
@@ -544,7 +562,91 @@ def _object_member_path(root: Path, object_id_value: str) -> Path:
     validate_id(IdKind.OBJECT, object_id_value)
     # Backup members are structural IDs, never user filenames.  A flat objects/
     # directory is the portable backup format; live bundle sharding is unrelated.
-    return root / "objects" / object_id_value
+    objects_dir = root / "objects"
+    _safe_directory(objects_dir)
+    return objects_dir / object_id_value
+
+
+def _sha256_object_member(root: Path, object_id_value: str, expected_size: int) -> str:
+    """Hash one object through an opened, verified objects directory.
+
+    Checking ``objects/<id>`` with a path alone leaves an intermediate ``objects`` symlink
+    race.  Open the directory with ``O_NOFOLLOW`` and the member relative to that descriptor;
+    the descriptor remains bound to the verified directory for the whole read.
+    """
+
+    validate_id(IdKind.OBJECT, object_id_value)
+    if type(expected_size) is not int or expected_size < 0:
+        raise MaintenanceError(MaintenanceReason.MANIFEST_TAMPERED, False, {})
+    objects_dir = root / "objects"
+    directory_facts = _safe_directory(objects_dir)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    directory_fd: int | None = None
+    member_fd: int | None = None
+    try:
+        try:
+            directory_fd = os.open(objects_dir, flags)
+            opened_directory = os.fstat(directory_fd)
+        except OSError as exc:
+            raise MaintenanceError(MaintenanceReason.SOURCE_INVALID, False, {}) from exc
+        if (opened_directory.st_dev, opened_directory.st_ino, opened_directory.st_mode) != (
+            directory_facts.st_dev,
+            directory_facts.st_ino,
+            directory_facts.st_mode,
+        ):
+            raise MaintenanceError(MaintenanceReason.SOURCE_INVALID, False, {})
+        try:
+            member_facts = os.stat(
+                object_id_value,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except OSError as exc:
+            raise MaintenanceError(MaintenanceReason.SOURCE_INVALID, False, {}) from exc
+        if (
+            not stat.S_ISREG(member_facts.st_mode)
+            or member_facts.st_nlink != 1
+            or stat.S_IMODE(member_facts.st_mode) & 0o077
+            or (hasattr(os, "geteuid") and member_facts.st_uid != os.geteuid())
+        ):
+            raise MaintenanceError(MaintenanceReason.SOURCE_INVALID, False, {})
+        if member_facts.st_size != expected_size:
+            raise MaintenanceError(MaintenanceReason.MANIFEST_TAMPERED, False, {})
+        member_flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            member_flags |= os.O_NOFOLLOW
+        try:
+            member_fd = os.open(object_id_value, member_flags, dir_fd=directory_fd)
+            opened_member = os.fstat(member_fd)
+        except OSError as exc:
+            raise MaintenanceError(MaintenanceReason.SOURCE_INVALID, False, {}) from exc
+        if (opened_member.st_dev, opened_member.st_ino, opened_member.st_size) != (
+            member_facts.st_dev,
+            member_facts.st_ino,
+            member_facts.st_size,
+        ):
+            raise MaintenanceError(MaintenanceReason.SOURCE_INVALID, False, {})
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(member_fd, _COPY_CHUNK_BYTES)
+            if not chunk:
+                break
+            digest.update(chunk)
+        after = os.fstat(member_fd)
+        if (after.st_dev, after.st_ino, after.st_size) != (
+            member_facts.st_dev,
+            member_facts.st_ino,
+            member_facts.st_size,
+        ):
+            raise MaintenanceError(MaintenanceReason.SOURCE_INVALID, False, {})
+        return "sha256:" + digest.hexdigest()
+    finally:
+        if member_fd is not None:
+            os.close(member_fd)
+        if directory_fd is not None:
+            os.close(directory_fd)
 
 
 def _verify_database_snapshot(path: Path, manifest: BackupManifest) -> None:
@@ -621,6 +723,8 @@ def _verify_privacy_snapshot(data: bytes, manifest: BackupManifest) -> None:
         object_ids: list[str] = []
         for raw in object_rows:
             row = _mapping(raw)
+            if set(row) != {"object_id"}:
+                raise ValueError("privacy_snapshot_object_shape_invalid")
             object_id_value = row.get("object_id")
             if type(object_id_value) is not str:
                 raise ValueError("privacy_snapshot_object_invalid")
@@ -638,6 +742,12 @@ def _verify_privacy_snapshot(data: bytes, manifest: BackupManifest) -> None:
             or len(cast(list[object], rows)) + len(cast(list[object], receipts))
             != manifest.privacy_audit_row_count
             or len(object_ids) != manifest.privacy_audit_object_count
+            or object_ids
+            != [
+                entry.object_id
+                for entry in manifest.objects
+                if entry.kind is ObjectKind.PRIVACY_AUDIT
+            ]
         ):
             raise ValueError("privacy_snapshot_binding_invalid")
     except Exception as exc:
@@ -680,7 +790,9 @@ def verify_backup_set(
     for entry in manifest.objects:
         path = _object_member_path(source, entry.object_id)
         try:
-            actual_object_digest = _sha256_file(path, entry.envelope_size)
+            actual_object_digest = _sha256_object_member(
+                source, entry.object_id, entry.envelope_size
+            )
         except MaintenanceError as exc:
             if exc.reason is MaintenanceReason.MANIFEST_TAMPERED:
                 raise MaintenanceError(MaintenanceReason.OBJECT_TAMPERED, False, {}) from exc
@@ -859,7 +971,8 @@ class SqliteMaintenance:
                 "lease_owner_id, lease_generation, source_route_identity_digest, "
                 "subject_frontier_seq, subject_frontier_digest, privacy_root_generation, "
                 "privacy_root_digest, quarantine_code, backup_manifest_digest "
-                ", result_canonical, result_digest "
+                ", result_canonical, result_digest, lease_expires_at, phase, "
+                "target_route_identity_digest "
                 "FROM maintenance_operations "
                 "WHERE installation_id = ? AND operation_id = ?",
                 (self._installation_id, operation_id),
@@ -890,7 +1003,21 @@ class SqliteMaintenance:
                     return replayed
                 if existing[2] != _OperationState.PENDING.value:
                     raise MaintenanceError(MaintenanceReason.MAINTENANCE_BUSY, False, {})
-                if (
+                route_switched_replay = (
+                    kind is MaintenanceKind.RESTORE and existing[16] == "route_switched"
+                )
+                if route_switched_replay:
+                    current_route = self._catalog.execute(
+                        "SELECT active_route_identity_digest, state FROM task_routes "
+                        "WHERE task_id = ?",
+                        (facts.task_id,),
+                    ).fetchone()
+                    if (
+                        current_route != (existing[17], "active")
+                        or facts.source_route_identity_digest != existing[17]
+                    ):
+                        raise MaintenanceError(MaintenanceReason.PLAN_STALE, False, {})
+                elif (
                     existing[6] != facts.source_route_identity_digest
                     or existing[7] != facts.frontier.sequence
                     or existing[8] != facts.frontier.head_digest
@@ -898,6 +1025,15 @@ class SqliteMaintenance:
                     or existing[10] != facts.privacy_roots.root_set_digest
                 ):
                     raise MaintenanceError(MaintenanceReason.PLAN_STALE, False, {})
+                lease_expires_at = existing[15]
+                if type(lease_expires_at) is not str:
+                    raise MaintenanceError(MaintenanceReason.BACKUP_INCOMPLETE, False, {})
+                try:
+                    lease_expiry = parse_rfc3339_millis(lease_expires_at)
+                except (TypeError, ValueError) as exc:
+                    raise MaintenanceError(MaintenanceReason.BACKUP_INCOMPLETE, False, {}) from exc
+                if lease_expiry > now:
+                    raise MaintenanceError(MaintenanceReason.MAINTENANCE_BUSY, True, {})
                 current_lease = cast(int, existing[5])
                 lease_generation = current_lease + 1
                 self._catalog.execute(
@@ -1172,6 +1308,154 @@ class SqliteMaintenance:
             self._catalog.execute("ROLLBACK")
             raise
 
+    @staticmethod
+    def _project_text_ref(value: object) -> ProjectTextRef:
+        """Decode a catalog pointer while keeping the encrypted object outside this boundary."""
+
+        if type(value) is bytes:
+            encoded = value
+        elif type(value) is str:
+            encoded = value.encode("utf-8")
+        else:
+            raise MaintenanceError(MaintenanceReason.REPLAY_MISMATCH, False, {})
+        try:
+            parsed = strict_json_parse(encoded)
+            if not isinstance(parsed, Mapping) or canonical_encode(parsed) != encoded:
+                raise ValueError("project_text_ref_noncanonical")
+            required = {
+                "object_id",
+                "content_digest",
+                "plaintext_size",
+                "owner_task_id",
+                "route_generation",
+            }
+            keys = set(parsed)
+            if keys not in (required, required | {"envelope_digest"}):
+                raise ValueError("project_text_ref_shape_invalid")
+            route_generation = parsed["route_generation"]
+            if type(route_generation) is not str:
+                raise ValueError("project_text_ref_generation_invalid")
+            generation = int(route_generation, 10)
+            if str(generation) != route_generation:
+                raise ValueError("project_text_ref_generation_invalid")
+            reference = ProjectTextRef(
+                object_id=cast(str, parsed["object_id"]),
+                content_digest=cast(str, parsed["content_digest"]),
+                plaintext_size=cast(int, parsed["plaintext_size"]),
+                owner_task_id=cast(str, parsed["owner_task_id"]),
+                route_generation=generation,
+                envelope_digest=cast(str | None, parsed.get("envelope_digest")),
+            )
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise MaintenanceError(MaintenanceReason.REPLAY_MISMATCH, False, {}) from exc
+        # A pre-C6 reference without the envelope digest cannot be proven against the restored
+        # object set.  Keeping it would allow a route switch to orphan plaintext under an
+        # uncheckable pointer, so restore rejects the legacy form explicitly.
+        if reference.envelope_digest is None:
+            raise MaintenanceError(MaintenanceReason.REPLAY_MISMATCH, False, {})
+        return reference
+
+    @staticmethod
+    def _project_text_ref_wire(reference: ProjectTextRef, original: object) -> bytes | str:
+        encoded = canonical_encode(reference.as_wire())
+        if type(original) is bytes:
+            return encoded
+        if type(original) is str:
+            try:
+                return encoded.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise MaintenanceError(MaintenanceReason.REPLAY_MISMATCH, False, {}) from exc
+        raise MaintenanceError(MaintenanceReason.REPLAY_MISMATCH, False, {})
+
+    def _catalog_table_exists_locked(self, name: str) -> bool:
+        row = self._catalog.execute(
+            "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ? LIMIT 1", (name,)
+        ).fetchone()
+        return row == (1,)
+
+    def _validate_project_text_owner_locked(self, reference: ProjectTextRef) -> None:
+        generations = {
+            row[0]
+            for row in self._catalog.execute(
+                "SELECT route_generation FROM task_routes WHERE task_id = ? "
+                "UNION ALL SELECT route_generation FROM retained_task_routes "
+                "WHERE installation_id = ? AND task_id = ? AND state IN ('retained', 'quarantined')",
+                (reference.owner_task_id, self._installation_id, reference.owner_task_id),
+            ).fetchall()
+            if len(row) == 1 and type(row[0]) is int
+        }
+        if reference.route_generation not in generations:
+            raise MaintenanceError(MaintenanceReason.REPLAY_MISMATCH, False, {})
+
+    def _rebase_project_text_refs_locked(
+        self, task_id_value: str, old_generation: int, new_generation: int
+    ) -> None:
+        """Validate every catalog pointer and rebase only the replaced route's current refs.
+
+        The encrypted object bytes remain in their owning bundle.  Rebase changes only the
+        structural route-generation field, and only when the pointer followed the active route
+        being replaced.  Pointers to another task or to an explicitly retained generation stay
+        untouched but are still checked for a live retention root.
+        """
+
+        if not self._catalog_table_exists_locked("projects"):
+            return
+        project_rows = self._catalog.execute(
+            "SELECT project_id, title_ref_canonical, description_ref_canonical FROM projects"
+        ).fetchall()
+        for row in project_rows:
+            if len(row) != 3 or type(row[0]) is not str:
+                raise MaintenanceError(MaintenanceReason.REPLAY_MISMATCH, False, {})
+            project_id_value = row[0]
+            for column, encoded in (
+                ("title_ref_canonical", row[1]),
+                ("description_ref_canonical", row[2]),
+            ):
+                if encoded is None:
+                    continue
+                reference = self._project_text_ref(encoded)
+                self._validate_project_text_owner_locked(reference)
+                if (
+                    reference.owner_task_id == task_id_value
+                    and reference.route_generation == old_generation
+                ):
+                    rebased = replace(reference, route_generation=new_generation)
+                    self._catalog.execute(
+                        f"UPDATE projects SET {column} = ? WHERE project_id = ? AND {column} IS ?",
+                        (
+                            self._project_text_ref_wire(rebased, encoded),
+                            project_id_value,
+                            encoded,
+                        ),
+                    )
+                    if self._catalog.changes() != 1:
+                        raise MaintenanceError(MaintenanceReason.CATALOG_ROUTE_CHANGED, False, {})
+
+        if not self._catalog_table_exists_locked("coordination_detections"):
+            return
+        detail_rows = self._catalog.execute(
+            "SELECT detection_id, detail_ref_json FROM coordination_detections "
+            "WHERE detail_ref_json IS NOT NULL"
+        ).fetchall()
+        for row in detail_rows:
+            if len(row) != 2 or type(row[0]) is not str:
+                raise MaintenanceError(MaintenanceReason.REPLAY_MISMATCH, False, {})
+            encoded = row[1]
+            reference = self._project_text_ref(encoded)
+            self._validate_project_text_owner_locked(reference)
+            if (
+                reference.owner_task_id == task_id_value
+                and reference.route_generation == old_generation
+            ):
+                rebased = replace(reference, route_generation=new_generation)
+                self._catalog.execute(
+                    "UPDATE coordination_detections SET detail_ref_json = ? "
+                    "WHERE detection_id = ? AND detail_ref_json IS ?",
+                    (self._project_text_ref_wire(rebased, encoded), row[0], encoded),
+                )
+                if self._catalog.changes() != 1:
+                    raise MaintenanceError(MaintenanceReason.CATALOG_ROUTE_CHANGED, False, {})
+
     async def _switch_restored_route(
         self, handle: MaintenanceHandle, target: _RestoredTarget
     ) -> None:
@@ -1180,9 +1464,6 @@ class SqliteMaintenance:
         if handle.kind is not MaintenanceKind.RESTORE:
             raise TypeError("maintenance_restore_handle_required")
         self._require_handle(handle)
-        roots = await self._procedures.current_privacy_roots(
-            str(handle.task_id), handle.route_identity_digest
-        )
         now_wire = format_rfc3339_millis(self._now())
         self._catalog.execute("BEGIN IMMEDIATE")
         try:
@@ -1199,6 +1480,80 @@ class SqliteMaintenance:
                 or type(route[2]) is not int
             ):
                 raise MaintenanceError(MaintenanceReason.CATALOG_ROUTE_CHANGED, False, {})
+            operation = self._catalog.execute(
+                "SELECT subject_frontier_seq, subject_frontier_digest, phase, "
+                "target_route_identity_digest, backup_manifest_digest, "
+                "privacy_root_generation, privacy_root_digest "
+                "FROM maintenance_operations WHERE installation_id = ? AND operation_id = ? "
+                "AND state = 'pending' AND phase IN ('reserved', 'source_verified', "
+                "'target_ready', 'target_verified', 'route_switched')",
+                (self._installation_id, str(handle.request_id)),
+            ).fetchone()
+            if operation is None:
+                raise MaintenanceError(MaintenanceReason.GENERATION_LOST, False, {})
+            if operation[2] == "route_switched":
+                # The route switch is committed before the terminal result.  A retry must
+                # re-prove the target privacy authority instead of treating the route and
+                # retained-row shape as sufficient evidence.  The live roots provider binds
+                # the digest to the current audit object set; the catalog row and object-bearing
+                # audit rows then prove that authority was persisted on the target route.
+                roots = await self._procedures.current_privacy_roots(
+                    str(handle.task_id), handle.route_identity_digest
+                )
+                root_row = self._catalog.execute(
+                    "SELECT route_identity_digest, root_generation, root_count, root_digest "
+                    "FROM privacy_root_sets WHERE task_id = ?",
+                    (str(handle.task_id),),
+                ).fetchone()
+                if root_row != (
+                    handle.route_identity_digest,
+                    roots.privacy_root_generation,
+                    len(roots.object_refs),
+                    roots.root_set_digest,
+                ) or (
+                    roots.privacy_root_generation != operation[5]
+                    or roots.root_set_digest != operation[6]
+                ):
+                    raise MaintenanceError(MaintenanceReason.REPLAY_MISMATCH, False, {})
+                audit_route_mismatch = self._catalog.execute(
+                    "SELECT 1 FROM privacy_audit_records "
+                    "WHERE task_id = ? AND content_object_id IS NOT NULL "
+                    "AND (route_identity_digest IS NULL OR route_identity_digest <> ?) LIMIT 1",
+                    (str(handle.task_id), handle.route_identity_digest),
+                ).fetchone()
+                if audit_route_mismatch is not None:
+                    raise MaintenanceError(MaintenanceReason.REPLAY_MISMATCH, False, {})
+                retained = self._catalog.execute(
+                    "SELECT bundle_relpath, route_identity_digest, route_generation "
+                    "FROM retained_task_routes WHERE installation_id = ? AND task_id = ? "
+                    "AND retained_by_operation_id = ? AND state = 'retained'",
+                    (
+                        self._installation_id,
+                        str(handle.task_id),
+                        str(handle.request_id),
+                    ),
+                ).fetchone()
+                if (
+                    route[1] != target.bundle_relpath
+                    or route[3] != operation[3]
+                    or target.evidence.task_id != str(handle.task_id)
+                    or target.evidence.owner_generation != handle.owner_generation
+                    or target.evidence.route_identity_digest != route[3]
+                    or target.result.active_route_identity_digest != route[3]
+                    or target.result.prior_route_identity_digest is None
+                    or retained is None
+                    or retained[0] != f"tasks/{handle.task_id}"
+                    or retained[1] != target.result.prior_route_identity_digest
+                    or type(retained[2]) is not int
+                    or retained[2] + 1 != route[2]
+                    or target.result.backup_manifest_digest != operation[4]
+                ):
+                    raise MaintenanceError(MaintenanceReason.REPLAY_MISMATCH, False, {})
+                self._catalog.execute("COMMIT")
+                return
+            roots = await self._procedures.current_privacy_roots(
+                str(handle.task_id), handle.route_identity_digest
+            )
             root_row = self._catalog.execute(
                 "SELECT route_identity_digest, root_generation, root_digest "
                 "FROM privacy_root_sets WHERE task_id = ?",
@@ -1210,16 +1565,31 @@ class SqliteMaintenance:
                 roots.root_set_digest,
             ):
                 raise MaintenanceError(MaintenanceReason.CATALOG_ROUTE_CHANGED, False, {})
-            operation = self._catalog.execute(
-                "SELECT subject_frontier_seq, subject_frontier_digest "
-                "FROM maintenance_operations WHERE installation_id = ? AND operation_id = ? "
-                "AND state = 'pending' AND phase IN ('reserved', 'source_verified', "
-                "'target_ready', 'target_verified')",
-                (self._installation_id, str(handle.request_id)),
-            ).fetchone()
-            if operation is None:
-                raise MaintenanceError(MaintenanceReason.GENERATION_LOST, False, {})
             old_generation = cast(int, route[2])
+            if (
+                target.evidence.task_id != str(handle.task_id)
+                or target.evidence.owner_generation != handle.owner_generation
+                or target.result.prior_route_identity_digest != handle.route_identity_digest
+                or target.evidence.route_identity_digest == handle.route_identity_digest
+            ):
+                raise MaintenanceError(MaintenanceReason.REPLAY_MISMATCH, False, {})
+            collision = self._catalog.execute(
+                "SELECT 1 FROM task_routes WHERE bundle_relpath = ? OR "
+                "active_route_identity_digest = ? LIMIT 1",
+                (target.bundle_relpath, target.evidence.route_identity_digest),
+            ).fetchone()
+            if collision is not None:
+                raise MaintenanceError(MaintenanceReason.REPLAY_MISMATCH, False, {})
+            collision = self._catalog.execute(
+                "SELECT 1 FROM retained_task_routes WHERE bundle_relpath = ? OR "
+                "route_identity_digest = ? LIMIT 1",
+                (target.bundle_relpath, target.evidence.route_identity_digest),
+            ).fetchone()
+            if collision is not None:
+                raise MaintenanceError(MaintenanceReason.REPLAY_MISMATCH, False, {})
+            self._rebase_project_text_refs_locked(
+                str(handle.task_id), old_generation, old_generation + 1
+            )
             self._catalog.execute(
                 "INSERT INTO retained_task_routes("
                 "installation_id, task_id, route_generation, bundle_relpath, "

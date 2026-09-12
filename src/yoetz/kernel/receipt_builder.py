@@ -6,7 +6,7 @@ from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Final, cast
+from typing import Final, Literal, cast
 
 from yoetz.domain.events import (
     CheckRecordedPayload,
@@ -16,6 +16,8 @@ from yoetz.domain.events import (
     NoObligationsReason,
     ObligationChangeKind,
     ObligationStatus,
+    is_lineage_service_stamped,
+    is_observation_authored,
 )
 from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
@@ -33,6 +35,9 @@ from yoetz.domain.receipts import (
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
     SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
+    ReceiptChildFinding,
+    ReceiptChildOutcome,
+    ReceiptChildren,
     ReceiptConclusion,
     ReceiptDocument,
     ReceiptGap,
@@ -64,8 +69,10 @@ from yoetz.kernel.claims import effective_claim_items
 from yoetz.kernel.command_attempts import command_attempts
 from yoetz.kernel.deterministic_checks import CaseAvailabilityFacts, CaseGap
 from yoetz.kernel.finding_resolution import finding_resolution_explanation
+from yoetz.kernel.lineage import LineageEvaluation, LineageRollupState
 from yoetz.kernel.plan_scope import CurrentPlanScope, current_plan_scope
 from yoetz.kernel.projections import ObligationProjectionRecord, ProjectionRecord, ProjectionState
+from yoetz.kernel.reducers import is_material_event_family
 from yoetz.protocol.coverage import LEDGER_FRESHNESS_ORDER, Coverage, weakest
 from yoetz.protocol.models import ReceiptInclude, ReceiptRedactionProfile
 
@@ -283,6 +290,7 @@ class ReceiptBuildContext:
     gaps: tuple[CaseGap, ...]
     finding_states: tuple[ReceiptFindingState, ...]
     applicable_check: CheckRecordedPayload | None
+    lineage: LineageEvaluation | None = None
     check_suffix: CheckSuffixClass | None = None
     records: tuple[LedgerRecord, ...] = ()
 
@@ -300,6 +308,7 @@ class ReceiptBuildContext:
                 self.applicable_check is not None
                 and type(self.applicable_check) is not CheckRecordedPayload
             )
+            or (self.lineage is not None and type(self.lineage) is not LineageEvaluation)
             or (self.check_suffix is not None and type(self.check_suffix) is not CheckSuffixClass)
         ):
             raise ValueError(_CONTEXT_INVALID)
@@ -340,6 +349,11 @@ class ReceiptBuildContext:
         if self.applicable_check is not None:
             if weakest(self.coverage, self.applicable_check.coverage) != self.coverage:
                 raise ValueError(_CONTEXT_INVALID)
+        if (
+            self.lineage is not None
+            and weakest(self.coverage, self.lineage.coverage) != self.coverage
+        ):
+            raise ValueError(_CONTEXT_INVALID)
         _validate_availability(self)
         _validate_finding_states(self)
         _validate_applicable_check(self)
@@ -712,6 +726,63 @@ def _apply_profile(
     )
 
 
+def _receipt_children(evaluation: LineageEvaluation | None) -> ReceiptChildren:
+    """Project the pure lineage evaluation into the receipt's bounded child section."""
+
+    if evaluation is None:
+        return ReceiptChildren()
+    snapshots = {snapshot.child_task_id: snapshot for snapshot in evaluation.snapshots}
+    children: list[ReceiptChildOutcome] = []
+    for rollup in evaluation.children:
+        snapshot = snapshots.get(rollup.child_task_id)
+        if snapshot is None:
+            # A synthetic rollup without its source snapshot cannot be rendered as a truthful
+            # child finding row.  Keep the child identity and outcome while naming the missing
+            # source through the evaluator's coverage gap.
+            findings: tuple[ReceiptChildFinding, ...] = ()
+        else:
+            findings = tuple(
+                ReceiptChildFinding(
+                    finding_id=finding.finding_id,
+                    kind=finding.kind,
+                    origin=finding.origin,
+                    priority=finding.priority,
+                    actionable=bool(finding.actionable),
+                    resolved=finding.resolved,
+                    resolution_event_id=finding.resolution_event_id,
+                )
+                for finding in snapshot.findings
+            )
+        # ``blocked`` is the evaluator's internal state for unresolved actionable child findings;
+        # receipts expose the bounded child outcome vocabulary, where that state is an open gap
+        # accompanied by the actionable finding rows.
+        outcome = (
+            "annotated"
+            if rollup.state is LineageRollupState.ANNOTATION
+            else "open_gap"
+            if rollup.state is LineageRollupState.BLOCKED
+            else rollup.outcome
+        )
+        children.append(
+            ReceiptChildOutcome(
+                child_task_id=rollup.child_task_id,
+                outcome=cast(
+                    Literal["clean", "annotated", "open_gap", "incomplete", "unavailable"],
+                    outcome,
+                ),
+                tested_manifest_ref=(
+                    None
+                    if rollup.state is LineageRollupState.UNAVAILABLE
+                    else rollup.tested_manifest_ref
+                ),
+                later_manifest_ref=rollup.later_manifest_ref,
+                freshness=cast(Literal["known", "unknown"], rollup.freshness),
+                findings=findings,
+            )
+        )
+    return ReceiptChildren(tuple(children))
+
+
 def _conclusion(
     context: ReceiptBuildContext,
     unresolved_actionable: tuple[Finding, ...],
@@ -720,8 +791,12 @@ def _conclusion(
         # These two closed gaps bound completion itself. Findings remain visible and actionable,
         # but they cannot make an empty completion scope read as sufficiently covered.
         return ReceiptConclusion.INSUFFICIENT_COVERAGE
-    if unresolved_actionable:
+    if unresolved_actionable or (
+        context.lineage is not None and context.lineage.actionable_finding_ids
+    ):
         return ReceiptConclusion.UNRESOLVED_FINDINGS_REMAIN
+    if context.lineage is not None and context.lineage.blocks_clean_completion:
+        return ReceiptConclusion.INSUFFICIENT_COVERAGE
     check = context.applicable_check
     if check is None:
         return ReceiptConclusion.INSUFFICIENT_COVERAGE
@@ -772,11 +847,64 @@ def _resolved_history_sentence(resolved_count: int) -> str:
     )
 
 
+def _suffix_record_kinds(context: ReceiptBuildContext) -> tuple[str | None, bool]:
+    """Return whether an attributable suffix contains service lineage and host observations.
+
+    ``CheckSuffixClass`` is intentionally derived by the application and remains the public
+    render context.  The builder has the frozen records as well, so it can refine the prose for
+    a service-generated lineage manifest without changing that context enum or any receipt wire
+    shape.  This is strictly a read over the recorded prefix; it never refreshes child state.
+    """
+
+    if (
+        context.check_suffix is None
+        or context.applicable_check is None
+        or not context.records
+        or context.projection.latest_tested_state is None
+    ):
+        return None, False
+    check_event_id = context.projection.latest_tested_state.source_check_event_id
+    check_record = next(
+        (record for record in context.records if record.event_id == check_event_id),
+        None,
+    )
+    if check_record is None:
+        return None, False
+    later_material = tuple(
+        record
+        for record in context.records
+        if is_material_event_family(record.schema.name)
+        and record.ledger.ingestion_sequence > check_record.ledger.ingestion_sequence
+    )
+    lineage_records = tuple(
+        record for record in later_material if is_lineage_service_stamped(record)
+    )
+    lineage_label: str | None = None
+    if lineage_records:
+        lineage_label = (
+            "service-generated child-dependency manifests"
+            if all(
+                record.schema.name == "child_dependencies_recorded" for record in lineage_records
+            )
+            else "service-generated lineage records"
+        )
+    return (
+        lineage_label,
+        any(
+            is_observation_authored(record) and not is_lineage_service_stamped(record)
+            for record in later_material
+        ),
+    )
+
+
 def _check_coverage_sentence(
     gap_codes: tuple[str, ...],
     frontier: Frontier,
     tested_subject_sequence: str | None,
     check_suffix: CheckSuffixClass | None = None,
+    *,
+    engine_derived_suffix: str | None = None,
+    host_observation_suffix: bool = False,
 ) -> str:
     """State what the recorded check does or does not cover here, in the reader's terms."""
 
@@ -793,16 +921,35 @@ def _check_coverage_sentence(
         if check_suffix is CheckSuffixClass.RESPONSES_ONLY:
             later = "only responses to the findings it returned were published after it"
         elif check_suffix is CheckSuffixClass.OBSERVATIONS_ONLY:
-            later = (
-                f"the records accepted after it through frontier {frontier.sequence} are "
-                "finding-free host observations, retained here but not evaluated by that check"
-            )
+            if engine_derived_suffix is not None:
+                later = (
+                    f"the records accepted after it through frontier {frontier.sequence} are "
+                    + (
+                        "finding-free host observations and "
+                        f"{engine_derived_suffix}, retained here but not evaluated by that check"
+                        if host_observation_suffix
+                        else f"{engine_derived_suffix}, retained here but not evaluated by that check"
+                    )
+                )
+            else:
+                later = (
+                    f"the records accepted after it through frontier {frontier.sequence} are "
+                    "finding-free host observations, retained here but not evaluated by that check"
+                )
         elif check_suffix is CheckSuffixClass.MIXED:
-            later = (
-                f"the records accepted after it through frontier {frontier.sequence} are "
-                "responses to the findings it returned and finding-free host observations, "
-                "retained here but not evaluated by that check"
-            )
+            if engine_derived_suffix is not None:
+                later = (
+                    f"the records accepted after it through frontier {frontier.sequence} are "
+                    "responses to the findings it returned and "
+                    + ("finding-free host observations plus " if host_observation_suffix else "")
+                    + f"{engine_derived_suffix}, retained here but not evaluated by that check"
+                )
+            else:
+                later = (
+                    f"the records accepted after it through frontier {frontier.sequence} are "
+                    "responses to the findings it returned and finding-free host observations, "
+                    "retained here but not evaluated by that check"
+                )
         else:
             later = (
                 f"no cooperative material work superseded it through frontier {frontier.sequence}"
@@ -882,6 +1029,8 @@ def _sections(
     resolution_explanations: tuple[str, ...] = (),
     attempt_explanations: tuple[str, ...] = (),
     check_suffix: CheckSuffixClass | None = None,
+    engine_derived_suffix: str | None = None,
+    host_observation_suffix: bool = False,
 ) -> tuple[ReceiptSection, ...]:
     gap_codes = coverage.known_gaps
     bodies: dict[ReceiptSectionKey, str] = {}
@@ -1024,7 +1173,12 @@ def _sections(
         # after it. Saying only `check_not_applicable` next to a fresh successful check reads as
         # a contradiction; the 2026-07-27 dogfood could not tell which of four readings was meant.
         check_sentence = _check_coverage_sentence(
-            gap_codes, frontier, tested_subject_sequence, check_suffix
+            gap_codes,
+            frontier,
+            tested_subject_sequence,
+            check_suffix,
+            engine_derived_suffix=engine_derived_suffix,
+            host_observation_suffix=host_observation_suffix,
         )
         if check_sentence:
             gap_body = f"{check_sentence} Coverage is limited by: {', '.join(gap_codes)}."
@@ -1135,6 +1289,7 @@ def build_receipt(
     claim_refs = _select_claim_refs(context, findings)
     evidence_refs = _select_evidence_refs(context, claim_refs, obligations, responses)
     gaps = _select_gaps(context)
+    children = _receipt_children(context.lineage)
     (
         retained_findings,
         retained_obligations,
@@ -1149,6 +1304,7 @@ def build_receipt(
         responses,
         gaps,
     )
+    engine_derived_suffix, host_observation_suffix = _suffix_record_kinds(context)
     # Resolved history is named only for rows the profile retains: a profile that omits a
     # finding row must not leak its id through the summary items.
     retained_ids = frozenset(finding.finding_id for finding in retained_findings)
@@ -1206,6 +1362,8 @@ def build_receipt(
         if context.records
         else (),
         check_suffix=context.check_suffix,
+        engine_derived_suffix=engine_derived_suffix,
+        host_observation_suffix=host_observation_suffix,
     )
     suppressed_count = (
         0 if context.applicable_check is None else context.applicable_check.suppressed_count
@@ -1228,4 +1386,5 @@ def build_receipt(
         gaps=retained_gaps,
         redactions=redactions,
         sections=sections,
+        children=children,
     )

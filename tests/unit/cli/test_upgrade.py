@@ -107,6 +107,15 @@ def test_codex_plan_has_no_invented_plugin_update_or_general_setup() -> None:
         assert _RUNNER.invoke(app, [*command[1:], "--help"]).exit_code == 0
 
 
+def test_existing_task_upgrade_uses_normal_startup_and_status() -> None:
+    steps = upgrade.build_upgrade_plan(["codex"], {})
+    data_step = next(step for step in steps if step.title == "Data and service")
+    assert data_step.commands == (("yoetz", "service", "status", "--json"),)
+    assert "upgrade automatically" in data_step.detail
+    assert "Existing tasks, settings and permissions are retained" in data_step.detail
+    assert "resumes the recorded upgrade" in data_step.detail
+
+
 def test_invalid_targets_fail_before_execution() -> None:
     with pytest.raises(ValueError, match="upgrade_target_must_be_absolute"):
         upgrade.build_upgrade_plan(["cursor"], {"project-root": "relative"})

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -25,7 +26,7 @@ from yoetz.domain.observation import (
     ObservationStatusQuery,
 )
 from yoetz.domain.values import JsonObject, Timestamp
-from yoetz.protocol.errors import ProtocolValueError
+from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 
 _DROPPED_GAP = "_local_stream_partial_dropped"
 _MAX_PARTIAL = local_mod._MAX_STREAM_PARTIAL_BYTES  # pyright: ignore[reportPrivateUsage]
@@ -316,6 +317,70 @@ def _force_envelope_eviction(
     store.note_coverage_gap(workspace, ObservationGapCode.SERVICE_UNAVAILABLE.value)
 
 
+def test_envelope_eviction_persists_retention_provenance_for_pairing_reconciliation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A size-pressure eviction must block legacy false-gap retirement."""
+
+    store, workspace, session = _consented_store(tmp_path)
+    legacy_post_only = replace(
+        _envelope(
+            session=session,
+            identity="hook:legacy-post-only",
+            ordinal=1,
+            source=ObservationSource.CLAUDE_HOOK,
+        ),
+        event_kind="PostToolUse",
+        structural_payload=JsonObject(
+            {
+                "capability_profile_id": "claude-code-cli-local-project-2.1.241",
+                "tool_call_id": "legacy-call",
+            }
+        ),
+        gap_codes=(ObservationGapCode.UNPAIRED_EVENT.value,),
+    )
+    true_orphan = replace(
+        _envelope(session=session, identity="hook:true-orphan", ordinal=2),
+        event_kind="PostToolUse",
+        gap_codes=(ObservationGapCode.UNPAIRED_EVENT.value,),
+    )
+    state = store._load(workspace)  # pyright: ignore[reportPrivateUsage]
+    state.envelopes = [legacy_post_only, true_orphan]
+    store._note_gap_state(  # pyright: ignore[reportPrivateUsage]
+        state, ObservationGapCode.UNPAIRED_EVENT.value
+    )
+    both_size = len(store._encode_state(workspace, state))  # pyright: ignore[reportPrivateUsage]
+    state.envelopes = [legacy_post_only]
+    one_size = len(store._encode_state(workspace, state))  # pyright: ignore[reportPrivateUsage]
+    state.envelopes = [legacy_post_only, true_orphan]
+    cap = one_size + max(64, (both_size - one_size) // 2)
+    if cap >= both_size:
+        cap = both_size - 1
+    monkeypatch.setattr(local_mod, "_MAX_STATE_BYTES", cap)
+
+    def choose_envelope_index(envelopes: list[ObservationEnvelope]) -> int | None:
+        return 1 if len(envelopes) > 1 else None
+
+    monkeypatch.setattr(
+        store,
+        "_fair_envelope_index",
+        choose_envelope_index,
+    )
+
+    store._save(workspace, state)  # pyright: ignore[reportPrivateUsage]
+
+    persisted = _state_json(tmp_path)
+    assert persisted["envelopes_truncated"] is True
+    assert len(cast(list[object], persisted["envelopes"])) == 1
+    reopened = LocalObservationStore(_state=tmp_path)
+    assert (
+        ObservationGapCode.UNPAIRED_EVENT.value
+        in reopened.status(ObservationStatusQuery(workspace)).gaps
+    )
+    history = cast(dict[str, dict[str, object]], persisted["gap_history"])
+    assert history[ObservationGapCode.UNPAIRED_EVENT.value]["active"] is True
+
+
 def test_truncation_gap_clears_once_the_store_stops_shedding_history(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -590,10 +655,41 @@ def test_pruned_binding_resumes_with_generation_continuity(tmp_path: Path) -> No
     store.note_session_end(workspace, commitment)
     assert store.prune_codex_session_bindings(workspace, ("sess-resumed",)) == ("sess-resumed",)
     assert store.codex_session_ended(workspace, "sess-resumed") is False
-
     assert store.bind_codex_session(workspace, "sess-resumed") == commitment
     # Bound again but not yet restarted: still the ended generation, exactly as
     # before pruning, until SessionStart advances it under the lifecycle lock.
     assert store.codex_session_ended(workspace, "sess-resumed") is True
     assert store.begin_session_generation(workspace, commitment) == 2
     assert store.codex_session_ended(workspace, "sess-resumed") is False
+
+
+def test_codex_binding_capacity_fails_closed_and_reclaims_only_terminal_lanes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raw child bindings stay bounded without dropping active accepted lanes."""
+
+    monkeypatch.setattr(local_mod, "_MAX_CODEX_SESSION_BINDINGS", 2)
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    first = store.bind_codex_session(workspace, "sess-binding-first")
+    store.bind_codex_session(workspace, "sess-binding-second")
+
+    with pytest.raises(PublicOperationError) as raised:
+        store.bind_codex_session(workspace, "sess-binding-third")
+    assert raised.value.code is PublicErrorCode.LIMIT_EXCEEDED
+    assert raised.value.retryable is True
+    assert store.codex_sessions_for_workspace(workspace) == (
+        "sess-binding-first",
+        "sess-binding-second",
+    )
+
+    # A durable terminal mark is enough to make one lane reclaimable. The
+    # binding itself is pruned atomically with the subsequent new bind; an
+    # active lane is never selected by the capacity guard.
+    store.note_session_end(workspace, first)
+    assert store.bind_codex_session(workspace, "sess-binding-third")
+    assert store.codex_sessions_for_workspace(workspace) == (
+        "sess-binding-second",
+        "sess-binding-third",
+    )

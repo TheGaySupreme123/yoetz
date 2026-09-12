@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -20,6 +21,7 @@ from builders.start_application import (
     start_request,
 )
 from yoetz.application.egress import PrivacyCoordinator
+from yoetz.application.projects import ProjectApplication
 from yoetz.application.service import (
     Application,
     ClientProjectionContext,
@@ -29,6 +31,7 @@ from yoetz.application.service import (
 )
 from yoetz.application.start import StartInternalResult
 from yoetz.application.status import StatusInternalResult
+from yoetz.application.task_views import LineageStatusSnapshot, ProjectStatusSnapshot
 from yoetz.domain.events import AcceptedEvent, RuntimeProfile
 from yoetz.domain.privacy import (
     AuthorizationScope,
@@ -64,7 +67,12 @@ from yoetz.protocol.models import (
     StatusCandidateFindingsPageModel,
     StatusCompactPageModel,
     StatusFindingsPageModel,
+    StatusLineageAnnotationModel,
+    StatusLineageChildModel,
+    StatusLineagePageModel,
     StatusObligationsPageModel,
+    StatusProjectMemberModel,
+    StatusProjectPageModel,
     StatusRequest,
     StatusResultModel,
     StatusResultsPageModel,
@@ -212,8 +220,13 @@ def _scope(_binding: object, source: Mapping[str, JsonValue]) -> AuthorizationSc
     )
 
 
-async def _semantic_disabled(frozen: object, findings: object) -> object:
-    del frozen, findings
+async def _semantic_disabled(
+    frozen: object,
+    findings: object,
+    runtime: object | None = None,
+    lineage_evaluation: object | None = None,
+) -> object:
+    del frozen, findings, runtime, lineage_evaluation
     raise AssertionError("semantic_evaluator_called_in_deterministic_mode")
 
 
@@ -1874,3 +1887,155 @@ async def test_status_filters_before_payload_hydration() -> None:
     full_page = cast(StatusObligationsPageModel, full.page)
     assert len(full_page.items) == len(obligation_ids)
     assert {item.obligation_id for item in full_page.items} == set(obligation_ids)
+
+
+async def test_lineage_paginates_children_and_annotations_and_rejects_changed_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yoetz.application import task_views
+
+    app, _runtime, _projection = _build_app(seed_offset=12)
+    started = await app.start(start_request(1200, title="Lineage pagination exercise"))
+    children = tuple(
+        StatusLineageChildModel.model_validate(
+            {
+                "task_id": protocol_id("tsk_", 12_000 + index),
+                "parent_task_id": started.task_id,
+                "origin": "self_registered",
+                "acceptance": "pending",
+                "work_state": "open",
+                "session_health": "contact_lost",
+                "depth": "1",
+                "rollup_state": "annotation",
+                "blocking_conditions": (),
+            }
+        )
+        for index in range(105)
+    )
+    annotations = tuple(
+        StatusLineageAnnotationModel.model_validate(
+            {
+                "correlation_id": f"lineage:observed-{index}",
+                "subagent_id": f"agent-{index}",
+                "origin": "host_observed",
+                "acceptance": "pending",
+            }
+        )
+        for index in range(8)
+    )
+    snapshot = LineageStatusSnapshot(None, children, annotations)
+
+    async def read_snapshot(*_args: object, **_kwargs: object) -> LineageStatusSnapshot:
+        return snapshot
+
+    monkeypatch.setattr(task_views, "lineage_status_page", read_snapshot)
+    wire: dict[str, JsonValue] = {
+        **_request_base(protocol_id("req_", 1201)),
+        "session_id": started.session_id,
+        "writer_id": started.writer_id,
+        "view": "lineage",
+        "limit": "50",
+    }
+    first = await app.status(StatusRequest.model_validate(wire))
+    assert isinstance(first.page, StatusLineagePageModel)
+    first_cursor = first.page.next_cursor
+    assert first_cursor is not None
+    seen_children = [item.task_id for item in first.page.children]
+    seen_annotations = [item.correlation_id for item in first.page.annotations]
+    cursor = first_cursor
+    while cursor is not None:
+        result = await app.status(StatusRequest.model_validate({**wire, "cursor": cursor}))
+        assert isinstance(result.page, StatusLineagePageModel)
+        assert len(result.page.children) + len(result.page.annotations) <= 50
+        seen_children.extend(item.task_id for item in result.page.children)
+        seen_annotations.extend(item.correlation_id for item in result.page.annotations)
+        cursor = result.page.next_cursor
+    assert seen_children == [item.task_id for item in children]
+    assert seen_annotations == [item.correlation_id for item in annotations]
+    assert _frontier(first.result_frontier) == _frontier(started.frontier)
+
+    with pytest.raises(PublicOperationError) as selector_error:
+        await app.status(
+            StatusRequest.model_validate(
+                {**wire, "cursor": first_cursor, "task_id": protocol_id("tsk_", 999)}
+            )
+        )
+    assert selector_error.value.code is PublicErrorCode.INVALID_REQUEST
+
+    snapshot = replace(snapshot, children=children[:-1])
+    with pytest.raises(PublicOperationError, match="cursor is stale"):
+        await app.status(StatusRequest.model_validate({**wire, "cursor": first_cursor}))
+
+
+async def test_project_status_pages_and_lineage_fallback_use_the_public_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yoetz.application import task_views
+
+    app, _runtime, _projection = _build_app(seed_offset=13)
+    app = replace(
+        app, project_application=cast(ProjectApplication, AsyncMock(spec=ProjectApplication))
+    )
+    started = await app.start(start_request(1300, title="Project status exercise"))
+    members = tuple(
+        StatusProjectMemberModel.model_validate(
+            {
+                "task_id": protocol_id("tsk_", 13_000 + index),
+                "actor_id": None if index else "harness:test",
+                "work_state": "open",
+                "session_health": "contact_lost",
+            }
+        )
+        for index in range(3)
+    )
+    snapshot: ProjectStatusSnapshot | LineageStatusSnapshot = ProjectStatusSnapshot(
+        {
+            "project_id": protocol_id("prj_", 1300),
+            "kind": "repository",
+            "membership_generation": "1",
+            "grant_state": None,
+        },
+        members,
+        LineageStatusSnapshot(None, ()),
+        (),
+        (),
+        (),
+    )
+
+    async def read_snapshot(
+        *_args: object, **_kwargs: object
+    ) -> ProjectStatusSnapshot | LineageStatusSnapshot:
+        return snapshot
+
+    monkeypatch.setattr(task_views, "project_status_snapshot", read_snapshot)
+    wire: dict[str, JsonValue] = {
+        **_request_base(protocol_id("req_", 1301)),
+        "session_id": started.session_id,
+        "writer_id": started.writer_id,
+        "view": "project",
+        "limit": "2",
+    }
+    first = await app.status(StatusRequest.model_validate(wire))
+    assert isinstance(first.page, StatusProjectPageModel)
+    assert len(first.page.members) == 2
+    assert first.page.next_cursor is not None
+    second = await app.status(
+        StatusRequest.model_validate({**wire, "cursor": first.page.next_cursor})
+    )
+    assert isinstance(second.page, StatusProjectPageModel)
+    assert second.page.members == members[2:]
+    assert second.page.next_cursor is None
+
+    snapshot = LineageStatusSnapshot(None, ())
+    fallback = await app.status(StatusRequest.model_validate(wire))
+    assert fallback.view == "lineage"
+    assert isinstance(fallback.page, StatusLineagePageModel)
+    facts = await app.projection_binding_facts(ControlMethod.STATUS, wire, fallback)
+    projected = await app.project_result_for_client(
+        ClientProjectionContext(ControlClientKind.CLI, ProjectionRenderMode.HUMAN_READABLE, True),
+        _cli_binding(1302, facts),
+        fallback,
+    )
+    assert isinstance(projected, StatusResultModel)
+    assert projected.root.ok is True
+    assert projected.root.view == "lineage"

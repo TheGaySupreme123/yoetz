@@ -38,8 +38,12 @@ import pathlib
 
 from jsonschema import Draft202012Validator
 
+from yoetz.protocol.schemas import load_schema_catalog
 from yoetz.version import build_version_manifest, version_manifest_json
 
+# Matching source and mirror bytes can share a stale schema inventory. Exercise the same closed
+# catalog loader used by every public request before claiming the package is usable.
+load_schema_catalog()
 schema = json.loads(
     pathlib.Path("schemas/version/version-manifest-2.2.0.schema.json").read_bytes()
 )
@@ -173,6 +177,7 @@ def _write_pass(repo_root: Path) -> bool:
         (
             "generate_schemas.py",
             "--write",
+            "--include-builder-owned",
             "--only",
             "privacy/privacy-policy-1.0.0.schema.json",
             "--only",

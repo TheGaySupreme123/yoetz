@@ -27,6 +27,7 @@ __all__ = [
     "ExternalRuntimeProfileConfig",
     "LocalModelProfileConfig",
     "LoggingConfig",
+    "LineageSettings",
     "NetworkPolicy",
     "ObservationConfig",
     "OwnerDeclaredEndpointConfig",
@@ -329,6 +330,33 @@ class ObservationConfig(StrictConfigModel):
         return value
 
 
+class LineageSettings(StrictConfigModel):
+    """Bounded delegation and liveness policy consumed by the ready lineage coordinator."""
+
+    start_lease_seconds: int = Field(default=60, ge=1, le=86_400)
+    attach_handle_ttl_seconds: int = Field(default=300, ge=1, le=86_400)
+    contact_lost_recovery_seconds: int = Field(default=300, ge=1, le=86_400)
+    max_depth: int = Field(default=8, ge=0, le=64)
+    max_fanout: int = Field(default=32, ge=1, le=64)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_raw(cls, value: object) -> object:
+        _reject_unknown(
+            value,
+            frozenset(
+                {
+                    "start_lease_seconds",
+                    "attach_handle_ttl_seconds",
+                    "contact_lost_recovery_seconds",
+                    "max_depth",
+                    "max_fanout",
+                }
+            ),
+        )
+        return value
+
+
 class LoggingConfig(StrictConfigModel):
     level: Literal["debug", "info", "warning", "error"] = "info"
     payloads: bool = False
@@ -612,6 +640,7 @@ class YoetzConfig(StrictConfigModel):
     storage: StorageConfig = Field(default_factory=StorageConfig)
     verification: VerificationConfig = Field(default_factory=VerificationConfig)
     observation: ObservationConfig = Field(default_factory=ObservationConfig)
+    lineage: LineageSettings = Field(default_factory=LineageSettings)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     privacy: PrivacyBootstrapConfig = Field(default_factory=PrivacyBootstrapConfig)
     provider: ProviderProfileConfig | None = None
@@ -629,6 +658,7 @@ class YoetzConfig(StrictConfigModel):
                 "storage",
                 "verification",
                 "observation",
+                "lineage",
                 "logging",
                 "privacy",
                 "provider",

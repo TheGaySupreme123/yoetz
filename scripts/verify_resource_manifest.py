@@ -2,8 +2,8 @@
 
 This is the sole repository tool allowed to copy canonical resources into
 ``src/yoetz/resources/`` and regenerate ``src/yoetz/resources/manifest.json``. Its default
-``--check`` mode is strictly read-only; ``--sync`` stages a complete tree and atomically replaces
-only inventory-owned destination files.
+``--check`` mode is strictly read-only; ``--sync`` stages a complete tree, atomically replaces
+current inventory-owned destination files, and retires destinations from the prior inventory.
 """
 
 from __future__ import annotations
@@ -177,6 +177,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "fixtures/agent-plugins/claude-code-cli-native-project-2.1.261.case.json",
+        "compatibility_manifest",
+        "application/json",
+        True,
+    ),
+    (
         "fixtures/agent-plugins/cursor-sdk-python-1.0.24.case.json",
         "compatibility_manifest",
         "application/json",
@@ -279,9 +285,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ("migrations/bundle/0010.sql", "migration", "application/sql", True),
     ("migrations/bundle/0011.sql", "migration", "application/sql", True),
     ("migrations/bundle/0012.sql", "migration", "application/sql", True),
+    ("migrations/bundle/0013.sql", "migration", "application/sql", True),
     ("migrations/catalog/0001.sql", "migration", "application/sql", True),
     ("migrations/catalog/0002.sql", "migration", "application/sql", True),
     ("migrations/catalog/0003.sql", "migration", "application/sql", True),
+    ("migrations/catalog/0004.sql", "migration", "application/sql", True),
+    ("migrations/catalog/0005.sql", "migration", "application/sql", True),
     (
         "schemas/common/actor-assertion-1.0.0.schema.json",
         "json_schema",
@@ -328,6 +337,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/config/yoetz-config-1.2.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/config/yoetz-config-1.3.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,
@@ -658,6 +673,37 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     ("schemas/findings/finding-1.0.0.schema.json", "json_schema", "application/schema+json", True),
     ("schemas/findings/finding-1.1.0.schema.json", "json_schema", "application/schema+json", True),
+    ("schemas/findings/finding-1.2.0.schema.json", "json_schema", "application/schema+json", True),
+    (
+        "schemas/events/finding-recorded-1.2.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/events/coordination-context-recorded-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/events/coordination-disposition-recorded-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/events/coordination-obligation-declared-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/operations/check-request-1.1.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
     (
         "schemas/findings/provider-judgment-1.0.0.schema.json",
         "json_schema",
@@ -678,6 +724,186 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/findings/runtime-attempt-evidence-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/events/child-accepted-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/events/child-dependencies-recorded-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/events/child-rejected-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/events/child-written-off-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/events/delegation-cancelled-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/events/delegation-declared-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/events/event-draft-1.2.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/events/opaque-unknown-event-draft-1.2.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/events/session-opened-1.2.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/events/work-abandoned-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/events/work-cancelled-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/events/work-closed-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/events/work-written-off-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/operations/check-result-1.2.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/operations/publish-work-request-1.2.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/operations/receipt-result-1.2.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/operations/start-request-1.1.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/operations/start-result-1.1.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/operations/status-request-1.2.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/operations/status-result-1.3.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/receipts/receipt-document-1.2.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/common/lineage-acceptance-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/common/lineage-origin-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/common/session-health-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/common/work-state-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/consent/catalog-7.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/consent/pending-agent-7.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/consent/prepare-result-7.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/consent/review-result-7.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/consent/status-7.0.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,
@@ -1050,6 +1276,30 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/service/control-hello-2.7.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/service/control-hello-result-2.7.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/service/control-request-2.7.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/service/control-result-2.7.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/service/service-status-1.0.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -1133,6 +1383,51 @@ def _within_allowed_root(path: str) -> bool:
     return any(path.startswith(root) for root in _ALLOWED_SOURCE_ROOTS)
 
 
+def _assert_no_symlink_path(path: Path, *, root: Path) -> None:
+    """Reject a path or any existing component beneath the selected repository root."""
+
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise ResourceManifestError("path_outside_root", detail=str(path)) from exc
+    current = root
+    if current.is_symlink():
+        raise ResourceManifestError("symlink_forbidden", detail=str(current))
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            raise ResourceManifestError("symlink_forbidden", detail=str(current))
+
+
+def _package_files(resource_root: Path, *, repo_root: Path) -> tuple[Path, ...]:
+    """Enumerate package files without following symlinked roots, directories, or files."""
+
+    _assert_no_symlink_path(resource_root, root=repo_root)
+    if not resource_root.exists():
+        return ()
+    if not resource_root.is_dir():
+        raise ResourceManifestError("resource_root_invalid", detail=str(resource_root))
+
+    files: list[Path] = []
+    pending = [resource_root]
+    while pending:
+        current = pending.pop()
+        with os.scandir(current) as entries:
+            for entry in entries:
+                path = Path(entry.path)
+                if entry.is_symlink():
+                    raise ResourceManifestError("symlink_forbidden", detail=str(path))
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(path)
+                elif entry.is_file(follow_symlinks=False):
+                    files.append(path)
+                else:
+                    raise ResourceManifestError("resource_entry_invalid", detail=str(path))
+    return tuple(
+        sorted(files, key=lambda path: path.relative_to(resource_root).as_posix().encode())
+    )
+
+
 # --------------------------------------------------------------------------
 # Public surface
 # --------------------------------------------------------------------------
@@ -1172,7 +1467,7 @@ def build_codex_skill_manifest(*, repo_root: Path) -> bytes:
     """Render nested managed-member identities from their single owning source bytes."""
 
     path = repo_root / _CODEX_SKILL_MANIFEST
-    data = _read_guarded(path, size_cap=_MAX_TEXT_BYTES)
+    data = _read_guarded(path, root=repo_root, size_cap=_MAX_TEXT_BYTES)
     try:
         parsed = strict_json_parse(data[:-1] if data.endswith(b"\n") else data)
     except Exception as exc:  # noqa: BLE001 - normalized into bounded verification failure
@@ -1189,7 +1484,9 @@ def build_codex_skill_manifest(*, repo_root: Path) -> bytes:
     document = dict(source)
     managed: list[JsonValue] = []
     for logical_name, origin, role, source_path in _CODEX_SKILL_MEMBERS:
-        member_data = _read_guarded(repo_root / source_path, size_cap=_MAX_TEXT_BYTES)
+        member_data = _read_guarded(
+            repo_root / source_path, root=repo_root, size_cap=_MAX_TEXT_BYTES
+        )
         member: dict[str, JsonValue] = {
             "logical_name": logical_name,
             "origin": origin,
@@ -1219,13 +1516,16 @@ def verify_codex_skill_manifest(*, repo_root: Path) -> bytes:
     """Return expected bytes or fail when nested managed-member metadata is stale."""
 
     expected = build_codex_skill_manifest(repo_root=repo_root)
-    actual = _read_guarded(repo_root / _CODEX_SKILL_MANIFEST, size_cap=_MAX_TEXT_BYTES)
+    actual = _read_guarded(
+        repo_root / _CODEX_SKILL_MANIFEST, root=repo_root, size_cap=_MAX_TEXT_BYTES
+    )
     if actual != expected:
         raise ResourceManifestError("codex_skill_manifest_stale", detail=_CODEX_SKILL_MANIFEST)
     return expected
 
 
-def _read_guarded(path: Path, *, size_cap: int) -> bytes:
+def _read_guarded(path: Path, *, root: Path, size_cap: int) -> bytes:
+    _assert_no_symlink_path(path, root=root)
     if path.is_symlink():
         raise ResourceManifestError("symlink_forbidden", detail=str(path))
     if not path.is_file():
@@ -1289,7 +1589,7 @@ def collect_source_entries(
     collected: list[CollectedResource] = []
     for entry in inventory.entries:
         source = repo_root / entry.source_path
-        data = _read_guarded(source, size_cap=entry.size_cap)
+        data = _read_guarded(source, root=repo_root, size_cap=entry.size_cap)
         _validate_text_policy(entry, data)
         digest = f"sha256:{hashlib.sha256(data).hexdigest()}"
         collected.append(CollectedResource(entry=entry, size=len(data), sha256=digest, data=data))
@@ -1365,6 +1665,9 @@ def verify_resource_tree(
     inventory_paths = {resource.entry.package_path for resource in resources}
     resource_root = repo_root / _PACKAGE_RESOURCE_ROOT
 
+    package_files = _package_files(resource_root, repo_root=repo_root)
+    package_paths = {path.relative_to(resource_root).as_posix(): path for path in package_files}
+
     missing: list[str] = []
     changed: list[str] = []
     for resource in resources:
@@ -1376,15 +1679,11 @@ def verify_resource_tree(
             changed.append(resource.entry.package_path)
 
     extra: list[str] = []
-    if resource_root.is_dir():
-        for candidate in sorted(resource_root.rglob("*")):
-            if candidate.is_dir() or candidate.is_symlink():
-                continue
-            relative = candidate.relative_to(resource_root).as_posix()
-            if relative == "manifest.json":
-                continue
-            if relative not in inventory_paths:
-                extra.append(relative)
+    for relative in sorted(package_paths):
+        if relative == "manifest.json":
+            continue
+        if relative not in inventory_paths:
+            extra.append(relative)
 
     manifest_path = resource_root / "manifest.json"
     manifest_mismatch = True
@@ -1402,19 +1701,45 @@ def verify_resource_tree(
 def sync_resource_tree(
     resources: Sequence[CollectedResource], manifest_bytes: bytes, *, repo_root: Path
 ) -> None:
-    """Atomically stage and replace only inventory-owned package resource files and manifest."""
+    """Atomically stage, replace, and retire the prior inventory's package files."""
 
     resource_root = repo_root / _PACKAGE_RESOURCE_ROOT
+    _assert_no_symlink_path(resource_root, root=repo_root)
     resource_root.mkdir(parents=True, exist_ok=True)
+    package_files = _package_files(resource_root, repo_root=repo_root)
 
     known_destinations = {resource.entry.package_path for resource in resources}
-    if resource_root.is_dir():
-        for candidate in resource_root.rglob("*"):
-            if candidate.is_dir() or candidate.is_symlink():
-                continue
-            relative = candidate.relative_to(resource_root).as_posix()
-            if relative != "manifest.json" and relative not in known_destinations:
-                raise ResourceManifestError("unknown_destination_file", detail=relative)
+    previous_destinations: set[str] = set()
+    previous_manifest = resource_root / "manifest.json"
+    if previous_manifest.is_file() and not previous_manifest.is_symlink():
+        try:
+            previous_document = strict_json_parse(previous_manifest.read_bytes())
+        except TypeError, ValueError:
+            previous_document = None
+        if isinstance(previous_document, Mapping):
+            previous_entries = previous_document.get("entries")
+            if isinstance(previous_entries, list):
+                for item in previous_entries:
+                    if not isinstance(item, Mapping):
+                        continue
+                    package_path = item.get("package_path")
+                    if type(package_path) is not str:
+                        continue
+                    if (
+                        _is_safe_relative_path(package_path)
+                        and _within_allowed_root(package_path)
+                        and package_path != "manifest.json"
+                    ):
+                        previous_destinations.add(package_path)
+    stale_destinations = previous_destinations - known_destinations
+    for candidate in package_files:
+        relative = candidate.relative_to(resource_root).as_posix()
+        if (
+            relative != "manifest.json"
+            and relative not in known_destinations
+            and relative not in previous_destinations
+        ):
+            raise ResourceManifestError("unknown_destination_file", detail=relative)
 
     with tempfile.TemporaryDirectory(
         dir=resource_root.parent, prefix=".verify-resource-manifest-"
@@ -1436,6 +1761,11 @@ def sync_resource_tree(
             target = resource_root / resource.entry.package_path
             target.parent.mkdir(parents=True, exist_ok=True)
             os.replace(source, target)
+        for relative in sorted(stale_destinations, key=str.encode):
+            target = resource_root / relative
+            _assert_no_symlink_path(target, root=repo_root)
+            if target.is_file() or target.is_symlink():
+                target.unlink()
         os.replace(staging_root / "manifest.json", resource_root / "manifest.json")
 
 
@@ -1469,7 +1799,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
 
-    repo_root = args.repo_root.resolve() if args.repo_root is not None else _default_repo_root()
+    repo_root = args.repo_root.absolute() if args.repo_root is not None else _default_repo_root()
     if not repo_root.is_dir():
         print(
             f"verify_resource_manifest: invocation error: repo root not found: {repo_root}",
@@ -1497,7 +1827,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"verify_resource_manifest: FAIL ({exc.reason}) {exc.detail}", file=sys.stderr)
             return 1
 
-    diff = verify_resource_tree(resources, manifest_bytes, repo_root=repo_root)
+    try:
+        diff = verify_resource_tree(resources, manifest_bytes, repo_root=repo_root)
+    except ResourceManifestError as exc:
+        print(f"verify_resource_manifest: FAIL ({exc.reason}) {exc.detail}", file=sys.stderr)
+        return 1
     if diff.is_clean:
         print(f"verify_resource_manifest: PASS ({len(resources)} resource(s))")
         return 0

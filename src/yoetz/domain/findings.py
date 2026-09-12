@@ -48,6 +48,7 @@ from yoetz.protocol.models import (
 )
 
 __all__ = [
+    "EXTERNAL_SEMANTIC_FINDING_KINDS",
     "FALLBACK_ORIGIN_REASONS",
     "FINDING_KIND_TRAITS",
     "CandidateFinding",
@@ -103,6 +104,7 @@ _SEMANTIC_VERSION_PATTERN: Final = re.compile(
 class FindingKind(str, Enum):  # noqa: UP042 - exact wire enum base
     ACTION_WITHOUT_RESULT = "action_without_result"
     CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE = "claim_without_admissible_evidence"
+    COORDINATION_OVERLAP = "coordination_overlap"
     COMPLETION_WITH_OPEN_OBLIGATIONS = "completion_with_open_obligations"
     CONTRADICTORY_CLAIMS_UNRESOLVED = "contradictory_claims_unresolved"
     DIFF_DOES_NOT_MATCH_ACCOUNT = "diff_does_not_match_account"
@@ -115,6 +117,28 @@ class FindingKind(str, Enum):  # noqa: UP042 - exact wire enum base
     RESULT_WITHOUT_ACTION = "result_without_action"
     STALE_EVIDENCE_FOR_CHANGED_STATE = "stale_evidence_for_changed_state"
     WEAK_OR_STALE_RESPONSE = "weak_or_stale_response"
+
+
+# D7 keeps project coordination local: coordination findings are produced from the admitted
+# coordination projection and are never included in an external semantic case. The provider
+# judgment 1.0 wire therefore retains this explicit historical allowlist; a future provider
+# contract must opt in to a new finding kind through a versioned wire change.
+EXTERNAL_SEMANTIC_FINDING_KINDS: Final[tuple[FindingKind, ...]] = (
+    FindingKind.ACTION_WITHOUT_RESULT,
+    FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
+    FindingKind.COMPLETION_WITH_OPEN_OBLIGATIONS,
+    FindingKind.CONTRADICTORY_CLAIMS_UNRESOLVED,
+    FindingKind.DIFF_DOES_NOT_MATCH_ACCOUNT,
+    FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM,
+    FindingKind.FAILED_WORK_OMITTED,
+    FindingKind.LEDGER_STALE_OR_INCOMPLETE,
+    FindingKind.MATERIAL_LIMITATION_OMITTED,
+    FindingKind.QUESTIONABLE_FINDING_REJECTION,
+    FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED,
+    FindingKind.RESULT_WITHOUT_ACTION,
+    FindingKind.STALE_EVIDENCE_FOR_CHANGED_STATE,
+    FindingKind.WEAK_OR_STALE_RESPONSE,
+)
 
 
 class FindingOrigin(str, Enum):  # noqa: UP042 - exact wire enum base
@@ -305,6 +329,7 @@ FINDING_KIND_TRAITS: Final[MappingProxyType[FindingKind, tuple[int, bool]]] = Ma
         FindingKind.DIFF_DOES_NOT_MATCH_ACCOUNT: (1, True),
         FindingKind.MATERIAL_LIMITATION_OMITTED: (1, True),
         FindingKind.QUESTIONABLE_FINDING_REJECTION: (2, True),
+        FindingKind.COORDINATION_OVERLAP: (2, True),
     }
 )
 
@@ -328,6 +353,8 @@ _POLICY_IDENTITY_BY_KIND: Final[MappingProxyType[FindingKind, tuple[str, str]]] 
             ("work-integrity", "0.1.0")
             if kind in _WORK_INTEGRITY_KINDS
             else ("research-evidence", "0.1.0")
+            if kind is not FindingKind.COORDINATION_OVERLAP
+            else ("coordination", "0.1.0")
         )
         for kind in FindingKind
     }

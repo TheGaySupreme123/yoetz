@@ -511,6 +511,17 @@ def render_config_toml(config: YoetzConfig) -> str:
     _emit_table(lines, "observation", {"enabled": config.observation.enabled})
     _emit_table(
         lines,
+        "lineage",
+        {
+            "start_lease_seconds": config.lineage.start_lease_seconds,
+            "attach_handle_ttl_seconds": config.lineage.attach_handle_ttl_seconds,
+            "contact_lost_recovery_seconds": config.lineage.contact_lost_recovery_seconds,
+            "max_depth": config.lineage.max_depth,
+            "max_fanout": config.lineage.max_fanout,
+        },
+    )
+    _emit_table(
+        lines,
         "logging",
         {"level": config.logging.level, "payloads": config.logging.payloads},
     )

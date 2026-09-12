@@ -139,6 +139,46 @@ _UNSAFE_OBSERVATION_STORAGE_ERRNOS: Final = frozenset(
 _P = ParamSpec("_P")
 
 
+def _session_filename_stem(path: Path) -> str:
+    """Remove only admitted stream suffixes while preserving the filename token."""
+
+    name = path.name
+    lower_name = name.lower()
+    for suffix in (".jsonl.zst", ".jsonl"):
+        if lower_name.endswith(suffix):
+            return name[: -len(suffix)]
+    return path.stem
+
+
+def _mapped_session_id_from_path(
+    path: Path,
+    *,
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    state_root: Path | None,
+) -> str | None:
+    """Recover one full host session id from an owner-authorized lifecycle mapping.
+
+    Native rollout filenames contain a timestamp prefix and a UUID whose hyphens make
+    suffix splitting lossy. A filename is only allowed to select one valid durable
+    mapping already bound unambiguously to the selected workspace; an unmapped explicit
+    path keeps the legacy recovery fallback below when it is not a native rollout name.
+    """
+
+    stem = _session_filename_stem(path)
+    if not stem:
+        return None
+    candidates: list[str] = []
+    for session_id in store.unambiguous_codex_sessions_for_workspace(workspace_commitment):
+        mapping = load_mapping(session_id, _state=state_root)
+        if mapping is None:
+            continue
+        token = mapping.codex_session_id
+        if stem == token or stem.endswith(f"-{token}") or f"-{token}_" in stem:
+            candidates.append(token)
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def _resolve_workspace(path: str | None) -> Path:
     root = canonical_workspace_locator("." if path is None else path)
     if root is None:
@@ -1853,10 +1893,22 @@ def reconcile_session_stream(
     if not path.is_file() or path.is_symlink():
         typer.echo("observation_reconcile_failed:session_file_unreadable", err=True)
         return 20
-    # Session commitment is derived from the file's stem (opaque token), never the full path.
-    session_token = path.stem if path.stem else "session"
-    if "-" in session_token:
-        session_token = session_token.rsplit("-", 1)[-1] or session_token
+    # Prefer the full host id from one durable lifecycle mapping. Native rollout filenames
+    # include hyphenated UUIDs; suffix splitting would orphan the mapped session. Unmapped
+    # explicit paths retain the established opaque-token recovery behavior.
+    session_token = _mapped_session_id_from_path(
+        path,
+        store=store,
+        workspace_commitment=workspace_commitment,
+        state_root=_state,
+    )
+    if session_token is None:
+        if path.stem.startswith("rollout-"):
+            typer.echo("observation_reconcile_failed:mapping_missing", err=True)
+            return 20
+        session_token = path.stem if path.stem else "session"
+        if "-" in session_token:
+            session_token = session_token.rsplit("-", 1)[-1] or session_token
     session_commitment = store.session_commitment(session_token[:128])
     store.bind_session(workspace_commitment, session_commitment)
     locator = CodexSessionStreamLocator(resolve_codex_home())

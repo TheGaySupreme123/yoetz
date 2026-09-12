@@ -5,7 +5,8 @@ import importlib
 import importlib.util
 import subprocess
 import sys
-from collections.abc import Iterator, Mapping
+from collections.abc import AsyncGenerator, Generator, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import FrozenInstanceError, fields, is_dataclass
 from enum import Enum
 from pathlib import Path
@@ -33,10 +34,46 @@ _EXPECTED_REASON_CODES = tuple(
 accepted_record_shape_invalid
 actor_id_malformed
 actor_id_not_generated
+ambiguous_binding
+attach_handle_expired
+attach_handle_invalid
+attach_handle_reused
+attach_handle_revoked
+attach_result_invalid
 byte_order_mark_forbidden
+child_check_frontier_ahead_of_child
+child_check_frontier_missing
+child_check_frontier_without_check
+child_dependencies_not_canonical
+child_dependency_count_invalid
+child_finding_count_invalid
+child_findings_not_canonical
+child_frontier_missing
+child_gap_frontier_mismatch
 claim_revision_invalid
 claim_revision_mismatch
 commitment_only_object_kind
+coordination_admission_required
+coordination_consent_required
+coordination_declaration_invalid
+coordination_detection_mismatch
+coordination_disposition_invalid
+coordination_evidence_missing
+coordination_generation_mismatch
+coordination_generation_revoked
+coordination_grant_required
+coordination_invalid
+coordination_obligation_conflict
+coordination_obligation_mismatch
+coordination_participants_unavailable
+coordination_recipient_mismatch
+coordination_resource_count_invalid
+coordination_route_unavailable
+coordination_runtime_unavailable
+coordination_source_unavailable
+coordination_task_pair_invalid
+coordination_tasks_not_canonical
+cross_repository_lineage_requires_grant
 dependency_changed
 duplicate_object_key
 duplicate_set_member
@@ -56,13 +93,17 @@ evidence_digest_provenance_invalid
 evidence_digest_subject_incompatible
 evidence_strength_unsupported
 expected_frontier_required
+finding_actionable_mismatch
 finding_json_shape_invalid
 finding_priority_mismatch
+finding_resolution_mismatch
 float_forbidden
 frame_invalid
 frame_too_large
 frontier_changed
 frontier_digest_mismatch
+general_project_membership_conflict
+host_lineage_annotation_invalid
 id_malformed_uuid
 id_not_ascii
 id_uuid_not_version_4
@@ -70,6 +111,7 @@ id_uuid_wrong_variant
 id_wrong_length
 id_wrong_prefix
 id_wrong_type
+implicit_project_requires_opt_out
 import_publication_authority_required
 import_report_invalid
 input_not_bytes
@@ -82,6 +124,10 @@ invalid_approved_check_policy
 invalid_chain
 invalid_check_types
 invalid_commitment
+invalid_continuation_expiry
+invalid_continuation_kind
+invalid_continuation_pending_id
+invalid_continuation_repository_setup
 invalid_cost_fields
 invalid_coverage_value
 invalid_digest
@@ -89,6 +135,7 @@ invalid_duration
 invalid_event_enum
 invalid_event_schema
 invalid_event_value_type
+invalid_external_runtime_authority
 invalid_finding_kind
 invalid_finding_origin
 invalid_finding_policy_identity
@@ -101,6 +148,9 @@ invalid_payload_ref
 invalid_projection_locator
 invalid_publication_channels
 invalid_ranked_findings
+invalid_receipt_child_finding
+invalid_receipt_child_outcome
+invalid_receipt_children
 invalid_receipt_conclusion
 invalid_receipt_document
 invalid_receipt_gap
@@ -118,11 +168,56 @@ invalid_semantic_fallback_origin
 invalid_semantic_outcome_type
 invalid_semantic_provenance
 invalid_semantic_status_reason_pair
+invalid_start_internal_result
 invalid_subject_state
 invalid_timestamp
 invalid_token_usage
 invalid_utf8
+invalid_workspace_inspect
 ledger_assigned_field_in_request_identity
+lineage_acceptance_transition
+lineage_catalog_busy
+lineage_catalog_migration_required
+lineage_child_missing
+lineage_child_not_found
+lineage_close_authority
+lineage_cycle
+lineage_depth_limit
+lineage_event_contradiction
+lineage_event_invalid
+lineage_event_operation_conflict
+lineage_event_operation_pending
+lineage_event_result_invalid
+lineage_fanout_limit
+lineage_handle_conflict
+lineage_handle_key_invalid
+lineage_handle_key_unavailable
+lineage_handle_missing
+lineage_manifest_stale
+lineage_operation_conflict
+lineage_operation_lease_expired
+lineage_operation_not_found
+lineage_operation_phase
+lineage_operation_quarantined
+lineage_parent_not_found
+lineage_parent_session_invalid
+lineage_phase_transition
+lineage_repository_mismatch
+lineage_request_identity_conflict
+lineage_reservation_conflict
+lineage_root_conflict
+lineage_root_dependency
+lineage_service_unavailable
+lineage_session_conflict
+lineage_session_not_active
+lineage_session_not_found
+lineage_session_scope
+lineage_task_conflict
+lineage_task_missing
+lineage_task_not_found
+lineage_transition_conflict
+lineage_work_terminal
+lineage_work_transition
 lone_surrogate
 malformed_json
 method_forbidden
@@ -130,6 +225,7 @@ missing_payload_field
 nesting_too_deep
 no_obligations_reason_conflict
 noncanonical_integer_string
+noncanonical_json
 not_an_accepted_envelope
 nul_byte_forbidden
 object_key_not_string
@@ -143,12 +239,20 @@ peer_untrusted
 plan_version_conflict
 privacy_projection_unavailable
 privacy_receipt_not_durable
+project_dissolved
+project_member_already_unbound
+project_member_not_found
+project_not_found
+projection_unavailable
 protocol_mismatch
 provider_attempt_provenance_is_not_final
 public_error_invalid_correlation_id
 public_error_invalid_message
 public_error_missing_correlation_id
 read_projection_failed
+receipt_child_manifest_mismatch
+receipt_children_not_canonical
+receipt_children_schema_version
 receipt_coverage_mismatch
 receipt_gap_not_in_coverage
 receipt_json_projection_blocked
@@ -162,6 +266,7 @@ request_timeout
 response_fields_invalid
 response_projection_failed
 runtime_attempt_evidence_json_shape_invalid
+runtime_opening_authority
 schema_artifact_role_invalid
 schema_artifact_role_mismatch
 schema_bytes_invalid
@@ -181,13 +286,17 @@ schema_not_found
 schema_path_unsafe
 schema_reference_unresolved
 schema_version_mismatch
+selector_conflict
 semantic_provenance_json_shape_invalid
 service_draining
 service_generation_changed
 service_incompatible
+service_stamp_required
 service_unavailable
+session_lineage_fields_incomplete
 session_superseded
 set_member_not_ascii
+stored_result_shape_invalid
 timestamp_not_utc
 timestamp_out_of_range
 timestamp_submillisecond_precision
@@ -366,7 +475,7 @@ def test_public_error_code_membership() -> None:
 def test_protocol_reason_registry_is_exact_and_import_order_independent() -> None:
     source_values = cast(tuple[str, ...], getattr(errors_module, "_PROTOCOL_REASON_CODE_VALUES"))
     assert source_values == _EXPECTED_REASON_CODES
-    assert len(source_values) == 169
+    assert len(source_values) == 277
     assert source_values == tuple(sorted(source_values, key=str.encode))
     assert len(source_values) == len(set(source_values))
     assert PROTOCOL_REASON_CODES == frozenset(_EXPECTED_REASON_CODES)
@@ -439,6 +548,70 @@ def test_dependency_root_has_no_internal_imports() -> None:
                 imported_modules.append(node.module)
     assert relative_imports == 0
     assert not any(module == "yoetz" or module.startswith("yoetz.") for module in imported_modules)
+
+
+def test_literal_protocol_refusals_use_registered_reasons() -> None:
+    """An unregistered refusal raises ValueError before the typed boundary can catch it."""
+    module_file = errors_module.__file__
+    assert module_file is not None
+    package_root = Path(module_file).parent.parent
+    unregistered: list[str] = []
+    for source in package_root.rglob("*.py"):
+        if "resources" in source.relative_to(package_root).parts:
+            continue
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+            public_reasons: list[str] = []
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "_error"
+            ):
+                public_reasons.extend(
+                    keyword.value.value
+                    for keyword in node.keywords
+                    if keyword.arg == "reason"
+                    and isinstance(keyword.value, ast.Constant)
+                    and isinstance(keyword.value.value, str)
+                )
+            if isinstance(node, ast.Dict):
+                public_reasons.extend(
+                    value.value
+                    for key, value in zip(node.keys, node.values, strict=True)
+                    if isinstance(key, ast.Constant)
+                    and key.value == "reason_code"
+                    and isinstance(value, ast.Constant)
+                    and isinstance(value.value, str)
+                )
+            for reason in public_reasons:
+                assert isinstance(node, ast.Call | ast.Dict)
+                if reason not in PROTOCOL_REASON_CODES:
+                    unregistered.append(
+                        f"{source.relative_to(package_root)}:{node.lineno}:{reason}"
+                    )
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "ProtocolValueError"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+                and node.args[0].value not in PROTOCOL_REASON_CODES
+            ):
+                unregistered.append(
+                    f"{source.relative_to(package_root)}:{node.lineno}:{node.args[0].value}"
+                )
+    assert not unregistered, unregistered
+
+
+def test_registered_refusal_reason_survives_public_error_projection() -> None:
+    for reason in PROTOCOL_REASON_CODES:
+        error = PublicOperationError(
+            PublicErrorCode.SESSION_CONFLICT,
+            "The operation was refused.",
+            False,
+            safe_details={"reason_code": reason},
+        )
+        assert error.safe_details == {"reason_code": reason}
 
 
 def test_operation_error_is_bounded() -> None:
@@ -514,6 +687,40 @@ def test_operation_error_exception_value_contract() -> None:
     assert "unknown" not in rendered
     with pytest.raises(FrozenInstanceError):
         setattr(error, "message", "changed")
+
+
+@pytest.mark.anyio
+async def test_public_failure_survives_sync_and_async_resource_cleanup() -> None:
+    error = PublicOperationError(PublicErrorCode.BUNDLE_BUSY, "The task is temporarily busy.", True)
+    cleaned: list[str] = []
+
+    @contextmanager
+    def synchronous() -> Generator[None]:
+        try:
+            yield
+        finally:
+            cleaned.append("sync")
+
+    @asynccontextmanager
+    async def asynchronous() -> AsyncGenerator[None]:
+        try:
+            yield
+        finally:
+            cleaned.append("async")
+
+    with pytest.raises(PublicOperationError) as caught:
+        async with asynchronous():
+            with synchronous():
+                raise error
+    assert caught.value is error
+    assert cleaned == ["sync", "async"]
+    assert error.__traceback__ is not None
+    error.add_note("bounded internal cleanup note")
+    assert error.__notes__ == ["bounded internal cleanup note"]
+    with pytest.raises(FrozenInstanceError):
+        error.message = "changed"
+    with pytest.raises(FrozenInstanceError):
+        del error.safe_details
 
 
 def test_safe_details_allowlist_and_types_are_exact() -> None:

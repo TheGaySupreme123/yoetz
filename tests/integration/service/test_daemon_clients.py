@@ -225,6 +225,7 @@ class _Application:
         self.publish_response_store_error: PublicOperationError | None = None
         self.privacy_setup_contexts: list[RepositoryPrivacyContext | None] = []
         self.observation_requests: list[JsonObject] = []
+        self.check_requests: list[CheckRequest] = []
 
     async def start(
         self,
@@ -260,6 +261,7 @@ class _Application:
     ) -> JsonObject:
         del route_profile, repository_privacy_context
         assert isinstance(request, CheckRequest)
+        self.check_requests.append(request)
         await asyncio.sleep(0)
         # Unprojected stand-in only. Projection is forced to fail in the dedicated correlation
         # tests before any public CheckResult is required.
@@ -1475,6 +1477,38 @@ async def test_connected_control_session_carries_trusted_presentation_to_daemon_
 
 
 @pytest.mark.anyio
+async def test_connected_service_client_accepts_coordination_check_pack() -> None:
+    """A current coordination check survives the real client and control-wire path."""
+
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    client_stream, server_stream = _connected_control_pair()
+    server_task = asyncio.create_task(daemon._serve_control_connection(server_stream))  # pyright: ignore[reportPrivateUsage]
+    service_client = None
+    try:
+        session = await client_handshake(client_stream, ControlClientKind.CLI, "0.3.0")
+        service_client = _connected_client(  # pyright: ignore[reportPrivateUsage]
+            client_stream,  # pyright: ignore[reportArgumentType]
+            session,
+            ControlClientKind.CLI,
+        )
+        application.projection_error = RuntimeError("test_projection_failure")
+        request = _check_body().model_copy(update={"policy_packs": ("coordination/0.1.0",)})
+
+        with pytest.raises(ControlError) as caught:
+            await service_client.check(request, deadline_ms=3_000)
+
+        assert caught.value.reason == "response_projection_failed"
+        assert application.check_requests == [request]
+    finally:
+        if service_client is not None:
+            await service_client.close()
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        await daemon.close()
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("source", "session_id", "mapping_version", "structural_payload"),
     [
@@ -2334,6 +2368,75 @@ async def test_ready_maintenance_sweeps_immediately_repeats_and_cancels_before_c
     await asyncio.sleep(0.03)
     assert events.count("sweep") == count_after_lock
     assert events.index("application_close") < events.index("vault_lock")
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_ready_maintenance_recovers_lineage_before_and_during_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    recovered_twice = asyncio.Event()
+
+    class Application(_Application):
+        observation_sweep: object
+        recovery_calls = 0
+
+        async def recover_lineage(self) -> object:
+            events.append("recovery")
+            self.recovery_calls += 1
+            if self.recovery_calls >= 2:
+                recovered_twice.set()
+            return (), ()
+
+    application = Application()
+
+    async def sweep() -> ObservationDrainSummary:
+        events.append("sweep")
+        return ObservationDrainSummary(
+            attempted=0,
+            acknowledged=0,
+            retry_pending=0,
+            quarantined=0,
+            reasons=(),
+        )
+
+    application.observation_sweep = sweep
+    vault = _Vault()
+    vault.ready = False
+    lifecycle = ServiceLifecycle(
+        _Clock(),
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "2" * 64,
+        instance_id=_INSTANCE_ID,
+        singleton_lock_path=tmp_path / "service.lock",
+    )
+
+    async def factory(_service_generation: int, _vault_generation: int) -> _Application:
+        return application
+
+    daemon = ServiceDaemon(
+        _composition=ServiceComposition(
+            lifecycle=lifecycle,
+            control_listener=_Listener(),  # pyright: ignore[reportArgumentType]
+            secret_ingress_listener=None,
+            human_control_listener=None,
+            human_control_service=None,
+            session_monitor=None,
+            vault=vault,
+            ready_application_factory=factory,
+        )
+    )
+    monkeypatch.setattr(daemon_module, "_OBSERVATION_SWEEP_INTERVAL_SECONDS", 0.01)
+    await daemon.start()
+    await daemon.composition.lifecycle.transition(ServiceState.UNLOCKING)
+    vault.ready = True
+    await daemon.activate_ready_application(7, 3)
+
+    await asyncio.wait_for(recovered_twice.wait(), timeout=1)
+    assert events[0] == "recovery"
+    assert events.index("sweep") > events.index("recovery")
+    await daemon.lock()
     await daemon.close()
 
 

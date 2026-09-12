@@ -355,9 +355,21 @@ class ObservationOutboxSweeper:
         loop = asyncio.get_running_loop()
         monotonic = loop.time if self._monotonic is None else self._monotonic
         deadline = None if self.budget_seconds is None else monotonic() + self.budget_seconds
-        rows, lifecycle_workspaces = await self._off_loop(
-            self._prepare_pending_rows_and_lifecycle_workspaces
-        )
+        preparation_error: Exception | None = None
+        try:
+            rows, lifecycle_workspaces = await self._off_loop(
+                self._prepare_pending_rows_and_lifecycle_workspaces
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            # Admission maintenance is a fail-closed prerequisite for delivery. Take a fresh
+            # workspace inventory for the independent capture-recovery lane, but discard any
+            # partially prepared rows and re-raise the maintenance failure after that turn. This
+            # keeps an unknown capture inventory recoverable without claiming admission succeeded.
+            preparation_error = error
+            rows = ()
+            lifecycle_workspaces = await self._off_loop(self.local.pending_workspaces)
         attempted = 0
         acknowledged = 0
         retry_pending = 0
@@ -371,6 +383,8 @@ class ObservationOutboxSweeper:
         remaining = None if deadline is None else deadline - monotonic()
         for outcome in await self._recover_capture_inventory(workspaces, remaining=remaining):
             reasons[outcome.value] = reasons.get(outcome.value, 0) + 1
+        if preparation_error is not None:
+            raise preparation_error
         for workspace in workspaces:
             if deadline is not None and monotonic() >= deadline:
                 # Budget spent: return what this pass resolved so far. The rows

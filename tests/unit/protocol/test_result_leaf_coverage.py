@@ -30,6 +30,8 @@ _STATUS_VIEW_BY_PAGE_MODEL = {
     "StatusResultsPageModel": "results",
     "StatusOperationPageModel": "operation",
     "StatusVersionsPageModel": "versions",
+    "StatusLineagePageModel": "lineage",
+    "StatusProjectPageModel": "project",
 }
 
 

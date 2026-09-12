@@ -20,6 +20,17 @@ from yoetz.kernel.reducers import replay
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.coverage import LedgerFreshness
 
+# The two coordination detail payloads are exercised by the closed codec tests but are not
+# replayed in either frozen corpus: their rows are produced only after a live detector/admission
+# decision.  Keep that boundary explicit so adding a new event family cannot silently leave the
+# replay corpus behind.
+_CODEC_ONLY_FAMILIES = frozenset(
+    {
+        "coordination_context_recorded",
+        "coordination_disposition_recorded",
+    }
+)
+
 
 def _fixture(loader: FixtureLoader) -> dict[str, Any]:
     return cast(dict[str, Any], loader.load_json("replay/unknown-schema.case.json"))
@@ -74,12 +85,26 @@ def test_unknown_event_adds_projection_gap_only(fixture_loader: FixtureLoader) -
     assert projection_digest(final) == expected_projection["digest"]
 
 
-def test_unknown_version_or_type_batch_rejects_or_preserves_as_specified() -> None:
-    known_records = replay_records("all-event-families")
-    assert all(type(record) is AcceptedEvent for record in known_records)
-    assert {cast(AcceptedEvent, record).schema.name for record in known_records} == set(
-        EVENT_FAMILIES
+def test_unknown_version_or_type_batch_rejects_or_preserves_as_specified(
+    fixture_loader: FixtureLoader,
+) -> None:
+    fixture_names: set[str] = set()
+    for fixture_name in ("all-event-families", "lineage-event-families"):
+        document = cast(
+            dict[str, Any], fixture_loader.load_json(f"replay/{fixture_name}.case.json")
+        )
+        raw_input = cast(dict[str, Any], document["input"])
+        fixture_names.update(cast(list[str], raw_input["expected_event_families"]))
+
+    known_records = (
+        *replay_records("all-event-families"),
+        *replay_records("lineage-event-families"),
     )
+    assert all(type(record) is AcceptedEvent for record in known_records)
+    record_names = {cast(AcceptedEvent, record).schema.name for record in known_records}
+    assert record_names == fixture_names
+    assert record_names <= set(EVENT_FAMILIES)
+    assert set(EVENT_FAMILIES) - record_names == _CODEC_ONLY_FAMILIES
 
     unknown_payload = freeze_json({"looks_known": {"task_title": "must stay opaque"}})
     for schema in (

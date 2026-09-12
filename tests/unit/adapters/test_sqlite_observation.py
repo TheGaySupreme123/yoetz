@@ -52,12 +52,12 @@ def test_guarded_legacy_bundle_keeps_structural_consent_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        # Drop 0010 (native consent), 0011 (durable native handoff), and 0012
-        # (semantic advice attempts) so this fixture remains a genuinely
-        # pre-native-content bundle.
+        # Drop 0010 (native consent), 0011 (durable native handoff), 0012
+        # (semantic advice attempts), and 0013 (lineage event families) so this
+        # fixture remains a genuinely pre-native-content bundle.
         migrations_module,
         "BUNDLE_MIGRATIONS",
-        migrations_module.BUNDLE_MIGRATIONS[:-3],
+        migrations_module.BUNDLE_MIGRATIONS[:-4],
     )
     store = _store()
     store.grant_consent(_WORKSPACE, _TIME)
@@ -436,8 +436,8 @@ def test_codex_session_commitment_for_session_recovers_historical_route() -> Non
         codex_session_commitment=_SESSION,
         bound_at=_TIME,
     )
-    # Binding a newer session marks the older route inactive, but the durable
-    # route still identifies the older task and must remain usable for recovery.
+    # Binding a newer session keeps the older route active; both task/session
+    # lanes remain available for recovery and concurrent verification.
     store.record_workspace_session_route(
         workspace=_WORKSPACE,
         yoetz_session_id="ses_10000000-0000-4000-8000-000000000002",
@@ -463,3 +463,41 @@ def test_codex_session_commitment_for_session_recovers_historical_route() -> Non
         )
         == _SESSION_B
     )
+
+
+def test_workspace_routes_keep_unrelated_sessions_active() -> None:
+    """A shared source workspace may have multiple task/session lanes (#498)."""
+
+    store = _store()
+    store.grant_consent(_WORKSPACE, _TIME)
+    for yoetz_session, session, task, writer in (
+        (
+            "ses_10000000-0000-4000-8000-000000000001",
+            _SESSION,
+            "tsk_10000000-0000-4000-8000-000000000011",
+            "wtr_10000000-0000-4000-8000-000000000011",
+        ),
+        (
+            "ses_10000000-0000-4000-8000-000000000002",
+            _SESSION_B,
+            "tsk_10000000-0000-4000-8000-000000000012",
+            "wtr_10000000-0000-4000-8000-000000000012",
+        ),
+    ):
+        store.record_workspace_session_route(
+            workspace=_WORKSPACE,
+            yoetz_session_id=yoetz_session,
+            yoetz_task_id=task,
+            yoetz_writer_id=writer,
+            codex_session_commitment=session,
+            bound_at=_TIME,
+        )
+    rows = store._db.execute(  # pyright: ignore[reportPrivateUsage]
+        "SELECT yoetz_session_id,active FROM observation_workspace_session_routes "
+        "WHERE workspace_commitment=? ORDER BY yoetz_session_id",
+        (_WORKSPACE,),
+    ).fetchall()
+    assert rows == [
+        ("ses_10000000-0000-4000-8000-000000000001", 1),
+        ("ses_10000000-0000-4000-8000-000000000002", 1),
+    ]

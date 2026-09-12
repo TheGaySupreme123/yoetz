@@ -12,9 +12,12 @@ from yoetz.protocol.models import (
     OmittedContentModel,
     PublicErrorModel,
     ReceiptSuccessModel,
+    StatusAdvicePageModel,
     StatusFindingsPageModel,
+    StatusLineagePageModel,
     StatusObligationsPageModel,
     StatusOperationPageModel,
+    StatusProjectPageModel,
     StatusSuccessModel,
 )
 
@@ -91,6 +94,32 @@ def render_human_check(result: CheckSuccessModel) -> str:
     suppressed = int(result.suppressed_count)
     if suppressed:
         lines.append(f"Suppressed findings: {suppressed}")
+    if result.children is not None:
+        children = result.children
+        lines.append(f"Child dependencies ({children.label}):")
+        if children.tested_manifest_frontier is not None:
+            lines.append(
+                "Tested manifest frontier: "
+                f"{children.tested_manifest_frontier.sequence} "
+                f"({children.tested_manifest_frontier.head_digest})"
+            )
+        if children.label == "preview":
+            lines.append("Preview facts do not change the recorded check.")
+        for child in children.items:
+            lines.append(
+                f"- {child.child_task_id}: {_token(child.origin)}, {_token(child.acceptance)}; "
+                f"work {_token(child.work_state)}, session {_token(child.session_health)}; "
+                f"rollup {_token(child.rollup_state)}"
+            )
+            if child.blocking_conditions:
+                lines.append("  Completion gaps: " + ", ".join(child.blocking_conditions))
+    if result.advisory_notes:
+        lines.append("Project advice (does not affect the verdict):")
+        for note in result.advisory_notes:
+            lines.append(
+                f"- {note.kind}: {note.count}; project {note.project_id}; "
+                "tasks " + ", ".join(note.task_ids)
+            )
     if result.coverage.known_gaps:
         lines.append("Coverage gaps: " + ", ".join(result.coverage.known_gaps))
         # The strict ceiling blocked this process while the last install applied the policy
@@ -131,6 +160,69 @@ def render_human_status(result: StatusSuccessModel) -> str:
                     f"Replay request ID: {result.page.continuation.replay_request_id}",
                 )
             )
+    elif isinstance(result.page, StatusLineagePageModel):
+        lines.extend(_render_lineage(result.page))
+    elif isinstance(result.page, StatusAdvicePageModel):
+        lines.append("Advice:")
+        for item in result.page.items:
+            if item.coordination_detection_id is not None:
+                lines.append(
+                    f"- Coordination overlap {item.coordination_detection_id}: "
+                    f"counterpart {item.coordination_counterpart_task_id}; "
+                    f"project {item.coordination_project_id}"
+                )
+                paths = item.coordination_resource_paths
+                if paths is not None:
+                    if isinstance(paths, OmittedContentModel):
+                        lines.append("  Resources: " + _projected_text(paths))
+                    else:
+                        lines.append("  Resources: " + ", ".join(paths))
+            else:
+                lines.append(
+                    f"- {item.rule_code}: priority {item.priority}; "
+                    f"next {item.recommended_next_action}"
+                )
+        if result.page.next_cursor is not None:
+            lines.append(f"Next page: {result.page.next_cursor}")
+    elif isinstance(result.page, StatusProjectPageModel):
+        page = result.page
+        lines.extend(
+            (
+                f"Project: {page.project_id} ({_token(page.kind)})",
+                f"Membership generation: {page.membership_generation}",
+                f"Coordination grant: {_token(page.grant_state)}",
+                "Members:",
+            )
+        )
+        if page.title is not None:
+            lines.insert(len(lines) - 1, "Title: " + _projected_text(page.title))
+        if page.description is not None:
+            lines.insert(len(lines) - 1, "Description: " + _projected_text(page.description))
+        for member in page.members:
+            lines.append(
+                f"- {member.task_id}: {_token(member.work_state)}, "
+                f"session {_token(member.session_health)} ({member.actor_id or 'unknown actor'})"
+            )
+        lines.extend(_render_lineage(page.lineage))
+        lines.append("Coordination detections:")
+        for detection in page.detections:
+            lines.append(
+                f"- {detection.detection_id}: {detection.resource_count} resources; "
+                f"{'open' if detection.open else 'addressed'}"
+            )
+            if detection.resource_paths is not None:
+                if isinstance(detection.resource_paths, OmittedContentModel):
+                    lines.append("  Resources: " + _projected_text(detection.resource_paths))
+                else:
+                    lines.append("  Resources: " + ", ".join(detection.resource_paths))
+        lines.append("Coordination coverage:")
+        for coverage in page.coverage:
+            lines.append(f"- {coverage.task_id}: {coverage.coverage} ({coverage.gap_code})")
+        lines.append("Member receipts:")
+        for receipt in page.receipts:
+            lines.append(f"- {receipt.task_id}: {receipt.conclusion} ({receipt.receipt_id})")
+        if page.next_cursor is not None:
+            lines.append(f"Next page: {page.next_cursor}")
     if isinstance(result.page, StatusFindingsPageModel):
         for finding in result.page.items:
             lines.append(
@@ -151,6 +243,25 @@ def render_human_status(result: StatusSuccessModel) -> str:
     gaps = tuple(result.gaps) + tuple(result.coverage.known_gaps)
     lines.append("Gaps: " + (", ".join(dict.fromkeys(gaps)) if gaps else "none"))
     return "\n".join(lines)
+
+
+def _render_lineage(page: StatusLineagePageModel) -> list[str]:
+    lines = [f"Parent task: {page.parent_task_id or 'none'}", "Child tasks:"]
+    if not page.children:
+        lines.append("- none in this page")
+    for child in page.children:
+        lines.append(
+            f"- {child.task_id}: {_token(child.origin)}, {_token(child.acceptance)}; "
+            f"work {_token(child.work_state)}, session {_token(child.session_health)}; "
+            f"rollup {_token(child.rollup_state)}"
+        )
+        if child.blocking_conditions:
+            lines.append("  Completion gaps: " + ", ".join(child.blocking_conditions))
+    for annotation in page.annotations:
+        lines.append(f"- Observed subagent {annotation.correlation_id}: pending child binding")
+    if page.next_cursor is not None:
+        lines.append(f"Next page: {page.next_cursor}")
+    return lines
 
 
 def render_human_receipt(result: ReceiptSuccessModel) -> str:

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import apsw
 import pytest
@@ -21,6 +22,7 @@ from yoetz.adapters.sqlite.maintenance import (
     verify_backup_set,
 )
 from yoetz.adapters.sqlite.migrations import initialize_bundle, initialize_catalog
+from yoetz.domain.coordination import ProjectTextRef
 from yoetz.domain.values import (
     Frontier,
     JsonObject,
@@ -238,6 +240,89 @@ def test_restore_verifies_manifest_keys_and_objects(tmp_path: Path) -> None:
     assert captured.value.reason is MaintenanceReason.OBJECT_TAMPERED
 
 
+@pytest.mark.anyio
+async def test_active_maintenance_lease_is_not_stolen() -> None:
+    harness = _harness()
+    harness.procedures.facts = _AuthorityFacts(
+        task_id=harness.procedures.facts.task_id,
+        frontier=Frontier.genesis(),
+        source_route_identity_digest=harness.procedures.facts.source_route_identity_digest,
+        owner_generation=1,
+        privacy_roots=harness.procedures.roots,
+        backup_mode=BackupMode.MACHINE_BOUND,
+        target_location_commitment=harness.procedures.backup_plan.destination_commitment,
+    )
+    acquired = await harness.adapter._acquire_maintenance(  # pyright: ignore[reportPrivateUsage]
+        harness.backup_command,
+        harness.procedures.backup_plan,
+        harness.procedures.backup_plan.plan_digest,
+    )
+    assert type(acquired) is MaintenanceHandle
+
+    with pytest.raises(MaintenanceError) as captured:
+        await harness.adapter._acquire_maintenance(  # pyright: ignore[reportPrivateUsage]
+            harness.backup_command,
+            harness.procedures.backup_plan,
+            harness.procedures.backup_plan.plan_digest,
+        )
+
+    assert captured.value.reason is MaintenanceReason.MAINTENANCE_BUSY
+    assert captured.value.retryable is True
+    assert harness.catalog.execute(
+        "SELECT lease_generation FROM maintenance_operations"
+    ).fetchone() == (1,)
+
+
+def test_backup_rejects_objects_directory_symlink(tmp_path: Path) -> None:
+    root, manifest, _entry = _backup_set(tmp_path)
+    objects = root / "objects"
+    outside = tmp_path / "outside-objects"
+    objects.rename(outside)
+    objects.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(MaintenanceError) as captured:
+        verify_backup_set(root, str(manifest.task_id))
+
+    assert captured.value.reason is MaintenanceReason.SOURCE_INVALID
+
+
+def test_backup_rejects_privacy_snapshot_object_not_in_manifest(tmp_path: Path) -> None:
+    root, manifest, _entry = _backup_set(tmp_path)
+    sidecar_path = root / "privacy-audit-snapshot.json"
+    sidecar = {
+        "origin_installation_id": _id(IdKind.INSTALLATION, 11),
+        "origin_task_id": str(manifest.task_id),
+        "catalog_version": "1",
+        "audit_store_version": "1",
+        "privacy_root_generation": 3,
+        "privacy_root_digest": manifest.privacy_root_digest,
+        "audit_rows": (),
+        "terminal_receipts": (),
+        "privacy_audit_objects": ({"object_id": _id(IdKind.OBJECT, 402)},),
+    }
+    sidecar_bytes = canonical_encode(sidecar)
+    _owner_only_file(sidecar_path, sidecar_bytes)
+    rewritten = replace(
+        manifest,
+        privacy_audit_snapshot_size=len(sidecar_bytes),
+        privacy_audit_snapshot_digest=_digest(sidecar_bytes),
+        manifest_digest="sha256:" + "0" * 64,
+    )
+    rewritten = replace(
+        rewritten,
+        manifest_digest=canonical_digest(_manifest_value(rewritten, include_self_digest=False)),
+    )
+    _owner_only_file(
+        root / "backup-manifest.json",
+        canonical_encode(_manifest_value(rewritten, include_self_digest=True)),
+    )
+
+    with pytest.raises(MaintenanceError) as captured:
+        verify_backup_set(root, str(manifest.task_id))
+
+    assert captured.value.reason is MaintenanceReason.MANIFEST_INVALID
+
+
 def test_backup_includes_privacy_catalog_roots_and_sidecar(tmp_path: Path) -> None:
     root, _manifest, entry = _backup_set(tmp_path)
 
@@ -246,6 +331,49 @@ def test_backup_includes_privacy_catalog_roots_and_sidecar(tmp_path: Path) -> No
     assert entry.kind is ObjectKind.PRIVACY_AUDIT
     assert verified.manifest.privacy_audit_object_count == 1
     assert verified.privacy_snapshot_path.name == "privacy-audit-snapshot.json"
+
+
+def test_restored_target_rejects_unscoped_staging_paths() -> None:
+    harness = _harness()
+    restored = harness.procedures.restored
+    for path in (
+        "tasks/../outside",
+        "tasks/restore-a/b",
+        "tasks/restore-",
+        "tasks/restore-\\windows",
+    ):
+        with pytest.raises(ValueError, match="restored_target_invalid"):
+            _RestoredTarget(
+                restored.evidence,
+                restored.result,
+                path,
+                restored.privacy_reconciled,
+            )
+
+
+@pytest.mark.anyio
+async def test_restore_rejects_target_from_another_owner_generation() -> None:
+    harness = _harness()
+    current = harness.procedures.restored
+    harness.procedures.restored = _RestoredTarget(
+        replace(current.evidence, owner_generation=current.evidence.owner_generation + 1),
+        current.result,
+        current.bundle_relpath,
+        current.privacy_reconciled,
+    )
+
+    with pytest.raises(MaintenanceError) as captured:
+        await harness.adapter.restore(
+            harness.restore_command,
+            confirmed_plan_digest=harness.procedures.restore_plan.plan_digest,
+            recovery_secret=None,
+        )
+
+    assert captured.value.reason is MaintenanceReason.REPLAY_MISMATCH
+    assert harness.catalog.execute(
+        "SELECT route_generation FROM task_routes WHERE task_id = ?",
+        (harness.procedures.facts.task_id,),
+    ).fetchone() == (1,)
 
 
 @dataclass(slots=True)
@@ -488,6 +616,129 @@ async def test_restore_switches_routes_atomically() -> None:
 
 
 @pytest.mark.anyio
+async def test_restore_route_switch_replay_completes_after_crash() -> None:
+    harness = _harness()
+    original_complete = harness.adapter._complete  # pyright: ignore[reportPrivateUsage]
+
+    def crash_after_route_switch(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise RuntimeError("fault_after_route_switch")
+
+    harness.adapter._complete = crash_after_route_switch  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="fault_after_route_switch"):
+        await harness.adapter.restore(
+            harness.restore_command,
+            confirmed_plan_digest=harness.procedures.restore_plan.plan_digest,
+            recovery_secret=None,
+        )
+    assert harness.catalog.execute(
+        "SELECT state, phase FROM maintenance_operations"
+    ).fetchone() == ("pending", "route_switched")
+
+    target_route = harness.procedures.restored.evidence.route_identity_digest
+    target_roots = _roots(str(harness.procedures.facts.task_id), target_route)
+    harness.procedures.roots = target_roots
+    harness.procedures.facts = replace(
+        harness.procedures.facts,
+        source_route_identity_digest=target_route,
+        privacy_roots=target_roots,
+    )
+    harness.catalog.execute(
+        "UPDATE maintenance_operations SET lease_expires_at = ?",
+        ("2026-07-19T08:59:59.000Z",),
+    )
+    harness.adapter._complete = original_complete  # type: ignore[method-assign]
+
+    result = await harness.adapter.restore(
+        harness.restore_command,
+        confirmed_plan_digest=harness.procedures.restore_plan.plan_digest,
+        recovery_secret=None,
+    )
+
+    assert result.active_route_identity_digest == target_route
+    assert harness.catalog.execute(
+        "SELECT state, phase FROM maintenance_operations"
+    ).fetchone() == ("complete", "terminal")
+    assert harness.catalog.execute(
+        "SELECT COUNT(*) FROM retained_task_routes WHERE retained_by_operation_id = ?",
+        (str(harness.restore_command.request_id),),
+    ).fetchone() == (1,)
+
+
+@pytest.mark.anyio
+async def test_restore_route_switch_replay_rejects_deleted_privacy_root() -> None:
+    harness = _harness()
+    original_complete = harness.adapter._complete  # pyright: ignore[reportPrivateUsage]
+
+    def crash_after_route_switch(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise RuntimeError("fault_after_route_switch")
+
+    harness.adapter._complete = crash_after_route_switch  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="fault_after_route_switch"):
+        await harness.adapter.restore(
+            harness.restore_command,
+            confirmed_plan_digest=harness.procedures.restore_plan.plan_digest,
+            recovery_secret=None,
+        )
+
+    target_route = harness.procedures.restored.evidence.route_identity_digest
+    target_roots = _roots(str(harness.procedures.facts.task_id), target_route)
+    harness.procedures.roots = target_roots
+    harness.procedures.facts = replace(
+        harness.procedures.facts,
+        source_route_identity_digest=target_route,
+        privacy_roots=target_roots,
+    )
+    harness.catalog.execute(
+        "DELETE FROM privacy_root_sets WHERE task_id = ?", (str(target_roots.task_id),)
+    )
+    harness.catalog.execute(
+        "UPDATE maintenance_operations SET lease_expires_at = ?",
+        ("2026-07-19T08:59:59.000Z",),
+    )
+    harness.adapter._complete = original_complete  # type: ignore[method-assign]
+
+    with pytest.raises(MaintenanceError) as captured:
+        await harness.adapter.restore(
+            harness.restore_command,
+            confirmed_plan_digest=harness.procedures.restore_plan.plan_digest,
+            recovery_secret=None,
+        )
+
+    assert captured.value.reason is MaintenanceReason.REPLAY_MISMATCH
+    assert harness.catalog.execute(
+        "SELECT state, phase FROM maintenance_operations"
+    ).fetchone() == ("pending", "route_switched")
+
+    harness.catalog.execute(
+        "INSERT INTO privacy_root_sets(task_id, route_identity_digest, root_generation, "
+        "root_count, root_digest, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            str(target_roots.task_id),
+            target_roots.route_identity_digest,
+            target_roots.privacy_root_generation,
+            len(target_roots.object_refs),
+            target_roots.root_set_digest,
+            "2026-07-19T09:00:00.000Z",
+        ),
+    )
+    harness.catalog.execute(
+        "UPDATE maintenance_operations SET lease_expires_at = ?",
+        ("2026-07-19T08:59:59.000Z",),
+    )
+    result = await harness.adapter.restore(
+        harness.restore_command,
+        confirmed_plan_digest=harness.procedures.restore_plan.plan_digest,
+        recovery_secret=None,
+    )
+    assert result.active_route_identity_digest == target_route
+    assert harness.catalog.execute(
+        "SELECT state, phase FROM maintenance_operations"
+    ).fetchone() == ("complete", "terminal")
+
+
+@pytest.mark.anyio
 async def test_restore_invalidates_nonterminal_privacy_authority() -> None:
     harness = _harness()
     harness.procedures.restored = _RestoredTarget(
@@ -508,6 +759,154 @@ async def test_restore_invalidates_nonterminal_privacy_authority() -> None:
     assert harness.catalog.execute("SELECT bundle_relpath FROM task_routes").fetchone() == (
         f"tasks/{harness.procedures.facts.task_id}",
     )
+
+
+@pytest.mark.anyio
+async def test_restore_rebases_owned_project_refs_and_preserves_other_route_generation() -> None:
+    harness = _harness()
+    task = str(harness.procedures.facts.task_id)
+    other_task = _id(IdKind.TASK, 205)
+    other_session = _id(IdKind.SESSION, 206)
+    now = "2026-07-19T09:00:00.000Z"
+    harness.catalog.execute(
+        "INSERT INTO task_routes(task_id, active_session_id, bundle_relpath, route_generation, "
+        "active_route_identity_digest, state, created_at, updated_at) "
+        "VALUES(?, ?, ?, 1, ?, 'active', ?, ?)",
+        (
+            other_task,
+            other_session,
+            f"tasks/{other_task}",
+            canonical_digest({"route": "other"}),
+            now,
+            now,
+        ),
+    )
+    project = _id(IdKind.PROJECT, 207)
+    owned = ProjectTextRef(
+        _id(IdKind.OBJECT, 208),
+        _digest(b"owned-content"),
+        13,
+        task,
+        1,
+        _digest(b"owned-envelope"),
+    )
+    foreign = ProjectTextRef(
+        _id(IdKind.OBJECT, 209),
+        _digest(b"foreign-content"),
+        15,
+        other_task,
+        1,
+        _digest(b"foreign-envelope"),
+    )
+    harness.catalog.execute(
+        "INSERT INTO projects(project_id, kind, repository_commitment, auto_grouping, "
+        "membership_generation, created_at, dissolved_at, title_ref_canonical, "
+        "description_ref_canonical) VALUES(?, 'general', NULL, 1, 1, ?, NULL, ?, ?)",
+        (project, now, canonical_encode(owned.as_wire()), canonical_encode(foreign.as_wire())),
+    )
+    detection = _id(IdKind.EVENT, 212)
+    harness.catalog.execute(
+        "INSERT INTO coordination_detections("
+        "detection_id, project_id, membership_generation, left_task_id, right_task_id, "
+        "overlap_kind, resource_identities_json, counterpart_task_id, advice_only, "
+        "obligation_declared, addressed, generation_valid, detail_ref_json, resolved) "
+        "VALUES(?, ?, 1, ?, ?, 'integration', ?, ?, 1, 0, 0, 1, ?, 0)",
+        (
+            detection,
+            project,
+            task,
+            other_task,
+            canonical_encode([canonical_digest({"resource": "src/a.py"})]).decode("utf-8"),
+            other_task,
+            canonical_encode(owned.as_wire()).decode("utf-8"),
+        ),
+    )
+
+    await harness.adapter.restore(
+        harness.restore_command,
+        confirmed_plan_digest=harness.procedures.restore_plan.plan_digest,
+        recovery_secret=None,
+    )
+
+    project_row = harness.catalog.execute(
+        "SELECT title_ref_canonical, description_ref_canonical FROM projects WHERE project_id = ?",
+        (project,),
+    ).fetchone()
+    assert project_row is not None
+    title, description = cast(tuple[object, object], project_row)
+    assert title == canonical_encode(
+        ProjectTextRef(
+            owned.object_id,
+            owned.content_digest,
+            owned.plaintext_size,
+            owned.owner_task_id,
+            2,
+            owned.envelope_digest,
+        ).as_wire()
+    )
+    assert description == canonical_encode(foreign.as_wire())
+    detail = harness.catalog.execute(
+        "SELECT detail_ref_json FROM coordination_detections WHERE detection_id = ?",
+        (detection,),
+    ).fetchone()
+    assert detail == (
+        canonical_encode(
+            ProjectTextRef(
+                owned.object_id,
+                owned.content_digest,
+                owned.plaintext_size,
+                owned.owner_task_id,
+                2,
+                owned.envelope_digest,
+            ).as_wire()
+        ).decode("utf-8"),
+    )
+    assert harness.catalog.execute(
+        "SELECT route_generation FROM task_routes WHERE task_id = ?", (task,)
+    ).fetchone() == (2,)
+    assert harness.catalog.execute(
+        "SELECT route_generation FROM retained_task_routes WHERE task_id = ?", (task,)
+    ).fetchone() == (1,)
+
+
+@pytest.mark.anyio
+async def test_restore_fails_closed_for_legacy_project_ref_and_rolls_back_route() -> None:
+    harness = _harness()
+    task = str(harness.procedures.facts.task_id)
+    project = _id(IdKind.PROJECT, 210)
+    legacy = ProjectTextRef(
+        _id(IdKind.OBJECT, 211),
+        _digest(b"legacy-content"),
+        14,
+        task,
+        1,
+    )
+    now = "2026-07-19T09:00:00.000Z"
+    encoded = canonical_encode(legacy.as_wire())
+    harness.catalog.execute(
+        "INSERT INTO projects(project_id, kind, repository_commitment, auto_grouping, "
+        "membership_generation, created_at, dissolved_at, title_ref_canonical, "
+        "description_ref_canonical) VALUES(?, 'general', NULL, 1, 1, ?, NULL, ?, NULL)",
+        (project, now, encoded),
+    )
+
+    with pytest.raises(MaintenanceError) as captured:
+        await harness.adapter.restore(
+            harness.restore_command,
+            confirmed_plan_digest=harness.procedures.restore_plan.plan_digest,
+            recovery_secret=None,
+        )
+
+    assert captured.value.reason is MaintenanceReason.REPLAY_MISMATCH
+    assert harness.catalog.execute(
+        "SELECT bundle_relpath, route_generation FROM task_routes WHERE task_id = ?", (task,)
+    ).fetchone() == (f"tasks/{task}", 1)
+    assert harness.catalog.execute(
+        "SELECT COUNT(*) FROM retained_task_routes WHERE task_id = ?", (task,)
+    ).fetchone() == (0,)
+    assert harness.catalog.execute(
+        "SELECT title_ref_canonical FROM projects WHERE project_id = ?", (project,)
+    ).fetchone() == (encoded,)
 
 
 @pytest.mark.anyio
@@ -545,6 +944,11 @@ async def test_backup_recovers_pin_after_bundle_commit_before_catalog_phase() ->
     stored_pin_id = stored_pin_row[0]
 
     harness.adapter.advance_phase = original_advance  # type: ignore[method-assign]
+    # A crashed owner may be reclaimed only after its durable lease expires.
+    harness.catalog.execute(
+        "UPDATE maintenance_operations SET lease_expires_at = ?",
+        ("2026-07-19T08:59:59.000Z",),
+    )
     resumed_handle = await harness.adapter._acquire_maintenance(  # pyright: ignore[reportPrivateUsage]
         harness.backup_command,
         harness.procedures.backup_plan,

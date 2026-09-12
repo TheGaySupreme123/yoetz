@@ -28,8 +28,10 @@ ADR wins; when an ADR and the code disagree, that is a bug in one of them and wo
 | [021](ADR-021-recommended-defaults-advisories-and-update-check-surfacing.md) | Recommended-defaults advisories and update-check surfacing |
 | [022](ADR-022-harness-observation-writer-identity-and-observation-tolerant-concurrency.md) | Harness observation writer identity and observation-tolerant concurrency |
 | [023](ADR-023-portable-plugin-carrier-host-activation.md) | Portable plugin carrier and host activation |
+| [024](ADR-024-installation-vault-recovery.md) | Installation-vault recovery |
 | [025](ADR-025-versioned-claim-correction.md) | Versioned append-only claim correction |
 | [026](ADR-026-isolated-root-runtime-identity.md) | Exact-target isolated-root runtime identity |
+| [027](ADR-027-task-lineage-and-project-scope.md) | Task lineage and project scope |
 | [028](ADR-028-instance-identity-and-runtime-pinned-roots.md) | Instance identity and runtime-pinned isolated roots |
 | [029](ADR-029-smart-observation-selection.md) | Smart observation selection and bounded observation budgets (proposed) |
 

@@ -74,6 +74,16 @@ or any snapshot of it ([ADR-017](adr/ADR-017-full-screen-terminal-interface.md) 
 against both, so "the durable adapter behaves like the reference" is a test result rather than an
 assumption.
 
+Multi-agent work has three separate owners. `application/lineage.py` and
+`adapters/sqlite/lineage_catalog.py` own recoverable delegation and attachment capabilities;
+`application/lineage_coordinator.py` records authorized child dependency snapshots in the parent
+ledger, and `kernel/lineage.py` evaluates those frozen snapshots for checks and receipts.
+`application/projects.py` owns project membership and admission, while `application/coordination.py`
+and `adapters/sqlite/project_coordination.py` own attributable overlap detections and durable
+delivery. `application/task_views.py` builds their read-only status views. Host observations enter
+through `ports/host_lineage.py` and `adapters/sqlite/host_lineage.py`; a provisional observation has
+no task bundle until a separately authorized child start binds it.
+
 `tui/` sitting beside `cli/` rather than inside it is also deliberate. It is a second presentation
 of the same operations, not a second authority over them: every gate — preview digests, foreign
 MCP entries, privacy widening, vault state, provider readiness — is enforced by the owning service
@@ -102,7 +112,7 @@ Flow for a typical task:
 5. **`receipt`** projects the honest summary: what was checked, at what coverage, what is still
    open. Available as `json`, `markdown`, or `text`.
 
-With separate project consent, first-party harness hooks may retain selected visible content as
+With separate workspace observation consent, first-party harness hooks may retain selected visible content as
 secret-scanned encrypted objects. The observation coordinator can materialize only eligible tool
 output, changed-file, diff, and bounded inspection objects as `observation_captured` immutable
 evidence. That path proves retention and byte identity, not correctness, reproduction, or egress
@@ -150,7 +160,10 @@ These are enforced in code and locked by tests; they are the reason the system i
 
 One SQLite bundle per task holds structural rows; content-bearing material lives in the encrypted
 object store and is referenced by digest. Migrations under `migrations/` are append-only and CI
-enforces that ([ADR-003](adr/ADR-003-storage-sqlite-durability.md)). Recovery paths — backup,
+enforces that ([ADR-003](adr/ADR-003-storage-sqlite-durability.md)). Task lineage and first-class
+projects ([ADR-027](adr/ADR-027-task-lineage-and-project-scope.md)) do not change that layout: a
+child is another bundle, and lineage or project membership lives in the catalog. The service, not
+a client, projects parent rollup and project status. Recovery paths — backup,
 restore, migrate, quarantine — are documented in [`docs/runbooks/`](runbooks/).
 Observation migration 0008 adds only nullable digest/byte bindings for the secret-scanned inner
 content; it adds no plaintext column and leaves older unbound rows readable at weaker coverage.

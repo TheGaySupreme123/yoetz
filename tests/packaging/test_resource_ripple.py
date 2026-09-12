@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -24,6 +25,7 @@ _CHECKOUT_TREES: Final = (
     ".agents/skills/yoetz",
     "fixtures/agent-plugins",
     "fixtures/canonical",
+    "fixtures/replay",
     "guidance",
     "migrations",
     "schemas",
@@ -52,6 +54,8 @@ def _copy_checkout(destination: Path) -> None:
 
 def _synthetic_checkout(root: Path, *, inventory_count: int, reviewed_count: int) -> None:
     _write(root, "src/yoetz/__init__.py", "")
+    _write(root, "src/yoetz/protocol/__init__.py", "")
+    _write(root, "src/yoetz/protocol/schemas.py", "def load_schema_catalog():\n    return None\n")
     _write(
         root,
         "src/yoetz/version.py",
@@ -107,11 +111,69 @@ def _run(*arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _run_resource_manifest(*arguments: str, repo_root: Path) -> subprocess.CompletedProcess[str]:
+    environment = dict(os.environ)
+    source_root = str(repo_root / "src")
+    existing = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = (
+        source_root if not existing else os.pathsep.join((source_root, existing))
+    )
+    return subprocess.run(
+        [
+            sys.executable,
+            str(_REPO_ROOT / "scripts/verify_resource_manifest.py"),
+            *arguments,
+            "--repo-root",
+            str(repo_root),
+        ],
+        cwd=repo_root,
+        env=environment,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=120,
+    )
+
+
+def _load_resource_manifest_module() -> Any:
+    spec = importlib.util.spec_from_file_location(
+        "_yoetz_test_verify_resource_manifest",
+        _REPO_ROOT / "scripts/verify_resource_manifest.py",
+    )
+    if spec is None or spec.loader is None:
+        raise AssertionError("could not load verify_resource_manifest.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_real_checkout_passes_the_single_ci_entrypoint() -> None:
     completed = _run("--check")
 
     assert completed.returncode == 0, completed.stderr
     assert "generated artifacts are at a fixed point" in completed.stdout
+
+
+@pytest.mark.slow
+def test_shared_stale_schema_member_identity_cannot_pass_the_ripple(tmp_path: Path) -> None:
+    """Source/mirror parity cannot conceal an invalid hand-maintained schema inventory."""
+
+    checkout = tmp_path / "checkout"
+    _copy_checkout(checkout)
+    manifest_path = checkout / "schemas/manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    member = next(
+        item for item in manifest["members"] if item["path"] == "consent/status-7.0.0.schema.json"
+    )
+    member["byte_length"] += 1
+    manifest_path.write_bytes(canonical_encode(manifest))
+
+    # The command owns all mirror and runtime digest changes, so the final failure can only be
+    # seen by loading the schema catalog, not by comparing a stale package mirror with a source.
+    completed = _run("--write", "--repo-root", str(checkout))
+    assert completed.returncode != 0
+    assert "schema_manifest_member_mismatch" in completed.stderr
 
 
 def test_write_repeats_until_the_owned_bytes_are_stable(tmp_path: Path) -> None:
@@ -122,6 +184,133 @@ def test_write_repeats_until_the_owned_bytes_are_stable(tmp_path: Path) -> None:
     assert completed.returncode == 0, completed.stderr
     assert "fixed point after 2 pass(es)" in completed.stdout
     assert (tmp_path / "schemas/state.txt").read_text(encoding="utf-8") == "stable\n"
+
+
+def test_sync_retires_prior_inventory_file_before_manifest_publish_and_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An interrupted retirement leaves an old manifest that a retry can converge."""
+
+    resource_manifest = _load_resource_manifest_module()
+
+    resource_root = tmp_path / "src/yoetz/resources"
+    stale_relative = "fixtures/replay/retired.case.json"
+    stale_path = resource_root / stale_relative
+    stale_path.parent.mkdir(parents=True)
+    stale_path.write_bytes(b"retired")
+    manifest_path = resource_root / "manifest.json"
+    old_manifest = canonical_encode({"entries": [{"package_path": stale_relative}]}) + b"\n"
+    manifest_path.write_bytes(old_manifest)
+
+    current_relative = "fixtures/canonical/current.case.json"
+    current_data = b"{}"
+    current = resource_manifest.CollectedResource(
+        resource_manifest.ResourceInventoryEntry(
+            logical_name=current_relative,
+            source_path=current_relative,
+            package_path=current_relative,
+            kind="canonical_vector",
+            media_type="application/json",
+            size_cap=100,
+            text=True,
+        ),
+        len(current_data),
+        f"sha256:{hashlib.sha256(current_data).hexdigest()}",
+        current_data,
+    )
+    new_manifest = canonical_encode({"entries": []}) + b"\n"
+    real_replace = resource_manifest.os.replace
+    interrupted = False
+
+    def interrupt_manifest_publish(source: Path, destination: Path) -> None:
+        nonlocal interrupted
+        if Path(destination) == manifest_path and not interrupted:
+            interrupted = True
+            raise OSError("simulated_manifest_publish_interruption")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(resource_manifest.os, "replace", interrupt_manifest_publish)
+    with pytest.raises(OSError, match="simulated_manifest_publish_interruption"):
+        resource_manifest.sync_resource_tree((current,), new_manifest, repo_root=tmp_path)
+
+    assert not stale_path.exists()
+    assert manifest_path.read_bytes() == old_manifest
+
+    monkeypatch.setattr(resource_manifest.os, "replace", real_replace)
+    resource_manifest.sync_resource_tree((current,), new_manifest, repo_root=tmp_path)
+    assert not stale_path.exists()
+    assert (resource_root / current_relative).read_bytes() == current_data
+    assert manifest_path.read_bytes() == new_manifest
+
+
+def test_real_sync_retires_stale_package_resource_and_keeps_source_fixture(
+    tmp_path: Path,
+) -> None:
+    """Inventory retirement removes only the generated mirror and keeps the source corpus."""
+
+    checkout = tmp_path / "checkout"
+    _copy_checkout(checkout)
+    relative = "fixtures/replay/lineage-event-families.case.json"
+    source = checkout / relative
+    package = checkout / "src/yoetz/resources" / relative
+    package.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, package)
+
+    manifest_path = checkout / "src/yoetz/resources/manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["entries"].append(
+        {
+            "kind": "canonical_vector",
+            "logical_name": relative,
+            "media_type": "application/vnd.yoetz.fixture-case+json",
+            "package_path": relative,
+            "sha256": f"sha256:{hashlib.sha256(source.read_bytes()).hexdigest()}",
+            "size": source.stat().st_size,
+            "source_path": relative,
+        }
+    )
+    manifest_path.write_bytes(canonical_encode(manifest) + b"\n")
+
+    completed = _run_resource_manifest("--sync", repo_root=checkout)
+
+    assert completed.returncode == 0, completed.stderr + completed.stdout
+    assert source.is_file()
+    assert not package.exists()
+
+
+@pytest.mark.parametrize(
+    "layout", ("package_root", "package_parent", "package_extra", "source_parent")
+)
+def test_resource_scans_reject_symlinked_roots_ancestors_and_extras(
+    tmp_path: Path, layout: str
+) -> None:
+    checkout = tmp_path / "checkout"
+    _copy_checkout(checkout)
+    resources = checkout / "src/yoetz/resources"
+
+    if layout == "package_root":
+        target = checkout / "package-resource-target"
+        shutil.move(str(resources), str(target))
+        resources.symlink_to(target, target_is_directory=True)
+    elif layout == "package_parent":
+        parent = resources / "fixtures"
+        target = checkout / "package-fixtures-target"
+        shutil.move(str(parent), str(target))
+        parent.symlink_to(target, target_is_directory=True)
+    elif layout == "package_extra":
+        target = checkout / "unowned-resource.json"
+        target.write_text("{}\n", encoding="utf-8")
+        (resources / "unowned-resource.json").symlink_to(target)
+    else:
+        parent = checkout / "fixtures/canonical"
+        target = checkout / "source-canonical-target"
+        shutil.move(str(parent), str(target))
+        parent.symlink_to(target, target_is_directory=True)
+
+    for mode in ("--check", "--sync"):
+        completed = _run_resource_manifest(mode, repo_root=checkout)
+        assert completed.returncode == 1
+        assert "symlink_forbidden" in completed.stderr
 
 
 @pytest.mark.slow
@@ -262,6 +451,34 @@ def test_obsolete_generated_member_requires_its_old_marker_binding(tmp_path: Pat
     written = _run("--write", "--repo-root", str(checkout))
     assert written.returncode == 0, written.stderr + written.stdout
     assert not (root / relative).exists()
+
+
+@pytest.mark.slow
+def test_write_regenerates_current_builder_owned_schema_without_changing_frozen_history(
+    tmp_path: Path,
+) -> None:
+    """One owning command repairs a stale current schema and all of its dependent bytes."""
+
+    checkout = tmp_path / "checkout"
+    _copy_checkout(checkout)
+    frozen_path = checkout / "schemas/operations/status-result-1.2.0.schema.json"
+    frozen = frozen_path.read_bytes()
+    current_path = checkout / "schemas/operations/status-result-1.3.0.schema.json"
+    expected = current_path.read_bytes()
+    current = json.loads(expected)
+    current["$defs"]["history_item"]["properties"]["summary_code"]["enum"].remove("child_accepted")
+    current_path.write_bytes(canonical_encode(current))
+
+    written = _run("--write", "--repo-root", str(checkout))
+
+    assert written.returncode == 0, written.stderr + written.stdout
+    assert current_path.read_bytes() == expected
+    assert frozen_path.read_bytes() == frozen
+    assert (
+        checkout / "src/yoetz/resources/schemas/operations/status-result-1.3.0.schema.json"
+    ).read_bytes() == expected
+    checked = _run("--check", "--repo-root", str(checkout))
+    assert checked.returncode == 0, checked.stderr + checked.stdout
 
 
 @pytest.mark.slow

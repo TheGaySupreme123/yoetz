@@ -196,7 +196,9 @@ def _versions() -> ReceiptVersionSlice:
             PolicyVersionEntry("research-evidence", "0.1.0"),
             PolicyVersionEntry("work-integrity", "0.1.0"),
         ),
-        schema_versions=(SchemaVersionEntry("receipts/receipt-document", "1.0.0"),),
+        # The current receipt writer emits the additive child section.  Its inner document
+        # schema_version remains 1.0.0; the artifact selected by the version slice is 1.2.0.
+        schema_versions=(SchemaVersionEntry("receipts/receipt-document", "1.2.0"),),
         resource_manifest_digest=PROJECTION_DIGEST,
     )
 
@@ -212,21 +214,31 @@ def _scope(_: ControlProjectionBinding, source: Mapping[str, JsonValue]) -> Auth
     )
 
 
-async def _semantic_never(frozen: object, findings: object) -> object:
+async def _semantic_never(
+    frozen: object,
+    findings: object,
+    runtime: object | None = None,
+    lineage_evaluation: object | None = None,
+) -> object:
     """Fail if a deterministic-only composition reaches semantic evaluation."""
 
-    del frozen, findings
+    del frozen, findings, runtime, lineage_evaluation
     raise AssertionError("semantic_evaluator_called_in_deterministic_mode")
 
 
-async def _semantic_succeeds(frozen: object, findings: object) -> object:
+async def _semantic_succeeds(
+    frozen: object,
+    findings: object,
+    runtime: object | None = None,
+    lineage_evaluation: object | None = None,
+) -> object:
     """Return a succeeded semantic outcome that raises no challenge of its own.
 
     Semantic *delivery* is a separate subject; these sweeps only need semantic to reach
     ``succeeded`` so that the deterministic findings travel the semantic modes too.
     """
 
-    del frozen, findings
+    del frozen, findings, runtime, lineage_evaluation
     return FinalSemanticEvaluation(
         SemanticStatus.SUCCEEDED,
         SemanticReason.SEMANTIC_COMPLETED,

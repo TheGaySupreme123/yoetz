@@ -45,6 +45,7 @@ from yoetz.domain.values import (
 )
 from yoetz.kernel.deterministic_checks import CaseGap, build_deterministic_case, case_coverage
 from yoetz.kernel.finding_resolution import finding_is_resolved
+from yoetz.kernel.lineage import evaluate_recorded_lineage
 from yoetz.kernel.receipt_builder import (
     CheckSuffixClass,
     ReceiptBuildContext,
@@ -538,6 +539,43 @@ def _context(
         assert record.payload is not None
         coverage = weakest(coverage, record.payload.coverage)
 
+    # Lineage is replay-only.  The coordinator may have read live children earlier, but a
+    # receipt never does: it evaluates the aggregate manifest events already present in this
+    # parent prefix.  When a check applies, evaluate the manifest at the check's subject frontier
+    # and retain any later recorded aggregate as an uncovered reference.
+    lineage = evaluate_recorded_lineage(
+        records,
+        tested_through_sequence=(
+            None if applicable is None else applicable.subject_frontier.sequence
+        ),
+        base_coverage=coverage,
+    )
+    coverage = lineage.coverage
+    blocking_children = {
+        rollup.child_task_id
+        for rollup in lineage.children
+        if rollup.blocks_clean_completion and rollup.tested_manifest_ref is not None
+    }
+    # Pending and informational children are annotations.  Keep their full evaluator gaps in
+    # the structured child section, but do not project those gaps into receipt coverage: doing so
+    # would turn an explicitly non-blocking relationship into an insufficient-completion result.
+    for lineage_gap in lineage.gaps:
+        if (
+            lineage_gap.child_task_id is not None
+            and lineage_gap.child_task_id not in blocking_children
+        ):
+            continue
+        event_ref = lineage_gap.manifest_event_id
+        child_ref = "" if lineage_gap.child_task_id is None else str(lineage_gap.child_task_id)
+        event_token = "" if event_ref is None else str(event_ref)
+        marker = ":".join(
+            token for token in ("lineage", lineage_gap.code, child_ref, event_token) if token
+        )
+        subject_refs = () if event_ref is None else (event_ref,)
+        candidate = CaseGap(marker, lineage_gap.code, subject_refs)
+        if not any(gap.marker == candidate.marker and gap.code == candidate.code for gap in gaps):
+            gaps.append(candidate)
+
     # ReceiptBuildContext requires exact equality between Coverage.known_gaps and CaseGap codes.
     # Check-derived codes were materialized above; a code introduced only by a retained finding
     # receives one task-global structural marker so many historical findings cannot exhaust the
@@ -570,6 +608,7 @@ def _context(
         ordered_gaps,
         finding_states,
         applicable,
+        lineage,
         check_suffix=check_suffix,
         records=records,
     )
@@ -625,7 +664,7 @@ def _internal_result(
     )
     return ReceiptInternalResult(
         "0.1",
-        "1.0.0",
+        document.schema_version,
         request.request_id,
         True,
         str(document.receipt_id),

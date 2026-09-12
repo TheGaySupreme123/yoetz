@@ -38,6 +38,7 @@ from yoetz.application.observation_materialize import (
     materialize_observation_outcome_correction,
     observation_operation_digest,
     observation_writer_id,
+    stable_observation_id,
 )
 from yoetz.domain.findings import Finding
 from yoetz.domain.observation import (
@@ -174,6 +175,48 @@ def test_materialize_pre_post_and_unpaired() -> None:
         task_id=task,
     )
     assert ObservationGapCode.CONTENT_UNSELECTED.value in unselected.coverage.known_gaps
+
+
+def test_materialization_uses_ledger_mapping_independent_of_transport_cursor() -> None:
+    """New IDs use obs-ledger/1.6 while explicit replay can select a legacy map."""
+
+    task = _task_id()
+    session = f"hmac-sha256:{'74' * 32}"
+    envelope = _envelope(session=session, kind="PreToolUse", identity="hook:mapping-source")
+    stream_cursor = replace(envelope.cursor, mapping_version="codex-obs-stream/1.4.0")
+    stream_transport = replace(envelope, cursor=stream_cursor)
+
+    current = materialize_observation_envelope(envelope, task_id=task)
+    current_from_stream = materialize_observation_envelope(stream_transport, task_id=task)
+    action_source = (
+        f"pre-event:codex:{envelope.session_commitment}:"
+        f"{envelope.cursor.source_generation}:{envelope.source_identity}"
+    )
+    current_event = stable_observation_id(
+        kind=IdKind.EVENT,
+        task_id=task,
+        source_identity=action_source,
+        mapping_version=MATERIALIZATION_MAPPING_VERSION,
+        role="action_event",
+    )
+    assert current.drafts[0].draft.event_id == current_event
+    assert current_from_stream.drafts[0].draft.event_id == current_event
+
+    legacy_mapping = MATERIALIZATION_LEGACY_MAPPING_VERSIONS[0]
+    replay = materialize_observation_envelope(
+        envelope,
+        task_id=task,
+        mapping_version=legacy_mapping,
+    )
+    legacy_event = stable_observation_id(
+        kind=IdKind.EVENT,
+        task_id=task,
+        source_identity=action_source,
+        mapping_version=legacy_mapping,
+        role="action_event",
+    )
+    assert replay.drafts[0].draft.event_id == legacy_event
+    assert replay.drafts[0].draft.event_id != current_event
 
 
 def test_materialize_post_only_profiles_never_invent_a_pre_pair() -> None:
@@ -2115,6 +2158,146 @@ async def test_nonretryable_public_ingest_errors_are_terminal(
     )
 
     result = await coordinator.ingest_request(
+        ObservationIngestRequest(
+            codex_session_id=mapping.codex_session_id,
+            envelope=_envelope(session=session),
+        )
+    )
+
+    assert result.reason == ObservationGapCode.LEDGER_REJECTED.value
+    assert route_observation_ingest(result).action is ObservationDrainAction.QUARANTINE
+
+
+@pytest.mark.anyio
+async def test_nonretryable_route_session_conflict_is_mapping_missing(
+    tmp_path: Path,
+) -> None:
+    """A route conflict keeps the row recoverable while the lifecycle mapping is repaired."""
+
+    class _RejectedRuntime:
+        async def route(self, command: object) -> object:
+            del command
+            raise PublicOperationError(
+                PublicErrorCode.SESSION_CONFLICT,
+                "Observation route is already bound.",
+                retryable=False,
+            )
+
+        async def release(self, runtime: object) -> None:
+            raise AssertionError(f"unrouted runtime released: {runtime!r}")
+
+    local, _workspace, session, mapping = _mapped_local(tmp_path, "route-conflict-952")
+    coordinator = ObservationCoordinator(
+        runtime=_RejectedRuntime(),  # type: ignore[arg-type]
+        local=local,
+        clock=object(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
+
+    result = await coordinator.ingest_request(
+        ObservationIngestRequest(
+            codex_session_id=mapping.codex_session_id,
+            envelope=_envelope(session=session),
+        )
+    )
+
+    assert result.disposition is ObservationIngestDisposition.REJECTED
+    assert result.reason == ObservationGapCode.MAPPING_MISSING.value
+    assert route_observation_ingest(result).action is ObservationDrainAction.RETRY
+
+
+@pytest.mark.anyio
+async def test_route_session_conflict_retries_after_mapping_repair_and_delivers_once(
+    tmp_path: Path,
+) -> None:
+    """A repaired lifecycle mapping drains the same queued observation exactly once."""
+
+    cell = _reattach_fixture(tmp_path, "route-recovery-952")
+    envelope = _envelope(
+        session=cell.session,
+        kind="PostToolUse",
+        identity="hook:route-recovery-952",
+        exit_status=1,
+    )
+    cell.local.enqueue_outbox(cell.workspace, cell.codex_id, envelope)
+    route_available = False
+    inner_route = cell.runtime_port.route
+
+    async def route(command: object) -> TaskRuntime:
+        if not route_available:
+            raise PublicOperationError(
+                PublicErrorCode.SESSION_CONFLICT,
+                "Observation route is inactive.",
+                retryable=False,
+            )
+        return await inner_route(command)
+
+    cell.runtime_port.route = route  # type: ignore[method-assign]
+    sweeper = ObservationOutboxSweeper(cell.local, cell.coordinator, budget_seconds=None)
+    try:
+        first = await sweeper.sweep()
+        assert first.retry_pending == 1
+        assert first.quarantined == 0
+        assert cell.local.pending_outbox_count(cell.workspace) == 1
+
+        # A host reattach persists a successor lifecycle mapping before the next drain pass.
+        cell.reattach()
+        route_available = True
+        second = await sweeper.sweep()
+    finally:
+        sweeper.close()
+        cell.coordinator.close()
+
+    assert second.acknowledged == 1
+    assert second.quarantined == 0
+    assert cell.local.pending_outbox_count(cell.workspace) == 0
+    assert cell.operation_count() == 1
+
+
+@pytest.mark.anyio
+async def test_nonretryable_post_route_session_conflict_is_ledger_rejected(
+    tmp_path: Path,
+) -> None:
+    """A conflict after route acquisition remains terminal and is quarantined."""
+
+    from types import SimpleNamespace
+
+    local, _workspace, session, mapping = _mapped_local(tmp_path, "store-conflict-952")
+
+    class _Store:
+        def grant_consent(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+            raise PublicOperationError(
+                PublicErrorCode.SESSION_CONFLICT,
+                "Observation session is already bound.",
+                retryable=False,
+            )
+
+    runtime = SimpleNamespace(
+        task_id=mapping.yoetz_task_id,
+        session_id=mapping.yoetz_session_id,
+        writer_id=observation_writer_id(mapping.yoetz_task_id, mapping.yoetz_session_id),
+        observation=_Store(),
+    )
+
+    class _RuntimePort:
+        async def route(self, command: object) -> object:
+            del command
+            return runtime
+
+        async def release(self, released: object) -> None:
+            assert released is runtime
+
+    result = await ObservationCoordinator(
+        runtime=_RuntimePort(),  # type: ignore[arg-type]
+        local=local,
+        clock=object(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    ).ingest_request(
         ObservationIngestRequest(
             codex_session_id=mapping.codex_session_id,
             envelope=_envelope(session=session),

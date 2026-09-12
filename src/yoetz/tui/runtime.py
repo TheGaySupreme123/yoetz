@@ -42,6 +42,7 @@ from yoetz.tui.models import (
     ReadinessLayer,
     ReceiptSummary,
     StatusSnapshot,
+    TaskStatusPage,
     VaultPosture,
     WorkDetail,
     WorkItem,
@@ -233,6 +234,7 @@ class YoetzRuntime:
         self._cwd = (cwd or Path.cwd()).resolve()
         self._sessions: dict[str, _WorkSession] = {}
         self._opened_titles: list[str] = []
+        self._pending_checks: dict[str, object] = {}
 
     # -- discovery ------------------------------------------------------
 
@@ -1339,22 +1341,23 @@ class YoetzRuntime:
     # -- the six canonical operations ----------------------------------
 
     async def open_task(self, title: str) -> WorkDetail:
-        """Attach to one task by title through ``start``, then read its views.
+        """Open an exact session selector, keeping display labels out of routing."""
 
-        There is no task-index operation in the control protocol and this
-        interface does not add one; a task is reached by the title the agent
-        used for it.
-        """
-
+        from yoetz.protocol.ids import IdKind, validate_id
         from yoetz.protocol.models import StartRequestModel
 
+        prior = self._sessions.get(title)
+        selector = title if prior is None else prior.session_id
+        try:
+            validate_id(IdKind.SESSION, selector)
+        except ValueError as exc:
+            raise RuntimeError_("session_selector_required", "enter the task's session ID") from exc
         request = StartRequestModel.model_validate(
             {
-                "protocol_version": "0.1",
-                "schema_version": "1.0.0",
-                "request_id": self._request_id(),
+                **self._workflow_identity(),
                 "mode": "attach",
-                "task_title": title,
+                "session_id": selector,
+                "task_title": "Terminal task view",
                 "requested_view": "compact",
             }
         )
@@ -1372,6 +1375,35 @@ class YoetzRuntime:
                 self._opened_titles.append(title)
             compact = success.compact
         return self._work_detail(title, session, compact)
+
+    async def task_status(
+        self, title: str, view: Literal["lineage", "project"], *, cursor: str | None = None
+    ) -> TaskStatusPage:
+        """Render the same service projection used by MCP and the CLI."""
+
+        from yoetz.cli.render import render_human_status
+        from yoetz.protocol.models import StatusRequestModel
+
+        session = self._sessions.get(title)
+        if session is None:
+            raise RuntimeError_("task_not_open", "open the task first")
+        request = StatusRequestModel.model_validate(
+            {
+                **self._workflow_identity(),
+                "session_id": session.session_id,
+                "writer_id": session.writer_id,
+                "view": view,
+                "limit": "50",
+                "cursor": cursor,
+            }
+        )
+        async with self._client() as client:
+            result = await client.status(request)
+        success = self._unwrap(result, "the task view could not be read")
+        session.frontier = success.head_frontier
+        return TaskStatusPage(
+            tuple(render_human_status(success).splitlines()), success.page.next_cursor
+        )
 
     def _work_detail(self, title: str, session: _WorkSession, compact: object) -> WorkDetail:
         coverage = getattr(compact, "coverage", None)
@@ -1396,30 +1428,41 @@ class YoetzRuntime:
     async def run_check(self, title: str, mode: CheckMode) -> tuple[str, tuple[str, ...]]:
         """Run one check in the requested mode and report it without softening."""
 
-        from yoetz.protocol.models import CheckRequestModel
+        from yoetz.protocol.models import CheckAwaitingHumanModel, CheckRequestModel
 
         session = self._sessions.get(title)
         if session is None:
             raise RuntimeError_("task_not_open", "open the task first")
-        request = CheckRequestModel.model_validate(
-            {
-                "protocol_version": "0.1",
-                "schema_version": "1.0.0",
-                "request_id": self._request_id(),
-                "session_id": session.session_id,
-                "writer_id": session.writer_id,
-                "expected_frontier": self._frontier(session),
-                "mode": mode.value,
-            }
+        pending = self._pending_checks.get(title)
+        request = (
+            pending
+            if isinstance(pending, CheckRequestModel)
+            else CheckRequestModel.model_validate(
+                {
+                    **self._workflow_identity(),
+                    "session_id": session.session_id,
+                    "writer_id": session.writer_id,
+                    "expected_frontier": self._frontier(session),
+                    "mode": mode.value,
+                }
+            )
         )
         async with self._client() as client:
             result = await client.check(request)
         success = self._unwrap(result, "the check could not be completed")
-        from yoetz.cli.render import render_human_check
+        session.frontier = success.result_frontier
+        from yoetz.cli.render import render_human_awaiting_human, render_human_check
 
+        if isinstance(success, CheckAwaitingHumanModel):
+            self._pending_checks[title] = request
+            return "awaiting_human", tuple(render_human_awaiting_human(success).splitlines())
+        self._pending_checks.pop(title, None)
         return str(success.verdict), tuple(render_human_check(success).splitlines())
 
     async def build_receipt(self, title: str, output_format: str) -> ReceiptSummary:
+        from yoetz.cli.render import render_human_receipt
+        from yoetz.protocol.canonical import canonical_encode
+        from yoetz.protocol.coverage import CheckType
         from yoetz.protocol.models import ReceiptRequestModel
 
         session = self._sessions.get(title)
@@ -1427,40 +1470,54 @@ class YoetzRuntime:
             raise RuntimeError_("task_not_open", "open the task first")
         request = ReceiptRequestModel.model_validate(
             {
-                "protocol_version": "0.1",
-                "schema_version": "1.0.0",
-                "request_id": self._request_id(),
+                **self._workflow_identity(),
                 "task_id": session.task_id,
                 "session_id": session.session_id,
                 "writer_id": session.writer_id,
                 "expected_frontier": self._frontier(session),
                 "format": output_format,
-                "include": "summary",
-                "redaction_profile": "standard",
+                "include": "standard",
+                "redaction_profile": "default_local_export",
             }
         )
         async with self._client() as client:
             result = await client.receipt(request)
         success = self._unwrap(result, "the receipt could not be built")
+        session.frontier = success.result_frontier
         coverage = getattr(success, "coverage", None)
         gaps = tuple(str(item) for item in getattr(coverage, "known_gaps", ()) or ())
+        semantic = CheckType.SEMANTIC_MODEL_DERIVED in success.coverage.check_types
+        rendered = (
+            canonical_encode(success.document).decode("utf-8")
+            if success.document is not None
+            else render_human_receipt(success)
+        )
         return ReceiptSummary(
             subject_id=session.task_id,
             verdict=str(success.conclusion),
             coverage=gaps or ("no gaps recorded",),
-            open_findings=int(getattr(success, "suppressed_finding_count", 0)),
             limitations=gaps,
-            semantic_available=False,
+            semantic_available=semantic,
             freshness=str(getattr(coverage, "ledger_freshness", "unknown")),
-            verified=("deterministic checks recorded in this receipt",),
-            not_verified=("external semantic review did not contribute to this receipt",),
+            rendered_lines=tuple(rendered.splitlines()),
         )
 
     def _frontier(self, session: _WorkSession) -> object:
         frontier = session.frontier
         return {
-            "sequence": getattr(frontier, "sequence", 0),
-            "digest": getattr(frontier, "digest", None),
+            "sequence": str(getattr(frontier, "sequence")),
+            "head_digest": getattr(frontier, "head_digest"),
+        }
+
+    def _workflow_identity(self) -> dict[str, object]:
+        from yoetz import __version__
+
+        return {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "request_id": self._request_id(),
+            "actor": {"actor_id": "yoetz:tui", "actor_type": "human"},
+            "client": {"kind": "yoetz_cli", "version": __version__, "integration": "local_cli"},
         }
 
     def _request_id(self) -> str:
@@ -1469,7 +1526,7 @@ class YoetzRuntime:
         return new_id(IdKind.REQUEST)
 
     def _unwrap(self, result: object, message: str) -> Any:
-        payload = getattr(result, "result", result)
+        payload = getattr(result, "root", getattr(result, "result", result))
         if getattr(payload, "ok", False) is not True:
             error = getattr(payload, "error", None)
             reason = str(getattr(error, "code", "operation_failed"))

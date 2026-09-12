@@ -77,10 +77,13 @@ from yoetz.protocol.coverage import (
 )
 
 # The exhaustive public policy-rule mapping frozen by the fixture ``owns_requirements`` fields.
-# Every one of the 14 registered FindingKind values is owned by exactly one of these seven
-# adversarial cases; ADV-005/007/010/011 exist but are deliberately excluded from this mapping (they
-# exercise plan-revision honesty, crash/retry idempotency, cross-channel import comparison, and
-# completion-scope coverage -- not a new FindingKind of their own).
+# The fourteen built-in policy FindingKind values are owned by exactly one of these seven
+# adversarial cases. ``coordination_overlap`` is deliberately outside this generic corpus: it is a
+# local coordination-runtime finding with its own project acceptance cases, not an external
+# semantic or built-in deterministic policy fixture. ADV-005/007/010/011 exist but are deliberately
+# excluded from this mapping (they exercise plan-revision honesty, crash/retry idempotency,
+# cross-channel import comparison, and completion-scope coverage -- not a new FindingKind of their
+# own).
 _ADV_KIND_MAP: dict[str, frozenset[FindingKind]] = {
     "ADV-001-abandoned-obligation": frozenset(
         {
@@ -718,7 +721,7 @@ def test_adversarial_expected_findings_match_deterministic_engine(
 
 
 def test_adv_claim_fixtures_fail_closed(fixture_loader: FixtureLoader) -> None:
-    """Every registered FindingKind is owned by exactly one mapped case, with no leftovers."""
+    """Every generic-policy FindingKind is owned by exactly one mapped case, with no leftovers."""
 
     union: set[FindingKind] = set()
     for adv_id, kinds in _ADV_KIND_MAP.items():
@@ -726,7 +729,10 @@ def test_adv_claim_fixtures_fail_closed(fixture_loader: FixtureLoader) -> None:
         overlap = union & kinds
         assert not overlap, (adv_id, overlap)
         union |= kinds
-    assert union == frozenset(FindingKind), frozenset(FindingKind) - union
+    expected_generic_kinds = frozenset(FindingKind) - {
+        FindingKind.COORDINATION_OVERLAP,
+    }
+    assert union == expected_generic_kinds, expected_generic_kinds - union
 
     for adv_id, mapped_kinds in _ADV_KIND_MAP.items():
         expected = _load_expected(fixture_loader, adv_id)
