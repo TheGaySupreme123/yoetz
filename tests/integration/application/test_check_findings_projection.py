@@ -84,11 +84,14 @@ _DIGEST = "sha256:" + "7" * 64
 
 
 async def _semantic_challenge(
-    frozen: FrozenCase, findings: tuple[Finding, ...]
+    frozen: FrozenCase,
+    findings: tuple[Finding, ...],
+    runtime: object | None = None,
+    lineage_evaluation: object | None = None,
 ) -> FinalSemanticEvaluation:
     """Hermetic second reviewer that challenges one real deterministic finding."""
 
-    del frozen
+    del frozen, runtime, lineage_evaluation
     assert findings
     provenance = SemanticProvenance(
         provider="fake",
@@ -130,9 +133,12 @@ async def _semantic_challenge(
 
 
 async def _semantic_unavailable(
-    frozen: FrozenCase, findings: tuple[Finding, ...]
+    frozen: FrozenCase,
+    findings: tuple[Finding, ...],
+    runtime: object | None = None,
+    lineage_evaluation: object | None = None,
 ) -> FinalSemanticEvaluation:
-    del frozen, findings
+    del frozen, findings, runtime, lineage_evaluation
     return FinalSemanticEvaluation(
         SemanticStatus.UNAVAILABLE,
         SemanticReason.CREDENTIAL_UNAVAILABLE,
@@ -329,7 +335,11 @@ async def test_check_with_a_finding_projects_a_complete_success(
     # requires the key all the same, as an explicit null.
     assert "provenance" in finding
     executions = cast(list[Mapping[str, JsonValue]], projected["policy_executions"])
-    assert [item["policy_id"] for item in executions] == ["research-evidence", "work-integrity"]
+    assert [item["policy_id"] for item in executions] == [
+        "coordination",
+        "research-evidence",
+        "work-integrity",
+    ]
 
 
 async def test_semantic_finding_projects_with_provenance_and_advice_text() -> None:

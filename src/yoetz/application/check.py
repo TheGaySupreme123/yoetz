@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast
 
+from yoetz.domain.coordination import CoordinationError, CoordinationErrorCode
+from yoetz.domain.events import LedgerRecord
 from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
     CandidateFinding,
@@ -55,6 +58,7 @@ from yoetz.kernel.deterministic_checks import (
     finding_basis_to_json,
     render_deterministic_finding_text,
 )
+from yoetz.kernel.lineage import LineageEvaluation, evaluate_recorded_lineage
 from yoetz.kernel.policies.research_evidence import research_evidence_findings
 from yoetz.kernel.policies.response_support import (
     RESEARCH_REJECTION_PRESENT_FACT,
@@ -63,6 +67,7 @@ from yoetz.kernel.policies.response_support import (
 from yoetz.kernel.policies.work_integrity import work_integrity_findings
 from yoetz.kernel.projections import PROJECTION_VERSION, ProjectionState
 from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
+from yoetz.kernel.reducers import replay
 from yoetz.observability.logging import (
     record_bounded_counts_without_raising,
     record_unexpected_exception_without_raising,
@@ -72,7 +77,10 @@ from yoetz.ports.control import McpHostProfile
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
+    CheckAdvisoryNote,
     CheckAwaitingHuman,
+    CheckChildPreviewItem,
+    CheckChildrenPreview,
     CheckCommitResult,
     CheckPhase,
     CheckPolicyExecution,
@@ -92,8 +100,10 @@ from yoetz.protocol.canonical import (
     strict_json_parse,
 )
 from yoetz.protocol.coverage import (
+    Coverage,
     LedgerFreshness,
     coverage_to_json,
+    weakest,
 )
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind
@@ -131,7 +141,8 @@ __all__ = [
 
 _RESEARCH_PACK = "research-evidence/0.1.0"
 _WORK_PACK = "work-integrity/0.1.0"
-_CANONICAL_PACKS = (_RESEARCH_PACK, _WORK_PACK)
+_COORDINATION_PACK = "coordination/0.1.0"
+_CANONICAL_PACKS = (_RESEARCH_PACK, _WORK_PACK, _COORDINATION_PACK)
 _UNAVAILABLE_GAPS = frozenset(
     {
         "captured_object_unavailable",
@@ -283,6 +294,41 @@ def check_awaiting_human_json(result: CheckAwaitingHuman) -> dict[str, JsonValue
 def check_internal_json(result: CheckCommitResult) -> dict[str, JsonValue]:
     """Serialize sink-independent CHECK success without a privacy projection."""
 
+    def children_json(children: CheckChildrenPreview) -> JsonValue:
+        return {
+            "label": children.label,
+            "items": tuple(
+                {
+                    "child_task_id": item.child_task_id,
+                    "origin": item.origin.value,
+                    "acceptance": item.acceptance.value,
+                    "work_state": item.work_state.value,
+                    "session_health": item.session_health.value,
+                    "rollup_state": item.rollup_state.value,
+                    "blocking_conditions": item.blocking_conditions,
+                }
+                for item in children.items
+            ),
+            "tested_manifest_frontier": (
+                None
+                if children.tested_manifest_frontier is None
+                else dict(children.tested_manifest_frontier.as_wire().items())
+            ),
+        }
+
+    def advisory_notes_json(
+        notes: tuple[CheckAdvisoryNote, ...],
+    ) -> tuple[JsonValue, ...]:
+        return tuple(
+            {
+                "kind": note.kind,
+                "project_id": note.project_id,
+                "task_ids": note.task_ids,
+                "count": str(note.count),
+            }
+            for note in notes
+        )
+
     return {
         "protocol_version": "0.1",
         "state": "complete",
@@ -324,7 +370,506 @@ def check_internal_json(result: CheckCommitResult) -> dict[str, JsonValue]:
             "projection_version": result.versions.projection_version,
             "policy_packs": result.versions.policy_packs,
         },
+        **({} if result.children is None else {"children": children_json(result.children)}),
+        **(
+            {}
+            if not result.advisory_notes
+            else {"advisory_notes": advisory_notes_json(result.advisory_notes)}
+        ),
     }
+
+
+def _lineage_preview(
+    evaluation: LineageEvaluation,
+    subject_frontier: Frontier,
+) -> CheckChildrenPreview | None:
+    """Adapt one frozen evaluator result to the additive CHECK child preview section."""
+
+    if not evaluation.snapshots:
+        return None
+    snapshots = {item.child_task_id: item for item in evaluation.snapshots}
+    items = tuple(
+        CheckChildPreviewItem(
+            child_task_id=str(rollup.child_task_id),
+            origin=snapshots[rollup.child_task_id].origin,
+            acceptance=snapshots[rollup.child_task_id].acceptance,
+            work_state=snapshots[rollup.child_task_id].work_state,
+            session_health=snapshots[rollup.child_task_id].session_health,
+            rollup_state=rollup.state,
+            blocking_conditions=rollup.blockers,
+        )
+        for rollup in evaluation.children
+        if rollup.child_task_id in snapshots
+    )
+    if not items:
+        return None
+    label = (
+        "preview"
+        if any(item.later_manifest_ref is not None for item in evaluation.children)
+        or any(gap.code == "lineage_manifest_uncovered" for gap in evaluation.gaps)
+        else "recorded"
+    )
+    return CheckChildrenPreview(label, items, subject_frontier)
+
+
+async def _lineage_at_frontier(
+    runtime: TaskRuntime,
+    frontier: Frontier,
+    *,
+    base_coverage: Coverage | None = None,
+) -> LineageEvaluation:
+    """Read only the parent ledger prefix named by a frozen check result."""
+
+    records = tuple(
+        [
+            record
+            async for record in runtime.ledger.load_events(
+                runtime.session_id,
+                through=frontier.sequence,
+            )
+        ]
+    )
+    if base_coverage is None:
+        return evaluate_recorded_lineage(
+            records,
+            tested_through_sequence=frontier.sequence,
+        )
+    return evaluate_recorded_lineage(
+        records,
+        tested_through_sequence=frontier.sequence,
+        base_coverage=base_coverage,
+    )
+
+
+async def _attach_replayed_lineage_preview(
+    runtime: TaskRuntime,
+    result: CheckCommitResult,
+) -> CheckCommitResult:
+    """Reconstruct the additive child preview from the exact recorded result prefix."""
+
+    if result.children is not None:
+        return result
+    evaluation = await _lineage_at_frontier(
+        runtime,
+        result.subject_frontier,
+        base_coverage=result.coverage,
+    )
+    preview = _lineage_preview(evaluation, result.subject_frontier)
+    return result if preview is None else replace(result, children=preview)
+
+
+type _AdvisoryFindingKey = tuple[
+    str,
+    str,
+    str,
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+]
+
+
+async def _current_task_findings(
+    app: Application,
+    task_id: str,
+) -> tuple[Finding, ...]:
+    """Read only current unresolved finding identities from an admitted task ledger."""
+
+    catalog = getattr(app, "start_catalog", None)
+    runtime_port = getattr(app, "runtime", None)
+    task_route = None if catalog is None else getattr(catalog, "task_route", None)
+    route = None
+    if not callable(task_route) or runtime_port is None:
+        return ()
+    try:
+        route = await cast(Callable[[str], Awaitable[object | None]], task_route)(task_id)
+        session_id = getattr(route, "session_id", None)
+        if type(session_id) is not str:
+            return ()
+        child_runtime = await runtime_port.route(
+            RouteCommand(
+                session_id,
+                None,
+                RouteAccess.STRUCTURAL_READ,
+                frozenset({RuntimeCapability.STRUCTURAL_READ}),
+            )
+        )
+        if type(child_runtime) is not TaskRuntime or child_runtime.task_id != task_id:
+            if type(child_runtime) is TaskRuntime:
+                await runtime_port.release(child_runtime)
+            return ()
+        try:
+            records: tuple[LedgerRecord, ...] = tuple(
+                [
+                    record
+                    async for record in child_runtime.ledger.load_events(child_runtime.session_id)
+                ]
+            )
+            projection = replay(records)
+        finally:
+            await runtime_port.release(child_runtime)
+    except Exception as exc:
+        record_unexpected_exception_without_raising(
+            exc,
+            component="check",
+            operation="project_advisory_finding_read",
+        )
+        return ()
+    return tuple(
+        finding
+        for item in projection.findings.values()
+        if not item.redacted
+        and item.resolved_by_check_event_id is None
+        and type(finding := item.payload) is Finding
+    )
+
+
+async def _current_task_structural_context(
+    app: Application,
+    task_id: str,
+    project_id: str,
+) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    """Return digest-only resource/plan identities for one admitted project member."""
+
+    project_application = getattr(app, "project_application", None)
+    coordination = (
+        None
+        if project_application is None
+        else getattr(project_application, "coordination_runtime", None)
+    )
+    inputs = None if coordination is None else getattr(coordination, "inputs", None)
+    input_for = None if inputs is None else getattr(inputs, "input_for", None)
+    if not callable(input_for):
+        return None
+    try:
+        declared = await cast(Callable[..., Awaitable[object | None]], input_for)(
+            task_id,
+            project_id,
+        )
+        if declared is None:
+            return None
+        resource_identities = getattr(declared, "resource_identities", None)
+        plan_identities = getattr(declared, "plan_identities", None)
+        if not callable(resource_identities) or not callable(plan_identities):
+            return None
+        resources_value: object = resource_identities()
+        plans_value: object = plan_identities()
+        if type(resources_value) is not tuple or type(plans_value) is not tuple:
+            return None
+        resources = cast(tuple[object, ...], resources_value)
+        plans = cast(tuple[object, ...], plans_value)
+        if any(type(item) is not str for item in (*resources, *plans)):
+            return None
+        resource_strings = cast(tuple[str, ...], resources)
+        plan_strings = cast(tuple[str, ...], plans)
+        return (
+            tuple(sorted(set(resource_strings), key=str.encode)),
+            tuple(sorted(set(plan_strings), key=str.encode)),
+        )
+    except Exception as exc:
+        record_unexpected_exception_without_raising(
+            exc,
+            component="check",
+            operation="project_advisory_context_read",
+        )
+        return None
+
+
+def _advisory_finding_key(
+    finding: Finding,
+    context: tuple[tuple[str, ...], tuple[str, ...]],
+) -> _AdvisoryFindingKey | None:
+    resources, plans = context
+    if not resources and not plans:
+        return None
+    subject_kinds = tuple(
+        sorted(
+            {
+                str(reference).split("_", 1)[0]
+                for reference in finding.subject_refs
+                if type(reference) is str and "_" in reference
+            },
+            key=str.encode,
+        )
+    )
+    return (
+        finding.kind.value,
+        finding.policy_id,
+        finding.policy_version,
+        subject_kinds,
+        resources,
+        plans,
+    )
+
+
+async def _duplicate_project_advisory_task_ids(
+    app: Application,
+    requester_task_id: str,
+    project_id: str,
+    counterpart_ids: tuple[str, ...],
+    findings: tuple[Finding, ...],
+) -> tuple[str, ...]:
+    """Find counterpart identities sharing a typed, resource-only finding signature."""
+
+    requester_context = await _current_task_structural_context(app, requester_task_id, project_id)
+    if requester_context is None:
+        return ()
+    own_keys = {
+        key
+        for finding in findings
+        if (key := _advisory_finding_key(finding, requester_context)) is not None
+    }
+    if not own_keys:
+        return ()
+    duplicate_tasks: set[str] = set()
+    for counterpart_id in counterpart_ids:
+        context = await _current_task_structural_context(app, counterpart_id, project_id)
+        if context is None:
+            continue
+        counterpart_findings = await _current_task_findings(app, counterpart_id)
+        counterpart_keys = {
+            key
+            for finding in counterpart_findings
+            if (key := _advisory_finding_key(finding, context)) is not None
+        }
+        if own_keys & counterpart_keys:
+            duplicate_tasks.add(counterpart_id)
+    if not duplicate_tasks:
+        return ()
+    return tuple(sorted({requester_task_id, *duplicate_tasks}, key=str.encode))
+
+
+_PROJECT_ADVICE_AUTHORITY_REFUSALS: Final = frozenset(
+    {
+        CoordinationErrorCode.CONSENT_REQUIRED,
+        CoordinationErrorCode.GRANT_REQUIRED,
+        CoordinationErrorCode.GRANT_REVOKED,
+        CoordinationErrorCode.GENERATION_MISMATCH,
+        CoordinationErrorCode.PROJECT_NOT_FOUND,
+        CoordinationErrorCode.PROJECT_DISSOLVED,
+        CoordinationErrorCode.MEMBER_NOT_FOUND,
+    }
+)
+
+
+async def _current_project_advisory_notes(
+    app: Application,
+    task_id: str,
+    findings: tuple[Finding, ...],
+) -> tuple[CheckAdvisoryNote, ...]:
+    """Project current, consented coordination advice beside a recorded check result.
+
+    Coordination advice is a projection-time observation.  It is deliberately looked up after
+    the ledger check has frozen/committed its deterministic result, and it is never passed to the
+    ranking or ledger commit paths.  ``ProjectApplication.live_admitted_member_task_ids`` is the
+    admission boundary here: it rechecks source consent, membership, grant, task liveness, and
+    current project generation before returning counterpart identities, so a revoked generation
+    fails closed. Recorded overlap advice can supply candidate identities, but every result still
+    requires the current member-admission boundary at the same captured generation.
+    """
+
+    project_application = getattr(app, "project_application", None)
+    catalog = getattr(project_application, "catalog", None)
+    list_projects = None if catalog is None else getattr(catalog, "list_task_project_ids", None)
+    project_state = None if catalog is None else getattr(catalog, "project_state", None)
+    live_members_for = (
+        None
+        if project_application is None
+        else getattr(project_application, "live_admitted_member_task_ids", None)
+    )
+    advice_for = (
+        None
+        if project_application is None
+        else getattr(project_application, "coordination_advice_for", None)
+    )
+    if not callable(list_projects) or not callable(project_state) or not callable(live_members_for):
+        return ()
+    try:
+        project_ids = await cast(Callable[[str], Awaitable[tuple[str, ...]]], list_projects)(
+            task_id
+        )
+    except Exception as exc:
+        # Advice is additive and optional.  A projection failure must not change the deterministic
+        # check outcome or strand an already committed operation; it simply produces no note.
+        record_unexpected_exception_without_raising(
+            exc,
+            component="check",
+            operation="project_advisory_membership_read",
+        )
+        return ()
+
+    notes: list[CheckAdvisoryNote] = []
+    valid_project_ids = tuple(item for item in project_ids if type(item) is str)
+    for project_id in sorted(set(valid_project_ids), key=str.encode):
+        try:
+            descriptor = await cast(Callable[[str], Awaitable[object | None]], project_state)(
+                project_id
+            )
+            generation = getattr(descriptor, "membership_generation", None)
+            if type(generation) is not int or generation < 1:
+                continue
+        except Exception:
+            continue
+        counterpart_ids: tuple[str, ...] = ()
+        live_lookup_failed = False
+        if callable(live_members_for):
+            try:
+                counterpart_ids = tuple(
+                    sorted(
+                        {
+                            member
+                            for member in await cast(
+                                Callable[..., Awaitable[tuple[str, ...]]], live_members_for
+                            )(task_id, project=project_id, expected_generation=generation)
+                            if type(member) is str and member != task_id
+                        },
+                        key=str.encode,
+                    )
+                )
+            except Exception as exc:
+                if (
+                    isinstance(exc, CoordinationError)
+                    and exc.code in _PROJECT_ADVICE_AUTHORITY_REFUSALS
+                ):
+                    # A missing or revoked authority is an expected absence of optional advice.
+                    # Do not retry it through the compatibility fallback or diagnose corruption.
+                    continue
+                live_lookup_failed = True
+                # A single stale or revoked project cannot suppress notes for other independently
+                # admitted projects, and never changes the recorded check verdict.
+                record_unexpected_exception_without_raising(
+                    exc,
+                    component="check",
+                    operation="project_advisory_read",
+                )
+        if (
+            (not callable(live_members_for) or live_lookup_failed)
+            and not counterpart_ids
+            and callable(advice_for)
+        ):
+            # Compatibility fallback for pre-B3 compositions: this remains generation/consent
+            # fenced but only knows about projects for which overlap advice was already delivered.
+            try:
+                rows = await cast(Callable[..., Awaitable[tuple[object, ...]]], advice_for)(
+                    task_id, project=project_id, expected_generation=generation
+                )
+                counterpart_ids = tuple(
+                    sorted(
+                        {
+                            counterpart
+                            for row in rows
+                            if getattr(row, "target_task_id", None) == task_id
+                            and getattr(row, "project_id", None) == project_id
+                            and type(counterpart := getattr(row, "counterpart_task_id", None))
+                            is str
+                            and counterpart != task_id
+                        },
+                        key=str.encode,
+                    )
+                )
+            except Exception as exc:
+                if (
+                    isinstance(exc, CoordinationError)
+                    and exc.code in _PROJECT_ADVICE_AUTHORITY_REFUSALS
+                ):
+                    continue
+                record_unexpected_exception_without_raising(
+                    exc,
+                    component="check",
+                    operation="project_advisory_read",
+                )
+        if counterpart_ids and callable(live_members_for):
+            try:
+                current_members = tuple(
+                    sorted(
+                        {
+                            member
+                            for member in await cast(
+                                Callable[..., Awaitable[tuple[str, ...]]], live_members_for
+                            )(task_id, project=project_id, expected_generation=generation)
+                            if type(member) is str and member != task_id
+                        },
+                        key=str.encode,
+                    )
+                )
+            except Exception:
+                # The second admission read is a revoke/generation fence.  A race here must
+                # suppress this projection rather than deliver identities from the prior page.
+                counterpart_ids = ()
+            else:
+                if current_members != counterpart_ids:
+                    counterpart_ids = ()
+        if counterpart_ids:
+            duplicate_task_ids = await _duplicate_project_advisory_task_ids(
+                app,
+                task_id,
+                project_id,
+                counterpart_ids,
+                findings,
+            )
+            if callable(live_members_for):
+                try:
+                    final_members = tuple(
+                        sorted(
+                            {
+                                member
+                                for member in await cast(
+                                    Callable[..., Awaitable[tuple[str, ...]]], live_members_for
+                                )(task_id, project=project_id, expected_generation=generation)
+                                if type(member) is str and member != task_id
+                            },
+                            key=str.encode,
+                        )
+                    )
+                except Exception:
+                    # Duplicate context and ledger reads can await long enough for source consent,
+                    # a recipient grant, or the project generation to change.  A failed final
+                    # admission read must suppress both notes from this stale projection.
+                    counterpart_ids = ()
+                    duplicate_task_ids = ()
+                else:
+                    if final_members != counterpart_ids:
+                        counterpart_ids = ()
+                        duplicate_task_ids = ()
+            if counterpart_ids:
+                try:
+                    notes.append(
+                        CheckAdvisoryNote(
+                            "live_member_present",
+                            project_id,
+                            counterpart_ids,
+                            len(counterpart_ids),
+                        )
+                    )
+                except TypeError, ValueError:
+                    # IDs are validated again at the structural result boundary.  An invalid adapter
+                    # row is not allowed to become a public note or affect the check itself.
+                    pass
+            if counterpart_ids and duplicate_task_ids:
+                try:
+                    notes.append(
+                        CheckAdvisoryNote(
+                            "duplicate_finding",
+                            project_id,
+                            duplicate_task_ids,
+                            len(duplicate_task_ids),
+                        )
+                    )
+                except TypeError, ValueError:
+                    pass
+        if len(notes) >= 64:
+            break
+    return tuple(notes)
+
+
+async def _attach_current_project_advisory_notes(
+    app: Application,
+    task_id: str,
+    result: CheckCommitResult,
+) -> CheckCommitResult:
+    """Attach current advice without changing the frozen result or replay semantics."""
+
+    notes = await _current_project_advisory_notes(app, task_id, result.findings)
+    return result if result.advisory_notes == notes else replace(result, advisory_notes=notes)
 
 
 @dataclass(frozen=True, slots=True)
@@ -519,6 +1064,7 @@ class Application(Protocol):
         frozen: FrozenCase,
         deterministic_findings: tuple[Finding, ...],
         runtime: TaskRuntime | None = None,
+        lineage_evaluation: LineageEvaluation | None = None,
     ) -> FinalSemanticEvaluation: ...
 
 
@@ -752,7 +1298,7 @@ def _pack_roots(case: DeterministicCase, pack: str) -> frozenset[str]:
             case.projection.evidence,
             case.projection.findings,
         )
-    else:
+    elif pack == _WORK_PACK:
         collections = (
             case.projection.obligations,
             case.projection.claims,
@@ -761,6 +1307,12 @@ def _pack_roots(case: DeterministicCase, pack: str) -> frozenset[str]:
             case.projection.evidence,
             case.projection.findings,
             case.projection.responses,
+        )
+    else:
+        collections = (
+            case.projection.coordination_contexts,
+            case.projection.coordination_declarations,
+            case.projection.coordination_dispositions,
         )
     return frozenset(str(value) for collection in collections for value in collection)
 
@@ -857,6 +1409,14 @@ def run_deterministic_policies(
             by_pack[pack] = ()
             continue
         policy_id, version = _pack_identity(pack)
+        if pack == _COORDINATION_PACK:
+            # Coordination assessments are supplied by the application runtime from the same
+            # frozen recipient projection immediately before this function's caller allocates
+            # finding IDs.  Keeping the execution row here makes selection/coverage explicit
+            # without consulting live catalog state from this pure dispatcher.
+            executions.append(CheckPolicyExecution(policy_id, version, "run", "completed"))
+            by_pack[pack] = ()
+            continue
         try:
             evaluated = registered[pack](case)
             if not scope.whole_case:
@@ -883,6 +1443,39 @@ def run_deterministic_policies(
     if len(keys) != len(set(keys)):
         raise _invalid("duplicate_deterministic_assessment")
     return assessments, tuple(executions)
+
+
+async def _coordination_assessments_for_frozen_case(
+    app: Application,
+    runtime: TaskRuntime,
+    case: DeterministicCase,
+    scope: CheckScope,
+    packs: tuple[str, ...],
+) -> tuple[DeterministicAssessment, ...]:
+    """Ask the composed coordination runtime to assess only frozen recipient facts."""
+
+    if _COORDINATION_PACK not in packs:
+        return ()
+    project_application = getattr(app, "project_application", None)
+    coordinator = getattr(project_application, "coordination_runtime", None)
+    assess = getattr(coordinator, "assessments_for_check", None)
+    if not callable(assess):
+        return ()
+    pending = assess(
+        runtime.task_id,
+        case,
+        scope_roots=scope.roots,
+        whole_case=scope.whole_case,
+    )
+    if not inspect.isawaitable(pending):
+        raise _invalid("coordination_assessment_invalid")
+    result = await cast(Awaitable[object], pending)
+    values = cast(tuple[object, ...], result)
+    if type(result) is not tuple or any(
+        type(item) is not DeterministicAssessment for item in values
+    ):
+        raise _invalid("coordination_assessment_invalid")
+    return cast(tuple[DeterministicAssessment, ...], result)
 
 
 FindingIdentity = tuple[FindingKind, str, tuple[EventId | ObligationId | ClaimId, ...]]
@@ -1039,6 +1632,8 @@ def _policy_identity(kind: FindingKind) -> tuple[str, str]:
     return (
         ("work-integrity", "0.1.0")
         if kind in _WORK_KINDS
+        else ("coordination", "0.1.0")
+        if kind is FindingKind.COORDINATION_OVERLAP
         else (
             "research-evidence",
             "0.1.0",
@@ -1212,6 +1807,7 @@ async def _semantic_evaluation(
     deterministic: tuple[Finding, ...],
     *,
     route_profile: Literal["policy", "strict"],
+    lineage_evaluation: LineageEvaluation | None = None,
 ) -> FinalSemanticEvaluation:
     if request.mode == "deterministic_only":
         return FinalSemanticEvaluation(
@@ -1229,7 +1825,13 @@ async def _semantic_evaluation(
             SemanticReason.PROVIDER_NOT_CONFIGURED,
         )
     try:
-        return await app.evaluate_semantic_check(frozen, deterministic, runtime)
+        if lineage_evaluation is None or not _semantic_evaluator_accepts_lineage(app):
+            # Keep the original three-argument application seam for integrations that predate
+            # the optional lineage semantic channel.  The production facade accepts the fourth
+            # argument below; omitting it when there is no lineage also avoids turning an old
+            # evaluator's harmless signature difference into a semantic coordinator failure.
+            return await app.evaluate_semantic_check(frozen, deterministic, runtime)
+        return await app.evaluate_semantic_check(frozen, deterministic, runtime, lineage_evaluation)
     except Exception as exc:
         # Optional/required semantic evaluator crash must never fabricate a clean semantic pass.
         record_unexpected_exception_without_raising(
@@ -1248,6 +1850,31 @@ async def _semantic_evaluation(
             SemanticStatus.FAILED,
             SemanticReason.COORDINATOR_FAILURE,
         )
+
+
+def _semantic_evaluator_accepts_lineage(app: Application) -> bool:
+    """Detect legacy application doubles before adding the optional lineage argument.
+
+    The service facade owns the four-argument seam.  A few embedders still provide the original
+    three-argument evaluator, so signature inspection keeps those integrations on their existing
+    path without catching a ``TypeError`` raised from inside an evaluator as if it were a harmless
+    signature mismatch.
+    """
+
+    try:
+        parameters = tuple(inspect.signature(app.evaluate_semantic_check).parameters.values())
+    except TypeError, ValueError:
+        # An opaque callable may still accept the new optional argument; let the normal exception
+        # fence below classify a genuine failure.
+        return True
+    return len(
+        tuple(
+            parameter
+            for parameter in parameters
+            if parameter.kind
+            in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        )
+    ) >= 4 or any(parameter.kind is inspect.Parameter.VAR_POSITIONAL for parameter in parameters)
 
 
 def _semantic_conclusion_token(result: FinalSemanticEvaluation) -> str:
@@ -1380,6 +2007,7 @@ async def execute_check_commit(
         )
     )
     frozen: FrozenCase | None = None
+    lineage_evaluation: LineageEvaluation
     try:
         if runtime.session_id != request.session_id or runtime.writer_id != request.writer_id:
             raise PublicOperationError(
@@ -1416,10 +2044,27 @@ async def execute_check_commit(
                 digest,
             )
         if isinstance(frozen_or_replay, CheckCommitResult):
-            return frozen_or_replay
+            replayed = await _attach_replayed_lineage_preview(runtime, frozen_or_replay)
+            # The ledger replay is frozen; only the additive project-advice projection is current.
+            return await _attach_current_project_advisory_notes(app, runtime.task_id, replayed)
         frozen = frozen_or_replay
+        # The child preview and its coverage are evaluated from the same immutable parent prefix
+        # that the check froze.  This is intentionally before semantic dispatch: a later child
+        # sweep cannot alter this check's subject, and no child bundle is opened on this path.
+        lineage_evaluation = await _lineage_at_frontier(
+            runtime,
+            frozen.case.frontier,
+            base_coverage=case_coverage(frozen.case),
+        )
         if frozen.lease.phase is CheckPhase.RESERVED:
             assessments, executions = run_deterministic_policies(frozen.case, scope, packs)
+            assessments = assessments + await _coordination_assessments_for_frozen_case(
+                app,
+                runtime,
+                frozen.case,
+                scope,
+                packs,
+            )
             deterministic = allocate_findings(
                 app.ids,
                 tuple(item.candidate for item in assessments),
@@ -1457,6 +2102,13 @@ async def execute_check_commit(
                     counts={"superseded_checkpoints": 1},
                 )
                 assessments, executions = run_deterministic_policies(frozen.case, scope, packs)
+                assessments = assessments + await _coordination_assessments_for_frozen_case(
+                    app,
+                    runtime,
+                    frozen.case,
+                    scope,
+                    packs,
+                )
                 deterministic = allocate_findings(
                     app.ids,
                     tuple(item.candidate for item in assessments),
@@ -1483,6 +2135,7 @@ async def execute_check_commit(
             frozen,
             deterministic,
             route_profile=route_profile,
+            lineage_evaluation=lineage_evaluation,
         )
         # Durable semantic attempts may renew the check lease (TTL 60s vs timeout up to 300s).
         if semantic_result.operation_lease is not None:
@@ -1557,6 +2210,7 @@ async def execute_check_commit(
             frozen.case,
             semantic=semantic_result.status is SemanticStatus.SUCCEEDED,
         )
+        coverage = weakest(coverage, lineage_evaluation.coverage)
         policy_failed = any(item.outcome == "failed" for item in executions)
         semantic_failed = semantic_result.status not in {
             SemanticStatus.NOT_REQUESTED,
@@ -1645,7 +2299,7 @@ async def execute_check_commit(
                 CheckPhase.READY_TO_FINALIZE,
             )
             frozen = FrozenCase(frozen.case, lease)
-        return await runtime.ledger.commit_check_if_current(
+        committed = await runtime.ledger.commit_check_if_current(
             frozen,
             ranked,
             executions,
@@ -1655,6 +2309,11 @@ async def execute_check_commit(
             request.request_id,
             scope=CheckScopeModel(claim_ids=scope.claim_ids, obligation_ids=scope.obligation_ids),
         )
+        preview = _lineage_preview(lineage_evaluation, frozen.case.frontier)
+        projected = committed if preview is None else replace(committed, children=preview)
+        # Advice is deliberately attached after the deterministic commit.  It is current
+        # projection context, never part of the frozen check event or its verdict calculation.
+        return await _attach_current_project_advisory_notes(app, runtime.task_id, projected)
     except PublicOperationError as exc:
         if frozen is not None and not exc.retryable:
             try:

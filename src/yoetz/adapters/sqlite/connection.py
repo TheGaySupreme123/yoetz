@@ -52,8 +52,8 @@ BUSY_TIMEOUT_MS: Final = 5_000
 STATEMENT_CACHE_SIZE: Final = 100
 WRITER_QUEUE_DEPTH: Final = 64
 
-_SUPPORTED_CATALOG_SCHEMA_VERSION: Final = 3
-_SUPPORTED_BUNDLE_SCHEMA_VERSION: Final = 12
+_SUPPORTED_CATALOG_SCHEMA_VERSION: Final = 5
+_SUPPORTED_BUNDLE_SCHEMA_VERSION: Final = 13
 _SUPPORTED_SCHEMA_VERSION: Final = _SUPPORTED_BUNDLE_SCHEMA_VERSION
 _PROTOCOL_VERSION: Final = "0.1"
 _SQLITE_OPEN_WRITER: Final = apsw.SQLITE_OPEN_READWRITE | apsw.SQLITE_OPEN_CREATE
@@ -78,8 +78,9 @@ _WRITER_SAFE_CONFIGURATION_PRAGMAS: Final = {
     "trusted_schema": frozenset({None, "OFF", "0"}),
 }
 # Observation consent supports both structural-only and native-content bundle
-# schemas. Permit only its read-only column probe, including on inspection
-# connections; this is not permission to run arbitrary PRAGMAs (#616).
+# schemas. Permit read-only column probes for the non-metadata tables used by
+# integrity capture, while keeping bundle_meta and the no-argument form
+# restricted; this is not permission to run arbitrary PRAGMAs (#616).
 _READ_ONLY_SCHEMA_PRAGMAS: Final = {"table_info": frozenset({"observation_consent"})}
 _STORAGE_UNSAFE_REASONS: Final = frozenset(
     {
@@ -388,6 +389,12 @@ def _read_only_authorizer(
     if action == apsw.SQLITE_PRAGMA:
         if second is None and first in _READ_ONLY_ALLOWED_PRAGMAS:
             return apsw.SQLITE_OK
+        # ``capture_sqlite_integrity`` uses the table-valued form
+        # ``pragma_table_info(?)`` to derive a stable column order for every
+        # preserved table.  Column metadata is read-only; the argument is
+        # still bound by SQLite and cannot introduce SQL syntax.
+        if first == "table_info" and second not in {None, "bundle_meta"}:
+            return apsw.SQLITE_OK
         if first in _READ_ONLY_SCHEMA_PRAGMAS and second in _READ_ONLY_SCHEMA_PRAGMAS[first]:
             return apsw.SQLITE_OK
     return apsw.SQLITE_DENY
@@ -413,6 +420,8 @@ def _writer_authorizer(
     if action == apsw.SQLITE_PRAGMA:
         if first in _WRITER_ALLOWED_PRAGMAS:
             return apsw.SQLITE_OK
+        if first == "table_info" and second not in {None, "bundle_meta"}:
+            return apsw.SQLITE_OK
         if first in _READ_ONLY_SCHEMA_PRAGMAS and second in _READ_ONLY_SCHEMA_PRAGMAS[first]:
             return apsw.SQLITE_OK
         if (
@@ -422,6 +431,21 @@ def _writer_authorizer(
             return apsw.SQLITE_OK
         return apsw.SQLITE_DENY
     return apsw.SQLITE_OK
+
+
+def _migration_authorizer(  # pyright: ignore[reportUnusedFunction]
+    action: int,
+    first: str | None,
+    second: str | None,
+    database: str | None,
+    trigger: str | None,
+) -> int:
+    """Extend the canonical writer policy only for migration-scoped PRAGMAs."""
+
+    if action == apsw.SQLITE_PRAGMA and first in {"foreign_keys", "legacy_alter_table"}:
+        if second in {None, "ON", "OFF", "1", "0"}:
+            return apsw.SQLITE_OK
+    return _writer_authorizer(action, first, second, database, trigger)
 
 
 def _open_structural_read_only(path: Path) -> apsw.Connection:
@@ -559,6 +583,42 @@ def _open_catalog_migration_writer(  # pyright: ignore[reportUnusedFunction]
         verify_sqlite_build(db)
         tables = _table_names(db)
         if "catalog_meta" not in tables or "bundle_meta" in tables:
+            raise StorageUnsafeError("schema_metadata_disagrees")
+        identity = verify_schema_identity(db)
+        if identity.state != "migration_required":
+            raise StorageUnsafeError("schema_metadata_disagrees")
+        return db
+    except Exception:
+        if db is not None:
+            _close_quietly(db)
+        raise
+
+
+def _open_bundle_migration_writer(  # pyright: ignore[reportUnusedFunction]
+    path: Path,
+) -> apsw.Connection:
+    """Open one existing stale bundle for the controlled upgrade phase.
+
+    This is deliberately narrower than a normal writer and is not a recovery or runtime-open
+    escape hatch.  It accepts only an initialized bundle whose schema is older than this binary;
+    callers must quiesce the service and close the connection before reopening through
+    :func:`open_writer`.  The ordinary authorizer is installed before returning, and the
+    migration runner temporarily replaces it only for its bounded DDL window.
+    """
+
+    _verify_safe_path(path, may_create=False)
+    db: apsw.Connection | None = None
+    try:
+        db = apsw.Connection(
+            str(path),
+            flags=apsw.SQLITE_OPEN_READWRITE,
+            statementcachesize=STATEMENT_CACHE_SIZE,
+        )
+        _configure_writer(db)
+        db.set_authorizer(_writer_authorizer)
+        verify_sqlite_build(db)
+        tables = _table_names(db)
+        if "bundle_meta" not in tables or "catalog_meta" in tables or "events" not in tables:
             raise StorageUnsafeError("schema_metadata_disagrees")
         identity = verify_schema_identity(db)
         if identity.state != "migration_required":

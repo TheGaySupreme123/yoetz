@@ -6,6 +6,29 @@ reverse-chronological released versions.
 
 ## Unreleased
 
+### Added
+
+- Multiple agents can work in independent tasks within one repository. Parents can delegate
+  work, children can register for explicit acceptance, and lineage views and receipts retain
+  each child's findings, unfinished work, and observation gaps. Requesting a receipt does not
+  close a task or erase a child dependency (issues #494–#504, #509).
+- Projects group concurrent tasks and surface declared overlaps under each source workspace's
+  existing consent. The CLI supports project creation, membership changes, grouping opt-out and
+  opt-in, and generation-bound coordination grants. Retrying a project mutation recovers its
+  recorded operation without creating a second project or repeating a membership change
+  (issues #505–#508).
+
+### Changed
+
+- Updating from 0.2 preserves existing tasks, settings, permissions, and host registrations.
+  On ordinary service startup after unlock, supported task ledgers receive a verified backup
+  and automatic schema upgrade before new work is admitted. Interrupted upgrades resume from
+  recorded progress; failed verification keeps the service unavailable for writes and retains
+  recovery evidence (issue #496).
+- The 0.3 functionality uses additive control contracts and migrations while retaining the
+  released 0.2 schemas and migration bytes. Observation selection, runtime isolation, and
+  recovery improvements from 0.2 remain in effect.
+
 ## 0.2.0 — 2026-09-11
 
 Official public-alpha package release. See [complete release notes](docs/releases/v0.2.0.md)
@@ -115,6 +138,14 @@ for host integration, observation selection and recovery, upgrade guidance, and 
   dogfood runs; ADR-026 records that exemption (issue #534).
 
 ### Added
+
+- ADR-027 ratifies task lineage and first-class project grouping: child tasks are own bundles with
+  catalog-held parent, depth, lineage digest, origin, acceptance, and work state; receipts roll
+  up one level by severity; `prj_` is the accepted project id. Coordination remains local
+  disclosure under each source workspace's consent, with a generation-bound coordination grant
+  for general or cross-repository work; the egress lattice is unchanged. `workspace_task_exists`
+  and only inventory-designated shared-mutable state are named for retirement, with replacement
+  invariants, in #496/#497. No wire, catalog, or admission change ships in this change (issue #494).
 
 - Agents can now set up or change semantic review through normal conversation. When a user
   explicitly wants semantic review, the agent recommends Expanded review first, explains the
@@ -576,7 +607,7 @@ and contained no usable Yoetz implementation.
 - First-party Codex **live observation and advice** as a required v0.1 capability (ADR-010
   amendment): dual-source ingest (hooks primary + selective session-stream reconciliation), local
   `ObservationPort` control (`yoetz observe status|grant|pause|resume|revoke|reconcile|drain|reclaim`), unified
-  `yoetz hooks observe`, project-level observation consent via private workspace commitment,
+  `yoetz hooks observe`, workspace-level observation consent via private workspace commitment,
   automatic session↔task attachment without depending on MCP `start`, descriptor-safe workspace
   inspection, approved-check runner, and deterministic `AdviceSnapshot` guidance (optional semantic
   review remains additive). Still exactly six MCP tools; observation is CLI/service control only.

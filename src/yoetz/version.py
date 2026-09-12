@@ -66,6 +66,7 @@ ENGINE_VERSION: Final = "0.1.0"
 PROJECTION_VERSION: Final = "yoetz/0.1.0"
 WORK_INTEGRITY_POLICY_VERSION: Final = "work-integrity/0.1.0"
 RESEARCH_EVIDENCE_POLICY_VERSION: Final = "research-evidence/0.1.0"
+COORDINATION_POLICY_VERSION: Final = "coordination/0.1.0"
 OBJECT_FORMAT_VERSION: Final = "yoetz-object/1"
 # Static identity on the status versions slice. Distinct from catalog/bundle schema counters
 # and from live SQLite user_version. Not a probed runtime fact.
@@ -74,8 +75,8 @@ UNAVAILABLE_RUNTIME_FACT: Final = "unavailable"
 _VERSION_WIRE_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+/-]{0,63}$")
 _PROFILE_ID_WIRE_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,127}$")
 _ASCII_PRINTABLE_PATTERN: Final = re.compile(r"^[ -~]+$")
-CATALOG_SCHEMA_VERSION: Final = "4"
-BUNDLE_SCHEMA_VERSION: Final = "2"
+CATALOG_SCHEMA_VERSION: Final = "5"
+BUNDLE_SCHEMA_VERSION: Final = "13"
 SQLITE_APPLICATION_ID: Final = "0x594F4554"
 
 _MANIFEST_SCHEMA: Final = "yoetz.resource-manifest/1"
@@ -86,7 +87,7 @@ _RESOURCE_LIMIT: Final = 4_194_304
 # One independently reviewed cardinality tripwire guards the generated resource manifest. All
 # per-kind counts are derived from the manifest entries so adding a resource has exactly one
 # hand-authored count to review and the owning resource-ripple command can regenerate the rest.
-REVIEWED_RESOURCE_COUNT: Final = 188
+REVIEWED_RESOURCE_COUNT: Final = 233
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -101,54 +102,67 @@ _RESOURCE_KINDS: Final = frozenset(
 )
 _REQUEST_RESULT_VERSIONS: Final = (
     ("actor-assertion", "1.0.0"),
-    ("catalog", "6.0.0"),
+    ("catalog", "7.0.0"),
     ("chat-user-attestation", "1.0.0"),
-    ("check-request", "1.0.0"),
-    ("check-result", "1.1.0"),
+    ("check-request", "1.1.0"),
+    ("check-result", "1.2.0"),
     ("client-info", "1.0.0"),
-    ("control-hello", "2.6.0"),
-    ("control-hello-result", "2.6.0"),
-    ("control-request", "2.6.0"),
-    ("control-result", "2.6.0"),
+    ("control-hello", "2.7.0"),
+    ("control-hello-result", "2.7.0"),
+    ("control-request", "2.7.0"),
+    ("control-result", "2.7.0"),
     ("coverage", "1.0.0"),
     ("egress-receipt", "1.0.0"),
-    ("finding", "1.1.0"),
+    ("finding", "1.2.0"),
     ("frontier", "1.0.0"),
+    ("lineage-acceptance", "1.0.0"),
+    ("lineage-origin", "1.0.0"),
     ("operation-result", "1.0.0"),
     ("outbound-case", "1.1.0"),
-    ("pending-agent", "6.0.0"),
-    ("prepare-result", "6.0.0"),
+    ("pending-agent", "7.0.0"),
+    ("prepare-result", "7.0.0"),
     ("privacy-policy", "1.1.0"),
     ("provider-judgment", "1.0.0"),
     ("public-error", "1.0.0"),
-    ("publish-work-request", "1.1.0"),
+    ("publish-work-request", "1.2.0"),
     ("publish-work-result", "1.0.0"),
     ("read-guidance-request", "1.0.0"),
     ("read-guidance-result", "1.0.0"),
-    ("receipt-document", "1.1.0"),
+    ("receipt-document", "1.2.0"),
     ("receipt-request", "1.0.0"),
-    ("receipt-result", "1.1.0"),
+    ("receipt-result", "1.2.0"),
     ("respond-request", "1.0.0"),
     ("respond-result", "1.0.0"),
-    ("review-result", "6.0.0"),
+    ("review-result", "7.0.0"),
     ("routine-read-summary", "1.0.0"),
     ("runtime-attempt-evidence", "1.0.0"),
     ("semantic-provenance", "1.1.0"),
     ("service-status", "1.0.0"),
+    ("session-health", "1.0.0"),
     ("setup-wizard-contract", "1.0.0"),
-    ("start-request", "1.0.0"),
-    ("start-result", "1.0.0"),
-    ("status", "6.0.0"),
-    ("status-request", "1.1.0"),
-    ("status-result", "1.2.0"),
+    ("start-request", "1.1.0"),
+    ("start-result", "1.1.0"),
+    ("status", "7.0.0"),
+    ("status-request", "1.2.0"),
+    ("status-result", "1.3.0"),
     ("subject-state-ref", "1.0.0"),
+    ("work-state", "1.0.0"),
 )
 _EVENT_NAMES: Final = (
     "action_recorded",
     "assignment_recorded",
     "check_recorded",
+    "child_accepted",
+    "child_dependencies_recorded",
+    "child_rejected",
+    "child_written_off",
     "claim_recorded",
+    "coordination_context_recorded",
+    "coordination_disposition_recorded",
+    "coordination_obligation_declared",
     "decision_recorded",
+    "delegation_cancelled",
+    "delegation_declared",
     "evidence_recorded",
     "finding_recorded",
     "obligation_published",
@@ -160,6 +174,10 @@ _EVENT_NAMES: Final = (
     "result_recorded",
     "session_opened",
     "session_resumed",
+    "work_abandoned",
+    "work_cancelled",
+    "work_closed",
+    "work_written_off",
 )
 _EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 
@@ -696,13 +714,12 @@ def build_version_manifest(*, include_optional_probes: bool = False) -> VersionM
             (
                 name,
                 "1.2.0"
-                if name == "evidence_recorded"
+                if name in {"evidence_recorded", "finding_recorded", "session_opened"}
                 else "1.1.0"
                 if name
                 in {
                     "check_recorded",
                     "claim_recorded",
-                    "finding_recorded",
                     "session_opened",
                     "session_resumed",
                 }
@@ -710,7 +727,11 @@ def build_version_manifest(*, include_optional_probes: bool = False) -> VersionM
             )
             for name in _EVENT_NAMES
         ),
-        policy_versions=(RESEARCH_EVIDENCE_POLICY_VERSION, WORK_INTEGRITY_POLICY_VERSION),
+        policy_versions=(
+            COORDINATION_POLICY_VERSION,
+            RESEARCH_EVIDENCE_POLICY_VERSION,
+            WORK_INTEGRITY_POLICY_VERSION,
+        ),
         object_format_version=OBJECT_FORMAT_VERSION,
         catalog_schema_version=CATALOG_SCHEMA_VERSION,
         bundle_schema_version=BUNDLE_SCHEMA_VERSION,

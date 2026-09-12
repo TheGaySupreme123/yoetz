@@ -90,6 +90,33 @@ For a material repair, use one bounded status → repair → check → read → 
 - Observed change with hidden content: record observation without claiming content review.
 - Reviewed targeted content: record only the bounded excerpt and its exact provenance.
 
+## Child dependencies and project advice
+
+A parent receipt evaluates direct children from a manifest recorded in the parent ledger. It
+names the tested manifest and any later recorded manifest the check did not cover. Receipt
+creation never reads children to refresh those facts. Unobserved freshness is `unknown`; a
+preview of live facts does not change a recorded check. Grandchild changes propagate through
+the child's own manifest before reaching its parent, one hop at a time.
+
+Accepted children with unresolved actionable findings prevent clean completion wording. Pending
+children and informational findings annotate. Open work, lost contact, abandonment, write-off,
+cancellation, and missing, unreadable, quarantined, or revoked child data remain named gaps.
+These limits do not prevent an honest incomplete receipt, and they do not prevent an unrelated
+qualifying repair of the parent's own deterministic findings. An issued receipt is immutable:
+later child completion needs a new recorded manifest, qualifying parent check, and new receipt.
+
+A child receipt does not prove incorporation or successful integration. Those outcomes belong
+to the parent's own obligations and evidence. Receipt generation never closes either task.
+Accepted lineage authorizes its bounded lineage channels while retaining each source's
+provenance and restrictions; it does not grant unrelated project or observation authority.
+
+Project `advisory_notes` carry admitted identities and counts only. They are not findings,
+cannot change a check verdict, and disappear when their current membership authority is revoked.
+Coordination findings use the local `coordination/0.1.0` pack over recorded recipient-ledger
+contexts. Explicit disposition evidence addresses the coordination obligation; a later qualifying
+check can resolve the finding even when agreed shared work still overlaps. Coordination context
+does not authorize sending another repository's content to an external semantic provider.
+
 ## Candidate findings are not a check
 
 `status` with `view=candidate_findings` is an advisory read of what deterministic packs currently say. Candidates have no verdict, IDs, or receipt and the read records nothing. An empty list means no rule fired at that frontier; it is not `no_issue_detected`.

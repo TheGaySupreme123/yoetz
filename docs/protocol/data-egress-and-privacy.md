@@ -155,7 +155,7 @@ ledger, task, or user content and are identical for every installation.
 ## Live harness observation retention
 
 First-party Codex live observation (ADR-010) is local control, not a network egress channel and not
-a seventh MCP tool. Observation consent is independent of egress consent: one project-level
+a seventh MCP tool. Observation consent is independent of egress consent: one workspace-level
 confirmation records a private workspace commitment (never a raw path). Revocation stops new
 ingestion and retains already-kept evidence. Never retain hidden reasoning or complete transcript
 prose. Sensitive bounded observation evidence lives only in encrypted objects; plaintext state is

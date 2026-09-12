@@ -646,6 +646,8 @@ def render_work_detail(detail: WorkDetail, width: int) -> tuple[str, ...]:
 def render_receipt(summary: ReceiptSummary, width: int) -> tuple[str, ...]:
     """The human view of a receipt: verdict, then everything qualifying it."""
 
+    if summary.rendered_lines:
+        return tuple(line for source in summary.rendered_lines for line in wrap(source, width))
     lines = [f"Verdict: {summary.verdict}", ""]
     lines.append("Coverage")
     lines.extend(_indent(summary.coverage or ("not recorded",), width=2))

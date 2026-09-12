@@ -459,7 +459,10 @@ async def _publish(
             "request_id": request_id_value,
             "session_id": runtime.session_id,
             "writer_id": runtime.writer_id,
-            "expected_frontier": frontier.as_wire(),
+            # Pydantic's closed wire model expects a concrete mapping here.  ``as_wire`` returns
+            # the domain's deeply frozen ``JsonObject``; materialize only this structural frontier
+            # at the application boundary, as the other public request builders do.
+            "expected_frontier": dict(frontier.as_wire().items()),
             "event_drafts": tuple(_draft_json(draft) for draft in drafts),
             "actor": {"actor_id": "importer", "actor_type": "importer"},
             "client": {

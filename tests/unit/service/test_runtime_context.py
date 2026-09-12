@@ -383,6 +383,176 @@ async def test_read_facade_has_no_mutators_and_close_poisons_handle() -> None:
     assert closed.value.code is PublicErrorCode.SERVICE_UNAVAILABLE
 
 
+@pytest.mark.anyio
+async def test_runtime_scope_ceiling_keeps_three_task_openings_isolated() -> None:
+    """A repository scope rejects only its third task with a typed capacity result."""
+
+    repo = "hmac-sha256:" + "e" * 64
+    routes: list[TaskRoute] = []
+    for offset in range(3):
+        task = _id(IdKind.TASK, 100 + offset)
+        session = _id(IdKind.SESSION, 200 + offset)
+        generation = 1
+        routes.append(
+            TaskRoute(
+                task,
+                session,
+                f"tasks/{task}",
+                generation,
+                TaskRouteState.ACTIVE,
+                canonical_digest(
+                    {
+                        "task_id": task,
+                        "bundle_relpath": f"tasks/{task}",
+                        "route_generation": generation,
+                    }
+                ),
+                repository_privacy_commitment=repo,
+            )
+        )
+
+    class _MultiCatalog:
+        generation = 3
+
+        async def resolve_route(self, session_id: str) -> TaskRoute | None:
+            return next((route for route in routes if route.session_id == session_id), None)
+
+        async def session_binding(self, session_id: str) -> SessionBinding | None:
+            del session_id
+            return None
+
+    first_route, writer = _route()
+    harness = _Harness(1, first_route, writer)
+    runtime = await open_local_bundle_runtime(
+        _context(frozenset(RuntimeCapability)),
+        _MultiCatalog(),
+        _Vault(),
+        harness.factories(),
+        _Diagnostics(),
+        object(),
+        RuntimeCachePolicy(
+            max_idle_tasks=3,
+            max_opening_tasks=3,
+            max_open_bundle_tasks=3,
+            max_writer_connections=3,
+            max_live_tasks_per_repository=2,
+            max_opening_tasks_per_repository=2,
+        ),
+    )
+    held: list[TaskRuntime] = []
+    for route in routes[:2]:
+        held.append(
+            await runtime.route(
+                RouteCommand(
+                    route.session_id,
+                    writer,
+                    RouteAccess.WRITE,
+                    frozenset({RuntimeCapability.WRITE}),
+                )
+            )
+        )
+    with pytest.raises(PublicOperationError) as busy:
+        await runtime.route(
+            RouteCommand(
+                routes[2].session_id,
+                writer,
+                RouteAccess.WRITE,
+                frozenset({RuntimeCapability.WRITE}),
+            )
+        )
+    assert busy.value.code is PublicErrorCode.BUNDLE_BUSY
+    assert busy.value.retryable is True
+    assert busy.value.safe_details == {
+        "reason_code": "ownership_contended",
+        "count": 2,
+        "limit": 2,
+    }
+    await runtime.release(held[0])
+    await runtime.release(held[1])
+    await runtime.close()
+
+
+@pytest.mark.anyio
+async def test_runtime_writer_connection_ceiling_is_explicit_and_actionable() -> None:
+    """Writer-capacity refusal is independent from the open-bundle cache bound."""
+
+    routes: list[TaskRoute] = []
+    for offset in range(3):
+        task = _id(IdKind.TASK, 300 + offset)
+        session = _id(IdKind.SESSION, 400 + offset)
+        routes.append(
+            TaskRoute(
+                task,
+                session,
+                f"tasks/{task}",
+                1,
+                TaskRouteState.ACTIVE,
+                canonical_digest(
+                    {
+                        "task_id": task,
+                        "bundle_relpath": f"tasks/{task}",
+                        "route_generation": 1,
+                    }
+                ),
+            )
+        )
+
+    class _MultiCatalog:
+        generation = 3
+
+        async def resolve_route(self, session_id: str) -> TaskRoute | None:
+            return next((route for route in routes if route.session_id == session_id), None)
+
+        async def session_binding(self, session_id: str) -> SessionBinding | None:
+            del session_id
+            return None
+
+    _first_route, writer = _route()
+    harness = _Harness(1, _first_route, writer)
+    runtime = await open_local_bundle_runtime(
+        _context(frozenset(RuntimeCapability)),
+        _MultiCatalog(),
+        _Vault(),
+        harness.factories(),
+        _Diagnostics(),
+        object(),
+        RuntimeCachePolicy(
+            max_idle_tasks=3,
+            max_opening_tasks=3,
+            max_open_bundle_tasks=3,
+            max_writer_connections=2,
+        ),
+    )
+    held = [
+        await runtime.route(
+            RouteCommand(
+                route.session_id,
+                writer,
+                RouteAccess.WRITE,
+                frozenset({RuntimeCapability.WRITE}),
+            )
+        )
+        for route in routes[:2]
+    ]
+    with pytest.raises(PublicOperationError) as busy:
+        await runtime.route(
+            RouteCommand(
+                routes[2].session_id,
+                writer,
+                RouteAccess.WRITE,
+                frozenset({RuntimeCapability.WRITE}),
+            )
+        )
+    assert busy.value.safe_details == {
+        "reason_code": "ownership_contended",
+        "count": 2,
+        "limit": 2,
+    }
+    for task_runtime in held:
+        await runtime.release(task_runtime)
+    await runtime.close()
+
+
 def test_context_is_constant_redacted_and_not_serializable() -> None:
     context = _context(frozenset({RuntimeCapability.STRUCTURAL_READ}))
     assert repr(context) == "ServiceRuntimeContext(<redacted>)"

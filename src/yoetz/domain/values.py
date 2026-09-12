@@ -42,6 +42,7 @@ __all__ = [
     "JsonValue",
     "ObjectId",
     "ObligationId",
+    "ProjectId",
     "ReceiptId",
     "RequestId",
     "ResultId",
@@ -65,6 +66,7 @@ __all__ = [
     "frontier_from_json",
     "object_id",
     "obligation_id",
+    "project_id",
     "occurred_at_consistency",
     "parse_rfc3339_millis",
     "parse_wire_sequence",
@@ -292,6 +294,7 @@ SessionId = NewType("SessionId", str)
 WriterId = NewType("WriterId", str)
 EventId = NewType("EventId", str)
 ObligationId = NewType("ObligationId", str)
+ProjectId = NewType("ProjectId", str)
 ClaimId = NewType("ClaimId", str)
 ActionId = NewType("ActionId", str)
 ResultId = NewType("ResultId", str)
@@ -329,6 +332,10 @@ def event_id(value: object) -> EventId:
 
 def obligation_id(value: object) -> ObligationId:
     return ObligationId(_validated_id(IdKind.OBLIGATION, value))
+
+
+def project_id(value: object) -> ProjectId:
+    return ProjectId(_validated_id(IdKind.PROJECT, value))
 
 
 def claim_id(value: object) -> ClaimId:

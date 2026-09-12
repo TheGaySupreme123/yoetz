@@ -9,6 +9,19 @@ from datetime import datetime
 from enum import Enum
 from typing import Final, Literal, Protocol
 
+from yoetz.domain.coordination import (
+    CoordinationGrant,
+    GrantState,
+    LineageAcceptance,
+    LineageOrigin,
+    MemberKind,
+    ProjectDescriptor,
+    ProjectKind,
+    ProjectMembership,
+    ProjectTextRef,
+    SessionHealth,
+    WorkState,
+)
 from yoetz.domain.values import (
     format_rfc3339_millis,
     validate_commitment,
@@ -16,15 +29,28 @@ from yoetz.domain.values import (
 )
 from yoetz.ports.runtime import StartCompletionEvidence
 from yoetz.protocol.canonical import canonical_digest, ensure_canonical_value
-from yoetz.protocol.ids import IdKind, validate_id
+from yoetz.protocol.ids import IdKind, validate_actor_id, validate_id
 
 __all__ = [
     "EXTERNAL_REF_DOMAIN",
     "START_TITLE_DOMAIN",
     "WORKSPACE_REF_DOMAIN",
     "EncryptedResultRef",
+    "CoordinationGrant",
+    "CoordinationGrantState",
+    "LineageAcceptance",
+    "LineageOrigin",
+    "MemberKind",
+    "ProjectDescriptor",
+    "ProjectKind",
+    "ProjectMembership",
+    "ProjectTextRef",
+    "ProjectMemberKind",
+    "ProjectState",
     "SafeReason",
+    "SessionHealth",
     "SessionBinding",
+    "SessionState",
     "StartAllocation",
     "StartCatalogPort",
     "StartCommand",
@@ -34,8 +60,18 @@ __all__ = [
     "StartOperationLease",
     "StartPhase",
     "TaskRoute",
+    "TaskLineage",
+    "TaskSourceProvenance",
     "TaskRouteState",
+    "WorkState",
 ]
+
+# Compatibility spellings used by the lifecycle and coordination application lanes.  The domain
+# module owns the durable enum vocabulary; the aliases keep this port's contract independent of
+# the wire/Pydantic enum definitions.
+ProjectState = ProjectDescriptor
+ProjectMemberKind = MemberKind
+CoordinationGrantState = GrantState
 
 START_TITLE_DOMAIN: Final = b"yoetz/start-title/v1\x00"
 WORKSPACE_REF_DOMAIN: Final = b"yoetz/workspace-ref/v1\x00"
@@ -73,6 +109,7 @@ class StartMode(str, Enum):  # noqa: UP042 - exact request enum base
     CREATE = "create"
     ATTACH = "attach"
     CREATE_OR_ATTACH = "create_or_attach"
+    DELEGATE = "delegate"
 
 
 def _invalid() -> ValueError:
@@ -151,6 +188,12 @@ class StartCommand:
     identity_commitments: StartIdentityCommitments
     session_id: str | None = None
     repository_privacy_commitment: str | None = None
+    parent_session_id: str | None = None
+    attach_handle: str | None = None
+    # Internal, service-derived route selector used after a lineage capability has been
+    # authenticated.  It never crosses the public start request boundary and is not part of
+    # request identity; the catalog still checks the operation digest before using it.
+    target_task_id: str | None = None
 
     def __post_init__(self) -> None:
         _id(IdKind.REQUEST, self.operation_id)
@@ -166,6 +209,12 @@ class StartCommand:
             raise _invalid()
         if self.session_id is not None:
             _id(IdKind.SESSION, self.session_id)
+        if self.parent_session_id is not None:
+            _id(IdKind.SESSION, self.parent_session_id)
+        if self.attach_handle is not None:
+            _safe_token(self.attach_handle)
+        if self.target_task_id is not None:
+            _id(IdKind.TASK, self.target_task_id)
         if self.repository_privacy_commitment is not None:
             try:
                 validate_commitment(self.repository_privacy_commitment)
@@ -177,6 +226,136 @@ class StartCommand:
             raise _invalid()
         if self.mode is StartMode.ATTACH and not input_has_refs and self.session_id is None:
             raise _invalid()
+        if self.mode is StartMode.DELEGATE and self.parent_session_id is None:
+            raise _invalid()
+        if self.attach_handle is not None and self.mode is not StartMode.ATTACH:
+            raise _invalid()
+        if self.target_task_id is not None and self.mode is not StartMode.ATTACH:
+            raise _invalid()
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class TaskLineage:
+    """Catalog-owned lineage and work facts for one task.
+
+    A route remains the owner of its bundle and routing identity. This value carries only the
+    structural relationship and lifecycle facts needed to coordinate tasks; it contains no title,
+    description, path, or ledger prose.
+    """
+
+    task_id: str
+    parent_task_id: str | None
+    depth: int
+    lineage_digest: str
+    origin: LineageOrigin | None
+    acceptance: LineageAcceptance | None
+    work_state: WorkState
+
+    def __post_init__(self) -> None:
+        task = _id(IdKind.TASK, self.task_id)
+        if self.parent_task_id is None:
+            if self.depth != 0 or self.origin is not None or self.acceptance is not None:
+                raise _invalid()
+        else:
+            parent = _id(IdKind.TASK, self.parent_task_id)
+            if (
+                parent == task
+                or type(self.depth) is not int
+                or not 1 <= self.depth <= _MAX_SAFE_INTEGER
+            ):
+                raise _invalid()
+            if (
+                type(self.origin) is not LineageOrigin
+                or type(self.acceptance) is not LineageAcceptance
+            ):
+                raise _invalid()
+        if type(self.depth) is not int or not 0 <= self.depth <= _MAX_SAFE_INTEGER:
+            raise _invalid()
+        try:
+            validate_sha256_digest(self.lineage_digest)
+        except ValueError as exc:
+            raise _invalid() from exc
+        if type(self.work_state) is not WorkState:
+            raise _invalid()
+
+    def __repr__(self) -> str:
+        return "TaskLineage(<redacted>)"
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class TaskSourceProvenance:
+    """Structural source and route facts used when a task is selected for a read."""
+
+    task_id: str
+    workspace_ref_commitment: str | None
+    external_ref_commitment: str | None
+    repository_privacy_commitment: str | None
+    route_generation: int
+    route_identity_digest: str
+
+    def __post_init__(self) -> None:
+        _id(IdKind.TASK, self.task_id)
+        if (self.workspace_ref_commitment is None) != (self.external_ref_commitment is None):
+            raise _invalid()
+        try:
+            if self.workspace_ref_commitment is not None:
+                validate_commitment(self.workspace_ref_commitment)
+            if self.external_ref_commitment is not None:
+                validate_commitment(self.external_ref_commitment)
+            if self.repository_privacy_commitment is not None:
+                validate_commitment(self.repository_privacy_commitment)
+            validate_sha256_digest(self.route_identity_digest)
+        except ValueError as exc:
+            raise _invalid() from exc
+        if (
+            type(self.route_generation) is not int
+            or not 1 <= self.route_generation <= _MAX_SAFE_INTEGER
+        ):
+            raise _invalid()
+
+    def __repr__(self) -> str:
+        return "TaskSourceProvenance(<redacted>)"
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class SessionState:
+    """Per-session liveness fact, kept separate from route and work state."""
+
+    task_id: str
+    session_id: str
+    health: SessionHealth
+    changed_at: datetime
+    lease_expires_at: datetime | None = None
+    actor_id: str | None = None
+
+    def __post_init__(self) -> None:
+        _id(IdKind.TASK, self.task_id)
+        _id(IdKind.SESSION, self.session_id)
+        if type(self.health) is not SessionHealth:
+            raise _invalid()
+        try:
+            format_rfc3339_millis(self.changed_at)
+            if self.lease_expires_at is not None:
+                format_rfc3339_millis(self.lease_expires_at)
+        except ValueError as exc:
+            raise _invalid() from exc
+        if self.health is SessionHealth.ACTIVE and self.lease_expires_at is not None:
+            if self.lease_expires_at <= self.changed_at:
+                raise _invalid()
+        if self.actor_id is not None:
+            try:
+                validate_actor_id(self.actor_id)
+            except (TypeError, ValueError) as exc:
+                raise _invalid() from exc
+
+    @property
+    def updated_at(self) -> datetime:
+        """Compatibility alias for callers that use the catalog column spelling."""
+
+        return self.changed_at
+
+    def __repr__(self) -> str:
+        return "SessionState(<redacted>)"
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +367,12 @@ class TaskRoute:
     state: TaskRouteState
     route_identity_digest: str
     repository_privacy_commitment: str | None = None
+    parent_task_id: str | None = None
+    depth: int = 0
+    lineage_digest: str | None = None
+    origin: LineageOrigin | None = None
+    acceptance: LineageAcceptance | None = None
+    work_state: WorkState = WorkState.OPEN
 
     def __post_init__(self) -> None:
         task = _id(IdKind.TASK, self.task_id)
@@ -209,6 +394,34 @@ class TaskRoute:
             }
         )
         if self.route_identity_digest != expected:
+            raise _invalid()
+        if self.parent_task_id is None:
+            if self.depth != 0 or self.origin is not None or self.acceptance is not None:
+                raise _invalid()
+        else:
+            parent = _id(IdKind.TASK, self.parent_task_id)
+            if (
+                parent == task
+                or type(self.depth) is not int
+                or not 1 <= self.depth <= _MAX_SAFE_INTEGER
+            ):
+                raise _invalid()
+            if (
+                type(self.origin) is not LineageOrigin
+                or type(self.acceptance) is not LineageAcceptance
+            ):
+                raise _invalid()
+        if type(self.depth) is not int or not 0 <= self.depth <= _MAX_SAFE_INTEGER:
+            raise _invalid()
+        lineage = self.lineage_digest
+        if lineage is None:
+            lineage = self.route_identity_digest
+            object.__setattr__(self, "lineage_digest", lineage)
+        try:
+            validate_sha256_digest(lineage)
+        except ValueError as exc:
+            raise _invalid() from exc
+        if type(self.work_state) is not WorkState:
             raise _invalid()
         if self.repository_privacy_commitment is not None:
             try:
@@ -276,6 +489,7 @@ class StartAllocation:
     response_result_digest: str | None
     lease: StartOperationLease | None
     replayed_result: bytes | None
+    attach_handle: str | None = None
 
     def __post_init__(self) -> None:
         if self.outcome not in {"reserved", "resumed", "replayed"}:
@@ -333,6 +547,8 @@ class StartAllocation:
         response_identity_absent = all(value is None for value in response_identity)
         if not (response_identity_complete or response_identity_absent):
             raise _invalid()
+        if self.attach_handle is not None:
+            _safe_token(self.attach_handle)
         if self.outcome == "replayed":
             if (
                 self.phase is not StartPhase.TERMINAL
@@ -392,6 +608,144 @@ class StartCatalogPort(Protocol):
     async def session_binding(self, session_id: str) -> SessionBinding | None: ...
 
     async def list_workspace_task_ids(self, workspace_ref_commitment: str) -> tuple[str, ...]: ...
+
+    async def list_project_task_ids(self, project_id: str) -> tuple[str, ...]: ...
+
+    async def list_repository_task_ids(
+        self, repository_privacy_commitment: str
+    ) -> tuple[str, ...]: ...
+
+    async def task_lineage(self, task_id: str) -> TaskLineage | None: ...
+
+    async def task_source_provenance(self, task_id: str) -> TaskSourceProvenance | None: ...
+
+    async def task_route_generation(self, task_id: str) -> int: ...
+
+    async def task_work_state(self, task_id: str) -> WorkState: ...
+
+    async def task_session_state(self, session_id: str) -> SessionState | None: ...
+
+    async def task_session_states(self, task_id: str) -> tuple[SessionState, ...]: ...
+
+    async def list_child_task_ids(self, parent_task_id: str) -> tuple[str, ...]: ...
+
+    async def list_task_project_ids(self, task_id: str) -> tuple[str, ...]: ...
+
+    async def list_task_project_ids_for_consent_invalidation(
+        self, task_id: str
+    ) -> tuple[str, ...]: ...
+
+    async def task_route(self, task_id: str) -> TaskRoute | None: ...
+
+    async def project_state(self, project_id: str) -> ProjectState | None: ...
+
+    async def repository_state(self, repository_commitment: str) -> ProjectState | None: ...
+
+    async def repository_auto_grouping_enabled(self, repository_commitment: str) -> bool: ...
+
+    async def ensure_repository_project_if_auto_grouping_enabled(
+        self, repository_commitment: str
+    ) -> ProjectState | None: ...
+
+    async def project_memberships(self, project_id: str) -> tuple[ProjectMembership, ...]: ...
+
+    async def coordination_grant(
+        self, project_id: str, membership_generation: int
+    ) -> CoordinationGrant | None: ...
+
+    async def record_task_lineage(
+        self,
+        task_id: str,
+        *,
+        parent_task_id: str | None,
+        depth: int,
+        lineage_digest: str,
+        origin: LineageOrigin | None,
+        acceptance: LineageAcceptance | None,
+    ) -> TaskLineage: ...
+
+    async def set_task_work_state(self, task_id: str, state: WorkState) -> TaskLineage: ...
+
+    async def record_session_state(
+        self,
+        task_id: str,
+        session_id: str,
+        *,
+        health: SessionHealth,
+        changed_at: datetime,
+        lease_expires_at: datetime | None = None,
+        actor_id: str | None = None,
+    ) -> SessionState: ...
+
+    async def expire_session_leases(
+        self, now: datetime | None = None, *, limit: int = 256
+    ) -> tuple[SessionState, ...]: ...
+
+    async def accept_task_lineage(self, task_id: str) -> TaskLineage: ...
+
+    async def reject_task_lineage(self, task_id: str) -> TaskLineage: ...
+
+    async def ensure_repository_project(self, repository_commitment: str) -> ProjectState: ...
+
+    async def create_general_project(
+        self, project_id: str, *, auto_grouping: bool = True
+    ) -> ProjectState: ...
+
+    async def record_project_membership(
+        self,
+        project_id: str,
+        *,
+        member_kind: ProjectMemberKind,
+        member_commitment_or_id: str,
+    ) -> ProjectMembership: ...
+
+    async def unbind_project_membership(
+        self,
+        project_id: str,
+        membership_generation: int,
+        *,
+        member_kind: ProjectMemberKind | None = None,
+        member_commitment_or_id: str | None = None,
+    ) -> ProjectMembership: ...
+
+    async def record_coordination_grant(
+        self,
+        project_id: str,
+        membership_generation: int,
+        *,
+        grant_state: CoordinationGrantState,
+        audit_ref: str,
+    ) -> CoordinationGrant: ...
+
+    async def dissolve_project(self, project_id: str) -> ProjectState: ...
+
+    async def advance_project_generation(
+        self,
+        project_id: str,
+        *,
+        reason: str,
+        expected_generation: int | None = None,
+    ) -> ProjectState: ...
+
+    async def set_project_auto_grouping(
+        self, repository_commitment: str, *, enabled: bool
+    ) -> ProjectState | None: ...
+
+    async def record_project_text_refs(
+        self,
+        project_id: str,
+        *,
+        title_ref: ProjectTextRef | None,
+        description_ref: ProjectTextRef | None,
+    ) -> ProjectState: ...
+
+    async def amend_project(
+        self,
+        project_id: str,
+        *,
+        title_ref: ProjectTextRef | None,
+        description_ref: ProjectTextRef | None,
+    ) -> ProjectState: ...
 
     async def bind_repository_privacy(
         self,

@@ -138,6 +138,7 @@ _FINDING_KIND_FACTS: Final[Mapping[FindingKind, tuple[int, str]]] = {
     FindingKind.DIFF_DOES_NOT_MATCH_ACCOUNT: (1, "research-evidence"),
     FindingKind.MATERIAL_LIMITATION_OMITTED: (1, "research-evidence"),
     FindingKind.QUESTIONABLE_FINDING_REJECTION: (2, "research-evidence"),
+    FindingKind.COORDINATION_OVERLAP: (2, "coordination"),
 }
 # The exact non-default (required) field names per family, mirroring each payload dataclass's
 # constructor signature in ``domain/events.py``/``domain/findings.py``.

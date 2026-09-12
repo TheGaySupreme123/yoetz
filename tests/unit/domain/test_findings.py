@@ -77,6 +77,7 @@ _WORK_INTEGRITY_KINDS = frozenset(
         FindingKind.WEAK_OR_STALE_RESPONSE,
     }
 )
+_COORDINATION_KINDS = frozenset({FindingKind.COORDINATION_OVERLAP})
 
 
 def _assert_reason(reason: str, operation: Callable[[], object]) -> None:
@@ -152,6 +153,8 @@ def _provenance(
 def _policy_identity(kind: FindingKind) -> tuple[str, str]:
     if kind in _WORK_INTEGRITY_KINDS:
         return "work-integrity", "0.1.0"
+    if kind in _COORDINATION_KINDS:
+        return "coordination", "0.1.0"
     return "research-evidence", "0.1.0"
 
 
@@ -200,6 +203,7 @@ def test_finding_kind_traits_are_exhaustive_and_exact() -> None:
         FindingKind.DIFF_DOES_NOT_MATCH_ACCOUNT: (1, True),
         FindingKind.MATERIAL_LIMITATION_OMITTED: (1, True),
         FindingKind.QUESTIONABLE_FINDING_REJECTION: (2, True),
+        FindingKind.COORDINATION_OVERLAP: (2, True),
     }
     assert isinstance(FINDING_KIND_TRAITS, MappingProxyType)
     assert dict(FINDING_KIND_TRAITS) == expected

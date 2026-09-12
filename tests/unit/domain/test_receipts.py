@@ -138,12 +138,37 @@ def test_receipt_document_is_frozen_and_exactly_shaped() -> None:
         "gaps",
         "redactions",
         "sections",
+        "children",
     )
     assert is_dataclass(document)
     assert ReceiptDocument.__slots__ == expected_fields
     assert tuple(item.name for item in fields(document)) == expected_fields
     with pytest.raises(FrozenInstanceError):
         setattr(document, "suppressed_finding_count", 1)
+
+
+def test_children_use_receipt_document_1_2_artifact_and_keep_inner_version() -> None:
+    """The additive artifact carries children while the inner document version stays 1.0.0."""
+
+    wire = _variant("deterministic-current.case.json", "current_complete")
+    versions = cast(dict[str, Any], wire["versions"])
+    schema_versions = cast(list[dict[str, str]], versions["schema_versions"])
+    for entry in schema_versions:
+        if entry["schema_id"] == "receipts/receipt-document":
+            entry["schema_version"] = "1.2.0"
+    wire["children"] = {"children": []}
+
+    document = receipt_document_from_json(wire)
+    assert document.schema_version == "1.0.0"
+    assert receipt_document_to_json(document) == wire
+
+
+def test_children_are_rejected_under_the_legacy_receipt_artifact() -> None:
+    wire = _variant("deterministic-current.case.json", "current_complete")
+    wire["children"] = {"children": []}
+    with pytest.raises(ProtocolValueError) as exc_info:
+        receipt_document_from_json(wire)
+    _assert_reason(exc_info, "invalid_receipt_document")
 
 
 def test_receipt_conclusion_vocab_is_conservative() -> None:

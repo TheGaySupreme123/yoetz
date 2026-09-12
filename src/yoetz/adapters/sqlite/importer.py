@@ -171,6 +171,18 @@ class SqliteImporter:
             policy=MemoryImportPolicy(),
         )
 
+    def rebind_session(self, admitted_session_id: str) -> None:
+        """Refresh the route session held by the task-owned capture delegate.
+
+        Runtime attachment may rotate a task's session while retaining its open SQLite bundle
+        ports. Import identity remains task-bound, while the session fence follows the active
+        authenticated route.
+        """
+
+        current = validate_session_id(admitted_session_id)
+        self._session_id = current
+        self._capture_delegate.rebind_session(current)
+
     async def _submit[T](self, function: Callable[[apsw.Connection], T]) -> T:
         future: Future[T] = self._writer.submit(function)
         try:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Final, Protocol, cast
 
@@ -14,6 +14,9 @@ from yoetz.domain.events import (
     AssignmentRecordedPayload,
     ClaimRecordedPayload,
     ClaimRecordedPayloadV1_1,
+    CoordinationContextRecordedPayload,
+    CoordinationDispositionRecordedPayload,
+    CoordinationObligationDeclaredPayload,
     DecisionRecordedPayload,
     EventPayload,
     EventSchema,
@@ -493,6 +496,30 @@ class ProjectionState:
     freshness: LedgerFreshness
     unknown_event_count: int
     coverage_gaps: tuple[str, ...]
+    # Coordination context/disposition records are recipient-ledger facts.  They remain separate
+    # from the semantic case collections so a check can consume only frozen, source-authorized
+    # coordination evidence.
+    coordination_contexts: Mapping[
+        EventId, ProjectionRecord[CoordinationContextRecordedPayload]
+    ] = field(
+        default_factory=lambda: cast(
+            dict[EventId, ProjectionRecord[CoordinationContextRecordedPayload]], {}
+        )
+    )
+    coordination_dispositions: Mapping[
+        EventId, ProjectionRecord[CoordinationDispositionRecordedPayload]
+    ] = field(
+        default_factory=lambda: cast(
+            dict[EventId, ProjectionRecord[CoordinationDispositionRecordedPayload]], {}
+        )
+    )
+    coordination_declarations: Mapping[
+        EventId, ProjectionRecord[CoordinationObligationDeclaredPayload]
+    ] = field(
+        default_factory=lambda: cast(
+            dict[EventId, ProjectionRecord[CoordinationObligationDeclaredPayload]], {}
+        )
+    )
 
     def __post_init__(self) -> None:
         if type(self.frontier) is not int or not 0 <= self.frontier <= _MAX_SQLITE_SIGNED_INTEGER:
@@ -590,6 +617,30 @@ class ProjectionState:
             "finding_id",
         )
         contradictions = self._copy_contradictions(self.contradictions)
+        coordination_contexts: dict[
+            EventId, ProjectionRecord[CoordinationContextRecordedPayload]
+        ] = self._copy_event_mapping(
+            self.coordination_contexts,
+            ProjectionRecord,
+            CoordinationContextRecordedPayload,
+            source_key=True,
+        )
+        coordination_dispositions: dict[
+            EventId, ProjectionRecord[CoordinationDispositionRecordedPayload]
+        ] = self._copy_event_mapping(
+            self.coordination_dispositions,
+            ProjectionRecord,
+            CoordinationDispositionRecordedPayload,
+            source_key=True,
+        )
+        coordination_declarations: dict[
+            EventId, ProjectionRecord[CoordinationObligationDeclaredPayload]
+        ] = self._copy_event_mapping(
+            self.coordination_declarations,
+            ProjectionRecord,
+            CoordinationObligationDeclaredPayload,
+            source_key=True,
+        )
 
         object.__setattr__(self, "plans", MappingProxyType(plans))
         object.__setattr__(self, "obligations", MappingProxyType(obligations))
@@ -602,6 +653,17 @@ class ProjectionState:
         object.__setattr__(self, "contradictions", MappingProxyType(contradictions))
         object.__setattr__(self, "findings", MappingProxyType(findings))
         object.__setattr__(self, "responses", MappingProxyType(responses))
+        object.__setattr__(self, "coordination_contexts", MappingProxyType(coordination_contexts))
+        object.__setattr__(
+            self,
+            "coordination_dispositions",
+            MappingProxyType(coordination_dispositions),
+        )
+        object.__setattr__(
+            self,
+            "coordination_declarations",
+            MappingProxyType(coordination_declarations),
+        )
 
     def _validate_record(self, record: _ProjectionRecordLike) -> None:
         if record.source_frontier > self.frontier:
@@ -837,7 +899,7 @@ def projection_snapshot(state: ProjectionState) -> dict[str, JsonValue]:
             ),
         )
     }
-    return {
+    snapshot: dict[str, JsonValue] = {
         "frontier": canonical_integer_string(state.frontier),
         "head_digest": state.head_digest,
         "plans": _sorted_record_map(
@@ -879,6 +941,21 @@ def projection_snapshot(state: ProjectionState) -> dict[str, JsonValue]:
         "unknown_event_count": state.unknown_event_count,
         "coverage_gaps": list(state.coverage_gaps),
     }
+    # Keep empty generation-1 snapshots byte-identical.  Coordination keys are emitted as soon
+    # as the recipient ledger records one of the new event families.
+    if state.coordination_contexts:
+        snapshot["coordination_contexts"] = _sorted_record_map(
+            cast(Mapping[EventId, _ProjectionRecordLike], state.coordination_contexts)
+        )
+    if state.coordination_dispositions:
+        snapshot["coordination_dispositions"] = _sorted_record_map(
+            cast(Mapping[EventId, _ProjectionRecordLike], state.coordination_dispositions)
+        )
+    if state.coordination_declarations:
+        snapshot["coordination_declarations"] = _sorted_record_map(
+            cast(Mapping[EventId, _ProjectionRecordLike], state.coordination_declarations)
+        )
+    return snapshot
 
 
 _SNAPSHOT_KEYS: Final = frozenset(
@@ -900,8 +977,16 @@ _SNAPSHOT_KEYS: Final = frozenset(
         "freshness",
         "unknown_event_count",
         "coverage_gaps",
+        "coordination_contexts",
+        "coordination_dispositions",
+        "coordination_declarations",
     }
 )
+_REQUIRED_SNAPSHOT_KEYS: Final = _SNAPSHOT_KEYS - {
+    "coordination_contexts",
+    "coordination_dispositions",
+    "coordination_declarations",
+}
 _RECORD_KEYS: Final = frozenset(
     {"payload", "payload_digest", "redacted", "source_event_id", "source_frontier"}
 )
@@ -917,6 +1002,9 @@ _COLLECTION_SCHEMAS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
         "claims": ("claim_recorded",),
         "findings": ("finding_recorded",),
         "responses": ("response_recorded",),
+        "coordination_contexts": ("coordination_context_recorded",),
+        "coordination_dispositions": ("coordination_disposition_recorded",),
+        "coordination_declarations": ("coordination_obligation_declared",),
     }
 )
 
@@ -1225,7 +1313,17 @@ def projection_from_snapshot(value: JsonValue) -> ProjectionState:
 
     try:
         frozen = freeze_json(value)
-        source = _snapshot_object(frozen, required=_SNAPSHOT_KEYS)
+        source = _snapshot_object(
+            frozen,
+            required=frozenset(_REQUIRED_SNAPSHOT_KEYS),
+            optional=frozenset(
+                {
+                    "coordination_contexts",
+                    "coordination_dispositions",
+                    "coordination_declarations",
+                }
+            ),
+        )
         freshness_value = source["freshness"]
         if type(freshness_value) is not str:
             raise _invalid()
@@ -1274,6 +1372,27 @@ def projection_from_snapshot(value: JsonValue) -> ProjectionState:
             freshness=LedgerFreshness(freshness_value),
             unknown_event_count=cast(int, source["unknown_event_count"]),
             coverage_gaps=cast(tuple[str, ...], _snapshot_array(source["coverage_gaps"])),
+            coordination_contexts=cast(
+                Mapping[EventId, ProjectionRecord[CoordinationContextRecordedPayload]],
+                _record_map_from_snapshot(
+                    source.get("coordination_contexts", {}),
+                    collection="coordination_contexts",
+                ),
+            ),
+            coordination_dispositions=cast(
+                Mapping[EventId, ProjectionRecord[CoordinationDispositionRecordedPayload]],
+                _record_map_from_snapshot(
+                    source.get("coordination_dispositions", {}),
+                    collection="coordination_dispositions",
+                ),
+            ),
+            coordination_declarations=cast(
+                Mapping[EventId, ProjectionRecord[CoordinationObligationDeclaredPayload]],
+                _record_map_from_snapshot(
+                    source.get("coordination_declarations", {}),
+                    collection="coordination_declarations",
+                ),
+            ),
         )
     except (KeyError, TypeError, ValueError) as exc:
         if type(exc) is ValueError and str(exc) == "invalid_projection_state":

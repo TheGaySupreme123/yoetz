@@ -16,6 +16,7 @@ from yoetz.application.unit_of_work import (
     run_prepared_append,
 )
 from yoetz.domain.events import (
+    LINEAGE_SERVICE_STAMPED_FAMILIES,
     PAYLOAD_TYPES,
     AcceptedEvent,
     ActionRecordedPayload,
@@ -154,6 +155,18 @@ _ORDINARY_FAMILIES = frozenset(
         "evidence_recorded",
         "claim_recorded",
         "plan_revised",
+        "coordination_obligation_declared",
+        "coordination_disposition_recorded",
+        # Lineage lifecycle actions are ordinary parent/child publications.  The remaining
+        # service-only families stay outside this set and are admitted exclusively by their
+        # coordinator writer path below.
+        "delegation_cancelled",
+        "child_accepted",
+        "child_rejected",
+        "child_written_off",
+        "work_closed",
+        "work_cancelled",
+        "work_written_off",
     }
 )
 _IMPORT_FAMILIES = frozenset(
@@ -172,6 +185,15 @@ _STATE_SENSITIVE_FAMILIES = frozenset(
         "result_recorded",
         "claim_recorded",
         "plan_revised",
+        "coordination_obligation_declared",
+        "delegation_cancelled",
+        "child_accepted",
+        "child_rejected",
+        "child_written_off",
+        "work_closed",
+        "work_cancelled",
+        "work_written_off",
+        "coordination_disposition_recorded",
     }
 )
 _UNKNOWN_GAP = "unknown_event_schema_preserved"
@@ -611,6 +633,15 @@ def _validate_admission(
     admitted = _IMPORT_FAMILIES if trusted_import else _ORDINARY_FAMILIES
     for index, item in enumerate(drafts):
         known = item.draft.schema in PAYLOAD_TYPES
+        # These event families carry service-authored relationship/lifecycle facts.  Even if a
+        # future admission profile adds a broader family set, a caller must never self-award a
+        # delegation declaration, frozen dependency manifest, or abandonment stamp.
+        if (
+            known
+            and item.draft.schema.name in LINEAGE_SERVICE_STAMPED_FAMILIES
+            and item.draft.schema.name != "coordination_obligation_declared"
+        ):
+            raise _event_invalid("event_family_not_admitted", event_index=index, subfield="schema")
         if (known and item.draft.schema.name not in admitted) or (not known and not trusted_import):
             raise _event_invalid("event_family_not_admitted", event_index=index, subfield="schema")
         payload = item.draft.payload

@@ -11,9 +11,17 @@ from urllib.parse import urlparse
 
 import pytest
 
+from yoetz.domain.observation import _STRUCTURAL_KEYS  # pyright: ignore[reportPrivateUsage]
+from yoetz.domain.values import JsonObject
+from yoetz.ports.control import ControlCallRequest
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.schemas import load_schema_catalog, validate_schema_instance
+from yoetz.service.control_protocol import (
+    decode_control_frame,
+    encode_control_frame,
+    parse_control_request,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _ROOT = _REPO_ROOT / "schemas" / "service"
@@ -23,6 +31,29 @@ _INSTANCE_ID = "svc_00000000-0000-4000-8000-000000000001"
 _RPC_ID = "rpc_00000000-0000-4000-8000-000000000002"
 _REQUEST_ID = "req_00000000-0000-4000-8000-000000000003"
 _DIGEST = "sha256:" + "0" * 64
+# Routine-read summaries use a separate observation envelope. These structural keys are therefore
+# intentionally absent from the ordinary native capture control envelope, even though the domain
+# observation validator admits them for that summary lane.
+_ROUTINE_SUMMARY_STRUCTURAL_KEYS = frozenset(
+    {
+        "summary_count",
+        "input_count",
+        "member_digest",
+        "fence",
+        "provenance",
+        "summary_schema",
+        "selection_policy_version",
+        "content_scope",
+        "coverage_gaps",
+        "subject_state_digest",
+        "members",
+        "selection_task_id",
+        "selection_session_id",
+        "selection_writer_id",
+        "selection_authority_generation",
+        "protection_reference",
+    }
+)
 _WORKFLOW_METHODS = (
     "check",
     "publish_work",
@@ -358,6 +389,41 @@ def _cursor_ingest_frame(structural: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _current_cli_observation_frame(
+    *, source: str, codex_session_id: str, structural: dict[str, Any]
+) -> dict[str, Any]:
+    """Build the control frame emitted after native Claude/Cursor hook sanitization."""
+
+    return {
+        "body": {
+            "codex_session_id": codex_session_id,
+            "envelope": {
+                "content_object_refs": [],
+                "cursor": {
+                    "byte_position": 0,
+                    "event_position": 1,
+                    "last_source_commitment": "hmac-sha256:" + "0" * 64,
+                    "mapping_version": "native-hook-test-1",
+                    "source_generation": 1,
+                },
+                "event_kind": "PostToolUse",
+                "gap_codes": [],
+                "receipt_time": "2026-08-24T00:00:00.000Z",
+                "session_commitment": "hmac-sha256:" + "1" * 64,
+                "source": source,
+                "source_identity": "hook:native",
+                "structural_payload": structural,
+            },
+        },
+        "kind": "call",
+        "method": "observation_ingest",
+        "protocol_version": "1.0",
+        "rpc_id": _RPC_ID,
+        "service_generation": "1",
+        "service_instance_id": _INSTANCE_ID,
+    }
+
+
 def test_v21_wire_admits_the_exact_cursor_structural_tokens_hook_ingress_sends() -> None:
     """The 2.1.0 request wire must carry every structural key Cursor ingress can emit.
 
@@ -606,6 +672,200 @@ def test_v24_updates_publish_provenance_privacy_and_ordinary_content_contracts()
     for stem in ("control-hello", "control-hello-result", "control-request", "control-result"):
         filename = f"{stem}-2.4.0.schema.json"
         assert (_ROOT / filename).read_bytes() == _PACKAGE_ROOT.joinpath(filename).read_bytes()
+
+
+def test_v25_observation_wire_tracks_domain_structural_keys_without_rewriting_v24() -> None:
+    request_v24 = cast(
+        dict[str, Any],
+        strict_json_parse((_ROOT / "control-request-2.4.0.schema.json").read_bytes()),
+    )
+    request_v25 = cast(
+        dict[str, Any],
+        strict_json_parse((_ROOT / "control-request-2.5.0.schema.json").read_bytes()),
+    )
+    v24_properties = request_v24["$defs"]["observation_envelope"]["properties"][
+        "structural_payload"
+    ]["properties"]
+    v25_properties = request_v25["$defs"]["observation_envelope"]["properties"][
+        "structural_payload"
+    ]["properties"]
+    expected_observation_keys = set(_STRUCTURAL_KEYS) - _ROUTINE_SUMMARY_STRUCTURAL_KEYS
+    assert set(v25_properties) == expected_observation_keys
+    assert set(v24_properties) == expected_observation_keys
+    assert v25_properties["pairing_mode"] == {
+        "enum": ["paired", "post_only"],
+        "type": "string",
+    }
+    assert v25_properties["correlation_kind"] == {
+        "enum": ["tool_call_id", "generation_id", "none"],
+        "type": "string",
+    }
+    assert v25_properties["generation_id"] == {
+        "maxLength": 128,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$",
+        "type": "string",
+    }
+
+
+@pytest.mark.parametrize(
+    ("source", "codex_session_id", "structural"),
+    [
+        (
+            "claude_hook",
+            "claude:session-1",
+            {
+                "action": "claude_mcp_success",
+                "capability_profile_id": "claude-code-cli-local-project-2.1.241",
+                "correlation_kind": "tool_call_id",
+                "hook_name": "PostToolUse",
+                "pairing_mode": "post_only",
+                "tool_call_id": "tool-1",
+            },
+        ),
+        (
+            "cursor_hook",
+            "cursor:session-1",
+            {
+                "action": "cursor_mcp",
+                "capability_profile_id": "cursor-ide-3.17.8",
+                "correlation_kind": "generation_id",
+                "cursor_version": "3.17.8",
+                "generation_id": "generation-1",
+                "hook_name": "PostToolUse",
+                "model_effort": "medium",
+                "model_id": "claude-4.5-sonnet",
+                "pairing_mode": "post_only",
+                "tool_call_id": "tool-1",
+            },
+        ),
+    ],
+)
+def test_v25_control_client_round_trips_cli_shaped_native_observation_frames(
+    source: str, codex_session_id: str, structural: dict[str, Any]
+) -> None:
+    """The control admission preserves pairing metadata from the 2.4 wire onward."""
+
+    frame = _current_cli_observation_frame(
+        source=source,
+        codex_session_id=codex_session_id,
+        structural=structural,
+    )
+    validate_schema_instance("control-request", "2.5.0", cast(JsonValue, frame))
+
+    parsed = parse_control_request(decode_control_frame(encode_control_frame(frame)))
+    assert isinstance(parsed, ControlCallRequest)
+    assert parsed.method.value == "observation_ingest"
+
+    validate_schema_instance("control-request", "2.4.0", cast(JsonValue, frame))
+    with pytest.raises(ProtocolValueError):
+        validate_schema_instance("control-request", "2.3.0", cast(JsonValue, frame))
+
+
+def test_v27_control_client_round_trips_selection_route_fields_without_rewriting_frozen_v26() -> (
+    None
+):
+    """Current native hook envelopes carry the selection route on the active 2.7 wire only."""
+
+    frame = _current_cli_observation_frame(
+        source="claude_hook",
+        codex_session_id="claude:session-1",
+        structural={
+            "action": "claude_mcp_success",
+            "capability_profile_id": "claude-code-cli-local-project-2.1.241",
+            "correlation_kind": "tool_call_id",
+            "hook_name": "PostToolUse",
+            "pairing_mode": "post_only",
+            "selection_authority_generation": "sha256:" + "2" * 64,
+            "selection_session_id": "ses_00000000-0000-4000-8000-000000000004",
+            "selection_task_id": "tsk_00000000-0000-4000-8000-000000000005",
+            "selection_writer_id": "wri_00000000-0000-4000-8000-000000000006",
+            "success": True,
+            "tool_call_id": "tool-1",
+        },
+    )
+
+    validate_schema_instance("control-request", "2.7.0", cast(JsonValue, frame))
+    parsed = parse_control_request(decode_control_frame(encode_control_frame(frame)))
+    assert isinstance(parsed, ControlCallRequest)
+    assert isinstance(parsed.body, JsonObject)
+    assert canonical_encode(parsed.body) == canonical_encode(frame["body"])
+
+    # The released 2.6 document remains byte-frozen and must not silently gain the
+    # current selection routing extension.
+    with pytest.raises(ProtocolValueError):
+        validate_schema_instance("control-request", "2.6.0", cast(JsonValue, frame))
+
+
+def test_v27_control_check_uses_current_request_wire_and_coordination_pack() -> None:
+    """The active control envelope carries the project-aware check operation schema."""
+
+    def operation_refs(filename: str) -> set[str]:
+        document = cast(dict[str, Any], strict_json_parse((_ROOT / filename).read_bytes()))
+        references: set[str] = set()
+
+        def collect_refs(value: object) -> None:
+            if isinstance(value, dict):
+                mapping = cast(dict[str, object], value)
+                reference = mapping.get("$ref")
+                if isinstance(reference, str) and "/operations/" in reference:
+                    references.add(reference.rsplit("/", 1)[-1])
+                for member in mapping.values():
+                    collect_refs(member)
+            elif isinstance(value, list):
+                for member in cast(list[object], value):
+                    collect_refs(member)
+
+        collect_refs(document)
+        return references
+
+    assert operation_refs("control-request-2.7.0.schema.json") == {
+        "check-request-1.1.0.schema.json",
+        "publish-work-request-1.2.0.schema.json",
+        "receipt-request-1.0.0.schema.json",
+        "respond-request-1.0.0.schema.json",
+        "start-request-1.1.0.schema.json",
+        "status-request-1.2.0.schema.json",
+    }
+    assert operation_refs("control-result-2.7.0.schema.json") == {
+        "check-result-1.2.0.schema.json",
+        "publish-work-result-1.0.0.schema.json",
+        "receipt-result-1.2.0.schema.json",
+        "respond-result-1.0.0.schema.json",
+        "start-result-1.1.0.schema.json",
+        "status-result-1.3.0.schema.json",
+    }
+
+    request: JsonValue = cast(
+        JsonValue,
+        {
+            "kind": "call",
+            "protocol_version": "1.0",
+            "rpc_id": _RPC_ID,
+            "service_instance_id": _INSTANCE_ID,
+            "service_generation": "1",
+            "method": "check",
+            "body": {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _REQUEST_ID,
+                "session_id": "ses_00000000-0000-4000-8000-000000000004",
+                "writer_id": "wri_00000000-0000-4000-8000-000000000005",
+                "expected_frontier": {"sequence": "0", "head_digest": "genesis"},
+                "mode": "deterministic_only",
+                "policy_packs": ["coordination/0.1.0"],
+                "actor": {"actor_id": "harness:test", "actor_type": "harness"},
+                "client": {
+                    "kind": "test_client",
+                    "version": "0.3.0",
+                    "integration": "cooperative_mcp",
+                },
+            },
+        },
+    )
+    validate_schema_instance("control-request", "2.7.0", request)
+    with pytest.raises(ProtocolValueError):
+        validate_schema_instance("control-request", "2.4.0", request)
 
 
 def test_v24_pairing_structural_fields_round_trip_and_are_rejected_by_v23() -> None:

@@ -142,7 +142,7 @@ def test_each_migration_family_has_contiguous_versions(installed: _Installed) ->
         "}))\n"
     )
     payload = _run_probe(installed, probe)
-    assert payload["catalog_versions"] == ["0001", "0002", "0003"]
+    assert payload["catalog_versions"] == ["0001", "0002", "0003", "0004", "0005"]
     assert payload["bundle_versions"] == [
         "0001",
         "0002",
@@ -156,14 +156,15 @@ def test_each_migration_family_has_contiguous_versions(installed: _Installed) ->
         "0010",
         "0011",
         "0012",
+        "0013",
     ]
-    assert payload["catalog_current"] == 3
-    assert payload["bundle_current"] == 12
+    assert payload["catalog_current"] == 5
+    assert payload["bundle_current"] == 13
 
 
 def test_migration_ddl_contains_only_reviewed_table_rebuilds(installed: _Installed) -> None:
     for family, versions in (
-        ("catalog", ("0001", "0002", "0003")),
+        ("catalog", ("0001", "0002", "0003", "0004", "0005")),
         (
             "bundle",
             (
@@ -179,6 +180,7 @@ def test_migration_ddl_contains_only_reviewed_table_rebuilds(installed: _Install
                 "0010",
                 "0011",
                 "0012",
+                "0013",
             ),
         ),
     ):
@@ -192,7 +194,7 @@ def test_migration_ddl_contains_only_reviewed_table_rebuilds(installed: _Install
                 / family
                 / f"{version}.sql"
             ).read_text(encoding="utf-8")
-            upper = text.upper()
+            upper = re.sub(r"--[^\n]*", "", text.upper())
             if (family, version) == ("bundle", "0009"):
                 # The reviewed CHECK widening copies every row before dropping only these
                 # two originals. Row/identity preservation is exercised by the migration
@@ -204,6 +206,31 @@ def test_migration_ddl_contains_only_reviewed_table_rebuilds(installed: _Install
                     assert upper.count(drop) == 1
                     assert upper.index(copy) < upper.index(drop) < upper.index(rename)
                     upper = upper.replace(drop, "", 1)
+            if (family, version) == ("bundle", "0013"):
+                copy = "INSERT INTO EVENTS_V13_NEW ("
+                drop = "DROP TABLE EVENTS;"
+                rename = "ALTER TABLE EVENTS_V13_NEW RENAME TO EVENTS;"
+                assert upper.count(drop) == 1
+                assert upper.index(copy) < upper.index(drop) < upper.index(rename)
+                upper = upper.replace(drop, "", 1)
+            if (family, version) == ("catalog", "0004"):
+                rename = "ALTER TABLE START_OPERATIONS RENAME TO START_OPERATIONS_V3;"
+                copy = "INSERT INTO START_OPERATIONS("
+                drop = "DROP TABLE START_OPERATIONS_V3;"
+                assert upper.count(drop) == 1
+                assert upper.index(rename) < upper.index(copy) < upper.index(drop)
+                upper = upper.replace(drop, "", 1)
+                backfill = (
+                    "UPDATE TASK_ROUTES\n"
+                    "SET LINEAGE_DIGEST = ACTIVE_ROUTE_IDENTITY_DIGEST\n"
+                    "WHERE LINEAGE_DIGEST =\n"
+                    "    'SHA256:0000000000000000000000000000000000000000000000000000000000000000';"
+                )
+                assert upper.count(backfill) == 1
+                upper = upper.replace(backfill, "", 1)
+                # These tokens declare transition guards; they do not modify a row.
+                assert upper.count("BEFORE UPDATE OF ") == 4
+                upper = upper.replace("BEFORE UPDATE OF ", "BEFORE CHANGE OF ")
             for forbidden in (r"DROP\s+TABLE", r"DELETE\s+FROM", r"\bUPDATE\b", r"\bTRUNCATE\b"):
                 assert re.search(forbidden, upper) is None, (family, version, forbidden)
 
@@ -236,9 +263,9 @@ def test_fresh_catalog_and_bundle_initialize_at_current_schema_version(
     payload = _run_probe(installed, probe)
     assert payload == {
         "catalog_state": "current",
-        "catalog_version": 3,
+        "catalog_version": 5,
         "bundle_state": "current",
-        "bundle_version": 12,
+        "bundle_version": 13,
     }
 
 
@@ -258,7 +285,7 @@ def test_replaying_migrations_on_an_already_current_database_is_a_verified_noop(
         "}))\n"
     )
     payload = _run_probe(installed, probe)
-    assert payload == {"from_version": 3, "to_version": 3, "applied_versions": []}
+    assert payload == {"from_version": 5, "to_version": 5, "applied_versions": []}
 
 
 def test_uninitialized_database_reports_uninitialized_not_current(installed: _Installed) -> None:
@@ -283,7 +310,7 @@ def test_newer_than_candidate_schema_fails_migration_and_identity_checks_honestl
         "from yoetz.adapters.sqlite.connection import verify_schema_identity, StorageUnsafeError\n"
         "catalog = apsw.Connection(':memory:')\n"
         "initialize_catalog(catalog)\n"
-        "catalog.execute('PRAGMA user_version = 4')\n"
+        "catalog.execute('PRAGMA user_version = 6')\n"
         "identity_reason = None\n"
         "try:\n"
         "    verify_schema_identity(catalog)\n"

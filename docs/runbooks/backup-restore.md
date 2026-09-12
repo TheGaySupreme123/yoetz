@@ -100,7 +100,7 @@ documentation.
 | Key locked/missing/wrong | Resolve the key backend or secret — never reset a key. |
 | Manifest/object/database/replay mismatch | Stop; preserve everything for support. |
 | Route changed since preview | Preview the current state again. |
-| Migration needed | Use a supported candidate package, or stop. |
+| Migration needed | For a supported 0.2-to-0.3 update, let controlled service startup perform its backup-first migration; for explicit backup/restore work, use a supported candidate package or stop. |
 
 Cancellation or a timeout never proves failure — inspect the structural result or `status` and retry
 the exact same request. No log or support bundle should ever include a path, a manifest with a user

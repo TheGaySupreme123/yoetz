@@ -195,10 +195,15 @@ def _scope(_: ControlProjectionBinding, source: Mapping[str, JsonValue]) -> Auth
     )
 
 
-async def _semantic_disabled(frozen: object, findings: object) -> object:
+async def _semantic_disabled(
+    frozen: object,
+    findings: object,
+    runtime: object | None = None,
+    lineage_evaluation: object | None = None,
+) -> object:
     """Fail if deterministic projection unexpectedly invokes semantic evaluation."""
 
-    del frozen, findings
+    del frozen, findings, runtime, lineage_evaluation
     raise AssertionError("semantic_evaluator_called_in_deterministic_mode")
 
 

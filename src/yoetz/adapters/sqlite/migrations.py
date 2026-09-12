@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib import resources
 from time import monotonic_ns
 from typing import TYPE_CHECKING, Final, cast
 
 import apsw
+
+from yoetz.adapters.sqlite.connection import (  # pyright: ignore[reportPrivateUsage]
+    _migration_authorizer,  # pyright: ignore[reportPrivateUsage]
+)
 
 if TYPE_CHECKING:
     from yoetz.ports.maintenance import MaintenanceHandle
@@ -67,6 +72,8 @@ CATALOG_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration("0001", _load_resource("catalog", "0001")),
     Migration("0002", _load_resource("catalog", "0002")),
     Migration("0003", _load_resource("catalog", "0003")),
+    Migration("0004", _load_resource("catalog", "0004")),
+    Migration("0005", _load_resource("catalog", "0005")),
 )
 BUNDLE_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration("0001", _load_resource("bundle", "0001")),
@@ -81,6 +88,7 @@ BUNDLE_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration("0010", _load_resource("bundle", "0010")),
     Migration("0011", _load_resource("bundle", "0011")),
     Migration("0012", _load_resource("bundle", "0012")),
+    Migration("0013", _load_resource("bundle", "0013")),
 )
 
 
@@ -138,6 +146,101 @@ def _execute(db: apsw.Connection, migration: Migration) -> None:
     db.execute(migration.ddl.decode("utf-8"))
 
 
+@contextmanager
+def _migration_authorization_window(db: apsw.Connection):
+    """Temporarily grant migration DDL PRAGMAs, then restore runtime write policy."""
+
+    previous_authorizer = db.authorizer
+    db.set_authorizer(_migration_authorizer)
+    try:
+        yield
+    finally:
+        db.set_authorizer(previous_authorizer)
+
+
+def _requires_foreign_keys_disabled(pending: Sequence[Migration]) -> bool:
+    """Return whether pending migrations include the isolated events-table rebuild."""
+
+    return any(item.version == "0013" for item in pending)
+
+
+def _validate_v10_bundle_layout(
+    db: apsw.Connection,
+    current: int,
+    pending: Sequence[Migration],
+) -> None:
+    """Refuse ambiguous pre-refresh bundles before any upgrade writes.
+
+    Released v0.2 v10 has the native-content consent column and the original events CHECK.
+    The short-lived 0.3 development v10 used the same user_version for its events CHECK
+    rebuild and therefore lacks that consent column.  There is no safe way to infer whether
+    that development schema has user data that can be replayed into the released frontier.
+    Only the released layout may continue through 0011-0013; every other combination fails
+    closed before opening a migration transaction.
+    """
+
+    if current not in {10, 11, 12} or not any(item.version == "0013" for item in pending):
+        return
+    profile_columns = {
+        cast(str, row[1])
+        for row in db.execute("PRAGMA table_info(observation_consent)")
+        if len(row) > 1 and type(row[1]) is str
+    }
+    event_row = db.execute(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'events'"
+    ).fetchone()
+    event_sql = event_row[0].casefold() if event_row and type(event_row[0]) is str else ""
+    has_content_profiles = "content_capture_profiles_json" in profile_columns
+    has_lineage_summary = "delegation_declared" in event_sql
+    required_v12_tables: set[str] = {"observation_capture_tickets"} if current >= 11 else set()
+    if current >= 12:
+        required_v12_tables.add("observation_advice_semantic_attempts")
+    tables = {
+        cast(str, row[0])
+        for row in db.execute(
+            "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        )
+        if len(row) == 1 and type(row[0]) is str
+    }
+    if has_content_profiles and not has_lineage_summary and required_v12_tables <= tables:
+        return
+    raise RuntimeError("schema_upgrade_path_unknown")
+
+
+def _set_event_summary_rebuild_mode(db: apsw.Connection) -> None:
+    """Permit the append-only events rebuild while preserving child-table references."""
+
+    # foreign_keys is a connection setting and must be changed outside a transaction.
+    # legacy_alter_table keeps REFERENCES events clauses unchanged while the old table is
+    # renamed and replaced.  Both settings are restored by the matching helper below.
+    if db.get_autocommit() is False:
+        raise RuntimeError("schema_rebuild_transaction_active")
+    foreign_keys_disabled = False
+    legacy_alter_enabled = False
+    try:
+        db.execute("PRAGMA foreign_keys = OFF")
+        foreign_keys_disabled = True
+        db.execute("PRAGMA legacy_alter_table = ON")
+        legacy_alter_enabled = True
+        if _pragma_int(db, "foreign_keys") != 0 or _pragma_int(db, "legacy_alter_table") != 1:
+            raise RuntimeError("schema_rebuild_pragma_mismatch")
+    except BaseException:
+        if legacy_alter_enabled:
+            db.execute("PRAGMA legacy_alter_table = OFF")
+        if foreign_keys_disabled:
+            db.execute("PRAGMA foreign_keys = ON")
+        raise
+
+
+def _clear_event_summary_rebuild_mode(db: apsw.Connection) -> None:
+    """Restore the reviewed schema connection settings after an events rebuild."""
+
+    db.execute("PRAGMA legacy_alter_table = OFF")
+    db.execute("PRAGMA foreign_keys = ON")
+    if _pragma_int(db, "foreign_keys") != 1 or _pragma_int(db, "legacy_alter_table") != 0:
+        raise RuntimeError("schema_rebuild_pragma_mismatch")
+
+
 def _verify_identity(db: apsw.Connection, expected_version: int) -> None:
     if _pragma_int(db, "foreign_keys") != 1 or _pragma_int(db, "trusted_schema") != 0:
         raise RuntimeError("schema_security_pragma_mismatch")
@@ -175,44 +278,48 @@ def initialize_bundle(db: apsw.Connection, bundle_meta_seed: Mapping[str, str]) 
     target_version = current_schema_version(BUNDLE_MIGRATIONS)
     seed["storage_schema_version"] = str(target_version)
 
-    with db:
-        for migration in BUNDLE_MIGRATIONS:
-            _execute(db, migration)
-        db.executemany(
-            "INSERT INTO bundle_meta(key, value) VALUES (?, ?)",
-            sorted(seed.items()),
-        )
-        db.execute("INSERT INTO counters(name, next_value) VALUES ('ingestion_sequence', 1)")
-        db.execute(
-            "INSERT INTO projection_state("
-            "projection_name, projection_version, projection_generation, "
-            "applied_through_seq, state_digest, engine_version"
-            ") VALUES ('work', 'yoetz/0.1.0', 1, 0, ?, '0.1.0')",
-            (EMPTY_PROJECTION_DIGEST,),
-        )
-        db.execute(
-            "INSERT INTO p1_projection_state("
-            "projection_name, frontier_seq, head_digest, "
-            "task_title_source_event_id, current_plan_source_event_id, "
-            "open_obligation_count, unresolved_finding_count, "
-            "status_coverage_canonical, status_gap_codes_canonical, "
-            "latest_check_event_id, latest_subject_frontier_seq, "
-            "latest_subject_frontier_digest, latest_verdict, "
-            "latest_returned_finding_ids, latest_suppressed_count, "
-            "latest_coverage_canonical, freshness, unknown_event_count"
-            ") VALUES ("
-            "'work', 0, 'genesis', NULL, NULL, 0, 0, NULL, NULL, "
-            "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'unknown', 0"
-            ")"
-        )
-        db.execute(
-            "INSERT INTO p1_query_snapshots("
-            "valid_from_seq, valid_to_seq, head_digest, "
-            "task_title_source_event_id, current_plan_source_event_id, "
-            "open_obligation_count, unresolved_finding_count, freshness, "
-            "coverage_canonical, gap_codes_canonical"
-            ") VALUES (0, NULL, 'genesis', NULL, NULL, 0, 0, 'unknown', NULL, NULL)"
-        )
+    # Fresh installation has no dependent event rows, but 0013 still uses the same narrowly
+    # scoped migration authorization window as an upgrade.  The runtime writer authorizer is
+    # restored before this function returns.
+    with _migration_authorization_window(db):
+        with db:
+            for migration in BUNDLE_MIGRATIONS:
+                _execute(db, migration)
+            db.executemany(
+                "INSERT INTO bundle_meta(key, value) VALUES (?, ?)",
+                sorted(seed.items()),
+            )
+            db.execute("INSERT INTO counters(name, next_value) VALUES ('ingestion_sequence', 1)")
+            db.execute(
+                "INSERT INTO projection_state("
+                "projection_name, projection_version, projection_generation, "
+                "applied_through_seq, state_digest, engine_version"
+                ") VALUES ('work', 'yoetz/0.1.0', 1, 0, ?, '0.1.0')",
+                (EMPTY_PROJECTION_DIGEST,),
+            )
+            db.execute(
+                "INSERT INTO p1_projection_state("
+                "projection_name, frontier_seq, head_digest, "
+                "task_title_source_event_id, current_plan_source_event_id, "
+                "open_obligation_count, unresolved_finding_count, "
+                "status_coverage_canonical, status_gap_codes_canonical, "
+                "latest_check_event_id, latest_subject_frontier_seq, "
+                "latest_subject_frontier_digest, latest_verdict, "
+                "latest_returned_finding_ids, latest_suppressed_count, "
+                "latest_coverage_canonical, freshness, unknown_event_count"
+                ") VALUES ("
+                "'work', 0, 'genesis', NULL, NULL, 0, 0, NULL, NULL, "
+                "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'unknown', 0"
+                ")"
+            )
+            db.execute(
+                "INSERT INTO p1_query_snapshots("
+                "valid_from_seq, valid_to_seq, head_digest, "
+                "task_title_source_event_id, current_plan_source_event_id, "
+                "open_obligation_count, unresolved_finding_count, freshness, "
+                "coverage_canonical, gap_codes_canonical"
+                ") VALUES (0, NULL, 'genesis', NULL, NULL, 0, 0, 'unknown', NULL, NULL)"
+            )
     _verify_identity(db, current_schema_version(BUNDLE_MIGRATIONS))
 
 
@@ -238,29 +345,38 @@ def run_migrations(
         pending = tuple(item for item in registry if int(item.version) > current)
         if not pending or int(pending[0].version) != current + 1:
             raise RuntimeError("schema_version_unknown")
-        with db:
-            for migration in pending:
-                _execute(db, migration)
-                applied.append(migration.version)
-            tables = {
-                cast(str, row[0])
-                for row in db.execute(
-                    "SELECT name FROM sqlite_schema "
-                    "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-                )
-            }
-            if "bundle_meta" in tables:
-                db.execute(
-                    "INSERT INTO bundle_meta(key, value) VALUES('storage_schema_version', ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (str(target),),
-                )
-            elif "catalog_meta" in tables:
-                db.execute(
-                    "INSERT INTO catalog_meta(key, value) VALUES('storage_schema_version', ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (str(target),),
-                )
+        _validate_v10_bundle_layout(db, current, pending)
+        rebuild_mode = _requires_foreign_keys_disabled(pending)
+        with _migration_authorization_window(db):
+            if rebuild_mode:
+                _set_event_summary_rebuild_mode(db)
+            try:
+                with db:
+                    for migration in pending:
+                        _execute(db, migration)
+                        applied.append(migration.version)
+                    tables = {
+                        cast(str, row[0])
+                        for row in db.execute(
+                            "SELECT name FROM sqlite_schema "
+                            "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+                        )
+                    }
+                    if "bundle_meta" in tables:
+                        db.execute(
+                            "INSERT INTO bundle_meta(key, value) VALUES('storage_schema_version', ?) "
+                            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                            (str(target),),
+                        )
+                    elif "catalog_meta" in tables:
+                        db.execute(
+                            "INSERT INTO catalog_meta(key, value) VALUES('storage_schema_version', ?) "
+                            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                            (str(target),),
+                        )
+            finally:
+                if rebuild_mode:
+                    _clear_event_summary_rebuild_mode(db)
         current = _pragma_int(db, "user_version")
     _verify_identity(db, target)
     elapsed_ms = max(0, (monotonic_ns() - started) // 1_000_000)

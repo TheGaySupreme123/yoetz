@@ -56,6 +56,7 @@ from yoetz.domain.findings import (
     rank_key,
     semantic_provenance_to_json,
 )
+from yoetz.domain.receipts import CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP
 from yoetz.domain.values import (
     Actor,
     ActorType,
@@ -104,6 +105,7 @@ from yoetz.kernel.receipt_capacity import (
 )
 from yoetz.kernel.reducers import (
     invalidates_recorded_check,
+    is_material_event_family,
     replay,
     replay_extension_with_index,
     replay_with_index,
@@ -167,6 +169,7 @@ from yoetz.protocol.canonical import (
 from yoetz.protocol.coverage import (
     AuthorshipAssurance,
     Coverage,
+    LedgerFreshness,
     PublicationChannel,
     coverage_for_channel,
     coverage_to_json,
@@ -198,12 +201,22 @@ from yoetz.version import build_status_version_slice_facts
 __all__ = ["MemoryLedgerAdapter", "MemoryLedgerState", "compact_status_coverage"]
 
 _GENESIS: Final = Frontier.genesis()
+_REPLAY_SAFE_IMMATERIAL_FAMILIES: Final = frozenset({"receipt_recorded"})
 type _SummaryCode = Literal[
     "action_recorded",
     "assignment_recorded",
     "check_recorded",
+    "child_accepted",
+    "child_dependencies_recorded",
+    "child_rejected",
+    "child_written_off",
     "claim_recorded",
+    "coordination_context_recorded",
+    "coordination_disposition_recorded",
+    "coordination_obligation_declared",
     "decision_recorded",
+    "delegation_cancelled",
+    "delegation_declared",
     "evidence_recorded",
     "finding_recorded",
     "obligation_published",
@@ -216,6 +229,10 @@ type _SummaryCode = Literal[
     "result_recorded",
     "session_opened",
     "session_resumed",
+    "work_abandoned",
+    "work_cancelled",
+    "work_closed",
+    "work_written_off",
 ]
 
 
@@ -899,7 +916,27 @@ def compact_status_coverage(
         for record in records
     ):
         return baseline
-    return weakest(baseline, check_record.payload.coverage)
+    coverage = weakest(baseline, check_record.payload.coverage)
+    if any(
+        is_material_event_family(record.schema.name)
+        and record.ledger.ingestion_sequence > check_record.ledger.ingestion_sequence
+        for record in records
+    ):
+        # The same attributable suffix that the receipt builder discloses still leaves the check
+        # useful, but only as of its tested subject frontier. Keep the current observation
+        # records visible in status and add the bounded qualification instead of manufacturing
+        # ``check_not_applicable`` or stale-after-material-change.
+        gaps = tuple(
+            sorted(
+                set(coverage.known_gaps) | {CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP},
+                key=str.encode,
+            )
+        )
+        freshness = coverage.ledger_freshness
+        if freshness is LedgerFreshness.CURRENT:
+            freshness = LedgerFreshness.PARTIAL
+        coverage = replace(coverage, ledger_freshness=freshness, known_gaps=gaps)
+    return coverage
 
 
 def _obligation_item(
@@ -1223,6 +1260,12 @@ def _projection_items(
         # `current`, so reporting the projection scalar raw lets the headline read cleaner than
         # the coverage it summarizes. Report the weaker of the two (issue #307).
         item_freshness = min(projection.freshness, item_coverage.ledger_freshness)
+        item_gaps = tuple(
+            sorted(
+                set(_status_gap_codes(projection.coverage_gaps)) | set(item_coverage.known_gaps),
+                key=str.encode,
+            )
+        )
         return (
             StatusCompactItemModel(
                 task_id=task,
@@ -1242,7 +1285,7 @@ def _projection_items(
                 unanswered_findings=unanswered_findings[:10],
                 freshness=item_freshness.value,
                 coverage=CoverageModel.model_validate(coverage_to_json(item_coverage)),
-                gaps=_status_gap_codes(projection.coverage_gaps),
+                gaps=item_gaps,
             ),
         )
     if view is ProjectionView.VERSIONS:
@@ -1433,6 +1476,28 @@ class MemoryLedgerAdapter:
             if record.ledger.ingestion_sequence > sequence
         )
 
+    def _receipt_prefix_suffix_safe_unlocked(
+        self, sequence: int, *, finding_free: bool = False
+    ) -> bool:
+        """True when a pinned receipt prefix only gained immaterial records.
+
+        A second rendering of one checked receipt may follow an engine-derived
+        ``receipt_recorded`` event. That suffix changes the ledger frontier and receipt history,
+        but it does not change the deterministic case. Observation records remain allowed under
+        the existing observation rule; all other event families, including child manifests, are
+        treated as material so a stale prefix cannot launder newer work.
+        """
+
+        return all(
+            (
+                is_observation_authored(record)
+                or record.schema.name in _REPLAY_SAFE_IMMATERIAL_FAMILIES
+            )
+            and not (finding_free and record.schema.name == "finding_recorded")
+            for record in self._state.records
+            if record.ledger.ingestion_sequence > sequence
+        )
+
     def _projection_anchored_unlocked(self, projection: ProjectionState) -> bool:
         """True when ``projection`` is the exact replay of this chain through its frontier."""
 
@@ -1535,7 +1600,7 @@ class MemoryLedgerAdapter:
                 and command.expected_frontier != subject.sequence
                 and not (
                     command.expected_frontier < subject.sequence
-                    and self._observation_only_since_unlocked(
+                    and self._receipt_prefix_suffix_safe_unlocked(
                         command.expected_frontier,
                         finding_free=command.operation_kind is OperationKind.RECEIPT,
                     )
@@ -1766,14 +1831,17 @@ class MemoryLedgerAdapter:
             if not any(row.session_id == session_id for row in self._state.records):
                 raise _frontier_conflict(live)
             # A case pinned to a past frontier stays valid while the live chain only extends it
-            # with observation-authored, finding-free records. Replaying and comparing the exact
-            # prefix is required: its head digest authenticates the ledger prefix, not an arbitrary
-            # caller-supplied ProjectionState that happens to repeat that frontier. Anything else
-            # is a real conflict.
+            # with observation-authored or receipt-only, finding-free records. Replaying and
+            # comparing the exact prefix is required: its head digest authenticates the ledger
+            # prefix, not an arbitrary caller-supplied ProjectionState that happens to repeat that
+            # frontier. Anything else is a real conflict.
             if projection != self._state.projection and not (
                 projection.frontier < live.sequence
                 and self._projection_anchored_unlocked(projection)
-                and self._observation_only_since_unlocked(projection.frontier, finding_free=True)
+                and self._receipt_prefix_suffix_safe_unlocked(
+                    projection.frontier,
+                    finding_free=True,
+                )
             ):
                 raise _frontier_conflict(live)
             by_event = {row.event_id: row for row in self._state.records}
@@ -2004,7 +2072,21 @@ class MemoryLedgerAdapter:
             elif type(last) is StatusResultItemModel:
                 next_position = IdProjectionPosition(last.result_id)
         status_gaps = _status_gap_codes(effective_projection.coverage_gaps)
-        coverage = replace(prefix[-1].coverage, known_gaps=status_gaps)
+        if view is ProjectionView.COMPACT:
+            # Compact status exposes the same applicable-check fold as the item and as the
+            # receipt. In particular, an observation-only suffix keeps the check attributable
+            # while qualifying it at its earlier tested frontier; do not let the page-level
+            # coverage silently drop that qualification.
+            compact_coverage = compact_status_coverage(prefix, effective_projection)
+            status_gaps = tuple(
+                sorted(
+                    set(status_gaps) | set(compact_coverage.known_gaps),
+                    key=str.encode,
+                )
+            )
+            coverage = replace(compact_coverage, known_gaps=status_gaps)
+        else:
+            coverage = replace(prefix[-1].coverage, known_gaps=status_gaps)
         page = ProjectionPage(
             query.view,
             selected,

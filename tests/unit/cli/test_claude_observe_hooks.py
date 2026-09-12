@@ -4,11 +4,15 @@ import io
 import json
 from collections.abc import Mapping
 from pathlib import Path
-from typing import cast
+from typing import NoReturn, cast
 
 import pytest
 
-from yoetz.adapters.integrations.codex_lifecycle import load_mapping
+from yoetz.adapters.integrations.codex_lifecycle import (
+    load_mapping,
+    mapping_from_start_ids,
+    store_mapping,
+)
 from yoetz.adapters.integrations.observation_local import AdviceDelivery, LocalObservationStore
 from yoetz.cli import observe_hooks
 from yoetz.domain.observation import (
@@ -20,6 +24,7 @@ from yoetz.domain.observation import (
 from yoetz.domain.observation_profiles import CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
 from yoetz.kernel.policies.observation_advice import ObservationCompositionFact
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
+from yoetz.protocol.ids import IdKind, new_id
 
 
 def test_claude_hook_ingress_retains_only_closed_structural_mcp_fields(
@@ -74,6 +79,50 @@ def test_claude_hook_ingress_retains_only_closed_structural_mcp_fields(
     assert captured["source"] is ObservationSource.CLAUDE_HOOK
     assert _recorded_diagnostics(local_state) == [("start_bind_unparsed", "PostToolUse")]
     assert list(inherited.iterdir()) == []
+
+
+@pytest.mark.parametrize("event_name", ["SubagentStart", "SubagentStop"])
+def test_claude_native_child_ingress_keeps_child_identity_without_parent_tool(
+    monkeypatch: pytest.MonkeyPatch,
+    event_name: str,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_handle_observe(**kwargs: object) -> int:
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(observe_hooks, "handle_observe", fake_handle_observe)
+    payload: dict[str, JsonValue] = {
+        "agent_id": "claude-agent-1",
+        "agent_type": "general-purpose",
+        "agent_transcript_path": "/private/agent-transcript.jsonl",
+        "cwd": "/private/project",
+        "hook_event_name": event_name,
+        "permission_mode": "dontAsk",
+        "session_id": "claude-parent-session",
+        "transcript_path": "/private/transcript.jsonl",
+    }
+
+    assert (
+        observe_hooks.handle_claude_observe(
+            event_name=event_name,
+            stdin_bytes=canonical_encode(payload),
+            stdout=io.BytesIO(),
+        )
+        == 0
+    )
+    sanitized = strict_json_parse(cast(bytes, captured["stdin_bytes"]))
+    assert isinstance(sanitized, Mapping)
+    assert sanitized == {
+        "action": "claude_subagent",
+        "correlation_kind": "tool_call_id",
+        "hook_event_name": event_name,
+        "pairing_mode": "post_only",
+        "session_id": "claude:claude-parent-session",
+        "subagent_id": "claude-agent-1",
+    }
+    assert captured["source"] is ObservationSource.CLAUDE_HOOK
 
 
 @pytest.mark.parametrize("response_shape", ["structured", "content_blocks", "json_string"])
@@ -509,6 +558,88 @@ def test_claude_real_ingress_session_start_emits_native_context_and_privacy_cana
         assert canary.encode() not in state_bytes
         assert canary.encode() not in stdout.getvalue()
     assert _recorded_diagnostics(tmp_path) == []
+
+
+def test_claude_received_clear_clears_existing_lifecycle_mapping(tmp_path: Path) -> None:
+    """The closed Claude source=clear flag reaches the shared mapping fence."""
+
+    _store, _commitment = _consented_store(tmp_path)
+    session = "claude:received-clear"
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=session,
+            yoetz_task_id=new_id(IdKind.TASK),
+            yoetz_session_id=new_id(IdKind.SESSION),
+            yoetz_writer_id=new_id(IdKind.WRITER),
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+    assert load_mapping(session, _state=tmp_path) is not None
+
+    assert (
+        observe_hooks.handle_claude_observe(
+            event_name="SessionStart",
+            stdin_bytes=canonical_encode(
+                {
+                    "hook_event_name": "SessionStart",
+                    "session_id": "received-clear",
+                    "source": "clear",
+                }
+            ),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    assert load_mapping(session, _state=tmp_path) is None
+
+
+def test_claude_received_clear_does_not_reopen_service_or_advisory(tmp_path: Path) -> None:
+    """The native clear action fences locally without a later status or attach RPC."""
+
+    _store, _commitment = _consented_store(tmp_path)
+    session = "claude:received-clear-service"
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=session,
+            yoetz_task_id=new_id(IdKind.TASK),
+            yoetz_session_id=new_id(IdKind.SESSION),
+            yoetz_writer_id=new_id(IdKind.WRITER),
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+    connects: list[object] = []
+
+    async def forbidden_connect(_kind: object) -> NoReturn:
+        connects.append(_kind)
+        raise AssertionError("native clear must not reopen the service")
+
+    stdout = io.BytesIO()
+    assert (
+        observe_hooks.handle_claude_observe(
+            event_name="SessionStart",
+            stdin_bytes=canonical_encode(
+                {
+                    "hook_event_name": "SessionStart",
+                    "session_id": "received-clear-service",
+                    "source": "clear",
+                }
+            ),
+            stdout=stdout,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            connect=forbidden_connect,
+            skip_service=False,
+        )
+        == 0
+    )
+    assert connects == []
+    assert load_mapping(session, _state=tmp_path) is None
+    assert stdout.getvalue() in {b"{}\n", b""}
 
 
 def test_claude_failure_advice_preserves_raw_event_and_commits_after_output(

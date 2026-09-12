@@ -95,10 +95,20 @@ documents that Yoetz cannot independently authenticate its chat provenance.
    Agent-facing projections never echo secret bytes. Vault initialization secrets remain
    helper-generated and console-only.
 
-9. **Future operations.** Backup, restore, migration, skill mutation, harness registration,
-   idle-relock weakening, and generic `privacy_policy_widen` remain catalogued but unimplemented
-   until the owning mutation boundary consumes this single-shot review safely.
-   `repository_privacy_grant` is the implemented exact-recipe privacy path for chat-user authorize.
+9. **Separate schema-only package update path.** A compatible package update may run the
+   service-owned `package_upgrade_migration` at the controlled READY boundary. It is limited to
+   the registered schema-12-to-13 bundle transition, takes its machine-bound backup first, and
+   carries no user-content, observation, consent, provider, disclosure, or egress authority. It
+   is not a public `migrate_execute` approval and cannot consume, replace, or weaken that review
+   contract. If the package path cannot prove the exact predecessor, backup, holder, migration,
+   replay, or terminal result, it fails closed and directs the operator to the explicit recovery
+   procedure.
+
+   Explicit backup, restore, and ad-hoc `migrate execute` remain `review_only`: they require their
+   own exact plan digest and trusted review. Skill mutation, harness registration, idle-relock
+   weakening, and generic `privacy_policy_widen` remain catalogued but unimplemented until their
+   owning mutation boundaries consume this single-shot review safely. `repository_privacy_grant`
+   is the implemented exact-recipe privacy path for chat-user authorize.
 
    **Amendment (2026-08-30, issue #301).** `import_publication` is implemented as a one-use
    `review_only` operation. The first import call durably stores its encrypted source and exact

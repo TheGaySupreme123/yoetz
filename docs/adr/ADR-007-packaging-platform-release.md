@@ -80,6 +80,31 @@ manifests, the packaging/capability suites, and the release workflows under `.gi
     hosted availability is independently verified release evidence, never an operational
     dependency.
 
+## Amendment — package update and compatible data upgrade (2026-09-12)
+
+Package replacement and data migration are separate lifecycle stages. The supported `uv tool`
+carrier executes only `uv tool upgrade yoetz` from `yoetz upgrade --accept --writers-stopped`; the
+command refuses source checkouts, pinned test instances, and isolated runtimes. Other carriers
+follow their own package procedure. A successful carrier command is therefore not a host,
+service, or data-upgrade result.
+
+After old hosts, hooks, and the service have been quiesced, the fresh service generation runs the
+storage-owned `BundleUpgradeCoordinator.run_before_ready` phase after catalog migration and before
+publishing READY. It uses the existing catalog `maintenance_operations` row (`kind = 'migration'`,
+`requested_target_version = '13'`) to resume one `package_upgrade_migration` operation, creates a
+verified machine-bound backup before applying bundle migration `0013` from schema 12 to 13, and
+reopens the bundle through the normal writer before projection replay verification. Existing task
+bundles, settings, permissions, host routes/integrations, consent, event history, objects, and
+frontiers are carried forward. A response loss or service restart reuses the recorded operation
+and backup identity; an unsupported or ambiguous path fails closed and keeps the installation out
+of READY until the documented recovery procedure succeeds.
+
+Host refresh, plugin activation, reload, and fresh-session checks remain separate proof facets. An
+upgrade does not select new hosts, roots, ownership, observation profiles, privacy recipes,
+providers, or Expanded review. Release acceptance still requires artifact-bound package evidence,
+the controlled startup migration result where applicable, and independent per-host activation and
+runtime evidence.
+
 ## Implementation-lock identities
 
 The 2026-07-17 implementation lock freezes the direct dependency declarations below. All are

@@ -779,7 +779,8 @@ async def resolve_captured_semantic_content(
     # selecting only the first object ID could split a valid multipart group and
     # turn an otherwise admissible capture into a false unavailable gap.
     selected_objects = tuple(sorted(candidates, key=str.encode))[:_MAX_CAPTURED_SEMANTIC_PARTS]
-    if len(candidates) > len(selected_objects):
+    metadata_selection_truncated = len(candidates) > len(selected_objects)
+    if metadata_selection_truncated:
         gaps.add(ObservationGapCode.CONTENT_UNSELECTED.value)
     if not selected_objects:
         return CapturedContentResolution(
@@ -977,7 +978,17 @@ async def resolve_captured_semantic_content(
             or [row[-1].part_index for row in rows] != list(range(count))
             or len({row[3] for row in rows}) != len(rows)
         ):
-            gaps.add(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
+            # A metadata prefix can strand a valid multipart group at the
+            # selection boundary. Its missing parts are outside this bounded
+            # read, so report capacity withholding rather than claiming that
+            # retained content is unavailable. Without prefix truncation, an
+            # incomplete group is a durable capture defect and remains an
+            # unavailable gap.
+            gaps.add(
+                ObservationGapCode.CONTENT_UNSELECTED.value
+                if metadata_selection_truncated
+                else ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+            )
             continue
         complete_groups.append(rows)
     complete_groups.sort(

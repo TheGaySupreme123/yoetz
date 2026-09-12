@@ -277,6 +277,25 @@ def test_native_projection_uses_claude_skill_and_shared_guidance_components() ->
     )
 
 
+def test_installed_neighbor_fixture_keeps_native_child_proof_bounded() -> None:
+    from fixture_loader import build_fixture_loader
+
+    fixture = cast(
+        dict[str, object],
+        build_fixture_loader().load_json(
+            "agent-plugins/claude-code-cli-native-project-2.1.261.case.json"
+        ),
+    )
+    assert fixture["capability_status"] == "native_child_hooks_bounded_proven"
+    assert fixture["model_use"] == "loopback_synthetic_only"
+    assert fixture["observation_evidence"] == "native_hook_payload_only"
+    limits = cast(list[object], fixture["proof_limits"])
+    assert "production_auth_unavailable_in_isolated_home" in limits
+    child = cast(dict[str, object], fixture["native_child_probe"])
+    assert child["child_lifecycle"] == "started_completed"
+    assert child["parent_tool_identifier"] == "absent_from_native_payload"
+
+
 def test_native_hook_timeouts_leave_room_for_local_capture_and_service_drain() -> None:
     artifact = render_claude_code_plugin(observation_profile="ordinary")
     hooks = json.loads(artifact.members["hooks/hooks.json"])["hooks"]

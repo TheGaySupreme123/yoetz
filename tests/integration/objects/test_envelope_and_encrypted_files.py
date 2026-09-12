@@ -207,13 +207,23 @@ def test_reviewed_commitment_vectors_are_byte_exact() -> None:
     plaintext = base64.b64decode(cast(str, raw["base64"]), validate=True)
     vectors = cast(list[dict[str, object]], fixture_input["commitment_vectors"])
     key = MacKeyForObjectTest(bytes(range(32, 64)))
-    assert len(vectors) == len(ObjectKind) == 17
+    # CAN-009 is a frozen v1.0 corpus.  PROJECT_TEXT was added by the current 0.3
+    # coordination surface, so its current domain is pinned below without rewriting that
+    # historical vector set.
+    assert len(vectors) == 17
+    vector_kinds = {ObjectKind(cast(str, vector["kind"])) for vector in vectors}
+    assert vector_kinds == set(ObjectKind) - {ObjectKind.PROJECT_TEXT}
     for vector in vectors:
         kind = ObjectKind(cast(str, vector["kind"]))
         domain = base64.b64decode(cast(str, vector["domain_base64"]), validate=True)
         assert domain == OBJECT_COMMITMENT_DOMAINS[kind]
         assert domain.endswith(b"\0")
         assert key.mac(domain, plaintext) == vector["commitment"]
+    project_text_domain = OBJECT_COMMITMENT_DOMAINS[ObjectKind.PROJECT_TEXT]
+    assert project_text_domain == b"yoetz/object/project_text/v1\0"
+    assert key.mac(project_text_domain, plaintext) == (
+        "hmac-sha256:cb9066d717d938caee9d1013127c792b38891acb4ced2303849a2111c30f66c6"
+    )
 
 
 def test_stage_fsync_rename_dirfsync_finalize(

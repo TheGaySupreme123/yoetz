@@ -135,6 +135,41 @@ async def test_healthy_workspace_creates_no_recovery_result() -> None:
     assert await _pass(_sweeper(recover), ("a",)) == ()
 
 
+@pytest.mark.anyio
+async def test_sweep_gives_unknown_capture_inventory_a_turn_when_admission_maintenance_fails() -> (
+    None
+):
+    """Recovery remains independent while delivery stays fail-closed."""
+
+    calls: list[str] = []
+
+    class _AdmissionFailingStore:
+        def pending_workspaces(self) -> tuple[str, ...]:
+            # This represents a workspace whose capture inventory is unknown.
+            return ("workspace",)
+
+        def maintain_selected_admission(self, _workspace: str, *, force: bool) -> None:
+            del force
+            raise RuntimeError("admission maintenance failed")
+
+    async def recover(workspace: str) -> Outcome:
+        calls.append(workspace)
+        return Outcome.INVENTORY_UNKNOWN
+
+    sweeper = ObservationOutboxSweeper(
+        cast(LocalObservationStore, _AdmissionFailingStore()),
+        cast(ObservationIngestCoordinator, None),
+        capture_recovery=recover,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="^admission maintenance failed$"):
+            await sweeper.sweep()
+    finally:
+        sweeper.close()
+
+    assert calls == ["workspace"]
+
+
 @pytest.mark.parametrize("budget", (0.0, -1.0, float("nan"), float("inf"), 1, True, "5"))
 def test_recovery_budget_must_be_finite_positive_float(budget: object) -> None:
     async def recover(_workspace: str) -> None:

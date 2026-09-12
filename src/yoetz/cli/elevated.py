@@ -47,8 +47,10 @@ from yoetz.service.elevated_bootstrap import (
     load_pending,
     operation_spec,
     prepare_pending,
+    project_coordination_target_digest,
     projection_for_status,
     record_import_publication_authorization,
+    record_project_coordination_authorization,
     status_payload,
 )
 
@@ -92,18 +94,26 @@ def prepare_elevated(
     *,
     provider_binding: Mapping[str, str] | None = None,
     grant_binding: Mapping[str, JsonValue] | None = None,
+    coordination_binding: Mapping[str, JsonValue] | None = None,
     target_digest: str | None = None,
 ) -> dict[str, JsonValue]:
-    digest = _target_digest(operation, provider_binding, grant_binding, target_digest)
+    digest = _target_digest(
+        operation, provider_binding, grant_binding, coordination_binding, target_digest
+    )
     pending = prepare_pending(
         operation,
         target_digest=digest,
         provider_binding=provider_binding,
         grant_binding=grant_binding,
+        coordination_binding=coordination_binding,
     )
     model = ConsentPrepareResultModel.model_validate(
         {
-            "schema": "yoetz.elevated-bootstrap.prepare-result/6",
+            "schema": (
+                "yoetz.elevated-bootstrap.prepare-result/7"
+                if pending.coordination_binding is not None
+                else "yoetz.elevated-bootstrap.prepare-result/6"
+            ),
             "pending": projection_for_status(pending),
         }
     )
@@ -130,6 +140,9 @@ def _render_review(console: TrustedForegroundConsole, pending: PendingElevatedCo
     if pending.grant_binding is not None:
         preview = canonical_encode(pending.grant_binding["preview"]).decode("utf-8")
         detail += f"Repository privacy preview (structural JSON):\n{preview}\n"
+    if pending.coordination_binding is not None:
+        binding = canonical_encode(pending.coordination_binding).decode("utf-8")
+        detail += f"Project coordination binding (structural JSON):\n{binding}\n"
     console.write(detail + pending.danger_text + "\n")
 
 
@@ -145,7 +158,11 @@ def _review_result(
     try:
         model = ConsentReviewResultModel.model_validate(
             {
-                "schema": "yoetz.elevated-bootstrap.result/6",
+                "schema": (
+                    "yoetz.elevated-bootstrap.result/7"
+                    if pending.operation == "project_coordination_grant"
+                    else "yoetz.elevated-bootstrap.result/6"
+                ),
                 "pending_id": pending.pending_id,
                 "operation": pending.operation,
                 "risk_class": pending.risk_class,
@@ -252,6 +269,14 @@ async def _complete_approved(
         return await _complete_provider_credential(console, pending)
     if pending.operation == "repository_privacy_grant":
         raise ElevatedBootstrapError("repository_privacy_grant_requires_yoetz_privacy")
+    if pending.operation == "project_coordination_grant":
+        authorization = record_project_coordination_authorization(pending)
+        return {
+            "project_id": authorization.project_id,
+            "membership_generation": str(authorization.membership_generation),
+            "audit_record_id": authorization.audit_record_id,
+            "outcome": "granted",
+        }
     if pending.operation == "import_publication":
         authorization = record_import_publication_authorization(pending)
         return {
@@ -332,6 +357,14 @@ async def authorize_elevated(
             result = await _complete_provider_credential_supplied(pending, provider_credential)
         elif pending.operation == "repository_privacy_grant":
             result = await _complete_repository_privacy_grant(pending)
+        elif pending.operation == "project_coordination_grant":
+            authorization = record_project_coordination_authorization(pending)
+            result = {
+                "project_id": authorization.project_id,
+                "membership_generation": str(authorization.membership_generation),
+                "audit_record_id": authorization.audit_record_id,
+                "outcome": "granted",
+            }
         elif pending.operation == "import_publication":
             authorization = record_import_publication_authorization(pending)
             result = {
@@ -771,6 +804,7 @@ def _target_digest(
     operation: ElevatedOperation,
     provider_binding: Mapping[str, str] | None,
     grant_binding: Mapping[str, JsonValue] | None,
+    coordination_binding: Mapping[str, JsonValue] | None,
     target_digest: str | None,
 ) -> str:
     spec = operation_spec(operation)
@@ -801,6 +835,10 @@ def _target_digest(
         if grant_binding is None:
             raise ElevatedBootstrapError("grant_binding_required")
         return grant_target_digest(grant_binding)
+    if operation == "project_coordination_grant":
+        if coordination_binding is None:
+            raise ElevatedBootstrapError("coordination_binding_required")
+        return project_coordination_target_digest(coordination_binding)
     if operation == "import_publication":
         raise ElevatedBootstrapError("import_publication_preview_required")
     if spec.requires_target_digest_arg:

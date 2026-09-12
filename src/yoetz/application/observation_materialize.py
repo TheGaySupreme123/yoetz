@@ -35,6 +35,7 @@ from yoetz.domain.events import (
     encode_payload,
     media_type_for,
 )
+from yoetz.domain.host_lineage import host_lineage_from_envelope
 from yoetz.domain.observation import (
     ROUTINE_READ_SUMMARY_DETAIL_GAP,
     ObservationContentKind,
@@ -497,6 +498,7 @@ def _captured_evidence_drafts(
     task_id: str,
     manifests: tuple[ObservationContentManifest, ...],
     parents: tuple[str, ...] = (),
+    mapping_version: str = MATERIALIZATION_MAPPING_VERSION,
 ) -> tuple[tuple[MaterializedObservationDraft, ...], tuple[str, ...]]:
     drafts: list[MaterializedObservationDraft] = []
     refs: list[str] = []
@@ -506,14 +508,14 @@ def _captured_evidence_drafts(
             kind=IdKind.EVIDENCE,
             task_id=task_id,
             source_identity=source,
-            mapping_version=MATERIALIZATION_MAPPING_VERSION,
+            mapping_version=mapping_version,
             role="captured_evidence",
         )
         event = stable_observation_id(
             kind=IdKind.EVENT,
             task_id=task_id,
             source_identity=source,
-            mapping_version=MATERIALIZATION_MAPPING_VERSION,
+            mapping_version=mapping_version,
             role="captured_evidence_event",
         )
         refs.append(evidence)
@@ -554,6 +556,7 @@ def materialize_routine_read_summary(
     summary: RoutineReadSummary,
     *,
     task_id: str,
+    mapping_version: str = MATERIALIZATION_MAPPING_VERSION,
 ) -> MaterializedObservationBatch:
     """Materialize one bounded summary without inventing per-call evidence.
 
@@ -564,6 +567,12 @@ def materialize_routine_read_summary(
     """
 
     baseline = coverage_for_channel(PublicationChannel.HOOK_OBSERVED)
+    try:
+        _validate_materialization_mapping_version(mapping_version)
+    except TypeError, ValueError:
+        return MaterializedObservationBatch(
+            (), baseline, PublicationChannel.HOOK_OBSERVED, (), "unsupported_mapping_version"
+        )
     if type(summary) is not RoutineReadSummary:
         return MaterializedObservationBatch(
             (), baseline, PublicationChannel.HOOK_OBSERVED, (), "invalid_routine_read_summary"
@@ -584,14 +593,14 @@ def materialize_routine_read_summary(
         kind=IdKind.EVIDENCE,
         task_id=task_id,
         source_identity=source,
-        mapping_version=MATERIALIZATION_MAPPING_VERSION,
+        mapping_version=mapping_version,
         role="routine_read_summary",
     )
     event = stable_observation_id(
         kind=IdKind.EVENT,
         task_id=task_id,
         source_identity=source,
-        mapping_version=MATERIALIZATION_MAPPING_VERSION,
+        mapping_version=mapping_version,
         role="routine_read_summary_event",
     )
     description = (
@@ -745,11 +754,28 @@ def materialize_observation_envelope(
     *,
     task_id: str,
     captured_content: tuple[ObservationContentManifest, ...] = (),
+    mapping_version: str = MATERIALIZATION_MAPPING_VERSION,
 ) -> MaterializedObservationBatch:
     """Map one envelope to zero or more ledger drafts.
 
+    ``mapping_version`` is the materialization schema, never the source cursor
+    version. New calls use the current ``obs-ledger/1.6.0`` default; a caller
+    replaying an already committed historical operation may explicitly select
+    one of the supported legacy versions.
+
     Returns ``skip_reason`` when the envelope should remain observation-store-only.
     """
+
+    try:
+        _validate_materialization_mapping_version(mapping_version)
+    except TypeError, ValueError:
+        return MaterializedObservationBatch(
+            (),
+            coverage_for_channel(PublicationChannel.HOOK_OBSERVED),
+            PublicationChannel.HOOK_OBSERVED,
+            (),
+            "unsupported_mapping_version",
+        )
 
     if type(envelope) is not ObservationEnvelope:
         return MaterializedObservationBatch(
@@ -774,7 +800,9 @@ def materialize_observation_envelope(
                 (ObservationGapCode.ROUTINE_READ_SUMMARY_INVALID.value,),
                 "invalid_routine_read_summary",
             )
-        return materialize_routine_read_summary(summary, task_id=task_id)
+        return materialize_routine_read_summary(
+            summary, task_id=task_id, mapping_version=mapping_version
+        )
 
     structural = cast(Mapping[str, JsonValue], envelope.structural_payload)
     pairing_mode, correlation_kind = _pairing_contract(envelope, structural)
@@ -795,7 +823,12 @@ def materialize_observation_envelope(
     captured, gaps = _eligible_captured_content(materialized_envelope, captured_content)
     coverage = _coverage_for(materialized_envelope, gaps=gaps, content_captured=bool(captured))
     channel = PublicationChannel.HOOK_OBSERVED
-    mapping = envelope.cursor.mapping_version or MATERIALIZATION_MAPPING_VERSION
+    # Cursor mappings describe the transport that delivered the envelope. They
+    # must never select ledger record identities: equivalent hook/stream input
+    # has one source-independent materialization mapping. Historical replay is
+    # explicit through the keyword above so a legacy committed graph can still
+    # be reconstructed without allowing a transport version to mint new IDs.
+    mapping = mapping_version
     kind = envelope.event_kind
     # Codex hook ``PostToolUse`` and a completed session-stream tool record
     # (rollout ``function_call_output``, historically exec ``item.completed``)
@@ -883,6 +916,7 @@ def materialize_observation_envelope(
             task_id=task_id,
             manifests=captured,
             parents=(event,),
+            mapping_version=mapping,
         )
         drafts.extend(captured_drafts)
         return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
@@ -948,6 +982,7 @@ def materialize_observation_envelope(
                 task_id=task_id,
                 manifests=captured,
                 parents=(event,),
+                mapping_version=mapping,
             )
             drafts.extend(captured_drafts)
             merged_gaps = (
@@ -969,14 +1004,14 @@ def materialize_observation_envelope(
             kind=IdKind.ACTION,
             task_id=task_id,
             source_identity=action_source,
-            mapping_version=MATERIALIZATION_MAPPING_VERSION,
+            mapping_version=mapping,
             role="action",
         )
         action_event = stable_observation_id(
             kind=IdKind.EVENT,
             task_id=task_id,
             source_identity=action_source,
-            mapping_version=MATERIALIZATION_MAPPING_VERSION,
+            mapping_version=mapping,
             role="action_event",
         )
         result_source = _materialization_call_source(
@@ -986,14 +1021,14 @@ def materialize_observation_envelope(
             kind=IdKind.RESULT,
             task_id=task_id,
             source_identity=result_source,
-            mapping_version=MATERIALIZATION_MAPPING_VERSION,
+            mapping_version=mapping,
             role="result",
         )
         result_event = stable_observation_id(
             kind=IdKind.EVENT,
             task_id=task_id,
             source_identity=result_source,
-            mapping_version=MATERIALIZATION_MAPPING_VERSION,
+            mapping_version=mapping,
             role="result_event",
         )
         action_kind = _action_kind(tool)
@@ -1024,6 +1059,7 @@ def materialize_observation_envelope(
             task_id=task_id,
             manifests=captured,
             parents=(action_event,),
+            mapping_version=mapping,
         )
         drafts.extend(captured_drafts)
         exit_status = _exit_status(structural)
@@ -1097,32 +1133,41 @@ def materialize_observation_envelope(
             )
         )
         captured_drafts, _captured_refs = _captured_evidence_drafts(
-            envelope, task_id=task_id, manifests=captured, parents=(event,)
+            envelope,
+            task_id=task_id,
+            manifests=captured,
+            parents=(event,),
+            mapping_version=mapping,
         )
         drafts.extend(captured_drafts)
         return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
 
     if kind in _SUBAGENT_START or kind in _SUBAGENT_STOP:
-        # Assignment requires obligations; record evidence-only until correlation is complete.
-        if correlation is None and structural.get("subagent_id") is None:
+        # Assignment requires obligations; record evidence-only until the service lineage
+        # coordinator binds this host observation to a child. Keep a stable, path-free
+        # correlation reference so a late stop can reconcile with its start without minting a
+        # second annotation.
+        lineage = host_lineage_from_envelope(envelope)
+        if lineage is None:
             return MaterializedObservationBatch(
                 (), coverage, channel, gaps, "missing_subagent_identity"
             )
+        lineage_source = f"{lineage.logical_identity}:{lineage.phase}"
         evidence = stable_observation_id(
             kind=IdKind.EVIDENCE,
             task_id=task_id,
-            source_identity=envelope.source_identity,
+            source_identity=lineage_source,
             mapping_version=mapping,
-            role="subagent",
+            role="subagent_observation",
         )
         event = stable_observation_id(
             kind=IdKind.EVENT,
             task_id=task_id,
-            source_identity=envelope.source_identity,
+            source_identity=lineage_source,
             mapping_version=mapping,
-            role="subagent_event",
+            role="subagent_observation_event",
         )
-        phase = "start" if kind in _SUBAGENT_START else "stop"
+        phase = lineage.phase
         drafts.append(
             _draft(
                 event=event,
@@ -1133,13 +1178,21 @@ def materialize_observation_envelope(
                     EvidenceKind.OTHER,
                     EvidenceImmutability.METADATA_ONLY,
                     envelope.receipt_time,
-                    description=f"Observed subagent {phase}",
+                    reference=f"host-lineage:{lineage.logical_identity}",
+                    description=(
+                        f"Observed host subagent {phase}; origin=host_observed; "
+                        f"acceptance=pending; correlation={lineage.logical_identity}"
+                    ),
                 ),
                 role="subagent",
             )
         )
         captured_drafts, _captured_refs = _captured_evidence_drafts(
-            envelope, task_id=task_id, manifests=captured, parents=(event,)
+            envelope,
+            task_id=task_id,
+            manifests=captured,
+            parents=(event,),
+            mapping_version=mapping,
         )
         drafts.extend(captured_drafts)
         return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
@@ -1177,7 +1230,11 @@ def materialize_observation_envelope(
             )
         )
         captured_drafts, _captured_refs = _captured_evidence_drafts(
-            envelope, task_id=task_id, manifests=captured, parents=(event,)
+            envelope,
+            task_id=task_id,
+            manifests=captured,
+            parents=(event,),
+            mapping_version=mapping,
         )
         drafts.extend(captured_drafts)
         return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
@@ -1213,7 +1270,11 @@ def materialize_observation_envelope(
             )
         )
         captured_drafts, _captured_refs = _captured_evidence_drafts(
-            envelope, task_id=task_id, manifests=captured, parents=(event,)
+            envelope,
+            task_id=task_id,
+            manifests=captured,
+            parents=(event,),
+            mapping_version=mapping,
         )
         drafts.extend(captured_drafts)
         return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
@@ -1249,7 +1310,11 @@ def materialize_observation_envelope(
         )
     )
     captured_drafts, _captured_refs = _captured_evidence_drafts(
-        envelope, task_id=task_id, manifests=captured, parents=(event,)
+        envelope,
+        task_id=task_id,
+        manifests=captured,
+        parents=(event,),
+        mapping_version=mapping,
     )
     drafts.extend(captured_drafts)
     return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
@@ -1428,6 +1493,11 @@ def canonical_logical_identity(
         return _logical_identity_digest(("opaque", "invalid"))
     if mapping_version in set(MATERIALIZATION_LEGACY_MAPPING_VERSIONS):
         return _legacy_logical_identity(envelope)
+    lineage = host_lineage_from_envelope(envelope)
+    if lineage is not None:
+        # Hook and session-stream copies of one host subagent signal share a source-stable
+        # identity. Keep the phase in the key so start and stop remain distinct.
+        return _logical_identity_digest(("subagent", lineage.logical_identity, lineage.phase))
     structural = cast(Mapping[str, JsonValue], envelope.structural_payload)
     _pairing_mode, correlation_kind = _pairing_contract(envelope, structural)
     host_call = _correlation(structural, correlation_kind=correlation_kind)

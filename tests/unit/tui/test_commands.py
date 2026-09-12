@@ -10,6 +10,8 @@ def test_the_documented_commands_are_all_present_with_descriptions() -> None:
     assert {
         "status",
         "work",
+        "lineage",
+        "project",
         "check",
         "receipt",
         "connect",
@@ -23,7 +25,7 @@ def test_the_documented_commands_are_all_present_with_descriptions() -> None:
     assert all(command.summary and command.summary[0].islower() for command in SLASH_COMMANDS)
     assert all(command.token.startswith("/") for command in SLASH_COMMANDS)
     work = next(command for command in SLASH_COMMANDS if command.name == "work")
-    assert "by title" in work.summary
+    assert "by session ID" in work.summary
     assert "browse" not in work.summary
 
 

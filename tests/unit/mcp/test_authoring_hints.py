@@ -325,7 +325,21 @@ def test_publish_work_examples_include_obligation_resolution_pair() -> None:
     """Agents must see an open obligation and its byte-identical resolution side by side."""
 
     examples = cast(list[JsonValue], _PUBLISH_SCHEMA["examples"])
-    resolution_example = cast(Mapping[str, JsonValue], examples[-1])
+    resolution_example = next(
+        cast(Mapping[str, JsonValue], example)
+        for example in examples
+        if any(
+            cast(Mapping[str, JsonValue], cast(Mapping[str, JsonValue], draft)["schema"])["name"]
+            == "obligation_published"
+            and cast(Mapping[str, JsonValue], cast(Mapping[str, JsonValue], draft)["payload"]).get(
+                "status"
+            )
+            == "resolved"
+            for draft in cast(
+                list[JsonValue], cast(Mapping[str, JsonValue], example)["event_drafts"]
+            )
+        )
+    )
     drafts = cast(list[JsonValue], resolution_example["event_drafts"])
     open_payload: Mapping[str, JsonValue] | None = None
     resolved_payload: Mapping[str, JsonValue] | None = None
@@ -410,9 +424,10 @@ def test_guidance_uris_in_tool_descriptions_resolve() -> None:
     for name in ("start", "publish_work", "check", "respond", "status", "receipt"):
         description = descriptor_for(name).description
         assert "yoetz://guidance/" in description
-        uri = description.rsplit("Guidance: ", 1)[1].rstrip(".")
-        payload = read_resource(uri)
-        assert payload.startswith(b"#") or payload.startswith(b"Yoetz")
+        for resource in description.split("yoetz://guidance/")[1:]:
+            name = resource.split(".md", 1)[0] + ".md"
+            payload = read_resource("yoetz://guidance/" + name)
+            assert payload.startswith(b"#") or payload.startswith(b"Yoetz")
 
 
 def test_invalid_request_message_names_registered_guidance() -> None:

@@ -25,5 +25,18 @@ CONTROL_ERROR_REASONS: Final = frozenset(
         "service_generation_changed",
         "endpoint_unsafe",
         "invalid_request",
+        "coordination_invalid",
+        "project_not_found",
+        "project_dissolved",
+        "implicit_project_requires_opt_out",
+        "general_project_membership_conflict",
+        "project_member_not_found",
+        "selector_conflict",
+        "coordination_consent_required",
+        "coordination_grant_required",
+        "coordination_generation_revoked",
+        "coordination_generation_mismatch",
+        "cross_repository_lineage_requires_grant",
+        "project_member_already_unbound",
     }
 )

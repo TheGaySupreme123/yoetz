@@ -410,6 +410,26 @@ def test_receipt_foregrounds_the_verdict_and_what_was_not_verified(
     assert "Deeper review: not available for this receipt" in joined
 
 
+def test_receipt_keeps_the_service_child_section_and_coverage_wording() -> None:
+    from yoetz.tui.models import ReceiptSummary
+
+    summary = ReceiptSummary(
+        subject_id="tsk_53000000-0000-4000-8000-000000000001",
+        verdict="insufficient_coverage",
+        rendered_lines=(
+            "Conclusion: insufficient_coverage",
+            "Children",
+            "Accepted child: open coverage gap; tested manifest remains unchanged.",
+            "Semantic review: contributed at the recorded frontier.",
+        ),
+    )
+    text = "\n".join(render_receipt(summary, 100))
+    assert "Accepted child: open coverage gap" in text
+    assert "contributed at the recorded frontier" in text
+    assert "Open findings: 0" not in text
+    assert "not available for this receipt" not in text
+
+
 def test_doctor_reports_problems_and_never_claims_to_have_fixed_them(
     assert_snapshot: Snapshot,
 ) -> None:

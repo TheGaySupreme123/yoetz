@@ -1487,9 +1487,58 @@ def test_0_150_1_stream_admits_from_header_and_envelopes_carry_no_content(
         "result_status",
         "exit_status",
         "tool_call_id",
+        "subagent_id",
     }
     for envelope in advance.envelopes:
         assert set(envelope.structural_payload) <= allowed, envelope.structural_payload
+
+    subagent = next(
+        envelope
+        for envelope in advance.envelopes
+        if envelope.structural_payload.get("subagent_id") is not None
+    )
+    assert subagent.event_kind == "SubagentStart"
+    assert subagent.structural_payload["subagent_id"] == ("019f8b27-b98e-7061-bbb5-d0b897594de7")
+    # The rollout item's ``id`` is not the parent's tool-call id.  The stream
+    # copy therefore remains child-only and can reconcile with a hook copy
+    # whose parent tool alias is absent or arrives separately.
+    assert "parent_tool_call_id" not in subagent.structural_payload
+    assert "tool_call_id" not in subagent.structural_payload
+    assert (
+        materialize_observation_envelope(
+            subagent, task_id="tsk_00000000-0000-4000-8000-000000000001"
+        ).skip_reason
+        is None
+    )
+
+
+def test_subagent_stream_accepts_explicit_parent_alias_but_ignores_item_id() -> None:
+    record = CodexParsedRecord(
+        1,
+        0,
+        160,
+        "response_item",
+        "SubAgentActivity",
+        JsonObject(
+            {
+                "payload": {
+                    "agent_thread_id": "child-stream-1",
+                    "id": "item-child-1",
+                    "kind": "started",
+                    "tool_use_id": "parent-tool-1",
+                    "type": "SubAgentActivity",
+                },
+                "type": "response_item",
+            }
+        ),
+    )
+
+    structural, gaps = stream_module.structural_from_stream_record(record)
+
+    assert gaps == ()
+    assert structural["subagent_id"] == "child-stream-1"
+    assert structural["parent_tool_call_id"] == "parent-tool-1"
+    assert "tool_call_id" not in structural
 
 
 def test_unsupported_release_is_refused_durably_without_cursor_loss(tmp_path: Path) -> None:

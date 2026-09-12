@@ -13,6 +13,7 @@ from yoetz.config.models import (
     PROFILE_CAPABILITIES,
     ConfigError,
     ExternalRuntimeProfileConfig,
+    LineageSettings,
     LocalModelProfileConfig,
     LoggingConfig,
     NetworkPolicy,
@@ -160,12 +161,19 @@ def test_defaults_are_frozen_and_all_disclosure_is_denied() -> None:
     assert config.storage == StorageConfig(data_dir=None, durability="full")
     assert config.verification == VerificationConfig(semantic="required", max_findings=10)
     assert config.observation == ObservationConfig(enabled=True)
+    assert config.lineage == LineageSettings()
     assert config.logging == LoggingConfig(level="info", payloads=False)
     assert config.privacy == safe_privacy_bootstrap()
     assert not config.privacy.network_egress_permitted
     assert not any(config.privacy.channel_policies.model_dump().values())
     with pytest.raises(ValidationError):
         config.profile = "test-fake"  # type: ignore[misc]
+
+
+def test_lineage_fanout_matches_child_manifest_capacity() -> None:
+    assert LineageSettings(max_fanout=64).max_fanout == 64
+    with pytest.raises(ConfigError, match="config_value_invalid"):
+        LineageSettings(max_fanout=65)
 
 
 def test_profile_capability_matrix_is_closed() -> None:
@@ -190,6 +198,8 @@ def test_profile_capability_matrix_is_closed() -> None:
         ),
         (lambda: VerificationConfig(max_findings=0), "max_findings_out_of_range"),
         (lambda: VerificationConfig(max_findings=11), "max_findings_out_of_range"),
+        (lambda: LineageSettings(max_depth=-1), "config_value_invalid"),
+        (lambda: LineageSettings(max_fanout=65), "config_value_invalid"),
         (
             lambda: ObservationConfig.model_validate(
                 {"enabled": True, "interval_seconds": 60}, strict=True

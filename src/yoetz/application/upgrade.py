@@ -88,13 +88,12 @@ def build_upgrade_plan(
         UpgradeStep(
             "Data and service",
             "Use the fresh launcher. An incompatible holder can be superseded by the ordinary "
-            "service handshake; use service restart only when its status/repair asks for it. If a "
-            "bundle reports MIGRATION_REQUIRED, use migrate preview and the returned backup-first "
-            "plan with migrate execute after exact approval. Never guess a session or plan digest.",
-            (
-                (launcher, "migrate", "preview", "--help"),
-                (launcher, "migrate", "execute", "--help"),
-            ),
+            "service handshake; use service restart only when its status/repair asks for it. "
+            "On unlock, supported existing task ledgers upgrade automatically with a verified "
+            "backup before new writes are admitted. Existing tasks, settings and permissions "
+            "are retained. If interrupted, retry the ordinary service startup; it resumes the "
+            "recorded upgrade. Check service status for recovery guidance before continuing.",
+            ((launcher, "service", "status", "--json"),),
         ),
     ]
     for host in hosts:
@@ -187,7 +186,7 @@ def build_upgrade_plan(
             "Activate and verify",
             "Reload/start a fresh Claude session; fully quit/relaunch Codex or Cursor when runtime "
             "status requires it. Verify the fresh package version, service identity, each selected "
-            "host's artifact/runtime status and any migration receipt before reporting completion. "
+            "host's artifact/runtime status and the service's completed data upgrade before reporting completion. "
             "Offer new settings separately; upgrading never opts into Expanded review or new disclosure.",
             ((launcher, "version", "--json"), (launcher, "service", "status", "--json")),
         )

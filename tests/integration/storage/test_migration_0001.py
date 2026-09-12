@@ -5,8 +5,13 @@ from pathlib import Path
 import apsw
 import pytest
 
+from yoetz.adapters.sqlite.connection import (  # pyright: ignore[reportPrivateUsage]
+    _writer_authorizer,  # pyright: ignore[reportPrivateUsage]
+)
 from yoetz.adapters.sqlite.migrations import (
     BUNDLE_MIGRATIONS,
+    CATALOG_MIGRATIONS,
+    _set_event_summary_rebuild_mode,  # pyright: ignore[reportPrivateUsage]
     current_schema_version,
     initialize_bundle,
     initialize_catalog,
@@ -18,24 +23,8 @@ ROOT = Path(__file__).parents[3]
 
 def test_root_and_installed_migration_resources_are_byte_identical() -> None:
     for family, versions in (
-        ("catalog", ("0001", "0002", "0003")),
-        (
-            "bundle",
-            (
-                "0001",
-                "0002",
-                "0003",
-                "0004",
-                "0005",
-                "0006",
-                "0007",
-                "0008",
-                "0009",
-                "0010",
-                "0011",
-                "0012",
-            ),
-        ),
+        ("catalog", tuple(item.version for item in CATALOG_MIGRATIONS)),
+        ("bundle", tuple(item.version for item in BUNDLE_MIGRATIONS)),
     ):
         for version in versions:
             root = ROOT / "migrations" / family / f"{version}.sql"
@@ -53,7 +42,7 @@ def test_fresh_migrations_install_identified_foreign_key_clean_schemas() -> None
     initialize_bundle(bundle, {"task_id": "task_test", "owner_generation": "generation_test"})
 
     assert catalog.execute("PRAGMA application_id").fetchone() == (0x594F4554,)
-    assert catalog.execute("PRAGMA user_version").fetchone() == (3,)
+    assert catalog.execute("PRAGMA user_version").fetchone() == (5,)
     assert catalog.execute("PRAGMA foreign_keys").fetchone() == (1,)
     assert catalog.execute("PRAGMA trusted_schema").fetchone() == (0,)
     assert catalog.execute("PRAGMA foreign_key_check").fetchone() is None
@@ -76,7 +65,42 @@ def test_fresh_migrations_install_identified_foreign_key_clean_schemas() -> None
     ).fetchone() == (1,)
 
 
-def test_bundle_run_migrations_applies_0002_from_schema_version_one() -> None:
+def test_fresh_bundle_migration_window_restores_strict_writer_authorizer() -> None:
+    bundle = apsw.Connection(":memory:")
+    bundle.set_authorizer(_writer_authorizer)
+
+    initialize_bundle(
+        bundle,
+        {"task_id": "task_test", "owner_generation": "generation_test", "protocol_version": "0.1"},
+    )
+
+    assert bundle.execute("PRAGMA user_version").fetchone() == (
+        current_schema_version(BUNDLE_MIGRATIONS),
+    )
+    assert bundle.execute("PRAGMA foreign_keys").fetchone() == (1,)
+    assert bundle.authorizer is _writer_authorizer
+    assert bundle.execute("PRAGMA table_info(observation_consent)").fetchall()
+    with pytest.raises(apsw.AuthError):
+        bundle.execute("PRAGMA legacy_alter_table = ON")
+    with pytest.raises(apsw.AuthError):
+        bundle.execute("PRAGMA foreign_keys = OFF")
+
+
+def test_event_summary_rebuild_rejects_active_transaction_without_changing_pragmas() -> None:
+    bundle = apsw.Connection(":memory:")
+    bundle.execute("PRAGMA foreign_keys = ON")
+    bundle.execute("PRAGMA legacy_alter_table = OFF")
+    bundle.execute("BEGIN")
+
+    with pytest.raises(RuntimeError, match="schema_rebuild_transaction_active"):
+        _set_event_summary_rebuild_mode(bundle)
+
+    assert bundle.execute("PRAGMA foreign_keys").fetchone() == (1,)
+    assert bundle.execute("PRAGMA legacy_alter_table").fetchone() == (0,)
+    bundle.execute("ROLLBACK")
+
+
+def test_bundle_run_migrations_applies_pending_versions_from_schema_version_one() -> None:
     bundle = apsw.Connection(":memory:")
     bundle.execute("PRAGMA foreign_keys = ON")
     bundle.execute("PRAGMA trusted_schema = OFF")
@@ -101,19 +125,7 @@ def test_bundle_run_migrations_applies_0002_from_schema_version_one() -> None:
     report = run_migrations(bundle, BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
     assert report.from_version == 1
     assert report.to_version == current_schema_version(BUNDLE_MIGRATIONS)
-    assert report.applied_versions == (
-        "0002",
-        "0003",
-        "0004",
-        "0005",
-        "0006",
-        "0007",
-        "0008",
-        "0009",
-        "0010",
-        "0011",
-        "0012",
-    )
+    assert report.applied_versions == tuple(item.version for item in BUNDLE_MIGRATIONS[1:])
     assert bundle.execute("PRAGMA user_version").fetchone() == (
         current_schema_version(BUNDLE_MIGRATIONS),
     )
@@ -123,6 +135,176 @@ def test_bundle_run_migrations_applies_0002_from_schema_version_one() -> None:
     assert bundle.execute(
         "SELECT 1 FROM sqlite_schema WHERE name = 'observation_consent'"
     ).fetchone() == (1,)
+
+
+def test_bundle_migration_0013_preserves_event_history_and_admits_current_families() -> None:
+    bundle = apsw.Connection(":memory:")
+    bundle.execute("PRAGMA foreign_keys = ON")
+    bundle.execute("PRAGMA trusted_schema = OFF")
+    event_rebuild_version = current_schema_version(BUNDLE_MIGRATIONS)
+    event_rebuild_index = next(
+        index for index, migration in enumerate(BUNDLE_MIGRATIONS) if migration.version == "0013"
+    )
+    main_frontier = event_rebuild_version - 1
+    with bundle:
+        for migration in BUNDLE_MIGRATIONS[:9]:
+            bundle.execute(migration.ddl.decode("utf-8"))
+        bundle.execute(
+            "INSERT INTO bundle_meta(key, value) VALUES "
+            "('task_id', 'task_test'), "
+            "('owner_generation', '1'), "
+            "('storage_schema_version', '9'), "
+            "('protocol_version', '0.1'), "
+            "('import_schema_version', '1')"
+        )
+        # The released 0.2 migrations occupy 0010-0012. Apply them before
+        # exercising the 0.3 events-table rebuild at 0013.
+        for migration in BUNDLE_MIGRATIONS[9:event_rebuild_index]:
+            bundle.execute(migration.ddl.decode("utf-8"))
+        bundle.execute(
+            "UPDATE bundle_meta SET value=? WHERE key='storage_schema_version'",
+            (str(main_frontier),),
+        )
+        bundle.execute("INSERT INTO counters(name, next_value) VALUES ('ingestion_sequence', 2)")
+        bundle.execute(
+            "INSERT INTO writers(writer_id, task_id, session_id, next_writer_seq, "
+            "head_entry_digest, state, created_at) VALUES "
+            "('writer', 'task_test', 'session', 2, 'head', 'active', '2026-01-01')"
+        )
+        bundle.execute(
+            "INSERT INTO objects(object_id, kind, plaintext_size, commitment, envelope_digest, "
+            "encryption_format, key_slot, state, durable_at) VALUES "
+            "('object-1', 'event_payload', 1, 'commitment-1', 'envelope-1', 'v1', "
+            "'slot', 'present', '2026-01-01')"
+        )
+        bundle.execute(
+            "INSERT INTO events("
+            "ingestion_seq, event_id, task_id, session_id, schema_name, schema_version, "
+            "projection_status, summary_code, author_id, author_type, author_assurance, "
+            "writer_id, writer_seq, operation_id, previous_ledger_digest, "
+            "previous_writer_digest, entry_digest, canonical_entry, payload_object_id, "
+            "payload_commitment, publication_channel, redaction_state, occurred_at, accepted_at"
+            ") VALUES (1, 'event-1', 'task_test', 'session', 'action_recorded', '1.0.0', "
+            "'projected', 'action_recorded', 'author', 'host', 'self_asserted', 'writer', 1, "
+            "'operation-1', 'previous-ledger', 'previous-writer', 'entry-1', X'01', "
+            "'object-1', 'commitment-1', 'local', 'none', '2026-01-01', '2026-01-01')"
+        )
+        bundle.execute(
+            "INSERT INTO event_projection_locators("
+            "event_id, schema_name, schema_version, logical_key, canonical_payload_digest, "
+            "redaction_target_event_ids, redaction_target_object_ids) VALUES "
+            "('event-1', 'action_recorded', '1.0.0', 'logical-1', 'payload-1', X'00', X'00')"
+        )
+        bundle.execute(
+            "INSERT INTO event_refs(event_id, ref_type, target_id) "
+            "VALUES ('event-1', 'artifact', 'artifact-1')"
+        )
+
+    original_event = bundle.execute(
+        "SELECT canonical_entry, summary_code FROM events WHERE event_id = 'event-1'"
+    ).fetchone()
+    original_locator = bundle.execute(
+        "SELECT * FROM event_projection_locators WHERE event_id = 'event-1'"
+    ).fetchone()
+    original_ref = bundle.execute("SELECT * FROM event_refs WHERE event_id = 'event-1'").fetchone()
+
+    report = run_migrations(bundle, BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
+
+    assert report.from_version == main_frontier
+    assert report.to_version == event_rebuild_version
+    assert report.applied_versions == ("0013",)
+    assert bundle.execute("PRAGMA user_version").fetchone() == (event_rebuild_version,)
+    assert bundle.execute("PRAGMA foreign_keys").fetchone() == (1,)
+    assert bundle.execute("PRAGMA legacy_alter_table").fetchone() == (0,)
+    assert bundle.execute("PRAGMA foreign_key_check").fetchone() is None
+    for child in (
+        "event_projection_locators",
+        "event_parents",
+        "event_refs",
+        "p1_coverage_gaps",
+    ):
+        child_sql = bundle.execute(
+            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
+            (child,),
+        ).fetchone()
+        assert child_sql is not None and f"events_v{event_rebuild_version}" not in child_sql[0]
+    assert (
+        bundle.execute(
+            "SELECT canonical_entry, summary_code FROM events WHERE event_id = 'event-1'"
+        ).fetchone()
+        == original_event
+    )
+    assert (
+        bundle.execute(
+            "SELECT * FROM event_projection_locators WHERE event_id = 'event-1'"
+        ).fetchone()
+        == original_locator
+    )
+    assert bundle.execute("SELECT * FROM event_refs WHERE event_id = 'event-1'").fetchone() == (
+        original_ref
+    )
+    assert {
+        row[0]
+        for row in bundle.execute(
+            "SELECT name FROM sqlite_schema WHERE type = 'index' AND name LIKE 'events_%'"
+        )
+    } == {
+        "events_session_seq",
+        "events_session_schema_seq",
+        "events_session_author_seq",
+        "events_session_schema_author_seq",
+        "events_schema_seq",
+        "events_writer_seq",
+        "events_payload_object",
+    }
+
+    current_families = (
+        "delegation_declared",
+        "delegation_cancelled",
+        "child_accepted",
+        "child_rejected",
+        "child_written_off",
+        "child_dependencies_recorded",
+        "work_closed",
+        "work_abandoned",
+        "work_cancelled",
+        "work_written_off",
+        "coordination_context_recorded",
+        "coordination_disposition_recorded",
+        "coordination_obligation_declared",
+    )
+    for writer_seq, summary_code in enumerate(current_families, start=2):
+        object_id = f"object-{writer_seq}"
+        bundle.execute(
+            "INSERT INTO objects(object_id, kind, plaintext_size, commitment, envelope_digest, "
+            "encryption_format, key_slot, state, durable_at) VALUES (?, 'event_payload', 1, ?, ?, "
+            "'v1', 'slot', 'present', '2026-01-01')",
+            (object_id, f"commitment-{writer_seq}", f"envelope-{writer_seq}"),
+        )
+        bundle.execute(
+            "INSERT INTO events("
+            "ingestion_seq, event_id, task_id, session_id, schema_name, schema_version, "
+            "projection_status, summary_code, author_id, author_type, author_assurance, "
+            "writer_id, writer_seq, operation_id, previous_ledger_digest, "
+            "previous_writer_digest, entry_digest, canonical_entry, payload_object_id, "
+            "payload_commitment, publication_channel, redaction_state, occurred_at, accepted_at"
+            ") VALUES (?, ?, 'task_test', 'session', ?, '1.0.0', 'projected', ?, 'author', "
+            "'host', 'self_asserted', 'writer', ?, ?, 'previous-ledger', 'previous-writer', "
+            "?, X'02', ?, ?, 'local', 'none', '2026-01-01', '2026-01-01')",
+            (
+                writer_seq,
+                f"event-{writer_seq}",
+                summary_code,
+                summary_code,
+                writer_seq,
+                f"operation-{writer_seq}",
+                f"entry-{writer_seq}",
+                object_id,
+                f"commitment-{writer_seq}",
+            ),
+        )
+
+    assert bundle.execute("SELECT COUNT(*) FROM events").fetchone() == (14,)
 
 
 def test_bundle_migration_0007_preserves_rows_and_widens_all_disposition_checks() -> None:

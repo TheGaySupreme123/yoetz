@@ -24,9 +24,9 @@ _MANIFEST_PATH = "manifest.json"
 _SCHEMA_NAMESPACE = "https://schemas.yoetz.dev/0.1/"
 _EXPECTED_SCHEMA_MANIFEST_SCHEMA = "yoetz.schema-manifest/1.0.0"
 _EXPECTED_SCHEMA_MANIFEST_VERSION = "1.0.0"
-_EXPECTED_MEMBER_COUNT = 136
-_EXPECTED_REQUEST_RESULT_VERSION_COUNT = 42
-_EXPECTED_EVENT_VERSION_COUNT = 16
+_EXPECTED_MEMBER_COUNT = 177
+_EXPECTED_REQUEST_RESULT_VERSION_COUNT = 46
+_EXPECTED_EVENT_VERSION_COUNT = 29
 
 
 def _schema_module() -> Any:
@@ -166,7 +166,16 @@ def test_schema_registry_is_complete() -> None:
     for member in members:
         path = member["path"]
         expected = (
-            "6.0.0"
+            "7.0.0"
+            if path
+            in {
+                "consent/catalog-7.0.0.schema.json",
+                "consent/pending-agent-7.0.0.schema.json",
+                "consent/prepare-result-7.0.0.schema.json",
+                "consent/review-result-7.0.0.schema.json",
+                "consent/status-7.0.0.schema.json",
+            }
+            else "6.0.0"
             if path
             in {
                 "consent/catalog-6.0.0.schema.json",
@@ -202,6 +211,8 @@ def test_schema_registry_is_complete() -> None:
                 "consent/review-result-3.0.0.schema.json",
                 "consent/status-3.0.0.schema.json",
             }
+            else "2.7.0"
+            if path.endswith("-2.7.0.schema.json")
             else "2.6.0"
             if path.endswith("-2.6.0.schema.json")
             else "2.5.0"
@@ -220,11 +231,28 @@ def test_schema_registry_is_complete() -> None:
                 and path != "consent/chat-user-attestation-1.0.0.schema.json"
             )
             or path.endswith("-2.0.0.schema.json")
+            else "1.3.0"
+            if path
+            in {
+                "config/yoetz-config-1.3.0.schema.json",
+                "operations/status-result-1.3.0.schema.json",
+            }
             else "1.2.0"
             if path
             in {
                 "config/yoetz-config-1.2.0.schema.json",
+                "events/event-draft-1.2.0.schema.json",
                 "events/evidence-recorded-1.2.0.schema.json",
+                "events/finding-recorded-1.2.0.schema.json",
+                "events/opaque-unknown-event-draft-1.2.0.schema.json",
+                "events/session-opened-1.2.0.schema.json",
+                "findings/finding-1.2.0.schema.json",
+                "operations/check-result-1.2.0.schema.json",
+                "operations/publish-work-request-1.2.0.schema.json",
+                "operations/receipt-result-1.2.0.schema.json",
+                "operations/status-request-1.2.0.schema.json",
+                "operations/status-result-1.2.0.schema.json",
+                "receipts/receipt-document-1.2.0.schema.json",
             }
             else (
                 "1.2.0"
@@ -243,11 +271,14 @@ def test_schema_registry_is_complete() -> None:
                     "events/session-resumed-1.1.0.schema.json",
                     "findings/finding-1.1.0.schema.json",
                     "findings/semantic-provenance-1.1.0.schema.json",
+                    "operations/check-request-1.1.0.schema.json",
                     "operations/check-result-1.1.0.schema.json",
                     "operations/publish-work-request-1.1.0.schema.json",
                     "operations/receipt-result-1.1.0.schema.json",
                     "operations/status-request-1.1.0.schema.json",
                     "operations/status-result-1.1.0.schema.json",
+                    "operations/start-request-1.1.0.schema.json",
+                    "operations/start-result-1.1.0.schema.json",
                     "privacy/outbound-case-1.1.0.schema.json",
                     "privacy/privacy-policy-1.1.0.schema.json",
                     "receipts/receipt-document-1.1.0.schema.json",
@@ -432,7 +463,7 @@ def test_live_version_manifest_2_2_tracks_the_current_inventory() -> None:
     events = _version_manifest_consts(document, "event_schema_versions")
     assert events["claim_recorded"] == "1.1.0"
     requests = _version_manifest_consts(document, "request_result_schema_versions")
-    assert requests["publish-work-request"] == "1.1.0"
+    assert requests["publish-work-request"] == "1.2.0"
 
 
 def test_schema_documents_are_frozen_when_catalog_available() -> None:

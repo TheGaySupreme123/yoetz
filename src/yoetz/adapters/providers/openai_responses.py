@@ -261,14 +261,22 @@ def _classify_rejected_judgment(parsed: JsonValue) -> JudgmentValidationStage:
 
 
 def _rename_schema_defs(raw: dict[str, object]) -> dict[str, object]:
-    """Strip the pydantic ``Model`` suffix from ``$defs`` anchors (matches schema generator)."""
+    """Normalize provider ``$defs`` anchors to the frozen schema names."""
 
     defs = raw.get("$defs")
     if type(defs) is not dict:
         return raw
     rename: dict[str, str] = {}
     for key in cast(dict[str, object], defs):
-        new_key = key[: -len("Model")] if key.endswith("Model") and len(key) > len("Model") else key
+        if key == "ProviderFindingKindWire":
+            # The public protocol owns a fifteen-kind FindingKindWire, while this provider alias
+            # deliberately keeps the historical fourteen-kind wire. Preserve the frozen artifact's
+            # definition key after Pydantic emits the provider-specific alias name.
+            new_key = "FindingKindWire"
+        else:
+            new_key = (
+                key[: -len("Model")] if key.endswith("Model") and len(key) > len("Model") else key
+            )
         rename[f"#/$defs/{key}"] = f"#/$defs/{new_key}"
 
     def _walk(node: object) -> object:

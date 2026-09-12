@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
@@ -17,6 +18,19 @@ from yoetz.adapters.privacy.catalog import (
     _policy_for_repository,  # pyright: ignore[reportPrivateUsage]
     _policy_from_bytes,  # pyright: ignore[reportPrivateUsage]
     _scope_digest,  # pyright: ignore[reportPrivateUsage]
+)
+from yoetz.domain.coordination import (
+    CoordinationGrant,
+    GrantState,
+    LineageAcceptance,
+    LineageOrigin,
+    MemberKind,
+    ProjectDescriptor,
+    ProjectKind,
+    ProjectMembership,
+    ProjectTextRef,
+    SessionHealth,
+    WorkState,
 )
 from yoetz.domain.privacy import AuthorizationScope, AuthorizationScopeKind, LocalDisclosureSink
 from yoetz.domain.values import (
@@ -37,6 +51,7 @@ from yoetz.ports.start_catalog import (
     EncryptedResultRef,
     SafeReason,
     SessionBinding,
+    SessionState,
     StartAllocation,
     StartCommand,
     StartIdentityCommitments,
@@ -44,12 +59,19 @@ from yoetz.ports.start_catalog import (
     StartMode,
     StartOperationLease,
     StartPhase,
+    TaskLineage,
     TaskRoute,
     TaskRouteState,
+    TaskSourceProvenance,
 )
-from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
+from yoetz.protocol.canonical import (
+    JsonValue,
+    canonical_digest,
+    canonical_encode,
+    strict_json_parse,
+)
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
-from yoetz.protocol.ids import IdKind, validate_id
+from yoetz.protocol.ids import IdKind, validate_actor_id, validate_id
 
 __all__ = [
     "CATALOG_SCHEMA_VERSION",
@@ -59,7 +81,7 @@ __all__ = [
     "workspace_ref_commitment",
 ]
 
-CATALOG_SCHEMA_VERSION: Final = 3
+CATALOG_SCHEMA_VERSION: Final = 4
 _LEASE_SECONDS: Final = 60
 _PHASE_SUCCESSOR: Final = {
     StartPhase.ROUTE_RESERVED: StartPhase.BUNDLE_READY,
@@ -88,6 +110,12 @@ class _RouteRow:
     route_identity_digest: str
     state: TaskRouteState
     repository_privacy_commitment: str | None
+    parent_task_id: str | None
+    depth: int
+    lineage_digest: str
+    origin: LineageOrigin | None
+    acceptance: LineageAcceptance | None
+    work_state: WorkState
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +182,7 @@ def _error(
         PublicErrorCode.SESSION_NOT_FOUND: "The requested task attachment was not found.",
         PublicErrorCode.BUNDLE_BUSY: "The task is temporarily busy.",
         PublicErrorCode.STORAGE_CORRUPT: "The local catalog is inconsistent.",
+        PublicErrorCode.MIGRATION_REQUIRED: "The local catalog needs a newer schema migration.",
         PublicErrorCode.INTERNAL_ERROR: "The start state is inconsistent.",
     }
     return PublicOperationError(
@@ -161,17 +190,6 @@ def _error(
         messages[code] if message is None else message,
         retryable,
         safe_details=safe_details,
-    )
-
-
-def _workspace_conflict() -> PublicOperationError:
-    return _error(
-        PublicErrorCode.SESSION_CONFLICT,
-        message=(
-            "A task already exists for this workspace. Attach with a previously returned "
-            "session_id, or retry with mode=create for an explicit separate sibling task."
-        ),
-        safe_details={"reason_code": "workspace_task_exists"},
     )
 
 
@@ -257,9 +275,27 @@ def external_ref_commitment(lookup: MacKeyHandle, external_ref: JsonValue) -> st
 
 
 def _route_from_row(row: tuple[object, ...]) -> _RouteRow:
-    if len(row) != 9:
+    if len(row) not in (9, 15):
         raise _error(PublicErrorCode.STORAGE_CORRUPT)
     try:
+        if len(row) == 9:
+            return _RouteRow(
+                task_id=_text(row[0]),
+                workspace_ref_commitment=_optional_text(row[1]),
+                external_ref_commitment=_optional_text(row[2]),
+                active_session_id=_text(row[3]),
+                bundle_relpath=_text(row[4]),
+                route_generation=_integer(row[5]),
+                route_identity_digest=_text(row[6]),
+                state=TaskRouteState(_text(row[7])),
+                repository_privacy_commitment=_optional_text(row[8]),
+                parent_task_id=None,
+                depth=0,
+                lineage_digest=_text(row[6]),
+                origin=None,
+                acceptance=None,
+                work_state=WorkState.OPEN,
+            )
         return _RouteRow(
             task_id=_text(row[0]),
             workspace_ref_commitment=_optional_text(row[1]),
@@ -270,6 +306,12 @@ def _route_from_row(row: tuple[object, ...]) -> _RouteRow:
             route_identity_digest=_text(row[6]),
             state=TaskRouteState(_text(row[7])),
             repository_privacy_commitment=_optional_text(row[8]),
+            parent_task_id=_optional_text(row[9]),
+            depth=_integer(row[10]),
+            lineage_digest=_text(row[11]),
+            origin=None if row[12] is None else LineageOrigin(_text(row[12])),
+            acceptance=None if row[13] is None else LineageAcceptance(_text(row[13])),
+            work_state=WorkState(_text(row[14])),
         )
     except ValueError as exc:
         raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
@@ -285,6 +327,12 @@ def _route_value(row: _RouteRow) -> TaskRoute:
             state=row.state,
             route_identity_digest=row.route_identity_digest,
             repository_privacy_commitment=row.repository_privacy_commitment,
+            parent_task_id=row.parent_task_id,
+            depth=row.depth,
+            lineage_digest=row.lineage_digest,
+            origin=row.origin,
+            acceptance=row.acceptance,
+            work_state=row.work_state,
         )
     except (TypeError, ValueError) as exc:
         raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
@@ -451,6 +499,16 @@ task_id, workspace_ref_commitment, external_ref_commitment, active_session_id,
 bundle_relpath, route_generation, active_route_identity_digest, state,
 repository_privacy_commitment
 """
+_ROUTE_COLUMNS_V4: Final = """
+task_id, workspace_ref_commitment, external_ref_commitment, active_session_id,
+bundle_relpath, route_generation, active_route_identity_digest, state,
+repository_privacy_commitment, parent_task_id, depth, lineage_digest, origin,
+acceptance, work_state
+"""
+_PROJECT_COLUMNS: Final = """
+project_id, kind, repository_commitment, auto_grouping, membership_generation,
+created_at, dissolved_at, title_ref_canonical, description_ref_canonical
+"""
 _OPERATION_COLUMNS: Final = """
 installation_id, operation_id, request_digest, requested_mode, route_action, state, phase,
 task_id, session_id, writer_id, lifecycle_event_id, route_generation, route_identity_digest,
@@ -462,6 +520,170 @@ _PUBLISH_RESPONSE_COLUMNS: Final = """
 writer_id, request_id, sink, task_id, session_id, request_digest,
 result_canonical, result_digest
 """
+
+
+def _lineage_from_route(route: _RouteRow) -> TaskLineage:
+    try:
+        return TaskLineage(
+            task_id=route.task_id,
+            parent_task_id=route.parent_task_id,
+            depth=route.depth,
+            lineage_digest=route.lineage_digest,
+            origin=route.origin,
+            acceptance=route.acceptance,
+            work_state=route.work_state,
+        )
+    except (TypeError, ValueError) as exc:
+        raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
+
+
+def _source_from_route(route: _RouteRow) -> TaskSourceProvenance:
+    try:
+        return TaskSourceProvenance(
+            task_id=route.task_id,
+            workspace_ref_commitment=route.workspace_ref_commitment,
+            external_ref_commitment=route.external_ref_commitment,
+            repository_privacy_commitment=route.repository_privacy_commitment,
+            route_generation=route.route_generation,
+            route_identity_digest=route.route_identity_digest,
+        )
+    except (TypeError, ValueError) as exc:
+        raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
+
+
+def _project_text_ref_blob(reference: ProjectTextRef | None) -> bytes | None:
+    if reference is None:
+        return None
+    try:
+        encoded = canonical_encode(reference.as_wire())
+    except (TypeError, ValueError) as exc:
+        raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+    if len(encoded) > 2_048:
+        raise _error(PublicErrorCode.INVALID_REQUEST)
+    return encoded
+
+
+def _project_text_ref_from_blob(value: object) -> ProjectTextRef | None:
+    if value is None:
+        return None
+    if type(value) is not bytes or not 1 <= len(value) <= 2_048:
+        raise _error(PublicErrorCode.STORAGE_CORRUPT)
+    try:
+        parsed = strict_json_parse(value)
+        if not isinstance(parsed, Mapping) or canonical_encode(parsed) != value:
+            raise ValueError("project_text_ref_noncanonical")
+        source = cast(Mapping[str, object], parsed)
+        required = {
+            "object_id",
+            "content_digest",
+            "plaintext_size",
+            "owner_task_id",
+            "route_generation",
+        }
+        keys = set(source)
+        if keys not in (required, required | {"envelope_digest"}):
+            raise ValueError("project_text_ref_shape_invalid")
+        plaintext_size = source["plaintext_size"]
+        route_generation = source["route_generation"]
+        if type(plaintext_size) is not int or type(route_generation) is not str:
+            raise ValueError("project_text_ref_scalar_invalid")
+        parsed_generation = int(route_generation, 10)
+        if str(parsed_generation) != route_generation:
+            raise ValueError("project_text_ref_generation_invalid")
+        return ProjectTextRef(
+            object_id=cast(str, source["object_id"]),
+            content_digest=cast(str, source["content_digest"]),
+            plaintext_size=plaintext_size,
+            owner_task_id=cast(str, source["owner_task_id"]),
+            route_generation=parsed_generation,
+            envelope_digest=cast(str | None, source.get("envelope_digest")),
+        )
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
+
+
+def _project_from_row(row: tuple[object, ...]) -> ProjectDescriptor:
+    if len(row) not in (7, 9):
+        raise _error(PublicErrorCode.STORAGE_CORRUPT)
+    try:
+        project_id = _text(row[0])
+        kind = ProjectKind(_text(row[1]))
+        repository = _optional_text(row[2])
+        auto_grouping = row[3]
+        generation = _integer(row[4])
+        created_at = parse_rfc3339_millis(_text(row[5]))
+        dissolved_at = None if row[6] is None else parse_rfc3339_millis(_text(row[6]))
+        title_ref = None if len(row) == 7 else _project_text_ref_from_blob(row[7])
+        description_ref = None if len(row) == 7 else _project_text_ref_from_blob(row[8])
+        if type(auto_grouping) is not int or auto_grouping not in (0, 1):
+            raise ValueError("auto_grouping_invalid")
+        return ProjectDescriptor(
+            project_id=project_id,
+            kind=kind,
+            repository_commitment=repository,
+            auto_grouping=bool(auto_grouping),
+            membership_generation=generation,
+            title_ref=title_ref,
+            description_ref=description_ref,
+            created_at=created_at,
+            dissolved_at=dissolved_at,
+        )
+    except (TypeError, ValueError) as exc:
+        raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
+
+
+def _membership_from_row(row: tuple[object, ...]) -> ProjectMembership:
+    if len(row) != 6:
+        raise _error(PublicErrorCode.STORAGE_CORRUPT)
+    try:
+        return ProjectMembership(
+            project_id=_text(row[0]),
+            membership_generation=_integer(row[1]),
+            member_kind=MemberKind(_text(row[2])),
+            member_commitment_or_id=_text(row[3]),
+            bound_at=parse_rfc3339_millis(_text(row[4])),
+            unbound_at=None if row[5] is None else parse_rfc3339_millis(_text(row[5])),
+        )
+    except (TypeError, ValueError) as exc:
+        raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
+
+
+def _grant_from_row(row: tuple[object, ...]) -> CoordinationGrant:
+    if len(row) != 6:
+        raise _error(PublicErrorCode.STORAGE_CORRUPT)
+    try:
+        return CoordinationGrant(
+            project_id=_text(row[0]),
+            membership_generation=_integer(row[1]),
+            state=GrantState(_text(row[2])),
+            audit_record_id=_text(row[3]),
+            granted_at=parse_rfc3339_millis(_text(row[4])),
+            revoked_at=None if row[5] is None else parse_rfc3339_millis(_text(row[5])),
+        )
+    except (TypeError, ValueError) as exc:
+        raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
+
+
+def _grouping_preference_from_row(row: tuple[object, ...]) -> bool:
+    if len(row) != 1 or type(row[0]) is not int or row[0] not in (0, 1):
+        raise _error(PublicErrorCode.STORAGE_CORRUPT)
+    return bool(row[0])
+
+
+def _session_from_row(row: tuple[object, ...]) -> SessionState:
+    if len(row) != 6:
+        raise _error(PublicErrorCode.STORAGE_CORRUPT)
+    try:
+        return SessionState(
+            task_id=_text(row[0]),
+            session_id=_text(row[1]),
+            health=SessionHealth(_text(row[2])),
+            changed_at=parse_rfc3339_millis(_text(row[3])),
+            lease_expires_at=None if row[4] is None else parse_rfc3339_millis(_text(row[4])),
+            actor_id=_optional_text(row[5]),
+        )
+    except (TypeError, ValueError) as exc:
+        raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
 
 
 class SqliteStartCatalog:
@@ -483,13 +705,26 @@ class SqliteStartCatalog:
         self._lookup = lookup
         self._clock = clock
         self._ids = ids
-        self._route_columns = _ROUTE_COLUMNS_V3
+        version_row = self._db.execute("PRAGMA user_version").fetchone()
+        if version_row is None or type(version_row[0]) is not int or version_row[0] < 0:
+            raise TypeError("catalog_schema_version_invalid")
+        self._catalog_schema_version = version_row[0]
+        self._route_columns = (
+            _ROUTE_COLUMNS_V4 if self._catalog_schema_version >= 4 else _ROUTE_COLUMNS_V3
+        )
         self._lease_owner_id = ids.new(IdKind.SERVICE_INSTANCE)
         validate_id(IdKind.SERVICE_INSTANCE, self._lease_owner_id)
 
     @property
     def generation(self) -> int:
         return self._owner_generation()
+
+    def _require_lineage_schema(self) -> None:
+        if self._catalog_schema_version < 4:
+            raise _error(
+                PublicErrorCode.MIGRATION_REQUIRED,
+                safe_details={"catalog_user_version": self._catalog_schema_version},
+            )
 
     async def recovery_routes(self) -> tuple[TaskRoute, ...]:
         """Decode every durable route for recovery verification without exposing identities."""
@@ -559,12 +794,1351 @@ class SqliteStartCatalog:
             "ORDER BY task_id ASC",
             (workspace_ref_commitment,),
         )
+        return self._task_ids_from_rows(rows)
+
+    async def list_project_task_ids(self, project_id: str) -> tuple[str, ...]:
+        self._require_lineage_schema()
+        try:
+            project = validate_id(IdKind.PROJECT, project_id)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        project_rows = self._rows(
+            f"SELECT {_PROJECT_COLUMNS} FROM projects WHERE project_id = ? LIMIT 2",
+            (project,),
+        )
+        if len(project_rows) > 1:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        if not project_rows:
+            return ()
+        descriptor = _project_from_row(project_rows[0])
+        if descriptor.dissolved_at is not None:
+            return ()
+        rows = self._rows(
+            "SELECT memberships.member_commitment_or_id "
+            "FROM project_memberships AS memberships "
+            "JOIN task_routes AS routes ON routes.task_id = memberships.member_commitment_or_id "
+            "WHERE memberships.project_id = ? AND memberships.member_kind = 'task' "
+            "AND memberships.unbound_at IS NULL AND routes.state != 'quarantined' "
+            "ORDER BY memberships.member_commitment_or_id ASC",
+            (project,),
+        )
+        task_ids = set(self._task_ids_from_rows(rows))
+        if (
+            descriptor.kind is ProjectKind.REPOSITORY
+            and descriptor.repository_commitment is not None
+            and descriptor.dissolved_at is None
+            and descriptor.auto_grouping
+        ):
+            implicit_rows = self._rows(
+                "SELECT task_id FROM task_routes WHERE repository_privacy_commitment = ? "
+                "AND state != 'quarantined' ORDER BY task_id ASC",
+                (descriptor.repository_commitment,),
+            )
+            task_ids.update(self._task_ids_from_rows(implicit_rows))
+        elif descriptor.kind is ProjectKind.GENERAL:
+            general_rows = self._rows(
+                "SELECT routes.task_id "
+                "FROM project_memberships AS memberships "
+                "JOIN task_routes AS routes ON ("
+                "  memberships.member_kind = 'repository' "
+                "  AND routes.repository_privacy_commitment = memberships.member_commitment_or_id "
+                "  OR memberships.member_kind = 'workspace' "
+                "  AND routes.workspace_ref_commitment = memberships.member_commitment_or_id"
+                ") WHERE memberships.project_id = ? AND memberships.unbound_at IS NULL "
+                "AND routes.state != 'quarantined' ORDER BY routes.task_id ASC",
+                (project,),
+            )
+            task_ids.update(self._task_ids_from_rows(general_rows))
+        return tuple(sorted(task_ids))
+
+    async def list_repository_task_ids(self, repository_privacy_commitment: str) -> tuple[str, ...]:
+        try:
+            validate_commitment(repository_privacy_commitment)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        rows = self._rows(
+            "SELECT task_id FROM task_routes "
+            "WHERE repository_privacy_commitment = ? AND state != 'quarantined' "
+            "ORDER BY task_id ASC",
+            (repository_privacy_commitment,),
+        )
+        return self._task_ids_from_rows(rows)
+
+    @staticmethod
+    def _task_ids_from_rows(rows: list[tuple[object, ...]]) -> tuple[str, ...]:
         task_ids: list[str] = []
         for row in rows:
             if len(row) != 1 or type(row[0]) is not str:
                 raise _error(PublicErrorCode.STORAGE_CORRUPT)
-            task_ids.append(row[0])
+            try:
+                task_ids.append(validate_id(IdKind.TASK, row[0]))
+            except (TypeError, ValueError) as exc:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
         return tuple(task_ids)
+
+    def _route_for_task_id(self, task_id: str) -> _RouteRow | None:
+        rows = self._rows(
+            f"SELECT {self._route_columns} FROM task_routes WHERE task_id = ? LIMIT 2",
+            (task_id,),
+        )
+        if len(rows) > 1:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        return None if not rows else _route_from_row(rows[0])
+
+    async def task_lineage(self, task_id: str) -> TaskLineage | None:
+        self._require_lineage_schema()
+        try:
+            task = validate_id(IdKind.TASK, task_id)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        route = self._route_for_task_id(task)
+        return None if route is None else _lineage_from_route(route)
+
+    async def task_source_provenance(self, task_id: str) -> TaskSourceProvenance | None:
+        self._require_lineage_schema()
+        try:
+            task = validate_id(IdKind.TASK, task_id)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        route = self._route_for_task_id(task)
+        return None if route is None else _source_from_route(route)
+
+    async def task_route_generation(self, task_id: str) -> int:
+        self._require_lineage_schema()
+        try:
+            task = validate_id(IdKind.TASK, task_id)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        route = self._route_for_task_id(task)
+        if route is None:
+            raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+        return route.route_generation
+
+    async def task_work_state(self, task_id: str) -> WorkState:
+        self._require_lineage_schema()
+        try:
+            task = validate_id(IdKind.TASK, task_id)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        route = self._route_for_task_id(task)
+        if route is None:
+            raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+        return route.work_state
+
+    async def task_session_state(self, session_id: str) -> SessionState | None:
+        self._require_lineage_schema()
+        try:
+            session = validate_id(IdKind.SESSION, session_id)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        rows = self._rows(
+            "SELECT task_id, session_id, health, changed_at, lease_expires_at, actor_id FROM task_sessions "
+            "WHERE session_id = ? LIMIT 2",
+            (session,),
+        )
+        if len(rows) > 1:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        if not rows:
+            return None
+        state = _session_from_row(rows[0])
+        now = self._clock.now_utc()
+        if state.health is SessionHealth.ACTIVE and (
+            state.lease_expires_at is None or state.lease_expires_at <= now
+        ):
+            # Status reads are read-only.  The injected clock derives the expired health; the
+            # service's lease/abandonment sweep owns the durable transition.
+            return SessionState(
+                task_id=state.task_id,
+                session_id=state.session_id,
+                health=SessionHealth.CONTACT_LOST,
+                changed_at=now,
+                lease_expires_at=None,
+                actor_id=state.actor_id,
+            )
+        return state
+
+    async def task_session_states(self, task_id: str) -> tuple[SessionState, ...]:
+        self._require_lineage_schema()
+        try:
+            task = validate_id(IdKind.TASK, task_id)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        rows = self._rows(
+            "SELECT task_id, session_id, health, changed_at, lease_expires_at, actor_id "
+            "FROM task_sessions WHERE task_id = ? ORDER BY session_id ASC",
+            (task,),
+        )
+        # Run the same expiry repair through the public single-session method so injected-clock
+        # behavior is identical for callers of either API.
+        result: list[SessionState] = []
+        for row in rows:
+            state = _session_from_row(row)
+            resolved = await self.task_session_state(state.session_id)
+            if resolved is None:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            result.append(resolved)
+        return tuple(result)
+
+    async def list_child_task_ids(self, parent_task_id: str) -> tuple[str, ...]:
+        self._require_lineage_schema()
+        try:
+            parent = validate_id(IdKind.TASK, parent_task_id)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        rows = self._rows(
+            "SELECT task_id FROM task_routes WHERE parent_task_id = ? "
+            "AND state != 'quarantined' ORDER BY task_id ASC",
+            (parent,),
+        )
+        return self._task_ids_from_rows(rows)
+
+    async def list_task_project_ids(self, task_id: str) -> tuple[str, ...]:
+        return await self._list_task_project_ids(task_id, include_quarantined=False)
+
+    async def list_task_project_ids_for_consent_invalidation(self, task_id: str) -> tuple[str, ...]:
+        """Enumerate durable project associations for a consent fence.
+
+        Quarantined routes are excluded from the normal disclosure enumeration, but their
+        already-recorded project associations still need fencing before source consent can be
+        granted again.  This private structural path does not make those associations visible to
+        callers of the normal membership API.
+        """
+
+        return await self._list_task_project_ids(task_id, include_quarantined=True)
+
+    async def _list_task_project_ids(
+        self, task_id: str, *, include_quarantined: bool
+    ) -> tuple[str, ...]:
+        self._require_lineage_schema()
+        try:
+            task = validate_id(IdKind.TASK, task_id)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        route = self._route_for_task_id(task)
+        if (
+            not include_quarantined
+            and route is not None
+            and route.state is TaskRouteState.QUARANTINED
+        ):
+            return ()
+        rows = self._rows(
+            "SELECT memberships.project_id FROM project_memberships AS memberships "
+            "JOIN projects ON projects.project_id = memberships.project_id "
+            "WHERE memberships.member_kind = 'task' "
+            "AND memberships.member_commitment_or_id = ? AND memberships.unbound_at IS NULL "
+            "AND projects.dissolved_at IS NULL ORDER BY memberships.project_id ASC",
+            (task,),
+        )
+        project_ids: list[str] = []
+        for row in rows:
+            if len(row) != 1 or type(row[0]) is not str:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            try:
+                project_ids.append(validate_id(IdKind.PROJECT, row[0]))
+            except (TypeError, ValueError) as exc:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
+        if route is not None and route.repository_privacy_commitment is not None:
+            implicit_rows = self._rows(
+                "SELECT project_id FROM projects WHERE kind = 'repository' "
+                "AND repository_commitment = ? AND auto_grouping = 1 AND dissolved_at IS NULL "
+                "LIMIT 2",
+                (route.repository_privacy_commitment,),
+            )
+            if len(implicit_rows) > 1:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            if implicit_rows:
+                if len(implicit_rows[0]) != 1 or type(implicit_rows[0][0]) is not str:
+                    raise _error(PublicErrorCode.STORAGE_CORRUPT)
+                try:
+                    project_ids.append(validate_id(IdKind.PROJECT, implicit_rows[0][0]))
+                except (TypeError, ValueError) as exc:
+                    raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
+        # General-project repository/workspace memberships are selectors for every task with
+        # matching authenticated route provenance.  Keep this inference aligned with the
+        # reference catalog so a pre-linked child repository can resolve the same project before
+        # its task membership row exists (the cross-repository lineage admission path).
+        if route is not None:
+            general_rows = self._rows(
+                "SELECT memberships.project_id "
+                "FROM project_memberships AS memberships "
+                "JOIN projects ON projects.project_id = memberships.project_id "
+                "WHERE projects.kind = 'general' AND projects.dissolved_at IS NULL "
+                "AND memberships.unbound_at IS NULL AND ("
+                "  memberships.member_kind = 'repository' "
+                "  AND memberships.member_commitment_or_id = ?"
+                "  OR memberships.member_kind = 'workspace' "
+                "  AND memberships.member_commitment_or_id = ?"
+                ") ORDER BY memberships.project_id ASC",
+                (route.repository_privacy_commitment, route.workspace_ref_commitment),
+            )
+            for row in general_rows:
+                if len(row) != 1 or type(row[0]) is not str:
+                    raise _error(PublicErrorCode.STORAGE_CORRUPT)
+                try:
+                    project_ids.append(validate_id(IdKind.PROJECT, row[0]))
+                except (TypeError, ValueError) as exc:
+                    raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
+        return tuple(sorted(set(project_ids)))
+
+    async def task_route(self, task_id: str) -> TaskRoute | None:
+        self._require_lineage_schema()
+        try:
+            task = validate_id(IdKind.TASK, task_id)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        route = self._route_for_task_id(task)
+        return None if route is None else _route_value(route)
+
+    async def repository_state(self, repository_commitment: str) -> ProjectDescriptor | None:
+        self._require_lineage_schema()
+        try:
+            validate_commitment(repository_commitment)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        rows = self._rows(
+            f"SELECT {_PROJECT_COLUMNS} FROM projects WHERE kind = 'repository' "
+            "AND repository_commitment = ? LIMIT 2",
+            (repository_commitment,),
+        )
+        if len(rows) > 1:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        return None if not rows else _project_from_row(rows[0])
+
+    async def repository_auto_grouping_enabled(self, repository_commitment: str) -> bool:
+        self._require_lineage_schema()
+        try:
+            validate_commitment(repository_commitment)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        with self._transaction():
+            return self._repository_auto_grouping_locked(repository_commitment)
+
+    def _repository_auto_grouping_locked(self, repository_commitment: str) -> bool:
+        preference_rows = self._rows(
+            "SELECT auto_grouping FROM repository_grouping_preferences "
+            "WHERE repository_commitment = ? LIMIT 2",
+            (repository_commitment,),
+        )
+        if len(preference_rows) > 1:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        preference = (
+            None if not preference_rows else _grouping_preference_from_row(preference_rows[0])
+        )
+        project_rows = self._rows(
+            "SELECT auto_grouping FROM projects "
+            "WHERE kind = 'repository' AND repository_commitment = ? LIMIT 2",
+            (repository_commitment,),
+        )
+        if len(project_rows) > 1:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        project = None if not project_rows else _grouping_preference_from_row(project_rows[0])
+        if preference is not None and project is not None and preference is not project:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        if preference is not None:
+            return preference
+        return True if project is None else project
+
+    async def project_state(self, project_id: str) -> ProjectDescriptor | None:
+        self._require_lineage_schema()
+        try:
+            project = validate_id(IdKind.PROJECT, project_id)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        rows = self._rows(
+            f"SELECT {_PROJECT_COLUMNS} FROM projects WHERE project_id = ? LIMIT 2",
+            (project,),
+        )
+        if len(rows) > 1:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        return None if not rows else _project_from_row(rows[0])
+
+    async def list_project_ids(self) -> tuple[str, ...]:
+        self._require_lineage_schema()
+        rows = self._rows(
+            "SELECT project_id FROM projects WHERE dissolved_at IS NULL ORDER BY project_id ASC",
+            (),
+        )
+        values: list[str] = []
+        for row in rows:
+            if len(row) != 1:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            try:
+                values.append(validate_id(IdKind.PROJECT, row[0]))
+            except (TypeError, ValueError) as exc:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
+        return tuple(values)
+
+    async def project_memberships(self, project_id: str) -> tuple[ProjectMembership, ...]:
+        self._require_lineage_schema()
+        try:
+            project = validate_id(IdKind.PROJECT, project_id)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        rows = self._rows(
+            "SELECT project_id, membership_generation, member_kind, "
+            "member_commitment_or_id, bound_at, unbound_at FROM project_memberships "
+            "WHERE project_id = ? ORDER BY membership_generation ASC, member_kind ASC, "
+            "member_commitment_or_id ASC",
+            (project,),
+        )
+        return tuple(_membership_from_row(row) for row in rows)
+
+    async def coordination_grant(
+        self, project_id: str, membership_generation: int
+    ) -> CoordinationGrant | None:
+        self._require_lineage_schema()
+        try:
+            project = validate_id(IdKind.PROJECT, project_id)
+            if type(membership_generation) is not int or membership_generation <= 0:
+                raise ValueError("membership_generation_invalid")
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        rows = self._rows(
+            "SELECT project_id, membership_generation, grant_state, audit_record_id, "
+            "granted_at, revoked_at FROM coordination_grants "
+            "WHERE project_id = ? AND membership_generation = ? LIMIT 2",
+            (project, membership_generation),
+        )
+        if len(rows) > 1:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        return None if not rows else _grant_from_row(rows[0])
+
+    async def record_task_lineage(
+        self,
+        task_id: str,
+        *,
+        parent_task_id: str | None,
+        depth: int,
+        lineage_digest: str,
+        origin: LineageOrigin | None,
+        acceptance: LineageAcceptance | None,
+    ) -> TaskLineage:
+        self._require_lineage_schema()
+        try:
+            task = validate_id(IdKind.TASK, task_id)
+            parent = None if parent_task_id is None else validate_id(IdKind.TASK, parent_task_id)
+            validate_sha256_digest(lineage_digest)
+            desired = TaskLineage(
+                task_id=task,
+                parent_task_id=parent,
+                depth=depth,
+                lineage_digest=lineage_digest,
+                origin=origin,
+                acceptance=acceptance,
+                work_state=WorkState.OPEN,
+            )
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        with self._transaction():
+            route = self._route_for_task_id(task)
+            if route is None:
+                raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+            if parent is not None:
+                parent_route = self._route_for_task_id(parent)
+                if parent_route is None:
+                    raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+                if parent_route.state is TaskRouteState.QUARANTINED:
+                    raise _error(PublicErrorCode.SESSION_CONFLICT)
+                if parent_route.depth + 1 != depth:
+                    raise _error(PublicErrorCode.SESSION_CONFLICT)
+                if (
+                    route.repository_privacy_commitment is not None
+                    and parent_route.repository_privacy_commitment is not None
+                    and not hmac.compare_digest(
+                        route.repository_privacy_commitment,
+                        parent_route.repository_privacy_commitment,
+                    )
+                ):
+                    raise _error(PublicErrorCode.SESSION_CONFLICT)
+            current = _lineage_from_route(route)
+            if current == desired:
+                return current
+            # Work state is intentionally preserved when lineage is recorded after route reserve.
+            if (
+                current.parent_task_id is not None
+                or current.origin is not None
+                or current.acceptance is not None
+                or current.depth != 0
+            ):
+                raise _error(PublicErrorCode.SESSION_CONFLICT)
+            try:
+                self._db.execute(
+                    "UPDATE task_routes SET parent_task_id = ?, depth = ?, lineage_digest = ?, "
+                    "origin = ?, acceptance = ?, updated_at = ? "
+                    "WHERE task_id = ? AND parent_task_id IS NULL AND depth = 0 "
+                    "AND origin IS NULL AND acceptance IS NULL",
+                    (
+                        parent,
+                        depth,
+                        lineage_digest,
+                        None if origin is None else origin.value,
+                        None if acceptance is None else acceptance.value,
+                        format_rfc3339_millis(self._clock.now_utc()),
+                        task,
+                    ),
+                )
+            except apsw.ConstraintError as exc:
+                raise _error(PublicErrorCode.SESSION_CONFLICT) from exc
+            if self._db.changes() != 1:
+                raise _error(PublicErrorCode.SESSION_CONFLICT)
+            updated = self._route_for_task_id(task)
+            if updated is None:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            return _lineage_from_route(updated)
+
+    @staticmethod
+    def _work_state_transition_allowed(current: WorkState, requested: WorkState) -> bool:
+        if current is requested:
+            return True
+        if current is not WorkState.OPEN:
+            return False
+        return requested in {
+            WorkState.CLOSED,
+            WorkState.CANCELLED,
+            WorkState.ABANDONED,
+            WorkState.WRITTEN_OFF,
+        }
+
+    async def set_task_work_state(self, task_id: str, state: WorkState) -> TaskLineage:
+        self._require_lineage_schema()
+        try:
+            task = validate_id(IdKind.TASK, task_id)
+            if type(state) is not WorkState:
+                raise ValueError("work_state_invalid")
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        with self._transaction():
+            route = self._route_for_task_id(task)
+            if route is None:
+                raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+            if not self._work_state_transition_allowed(route.work_state, state):
+                raise _error(PublicErrorCode.SESSION_CONFLICT)
+            if route.work_state is not state:
+                self._db.execute(
+                    "UPDATE task_routes SET work_state = ?, updated_at = ? WHERE task_id = ?",
+                    (state.value, format_rfc3339_millis(self._clock.now_utc()), task),
+                )
+                if self._db.changes() != 1:
+                    raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            updated = self._route_for_task_id(task)
+            if updated is None:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            return _lineage_from_route(updated)
+
+    async def record_session_state(
+        self,
+        task_id: str,
+        session_id: str,
+        *,
+        health: SessionHealth,
+        changed_at: datetime,
+        lease_expires_at: datetime | None = None,
+        actor_id: str | None = None,
+    ) -> SessionState:
+        self._require_lineage_schema()
+        try:
+            task = validate_id(IdKind.TASK, task_id)
+            session = validate_id(IdKind.SESSION, session_id)
+            if type(health) is not SessionHealth:
+                raise ValueError("session_health_invalid")
+            changed_wire = format_rfc3339_millis(changed_at)
+            if lease_expires_at is not None:
+                lease_wire = format_rfc3339_millis(lease_expires_at)
+                if health is SessionHealth.ACTIVE and lease_expires_at <= changed_at:
+                    raise ValueError("session_lease_expired")
+            else:
+                lease_wire = None
+            if health is SessionHealth.ACTIVE and lease_expires_at is None:
+                lease_expires_at = changed_at + timedelta(seconds=_LEASE_SECONDS)
+                lease_wire = format_rfc3339_millis(lease_expires_at)
+            if actor_id is not None:
+                validate_actor_id(actor_id)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        with self._transaction():
+            route = self._route_for_task_id(task)
+            if route is None:
+                raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+            rows = self._rows(
+                "SELECT task_id, session_id, health, changed_at, lease_expires_at, actor_id FROM task_sessions "
+                "WHERE session_id = ? LIMIT 2",
+                (session,),
+            )
+            if len(rows) > 1:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            if rows:
+                current = _session_from_row(rows[0])
+                if current.task_id != task:
+                    raise _error(PublicErrorCode.SESSION_CONFLICT)
+                if current.health is not health:
+                    try:
+                        self._db.execute(
+                            "UPDATE task_sessions SET health = ?, changed_at = ?, ended_at = ?, "
+                            "lease_expires_at = ?, actor_id = ? "
+                            "WHERE session_id = ? AND task_id = ?",
+                            (
+                                health.value,
+                                changed_wire,
+                                changed_wire if health is SessionHealth.ENDED else None,
+                                lease_wire if health is SessionHealth.ACTIVE else None,
+                                actor_id if actor_id is not None else current.actor_id,
+                                session,
+                                task,
+                            ),
+                        )
+                    except apsw.ConstraintError as exc:
+                        raise _error(PublicErrorCode.SESSION_CONFLICT) from exc
+                    if self._db.changes() != 1:
+                        raise _error(PublicErrorCode.STORAGE_CORRUPT)
+                elif (
+                    current.changed_at != changed_at
+                    or current.lease_expires_at
+                    != (lease_expires_at if health is SessionHealth.ACTIVE else None)
+                    or (actor_id is not None and current.actor_id != actor_id)
+                ):
+                    try:
+                        self._db.execute(
+                            "UPDATE task_sessions SET changed_at = ?, lease_expires_at = ?, actor_id = ? "
+                            "WHERE session_id = ? AND task_id = ?",
+                            (
+                                changed_wire,
+                                lease_wire if health is SessionHealth.ACTIVE else None,
+                                actor_id if actor_id is not None else current.actor_id,
+                                session,
+                                task,
+                            ),
+                        )
+                    except apsw.ConstraintError as exc:
+                        raise _error(PublicErrorCode.SESSION_CONFLICT) from exc
+                    if self._db.changes() != 1:
+                        raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            else:
+                self._db.execute(
+                    "INSERT INTO task_sessions(session_id, task_id, health, changed_at, created_at, "
+                    "ended_at, lease_expires_at, actor_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        session,
+                        task,
+                        health.value,
+                        changed_wire,
+                        changed_wire,
+                        changed_wire if health is SessionHealth.ENDED else None,
+                        lease_wire if health is SessionHealth.ACTIVE else None,
+                        actor_id,
+                    ),
+                )
+            updated_rows = self._rows(
+                "SELECT task_id, session_id, health, changed_at, lease_expires_at, actor_id FROM task_sessions "
+                "WHERE session_id = ? LIMIT 2",
+                (session,),
+            )
+            if len(updated_rows) != 1:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            return _session_from_row(updated_rows[0])
+
+    async def expire_session_leases(
+        self, now: datetime | None = None, *, limit: int = 256
+    ) -> tuple[SessionState, ...]:
+        """Persist contact loss for expired session leases in a bounded service sweep.
+
+        Status reads deliberately derive ``contact_lost`` without writing.  The service owns this
+        explicit write path, which makes the transition observable and retryable without allowing
+        an arbitrary status request to mutate the catalog.
+        """
+
+        effective_now = self._clock.now_utc() if now is None else now
+        try:
+            now_wire = format_rfc3339_millis(effective_now)
+            if type(limit) is not int or not 1 <= limit <= 256:
+                raise ValueError("session_expiry_limit_invalid")
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        with self._transaction():
+            rows = self._rows(
+                "SELECT task_id, session_id, health, changed_at, lease_expires_at, actor_id "
+                "FROM task_sessions WHERE health = 'active' "
+                "AND (lease_expires_at IS NULL OR lease_expires_at <= ?) "
+                "ORDER BY session_id ASC LIMIT ?",
+                (now_wire, limit),
+            )
+            expired: list[SessionState] = []
+            for row in rows:
+                current = _session_from_row(row)
+                self._db.execute(
+                    "UPDATE task_sessions SET health = 'contact_lost', changed_at = ?, "
+                    "lease_expires_at = NULL WHERE session_id = ? AND task_id = ? "
+                    "AND health = 'active' AND (lease_expires_at IS NULL OR lease_expires_at <= ?)",
+                    (now_wire, current.session_id, current.task_id, now_wire),
+                )
+                if self._db.changes() != 1:
+                    continue
+                updated = _session_from_row(
+                    (
+                        current.task_id,
+                        current.session_id,
+                        SessionHealth.CONTACT_LOST.value,
+                        now_wire,
+                        None,
+                        current.actor_id,
+                    )
+                )
+                expired.append(updated)
+            return tuple(expired)
+
+    async def accept_task_lineage(self, task_id: str) -> TaskLineage:
+        self._require_lineage_schema()
+        return await self._set_lineage_acceptance(task_id, LineageAcceptance.ACCEPTED)
+
+    async def reject_task_lineage(self, task_id: str) -> TaskLineage:
+        self._require_lineage_schema()
+        return await self._set_lineage_acceptance(task_id, LineageAcceptance.REJECTED)
+
+    async def _set_lineage_acceptance(
+        self, task_id: str, acceptance: LineageAcceptance
+    ) -> TaskLineage:
+        try:
+            task = validate_id(IdKind.TASK, task_id)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        with self._transaction():
+            route = self._route_for_task_id(task)
+            if route is None:
+                raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+            if route.parent_task_id is None:
+                raise _error(PublicErrorCode.SESSION_CONFLICT)
+            if route.acceptance is acceptance:
+                return _lineage_from_route(route)
+            if route.acceptance is not LineageAcceptance.PENDING:
+                raise _error(PublicErrorCode.SESSION_CONFLICT)
+            try:
+                self._db.execute(
+                    "UPDATE task_routes SET acceptance = ?, updated_at = ? WHERE task_id = ? "
+                    "AND acceptance = 'pending'",
+                    (acceptance.value, format_rfc3339_millis(self._clock.now_utc()), task),
+                )
+            except apsw.ConstraintError as exc:
+                raise _error(PublicErrorCode.SESSION_CONFLICT) from exc
+            if self._db.changes() != 1:
+                raise _error(PublicErrorCode.SESSION_CONFLICT)
+            updated = self._route_for_task_id(task)
+            if updated is None:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            return _lineage_from_route(updated)
+
+    def _ensure_repository_project_locked(
+        self, repository_commitment: str, *, only_if_auto_grouping: bool
+    ) -> ProjectDescriptor | None:
+        rows = self._rows(
+            f"SELECT {_PROJECT_COLUMNS} FROM projects "
+            "WHERE kind = 'repository' AND repository_commitment = ? LIMIT 2",
+            (repository_commitment,),
+        )
+        if len(rows) > 1:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        if rows:
+            project = _project_from_row(rows[0])
+            if project.dissolved_at is not None:
+                raise _error(PublicErrorCode.SESSION_CONFLICT)
+            if only_if_auto_grouping and not project.auto_grouping:
+                return None
+            return project
+        auto_grouping = self._repository_auto_grouping_locked(repository_commitment)
+        if only_if_auto_grouping and not auto_grouping:
+            return None
+        project_id = self._ids.new(IdKind.PROJECT)
+        try:
+            validate_id(IdKind.PROJECT, project_id)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
+        now_wire = format_rfc3339_millis(self._clock.now_utc())
+        try:
+            self._db.execute(
+                "INSERT INTO projects(project_id, kind, repository_commitment, auto_grouping, "
+                "membership_generation, created_at, dissolved_at, title_ref_canonical, "
+                "description_ref_canonical) VALUES (?, 'repository', ?, ?, 1, ?, NULL, NULL, NULL)",
+                (project_id, repository_commitment, int(auto_grouping), now_wire),
+            )
+            self._db.execute(
+                "INSERT INTO project_memberships(project_id, membership_generation, member_kind, "
+                "member_commitment_or_id, bound_at, unbound_at) VALUES (?, 1, 'repository', ?, ?, NULL)",
+                (project_id, repository_commitment, now_wire),
+            )
+        except apsw.ConstraintError as exc:
+            raise _error(PublicErrorCode.SESSION_CONFLICT) from exc
+        rows = self._rows(
+            f"SELECT {_PROJECT_COLUMNS} FROM projects WHERE project_id = ? LIMIT 2",
+            (project_id,),
+        )
+        if len(rows) != 1:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        return _project_from_row(rows[0])
+
+    async def ensure_repository_project(self, repository_commitment: str) -> ProjectDescriptor:
+        self._require_lineage_schema()
+        try:
+            validate_commitment(repository_commitment)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        with self._transaction():
+            project = self._ensure_repository_project_locked(
+                repository_commitment, only_if_auto_grouping=False
+            )
+            assert project is not None
+            return project
+
+    async def ensure_repository_project_if_auto_grouping_enabled(
+        self, repository_commitment: str
+    ) -> ProjectDescriptor | None:
+        self._require_lineage_schema()
+        try:
+            validate_commitment(repository_commitment)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        with self._transaction():
+            return self._ensure_repository_project_locked(
+                repository_commitment, only_if_auto_grouping=True
+            )
+
+    async def create_general_project(
+        self, project_id: str, *, auto_grouping: bool = True
+    ) -> ProjectDescriptor:
+        self._require_lineage_schema()
+        try:
+            project = validate_id(IdKind.PROJECT, project_id)
+            if type(auto_grouping) is not bool:
+                raise ValueError("auto_grouping_invalid")
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        with self._transaction():
+            if self._rows("SELECT 1 FROM projects WHERE project_id = ? LIMIT 2", (project,)):
+                raise _error(PublicErrorCode.SESSION_CONFLICT)
+            now_wire = format_rfc3339_millis(self._clock.now_utc())
+            try:
+                self._db.execute(
+                    "INSERT INTO projects(project_id, kind, repository_commitment, auto_grouping, "
+                    "membership_generation, created_at, dissolved_at, title_ref_canonical, "
+                    "description_ref_canonical) VALUES (?, 'general', NULL, ?, 1, ?, NULL, NULL, NULL)",
+                    (project, 1 if auto_grouping else 0, now_wire),
+                )
+            except apsw.ConstraintError as exc:
+                raise _error(PublicErrorCode.SESSION_CONFLICT) from exc
+            rows = self._rows(
+                f"SELECT {_PROJECT_COLUMNS} FROM projects WHERE project_id = ? LIMIT 2",
+                (project,),
+            )
+            if len(rows) != 1:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            return _project_from_row(rows[0])
+
+    @staticmethod
+    def _validate_membership_identity(
+        member_kind: MemberKind, member_commitment_or_id: str
+    ) -> tuple[MemberKind, str]:
+        if type(member_kind) is not MemberKind or type(member_commitment_or_id) is not str:
+            raise ValueError("membership_identity_invalid")
+        if member_kind is MemberKind.TASK:
+            return member_kind, validate_id(IdKind.TASK, member_commitment_or_id)
+        validate_commitment(member_commitment_or_id)
+        return member_kind, member_commitment_or_id
+
+    async def record_project_membership(
+        self,
+        project_id: str,
+        *,
+        member_kind: MemberKind,
+        member_commitment_or_id: str,
+    ) -> ProjectMembership:
+        self._require_lineage_schema()
+        try:
+            project = validate_id(IdKind.PROJECT, project_id)
+            kind, member = self._validate_membership_identity(member_kind, member_commitment_or_id)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        with self._transaction():
+            project_rows = self._rows(
+                f"SELECT {_PROJECT_COLUMNS} FROM projects WHERE project_id = ? LIMIT 2",
+                (project,),
+            )
+            if len(project_rows) != 1:
+                raise _error(
+                    PublicErrorCode.SESSION_NOT_FOUND
+                    if not project_rows
+                    else PublicErrorCode.STORAGE_CORRUPT
+                )
+            descriptor = _project_from_row(project_rows[0])
+            if descriptor.dissolved_at is not None:
+                raise _error(PublicErrorCode.SESSION_CONFLICT)
+            if kind is MemberKind.TASK and descriptor.kind is ProjectKind.GENERAL:
+                general_rows = self._rows(
+                    "SELECT memberships.project_id FROM project_memberships AS memberships "
+                    "JOIN projects ON projects.project_id = memberships.project_id "
+                    "WHERE memberships.member_kind = 'task' "
+                    "AND memberships.member_commitment_or_id = ? "
+                    "AND memberships.unbound_at IS NULL AND projects.kind = 'general' "
+                    "AND memberships.project_id != ? LIMIT 2",
+                    (member, project),
+                )
+                if general_rows:
+                    raise _error(PublicErrorCode.SESSION_CONFLICT)
+            existing_rows = self._rows(
+                "SELECT project_id, membership_generation, member_kind, member_commitment_or_id, "
+                "bound_at, unbound_at FROM project_memberships WHERE project_id = ? "
+                "AND member_kind = ? AND member_commitment_or_id = ? AND unbound_at IS NULL LIMIT 2",
+                (project, kind.value, member),
+            )
+            if len(existing_rows) > 1:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            if existing_rows:
+                return _membership_from_row(existing_rows[0])
+            generation_rows = self._rows(
+                "SELECT MAX(membership_generation) FROM project_memberships WHERE project_id = ?",
+                (project,),
+            )
+            current = descriptor.membership_generation
+            if generation_rows and generation_rows[0][0] is not None:
+                if type(generation_rows[0][0]) is not int:
+                    raise _error(PublicErrorCode.STORAGE_CORRUPT)
+                current = max(current, generation_rows[0][0])
+            generation = current + 1
+            now_wire = format_rfc3339_millis(self._clock.now_utc())
+            try:
+                self._db.execute(
+                    "INSERT INTO project_memberships(project_id, membership_generation, member_kind, "
+                    "member_commitment_or_id, bound_at, unbound_at) VALUES (?, ?, ?, ?, ?, NULL)",
+                    (project, generation, kind.value, member, now_wire),
+                )
+                self._db.execute(
+                    "UPDATE projects SET membership_generation = ? WHERE project_id = ? "
+                    "AND membership_generation = ?",
+                    (generation, project, descriptor.membership_generation),
+                )
+                if self._db.changes() != 1:
+                    raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            except apsw.ConstraintError as exc:
+                raise _error(PublicErrorCode.SESSION_CONFLICT) from exc
+            rows = self._rows(
+                "SELECT project_id, membership_generation, member_kind, member_commitment_or_id, "
+                "bound_at, unbound_at FROM project_memberships WHERE project_id = ? "
+                "AND membership_generation = ? AND member_kind = ? AND member_commitment_or_id = ? LIMIT 2",
+                (project, generation, kind.value, member),
+            )
+            if len(rows) != 1:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            return _membership_from_row(rows[0])
+
+    async def record_coordination_grant(
+        self,
+        project_id: str,
+        membership_generation: int,
+        *,
+        grant_state: GrantState,
+        audit_ref: str,
+    ) -> CoordinationGrant:
+        self._require_lineage_schema()
+        try:
+            project = validate_id(IdKind.PROJECT, project_id)
+            if type(membership_generation) is not int or membership_generation <= 0:
+                raise ValueError("membership_generation_invalid")
+            if type(grant_state) is not GrantState:
+                raise ValueError("grant_state_invalid")
+            if type(audit_ref) is not str or not 1 <= len(audit_ref) <= 128:
+                raise ValueError("grant_audit_ref_invalid")
+            if any(
+                char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-"
+                for char in audit_ref
+            ):
+                raise ValueError("grant_audit_ref_invalid")
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        with self._transaction():
+            project_rows = self._rows(
+                f"SELECT {_PROJECT_COLUMNS} FROM projects WHERE project_id = ? LIMIT 2",
+                (project,),
+            )
+            if len(project_rows) != 1:
+                raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+            descriptor = _project_from_row(project_rows[0])
+            if (
+                descriptor.dissolved_at is not None
+                or membership_generation > descriptor.membership_generation
+            ):
+                raise _error(PublicErrorCode.SESSION_CONFLICT)
+            rows = self._rows(
+                "SELECT project_id, membership_generation, grant_state, audit_record_id, granted_at, revoked_at "
+                "FROM coordination_grants WHERE project_id = ? AND membership_generation = ? LIMIT 2",
+                (project, membership_generation),
+            )
+            if len(rows) > 1:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            now = self._clock.now_utc()
+            now_wire = format_rfc3339_millis(now)
+            if rows:
+                current = _grant_from_row(rows[0])
+                if current.audit_record_id != audit_ref:
+                    raise _error(PublicErrorCode.SESSION_CONFLICT)
+                if current.state is grant_state:
+                    return current
+                if current.state is GrantState.REVOKED or grant_state is not GrantState.REVOKED:
+                    raise _error(PublicErrorCode.SESSION_CONFLICT)
+                try:
+                    self._db.execute(
+                        "UPDATE coordination_grants SET grant_state = 'revoked', revoked_at = ? "
+                        "WHERE project_id = ? AND membership_generation = ? AND grant_state = 'active'",
+                        (now_wire, project, membership_generation),
+                    )
+                except apsw.ConstraintError as exc:
+                    raise _error(PublicErrorCode.SESSION_CONFLICT) from exc
+                if self._db.changes() != 1:
+                    raise _error(PublicErrorCode.SESSION_CONFLICT)
+            else:
+                try:
+                    self._db.execute(
+                        "INSERT INTO coordination_grants(project_id, membership_generation, grant_state, "
+                        "audit_record_id, granted_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            project,
+                            membership_generation,
+                            grant_state.value,
+                            audit_ref,
+                            now_wire,
+                            now_wire if grant_state is GrantState.REVOKED else None,
+                        ),
+                    )
+                except apsw.ConstraintError as exc:
+                    raise _error(PublicErrorCode.SESSION_CONFLICT) from exc
+            rows = self._rows(
+                "SELECT project_id, membership_generation, grant_state, audit_record_id, granted_at, revoked_at "
+                "FROM coordination_grants WHERE project_id = ? AND membership_generation = ? LIMIT 2",
+                (project, membership_generation),
+            )
+            if len(rows) != 1:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            return _grant_from_row(rows[0])
+
+    async def dissolve_project(self, project_id: str) -> ProjectDescriptor:
+        self._require_lineage_schema()
+        try:
+            project = validate_id(IdKind.PROJECT, project_id)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        with self._transaction():
+            rows = self._rows(
+                f"SELECT {_PROJECT_COLUMNS} FROM projects WHERE project_id = ? LIMIT 2",
+                (project,),
+            )
+            if len(rows) != 1:
+                raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+            current = _project_from_row(rows[0])
+            if current.dissolved_at is not None:
+                return current
+            now_wire = format_rfc3339_millis(self._clock.now_utc())
+            self._db.execute(
+                "UPDATE project_memberships SET unbound_at = ? WHERE project_id = ? AND unbound_at IS NULL",
+                (now_wire, project),
+            )
+            next_generation = current.membership_generation + 1
+            self._db.execute(
+                "UPDATE projects SET membership_generation = ?, dissolved_at = ? WHERE project_id = ? "
+                "AND dissolved_at IS NULL",
+                (next_generation, now_wire, project),
+            )
+            if self._db.changes() != 1:
+                raise _error(PublicErrorCode.SESSION_CONFLICT)
+            rows = self._rows(
+                f"SELECT {_PROJECT_COLUMNS} FROM projects WHERE project_id = ? LIMIT 2",
+                (project,),
+            )
+            if len(rows) != 1:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            return _project_from_row(rows[0])
+
+    async def advance_project_generation(
+        self, project_id: str, *, reason: str, expected_generation: int | None = None
+    ) -> ProjectDescriptor:
+        self._require_lineage_schema()
+        try:
+            project = validate_id(IdKind.PROJECT, project_id)
+            if type(reason) is not str or not 1 <= len(reason) <= 128:
+                raise ValueError("project_generation_reason_invalid")
+            if any(
+                character
+                not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-"
+                for character in reason
+            ):
+                raise ValueError("project_generation_reason_invalid")
+            if expected_generation is not None and (
+                type(expected_generation) is not int or expected_generation < 1
+            ):
+                raise ValueError("project_generation_expected_invalid")
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        with self._transaction():
+            rows = self._rows(
+                f"SELECT {_PROJECT_COLUMNS} FROM projects WHERE project_id = ? LIMIT 2",
+                (project,),
+            )
+            if len(rows) != 1:
+                raise _error(
+                    PublicErrorCode.SESSION_NOT_FOUND
+                    if not rows
+                    else PublicErrorCode.STORAGE_CORRUPT
+                )
+            current = _project_from_row(rows[0])
+            if expected_generation is not None:
+                if current.membership_generation < expected_generation:
+                    raise _error(PublicErrorCode.SESSION_CONFLICT)
+                if current.membership_generation > expected_generation:
+                    return current
+            self._db.execute(
+                "UPDATE projects SET membership_generation = membership_generation + 1 "
+                "WHERE project_id = ? AND membership_generation = ?",
+                (project, current.membership_generation),
+            )
+            if self._db.changes() != 1:
+                raise _error(PublicErrorCode.SESSION_CONFLICT)
+            rows = self._rows(
+                f"SELECT {_PROJECT_COLUMNS} FROM projects WHERE project_id = ? LIMIT 2",
+                (project,),
+            )
+            if len(rows) != 1:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            return _project_from_row(rows[0])
+
+    async def set_project_auto_grouping(
+        self, repository_commitment: str, *, enabled: bool
+    ) -> ProjectDescriptor | None:
+        self._require_lineage_schema()
+        try:
+            validate_commitment(repository_commitment)
+            if type(enabled) is not bool:
+                raise ValueError("project_auto_grouping_invalid")
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        with self._transaction():
+            rows = self._rows(
+                f"SELECT {_PROJECT_COLUMNS} FROM projects "
+                "WHERE kind = 'repository' AND repository_commitment = ? LIMIT 2",
+                (repository_commitment,),
+            )
+            if len(rows) > 1:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            now_wire = format_rfc3339_millis(self._clock.now_utc())
+            if not rows:
+                self._db.execute(
+                    "INSERT INTO repository_grouping_preferences(repository_commitment, "
+                    "auto_grouping, updated_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(repository_commitment) DO UPDATE SET "
+                    "auto_grouping = excluded.auto_grouping, updated_at = excluded.updated_at",
+                    (repository_commitment, int(enabled), now_wire),
+                )
+                return None
+            current = _project_from_row(rows[0])
+            if current.dissolved_at is not None:
+                raise _error(PublicErrorCode.SESSION_CONFLICT)
+            self._db.execute(
+                "INSERT INTO repository_grouping_preferences(repository_commitment, "
+                "auto_grouping, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(repository_commitment) DO UPDATE SET "
+                "auto_grouping = excluded.auto_grouping, updated_at = excluded.updated_at",
+                (repository_commitment, int(enabled), now_wire),
+            )
+            if current.auto_grouping is enabled:
+                return current
+            self._db.execute(
+                "UPDATE projects SET auto_grouping = ?, membership_generation = membership_generation + 1 "
+                "WHERE project_id = ? AND membership_generation = ?",
+                (1 if enabled else 0, current.project_id, current.membership_generation),
+            )
+            if self._db.changes() != 1:
+                raise _error(PublicErrorCode.SESSION_CONFLICT)
+            rows = self._rows(
+                f"SELECT {_PROJECT_COLUMNS} FROM projects WHERE project_id = ? LIMIT 2",
+                (current.project_id,),
+            )
+            if len(rows) != 1:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            return _project_from_row(rows[0])
+
+    async def record_project_text_refs(
+        self,
+        project_id: str,
+        *,
+        title_ref: ProjectTextRef | None,
+        description_ref: ProjectTextRef | None,
+        expected_current_refs: tuple[ProjectTextRef | None, ProjectTextRef | None] | None = None,
+    ) -> ProjectDescriptor:
+        self._require_lineage_schema()
+        try:
+            project = validate_id(IdKind.PROJECT, project_id)
+            if title_ref is not None and type(title_ref) is not ProjectTextRef:
+                raise ValueError("project_title_ref_invalid")
+            if description_ref is not None and type(description_ref) is not ProjectTextRef:
+                raise ValueError("project_description_ref_invalid")
+            title_blob = _project_text_ref_blob(title_ref)
+            description_blob = _project_text_ref_blob(description_ref)
+            if expected_current_refs is not None:
+                if (
+                    type(expected_current_refs) is not tuple
+                    or len(expected_current_refs) != 2
+                    or any(
+                        item is not None and type(item) is not ProjectTextRef
+                        for item in expected_current_refs
+                    )
+                ):
+                    raise ValueError("project_text_expected_refs_invalid")
+                expected_title_blob = _project_text_ref_blob(expected_current_refs[0])
+                expected_description_blob = _project_text_ref_blob(expected_current_refs[1])
+            else:
+                expected_title_blob = expected_description_blob = None
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        with self._transaction():
+            rows = self._rows(
+                f"SELECT {_PROJECT_COLUMNS} FROM projects WHERE project_id = ? LIMIT 2",
+                (project,),
+            )
+            if len(rows) != 1:
+                raise _error(
+                    PublicErrorCode.SESSION_NOT_FOUND
+                    if not rows
+                    else PublicErrorCode.STORAGE_CORRUPT
+                )
+            if expected_current_refs is None:
+                self._db.execute(
+                    "UPDATE projects SET title_ref_canonical = ?, description_ref_canonical = ? "
+                    "WHERE project_id = ?",
+                    (title_blob, description_blob, project),
+                )
+            else:
+                self._db.execute(
+                    "UPDATE projects SET title_ref_canonical = ?, description_ref_canonical = ? "
+                    "WHERE project_id = ? AND title_ref_canonical IS ? "
+                    "AND description_ref_canonical IS ?",
+                    (
+                        title_blob,
+                        description_blob,
+                        project,
+                        expected_title_blob,
+                        expected_description_blob,
+                    ),
+                )
+            if self._db.changes() != 1:
+                current_rows = self._rows(
+                    f"SELECT {_PROJECT_COLUMNS} FROM projects WHERE project_id = ? LIMIT 2",
+                    (project,),
+                )
+                if len(current_rows) != 1:
+                    raise _error(PublicErrorCode.STORAGE_CORRUPT)
+                current = _project_from_row(current_rows[0])
+                if current.title_ref == title_ref and current.description_ref == description_ref:
+                    return current
+                raise _error(PublicErrorCode.SESSION_CONFLICT)
+            rows = self._rows(
+                f"SELECT {_PROJECT_COLUMNS} FROM projects WHERE project_id = ? LIMIT 2",
+                (project,),
+            )
+            if len(rows) != 1:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            return _project_from_row(rows[0])
+
+    async def amend_project(
+        self,
+        project_id: str,
+        *,
+        title_ref: ProjectTextRef | None,
+        description_ref: ProjectTextRef | None,
+        expected_current_refs: tuple[ProjectTextRef | None, ProjectTextRef | None] | None = None,
+    ) -> ProjectDescriptor:
+        return await self.record_project_text_refs(
+            project_id,
+            title_ref=title_ref,
+            description_ref=description_ref,
+            expected_current_refs=expected_current_refs,
+        )
+
+    async def unbind_project_membership(
+        self,
+        project_id: str,
+        membership_generation: int,
+        *,
+        member_kind: MemberKind | None = None,
+        member_commitment_or_id: str | None = None,
+    ) -> ProjectMembership:
+        self._require_lineage_schema()
+        try:
+            project = validate_id(IdKind.PROJECT, project_id)
+            if type(membership_generation) is not int or membership_generation <= 0:
+                raise ValueError("membership_generation_invalid")
+            if (member_kind is None) != (member_commitment_or_id is None):
+                raise ValueError("membership_selector_invalid")
+            if member_kind is not None and member_commitment_or_id is not None:
+                member_kind, member_commitment_or_id = self._validate_membership_identity(
+                    member_kind, member_commitment_or_id
+                )
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        with self._transaction():
+            sql = (
+                "SELECT project_id, membership_generation, member_kind, member_commitment_or_id, "
+                "bound_at, unbound_at FROM project_memberships WHERE project_id = ? "
+                "AND membership_generation = ? AND unbound_at IS NULL"
+            )
+            bindings: tuple[apsw.Binding, ...] = (project, membership_generation)
+            if member_kind is not None and member_commitment_or_id is not None:
+                sql += " AND member_kind = ? AND member_commitment_or_id = ?"
+                bindings += (member_kind.value, member_commitment_or_id)
+            sql += " LIMIT 2"
+            rows = self._rows(sql, bindings)
+            if not rows:
+                raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+            if len(rows) != 1:
+                raise _error(PublicErrorCode.SESSION_CONFLICT)
+            current = _membership_from_row(rows[0])
+            now_wire = format_rfc3339_millis(self._clock.now_utc())
+            try:
+                self._db.execute(
+                    "UPDATE project_memberships SET unbound_at = ? WHERE project_id = ? "
+                    "AND membership_generation = ? AND member_kind = ? "
+                    "AND member_commitment_or_id = ? AND unbound_at IS NULL",
+                    (
+                        now_wire,
+                        project,
+                        membership_generation,
+                        current.member_kind.value,
+                        current.member_commitment_or_id,
+                    ),
+                )
+            except apsw.ConstraintError as exc:
+                raise _error(PublicErrorCode.SESSION_CONFLICT) from exc
+            if self._db.changes() != 1:
+                raise _error(PublicErrorCode.SESSION_CONFLICT)
+            generation_rows = self._rows(
+                "SELECT membership_generation FROM projects WHERE project_id = ? LIMIT 2",
+                (project,),
+            )
+            if len(generation_rows) != 1 or type(generation_rows[0][0]) is not int:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            next_generation = max(generation_rows[0][0], membership_generation) + 1
+            self._db.execute(
+                "UPDATE projects SET membership_generation = ? WHERE project_id = ?",
+                (next_generation, project),
+            )
+            if self._db.changes() != 1:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            rows = self._rows(
+                "SELECT project_id, membership_generation, member_kind, member_commitment_or_id, "
+                "bound_at, unbound_at FROM project_memberships WHERE project_id = ? "
+                "AND membership_generation = ? AND member_kind = ? AND member_commitment_or_id = ? LIMIT 2",
+                (
+                    project,
+                    current.membership_generation,
+                    current.member_kind.value,
+                    current.member_commitment_or_id,
+                ),
+            )
+            if len(rows) != 1:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            return _membership_from_row(rows[0])
 
     def _bind_repository_privacy_in_transaction(
         self,
@@ -771,7 +2345,17 @@ class SqliteStartCatalog:
 
             route = self._resolve_requested_route(request)
             if request.mode is StartMode.CREATE and route is not None:
-                raise _error(PublicErrorCode.SESSION_CONFLICT)
+                raise _error(
+                    PublicErrorCode.SESSION_CONFLICT,
+                    safe_details={
+                        "reason_code": (
+                            "workspace_task_exists"
+                            if request.identity_commitments.workspace_ref_commitment is not None
+                            and request.identity_commitments.external_ref_commitment is not None
+                            else "selector_conflict"
+                        )
+                    },
+                )
             if request.mode is StartMode.ATTACH and route is None:
                 raise _error(PublicErrorCode.SESSION_NOT_FOUND)
             if route is not None:
@@ -792,15 +2376,6 @@ class SqliteStartCatalog:
 
             created = route is None
             if created:
-                workspace = request.identity_commitments.workspace_ref_commitment
-                if request.mode is StartMode.CREATE_OR_ATTACH and workspace is not None:
-                    rows = self._rows(
-                        "SELECT 1 FROM task_routes "
-                        "WHERE workspace_ref_commitment = ? AND state != 'quarantined' LIMIT 1",
-                        (workspace,),
-                    )
-                    if rows:
-                        raise _workspace_conflict()
                 task_id = proposed[IdKind.TASK]
                 session_id = proposed[IdKind.SESSION]
                 bundle_relpath = f"tasks/{task_id}"
@@ -811,24 +2386,57 @@ class SqliteStartCatalog:
                         "task_id": task_id,
                     }
                 )
-                self._db.execute(
-                    """INSERT INTO task_routes (
-                        task_id, workspace_ref_commitment, external_ref_commitment,
-                        active_session_id, bundle_relpath, route_generation,
-                        active_route_identity_digest, state, quarantine_code, created_at, updated_at,
-                        repository_privacy_commitment
-                    ) VALUES (?, ?, ?, ?, ?, 1, ?, 'initializing', NULL, ?, ?, NULL)""",
-                    (
-                        task_id,
-                        request.identity_commitments.workspace_ref_commitment,
-                        request.identity_commitments.external_ref_commitment,
-                        session_id,
-                        bundle_relpath,
-                        route_digest,
-                        now_wire,
-                        now_wire,
-                    ),
-                )
+                if self._catalog_schema_version >= 4:
+                    self._db.execute(
+                        """INSERT INTO task_routes (
+                            task_id, workspace_ref_commitment, external_ref_commitment,
+                            active_session_id, bundle_relpath, route_generation,
+                            active_route_identity_digest, state, quarantine_code, created_at, updated_at,
+                            repository_privacy_commitment, parent_task_id, depth, lineage_digest,
+                            origin, acceptance, work_state
+                        ) VALUES (?, ?, ?, ?, ?, 1, ?, 'initializing', NULL, ?, ?, NULL, NULL, 0, ?, NULL, NULL, 'open')""",
+                        (
+                            task_id,
+                            request.identity_commitments.workspace_ref_commitment,
+                            request.identity_commitments.external_ref_commitment,
+                            session_id,
+                            bundle_relpath,
+                            route_digest,
+                            now_wire,
+                            now_wire,
+                            route_digest,
+                        ),
+                    )
+                    self._db.execute(
+                        "INSERT INTO task_sessions(session_id, task_id, health, changed_at, created_at, "
+                        "ended_at, lease_expires_at, actor_id) VALUES (?, ?, 'active', ?, ?, NULL, ?, NULL)",
+                        (
+                            session_id,
+                            task_id,
+                            now_wire,
+                            now_wire,
+                            format_rfc3339_millis(now + timedelta(seconds=_LEASE_SECONDS)),
+                        ),
+                    )
+                else:
+                    self._db.execute(
+                        """INSERT INTO task_routes (
+                            task_id, workspace_ref_commitment, external_ref_commitment,
+                            active_session_id, bundle_relpath, route_generation,
+                            active_route_identity_digest, state, quarantine_code, created_at, updated_at,
+                            repository_privacy_commitment
+                        ) VALUES (?, ?, ?, ?, ?, 1, ?, 'initializing', NULL, ?, ?, NULL)""",
+                        (
+                            task_id,
+                            request.identity_commitments.workspace_ref_commitment,
+                            request.identity_commitments.external_ref_commitment,
+                            session_id,
+                            bundle_relpath,
+                            route_digest,
+                            now_wire,
+                            now_wire,
+                        ),
+                    )
                 route = _RouteRow(
                     task_id,
                     request.identity_commitments.workspace_ref_commitment,
@@ -839,6 +2447,12 @@ class SqliteStartCatalog:
                     route_digest,
                     TaskRouteState.INITIALIZING,
                     None,
+                    None,
+                    0,
+                    route_digest,
+                    None,
+                    None,
+                    WorkState.OPEN,
                 )
                 if request.repository_privacy_commitment is not None:
                     route = self._bind_repository_privacy_in_transaction(
@@ -849,6 +2463,18 @@ class SqliteStartCatalog:
                     )
             else:
                 session_id = proposed[IdKind.SESSION]
+                if self._catalog_schema_version >= 4:
+                    self._db.execute(
+                        "INSERT INTO task_sessions(session_id, task_id, health, changed_at, created_at, "
+                        "ended_at, lease_expires_at, actor_id) VALUES (?, ?, 'active', ?, ?, NULL, ?, NULL)",
+                        (
+                            session_id,
+                            route.task_id,
+                            now_wire,
+                            now_wire,
+                            format_rfc3339_millis(now + timedelta(seconds=_LEASE_SECONDS)),
+                        ),
+                    )
 
             lease_expires_at = format_rfc3339_millis(now + timedelta(seconds=_LEASE_SECONDS))
             self._db.execute(
@@ -992,6 +2618,25 @@ class SqliteStartCatalog:
             )
             if self._db.changes() != 1:
                 raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            if self._catalog_schema_version >= 4:
+                self._db.execute(
+                    "UPDATE task_sessions SET health = 'ended', changed_at = ?, ended_at = ?, "
+                    "lease_expires_at = NULL WHERE task_id = ? AND session_id != ? "
+                    "AND health != 'ended'",
+                    (now_wire, now_wire, row.task_id, row.session_id),
+                )
+                self._db.execute(
+                    "UPDATE task_sessions SET health = 'active', changed_at = ?, "
+                    "lease_expires_at = ? WHERE task_id = ? AND session_id = ?",
+                    (
+                        now_wire,
+                        format_rfc3339_millis(now + timedelta(seconds=_LEASE_SECONDS)),
+                        row.task_id,
+                        row.session_id,
+                    ),
+                )
+                if self._db.changes() != 1:
+                    raise _error(PublicErrorCode.STORAGE_CORRUPT)
             self._db.execute(
                 """UPDATE start_operations SET
                     state = 'complete', phase = 'terminal', owner_generation = NULL,
@@ -1140,25 +2785,43 @@ class SqliteStartCatalog:
         )
 
     def _resolve_requested_route(self, request: StartCommand) -> _RouteRow | None:
+        # A handle or self-registration is authenticated by the lineage coordinator before this
+        # catalog is called.  Keep the resulting task selector internal and exact: pair/workspace
+        # membership is never allowed to discover a route for this path.
+        if request.target_task_id is not None:
+            target = validate_id(IdKind.TASK, request.target_task_id)
+            route = self._route_for_task_id(target)
+            if route is None:
+                raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+            if request.session_id is not None and route.active_session_id != request.session_id:
+                raise _error(
+                    PublicErrorCode.SESSION_CONFLICT,
+                    safe_details={"reason_code": "selector_conflict"},
+                )
+            return route
         by_commitment: _RouteRow | None = None
         workspace = request.identity_commitments.workspace_ref_commitment
         external = request.identity_commitments.external_ref_commitment
         if workspace is not None and external is not None:
             rows = self._rows(
                 f"SELECT {self._route_columns} FROM task_routes "
-                "WHERE workspace_ref_commitment = ? AND external_ref_commitment = ? LIMIT 2",
+                "WHERE workspace_ref_commitment = ? AND external_ref_commitment = ?",
                 (workspace, external),
             )
-            if len(rows) > 1:
+            root_rows = [row for row in rows if _route_from_row(row).parent_task_id is None]
+            if len(root_rows) > 1:
                 raise _error(PublicErrorCode.STORAGE_CORRUPT)
-            if rows:
-                by_commitment = _route_from_row(rows[0])
+            if root_rows:
+                by_commitment = _route_from_row(root_rows[0])
         by_session: _RouteRow | None = None
         if request.session_id is not None:
             by_session = self._route_for_session(request.session_id)
         if by_commitment is not None and by_session is not None:
             if by_commitment.task_id != by_session.task_id:
-                raise _error(PublicErrorCode.SESSION_CONFLICT)
+                raise _error(
+                    PublicErrorCode.SESSION_CONFLICT,
+                    safe_details={"reason_code": "selector_conflict"},
+                )
             return by_commitment
         if by_session is not None and workspace is not None and by_commitment is None:
             # A host-session rotation may carry the new paired identity together
@@ -1167,19 +2830,25 @@ class SqliteStartCatalog:
             # neither the pair nor workspace possession discovers a route.
             workspace_rows = self._rows(
                 f"SELECT {self._route_columns} FROM task_routes "
-                "WHERE workspace_ref_commitment = ? AND state != 'quarantined' LIMIT 2",
+                "WHERE workspace_ref_commitment = ? AND state != 'quarantined'",
                 (workspace,),
             )
+            root_workspace_rows = [
+                row for row in workspace_rows if _route_from_row(row).parent_task_id is None
+            ]
             if (
                 request.mode is not StartMode.ATTACH
                 or request.session_id != by_session.active_session_id
                 or by_session.state is TaskRouteState.QUARANTINED
                 or by_session.workspace_ref_commitment is None
                 or not hmac.compare_digest(by_session.workspace_ref_commitment, workspace)
-                or len(workspace_rows) != 1
-                or _route_from_row(workspace_rows[0]).task_id != by_session.task_id
+                or len(root_workspace_rows) != 1
+                or _route_from_row(root_workspace_rows[0]).task_id != by_session.task_id
             ):
-                raise _error(PublicErrorCode.SESSION_CONFLICT)
+                raise _error(
+                    PublicErrorCode.SESSION_CONFLICT,
+                    safe_details={"reason_code": "selector_conflict"},
+                )
             pending = self._rows(
                 "SELECT 1 FROM start_operations WHERE task_id = ? AND state = 'pending' LIMIT 1",
                 (by_session.task_id,),
@@ -1193,7 +2862,10 @@ class SqliteStartCatalog:
                 raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
             return by_session
         if request.session_id is not None and (by_session is None and by_commitment is not None):
-            raise _error(PublicErrorCode.SESSION_CONFLICT)
+            raise _error(
+                PublicErrorCode.SESSION_CONFLICT,
+                safe_details={"reason_code": "selector_conflict"},
+            )
         return by_commitment or by_session
 
     def _route_for_session(self, session_id: str) -> _RouteRow | None:

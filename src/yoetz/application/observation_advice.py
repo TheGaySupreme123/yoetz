@@ -237,6 +237,7 @@ class ObservationAdviceBuildInput:
     envelopes: tuple[ObservationEnvelope, ...]
     lifecycle: ObservationLifecycle
     gaps: tuple[str, ...]
+    lineage_refs: tuple[tuple[str, str], ...] = ()
     check_facts: tuple[ObservationCheckFact, ...] = ()
     inspect_fact: ObservationInspectFact | None = None
     composition: ObservationCompositionFact | None = None
@@ -283,6 +284,7 @@ class ObservationAdviceContextBuilder:
         *,
         yoetz_session_id: str | None = None,
         session_commitment: str | None = None,
+        lineage_refs: tuple[tuple[str, str], ...] = (),
     ) -> AdviceSnapshot | None:
         # Task-scoped conditions come from the mapped session's own evidence and
         # current health. The workspace-wide aggregate remains the operator
@@ -310,6 +312,7 @@ class ObservationAdviceContextBuilder:
                 envelopes=envelopes,
                 lifecycle=status.lifecycle,
                 gaps=status.gaps,
+                lineage_refs=lineage_refs,
                 check_facts=checks,
                 inspect_fact=inspect_fact,
                 composition=composition,
@@ -357,6 +360,7 @@ class ObservationAdviceContextBuilder:
                 envelopes=envelopes,
                 lifecycle=status.lifecycle,
                 gaps=status.gaps,
+                lineage_refs=lineage_refs,
                 check_facts=checks,
                 inspect_fact=inspect_fact,
                 composition=composition,
@@ -703,6 +707,7 @@ def build_observation_advice_snapshot(
         envelopes=input_value.envelopes,
         lifecycle=input_value.lifecycle,
         gaps=input_value.gaps,
+        lineage_refs=input_value.lineage_refs,
         check_facts=input_value.check_facts,
         inspect_fact=input_value.inspect_fact,
         composition=input_value.composition,

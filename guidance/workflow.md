@@ -28,20 +28,21 @@ order of recovery, user handoff, and the bounded optional-service fallback.
 `start` resumes by one of two selectors (never by bare `task_id`):
 
 1. `session_id` — continue the exact session you already hold.
-2. `workspace_ref` + `external_ref` as a pair — resolve the durable task for that project work item without a `session_id`. Under `mode=create_or_attach`, the same pair creates on first use and attaches on every later conversation. Attach mints a fresh session and writer; use the returned ids. The previously held session is retired for routing, but `status view=operation` from the successor session recovers that task's request ids, and `start mode=attach` with the retired `session_id` re-binds the same task. A different `external_ref` in a workspace that already has a task is `SESSION_CONFLICT` (`workspace_task_exists`) without task selectors — attach with the previously held session id, or retry with `mode=create` for an explicit sibling.
+2. `workspace_ref` + `external_ref` as a pair — resolve the durable task for that project work item without a `session_id`. Under `mode=create_or_attach`, the same pair creates on first use and attaches on every later conversation. Attach mints a fresh session and writer; use the returned ids. The previously held session is retired for routing, but `status view=operation` from the successor session recovers that task's request ids, and `start mode=attach` with the retired `session_id` re-binds the same task. A different complete pair can be independent work, even when the workspace already has a dormant task. Automatic host admission may first recover a unique valid same-host mapping whose `SessionEnd` was received; it holds the required workspace and lifecycle locks, revalidates ownership and state, and only then attaches. With no usable persisted selector, it creates the new pair. An ambiguous candidate, ownership failure, busy recovery lock, or changed recovery snapshot remains a typed refusal or retry boundary; it never guesses from workspace membership or age. `workspace_task_exists` is reserved for explicit `mode=create` colliding with an identical pair.
 
 Convention:
 
-- `workspace_ref` = the canonical absolute repository root of the working tree you are in (a linked Git worktree is its own root). Never a remote URL: the workspace commitment is keyed on the exact value, so hook observation on Claude Code, Codex, and Cursor auto-attaches with this root and `workspace_task_exists` protects you from a sibling only under the same value. A remote URL or any other spelling is a different workspace and silently creates a sibling task.
+- `workspace_ref` = the canonical absolute repository root of the working tree you are in (a linked Git worktree is its own root). Never a remote URL: selector commitments use the exact value, and host hooks use this same root for consent and automatic recovery. A different workspace value is a different selector and may create independent work; workspace membership and `workspace_task_exists` do not authorize automatic attachment.
 - `external_ref` = stable task identity within that project (branch name, issue reference, or plan slug). A hook-mapped task carries `<host>-session:<host session id>`; do not reproduce that pair. Attach to a host-mapped task with `mode=attach` and the `session_id` the session-start context names.
 
 Same conversation resuming, or a fresh conversation continuing the same work → `mode=create_or_attach` with the same pair and no `session_id`. Sibling work in the same project → use `mode=create` with the same `workspace_ref` and a different `external_ref` only when the recovery table permits one; do not use `create_or_attach` for a new sibling. Both refs are one-shot redacted values: only installation-keyed HMAC commitments are persisted, so a repository path or remote URL never lands in durable state — do not self-censor into unstable refs.
 
 ## Recovery decision table (0.2)
 
-Use this table after a reconnect, timeout, session rotation, host handoff, or a known terminal
-same-task boundary. It uses the existing `start`, `status`, and workflow operations; it does not
-add a task-lineage field or change the wire contract.
+Use this shipped 0.2 table after a reconnect, timeout, session rotation, host handoff, or a known
+terminal same-task boundary. The 0.3 lineage/project selectors and modes extend the workflow below
+without changing these recovery floors. Recovery adds no separate tool and never authorizes guessing
+a task identity.
 
 The operation view requires both `session_id` and `writer_id`. If a `start` response is lost before
 those ids are returned, do not invent them or issue a fabricated status query: replay the exact
@@ -71,6 +72,23 @@ have committed, its operation-recovery row always wins over the sibling row.
 
 “Not give up” means using this one bounded, explicit verification handoff after the known terminal
 boundary. It does not mean creating tasks until a receipt looks clean.
+
+## Upgrade and schema continuity
+
+For an explicit user-requested update, run `yoetz upgrade` and preserve the existing host roots,
+ownership, route, observation profile, settings, permissions, and integrations. Stop old hosts,
+hooks, and the service through their supported lifecycle before accepting package replacement. The
+package command is only the package step. On the next controlled service startup, a compatible
+0.2-to-0.3 bundle migration runs backup-first before READY and preserves existing task data; the
+user does not perform a per-task migration ceremony.
+
+Treat a startup migration refusal, unsupported layout, holder conflict, or rollback-required result
+as a typed boundary. Keep the same operation and backup identity, follow the returned supported
+recovery procedure, and never retry with a new migration or edit storage by hand. An automatic
+schema upgrade changes no observation consent, content selection, provider, disclosure, or egress
+authority. Host refresh, activation, reload, and a fresh-session check remain separate evidence
+facets. A package exit or a READY service without the corresponding migration result is not full
+upgrade proof.
 
 Tell the user that Yoetz is being used, and claim activation only after `start` returns. Apply
 [startup failure precedence](coverage-and-receipts.md#startup-failure-precedence) before any
@@ -156,6 +174,16 @@ import, or a recommendation, read [Setup and consent](request-templates.md#setup
 before acting. Preserve exact request and pending identities. Never run service lifecycle commands
 for `INTERNAL_ERROR` or a message that did not name that command.
 
+1. Decide whether the task is material enough for Yoetz.
+2. Start or attach with stable request identity and the intended create or attach semantics.
+3. Publish a bounded plan, requested outcomes, acceptance evidence, and assignments. Declare completion scope with obligation refs, or — only when the effective ref set is empty — one typed `no_obligations_reason`: `no_material_change`, `single_atomic_change`, or `exploratory_scope_unknown`. Group large inventories into independently reviewable work packages; files are leaf evidence, not automatic obligations.
+4. Delegate with `start mode=delegate` using the parent's current session. Give the intended child the complete returned `attach_handle` and bounded assignment context. The child attaches with that handle and uses its own returned session and writer. Do not send or publish full transcripts.
+5. Publish material work-package transitions: assignment, decision, blocked attempt, independently useful result, completion, or revision. Omit routine reads, searches, formatting, and per-file mechanics.
+6. Stay next to the record. After resume, compaction, handoff, or uncertainty about what is already done or committed, call `status`. `view=candidate_findings` is an advisory read: it creates no verdict, IDs, receipt, or event. For claim correction, read `candidate_findings`, `history`, and `results`, then dry-run one `claim_recorded/1.1.0` replacement: admissible support belongs in `supporting_refs`, partial/failed results in `limitation_refs`, and prior effective claim ids in `supersedes_claim_refs`.
+7. Before completion, publish the intended material completion claim and current evidence, then call `check`. Read `declared_obligation_count`, `no_obligations_reason`, and `closure_readiness` on `status` first. A readable plan with zero declared obligations and no reason is blocked by `no_obligations_declared`; add effective obligations or revise the plan with a typed reason. The reason clears readiness but a completion claim over zero obligations still yields an insufficient-coverage gap. Resolve remediable blockers before spending a check or receipt. `receipt_findings_unresolved` is different: it says an actionable finding is still current. Only a later qualifying check of the repaired record resolves it, never a response; if you can repair the record, do so and recheck. Then read the finding's `resolved` state. If the issue re-fires, or it does not re-fire but remains `resolved=false` because the check did not qualify, proceed to the receipt rather than rechecking unchanged state. A deterministic check with otherwise readable proof may still qualify when its only case-wide host-observation limits are `captured_object_unavailable`, `content_unselected`, `host_outcome_unavailable`, or `unpaired_event`; those codes remain receipt limitations, require the original finding coverage to have been readable, and never relax semantic-finding proof. Select `semantic_required` when the user, effective policy, or named acceptance criterion requires independent semantic review; omit `mode` when relying on the configured default; use `semantic_if_configured` only when review is known to be optional; use `deterministic_only` only for explicitly local/structural checks, a semantic-disabled policy, or a deliberate no-egress choice, and disclose that limitation. Publish the smallest state-bound diff/symbol and the directly relevant test or failure excerpt; never rely on self-asserted completion prose alone.
+8. Respond to each challenge by accepting and acting, supplying evidence, revising the claim, disputing with evidence, or stating an unresolved limitation. Agents can record `acknowledged`, `provenance_disputed`, or `rejected`; `waived` is reserved for an authorized local-CLI human. A readable response identifies the finding as answered and removes it from `unanswered_finding_count`, but it does not erase the historical finding, reduce `receipt_blocking_finding_count`, or close an underlying coverage gap. Repair the record and recheck: a later qualifying check that finds the same issue absent resolves the finding, which then stays visible as history; the receipt wording names resolved history apart from current findings and from coverage limitations.
+9. Recheck after any material edit, evidence change, or plan change. A readable response to a finding returned by the current check needs no recheck; a redacted or unreadable response does because it cannot prove which finding it answered.
+10. Request a receipt and keep the final answer no stronger than its weakest material coverage, freshness, unresolved findings, and limitations. All receipt formats (`json`, `markdown`, `text`) project under default policy; if a stricter owner policy blocks `json`, re-request `markdown` or `text`.
 ## Consumer and maintainer scope
 
 To operate Yoetz, use schemas, guidance, and `status`; do not inspect its live SQLite databases,
@@ -183,6 +211,60 @@ selection inputs; `--input <selection.json>` prepares one operation with fresh l
 IDs, a dry-run publication where applicable, and a same-request recovery query. Review and submit
 explicitly. It never invents attempts, evidence, finding dispositions, or obligation satisfaction.
 
+### Delegation and project coordination
+
+Each participating child has its own task ledger, session, and writer. The parent calls `start`
+with `mode=delegate` and its current `session_id`; the returned child is `parent_minted` and
+`accepted`. Pass the complete expiring, single-use `attach_handle` only to the intended child in
+its assignment. The child calls `start mode=attach` with that handle and publishes with its own
+returned session and writer. The parent keeps its original binding. A timeout requires the exact
+same request and `request_id`; never create another child to recover a pending delegation.
+
+A child without a handle may create a separate task with `parent_session_id`. This is
+`self_registered` and `pending`: knowing a parent session is not authority to add blocking work.
+The parent may publish `child_accepted` or `child_rejected`. Acceptance never changes origin;
+an accepted relationship cannot later be rejected. Conflicting selectors, invalid parent refs,
+expired handles, cycles, and configured depth or fan-out limits produce typed refusals. Recover
+through the returned operation/status information, not by guessing identities.
+
+Use `status view=lineage` after a handoff to inspect recorded relationships. Host observations
+can be provisional annotations without a child ledger; never claim those children published or
+checked work. A delegate summary is a claim, not proof. The parent's own obligations must cover
+incorporating each child's work and verifying the combined result; a clean child receipt does
+not establish integration. Preserve contradictory claims until a recorded decision resolves them.
+
+Work state, session health, and receipt history are separate. A receipt never closes work:
+publish `work_closed` when the work is complete. Lost contact leaves work open during the
+documented recovery window; the service records abandonment only after it expires. Late evidence
+remains visible with a gap. `delegation_cancelled` revokes the Yoetz capability, not the host
+process. `child_written_off` and cancellation preserve an accepted dependency and its incomplete
+outcome. Publish these lifecycle transitions through `publish_work`, using the request templates.
+
+Parent checks use the latest dependency manifest recorded in the parent's ledger. Receipt creation
+does not refresh it. If a newer manifest was recorded after the check, recheck for an updated
+conclusion; an honest incomplete receipt remains available while children are active. Read
+[coverage and receipts](coverage-and-receipts.md) for severity and freshness limits.
+
+### Project coordination
+
+Projects group work without granting attach authority. Automatic repository grouping begins with
+a second live task when enabled. Use `status view=project`, `yoetz project status`, or `/project`
+to inspect the admitted scope; membership and a dormant sibling never select a task to resume.
+Each source workspace must grant workspace-level observation consent. The `prj_` project membership
+object is a separate grouping fact. General and cross-repository projects additionally need approval
+for the exact current membership generation. Revocation, unlink, dissolve, or opt-out invalidates
+old deliveries; project membership does not authorize cross-repository semantic input.
+
+Presence and duplicate-finding notes are advisory, separate from findings, and cannot change the
+verdict. Overlap advice concerns declared structured resources, not inferred intent or ownership.
+A `coordination_overlap` finding requires an explicitly declared coordination obligation and a
+recorded context. Publish the obligation first, then `coordination_obligation_declared` with its
+ID and the admitted detection, project, recipient task, and membership generation. Ordinary file
+or source requested items identify potential overlap; they do not declare coordination work.
+Publish a `coordination_disposition_recorded` event linking that same obligation and
+evidence for `shared_work`, `sequencing`, or `scope_revision`. That addresses the obligation;
+a later qualifying `coordination/0.1.0` check resolves a finding. A bare `respond` acknowledgement
+does neither. An agreed shared-work disposition may leave the resource overlap in place.
 ### Protect an evidence-sensitive read
 
 If a later claim, obligation, or finding may depend on a read, protect the next read before the
@@ -206,6 +288,46 @@ The hook binds the protection to the exact native read identity. A pre-event res
 and its logical post consumes one slot; failures, denials, cancellation, partial or unknown
 outcomes, and missing posts remain individually visible. Never replace a protected read with a
 caller-supplied routine label or infer success from its content.
+
+### Start selectors and findings
+
+`start` resumes by a held session or exact identity pair; an intended new child may instead use
+its complete attach handle. Never attach by bare `task_id`:
+
+1. `session_id` — continue the exact session you already hold.
+2. `workspace_ref` + `external_ref` as a pair — resolve the durable task for that work item without a `session_id`. Under ordinary `mode=create_or_attach`, the same pair creates on first use and attaches on later conversations; a different complete pair creates an independent sibling. A host hook may first recover a unique valid same-host mapping whose `SessionEnd` was received, under the workspace and lifecycle locks; no usable selector creates the new pair, while an ambiguous candidate, ownership failure, busy recovery lock, or changed snapshot refuses or retries without guessing. Attach mints a fresh session and writer; use the returned ids. The previously held session is retired for routing, but `status view=operation` from the successor session recovers that task's request ids, and `start mode=attach` with the retired `session_id` re-binds the same task. Incomplete or conflicting selectors refuse without guessing among siblings.
+
+Convention:
+
+- `workspace_ref` = the canonical absolute repository root of the working tree you are in (a linked Git worktree is its own root). Never a remote URL: selector commitments use the exact value. Repository grouping uses trusted repository identity separately and never substitutes for a workspace selector.
+- `external_ref` = stable task identity within that project (branch name, issue reference, or plan slug). A hook-mapped task carries `<host>-session:<host session id>`; do not reproduce that pair. Attach to a host-mapped task with `mode=attach` and the `session_id` the session-start context names.
+
+Same conversation resuming, or a fresh conversation continuing the same work → `mode=create_or_attach` with the same pair and no `session_id`. Sibling work → a different complete pair, or explicit `mode=create`. Selector refs are committed with installation-keyed HMACs rather than stored as structural plaintext. Keep them stable; do not self-censor into a different identity.
+
+## Findings and recheck
+
+Candidate findings are what deterministic packs currently say about the record. They carry no verdict and cannot be cited as a check. An empty candidate list means only that no rule fired in that advisory read. Only a recorded check can support receipt-bounded completion wording.
+
+The cheapest finding is the one that never fires. Before the first `check`, read `status` with `view=obligations`: every row exposes its exact `requested_items` plus the `unattempted_items` subset under the existing obligation-text privacy category. Record each attempted value exactly on `action_recorded.attempted_items` (`attempted_items` belongs to that family alone — never a claim), and do not resolve the obligation while `unattempted_items` remains non-empty. Also confirm that completion scope is declared, every claim has linked evidence, and every declared obligation is resolved or deliberately left open with a stated reason. A typed empty-scope declaration still produces `completion_scope_declared_none` when a completion claim exists; it records the scope decision rather than proving it. This pre-flight costs one status read; an actionable finding costs the receipt for the rest of the task.
+
+## Degraded and unavailable behavior
+
+Never invent success. State the unavailable or degraded boundary, continue ordinary work when allowed, and do not claim a live task, finding, verdict, or receipt. If the host requires Yoetz, stop at that host-owned requirement.
+
+Read `retryable` on every error before acting. A `retryable: false` error is terminal for that call: do not repeat it with a new `request_id`, do not probe with other Yoetz operations to "confirm", and do not rewrite state to work around it. Record the `correlation_id`; if a shell is available, run `yoetz service diagnostics --correlation-id <id>` once and report its bounded record, then continue without Yoetz. A `SERVICE_UNAVAILABLE` error whose message names a repair command (for example `yoetz service restart` when the running service belongs to a different Yoetz installation) is the one case where a single repair is appropriate: run exactly that command if the host allows shell use, then retry the original call once with the same `request_id`. If it fails again, treat Yoetz as unavailable for the rest of the task and say so. Lifecycle commands (`yoetz service stop`, `service run`, `service restart`) are never a response to `INTERNAL_ERROR` or to any message that did not name that exact command.
+
+One typed exception: an error carrying `safe_details.continuation: vault_initialization_required` is a bounded first-run handoff, not an ordinary terminal error. The vault was never initialized, nothing was written, and no unlock or recovery path applies. Suspend the original request and follow the continuation exactly once: run the carried `prepare_command`, present the returned pending's danger text and digests to the user, and wait for their exact decision; if a pending consent action already exists, read it with `yoetz consent status` instead of preparing another. Yoetz generates and stores the initialization secret locally — never request, receive, or transmit a secret or recovery material. Relaying an approval through the carried `authorize_command` is valid only for an allowlisted first-party agent-chat client acting on an explicit current-chat instruction; every other host directs the user to run the carried `review_command` on a local terminal and waits. When the ceremony reports ready, replay the exact original `request_id` and body once (`replay_request_id` names it) and continue normally; on denial or expiry, do not prepare again in the same task — state the boundary and continue without Yoetz. Never create a replacement `start`, and never treat chat assent as authority.
+
+### Inherited unavailability and delegation
+
+An availability failure belongs to the host binding — this MCP process, its route, and the service endpoint — not to the request that first saw it. When an error carries `safe_details.availability: terminal_unavailable`, the bridge has latched that state: every later call under a new `request_id` returns the same `correlation_id` with `availability_inherited: true` and records no new diagnostic, until the named repair changes the running service, the original `request_id` replays successfully, or — for a `retryable: true` class only — the bridge's own quiet handshake finds the service listening again, in which case the call simply proceeds. That handshake belongs to the bridge, never to you: nobody probes to find out. An inherited answer is not a fresh failure; do not diagnose it again.
+
+When you delegate after that result, carry it into every assignment as a bounded `yoetz_availability` block: `state: terminal_unavailable`, the host binding (`host_profile`, `route_profile`), the parent `correlation_id` and original `request_id`, and the proof limit ("no live Yoetz ledger, publication, check, or receipt exists for this task") — never transcript content. A delegate that inherits `terminal_unavailable` makes no Yoetz call for that binding and work item: no `start`, `status`, `check`, diagnostics, or `yoetz service` command. It publishes nothing, states that the parent has no live ledger, and returns its work to the coordinator. Only the coordinator runs the one repair the typed result named and replays the original `request_id` once. In the final report, separate the initial integration cause (the parent's correlation) from delegate amplification, and never claim delegate publications, assignments, or attribution without a task and session.
+
+## Safety and privacy
+
+Publish no hidden reasoning, transcript, secret, broad repository content, or unrelated source. Prefer typed facts, digests, bounded counts, and only the smallest material state-bound excerpt. See [publication policy](publication-policy.md) and [coverage and receipts](coverage-and-receipts.md).
+### Promote a buffered read
 
 If the read becomes relevant after classification but before the bounded buffer is delivered,
 promote its exact source identity:

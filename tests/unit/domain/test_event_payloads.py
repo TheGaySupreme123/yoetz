@@ -21,6 +21,7 @@ from hypothesis import example, given, settings
 from hypothesis import strategies as st
 from hypothesis.strategies import SearchStrategy
 
+from yoetz.domain.coordination import CoordinationDisposition, OverlapKind
 from yoetz.domain.events import (
     CLAIM_SCHEMA_VERSION,
     EVENT_FAMILIES,
@@ -36,6 +37,10 @@ from yoetz.domain.events import (
     ClaimRecordedPayload,
     ClaimRecordedPayloadV1_1,
     ClientKind,
+    CoordinationContextRecordedPayload,
+    CoordinationDispositionRecordedPayload,
+    CoordinationObligationDeclaredPayload,
+    DelegationDeclaredPayload,
     EventDraft,
     EventPayload,
     EventSchema,
@@ -48,6 +53,7 @@ from yoetz.domain.events import (
     FindingRecordedPayload,
     IntegrationKind,
     LedgerChain,
+    LineageOrigin,
     NoObligationsReason,
     ObligationChange,
     ObligationChangeKind,
@@ -123,6 +129,9 @@ from yoetz.protocol.models import (
 from yoetz.protocol.schemas import validate_schema_instance
 
 _FIXTURE_PATH = Path(__file__).parents[3] / "fixtures" / "replay" / "all-event-families.case.json"
+_LINEAGE_FIXTURE_PATH = (
+    Path(__file__).parents[3] / "fixtures" / "replay" / "lineage-event-families.case.json"
+)
 _DIGEST = "sha256:" + "1" * 64
 _COMMITMENT = "hmac-sha256:" + "2" * 64
 _SRC_ROOT: Final = Path(__file__).parents[3] / "src"
@@ -155,23 +164,74 @@ _EVENT_MATRIX_SCRIPT: Final = textwrap.dedent(
 ).strip()
 
 
-def _fixture_rows() -> tuple[dict[str, Any], ...]:
-    document = cast(dict[str, Any], json.loads(_FIXTURE_PATH.read_text(encoding="utf-8")))
+def _fixture_rows(path: Path) -> tuple[dict[str, Any], ...]:
+    document = cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
     raw_input = cast(dict[str, Any], document["input"])
     rows = cast(list[dict[str, Any]], raw_input["accepted_entries"])
     return tuple(deepcopy(rows))
 
 
-_ROWS = _fixture_rows()
+_ROWS = _fixture_rows(_FIXTURE_PATH)
+_LINEAGE_ROWS = _fixture_rows(_LINEAGE_FIXTURE_PATH)
 _ROW_BY_FAMILY = {
-    cast(str, cast(dict[str, Any], row["envelope"])["schema"]["name"]): row for row in _ROWS
+    cast(str, cast(dict[str, Any], row["envelope"])["schema"]["name"]): row
+    for row in (*_ROWS, *_LINEAGE_ROWS)
 }
+_FIXTURE_FAMILIES: Final[tuple[str, ...]] = tuple(
+    family for family in EVENT_FAMILIES if family in _ROW_BY_FAMILY
+)
 
 
 def _assert_reason(reason: str, operation: Callable[[], object]) -> None:
     with pytest.raises(ProtocolValueError) as caught:
         operation()
     assert caught.value.reason_code == reason
+
+
+def _coordination_context_wire() -> dict[str, Any]:
+    return {
+        "detection_id": "evt_30000003-0000-4000-8000-000000000101",
+        "project_id": "prj_30000003-0000-4000-8000-000000000102",
+        "membership_generation": "3",
+        "left_task_id": "tsk_30000003-0000-4000-8000-000000000103",
+        "right_task_id": "tsk_30000003-0000-4000-8000-000000000104",
+        "recipient_task_id": "tsk_30000003-0000-4000-8000-000000000103",
+        "counterpart_task_id": "tsk_30000003-0000-4000-8000-000000000104",
+        "source_task_id": "tsk_30000003-0000-4000-8000-000000000104",
+        "overlap_kind": "integration",
+        "resource_identities": [
+            "sha256:" + "1" * 64,
+            "sha256:" + "2" * 64,
+        ],
+        "resource_count": "2",
+        "source_repository_commitment": "hmac-sha256:" + "3" * 64,
+        "source_workspace_commitment": "hmac-sha256:" + "4" * 64,
+        "source_route_generation": "7",
+        "source_attributable_paths": True,
+        "context_digest": "sha256:" + "5" * 64,
+    }
+
+
+def _coordination_disposition_wire() -> dict[str, Any]:
+    return {
+        "detection_id": "evt_30000003-0000-4000-8000-000000000101",
+        "project_id": "prj_30000003-0000-4000-8000-000000000102",
+        "membership_generation": "3",
+        "recipient_task_id": "tsk_30000003-0000-4000-8000-000000000103",
+        "obligation_id": "obl_30000003-0000-4000-8000-000000000105",
+        "disposition": "shared_work",
+        "evidence_refs": ["evd_30000003-0000-4000-8000-000000000106"],
+    }
+
+
+def _coordination_obligation_declared_wire() -> dict[str, Any]:
+    return {
+        "detection_id": "evt_30000003-0000-4000-8000-000000000101",
+        "project_id": "prj_30000003-0000-4000-8000-000000000102",
+        "membership_generation": "3",
+        "recipient_task_id": "tsk_30000003-0000-4000-8000-000000000103",
+        "obligation_id": "obl_30000003-0000-4000-8000-000000000105",
+    }
 
 
 def _schema_for(row: Mapping[str, Any]) -> EventSchema:
@@ -218,6 +278,23 @@ _GENERATED_TEXT: Final[SearchStrategy[str]] = st.one_of(
 
 def _generated_payload(family: str, text_value: str, integer_value: int) -> EventPayload:
     payload = cast(EventPayload, _decode_row(_ROW_BY_FAMILY[family]))
+    if family in {
+        "delegation_declared",
+        "delegation_cancelled",
+        "child_accepted",
+        "child_rejected",
+        "child_written_off",
+        "child_dependencies_recorded",
+        "work_closed",
+        "work_abandoned",
+        "work_cancelled",
+        "work_written_off",
+        "coordination_obligation_declared",
+    }:
+        # Lineage payloads are intentionally all structural and closed.  Their golden rows already
+        # exercise the accepted values; retain those values while this matrix varies text and
+        # integer inputs for the pre-existing prose-bearing payload families.
+        return payload
     if family == "check_recorded":
         changes: dict[str, object] = {"suppressed_count": integer_value}
     elif family == "receipt_recorded":
@@ -249,11 +326,11 @@ def _fixed_generated_payloads() -> tuple[tuple[EventSchema, EventPayload], ...]:
                 9_007_199_254_740_991,
             ),
         )
-        for index, family in enumerate(EVENT_FAMILIES)
+        for index, family in enumerate(_FIXTURE_FAMILIES)
     )
 
 
-@pytest.mark.parametrize("family", EVENT_FAMILIES)
+@pytest.mark.parametrize("family", _FIXTURE_FAMILIES)
 def test_each_event_family_validates_required_and_optional_fields(family: str) -> None:
     row = _ROW_BY_FAMILY[family]
     schema = _schema_for(row)
@@ -285,11 +362,21 @@ _REQUIRED_FIELD_BY_FAMILY = {
     "redaction_recorded": "target_event_ids",
     "check_recorded": "scope",
     "receipt_recorded": "receipt_id",
+    "delegation_declared": "child_task_id",
+    "delegation_cancelled": "child_task_id",
+    "child_accepted": "child_task_id",
+    "child_rejected": "child_task_id",
+    "child_written_off": "child_task_id",
+    "child_dependencies_recorded": "children",
+    "coordination_obligation_declared": "detection_id",
+    "work_abandoned": "service_stamped",
 }
 
 
-@pytest.mark.parametrize("family", EVENT_FAMILIES)
+@pytest.mark.parametrize("family", _FIXTURE_FAMILIES)
 def test_each_known_family_rejects_one_missing_required_field(family: str) -> None:
+    if family not in _REQUIRED_FIELD_BY_FAMILY:
+        pytest.skip("family has no required payload fields beyond the closed empty object")
     row = _ROW_BY_FAMILY[family]
     wire = deepcopy(cast(dict[str, Any], row["payload"]))
     del wire[_REQUIRED_FIELD_BY_FAMILY[family]]
@@ -303,7 +390,7 @@ def test_each_known_family_rejects_one_missing_required_field(family: str) -> No
 
 
 def test_event_payloads_are_frozen() -> None:
-    for row in _ROWS:
+    for row in (*_ROWS, *_LINEAGE_ROWS):
         payload = _decode_row(row)
         assert is_dataclass(payload)
         field_name = fields(payload)[0].name
@@ -475,12 +562,28 @@ def test_exact_schema_pair_dispatch_and_unknown_boundary() -> None:
     assert {schema.version for schema in PAYLOAD_TYPES if schema.name == "finding_recorded"} == {
         SCHEMA_VERSION,
         "1.1.0",
+        "1.2.0",
     }
+    assert {
+        schema.version for schema in PAYLOAD_TYPES if schema.name == "coordination_context_recorded"
+    } == {"1.0.0"}
+    assert {
+        schema.version
+        for schema in PAYLOAD_TYPES
+        if schema.name == "coordination_disposition_recorded"
+    } == {"1.0.0"}
+    assert {
+        schema.version
+        for schema in PAYLOAD_TYPES
+        if schema.name == "coordination_obligation_declared"
+    } == {"1.0.0"}
     for family in ("session_opened", "session_resumed"):
-        assert {schema.version for schema in PAYLOAD_TYPES if schema.name == family} == {
-            SCHEMA_VERSION,
-            "1.1.0",
-        }
+        expected_versions = {SCHEMA_VERSION, "1.1.0"}
+        if family == "session_opened":
+            expected_versions.add("1.2.0")
+        assert {
+            schema.version for schema in PAYLOAD_TYPES if schema.name == family
+        } == expected_versions
     assert all(
         schema.version == SCHEMA_VERSION
         for schema in PAYLOAD_TYPES
@@ -493,6 +596,84 @@ def test_exact_schema_pair_dispatch_and_unknown_boundary() -> None:
             "session_opened",
             "session_resumed",
         }
+    )
+
+
+def test_coordination_payloads_round_trip_with_closed_wire_shapes() -> None:
+    context_schema = EventSchema("coordination_context_recorded", "1.0.0")
+    context = decode_payload(context_schema, freeze_json(_coordination_context_wire()))
+    assert type(context) is CoordinationContextRecordedPayload
+    assert context.overlap_kind is OverlapKind.INTEGRATION
+    assert context.source_task_id == context.counterpart_task_id
+    assert encode_payload(context) == freeze_json(_coordination_context_wire())
+    assert decode_payload(context_schema, encode_payload(context)) == context
+
+    disposition_schema = EventSchema("coordination_disposition_recorded", "1.0.0")
+    disposition = decode_payload(disposition_schema, freeze_json(_coordination_disposition_wire()))
+    assert type(disposition) is CoordinationDispositionRecordedPayload
+    assert disposition.disposition is CoordinationDisposition.SHARED_WORK
+    assert encode_payload(disposition) == freeze_json(_coordination_disposition_wire())
+    assert decode_payload(disposition_schema, encode_payload(disposition)) == disposition
+
+    declaration_schema = EventSchema("coordination_obligation_declared", "1.0.0")
+    declaration = decode_payload(
+        declaration_schema,
+        freeze_json(_coordination_obligation_declared_wire()),
+    )
+    assert type(declaration) is CoordinationObligationDeclaredPayload
+    assert declaration.membership_generation == 3
+    assert encode_payload(declaration) == freeze_json(_coordination_obligation_declared_wire())
+    assert decode_payload(declaration_schema, encode_payload(declaration)) == declaration
+    validate_schema_instance(
+        "coordination-obligation-declared",
+        "1.0.0",
+        encode_payload(declaration),
+    )
+
+
+def test_coordination_payloads_reject_ambiguous_or_bare_wire_values() -> None:
+    context_schema = EventSchema("coordination_context_recorded", "1.0.0")
+    for field, value, reason in (
+        (
+            "source_task_id",
+            "tsk_30000003-0000-4000-8000-000000000103",
+            "coordination_task_pair_invalid",
+        ),
+        ("resource_count", "02", "invalid_event_value_type"),
+    ):
+        wire = _coordination_context_wire()
+        wire[field] = value
+        _assert_reason(reason, lambda wire=wire: decode_payload(context_schema, freeze_json(wire)))
+
+    unsorted_resources = _coordination_context_wire()
+    unsorted_resources["resource_identities"] = list(
+        reversed(cast(list[str], unsorted_resources["resource_identities"]))
+    )
+    _assert_reason(
+        "unsorted_set_field",
+        lambda: decode_payload(context_schema, freeze_json(unsorted_resources)),
+    )
+
+    disposition_schema = EventSchema("coordination_disposition_recorded", "1.0.0")
+    empty_evidence = _coordination_disposition_wire()
+    empty_evidence["evidence_refs"] = []
+    _assert_reason(
+        "invalid_event_value_type",
+        lambda: decode_payload(disposition_schema, freeze_json(empty_evidence)),
+    )
+
+    declaration_schema = EventSchema("coordination_obligation_declared", "1.0.0")
+    declaration = _coordination_obligation_declared_wire()
+    declaration["membership_generation"] = "03"
+    _assert_reason(
+        "invalid_event_value_type",
+        lambda: decode_payload(declaration_schema, freeze_json(declaration)),
+    )
+    declaration = _coordination_obligation_declared_wire()
+    declaration["unexpected"] = True
+    _assert_reason(
+        "unknown_payload_field",
+        lambda: decode_payload(declaration_schema, freeze_json(declaration)),
     )
     row = _ROW_BY_FAMILY["session_opened"]
     valid_payload = freeze_json(row["payload"])
@@ -824,6 +1005,66 @@ def test_session_opened_preserves_full_start_content_and_independent_history_ref
             integration=IntegrationKind.LOCAL_CLI,
             profile=RuntimeProfile.TEST_FAKE,
             external_ref="e" * 8_193,
+        ),
+    )
+
+
+def test_current_lineage_events_bind_project_membership_generation() -> None:
+    project = "prj_30000003-0000-4000-8000-000000000012"
+    session_schema = EventSchema("session_opened", "1.2.0")
+    session = SessionOpenedPayload(
+        task_title="cross-repository child",
+        client_kind=ClientKind.TEST_CLIENT,
+        client_version="0.1.0",
+        integration=IntegrationKind.COOPERATIVE_MCP,
+        profile=RuntimeProfile.TEST_FAKE,
+        parent_task_id=task_id("tsk_30000003-0000-4000-8000-000000000001"),
+        depth=1,
+        origin=LineageOrigin.PARENT_MINTED,
+        project_id=project,
+        membership_generation=7,
+    )
+    session_wire = cast(dict[str, Any], encode_payload(session))
+    assert session_wire["project_id"] == project
+    assert session_wire["membership_generation"] == "7"
+    assert decode_payload(session_schema, freeze_json(session_wire)) == session
+    validate_schema_instance("session-opened", "1.2.0", session_wire)
+    _assert_reason(
+        "invalid_event_schema",
+        lambda: decode_payload(EventSchema("session_opened", "1.1.0"), freeze_json(session_wire)),
+    )
+    _assert_reason(
+        "session_lineage_fields_incomplete",
+        lambda: SessionOpenedPayload(
+            task_title="cross-repository child",
+            client_kind=ClientKind.TEST_CLIENT,
+            client_version="0.1.0",
+            integration=IntegrationKind.COOPERATIVE_MCP,
+            profile=RuntimeProfile.TEST_FAKE,
+            project_id=project,
+        ),
+    )
+
+    delegation_schema = EventSchema("delegation_declared", "1.0.0")
+    delegation = DelegationDeclaredPayload(
+        child_task_id=task_id("tsk_30000003-0000-4000-8000-000000000002"),
+        handle_digest="sha256:" + "3" * 64,
+        depth=1,
+        project_id=project,
+        membership_generation=7,
+    )
+    delegation_wire = cast(dict[str, Any], encode_payload(delegation))
+    assert delegation_wire["project_id"] == project
+    assert delegation_wire["membership_generation"] == "7"
+    assert decode_payload(delegation_schema, freeze_json(delegation_wire)) == delegation
+    validate_schema_instance("delegation-declared", "1.0.0", delegation_wire)
+    _assert_reason(
+        "invalid_event_value_type",
+        lambda: DelegationDeclaredPayload(
+            child_task_id=task_id("tsk_30000003-0000-4000-8000-000000000002"),
+            handle_digest="sha256:" + "3" * 64,
+            depth=1,
+            project_id=project,
         ),
     )
 
@@ -1315,7 +1556,7 @@ def test_check_payload_provenance_matches_selected_final_outcome() -> None:
     )
 
 
-@pytest.mark.parametrize("family", EVENT_FAMILIES)
+@pytest.mark.parametrize("family", _FIXTURE_FAMILIES)
 @example(text_value="x" * 8_192, integer_value=9_007_199_254_740_991)
 @settings(max_examples=20)
 @given(
@@ -1535,7 +1776,7 @@ def _unknown_from_row(row: Mapping[str, Any]) -> UnknownEvent:
     )
 
 
-@pytest.mark.parametrize("family", EVENT_FAMILIES)
+@pytest.mark.parametrize("family", _FIXTURE_FAMILIES)
 def test_accepted_record_views_are_exact(family: str) -> None:
     row = _ROW_BY_FAMILY[family]
     record = _accepted_from_row(row)

@@ -5,17 +5,50 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
-from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+import inspect
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from typing import Literal, Protocol, cast
 
 from pydantic import BaseModel
 
+from yoetz.application.coordination import CoordinationParticipant
 from yoetz.application.egress import PrivacyCoordinator
+from yoetz.application.lineage import LineageCoordinator, LineageSnapshot, LineageStatus
 from yoetz.application.observation_advice_semantic import ObservationAdviceSemanticSupervisor
 from yoetz.application.observation_verification import ObservationVerificationSupervisor
+from yoetz.application.projects import ProjectApplication
+from yoetz.application.start import recover_delegation
 from yoetz.application.unit_of_work import run_publish_response_commit
-from yoetz.domain.events import RuntimeProfile
+from yoetz.domain.coordination import (
+    CoordinationError,
+    CoordinationErrorCode,
+    LineageAcceptance,
+    SessionHealth,
+    WorkState,
+)
+from yoetz.domain.events import (
+    LINEAGE_SERVICE_STAMPED_FAMILIES,
+    AcceptedEvent,
+    ChildAcceptedPayload,
+    ChildDependenciesRecordedPayload,
+    ChildRejectedPayload,
+    ChildWrittenOffPayload,
+    CoordinationContextRecordedPayload,
+    CoordinationDispositionRecordedPayload,
+    CoordinationObligationDeclaredPayload,
+    DelegationCancelledPayload,
+    DelegationDeclaredPayload,
+    EventSchema,
+    EvidenceRecordedPayload,
+    ResultRecordedPayload,
+    RuntimeProfile,
+    WorkAbandonedPayload,
+    WorkCancelledPayload,
+    WorkClosedPayload,
+    WorkWrittenOffPayload,
+    decode_payload,
+)
 from yoetz.domain.privacy import (
     AuthorizationScope,
     AuthorizationScopeKind,
@@ -36,6 +69,10 @@ from yoetz.domain.values import (
     validate_commitment,
     validate_sha256_digest,
 )
+from yoetz.domain.values import (
+    JsonValue as DomainJsonValue,
+)
+from yoetz.kernel.lineage import LineageEvaluation
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.control import (
     ControlClientKind,
@@ -46,6 +83,7 @@ from yoetz.ports.control import (
     RepositoryPrivacyContext,
 )
 from yoetz.ports.diagnostics import RuntimeCapability
+from yoetz.ports.host_lineage import HostLineageRegistryPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.importer import ImportAllocation
 from yoetz.ports.ledger import CheckAwaitingHuman, CheckCommitResult, FrozenCase
@@ -55,7 +93,7 @@ from yoetz.ports.publish_response_catalog import (
     StoredPublishResponse,
 )
 from yoetz.ports.runtime import BundleRuntimePort, RouteAccess, RouteCommand, TaskRuntime
-from yoetz.ports.start_catalog import StartCatalogPort, TaskRoute, TaskRouteState
+from yoetz.ports.start_catalog import SessionState, StartCatalogPort, TaskRoute, TaskRouteState
 from yoetz.protocol.canonical import (
     MAX_JSON_DEPTH,
     JsonValue,
@@ -113,6 +151,144 @@ __all__ = [
 ]
 
 _MAX_FINDINGS_LIMIT = 10
+
+# These families are ordinary public writes, but their catalog state must move together with the
+# accepted ledger event.  The three service-owned families are intentionally kept separate: they
+# are rejected by ``publish_work`` and can only be appended by the coordinator's authenticated
+# service writer path.
+_LINEAGE_PUBLIC_LIFECYCLE_FAMILIES = frozenset(
+    {
+        "delegation_cancelled",
+        "child_accepted",
+        "child_rejected",
+        "child_written_off",
+        "work_closed",
+        "work_cancelled",
+        "work_written_off",
+    }
+)
+
+
+def _lineage_publication_payloads(request: PublishWorkRequest) -> tuple[object, ...]:
+    """Decode lifecycle drafts after request validation using the frozen domain registry.
+
+    ``PublishWorkRequest`` deliberately keeps drafts as canonical JSON so the ordinary publish
+    path can preserve its existing request identity.  This small service-side projection extracts
+    only the lineage payloads needed to update the catalog; it never stores or logs the submitted
+    title, description, or other event content.
+    """
+
+    payloads: list[object] = []
+    for draft in request.event_drafts:
+        if not isinstance(draft, Mapping):
+            continue
+        schema = draft.get("schema")
+        if not isinstance(schema, Mapping):
+            continue
+        name = schema.get("name")
+        version = schema.get("version")
+        if type(name) is not str or type(version) is not str:
+            continue
+        if name not in _LINEAGE_PUBLIC_LIFECYCLE_FAMILIES | LINEAGE_SERVICE_STAMPED_FAMILIES:
+            continue
+        try:
+            payloads.append(
+                decode_payload(
+                    EventSchema(name, version),
+                    cast(DomainJsonValue, draft.get("payload")),
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            # The normal publish validator runs before this helper.  Reaching this branch means
+            # the caller supplied a hand-built model that bypassed that contract, so expose one
+            # stable request error instead of leaking parser details.
+            raise PublicOperationError(
+                PublicErrorCode.INVALID_REQUEST,
+                "The lineage lifecycle event is invalid.",
+                False,
+                safe_details={"reason_code": "lineage_event_invalid"},
+            ) from exc
+    return tuple(payloads)
+
+
+def _coordination_publication_payloads(
+    request: PublishWorkRequest,
+) -> tuple[CoordinationDispositionRecordedPayload, ...]:
+    """Decode only typed coordination dispositions from an ordinary publish request."""
+
+    payloads: list[CoordinationDispositionRecordedPayload] = []
+    for draft in request.event_drafts:
+        if not isinstance(draft, Mapping):
+            continue
+        schema = draft.get("schema")
+        if not isinstance(schema, Mapping):
+            continue
+        if schema.get("name") != "coordination_disposition_recorded":
+            continue
+        try:
+            payload = decode_payload(
+                EventSchema(
+                    cast(str, schema.get("name")),
+                    cast(str, schema.get("version")),
+                ),
+                cast(DomainJsonValue, draft.get("payload")),
+            )
+        except (TypeError, ValueError) as exc:
+            raise PublicOperationError(
+                PublicErrorCode.INVALID_REQUEST,
+                "The coordination disposition is invalid.",
+                False,
+                safe_details={"reason_code": "coordination_disposition_invalid"},
+            ) from exc
+        if type(payload) is not CoordinationDispositionRecordedPayload:
+            raise PublicOperationError(
+                PublicErrorCode.INVALID_REQUEST,
+                "The coordination disposition is invalid.",
+                False,
+                safe_details={"reason_code": "coordination_disposition_invalid"},
+            )
+        payloads.append(payload)
+    return tuple(payloads)
+
+
+def _coordination_declaration_payloads(
+    request: PublishWorkRequest,
+) -> tuple[CoordinationObligationDeclaredPayload, ...]:
+    """Decode explicit coordination bindings from an ordinary agent publication."""
+
+    payloads: list[CoordinationObligationDeclaredPayload] = []
+    for draft in request.event_drafts:
+        if not isinstance(draft, Mapping):
+            continue
+        schema = draft.get("schema")
+        if not isinstance(schema, Mapping):
+            continue
+        if schema.get("name") != "coordination_obligation_declared":
+            continue
+        try:
+            payload = decode_payload(
+                EventSchema(
+                    cast(str, schema.get("name")),
+                    cast(str, schema.get("version")),
+                ),
+                cast(DomainJsonValue, draft.get("payload")),
+            )
+        except (TypeError, ValueError) as exc:
+            raise PublicOperationError(
+                PublicErrorCode.INVALID_REQUEST,
+                "The coordination declaration is invalid.",
+                False,
+                safe_details={"reason_code": "coordination_declaration_invalid"},
+            ) from exc
+        if type(payload) is not CoordinationObligationDeclaredPayload:
+            raise PublicOperationError(
+                PublicErrorCode.INVALID_REQUEST,
+                "The coordination declaration is invalid.",
+                False,
+                safe_details={"reason_code": "coordination_declaration_invalid"},
+            )
+        payloads.append(payload)
+    return tuple(payloads)
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,7 +478,13 @@ type UnprojectedControlBody = (
 
 
 class _SemanticEvaluator(Protocol):
-    def __call__(self, frozen: FrozenCase, findings: tuple[Finding, ...]) -> Awaitable[object]: ...
+    def __call__(
+        self,
+        frozen: FrozenCase,
+        findings: tuple[Finding, ...],
+        runtime: TaskRuntime | None = None,
+        lineage_evaluation: LineageEvaluation | None = None,
+    ) -> Awaitable[object]: ...
 
 
 type _ScopeResolver = Callable[
@@ -340,6 +522,7 @@ _STRUCTURAL_SUPPORT_METHODS = frozenset(
         ControlMethod.OBSERVATION_PAUSE,
         ControlMethod.OBSERVATION_RESUME,
         ControlMethod.OBSERVATION_REVOKE,
+        ControlMethod.PROJECT,
     }
 )
 _PATH_BEARING_SUPPORT_METHODS = frozenset(
@@ -612,6 +795,9 @@ class Application:
     observation_sweep: Callable[[], Awaitable[object]] | None = field(
         default=None, repr=False, compare=False
     )
+    coordination_sweep: Callable[[], Awaitable[object]] | None = field(
+        default=None, repr=False, compare=False
+    )
     ready_recommendation_refresh: Callable[[], Awaitable[object]] | None = field(
         default=None, repr=False, compare=False
     )
@@ -632,12 +818,27 @@ class Application:
         default=None, repr=False, compare=False
     )
     enforce_repository_identity: bool = True
+    # The lineage coordinator is optional for pre-0004 test/catalog compositions.  READY
+    # production composition supplies the SQLite-backed instance so status and start share one
+    # authority.
+    lineage: LineageCoordinator | None = field(default=None, repr=False, compare=False)
+    project_application: ProjectApplication | None = field(default=None, repr=False, compare=False)
+    host_lineage_registry: HostLineageRegistryPort | None = field(
+        default=None, repr=False, compare=False
+    )
+    _lineage_publish_lock: asyncio.Lock = field(init=False, repr=False, compare=False)
+    # One ready service owns one runtime cache.  Serialize start admission so two concurrent
+    # route rotations for the same bundle cannot race the runtime's single-writer lease while the
+    # catalog still admits both request identities atomically.
+    _start_lock: asyncio.Lock = field(init=False, repr=False, compare=False)
     _close_lock: asyncio.Lock = field(init=False, repr=False, compare=False)
     _close_task: asyncio.Task[None] | None = field(
         init=False, default=None, repr=False, compare=False
     )
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "_lineage_publish_lock", asyncio.Lock())
+        object.__setattr__(self, "_start_lock", asyncio.Lock())
         object.__setattr__(self, "_close_lock", asyncio.Lock())
         if type(self.connected_provider_ids) is not tuple or any(
             type(item) is not str for item in self.connected_provider_ids
@@ -649,6 +850,8 @@ class Application:
             raise TypeError("semantic_ready_invalid")
         if self.observation_sweep is not None and not callable(self.observation_sweep):
             raise TypeError("observation_sweep_invalid")
+        if self.coordination_sweep is not None and not callable(self.coordination_sweep):
+            raise TypeError("coordination_sweep_invalid")
         if self.ready_recommendation_refresh is not None and not callable(
             self.ready_recommendation_refresh
         ):
@@ -728,15 +931,601 @@ class Application:
         *,
         repository_privacy_context: RepositoryPrivacyContext | None = None,
     ) -> StartInternalResult:
-        return await execute_start(
-            self,  # pyright: ignore[reportArgumentType]
-            request,
-            repository_privacy_commitment=(
-                None
-                if repository_privacy_context is None
-                else repository_privacy_context.commitment
-            ),
+        # Delegate/self-register requests use a parent session as their authority but do not pass
+        # through the start-catalog route transition that rotates or renews an existing session.
+        # Touch that lease before executing the lineage operation so an active parent cannot be
+        # declared contact-lost while its child is being provisioned.  Ordinary resume/create
+        # requests are renewed by the catalog reservation itself; attach has no pre-existing child
+        # session to renew.
+        if request.mode == "delegate":
+            await self._renew_activity_session(request.session_id, request)
+        elif request.parent_session_id is not None:
+            await self._renew_activity_session(request.parent_session_id, request)
+        async with self._start_lock:
+            # A public lifecycle append and its catalog mirror share the lineage publication
+            # lock.  Parent-authorized starts take that same lock and reconcile any event that
+            # survived an append-before-sync crash before admission, so a stale OPEN projection
+            # cannot mint a child after the parent ledger already closed its work.  Attach has no
+            # parent admission and remains allowed to continue an already-minted child.
+            parent_admission = request.mode == "delegate" or request.parent_session_id is not None
+            if parent_admission:
+                async with self._lineage_publish_lock:
+                    await self.reconcile_lineage_publications()
+                    result = await execute_start(
+                        self,  # pyright: ignore[reportArgumentType]
+                        request,
+                        repository_privacy_commitment=(
+                            None
+                            if repository_privacy_context is None
+                            else repository_privacy_context.commitment
+                        ),
+                    )
+            else:
+                result = await execute_start(
+                    self,  # pyright: ignore[reportArgumentType]
+                    request,
+                    repository_privacy_commitment=(
+                        None
+                        if repository_privacy_context is None
+                        else repository_privacy_context.commitment
+                    ),
+                )
+            await self._maybe_birth_implicit_repository_project(repository_privacy_context)
+            return result
+
+    async def _maybe_birth_implicit_repository_project(
+        self, repository_privacy_context: RepositoryPrivacyContext | None
+    ) -> None:
+        """Create the implicit repository project when a second task is actually live.
+
+        Repository identity is trusted control context, so a public workspace or external
+        selector cannot trigger discovery.  The project is born only after the completed start
+        route is visible as ``active`` with an active session; an initializing or contact-lost task
+        never counts.  The catalog's ensure operation is idempotent across replays.
+        """
+
+        if repository_privacy_context is None:
+            return
+        list_tasks = getattr(self.start_catalog, "list_repository_task_ids", None)
+        task_route = getattr(self.start_catalog, "task_route", None)
+        task_session_state = getattr(self.start_catalog, "task_session_state", None)
+        ensure_project = getattr(self.start_catalog, "ensure_repository_project", None)
+        grouping_enabled = getattr(self.start_catalog, "repository_auto_grouping_enabled", None)
+        ensure_if_enabled = getattr(
+            self.start_catalog, "ensure_repository_project_if_auto_grouping_enabled", None
         )
+        if not all(
+            callable(item)
+            for item in (
+                list_tasks,
+                task_route,
+                task_session_state,
+                ensure_project,
+                grouping_enabled,
+            )
+        ):
+            return
+        repository = repository_privacy_context.commitment
+        task_ids = await cast(Callable[[str], Awaitable[tuple[str, ...]]], list_tasks)(repository)
+        live = 0
+        for task_id in task_ids:
+            route = await cast(Callable[[str], Awaitable[TaskRoute | None]], task_route)(task_id)
+            if route is None or route.state is not TaskRouteState.ACTIVE:
+                continue
+            if getattr(route, "work_state", WorkState.OPEN) is not WorkState.OPEN:
+                continue
+            state = await cast(Callable[[str], Awaitable[SessionState | None]], task_session_state)(
+                route.session_id
+            )
+            if state is not None and state.health is SessionHealth.ACTIVE:
+                live += 1
+                if live >= 2:
+                    enabled = await cast(Callable[[str], Awaitable[bool]], grouping_enabled)(
+                        repository
+                    )
+                    if type(enabled) is not bool or not enabled:
+                        return
+                    if callable(ensure_if_enabled):
+                        await cast(Callable[[str], Awaitable[object]], ensure_if_enabled)(
+                            repository
+                        )
+                    else:
+                        # Older test doubles may only implement the original ensure operation;
+                        # the preference recheck above still prevents disabled implicit birth.
+                        await cast(Callable[[str], Awaitable[object]], ensure_project)(repository)
+                    return
+
+    async def _renew_activity_session(
+        self,
+        session_id: str | None,
+        request: object,
+    ) -> None:
+        """Renew one authenticated live-session lease for a mutating workflow call.
+
+        Lease renewal is deliberately separate from status reads.  The start catalog remains the
+        durable authority for session health; the lineage snapshot is repaired only when this
+        application uses an in-memory lineage store, so a contact-lost session can recover on its
+        first authorized activity without making a read path mutate state.
+        """
+
+        if type(session_id) is not str:
+            return
+        binding = await self.start_catalog.session_binding(session_id)
+        if binding is None or binding.session_id != session_id:
+            return
+        request_writer_id = getattr(request, "writer_id", None)
+        if type(request_writer_id) is str and request_writer_id != binding.writer_id:
+            return
+        record = getattr(self.start_catalog, "record_session_state", None)
+        if callable(record):
+            actor = getattr(getattr(request, "actor", None), "actor_id", None)
+            await cast(Callable[..., Awaitable[object]], record)(
+                binding.task_id,
+                session_id,
+                health=SessionHealth.ACTIVE,
+                changed_at=self.clock.now_utc(),
+                lease_expires_at=None,
+                actor_id=actor if type(actor) is str else None,
+            )
+        lineage = self.lineage
+        if lineage is None:
+            return
+        snapshot = await lineage.store.get_task(binding.task_id)
+        if snapshot is None or (
+            snapshot.active_session_id == session_id
+            and snapshot.session_health is SessionHealth.ACTIVE
+        ):
+            return
+        if snapshot.active_session_id not in {None, session_id}:
+            return
+        await lineage.store.save_task(
+            replace(
+                snapshot,
+                active_session_id=session_id,
+                session_health=SessionHealth.ACTIVE,
+                contact_lost_at=None,
+                abandonment_deadline=None,
+                lineage_authority_revision=snapshot.lineage_authority_revision + 1,
+            )
+        )
+
+    async def lineage_status(
+        self,
+        task_id: str,
+        requester_session_id: str,
+        *,
+        at_frontier: int | None = None,
+    ) -> LineageStatus:
+        """Return one authenticated, one-level lineage projection.
+
+        Structural lineage is scoped to the requesting task session.  The optional frontier is a
+        freshness assertion for callers that already read a task ledger; catalog lifecycle state
+        is still the authority and no child payload is loaded here.
+        """
+
+        if self.lineage is None:
+            raise PublicOperationError(
+                PublicErrorCode.SERVICE_UNAVAILABLE,
+                "The lineage service is temporarily unavailable.",
+                True,
+                safe_details={"reason_code": "lineage_service_unavailable"},
+            )
+        if type(at_frontier) not in {int, type(None)} or (
+            type(at_frontier) is int and at_frontier < 0
+        ):
+            raise PublicOperationError(
+                PublicErrorCode.INVALID_REQUEST,
+                "The lineage frontier is invalid.",
+                False,
+            )
+        try:
+            bound_task = await self.lineage.store.get_session_task(requester_session_id)
+        except (TypeError, ValueError) as exc:
+            raise PublicOperationError(
+                PublicErrorCode.INVALID_REQUEST,
+                "The lineage session is invalid.",
+                False,
+            ) from exc
+        try:
+            requested_task_id = validate_id(IdKind.TASK, task_id)
+        except (TypeError, ValueError) as exc:
+            raise PublicOperationError(
+                PublicErrorCode.INVALID_REQUEST,
+                "The lineage task is invalid.",
+                False,
+            ) from exc
+        if bound_task != requested_task_id:
+            raise PublicOperationError(
+                PublicErrorCode.SESSION_CONFLICT,
+                "The lineage session is not authorized for this task.",
+                False,
+                safe_details={"reason_code": "lineage_session_scope"},
+            )
+        return await self.lineage.status(task_id)
+
+    async def recover_lineage(self) -> tuple[tuple[object, ...], tuple[object, ...]]:
+        """Run one bounded recovery sweep for delegation operations and task sessions.
+
+        The daemon may invoke this from its existing service sweep.  Recovery is explicit and
+        clock-injected: an expired lease becomes ``contact_lost`` first, and only a later sweep
+        after the configured window changes open work to ``abandoned``.  No receipt or status read
+        calls this method implicitly.
+        """
+
+        if self.lineage is None:
+            raise PublicOperationError(
+                PublicErrorCode.SERVICE_UNAVAILABLE,
+                "The lineage service is temporarily unavailable.",
+                True,
+                safe_details={"reason_code": "lineage_service_unavailable"},
+            )
+        # Ledger lifecycle events are the evidence of an accepted public write.  Reconcile that
+        # evidence before expiring leases so a restart cannot strand a catalog projection merely
+        # because the session stopped heartbeating while the process was down.
+        await self.reconcile_lineage_publications()
+        store = self.lineage.store
+        expired: tuple[SessionState, ...] = ()
+        expire = getattr(store, "expire_session_leases", None)
+        if callable(expire):
+            expired = tuple(await cast(Callable[[], Awaitable[tuple[SessionState, ...]]], expire)())
+            for state in expired:
+                await self.lineage.mark_contact_lost(session_id=state.session_id)
+        reclaimed = tuple(await self.lineage.recover_delegations())
+        operations: list[object] = []
+        for operation in reclaimed:
+            try:
+                operations.append(await recover_delegation(self, operation))
+            except PublicOperationError as exc:
+                # A parent that is still ended or a bundle temporarily held by another worker
+                # remains pending under its durable lease.  The next periodic sweep reclaims and
+                # retries it; unrelated tasks continue through this recovery turn.
+                if not exc.retryable:
+                    continue
+            except OSError, TimeoutError:
+                # Environmental bundle/key availability is likewise retryable at this boundary.
+                continue
+        abandoned = tuple(await self.lineage.recover_abandoned())
+        return tuple(operations), (*expired, *abandoned)
+
+    async def reconcile_lineage_publications(self) -> tuple[int, int]:
+        """Repair catalog lifecycle rows from events that survived an append-before-sync crash.
+
+        Ledger append and catalog projection are separate durable stores.  The normal publish path
+        mirrors them immediately, but a process can terminate between those commits.  On the next
+        ready generation, read-capable routes provide the authenticated ledger bytes and this
+        method reapplies only registered lineage lifecycle payloads through idempotent recovery
+        transitions.  It deliberately scans historical session ids through the current task
+        runtime, so a reattach before recovery does not hide the old event.
+
+        The return value is structural only: ``(events_scanned, events_reconciled)``.
+        """
+
+        lineage = self.lineage
+        if lineage is None:
+            return 0, 0
+        list_tasks = getattr(lineage.store, "list_tasks", None)
+        task_route = getattr(self.start_catalog, "task_route", None)
+        task_sessions = getattr(self.start_catalog, "task_session_states", None)
+        if not callable(list_tasks) or not callable(task_route):
+            return 0, 0
+        snapshots = await cast(Callable[[], Awaitable[tuple[object, ...]]], list_tasks)()
+        scanned = 0
+        reconciled = 0
+        for snapshot in snapshots:
+            if not isinstance(snapshot, LineageSnapshot):
+                # ``list_tasks`` is a typed lineage-store seam; keep malformed compatibility
+                # doubles from becoming a user-visible maintenance crash.
+                continue
+            task_id = snapshot.task_id
+            route = await cast(Callable[[str], Awaitable[TaskRoute | None]], task_route)(task_id)
+            if route is None or route.state is not TaskRouteState.ACTIVE:
+                continue
+            try:
+                runtime = await self.runtime.route(
+                    RouteCommand(
+                        session_id=route.session_id,
+                        writer_id=None,
+                        access=RouteAccess.PAYLOAD_READ,
+                        required_capabilities=frozenset(
+                            {RuntimeCapability.STRUCTURAL_READ, RuntimeCapability.PAYLOAD_READ}
+                        ),
+                    )
+                )
+            except PublicOperationError as exc:
+                # Another ready request may briefly own the bundle opener, or the generation may
+                # be closing.  Leave that route for the next bounded sweep; hard storage errors
+                # still surface so the daemon's recovery diagnostics remain honest.
+                if exc.retryable:
+                    continue
+                raise
+            try:
+                session_ids: tuple[str, ...] = (route.session_id,)
+                if callable(task_sessions):
+                    states = await cast(
+                        Callable[[str], Awaitable[tuple[SessionState, ...]]], task_sessions
+                    )(task_id)
+                    session_ids = tuple(
+                        sorted({route.session_id, *(state.session_id for state in states)})
+                    )
+                seen_events: set[str] = set()
+                for session_id in session_ids:
+                    async for record in runtime.ledger.load_events(session_id):
+                        if not isinstance(record, AcceptedEvent) or str(record.task_id) != task_id:
+                            continue
+                        event_id = str(record.event_id)
+                        if event_id in seen_events:
+                            continue
+                        seen_events.add(event_id)
+                        payload = record.payload
+                        if not isinstance(
+                            payload,
+                            (
+                                ChildAcceptedPayload,
+                                ChildRejectedPayload,
+                                ChildWrittenOffPayload,
+                                DelegationCancelledPayload,
+                                WorkClosedPayload,
+                                WorkCancelledPayload,
+                                WorkWrittenOffPayload,
+                            ),
+                        ):
+                            continue
+                        scanned += 1
+                        if isinstance(payload, ChildAcceptedPayload):
+                            await lineage.reconcile_child_acceptance(
+                                parent_task_id=task_id,
+                                child_task_id=str(payload.child_task_id),
+                                target=LineageAcceptance.ACCEPTED,
+                            )
+                        elif isinstance(payload, ChildRejectedPayload):
+                            await lineage.reconcile_child_acceptance(
+                                parent_task_id=task_id,
+                                child_task_id=str(payload.child_task_id),
+                                target=LineageAcceptance.REJECTED,
+                            )
+                        elif isinstance(payload, ChildWrittenOffPayload):
+                            await lineage.reconcile_child_work(
+                                parent_task_id=task_id,
+                                child_task_id=str(payload.child_task_id),
+                                target=WorkState.WRITTEN_OFF,
+                            )
+                        elif isinstance(payload, DelegationCancelledPayload):
+                            await lineage.reconcile_child_work(
+                                parent_task_id=task_id,
+                                child_task_id=str(payload.child_task_id),
+                                target=WorkState.CANCELLED,
+                            )
+                        elif isinstance(payload, WorkClosedPayload):
+                            await lineage.reconcile_owned_work(
+                                task_id=task_id, target=WorkState.CLOSED
+                            )
+                        elif isinstance(payload, WorkCancelledPayload):
+                            await lineage.reconcile_owned_work(
+                                task_id=task_id, target=WorkState.CANCELLED
+                            )
+                        else:
+                            await lineage.reconcile_owned_work(
+                                task_id=task_id, target=WorkState.WRITTEN_OFF
+                            )
+                        reconciled += 1
+            finally:
+                await self.runtime.release(runtime)
+        return scanned, reconciled
+
+    async def _sync_lineage_publication(
+        self,
+        request: PublishWorkRequest,
+        payloads: tuple[object, ...],
+    ) -> None:
+        """Apply accepted public lifecycle events to the authoritative lineage catalog."""
+
+        if not payloads:
+            return
+        lineage = self.lineage
+        if lineage is None:
+            raise PublicOperationError(
+                PublicErrorCode.SERVICE_UNAVAILABLE,
+                "The lineage service is temporarily unavailable.",
+                True,
+                safe_details={"reason_code": "lineage_service_unavailable"},
+            )
+        for payload in payloads:
+            if isinstance(payload, ChildAcceptedPayload):
+                await lineage.accept_child(
+                    parent_session_id=request.session_id,
+                    child_task_id=str(payload.child_task_id),
+                )
+            elif isinstance(payload, ChildRejectedPayload):
+                await lineage.reject_child(
+                    parent_session_id=request.session_id,
+                    child_task_id=str(payload.child_task_id),
+                )
+            elif isinstance(payload, ChildWrittenOffPayload):
+                await lineage.write_off_child(
+                    parent_session_id=request.session_id,
+                    child_task_id=str(payload.child_task_id),
+                )
+            elif isinstance(payload, DelegationCancelledPayload):
+                await lineage.cancel_child(
+                    parent_session_id=request.session_id,
+                    child_task_id=str(payload.child_task_id),
+                )
+            elif isinstance(payload, WorkClosedPayload):
+                await lineage.close_work(session_id=request.session_id)
+            elif isinstance(payload, WorkCancelledPayload):
+                await lineage.cancel_work(session_id=request.session_id)
+            elif isinstance(payload, WorkWrittenOffPayload):
+                await lineage.write_off_work(session_id=request.session_id)
+            else:
+                # Service-only families are rejected before append by ``prepare_publication``.  A
+                # defensive branch keeps a future family from silently bypassing catalog state.
+                raise PublicOperationError(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "The lineage lifecycle event is not publicly writable.",
+                    False,
+                    safe_details={"reason_code": "event_family_not_admitted"},
+                )
+
+    async def _validate_lineage_publication(
+        self,
+        request: PublishWorkRequest,
+        payloads: tuple[object, ...],
+    ) -> None:
+        """Validate public lifecycle authority before the ledger append.
+
+        Catalog transitions are applied after the append so a successful publication has one
+        durable operation identity.  This read-only pass closes the reverse failure window: a
+        stale parent or terminal child is refused before an event can be accepted without its
+        matching lineage projection.  Service-stamped families remain the responsibility of the
+        ordinary publish admission guard and are intentionally skipped here.
+        """
+
+        lineage = self.lineage
+        if not payloads:
+            return
+        if lineage is None:
+            raise PublicOperationError(
+                PublicErrorCode.SERVICE_UNAVAILABLE,
+                "The lineage service is temporarily unavailable.",
+                True,
+                safe_details={"reason_code": "lineage_service_unavailable"},
+            )
+        # A single append is atomic in the task ledger, so it must describe at most one terminal
+        # decision for each relationship/task.  Without this preflight, a batch containing
+        # ``work_closed`` followed by ``work_cancelled`` would append both events and only mirror
+        # the first catalog transition; every retry would then be unable to reconcile the second.
+        acceptance_targets: dict[str, LineageAcceptance] = {}
+        work_targets: dict[str, WorkState] = {}
+        for payload in payloads:
+            if isinstance(payload, ChildAcceptedPayload):
+                key = str(payload.child_task_id)
+                target = LineageAcceptance.ACCEPTED
+                previous = acceptance_targets.setdefault(key, target)
+                if previous is not target:
+                    raise PublicOperationError(
+                        PublicErrorCode.SESSION_CONFLICT,
+                        "The child lifecycle batch contains conflicting transitions.",
+                        False,
+                        safe_details={"reason_code": "lineage_transition_conflict"},
+                    )
+            elif isinstance(payload, ChildRejectedPayload):
+                key = str(payload.child_task_id)
+                target = LineageAcceptance.REJECTED
+                previous = acceptance_targets.setdefault(key, target)
+                if previous is not target:
+                    raise PublicOperationError(
+                        PublicErrorCode.SESSION_CONFLICT,
+                        "The child lifecycle batch contains conflicting transitions.",
+                        False,
+                        safe_details={"reason_code": "lineage_transition_conflict"},
+                    )
+            elif isinstance(payload, ChildWrittenOffPayload):
+                key = str(payload.child_task_id)
+                target = WorkState.WRITTEN_OFF
+                previous = work_targets.setdefault(key, target)
+                if previous is not target:
+                    raise PublicOperationError(
+                        PublicErrorCode.SESSION_CONFLICT,
+                        "The child lifecycle batch contains conflicting transitions.",
+                        False,
+                        safe_details={"reason_code": "lineage_transition_conflict"},
+                    )
+            elif isinstance(payload, DelegationCancelledPayload):
+                key = str(payload.child_task_id)
+                target = WorkState.CANCELLED
+                previous = work_targets.setdefault(key, target)
+                if previous is not target:
+                    raise PublicOperationError(
+                        PublicErrorCode.SESSION_CONFLICT,
+                        "The child lifecycle batch contains conflicting transitions.",
+                        False,
+                        safe_details={"reason_code": "lineage_transition_conflict"},
+                    )
+            elif isinstance(payload, WorkClosedPayload):
+                key = request.session_id
+                target = WorkState.CLOSED
+                previous = work_targets.setdefault(key, target)
+                if previous is not target:
+                    raise PublicOperationError(
+                        PublicErrorCode.SESSION_CONFLICT,
+                        "The task lifecycle batch contains conflicting transitions.",
+                        False,
+                        safe_details={"reason_code": "lineage_transition_conflict"},
+                    )
+            elif isinstance(payload, WorkCancelledPayload):
+                key = request.session_id
+                target = WorkState.CANCELLED
+                previous = work_targets.setdefault(key, target)
+                if previous is not target:
+                    raise PublicOperationError(
+                        PublicErrorCode.SESSION_CONFLICT,
+                        "The task lifecycle batch contains conflicting transitions.",
+                        False,
+                        safe_details={"reason_code": "lineage_transition_conflict"},
+                    )
+            elif isinstance(payload, WorkWrittenOffPayload):
+                key = request.session_id
+                target = WorkState.WRITTEN_OFF
+                previous = work_targets.setdefault(key, target)
+                if previous is not target:
+                    raise PublicOperationError(
+                        PublicErrorCode.SESSION_CONFLICT,
+                        "The task lifecycle batch contains conflicting transitions.",
+                        False,
+                        safe_details={"reason_code": "lineage_transition_conflict"},
+                    )
+        for payload in payloads:
+            if isinstance(payload, ChildAcceptedPayload):
+                await lineage.validate_acceptance_transition(
+                    parent_session_id=request.session_id,
+                    child_task_id=str(payload.child_task_id),
+                    target=LineageAcceptance.ACCEPTED,
+                )
+            elif isinstance(payload, ChildRejectedPayload):
+                await lineage.validate_acceptance_transition(
+                    parent_session_id=request.session_id,
+                    child_task_id=str(payload.child_task_id),
+                    target=LineageAcceptance.REJECTED,
+                )
+            elif isinstance(payload, ChildWrittenOffPayload):
+                await lineage.validate_child_work_transition(
+                    parent_session_id=request.session_id,
+                    child_task_id=str(payload.child_task_id),
+                    target=WorkState.WRITTEN_OFF,
+                )
+            elif isinstance(payload, DelegationCancelledPayload):
+                await lineage.validate_child_work_transition(
+                    parent_session_id=request.session_id,
+                    child_task_id=str(payload.child_task_id),
+                    target=WorkState.CANCELLED,
+                )
+            elif isinstance(payload, WorkClosedPayload):
+                await lineage.validate_owned_work_transition(
+                    session_id=request.session_id,
+                    target=WorkState.CLOSED,
+                )
+            elif isinstance(payload, WorkCancelledPayload):
+                await lineage.validate_owned_work_transition(
+                    session_id=request.session_id,
+                    target=WorkState.CANCELLED,
+                )
+            elif isinstance(payload, WorkWrittenOffPayload):
+                await lineage.validate_owned_work_transition(
+                    session_id=request.session_id,
+                    target=WorkState.WRITTEN_OFF,
+                )
+            elif isinstance(
+                payload,
+                (DelegationDeclaredPayload, ChildDependenciesRecordedPayload, WorkAbandonedPayload),
+            ):
+                continue
+            else:
+                raise PublicOperationError(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "The lineage lifecycle event is not publicly writable.",
+                    False,
+                    safe_details={"reason_code": "event_family_not_admitted"},
+                )
 
     async def _require_repository_route(
         self,
@@ -828,7 +1617,452 @@ class Application:
         repository_privacy_context: RepositoryPrivacyContext | None = None,
     ) -> PublishWorkInternalResult | PublishWorkResult:
         await self._require_repository_route(request, repository_privacy_context)
-        return await execute_publish_work(self, request)  # pyright: ignore[reportArgumentType]
+        await self._renew_activity_session(request.session_id, request)
+        payloads = _lineage_publication_payloads(request)
+        coordination_declarations = _coordination_declaration_payloads(request)
+        coordination_payloads = _coordination_publication_payloads(request)
+        await self._validate_coordination_declarations(request, coordination_declarations)
+        await self._validate_coordination_publications(request, coordination_payloads)
+        if any(
+            isinstance(
+                item,
+                (DelegationDeclaredPayload, ChildDependenciesRecordedPayload, WorkAbandonedPayload),
+            )
+            for item in payloads
+        ):
+            # Service-stamped facts are never admitted through the ordinary client writer, even
+            # when a caller presents a harness/service-looking actor.  Their authenticated writer
+            # paths are delegation and manifest/lease recovery respectively.
+            raise PublicOperationError(
+                PublicErrorCode.INVALID_REQUEST,
+                "The lineage lifecycle event is not publicly writable.",
+                False,
+                safe_details={"reason_code": "event_family_not_admitted"},
+            )
+        if payloads:
+            # Serialize lifecycle validation, ledger append/replay, and catalog reconciliation in
+            # this service generation.  A retry after a post-append failure can then reapply the
+            # same idempotent transition without a second concurrent writer changing its target.
+            async with self._lineage_publish_lock:
+                await self._validate_lineage_publication(request, payloads)
+                result = await execute_publish_work(self, request)  # pyright: ignore[reportArgumentType]
+                # Dry-run is explicitly non-mutating.  A real accepted or replayed publication is
+                # idempotently mirrored into catalog state after the ledger append succeeds.
+                if not (
+                    isinstance(result, PublishWorkResultModel)
+                    and getattr(result.root, "outcome", None) == "dry_run"
+                ):
+                    await self._sync_lineage_publication(request, payloads)
+                    await self._sweep_project_coordination(result)
+                    await self._apply_coordination_dispositions(coordination_payloads)
+                return result
+        result = await execute_publish_work(self, request)  # pyright: ignore[reportArgumentType]
+        await self._sweep_project_coordination(result)
+        if not (
+            isinstance(result, PublishWorkResultModel)
+            and getattr(result.root, "outcome", None) == "dry_run"
+        ):
+            await self._apply_coordination_dispositions(coordination_payloads)
+        return result
+
+    async def _sweep_project_coordination(self, result: object) -> None:
+        """Run the ready project's durable overlap sweep after an accepted publish.
+
+        Coordination is a secondary, idempotent projection of the already durable ledger append.
+        A detector/runtime failure therefore cannot turn a successful ``publish_work`` into a
+        false write failure; the next public publish or explicit maintenance sweep retries the
+        same generation-bound pair delivery through the durable store.
+        """
+
+        if not isinstance(result, PublishWorkInternalResult):
+            return
+
+        project_application = self.project_application
+        if project_application is None:
+            return
+        coordinator = getattr(project_application, "coordination_runtime", None)
+        sweep = getattr(coordinator, "sweep", None)
+        if not callable(sweep):
+            return
+        try:
+            pending = sweep(task_id=result.task_id)
+            if inspect.isawaitable(pending):
+                await pending
+        except Exception:
+            # The ledger result is already committed.  Delivery rows and the next sweep provide
+            # crash/restart recovery; no user-controlled content is attached to this diagnostic
+            # boundary.
+            return
+
+    async def _validate_coordination_publications(
+        self,
+        request: PublishWorkRequest,
+        payloads: tuple[CoordinationDispositionRecordedPayload, ...],
+    ) -> None:
+        """Fence typed dispositions to the current recipient route and durable obligation."""
+
+        if not payloads:
+            return
+        projects = self.project_application
+        if projects is None:
+            raise PublicOperationError(
+                PublicErrorCode.INVALID_REQUEST,
+                "The coordination disposition is unavailable.",
+                False,
+                safe_details={"reason_code": "coordination_runtime_unavailable"},
+            )
+        resolve_route = getattr(self.start_catalog, "resolve_route", None)
+        if not callable(resolve_route):
+            raise PublicOperationError(
+                PublicErrorCode.INVALID_REQUEST,
+                "The coordination disposition is unavailable.",
+                False,
+                safe_details={"reason_code": "coordination_route_unavailable"},
+            )
+        route = await cast(Callable[[str], Awaitable[TaskRoute | None]], resolve_route)(
+            request.session_id
+        )
+        coordinator = getattr(projects, "coordination_runtime", None)
+        detector = getattr(coordinator, "detector", None)
+        store = getattr(detector, "store", None)
+        if route is None or store is None:
+            raise PublicOperationError(
+                PublicErrorCode.INVALID_REQUEST,
+                "The coordination disposition is unavailable.",
+                False,
+                safe_details={"reason_code": "coordination_runtime_unavailable"},
+            )
+        for payload in payloads:
+            if payload.recipient_task_id != route.task_id:
+                raise PublicOperationError(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "The coordination disposition is invalid.",
+                    False,
+                    safe_details={"reason_code": "coordination_recipient_mismatch"},
+                )
+            detection = await store.get_detection(str(payload.detection_id))
+            state = await store.obligation(str(payload.detection_id), route.task_id)
+            if (
+                detection is None
+                or detection.project_id != str(payload.project_id)
+                or detection.membership_generation != payload.membership_generation
+                or route.task_id not in {detection.left_task_id, detection.right_task_id}
+                or state is None
+                or not state.declared
+                or state.obligation_id != str(payload.obligation_id)
+            ):
+                raise PublicOperationError(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "The coordination disposition is invalid.",
+                    False,
+                    safe_details={"reason_code": "coordination_obligation_mismatch"},
+                )
+            provenance = await projects.catalog.task_source_provenance(route.task_id)
+            if provenance is None or provenance.workspace_ref_commitment is None:
+                raise PublicOperationError(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "The coordination disposition is unavailable.",
+                    False,
+                    safe_details={"reason_code": "coordination_source_unavailable"},
+                )
+            try:
+                await projects.admit(
+                    source_task_id=route.task_id,
+                    source_workspace_commitment=provenance.workspace_ref_commitment,
+                    project=str(payload.project_id),
+                    expected_generation=payload.membership_generation,
+                )
+            except (CoordinationError, ValueError) as exc:
+                raise PublicOperationError(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "The coordination disposition is unavailable.",
+                    False,
+                    safe_details={"reason_code": "coordination_admission_required"},
+                ) from exc
+
+            # Evidence references are proof links, not caller assertions.  Require each to be
+            # present in the recipient ledger before accepting the disposition.
+            task_runtime = await self.runtime.route(
+                RouteCommand(
+                    route.session_id,
+                    None,
+                    RouteAccess.PAYLOAD_READ,
+                    frozenset({RuntimeCapability.STRUCTURAL_READ, RuntimeCapability.PAYLOAD_READ}),
+                )
+            )
+            try:
+                found: set[str] = set()
+                context_digest: str | None = None
+                context_sequence = 0
+                async for record in task_runtime.ledger.load_events(task_runtime.session_id):
+                    if type(record) is not AcceptedEvent or record.payload is None:
+                        continue
+                    if isinstance(record.payload, EvidenceRecordedPayload):
+                        found.add(str(record.payload.evidence_id))
+                    elif isinstance(record.payload, ResultRecordedPayload):
+                        found.add(str(record.payload.result_id))
+                    elif isinstance(record.payload, CoordinationContextRecordedPayload):
+                        context = record.payload
+                        if (
+                            context.detection_id == payload.detection_id
+                            and context.project_id == payload.project_id
+                            and context.membership_generation == payload.membership_generation
+                            and context.recipient_task_id == payload.recipient_task_id
+                            and record.ledger.ingestion_sequence > context_sequence
+                        ):
+                            context_digest = context.context_digest
+                            context_sequence = record.ledger.ingestion_sequence
+                if payload.context_digest is not None and payload.context_digest != context_digest:
+                    raise PublicOperationError(
+                        PublicErrorCode.INVALID_REQUEST,
+                        "The coordination disposition is invalid.",
+                        False,
+                        safe_details={"reason_code": "coordination_detection_mismatch"},
+                    )
+                if any(str(ref) not in found for ref in payload.evidence_refs):
+                    raise PublicOperationError(
+                        PublicErrorCode.INVALID_REQUEST,
+                        "The coordination disposition is invalid.",
+                        False,
+                        safe_details={"reason_code": "coordination_evidence_missing"},
+                    )
+            finally:
+                await self.runtime.release(task_runtime)
+
+    async def _validate_coordination_declarations(
+        self,
+        request: PublishWorkRequest,
+        payloads: tuple[CoordinationObligationDeclaredPayload, ...],
+    ) -> None:
+        """Validate an ordinary declaration against the exact frozen detection pair.
+
+        The declaration event is authored by the recipient task through ``publish_work``.  The
+        service checks the current route, the existing open obligation, both source workspaces,
+        and the generation-bound project admission before the event is appended.  The subsequent
+        project sweep consumes the accepted event from the recipient ledger; no service writer
+        synthesizes a declaration on the caller's behalf.
+        """
+
+        if not payloads:
+            return
+        projects = self.project_application
+        if projects is None:
+            raise PublicOperationError(
+                PublicErrorCode.INVALID_REQUEST,
+                "The coordination declaration is unavailable.",
+                False,
+                safe_details={"reason_code": "coordination_runtime_unavailable"},
+            )
+        resolve_route = getattr(self.start_catalog, "resolve_route", None)
+        if not callable(resolve_route):
+            raise PublicOperationError(
+                PublicErrorCode.INVALID_REQUEST,
+                "The coordination declaration is unavailable.",
+                False,
+                safe_details={"reason_code": "coordination_route_unavailable"},
+            )
+        route = await cast(Callable[[str], Awaitable[TaskRoute | None]], resolve_route)(
+            request.session_id
+        )
+        coordinator = getattr(projects, "coordination_runtime", None)
+        detector = getattr(coordinator, "detector", None)
+        store = getattr(detector, "store", None)
+        inputs = getattr(coordinator, "inputs", None)
+        if route is None or store is None or inputs is None:
+            raise PublicOperationError(
+                PublicErrorCode.INVALID_REQUEST,
+                "The coordination declaration is unavailable.",
+                False,
+                safe_details={"reason_code": "coordination_runtime_unavailable"},
+            )
+        owns_obligation = getattr(inputs, "owns_obligation", None)
+        input_for = getattr(inputs, "input_for", None)
+        participants_for = getattr(store, "participants", None)
+        detection_for = getattr(store, "get_detection", None)
+        if (
+            not callable(owns_obligation)
+            or not callable(input_for)
+            or not callable(participants_for)
+            or not callable(detection_for)
+        ):
+            raise PublicOperationError(
+                PublicErrorCode.INVALID_REQUEST,
+                "The coordination declaration is unavailable.",
+                False,
+                safe_details={"reason_code": "coordination_runtime_unavailable"},
+            )
+        seen_bindings: dict[tuple[str, str, int], str] = {}
+        for payload in payloads:
+            if str(payload.recipient_task_id) != route.task_id:
+                raise PublicOperationError(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "The coordination declaration is invalid.",
+                    False,
+                    safe_details={"reason_code": "coordination_recipient_mismatch"},
+                )
+            binding_key = (
+                str(payload.detection_id),
+                str(payload.recipient_task_id),
+                payload.membership_generation,
+            )
+            prior_binding = seen_bindings.get(binding_key)
+            if prior_binding is not None and prior_binding != str(payload.obligation_id):
+                raise PublicOperationError(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "The coordination declaration is invalid.",
+                    False,
+                    safe_details={"reason_code": "coordination_obligation_conflict"},
+                )
+            seen_bindings[binding_key] = str(payload.obligation_id)
+            current_input = await cast(Callable[[str, str], Awaitable[object | None]], input_for)(
+                route.task_id, str(payload.project_id)
+            )
+            existing_declarations = (
+                ()
+                if current_input is None
+                else getattr(current_input, "coordination_declarations", ())
+            )
+            for existing in cast(
+                tuple[CoordinationObligationDeclaredPayload, ...], existing_declarations
+            ):
+                if (
+                    existing.detection_id == payload.detection_id
+                    and existing.recipient_task_id == payload.recipient_task_id
+                    and existing.membership_generation == payload.membership_generation
+                    and existing.obligation_id != payload.obligation_id
+                ):
+                    raise PublicOperationError(
+                        PublicErrorCode.INVALID_REQUEST,
+                        "The coordination declaration is invalid.",
+                        False,
+                        safe_details={"reason_code": "coordination_obligation_conflict"},
+                    )
+            detection = await cast(Callable[[str], Awaitable[object | None]], detection_for)(
+                str(payload.detection_id)
+            )
+            if (
+                detection is None
+                or getattr(detection, "project_id", None) != str(payload.project_id)
+                or getattr(detection, "membership_generation", None)
+                != payload.membership_generation
+                or route.task_id
+                not in {
+                    getattr(detection, "left_task_id", None),
+                    getattr(detection, "right_task_id", None),
+                }
+            ):
+                raise PublicOperationError(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "The coordination declaration is invalid.",
+                    False,
+                    safe_details={"reason_code": "coordination_detection_mismatch"},
+                )
+            owns = cast(
+                Callable[[str, str], Awaitable[object]],
+                owns_obligation,
+            )(route.task_id, str(payload.obligation_id))
+            if inspect.isawaitable(owns):
+                owns_result = await owns
+            else:
+                owns_result = owns
+            if owns_result is not True:
+                raise PublicOperationError(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "The coordination declaration is invalid.",
+                    False,
+                    safe_details={"reason_code": "coordination_obligation_mismatch"},
+                )
+            participants = cast(
+                tuple[CoordinationParticipant, CoordinationParticipant] | None,
+                await cast(Callable[[str], Awaitable[object | None]], participants_for)(
+                    str(payload.detection_id)
+                ),
+            )
+            if (
+                type(participants) is not tuple
+                or len(participants) != 2
+                or any(type(item) is not CoordinationParticipant for item in participants)
+            ):
+                raise PublicOperationError(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "The coordination declaration is invalid.",
+                    False,
+                    safe_details={"reason_code": "coordination_participants_unavailable"},
+                )
+            by_task: dict[str, CoordinationParticipant] = {
+                item.task_id: item for item in participants
+            }
+            recipient = by_task.get(route.task_id)
+            counterpart_id = next(
+                (value for value in by_task if value != route.task_id),
+                None,
+            )
+            if recipient is None or counterpart_id is None:
+                raise PublicOperationError(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "The coordination declaration is invalid.",
+                    False,
+                    safe_details={"reason_code": "coordination_participants_unavailable"},
+                )
+            counterpart = by_task[counterpart_id]
+            recipient_workspace = recipient.workspace_commitment
+            counterpart_workspace = counterpart.workspace_commitment
+            recipient_repository = recipient.repository_commitment
+            counterpart_repository = counterpart.repository_commitment
+            cross_repository = recipient_repository != counterpart_repository
+            try:
+                await projects.admit(
+                    source_task_id=route.task_id,
+                    source_workspace_commitment=recipient_workspace,
+                    project=str(payload.project_id),
+                    expected_generation=payload.membership_generation,
+                    cross_repository=cross_repository,
+                )
+                await projects.admit(
+                    source_task_id=counterpart_id,
+                    source_workspace_commitment=counterpart_workspace,
+                    project=str(payload.project_id),
+                    expected_generation=payload.membership_generation,
+                    cross_repository=cross_repository,
+                )
+                current_route_generation = await projects.current_route_generation(route.task_id)
+                counterpart_route_generation = await projects.current_route_generation(
+                    counterpart_id
+                )
+                if (
+                    current_route_generation != recipient.route_generation
+                    or counterpart_route_generation != counterpart.route_generation
+                ):
+                    raise CoordinationError(CoordinationErrorCode.GENERATION_MISMATCH)
+            except (CoordinationError, ValueError) as exc:
+                raise PublicOperationError(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "The coordination declaration is unavailable.",
+                    False,
+                    safe_details={"reason_code": "coordination_admission_required"},
+                ) from exc
+
+    async def _apply_coordination_dispositions(
+        self,
+        payloads: tuple[CoordinationDispositionRecordedPayload, ...],
+    ) -> None:
+        """Mirror accepted typed dispositions into durable coordination status state."""
+
+        if not payloads or self.project_application is None:
+            return
+        coordinator = getattr(self.project_application, "coordination_runtime", None)
+        detector = getattr(coordinator, "detector", None)
+        disposition = getattr(detector, "disposition", None)
+        if not callable(disposition):
+            return
+        for payload in payloads:
+            result = disposition(
+                str(payload.detection_id),
+                str(payload.recipient_task_id),
+                disposition=payload.disposition.value,
+            )
+            if inspect.isawaitable(result):
+                await result
 
     def publish_response_key(
         self, result: PublishWorkInternalResult, sink: LocalDisclosureSink
@@ -960,6 +2194,7 @@ class Application:
         from yoetz.application.check import execute_check
 
         await self._require_repository_route(request, repository_privacy_context)
+        await self._renew_activity_session(request.session_id, request)
         # Resolve omitted mode via policy so recorded check events carry the resolved value.
         if request.mode is None:
             request = request.model_copy(
@@ -979,6 +2214,7 @@ class Application:
         repository_privacy_context: RepositoryPrivacyContext | None = None,
     ) -> RespondInternalResult:
         await self._require_repository_route(request, repository_privacy_context)
+        await self._renew_activity_session(request.session_id, request)
         return await execute_respond(self, request)  # pyright: ignore[reportArgumentType]
 
     async def status(
@@ -989,6 +2225,7 @@ class Application:
         repository_privacy_context: RepositoryPrivacyContext | None = None,
     ) -> StatusInternalResult:
         await self._require_repository_route(request, repository_privacy_context)
+        await self._renew_activity_session(request.session_id, request)
         return await execute_status(
             self,  # pyright: ignore[reportArgumentType]
             request,
@@ -1002,6 +2239,7 @@ class Application:
         repository_privacy_context: RepositoryPrivacyContext | None = None,
     ) -> ReceiptInternalResult:
         await self._require_repository_route(request, repository_privacy_context)
+        await self._renew_activity_session(request.session_id, request)
         return await execute_receipt(self, request)  # pyright: ignore[reportArgumentType]
 
     async def import_codex_jsonl(
@@ -1013,6 +2251,7 @@ class Application:
         if type(request) is not ImportCodexJsonlRequest:
             request = import_request_from_control(request)
         await self._require_repository_route(request, repository_privacy_context)
+        await self._renew_activity_session(request.session_id, request)
         return await execute_import_codex_jsonl(
             self,  # pyright: ignore[reportArgumentType]
             request,
@@ -1108,6 +2347,28 @@ class Application:
     async def observation_revoke(self, request: object) -> JsonObject:
         return await self._support(ControlMethod.OBSERVATION_REVOKE, request)
 
+    async def project(
+        self,
+        request: object,
+        *,
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
+    ) -> JsonObject:
+        """Dispatch one CLI-only project request through the composed project application."""
+
+        if self.project_application is None:
+            raise ControlError("method_forbidden")
+        if isinstance(request, Mapping):
+            source = cast(Mapping[str, object], request)
+        else:
+            source = None
+        if source is not None and source.get("operation") == "status":
+            raise PublicOperationError(
+                PublicErrorCode.INVALID_REQUEST,
+                "Project status requires the STATUS operation with view=project and the held session and writer.",
+                False,
+            )
+        return await self._support(ControlMethod.PROJECT, cast(object, request))
+
     async def _support(
         self,
         method: ControlMethod,
@@ -1150,12 +2411,22 @@ class Application:
             raise TypeError("projection_session_invalid")
         route = await self.start_catalog.resolve_route(session_value)
         task_value = source.get("task_id")
+        # A delegated start deliberately carries the parent session/writer so the host remains
+        # on its original lane while the child is still waiting for its one-time attach handle.
+        # Bind that response to the parent route for disclosure authorization; requiring the
+        # parent session's route to already belong to the not-yet-attached child would make the
+        # public delegate operation fail before the child can ever attach.
+        route_task_value = (
+            source.get("parent_task_id")
+            if method is ControlMethod.START and source.get("outcome") == "delegated"
+            else task_value
+        )
         if (
             route is None
             or route.state is not TaskRouteState.ACTIVE
             or route.session_id != session_value
-            or type(task_value) is not str
-            or route.task_id != task_value
+            or type(route_task_value) is not str
+            or route.task_id != route_task_value
         ):
             raise ControlError("privacy_projection_unavailable", retryable=True)
         return ProjectionBindingFacts(original_request_id, route.route_identity_digest)
@@ -1217,14 +2488,25 @@ class Application:
         frozen: FrozenCase,
         deterministic_findings: tuple[Finding, ...],
         runtime: object | None = None,
+        lineage_evaluation: LineageEvaluation | None = None,
     ) -> object:
         evaluator = self.semantic_evaluator
         # Production evaluators accept the task runtime for durable job/attempt coordination.
         # Test doubles may still be binary callables.
         try:
-            return await evaluator(frozen, deterministic_findings, runtime)  # type: ignore[misc]
+            return await evaluator(
+                frozen,
+                deterministic_findings,
+                cast(TaskRuntime | None, runtime),
+                lineage_evaluation,
+            )
         except TypeError:
-            return await evaluator(frozen, deterministic_findings)
+            try:
+                return await evaluator(
+                    frozen, deterministic_findings, cast(TaskRuntime | None, runtime)
+                )
+            except TypeError:
+                return await evaluator(frozen, deterministic_findings)
 
     async def project_result_for_client(
         self,
@@ -1246,8 +2528,96 @@ class Application:
         if (binding.route_identity_digest is not None) != needs_route:
             raise TypeError("projection_route_binding_invalid")
         sink = resolve_client_disclosure_sink(context)
+        project_status = source.get("view") == "project" and method in {
+            ControlMethod.STATUS,
+            ControlMethod.PROJECT,
+        }
+        advice_status = source.get("view") == "advice" and method is ControlMethod.STATUS
+        # The advice page is also a valid empty structural snapshot when the observation/project
+        # subsystem is not installed in a composed application.  There is no source-owned
+        # selector to hydrate or revalidate in that shape.  Any populated advice item still
+        # requires the project application below, preserving the fail-closed privacy boundary.
+        advice_items: Sequence[JsonValue] | None = None
+        if advice_status:
+            page = source.get("page")
+            raw_items = page.get("items") if isinstance(page, Mapping) else None
+            if type(raw_items) in {tuple, list}:
+                advice_items = cast(Sequence[JsonValue], raw_items)
+        advice_needs_project_application = advice_status and (
+            advice_items is None or bool(advice_items)
+        )
+        if project_status:
+            from yoetz.application.project_projection import (
+                hydrate_project_status_coordination_resources,
+                hydrate_project_status_text,
+            )
+
+            if self.project_application is None:
+                raise ControlError("privacy_projection_unavailable", retryable=True)
+            source = await hydrate_project_status_text(self.project_application, source, sink)
+            source = await hydrate_project_status_coordination_resources(
+                self.project_application, source, sink
+            )
+        elif advice_needs_project_application:
+            from yoetz.application.project_projection import (
+                hydrate_status_advice_coordination_resources,
+            )
+
+            if self.project_application is None:
+                raise ControlError("privacy_projection_unavailable", retryable=True)
+            source = await hydrate_status_advice_coordination_resources(
+                self.project_application, source, sink
+            )
         items: list[CandidateContextItem] = []
+        if project_status:
+            from yoetz.application.project_projection import source_denied_project_items
+
+            items.extend(source_denied_project_items(source, scope))
+            page = source.get("page")
+            detections = page.get("detections") if isinstance(page, Mapping) else None
+            if type(detections) in {tuple, list}:
+                for index, raw_detection in enumerate(cast(Sequence[JsonValue], detections)):
+                    if not isinstance(raw_detection, Mapping):
+                        raise TypeError("project_detection_projection_invalid")
+                    resource_paths = raw_detection.get("resource_paths")
+                    if resource_paths is None:
+                        continue
+                    items.append(
+                        CandidateContextItem(
+                            f"coordination-resource-{index}",
+                            DataCategory.REPOSITORY_EXCERPT,
+                            scope,
+                            f"/page/detections/{index}/resource_paths",
+                            canonical_encode(resource_paths),
+                        )
+                    )
+        if advice_status:
+            page = source.get("page")
+            raw_advice_items = page.get("items") if isinstance(page, Mapping) else None
+            if type(raw_advice_items) in {tuple, list}:
+                for index, raw_item in enumerate(cast(Sequence[JsonValue], raw_advice_items)):
+                    if not isinstance(raw_item, Mapping):
+                        raise TypeError("advice_item_projection_invalid")
+                    resource_paths = raw_item.get("coordination_resource_paths")
+                    if resource_paths is None:
+                        continue
+                    items.append(
+                        CandidateContextItem(
+                            f"coordination-advice-resource-{index}",
+                            DataCategory.REPOSITORY_EXCERPT,
+                            scope,
+                            f"/page/items/{index}/coordination_resource_paths",
+                            canonical_encode(resource_paths),
+                        )
+                    )
+        coordination_resource_prefixes = tuple(
+            item.origin_ref + "/"
+            for item in items
+            if item.item_id.startswith(("coordination-resource-", "coordination-advice-resource-"))
+        )
         for ordinal, (pointer, value) in enumerate(_leaves(source), start=1):
+            if any(pointer.startswith(prefix) for prefix in coordination_resource_prefixes):
+                continue
             # A leaf that cannot be classified stops the projection before any response exists, so
             # nothing is disclosed. The daemon reclassifies the escaping ProtocolValueError by
             # method: a write keeps the same-request_id remedy, a read is told to repeat. Naming it
@@ -1313,6 +2683,16 @@ class Application:
             completed = cast(LocalDisclosureApproved | LocalDisclosureBlocked, decision)
         else:
             raise TypeError("local_disclosure_result_invalid")
+        if project_status:
+            from yoetz.application.project_projection import revalidate_project_status_sources
+
+            assert self.project_application is not None
+            await revalidate_project_status_sources(self.project_application, source, sink)
+        elif advice_needs_project_application:
+            from yoetz.application.project_projection import revalidate_status_advice_sources
+
+            assert self.project_application is not None
+            await revalidate_status_advice_sources(self.project_application, source, sink)
         # Digest-bound JSON receipt documents cannot be partly rewritten with omission
         # markers; fail closed when any present document content leaf is blocked.
         # Distinct from transient privacy_projection_unavailable (LocalDisclosureUnavailable).
@@ -1453,10 +2833,18 @@ class ServiceReadyContext:
     observation_sweep: Callable[[], Awaitable[object]] | None = field(
         default=None, repr=False, compare=False
     )
+    coordination_sweep: Callable[[], Awaitable[object]] | None = field(
+        default=None, repr=False, compare=False
+    )
     ready_recommendation_refresh: Callable[[], Awaitable[object]] | None = field(
         default=None, repr=False, compare=False
     )
     observation_sweep_close: Callable[[], None] | None = field(
+        default=None, repr=False, compare=False
+    )
+    lineage: LineageCoordinator | None = field(default=None, repr=False, compare=False)
+    project_application: ProjectApplication | None = field(default=None, repr=False, compare=False)
+    host_lineage_registry: HostLineageRegistryPort | None = field(
         default=None, repr=False, compare=False
     )
     reconcile_observation_capture: Callable[[TaskRuntime], Awaitable[None]] | None = field(
@@ -1481,6 +2869,8 @@ class ServiceReadyContext:
             raise TypeError("semantic_ready_invalid")
         if self.observation_sweep is not None and not callable(self.observation_sweep):
             raise TypeError("observation_sweep_invalid")
+        if self.coordination_sweep is not None and not callable(self.coordination_sweep):
+            raise TypeError("coordination_sweep_invalid")
         if self.ready_recommendation_refresh is not None and not callable(
             self.ready_recommendation_refresh
         ):
@@ -1550,10 +2940,14 @@ class ReadyApplicationFactory:
                 fallback_credential_connected=context.fallback_credential_connected,
                 semantic_ready=context.semantic_ready,
                 observation_sweep=context.observation_sweep,
+                coordination_sweep=context.coordination_sweep,
                 ready_recommendation_refresh=context.ready_recommendation_refresh,
                 observation_sweep_close=context.observation_sweep_close,
                 reconcile_observation_capture=context.reconcile_observation_capture,
                 enforce_repository_identity=True,
+                lineage=context.lineage,
+                project_application=context.project_application,
+                host_lineage_registry=context.host_lineage_registry,
                 advice_semantic_supervisor=context.advice_semantic_supervisor,
             )
             if context.verification_supervisor is not None:
