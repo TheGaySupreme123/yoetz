@@ -85,7 +85,8 @@ npx yoetz
 ```
 
 The npm package bundles no Python and no Yoetz code and never installs `uv` itself; it only
-launches the exact matching Python distribution.
+launches the exact matching Python distribution. Yoetz runs on macOS and Linux; on Windows, install
+it inside WSL 2 — see [Windows](docs/usage/install-and-first-run.md#windows).
 
 > [!TIP]
 > **Let your agent set it up.** Paste this into your coding agent and it walks you through
@@ -97,8 +98,9 @@ launches the exact matching Python distribution.
 >
 > curl -fsSL https://raw.githubusercontent.com/TheGaySupreme123/yoetz/main/docs/usage/agent-start.md
 >
-> It tells you what to run yourself, what to ask me, and where to hand me the terminal. Setup's
-> questions are mine to answer in my own terminal, and show me any proposed change before it is
+> It tells you what to run yourself, what to ask me, and where to hand me the terminal. If your
+> sandbox blocks that fetch, ask me to approve it or to paste the guide. Setup's questions are
+> mine to answer, so ask me each one and wait, and show me any proposed change before it is
 > applied.
 > ```
 

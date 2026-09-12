@@ -15,7 +15,7 @@ const AGENT_PROMPT = `I want to install Yoetz (${GITHUB}). Start by fetching its
 
 curl -fsSL https://raw.githubusercontent.com/TheGaySupreme123/yoetz/main/docs/usage/agent-start.md
 
-It tells you what to run yourself, what to ask me, and where to hand me the terminal. Then help me through the CLI: setup's questions are mine to answer in my own terminal, and show me any proposed change before it is applied.`;
+It tells you what to run yourself, what to ask me, and where to hand me the terminal. If your sandbox blocks that fetch, ask me to approve it or to paste the guide. Then help me through the CLI: setup's questions are mine to answer, so ask me each one and wait, and show me any proposed change before it is applied.`;
 const TITLE = "Yoetz: honest completion checks for AI coding agents";
 const DESCRIPTION =
   "Yoetz is a local-first, open-source work ledger for AI coding agents. An agent publishes what it did; Yoetz checks the record and issues a receipt that states what was verified, at what coverage, and what is still open. First-party for Codex, Claude Code, and Cursor.";
@@ -309,6 +309,9 @@ const next = [
 
             <p class="inst-note agent-note">
               Copies a prompt. Paste it into your agent: it installs Yoetz and shows you every change first.
+            </p>
+            <p class="inst-note platform-note">
+              macOS and Linux. On Windows, install inside <a href={`${GITHUB}/blob/main/docs/usage/install-and-first-run.md#windows`}>WSL 2</a>.
             </p>
           </div>
         </div>

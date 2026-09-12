@@ -8,6 +8,7 @@ full CLI unchanged, so usage errors and ``--help`` stay byte-identical.
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from typing import Final
@@ -17,7 +18,23 @@ from typing import Final
 # measurable and is documented (~20 ms), never guessed.
 _ENTRY_MONOTONIC: Final = time.monotonic()
 
-__all__ = ["main"]
+__all__ = ["UNSUPPORTED_PLATFORM_MESSAGE", "main"]
+
+# Yoetz is POSIX-only: the service listens on an owner-only AF_UNIX socket, and every path,
+# vault, and lock check compares ``st_uid`` against ``os.geteuid()``. On native Windows the path
+# probe raised ``AttributeError`` inside the catch-all and every stateful command printed
+# ``internal_error`` (issue #709). Refusing here names the real condition and the way out.
+_NATIVE_WINDOWS: Final = "nt"
+_PLATFORM_EXEMPT_COMMANDS: Final = frozenset({"version"})
+_PLATFORM_EXEMPT_FLAGS: Final = frozenset({"--help", "-h", "--version"})
+# ``service_unavailable`` exits 20 in ``yoetz.cli.exits``: no Yoetz service can ever be reached
+# from this process, so the exit matches the public code an absent service already carries.
+_UNSUPPORTED_PLATFORM_EXIT: Final = 20
+UNSUPPORTED_PLATFORM_MESSAGE: Final = (
+    "unsupported_platform: Yoetz runs on macOS and Linux; native Windows is not supported.\n"
+    "On Windows, install and run Yoetz inside WSL 2 (Ubuntu). Setup guide:\n"
+    "  https://github.com/TheGaySupreme123/yoetz/blob/main/docs/usage/install-and-first-run.md#windows"
+)
 
 
 def _observe_fast_path(arguments: list[str]) -> int | None:
@@ -197,6 +214,35 @@ def _claude_observe_fast_path(arguments: list[str]) -> int | None:
     return 0
 
 
+def _unsupported_platform_exit(arguments: list[str], *, os_name: str | None = None) -> int | None:
+    """Return the bounded exit for native Windows, or None where Yoetz can run.
+
+    ``version``, ``--version``, and ``--help`` stay available so a user or agent can still see what
+    was installed; everything else would only reach ``internal_error``.
+    """
+
+    if (os.name if os_name is None else os_name) != _NATIVE_WINDOWS:
+        return None
+    if arguments and arguments[0] in _PLATFORM_EXEMPT_COMMANDS:
+        return None
+    if any(token in _PLATFORM_EXEMPT_FLAGS for token in arguments):
+        return None
+    try:
+        sys.stderr.write(UNSUPPORTED_PLATFORM_MESSAGE + "\n")
+        sys.stderr.flush()
+    except OSError:
+        pass
+    return _UNSUPPORTED_PLATFORM_EXIT
+
+
+def _run_full_cli() -> None:
+    """Load the typer graph and dispatch; split out so tests can prove it never loads on Windows."""
+
+    from yoetz.cli.app import main as app_main
+
+    app_main()
+
+
 def main() -> None:
     """Installed console entry point."""
 
@@ -217,6 +263,7 @@ def main() -> None:
         code = _spool_fast_path(argv[2:])
         if code is not None:
             raise SystemExit(code)
-    from yoetz.cli.app import main as app_main
-
-    app_main()
+    code = _unsupported_platform_exit(argv)
+    if code is not None:
+        raise SystemExit(code)
+    _run_full_cli()

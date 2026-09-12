@@ -44,6 +44,31 @@ Compatibility extras (the standard install already contains these exact dependen
 | `semantic-openai` | Existing install-command alias for the HTTP client and OpenAI SDK |
 | `portable-recovery` | Existing install-command alias for Argon2 recovery/passphrase support |
 
+## Windows
+
+Yoetz runs on macOS and Linux. On Windows it runs inside WSL 2 (Windows Subsystem for Linux),
+Microsoft's supported way to run Linux programs on Windows. A native Windows install succeeds, but
+every command except `yoetz version`, `--version`, and `--help` then refuses with
+`unsupported_platform` and points here.
+
+1. Open **PowerShell as administrator** and run `wsl --install`. Restart Windows when asked.
+2. Open **Ubuntu** from the Start menu. The first launch asks you to choose a Linux username and
+   password.
+3. Inside that Ubuntu window, install `uv`, then Yoetz:
+
+   ```text
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   source "$HOME/.local/bin/env"
+   uv tool install --managed-python --python 3.14.6 "yoetz==0.1.0"
+   yoetz
+   ```
+
+Everything else on this page happens inside that Ubuntu window, including `yoetz service run` and
+the steps that need your own terminal. A coding agent driving the install from the Windows side
+can run each command with `wsl -e bash -lc "..."`. Connecting a Windows-native Codex, Claude Code,
+or Cursor to a Yoetz inside WSL is untested and not claimed: connect from the same WSL
+environment, or keep Yoetz local-only through the CLI.
+
 ## First run
 
 The first bare `yoetz` on an interactive terminal opens the full-screen interface in first-run

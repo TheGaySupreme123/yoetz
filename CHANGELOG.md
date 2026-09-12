@@ -6,6 +6,26 @@ reverse-chronological released versions.
 
 ## Unreleased
 
+### Changed
+
+- The agent install guide (`docs/usage/agent-start.md`) now opens with a platform check — macOS
+  and Linux, Windows only inside WSL 2, with the exact WSL and `uv` installation steps and which
+  side of Windows each command runs on — tells an agent whose host has no structured question
+  tool (Cursor's agent, for one) to put each decision in plain chat and wait for the answer
+  instead of choosing, and hands the terminal over as if the user has never opened one.
+  [Install and first run](docs/usage/install-and-first-run.md) gains the Windows section the CLI
+  and README link to. Host notes checked against the September 2026 documentation of Codex,
+  Claude Code, and Cursor record what each does differently: where its question tool
+  is unavailable or non-blocking, what blocks the guide fetch or the `uv` installer, and what
+  native Windows means for it. The copied setup prompt now tells the agent to ask for approval
+  or a pasted guide when its sandbox blocks the fetch (issue #709).
+
+### Fixed
+
+- On native Windows, `yoetz` refuses with a bounded `unsupported_platform` line naming the WSL
+  path (exit 20) instead of `internal_error` from every stateful command; `version`,
+  `--version`, and `--help` still answer (issue #709).
+
 ## 0.2.0 — 2026-09-11
 
 Official public-alpha package release. See [complete release notes](docs/releases/v0.2.0.md)
