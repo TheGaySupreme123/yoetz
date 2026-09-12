@@ -464,6 +464,8 @@ em.new {
   .nx { flex-direction: column; gap: 10px; max-width: 460px; }
   .nx-card { flex: 0 0 auto; }
   .nx-link { display: none; }
+  /* Stacked cards would sit empty while the loop reaches them; show the final frame. */
+  .nx * { animation: none !important; }
 }
 @media (max-width: 860px) {
   .arch-notes { grid-template-columns: 1fr; gap: 22px; }
