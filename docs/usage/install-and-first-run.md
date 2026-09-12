@@ -14,6 +14,10 @@
 
 ## Install
 
+For guided setup, click **Set up with your agent** on [yoetz.dev](https://yoetz.dev).
+The popup confirms the instruction was copied. Paste it into your agent’s chat, then send it
+to start setup.
+
 The supported install path is Python via [`uv`](https://docs.astral.sh/uv/):
 
 ```text

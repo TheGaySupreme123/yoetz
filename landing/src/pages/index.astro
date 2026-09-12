@@ -294,7 +294,7 @@ const next = [
               <button class="inst-tab" type="button" data-key="pypi" data-command={INSTALL_COMMAND}>Install with PyPI</button>
               <button class="inst-tab" type="button" data-key="npm" data-command="npx yoetz">Install with npm</button>
               <button class="inst-tab agent" type="button" id="agent-copy" data-command={AGENT_PROMPT}>
-                <span id="agent-copy-label" role="status" aria-live="polite">Set up with your agent</span> <span class="rec">recommended</span>
+                <span id="agent-copy-label">Set up with your agent</span> <span class="rec">recommended</span>
               </button>
             </div>
 
@@ -302,7 +302,7 @@ const next = [
               <span class="ct-check" aria-hidden="true">✓</span>
               <span class="ct-body">
                 <span class="ct-title">Copied to your clipboard</span>
-                <code class="ct-cmd" id="copy-toast-cmd"></code>
+                <span class="ct-detail ct-cmd" id="copy-toast-detail"></span>
               </span>
             </div>
 
@@ -783,8 +783,18 @@ const next = [
       // --- Install tabs: a click copies the command and confirms it ---
       const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>(".inst-tab:not(.agent)"));
       const toast = document.getElementById("copy-toast");
-      const toastCmd = document.getElementById("copy-toast-cmd");
+      const toastDetail = document.getElementById("copy-toast-detail");
       let toastTimer: ReturnType<typeof setTimeout>;
+      function showCopyToast(detail: string, isCommand = true) {
+        if (!toast || !toastDetail) return;
+        toastDetail.textContent = detail;
+        toastDetail.classList.toggle("ct-cmd", isCommand);
+        toast.hidden = false;
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => {
+          toast.hidden = true;
+        }, isCommand ? 3200 : 8000);
+      }
       for (const tab of tabs) {
         tab.addEventListener("click", async () => {
           const cmd = tab.dataset.command ?? "";
@@ -794,14 +804,7 @@ const next = [
           } catch {
             return;
           }
-          if (toast && toastCmd) {
-            toastCmd.textContent = cmd;
-            toast.hidden = false;
-            clearTimeout(toastTimer);
-            toastTimer = setTimeout(() => {
-              toast.hidden = true;
-            }, 3200);
-          }
+          showCopyToast(cmd);
         });
       }
 
@@ -817,6 +820,7 @@ const next = [
         } catch {
           return;
         }
+        showCopyToast("Paste the instruction into your agent’s chat, then send it to start setup.", false);
         if (agentLabel) agentLabel.textContent = "Copied to your clipboard";
         agentBtn.classList.add("copied");
         clearTimeout(agentTimer);
