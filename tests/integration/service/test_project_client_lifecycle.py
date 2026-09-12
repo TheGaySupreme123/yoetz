@@ -820,6 +820,12 @@ async def test_ready_service_client_admits_claude_and_cursor_observation_wire(
             )
         )
         await daemon.start()
+        # This test drives the two newly queued rows through the authenticated client itself.
+        # The daemon's independent READY maintenance loop may otherwise ingest one between the
+        # hook and this client's call, turning a deterministic wire assertion into a timing-based
+        # ACCEPTED versus DUPLICATE race.  Maintenance delivery has its own lifecycle coverage;
+        # keep this client-boundary case focused on the exact request/result pair.
+        await daemon._cancel_ready_maintenance()  # pyright: ignore[reportPrivateUsage]
         client_stream, server_stream = _pair()
         server_task = asyncio.create_task(daemon._serve_control_connection(server_stream))  # pyright: ignore[reportPrivateUsage]
         client = None
