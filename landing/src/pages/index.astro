@@ -807,7 +807,10 @@ const next = [
           } catch {
             return;
           }
-          showCopyToast("Paste this command into your terminal, then press Enter.", cmd);
+          const nextStep = tab.dataset.key === "pypi"
+            ? "Paste this command into your terminal and press Enter. Once installed, run yoetz in your terminal to start setup."
+            : "Paste this command into your terminal and press Enter to start setup.";
+          showCopyToast(nextStep, cmd);
         });
       }
 
