@@ -164,6 +164,66 @@ time; what they will see (a full-screen setup, a hidden prompt that shows nothin
 a key, a request for their passphrase); and what to tell you when it is done. Say in one sentence
 why the step needs their terminal rather than you.
 
+### Host notes — what your own host does differently
+
+Checked against each host's official documentation in September 2026; a newer host may differ.
+Whatever the host, the rules above stand: the user decides, and a pending question pauses every
+consequential step — no install, no `setup run`, no registration until it is answered.
+
+**Codex**
+
+- Questions: `request_user_input` exists only in plan mode and is unavailable in the default
+  mode. Ask in chat as above, or ask the user to switch to plan mode (`/plan`) for the setup
+  decisions.
+- Fetching this guide: the sandbox blocks network by default, so the `curl` needs a one-time
+  approval, or `network_access = true` under `[sandbox_workspace_write]` in
+  `~/.codex/config.toml`. Codex's built-in web search does not fetch raw files.
+- Windows: Codex runs natively in PowerShell; Yoetz does not. Run every Yoetz command through
+  `wsl -e bash -lc "…"`, and register the integration only from a Codex running inside WSL 2.
+- Integration: the first-run wizard (`yoetz`) connects Codex itself; the direct route is
+  `yoetz integrate codex mcp preview`, then `install` after approval. Writes under `~/.codex` are
+  outside the workspace and prompt for approval; that prompt is expected.
+
+**Claude Code**
+
+- Questions: `AskUserQuestion` is built in and waits for the answer. It is unavailable inside
+  subagents and in headless `-p` runs, so ask from the main conversation.
+- Fetching this guide: use `curl` through Bash for the exact bytes. `WebFetch` returns a small
+  model's summary of the page, not the page.
+- Install line: auto mode's classifier blocks `curl | sh` by default, and the `uv` installer is
+  one. Either the user approves it once, or hand it over as a terminal step.
+- Windows: Claude Code runs natively (PowerShell or Git Bash); Yoetz does not. Run Yoetz commands
+  through `wsl -e bash -lc "…"`. For host integration, Claude Code itself must run inside WSL 2,
+  installed and launched from the WSL terminal; the Windows-side and WSL-side `~/.claude` are
+  separate homes.
+- Integration: `yoetz integrate claude plugin preview`, then `install` after the user approves
+  the digest.
+
+**Cursor**
+
+- Questions: the "Ask questions" tool exists in every mode since Cursor 2.4, but it does not pause
+  the agent — Cursor keeps reading, editing, and running commands while the answer is pending.
+  That is how an install on Cursor asked nothing and chose for the user. After asking, stop:
+  end the turn and do nothing consequential until the answer arrives. Plan mode asks one
+  question at a time, if the user prefers.
+- Fetching this guide: shell commands outside the allowlist run in a sandbox with no network. If
+  the `curl` fails with a network error, ask the user to approve it outside the sandbox, or to
+  paste the guide into the chat.
+- Windows: Cursor's agent terminal is PowerShell on native Windows; run Yoetz commands through
+  `wsl -e bash -lc "…"`. The Cursor integration is untested on Windows and WSL.
+- Integration: `yoetz integrate cursor plugin preview` with an explicit Cursor configuration
+  root and project, then `install` after approval. Cursor Cloud agents are not supported; install
+  from a local Cursor.
+
+**Grok Build (xAI) and any other agent**
+
+- No first-party integration. Grok Build has a structured question tool, a real `web_fetch`, and
+  native Windows binaries; the Windows rule for Yoetz is the same. Use Yoetz over MCP with no
+  integration: show the user the exact `yoetz mcp serve` entry for the host's own MCP
+  configuration before adding it, and never replace an existing entry named `yoetz`. Grok Build
+  also reads Claude Code and Cursor hook and MCP files, so a registration made for one of those
+  hosts may become visible to it; that path is untested and not claimed.
+
 ## 3. Before recommending a semantic provider — inspect the installed catalog
 
 Run this read-only command instead of relying on model memory or a stale guide:

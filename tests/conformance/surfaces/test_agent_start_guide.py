@@ -91,3 +91,36 @@ def test_agent_start_lists_the_questions_in_order_with_recommendations() -> None
         assert heading in guide, heading
     assert "No recommendation and no default" in guide
     assert "local only is a finished state, not a fallback" in guide
+
+
+def test_agent_start_host_notes_cover_every_first_party_host_and_the_generic_route() -> None:
+    guide = _collapsed("docs/usage/agent-start.md")
+
+    assert "### Host notes" in guide
+    for host in (
+        "**Codex**",
+        "**Claude Code**",
+        "**Cursor**",
+        "**Grok Build (xAI) and any other agent**",
+    ):
+        assert host in guide, host
+    # The Cursor finding that started this: its question tool does not pause the agent.
+    assert "it does not pause the agent" in guide
+    # Each host's fetch blocker is named, and the guide is fetched as exact bytes on Claude Code.
+    assert "the sandbox blocks network by default" in guide
+    assert "`WebFetch` returns a small model's summary" in guide
+    assert "run in a sandbox with no network" in guide
+    # Cursor Cloud stays unsupported, matching the install page.
+    assert "Cursor Cloud agents are not supported" in guide
+
+
+def test_copied_setup_prompt_matches_between_readme_and_landing() -> None:
+    # The README prompt is a blockquote; drop the `>` markers before comparing sentences.
+    readme = " ".join(token for token in _text("README.md").split() if token != ">")
+    landing = _collapsed("landing/src/pages/index.astro")
+    for sentence in (
+        "If your sandbox blocks that fetch, ask me to approve it or to paste the guide.",
+        "ask me each one and wait",
+    ):
+        assert sentence in readme, sentence
+        assert sentence in landing, sentence

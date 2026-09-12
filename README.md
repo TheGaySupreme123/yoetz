@@ -98,8 +98,9 @@ it inside WSL 2 — see [Windows](docs/usage/install-and-first-run.md#windows).
 >
 > curl -fsSL https://raw.githubusercontent.com/TheGaySupreme123/yoetz/main/docs/usage/agent-start.md
 >
-> It tells you what to run yourself, what to ask me, and where to hand me the terminal. Setup's
-> questions are mine to answer in my own terminal, and show me any proposed change before it is
+> It tells you what to run yourself, what to ask me, and where to hand me the terminal. If your
+> sandbox blocks that fetch, ask me to approve it or to paste the guide. Setup's questions are
+> mine to answer, so ask me each one and wait, and show me any proposed change before it is
 > applied.
 > ```
 
