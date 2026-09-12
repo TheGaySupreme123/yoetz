@@ -234,10 +234,7 @@ const next = [
             <span class="line">Agents claim they're done.</span>
             <span class="line grad"><img class="h1-logo" src="/assets/yoetz-logo.png" alt="Yoetz" /> checks if they're actually done.</span>
           </h1>
-          <p class="sr-only">
-            Your agent claims it is done. Yoetz checks that claim against its own ledger of the work and
-            issues a receipt: what was verified, at what coverage, and what is still open.
-          </p>
+          <p class="sr-only">A receipt for every claim: what was verified, and what is still open.</p>
           <div class="hx" aria-hidden="true">
             <div class="hx-card hx-agent">
               <div class="hx-eyebrow">Agent says</div>
@@ -267,7 +264,7 @@ const next = [
                 <span id="agent-copy-label">Set up with your agent</span> <span class="rec">recommended</span>
               </button>
               <button class="inst-tab manual" type="button" id="manual-toggle" aria-expanded="false" aria-controls="manual-panel">
-                Install manually
+                <span id="manual-label">Install manually</span>
                 <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
               </button>
             </div>
@@ -289,10 +286,11 @@ const next = [
             </div>
 
             <p class="inst-note agent-note">
-              Copies a prompt. Paste it into your agent: it installs Yoetz and shows you every change first.
+              <span class="d">Copies a prompt. Paste it into your agent: it installs Yoetz and shows you every change first.</span>
+              <span class="m">Copies a prompt. macOS, Linux, or <a href={`${GITHUB}/blob/main/docs/usage/install-and-first-run.md#windows`}>WSL&nbsp;2</a>.</span>
             </p>
             <p class="inst-note platform-note">
-              macOS and Linux. On Windows, install inside <a href={`${GITHUB}/blob/main/docs/usage/install-and-first-run.md#windows`}>WSL 2</a>.
+              <span class="d">macOS and Linux. On Windows, install inside <a href={`${GITHUB}/blob/main/docs/usage/install-and-first-run.md#windows`}>WSL 2</a>.</span>
             </p>
           </div>
           <div class="hero-hosts" aria-label="Officially supported agents">
@@ -398,7 +396,73 @@ const next = [
       <div class="ds-section-head">
         <span class="ds-kicker">Under the hood</span>
         <h2 class="ds-h2">Hooks and MCP, one local service.</h2>
-        <p class="ds-lead centered">The agent talks to Yoetz over MCP. The host reports through hooks. One service on your machine holds the record and checks it.</p>
+        <p class="ds-lead centered">
+          <span class="d">The agent talks to Yoetz over MCP. The host reports through hooks. One service on your machine holds the record and checks it.</span>
+          <span class="m">Two records in, one receipt out. All on your machine.</span>
+        </p>
+      </div>
+
+      <!-- Phone version of the diagram below: top to bottom instead of left to right. -->
+      <div class="arch-m" aria-hidden="true">
+        <svg viewBox="0 0 320 392" fill="none" stroke-linecap="round" stroke-linejoin="round">
+          <defs>
+            <marker id="arr-on-m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 L9 5 L0 9 z" fill="#14b8a6" /></marker>
+            <marker id="arr-m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 L9 5 L0 9 z" fill="#94a3b8" /></marker>
+          </defs>
+
+          <rect x="4" y="4" width="312" height="384" rx="16" class="art-box" stroke-dasharray="5 5" />
+          <text x="160" y="22" class="art-tag" text-anchor="middle">your machine · nothing leaves it</text>
+
+          <!-- agent -->
+          <rect x="40" y="36" width="240" height="72" rx="12" class="art-box" />
+          <text x="160" y="58" class="art-txt strong" text-anchor="middle">your agent</text>
+          <image href="/assets/openai.svg" x="115" y="70" width="22" height="22" />
+          <image href="/assets/claude.svg" x="149" y="70" width="22" height="22" />
+          <image href="/assets/cursor.svg" x="183" y="70" width="22" height="22" />
+
+          <!-- down: MCP -->
+          <path d="M64 108 V 124" class="art-line on" />
+          <text x="64" y="142" class="art-txt on" text-anchor="middle">MCP</text>
+          <text x="64" y="155" class="art-tag on" text-anchor="middle">what it says</text>
+          <path d="M64 162 V 190" class="art-line on" marker-end="url(#arr-on-m)" />
+
+          <!-- down: hooks -->
+          <path d="M160 108 V 124" class="art-line" />
+          <text x="160" y="142" class="art-txt" text-anchor="middle">hooks</text>
+          <text x="160" y="155" class="art-tag" text-anchor="middle">what it did</text>
+          <path d="M160 162 V 190" class="art-line" marker-end="url(#arr-m)" />
+
+          <!-- up: receipt -->
+          <path d="M256 190 V 162" class="art-line on" />
+          <text x="256" y="142" class="art-txt on" text-anchor="middle">receipt</text>
+          <text x="256" y="155" class="art-tag on" text-anchor="middle">to the chat</text>
+          <path d="M256 124 V 108" class="art-line on" marker-end="url(#arr-on-m)" />
+
+          <!-- service -->
+          <rect x="16" y="190" width="288" height="152" rx="14" class="art-box on" />
+          <text x="160" y="209" class="art-tag on" text-anchor="middle">yoetz service · one local process</text>
+
+          <rect x="22" y="222" width="84" height="50" rx="10" class="art-box" />
+          <text x="64" y="243" class="art-txt strong" text-anchor="middle">ledger</text>
+          <text x="64" y="259" class="art-tag" text-anchor="middle">append-only</text>
+
+          <path d="M106 247 H 116" class="art-line on" marker-end="url(#arr-on-m)" />
+          <rect x="118" y="222" width="84" height="50" rx="10" class="art-box on" />
+          <text x="160" y="243" class="art-txt strong" text-anchor="middle">rules</text>
+          <text x="160" y="259" class="art-tag" text-anchor="middle">deterministic</text>
+
+          <path d="M202 247 H 212" class="art-line on" marker-end="url(#arr-on-m)" />
+          <rect x="214" y="222" width="84" height="50" rx="10" class="art-box on solid" />
+          <text x="256" y="243" class="art-txt inv" text-anchor="middle">receipt</text>
+          <text x="256" y="259" class="art-txt inv" text-anchor="middle" opacity="0.85">what's open</text>
+
+          <path d="M160 272 V 288" class="art-line" stroke-dasharray="3 4" />
+          <rect x="66" y="290" width="188" height="40" rx="10" class="art-box" stroke-dasharray="4 3" />
+          <text x="160" y="307" class="art-txt" text-anchor="middle">reviewer model · optional</text>
+          <text x="160" y="321" class="art-tag" text-anchor="middle">your API key or ChatGPT plan</text>
+
+          <text x="160" y="368" class="art-tag" text-anchor="middle">nothing goes through us</text>
+        </svg>
       </div>
 
       <div class="arch" aria-hidden="true">
@@ -480,15 +544,15 @@ const next = [
       <div class="arch-notes">
         <div>
           <div class="arch-k">over MCP</div>
-          <p>The agent publishes its plan, work, claims, and evidence through six tools. Any MCP host can, with nothing installed.</p>
+          <p><span class="d">The agent publishes its plan, work, claims, and evidence through six tools. Any MCP host can, with nothing installed.</span><span class="m">The agent publishes its plan, work, claims, and evidence.</span></p>
         </div>
         <div>
           <div class="arch-k">through hooks</div>
-          <p>Codex, Claude Code, and Cursor also report what actually happened: sessions, tool calls, edits. Structural facts, never your files.</p>
+          <p><span class="d">Codex, Claude Code, and Cursor also report what actually happened: sessions, tool calls, edits. Structural facts, never your files.</span><span class="m">The host reports what actually happened. Never your files.</span></p>
         </div>
         <div>
           <div class="arch-k">in one local service</div>
-          <p>Both records land in an append-only ledger. Deterministic rules compare them, and the receipt states exactly how far the check reached.</p>
+          <p><span class="d">Both records land in an append-only ledger. Deterministic rules compare them, and the receipt states exactly how far the check reached.</span><span class="m">Rules compare the two records. The receipt says how far the check reached.</span></p>
         </div>
       </div>
 
@@ -689,12 +753,14 @@ const next = [
       // --- Manual install disclosure ---
       const manualToggle = document.getElementById("manual-toggle");
       const manualPanel = document.getElementById("manual-panel");
+      const manualLabel = document.getElementById("manual-label");
       manualToggle?.addEventListener("click", () => {
         if (!manualPanel) return;
         const open = manualPanel.hidden;
         manualPanel.hidden = !open;
         manualToggle.setAttribute("aria-expanded", String(open));
         manualToggle.classList.toggle("open", open);
+        if (manualLabel) manualLabel.textContent = open ? "Install options" : "Install manually";
       });
 
       // --- Copy: agent setup prompt ---
