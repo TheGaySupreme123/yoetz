@@ -410,11 +410,12 @@ jobs:
 
       - name: Install the candidate wheel into an isolated environment
         run: |
+          candidate_version=$(uv run --locked python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
           uv venv "${{ runner.temp }}/subprocess-venv"
           uv pip install --python "${{ runner.temp }}/subprocess-venv/bin/python" \
-            --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==0.1.0"
+            --no-index --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==${candidate_version}"
           uv pip install --python "${{ runner.temp }}/subprocess-venv/bin/python" \
-            "yoetz[semantic-openai,portable-recovery]==0.1.0"
+            "yoetz[semantic-openai,portable-recovery]==${candidate_version}"
           echo "${{ runner.temp }}/subprocess-venv/bin" >> "$GITHUB_PATH"
 
       - name: uv sync --locked (test runner tooling only)
@@ -485,10 +486,11 @@ jobs:
 
       - name: Install the wheel outside the checkout
         run: |
+          candidate_version=$(uv run --locked python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
           uv venv "${{ runner.temp }}/pkg-venv"
           uv pip install --python "${{ runner.temp }}/pkg-venv/bin/python" \
-            --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==0.1.0"
-          uv pip install --python "${{ runner.temp }}/pkg-venv/bin/python" "yoetz==0.1.0"
+            --no-index --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==${candidate_version}"
+          uv pip install --python "${{ runner.temp }}/pkg-venv/bin/python" "yoetz==${candidate_version}"
 
       - name: Isolate HOME/XDG/Yoetz app data inside job temp directory
         run: |
