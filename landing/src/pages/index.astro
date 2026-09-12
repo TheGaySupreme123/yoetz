@@ -188,14 +188,6 @@ for (const sc of termScripts) {
 const termLines = termScripts[0].lines;
 const firstHost = hosts[termScripts[0].host];
 
-// How it works: four nodes, one sentence each.
-const flow = [
-  { key: "publish", title: "Publish", ops: "start · publish_work", text: "The agent writes its plan, work, results, and claims to the ledger." },
-  { key: "ledger", title: "Ledger", ops: "append-only · local", text: "On your machine. Nothing is inferred from your repository." },
-  { key: "check", title: "Check", ops: "check · respond", text: "Rules catch gaps in the record. An optional reviewer model challenges the work." },
-  { key: "receipt", title: "Receipt", ops: "receipt", text: "What was checked, at what coverage, and what is still open." },
-];
-
 // Coming soon.
 const next = [
   { key: "delegate", title: "Delegate", text: "A parent mints a child task with an expiring handle. The child publishes, checks, and gets its own receipt." },

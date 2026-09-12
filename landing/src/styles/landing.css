@@ -115,6 +115,7 @@ img { max-width: 100%; }
 .hx-c4     { animation: hxC4 11s ease-out infinite; }
 .hx-dot2   { animation: hxDot2 11s linear infinite; }
 .hx-r1     { animation: hxR1 11s ease-out infinite; }
+.hx-r2     { animation: hxR2 11s ease-out infinite; }
 .hx-fill   { animation: hxFill 11s ease-out infinite; }
 .hx-r3     { animation: hxR3 11s ease-out infinite; }
 .hx-stamp  { animation: hxStamp 11s ease-out infinite; }
@@ -128,6 +129,7 @@ img { max-width: 100%; }
 @keyframes hxC4 { 0%, 33% { opacity: 0; transform: translateY(3px); } 36% { opacity: 1; transform: none; } 90% { opacity: 1; } 95%, 100% { opacity: 0; } }
 @keyframes hxDot2 { 0%, 40% { opacity: 0; transform: translateX(-2px); } 41% { opacity: 1; } 46% { opacity: 1; transform: translateX(20px); } 47%, 100% { opacity: 0; transform: translateX(20px); } }
 @keyframes hxR1 { 0%, 48% { opacity: 0; transform: translateY(3px); } 51% { opacity: 1; transform: none; } 90% { opacity: 1; } 95%, 100% { opacity: 0; } }
+@keyframes hxR2 { 0%, 51% { opacity: 0; transform: translateY(3px); } 54% { opacity: 1; transform: none; } 90% { opacity: 1; } 95%, 100% { opacity: 0; } }
 @keyframes hxFill { 0%, 52% { width: 0; } 60% { width: 67%; } 90% { width: 67%; opacity: 1; } 95%, 100% { width: 67%; opacity: 0; } }
 @keyframes hxR3 { 0%, 62% { opacity: 0; transform: translateY(3px); } 65% { opacity: 1; transform: none; } 90% { opacity: 1; } 95%, 100% { opacity: 0; } }
 @keyframes hxStamp { 0%, 68% { opacity: 0; transform: scale(1.35); } 71% { opacity: 1; transform: none; } 90% { opacity: 1; } 95%, 100% { opacity: 0; } }
