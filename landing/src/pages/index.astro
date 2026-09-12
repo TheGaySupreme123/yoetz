@@ -264,7 +264,7 @@ const next = [
                 <span id="agent-copy-label">Set up with your agent</span> <span class="rec">recommended</span>
               </button>
               <button class="inst-tab manual" type="button" id="manual-toggle" aria-expanded="false" aria-controls="manual-panel">
-                Install manually
+                <span id="manual-label">Install manually</span>
                 <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
               </button>
             </div>
@@ -753,12 +753,14 @@ const next = [
       // --- Manual install disclosure ---
       const manualToggle = document.getElementById("manual-toggle");
       const manualPanel = document.getElementById("manual-panel");
+      const manualLabel = document.getElementById("manual-label");
       manualToggle?.addEventListener("click", () => {
         if (!manualPanel) return;
         const open = manualPanel.hidden;
         manualPanel.hidden = !open;
         manualToggle.setAttribute("aria-expanded", String(open));
         manualToggle.classList.toggle("open", open);
+        if (manualLabel) manualLabel.textContent = open ? "Install options" : "Install manually";
       });
 
       // --- Copy: agent setup prompt ---
