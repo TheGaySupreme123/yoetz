@@ -156,7 +156,7 @@ def test_real_checkout_passes_the_single_ci_entrypoint() -> None:
 
 
 @pytest.mark.slow
-def test_shared_stale_schema_member_identity_cannot_pass_the_ripple(tmp_path: Path) -> None:
+def test_shared_invalid_schema_member_identity_cannot_pass_the_ripple(tmp_path: Path) -> None:
     """Source/mirror parity cannot conceal an invalid hand-maintained schema inventory."""
 
     checkout = tmp_path / "checkout"
@@ -164,9 +164,11 @@ def test_shared_stale_schema_member_identity_cannot_pass_the_ripple(tmp_path: Pa
     manifest_path = checkout / "schemas/manifest.json"
     manifest = json.loads(manifest_path.read_bytes())
     member = next(
-        item for item in manifest["members"] if item["path"] == "consent/status-7.0.0.schema.json"
+        item for item in manifest["members"] if item["path"] == "consent/status-6.0.0.schema.json"
     )
-    member["byte_length"] += 1
+    # The owning ripple refreshes digest/size bindings from source bytes. Media type remains
+    # part of the hand-maintained identity and cannot be repaired by refreshing those bindings.
+    member["media_type"] = "text/plain"
     manifest_path.write_bytes(canonical_encode(manifest))
 
     # The command owns all mirror and runtime digest changes, so the final failure can only be
