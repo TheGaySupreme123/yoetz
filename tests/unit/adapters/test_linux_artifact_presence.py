@@ -17,7 +17,6 @@ from yoetz.adapters.integrations.linux_artifact_presence import (
     ConversationState,
     IsolatedPamAuthenticator,
     LinuxArtifactUserPresence,
-    LinuxPamAuthenticator,
     PamMessage,
     PamResponse,
     ResponseAllocator,
@@ -358,7 +357,7 @@ def test_real_pam_rejects_a_wrong_password_for_the_invoking_account() -> None:
         prompts += 1
         return bytearray(b"not-the-account-password-" + str(time.time_ns()).encode())
 
-    assert LinuxPamAuthenticator().authenticate(account, read_password) is False
+    assert IsolatedPamAuthenticator().authenticate(account, read_password) is False
     assert prompts <= 1
 
 

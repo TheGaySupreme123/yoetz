@@ -21,8 +21,9 @@ import signal
 import subprocess
 import sys
 from collections.abc import Callable
+from io import BufferedReader
 from types import TracebackType
-from typing import Final, Protocol, Self
+from typing import Final, Protocol, Self, cast
 
 from yoetz.cli.trusted_console import TrustedForegroundConsole
 from yoetz.ports.plugin_artifacts import ArtifactAuthority
@@ -308,7 +309,7 @@ def pam_worker() -> int:
             return 1
         while used < len(secret):
             with memoryview(secret)[used:] as target:
-                count = sys.stdin.buffer.readinto(target)
+                count = cast(BufferedReader, sys.stdin.buffer).readinto(target)
             if not count:
                 break
             used += count
