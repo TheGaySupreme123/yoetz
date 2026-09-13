@@ -716,8 +716,10 @@ usage, cost, and failure facts; semantic-attempt ID; dispatch kind; exactly one 
 authorization or local-disclosure reservation; durable privacy-receipt ID; external request
 commitment when applicable; and the validated terminal status/reason pair. The exact Python fields
 and wire conversions are frozen in `domain/findings.md` and
-`semantic-provenance-1.0.0.schema.json`; the append-only external-runtime extension is frozen in
-`semantic-provenance-1.1.0.schema.json` and `runtime-attempt-evidence-1.0.0.schema.json`. The
+`semantic-provenance-1.0.0.schema.json`; the append-only external-runtime extension is carried by
+current `semantic-provenance-1.2.0.schema.json` and `runtime-attempt-evidence-1.1.0.schema.json`,
+while the released `semantic-provenance-1.1.0.schema.json` and
+`runtime-attempt-evidence-1.0.0.schema.json` remain readable. The
 same append-only `1.1.0` carries the optional `fallback_from` object (issue #582) — `provider`,
 `endpoint_profile_id`, `endpoint_profile_version`, `model`, `attempted_count`, `reason` —
 present exactly when the declared fallback endpoint served the attempt; the top-level
@@ -740,6 +742,17 @@ attempt provenance remains valid check accounting but can never justify a semant
 `finding_from_json`/`finding_to_json` and
 `semantic_provenance_from_json`/`semantic_provenance_to_json` are the sole codecs. The finding
 event alias delegates to them; no event, port, Pydantic model, or adapter owns a parallel dump.
+
+Codex subscription-runtime attempts may carry a bounded `runtime_evidence.token_usage` object in
+the current runtime evidence schema. It records one cumulative `total` snapshot as non-overlapping
+`input_tokens`, `output_tokens`, and `total_tokens`, plus the `cached_input_tokens`,
+`cache_write_input_tokens`, and `reasoning_output_tokens` counters for analysis. Cached input and
+reasoning output are subsets and are never added again; cache-write input remains a separate
+provider counter with no assumed arithmetic relationship. Repeated snapshots are replaced rather
+than summed. Missing usage remains absent, and malformed or regressing matching snapshots leave a
+closed `token_usage_invalid` diagnostic without invalidating an otherwise valid semantic judgment.
+Only the exact active thread and turn are accepted, and no account identifiers or raw provider
+notification body is retained.
 
 Work-integrity finding kinds (`FindingKind`):
 `completion_with_open_obligations`, `requested_item_never_attempted`,
@@ -852,7 +865,12 @@ policy/schema version entries, obligation/response/gap/redaction records, and ca
 It owns receipt-only enums; response disposition and waiver scope reuse `domain/findings.py`, and
 the boundary `ReceiptRedactionProfile` reuses `protocol/models.py`. The document field inventory
 is exactly the receipt-document schema, including `suppressed_finding_count`, and it has no
-post-append result frontier.
+post-append result frontier. An applicable semantic check contributes its selected
+  `semantic_provenance`, including bounded per-attempt token usage; deterministic or historical
+  receipts omit that optional field so their prior bytes remain unchanged.
+  The receipt provenance represents the applicable provider result; usage for failed, expired, or
+  late physical retries remains in the durable semantic-attempt ledger and internal accounting,
+  rather than being invented into that public provenance.
 
 `receipt_document_from_json`/`receipt_document_to_json` are the sole document codecs.
 `render_receipt_compact(document) -> str` returns one bounded string; there is no v0.1
@@ -1135,9 +1153,12 @@ coverage.
   versions: ReceiptVersionSlice, redaction_profile, include) -> ReceiptDocument`. Every
   nondeterministic input is explicit; the
   builder reads no clock or ID source. `ReceiptDocument` contains its identity, generation time,
-  subject frontier, and exact nonnegative `suppressed_finding_count` from the applicable latest
-  check, but not the post-append result frontier (which would create a digest
-  self-reference). `ReceiptResult` carries both subject and post-commit result frontiers.
+  subject frontier, exact nonnegative `suppressed_finding_count`, and optional
+  `semantic_provenance` from the applicable latest check, but not the post-append result frontier
+  (which would create a digest self-reference). When no applicable semantic attempt exists, the
+  receipt omits that field, preserving historical deterministic receipt bytes. `ReceiptResult`
+  carries both subject and post-commit result frontiers. The provenance and token counters name
+  that selected semantic attempt; they are not a sum across retries or recovery attempts.
 - Receipt boundary tokens are closed: `ReceiptFormat` is `json|markdown|text`, `ReceiptInclude`
   is `summary|standard|full`, and `ReceiptRedactionProfile` is
   `full_local|default_local_export|redacted_share`. `include` changes only the registered section
@@ -1150,10 +1171,11 @@ coverage.
   selected text field; `default_local_export` clears obligation summaries and receipt-gap details
   but retains finding text and response reasons; `redacted_share` additionally omits semantic
   finding rows and rejected/waived response rows while retaining deterministic ID-only findings,
-  acknowledged responses, structural IDs, conclusion, coverage, gaps, and versions. Every omitted
-  protected content leaf is counted once in the sorted `ReceiptRedaction` rows; omitted structural
-  IDs and enum/relation fields are not content-redaction counts. Sections are regenerated only
-  from retained structural values and fixed templates; they never copy omitted text. Therefore a
+  acknowledged responses, structural IDs, conclusion, coverage, gaps, versions, and the bounded
+  semantic provenance/token-usage counters. Every omitted protected content leaf is counted once
+  in the sorted `ReceiptRedaction` rows; omitted structural IDs and enum/relation fields are not
+  content-redaction counts. Sections are regenerated only from retained structural values and
+  fixed templates; they never copy omitted text. Therefore a
   profile/include transform that changes selected fields or sections changes the canonical
   document and digest; it is not a render-only rewrite. Conclusion, subject frontier, suppression,
   weakest coverage, and material gap codes are invariant and may only stay equal or weaken.

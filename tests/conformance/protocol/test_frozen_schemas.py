@@ -24,7 +24,7 @@ _MANIFEST_PATH = "manifest.json"
 _SCHEMA_NAMESPACE = "https://schemas.yoetz.dev/0.1/"
 _EXPECTED_SCHEMA_MANIFEST_SCHEMA = "yoetz.schema-manifest/1.0.0"
 _EXPECTED_SCHEMA_MANIFEST_VERSION = "1.0.0"
-_EXPECTED_MEMBER_COUNT = 136
+_EXPECTED_MEMBER_COUNT = 145
 _EXPECTED_REQUEST_RESULT_VERSION_COUNT = 42
 _EXPECTED_EVENT_VERSION_COUNT = 16
 
@@ -225,9 +225,19 @@ def test_schema_registry_is_complete() -> None:
             in {
                 "config/yoetz-config-1.2.0.schema.json",
                 "events/evidence-recorded-1.2.0.schema.json",
+                "events/check-recorded-1.2.0.schema.json",
+                "events/finding-recorded-1.2.0.schema.json",
+                "findings/finding-1.2.0.schema.json",
+                "findings/semantic-provenance-1.2.0.schema.json",
+                "operations/check-result-1.2.0.schema.json",
+                "operations/receipt-result-1.2.0.schema.json",
+                "operations/status-result-1.2.0.schema.json",
+                "receipts/receipt-document-1.2.0.schema.json",
             }
             else (
-                "1.2.0"
+                "1.3.0"
+                if path == "operations/status-result-1.3.0.schema.json"
+                else "1.2.0"
                 if path == "operations/status-result-1.2.0.schema.json"
                 else "1.1.0"
                 if path
@@ -243,6 +253,7 @@ def test_schema_registry_is_complete() -> None:
                     "events/session-resumed-1.1.0.schema.json",
                     "findings/finding-1.1.0.schema.json",
                     "findings/semantic-provenance-1.1.0.schema.json",
+                    "findings/runtime-attempt-evidence-1.1.0.schema.json",
                     "operations/check-result-1.1.0.schema.json",
                     "operations/publish-work-request-1.1.0.schema.json",
                     "operations/receipt-result-1.1.0.schema.json",

@@ -13,9 +13,12 @@ from yoetz.domain.findings import (
     Finding,
     FindingOrigin,
     ResponseDisposition,
+    SemanticProvenance,
     WaiverScope,
     finding_from_json,
     finding_to_json,
+    semantic_provenance_from_json,
+    semantic_provenance_to_json,
 )
 from yoetz.domain.values import (
     ClaimId,
@@ -616,6 +619,10 @@ class ReceiptDocument:
     gaps: tuple[ReceiptGap, ...]
     redactions: tuple[ReceiptRedaction, ...]
     sections: tuple[ReceiptSection, ...]
+    # A receipt carries the provenance of the applicable semantic check when one exists.  The
+    # field is optional so historical deterministic receipts keep their exact frozen bytes and
+    # old readers can continue to omit it.
+    semantic_provenance: SemanticProvenance | None = None
 
     def __post_init__(self) -> None:
         invalid = "invalid_receipt_document"
@@ -632,6 +639,11 @@ class ReceiptDocument:
         ):
             raise ProtocolValueError(invalid)
         if type(self.versions) is not ReceiptVersionSlice or type(self.coverage) is not Coverage:
+            raise ProtocolValueError(invalid)
+        if (
+            self.semantic_provenance is not None
+            and type(self.semantic_provenance) is not SemanticProvenance
+        ):
             raise ProtocolValueError(invalid)
         findings = _validate_tuple(self.findings, 0, 100, invalid)
         if any(type(value) is not Finding for value in findings):
@@ -904,7 +916,7 @@ def receipt_document_from_json(value: object) -> ReceiptDocument:
             "sections",
         }
     )
-    source = _closed_object(value, keys, frozenset(), invalid)
+    source = _closed_object(value, keys, frozenset({"semantic_provenance"}), invalid)
     if _field(source, "schema_version", invalid) != "1.0.0":
         raise ProtocolValueError(invalid)
     raw_suppressed = _field(source, "suppressed_finding_count", invalid)
@@ -935,6 +947,14 @@ def receipt_document_from_json(value: object) -> ReceiptDocument:
     sections = tuple(
         _section_from_json(item) for item in _array(_field(source, "sections", invalid), invalid)
     )
+    source_keys = frozenset(cast(tuple[str, ...], tuple(source)))
+    semantic_provenance_value = (
+        None
+        if "semantic_provenance" not in source_keys
+        else semantic_provenance_from_json(
+            freeze_json(_field(source, "semantic_provenance", invalid))
+        )
+    )
     return ReceiptDocument(
         receipt_id=receipt_id(_field(source, "receipt_id", invalid)),
         task_id=task_id(_field(source, "task_id", invalid)),
@@ -957,6 +977,7 @@ def receipt_document_from_json(value: object) -> ReceiptDocument:
         gaps=gaps,
         redactions=redactions,
         sections=sections,
+        semantic_provenance=semantic_provenance_value,
     )
 
 
@@ -1045,7 +1066,7 @@ def receipt_document_to_json(document: ReceiptDocument) -> dict[str, object]:
 
     if type(document) is not ReceiptDocument:
         raise ProtocolValueError("invalid_receipt_document")
-    return {
+    result: dict[str, object] = {
         "schema_version": document.schema_version,
         "receipt_id": document.receipt_id,
         "task_id": document.task_id,
@@ -1065,6 +1086,11 @@ def receipt_document_to_json(document: ReceiptDocument) -> dict[str, object]:
         "redactions": [_redaction_to_json(value) for value in document.redactions],
         "sections": [_section_to_json(value) for value in document.sections],
     }
+    # Omit absent provenance rather than emitting null: deterministic and historical receipt
+    # documents therefore retain their exact pre-extension bytes.
+    if document.semantic_provenance is not None:
+        result["semantic_provenance"] = semantic_provenance_to_json(document.semantic_provenance)
+    return result
 
 
 def receipt_weakest_coverage(document: ReceiptDocument) -> Coverage:

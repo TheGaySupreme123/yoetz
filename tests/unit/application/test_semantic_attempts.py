@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Literal, cast
 
 import pytest
@@ -22,6 +23,7 @@ from yoetz.application.semantic_attempts import (
     run_durable_semantic_attempts,
     should_retry_after,
 )
+from yoetz.domain.findings import RuntimeTokenUsage
 from yoetz.domain.values import Frontier
 from yoetz.ports.ledger import (
     AttemptOutcome,
@@ -351,6 +353,7 @@ class _FakeLedger:
         outcome: AttemptOutcome,
         result_object_ref: ObjectRef | None = None,
         terminal_code: SemanticReason | None = None,
+        token_usage: RuntimeTokenUsage | None = None,
     ) -> None:
         assert self.attempts is not None
         assert self.outcomes is not None
@@ -374,6 +377,8 @@ class _FakeLedger:
             state,
             terminal_code,
             result_object_ref,
+            None,
+            token_usage,
         )
         if outcome is AttemptOutcome.EXPIRED:
             self.job = replace(
@@ -1298,10 +1303,13 @@ async def test_repeated_cancellation_cannot_interrupt_terminal_writes() -> None:
             outcome: AttemptOutcome,
             result_object_ref: ObjectRef | None = None,
             terminal_code: SemanticReason | None = None,
+            token_usage: RuntimeTokenUsage | None = None,
         ) -> None:
             cleanup_started.set()
             await allow_cleanup.wait()
-            await super().record_attempt_outcome(handle, outcome, result_object_ref, terminal_code)
+            await super().record_attempt_outcome(
+                handle, outcome, result_object_ref, terminal_code, token_usage
+            )
 
     lease = _lease()
     job = SemanticJobRecord(
@@ -2031,7 +2039,7 @@ async def test_exception_stage_survives_cleanup_and_is_request_joined(
             build_final=lambda status, reason, evaluation, accounting: (status, reason),
         )
 
-    if stage in {"response_persistence", "result_commit"}:
+    if stage == "result_commit":
         with pytest.raises(RuntimeError):
             await run()
     else:
@@ -2043,3 +2051,46 @@ async def test_exception_stage_survives_cleanup_and_is_request_joined(
     assert dispatch_count == (0 if stage == "claim" else 1)
     if cleanup_fails and stage in {"claim", "dispatch_entered"}:
         assert len(records) >= 2
+
+
+@pytest.mark.anyio
+async def test_response_publication_failure_keeps_runtime_usage_on_failed_attempt() -> None:
+    usage = RuntimeTokenUsage(120, 60, 10, 30, 8, 150)
+    ledger = _FakeLedger(_queued_job(), _lease())
+
+    async def dispatch(handle: SemanticAttemptHandle, deadline: Deadline) -> _Eval:
+        del handle, deadline
+        return _Eval(
+            SemanticStatus.SUCCEEDED,
+            SemanticReason.SEMANTIC_COMPLETED,
+            provenance=SimpleNamespace(
+                runtime_evidence=SimpleNamespace(token_usage=usage),
+            ),
+        )
+
+    async def publish(handle: SemanticAttemptHandle, evaluation: object) -> ObjectRef:
+        del handle, evaluation
+        raise RuntimeError("response_publish_failed")
+
+    result = await run_durable_semantic_attempts(
+        ledger=ledger,
+        lease=ledger.lease,
+        job=ledger.job,
+        deadline=Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1000.0),
+        max_retries=0,
+        now_monotonic=lambda: 0.0,
+        dispatch=dispatch,
+        publish_success_response=publish,
+        build_final=lambda status, reason, evaluation, accounting: (status, reason, accounting),
+    )
+
+    status, reason, accounting = cast(
+        tuple[SemanticStatus, SemanticReason, SemanticAttemptAccounting], result
+    )
+    assert (status, reason) == (
+        SemanticStatus.FAILED,
+        SemanticReason.COORDINATOR_FAILURE,
+    )
+    assert accounting.attempt_usages[0].token_usage == usage
+    assert ledger.attempts is not None
+    assert ledger.attempts[_ATT1].token_usage == usage

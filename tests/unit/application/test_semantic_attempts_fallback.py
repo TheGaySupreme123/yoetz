@@ -31,6 +31,7 @@ from unit.application.test_semantic_attempts import (
 from yoetz.application.semantic_attempts import (
     SemanticAttemptAccounting,
     SemanticAttemptDispatch,
+    SemanticAttemptUsage,
     SemanticEndpointPlan,
     SemanticFallbackPlan,
     attempt_accounting_to_json,
@@ -460,6 +461,10 @@ async def test_without_a_plan_the_accounting_is_the_single_endpoint_shape() -> N
         selected_attempt_id=_ATT2,
         exhausted=False,
         terminal_reason_counts=(("transport_unavailable", 1),),
+        attempt_usages=(
+            SemanticAttemptUsage(_ATT1, 1, None),
+            SemanticAttemptUsage(_ATT2, 2, None),
+        ),
     )
     assert "endpoint_attempts" not in attempt_accounting_to_json(accounting)
     assert ledger.attempts is not None

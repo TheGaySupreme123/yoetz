@@ -288,6 +288,66 @@ def _attempt(
     )
 
 
+_THREAD_ID = "019a0000-0000-7000-8000-000000000001"
+_TURN_ID = "019a0000-0000-7000-8000-000000000002"
+
+
+def _token_usage_notice(
+    *,
+    thread_id: str = _THREAD_ID,
+    turn_id: str = _TURN_ID,
+    total_input: int = 100,
+    total_cached: int = 40,
+    total_cache_write: int = 0,
+    total_output: int = 30,
+    total_reasoning: int = 10,
+    last_input: int = 100,
+    last_cached: int = 40,
+    last_cache_write: int = 0,
+    last_output: int = 30,
+    last_reasoning: int = 10,
+) -> dict[str, object]:
+    def breakdown(
+        input_tokens: int,
+        cached_input_tokens: int,
+        cache_write_input_tokens: int,
+        output_tokens: int,
+        reasoning_output_tokens: int,
+    ) -> dict[str, int]:
+        return {
+            "inputTokens": input_tokens,
+            "cachedInputTokens": cached_input_tokens,
+            "cacheWriteInputTokens": cache_write_input_tokens,
+            "outputTokens": output_tokens,
+            "reasoningOutputTokens": reasoning_output_tokens,
+            "totalTokens": input_tokens + output_tokens,
+        }
+
+    return {
+        "method": "thread/tokenUsage/updated",
+        "params": {
+            "threadId": thread_id,
+            "turnId": turn_id,
+            "tokenUsage": {
+                "last": breakdown(
+                    last_input,
+                    last_cached,
+                    last_cache_write,
+                    last_output,
+                    last_reasoning,
+                ),
+                "total": breakdown(
+                    total_input,
+                    total_cached,
+                    total_cache_write,
+                    total_output,
+                    total_reasoning,
+                ),
+            },
+        },
+    }
+
+
 class _Runtime:
     def __init__(
         self,
@@ -1247,6 +1307,164 @@ async def test_success_records_weaker_runtime_boundary_without_identity_or_trans
     assert evidence.final_output_sha256 is not None
     assert "discard@example" not in repr(result)
     assert "no_material_discrepancy" not in repr(evidence)
+
+
+async def test_token_usage_keeps_latest_cumulative_total_and_non_overlapping_subsets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(_profile())
+    runtime.events[0:0] = [
+        _token_usage_notice(total_input=100, total_cached=40, total_output=30),
+        _token_usage_notice(
+            total_input=160,
+            total_cached=80,
+            total_cache_write=5,
+            total_output=50,
+            total_reasoning=20,
+        ),
+    ]
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultSuccess
+    evidence = result.provenance.runtime_evidence
+    assert evidence is not None and evidence.token_usage is not None
+    assert evidence.token_usage.input_tokens == 160
+    assert evidence.token_usage.cached_input_tokens == 80
+    assert evidence.token_usage.cache_write_input_tokens == 5
+    assert evidence.token_usage.output_tokens == 50
+    assert evidence.token_usage.reasoning_output_tokens == 20
+    assert evidence.token_usage.total_tokens == 210
+    assert result.provenance.token_usage is not None
+    assert result.provenance.token_usage.input_tokens == 160
+    assert result.provenance.token_usage.output_tokens == 50
+    assert result.provenance.token_usage.total_tokens == 210
+
+
+async def test_token_usage_buffered_before_turn_ack_is_attributed_after_ack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(_profile())
+    original_request = runtime.request
+
+    async def request_with_buffered_usage(
+        request_id: int, method: str, params: object, timeout: float
+    ) -> dict[str, object]:
+        if method == "turn/start":
+            runtime.pending_notifications.append(_token_usage_notice(total_cache_write=7))
+        return await original_request(request_id, method, params, timeout)
+
+    monkeypatch.setattr(runtime, "request", request_with_buffered_usage)
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultSuccess
+    evidence = result.provenance.runtime_evidence
+    assert evidence is not None and evidence.token_usage is not None
+    assert evidence.token_usage.cache_write_input_tokens == 7
+
+
+async def test_cumulative_token_usage_regression_keeps_larger_snapshot_and_marks_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(_profile())
+    runtime.events[0:0] = [
+        _token_usage_notice(total_input=160, total_cached=80, total_output=50),
+        _token_usage_notice(total_input=120, total_cached=60, total_output=40),
+    ]
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultSuccess
+    evidence = result.provenance.runtime_evidence
+    assert evidence is not None and evidence.token_usage is not None
+    assert evidence.token_usage.total_tokens == 210
+    assert evidence.failure_stage == "token_usage_invalid"
+
+
+async def test_malformed_matching_token_usage_is_nonterminal_and_stays_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(_profile())
+    runtime.events.insert(
+        0,
+        {
+            "method": "thread/tokenUsage/updated",
+            "params": {
+                "threadId": _THREAD_ID,
+                "turnId": _TURN_ID,
+                "tokenUsage": {"last": {}, "total": {}},
+            },
+        },
+    )
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultSuccess
+    evidence = result.provenance.runtime_evidence
+    assert evidence is not None
+    assert evidence.token_usage is None
+    assert evidence.failure_stage == "token_usage_invalid"
+
+
+async def test_unrelated_token_usage_is_ignored_without_retaining_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(_profile())
+    runtime.events.insert(
+        0,
+        _token_usage_notice(thread_id="other-thread", turn_id="other-turn"),
+    )
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultSuccess
+    evidence = result.provenance.runtime_evidence
+    assert evidence is not None
+    assert evidence.token_usage is None
+    assert evidence.failure_stage is None
+
+
+async def test_token_usage_survives_terminal_turn_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(_profile())
+    runtime.events[0:0] = [
+        _token_usage_notice(total_input=120, total_cached=60, total_output=40),
+        {
+            "method": "error",
+            "params": {"error": {"codexErrorInfo": "usageLimitExceeded"}},
+        },
+    ]
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultUnavailable
+    evidence = result.provenance.runtime_evidence
+    assert evidence is not None and evidence.token_usage is not None
+    assert evidence.token_usage.total_tokens == 160
+    assert result.provenance.token_usage is not None
+    assert result.provenance.token_usage.total_tokens == 160
+
+
+def test_token_usage_parser_rejects_incoherent_counters() -> None:
+    notices = [_token_usage_notice(total_cached=101), _token_usage_notice(total_reasoning=31)]
+    incoherent_total = _token_usage_notice()
+    incoherent_params = cast(dict[str, object], incoherent_total["params"])
+    incoherent_usage = cast(dict[str, object], incoherent_params["tokenUsage"])
+    incoherent_total_breakdown = cast(dict[str, object], incoherent_usage["total"])
+    incoherent_total_breakdown["totalTokens"] = 1
+    notices.append(incoherent_total)
+    missing_cache_write = _token_usage_notice()
+    missing_params = cast(dict[str, object], missing_cache_write["params"])
+    missing_usage = cast(dict[str, object], missing_params["tokenUsage"])
+    del cast(dict[str, object], missing_usage["total"])["cacheWriteInputTokens"]
+    notices.append(missing_cache_write)
+
+    for notice in notices:
+        with pytest.raises(ValueError, match="^codex_app_server_token_usage_invalid$"):
+            module._runtime_token_usage_from_notification(  # pyright: ignore[reportPrivateUsage]
+                notice, thread_id=_THREAD_ID, turn_id=_TURN_ID
+            )
 
 
 async def test_missing_model_fails_before_case_disclosure(
