@@ -21,6 +21,10 @@ from yoetz.adapters.providers.codex_app_server import (
     CODEX_EVALUATOR_CAPABILITY_PROFILE,
     CODEX_EVALUATOR_CONFIG_SHA256,
     CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT,
+    CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256,
+    CODEX_EVALUATOR_LINUX_X64_EXECUTABLE_SHA256,
+    CODEX_EVALUATOR_LINUX_X64_SOURCE_IDENTITY,
+    CODEX_EVALUATOR_RUNTIME_VERSION,
     CodexAppServerEvaluator,
     CodexAppServerExternalFactory,
     CodexAppServerProfile,
@@ -66,9 +70,9 @@ def _profile() -> CodexAppServerProfile:
         endpoint_profile_id="codex-chatgpt-subscription",
         endpoint_profile_version="1.0.0",
         executable_path=Path("/opt/codex/0.150.1/codex"),
-        executable_sha256="sha256:" + "a" * 64,
+        executable_sha256="sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b",
         runtime_version="0.150.1",
-        source_identity="openai-codex-darwin-arm64-0.150.1",
+        source_identity="openai-codex-npm-darwin-arm64-0.150.1",
         app_server_schema_sha256=CODEX_APP_SERVER_SCHEMA_SHA256,
         capability_cell_sha256=CODEX_EVALUATOR_CAPABILITY_CELL_SHA256,
         capability_profile=CODEX_EVALUATOR_CAPABILITY_PROFILE,
@@ -116,6 +120,91 @@ def test_committed_compatibility_cell_matches_runtime_constants() -> None:
     assert config.decode("utf-8") == module.CODEX_EVALUATOR_CONFIG
     assert cell["upstream_body_observability"] == "unavailable"
     assert cell["release_evidence"] == "pending"
+
+
+def test_committed_linux_compatibility_cell_matches_runtime_constants() -> None:
+    root = Path(__file__).resolve().parents[4]
+    cell = json.loads(
+        (root / "support/codex-evaluator/0.150.1/cell-linux-x64.json").read_text("utf-8")
+    )
+    identity_keys = (
+        "schema",
+        "runtime_version",
+        "distribution_kind",
+        "distribution",
+        "platform",
+        "protocol",
+        "executable_sha256",
+        "app_server_schema_sha256",
+        "isolated_config_sha256",
+        "capability_profile",
+        "credential_authority",
+        "upstream_body_observability",
+        "evidence_reviewed_at",
+        "evidence_expires_at",
+    )
+
+    assert cell["runtime_version"] == CODEX_EVALUATOR_RUNTIME_VERSION
+    assert cell["app_server_schema_sha256"] == CODEX_APP_SERVER_SCHEMA_SHA256
+    assert cell["capability_profile"] == CODEX_EVALUATOR_CAPABILITY_PROFILE
+    assert cell["capability_cell_sha256"] == CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256
+    assert cell["executable_sha256"] == CODEX_EVALUATOR_LINUX_X64_EXECUTABLE_SHA256
+    assert cell["isolated_config_sha256"] == CODEX_EVALUATOR_CONFIG_SHA256
+    assert canonical_digest({key: cell[key] for key in identity_keys}) == (
+        CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256
+    )
+    assert cell["platform"] == {"architecture": "x86_64", "os": "linux"}
+    assert cell["release_evidence"] == "pending"
+
+
+def test_linux_cell_identity_binds_the_native_digest_and_package_alias() -> None:
+    cell = module.codex_evaluator_cell_for_platform("linux", "x86_64")
+    assert module.codex_evaluator_cell_for_platform("linux2", "amd64") is cell
+
+    assert cell.source_identity == CODEX_EVALUATOR_LINUX_X64_SOURCE_IDENTITY
+    assert cell.executable_sha256 == CODEX_EVALUATOR_LINUX_X64_EXECUTABLE_SHA256
+    assert cell.capability_cell_sha256 == CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256
+    assert cell.native_package_directory == "codex-linux-x64"
+    assert cell.native_package_spec == "npm:@openai/codex@0.150.1-linux-x64"
+    assert cell.native_executable_relative.as_posix() == (
+        "vendor/x86_64-unknown-linux-musl/bin/codex"
+    )
+
+
+def test_linux_cell_rejects_mac_digest_or_source_identity() -> None:
+    with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
+        module.codex_evaluator_cell_for_binding(
+            source_identity=CODEX_EVALUATOR_LINUX_X64_SOURCE_IDENTITY,
+            executable_sha256="sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b",
+            runtime_version="0.150.1",
+            app_server_schema_sha256=CODEX_APP_SERVER_SCHEMA_SHA256,
+            capability_cell_sha256=CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256,
+            capability_profile=CODEX_EVALUATOR_CAPABILITY_PROFILE,
+            capability_evidence_expires_at=CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT,
+            isolated_config_sha256=CODEX_EVALUATOR_CONFIG_SHA256,
+        )
+
+    with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
+        module.codex_evaluator_cell_for_binding(
+            source_identity="openai-codex-npm-darwin-arm64-0.150.1",
+            executable_sha256=CODEX_EVALUATOR_LINUX_X64_EXECUTABLE_SHA256,
+            runtime_version="0.150.1",
+            app_server_schema_sha256=CODEX_APP_SERVER_SCHEMA_SHA256,
+            capability_cell_sha256=CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256,
+            capability_profile=CODEX_EVALUATOR_CAPABILITY_PROFILE,
+            capability_evidence_expires_at=CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT,
+            isolated_config_sha256=CODEX_EVALUATOR_CONFIG_SHA256,
+        )
+
+
+def test_local_binding_rejects_a_mac_cell_on_linux_before_file_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(module.sys, "platform", "linux")
+    monkeypatch.setattr(module.platform, "machine", lambda: "x86_64")
+
+    with pytest.raises(ValueError, match="codex_runtime_platform_unsupported"):
+        _profile().verify_local_binding()
 
 
 def test_codex_output_schema_omits_only_provider_rejected_uniqueness_keyword() -> None:

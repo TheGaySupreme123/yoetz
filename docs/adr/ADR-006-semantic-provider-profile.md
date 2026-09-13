@@ -262,6 +262,18 @@ and unreviewed event failures stay terminal but are unavailable rather than inva
 The runbook records the exact new cell digest and synthetic evidence boundary. Existing bindings
 require explicit setup to accept the new identity; no privacy authority migrates implicitly.
 
+### Linux x86_64 cell amendment (2026-09-13, issue #716)
+
+The same evaluator contract now has a separate Linux x86_64 implementation cell for Codex npm
+`0.150.1-linux-x64` (`@openai/codex-linux-x64`). Its native executable, source identity, package
+layout, platform, and capability-cell digest are distinct from the macOS arm64 cell; its
+app-server v2 schema, isolated configuration, model/reasoning contract, OAuth authority, and
+privacy/cleanup fences remain identical. An x86_64 WSL2 Linux userspace is eligible for the Linux
+cell, but WSL-specific smoke evidence is pending; this amendment creates no native Windows cell.
+The Linux cell remains an implementation candidate until its packaged Yoetz lifecycle and
+semantic-receipt evidence is complete. The empty `runtime-support.json` arrays therefore remain
+unchanged.
+
 The gateway issues a secret-free, dispatch-bound `ExternalRuntimeAuthority` instead of minting a
 vault handle. The runtime may receive only the already-approved canonical case through stdin. Its
 `RuntimeAttemptEvidence` commits to the disclosed case, instruction, output schema, launcher,

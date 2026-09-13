@@ -12,9 +12,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import platform
 import shutil
 import signal
 import stat
+import sys
 import tempfile
 from collections import deque
 from collections.abc import Callable, Mapping
@@ -79,12 +81,18 @@ __all__ = [
     "CODEX_EVALUATOR_CONFIG",
     "CODEX_EVALUATOR_CONFIG_SHA256",
     "CODEX_EVALUATOR_RUNTIME_VERSION",
+    "CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256",
+    "CODEX_EVALUATOR_LINUX_X64_EXECUTABLE_SHA256",
+    "CODEX_EVALUATOR_LINUX_X64_SOURCE_IDENTITY",
     "CodexAppServerExternalFactory",
     "CodexAppServerProfile",
+    "CodexEvaluatorCell",
     "CodexLoginChallenge",
     "CodexRuntimeStatus",
     "codex_account_status",
     "codex_binding_from_config",
+    "codex_evaluator_cell_for_binding",
+    "codex_evaluator_cell_for_platform",
     "codex_factory_builders_from_config",
     "codex_login",
     "codex_logout",
@@ -100,6 +108,13 @@ CODEX_EVALUATOR_CAPABILITY_CELL_SHA256: Final = (
     "sha256:c04d2dd111c85d323c3f96c7041bb598f047fff9f73b84f916d38b5321d32cfa"
 )
 CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT: Final = "2026-11-30T00:00:00Z"
+CODEX_EVALUATOR_LINUX_X64_EXECUTABLE_SHA256: Final = (
+    "sha256:abf1bb1643a79f73aa78ee627e111e02d4f8c98f25813a0cf6ce277709664386"
+)
+CODEX_EVALUATOR_LINUX_X64_SOURCE_IDENTITY: Final = "openai-codex-npm-linux-x64-0.150.1"
+CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256: Final = (
+    "sha256:3fac9e18eca7395b14166114ebf49eaaae5fe3061e86c0d5b76eb17b54488cab"
+)
 _CAPABILITY_EVIDENCE_EXPIRES_AT: Final = datetime(2026, 11, 30, tzinfo=UTC)
 CODEX_EVALUATOR_CONFIG: Final = """approval_policy = "never"
 cli_auth_credentials_store = "file"
@@ -144,6 +159,113 @@ CODEX_EVALUATOR_CONFIG_SHA256: Final = _CONFIG_SHA256
 _INSTRUCTION_SHA256: Final = (
     "sha256:" + hashlib.sha256(SEMANTIC_REVIEW_INSTRUCTION.encode()).hexdigest()
 )
+
+
+@dataclass(frozen=True, slots=True)
+class CodexEvaluatorCell:
+    """One exact Codex subscription runtime cell.
+
+    The app-server protocol and Yoetz-owned configuration are shared by the two supported
+    cells, but the native executable, package layout, and capability identity remain bound to
+    the selected platform.  Keeping these facts together prevents a persisted Linux source
+    identity from being paired with the macOS digest (or vice versa).
+    """
+
+    platform_os: Literal["darwin", "linux"]
+    platform_architecture: Literal["arm64", "x86_64"]
+    source_identity: str
+    executable_sha256: str
+    app_server_schema_sha256: str
+    capability_cell_sha256: str
+    capability_profile: str
+    capability_evidence_expires_at: str
+    isolated_config_sha256: str
+    native_package_directory: str
+    native_package_version: str
+    native_executable_relative: Path
+
+    @property
+    def native_package_spec(self) -> str:
+        # The platform package is the optional-dependency key, while npm resolves the alias
+        # through the canonical @openai/codex package name (the upstream package metadata uses
+        # ``npm:@openai/codex@0.150.1-linux-x64`` and its darwin equivalent).
+        return f"npm:@openai/codex@{self.native_package_version}"
+
+
+_MACOS_ARM64_CELL: Final = CodexEvaluatorCell(
+    platform_os="darwin",
+    platform_architecture="arm64",
+    source_identity="openai-codex-npm-darwin-arm64-0.150.1",
+    executable_sha256="sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b",
+    app_server_schema_sha256=CODEX_APP_SERVER_SCHEMA_SHA256,
+    capability_cell_sha256=CODEX_EVALUATOR_CAPABILITY_CELL_SHA256,
+    capability_profile=CODEX_EVALUATOR_CAPABILITY_PROFILE,
+    capability_evidence_expires_at=CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT,
+    isolated_config_sha256=_CONFIG_SHA256,
+    native_package_directory="codex-darwin-arm64",
+    native_package_version=f"{CODEX_EVALUATOR_RUNTIME_VERSION}-darwin-arm64",
+    native_executable_relative=Path("vendor/aarch64-apple-darwin/bin/codex"),
+)
+_LINUX_X64_CELL: Final = CodexEvaluatorCell(
+    platform_os="linux",
+    platform_architecture="x86_64",
+    source_identity=CODEX_EVALUATOR_LINUX_X64_SOURCE_IDENTITY,
+    executable_sha256=CODEX_EVALUATOR_LINUX_X64_EXECUTABLE_SHA256,
+    app_server_schema_sha256=CODEX_APP_SERVER_SCHEMA_SHA256,
+    capability_cell_sha256=CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256,
+    capability_profile=CODEX_EVALUATOR_CAPABILITY_PROFILE,
+    capability_evidence_expires_at=CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT,
+    isolated_config_sha256=_CONFIG_SHA256,
+    native_package_directory="codex-linux-x64",
+    native_package_version=f"{CODEX_EVALUATOR_RUNTIME_VERSION}-linux-x64",
+    native_executable_relative=Path("vendor/x86_64-unknown-linux-musl/bin/codex"),
+)
+_EVALUATOR_CELLS_BY_PLATFORM: Final = {
+    ("darwin", "arm64"): _MACOS_ARM64_CELL,
+    ("linux", "x86_64"): _LINUX_X64_CELL,
+}
+
+
+def codex_evaluator_cell_for_platform(platform_os: str, architecture: str) -> CodexEvaluatorCell:
+    """Return the exact reviewed cell for one normalized host platform."""
+
+    normalized_os = "linux" if platform_os.startswith("linux") else platform_os
+    normalized_architecture = "x86_64" if architecture == "amd64" else architecture
+    try:
+        return _EVALUATOR_CELLS_BY_PLATFORM[(normalized_os, normalized_architecture)]
+    except KeyError as error:
+        raise ValueError("codex_runtime_platform_unsupported") from error
+
+
+def codex_evaluator_cell_for_binding(
+    *,
+    source_identity: str,
+    executable_sha256: str,
+    runtime_version: str,
+    app_server_schema_sha256: str,
+    capability_cell_sha256: str,
+    capability_profile: str,
+    capability_evidence_expires_at: str,
+    isolated_config_sha256: str,
+) -> CodexEvaluatorCell:
+    """Validate every compatibility-critical field against one exact platform cell."""
+
+    cell: CodexEvaluatorCell | None = None
+    if source_identity == _MACOS_ARM64_CELL.source_identity:
+        cell = _MACOS_ARM64_CELL
+    elif source_identity == _LINUX_X64_CELL.source_identity:
+        cell = _LINUX_X64_CELL
+    if cell is None or (
+        executable_sha256 != cell.executable_sha256
+        or runtime_version != CODEX_EVALUATOR_RUNTIME_VERSION
+        or app_server_schema_sha256 != cell.app_server_schema_sha256
+        or capability_cell_sha256 != cell.capability_cell_sha256
+        or capability_profile != cell.capability_profile
+        or capability_evidence_expires_at != cell.capability_evidence_expires_at
+        or isolated_config_sha256 != cell.isolated_config_sha256
+    ):
+        raise ValueError("codex_runtime_capability_unsupported")
+    return cell
 
 
 def _codex_output_schema(value: JsonValue) -> JsonValue:
@@ -358,15 +480,16 @@ class CodexAppServerProfile:
         )
 
     def __post_init__(self) -> None:
-        if (
-            self.runtime_version != CODEX_EVALUATOR_RUNTIME_VERSION
-            or self.app_server_schema_sha256 != CODEX_APP_SERVER_SCHEMA_SHA256
-            or self.capability_cell_sha256 != CODEX_EVALUATOR_CAPABILITY_CELL_SHA256
-            or self.capability_profile != CODEX_EVALUATOR_CAPABILITY_PROFILE
-            or self.capability_evidence_expires_at != CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT
-            or self.isolated_config_sha256 != _CONFIG_SHA256
-        ):
-            raise ValueError("codex_runtime_capability_unsupported")
+        codex_evaluator_cell_for_binding(
+            source_identity=self.source_identity,
+            executable_sha256=self.executable_sha256,
+            runtime_version=self.runtime_version,
+            app_server_schema_sha256=self.app_server_schema_sha256,
+            capability_cell_sha256=self.capability_cell_sha256,
+            capability_profile=self.capability_profile,
+            capability_evidence_expires_at=self.capability_evidence_expires_at,
+            isolated_config_sha256=self.isolated_config_sha256,
+        )
         for digest in (
             self.executable_sha256,
             self.app_server_schema_sha256,
@@ -404,6 +527,20 @@ class CodexAppServerProfile:
         return canonical_digest({"argv": list(self.launcher_argv), "version": 1})
 
     def verify_local_binding(self) -> None:
+        bound_cell = codex_evaluator_cell_for_binding(
+            source_identity=self.source_identity,
+            executable_sha256=self.executable_sha256,
+            runtime_version=self.runtime_version,
+            app_server_schema_sha256=self.app_server_schema_sha256,
+            capability_cell_sha256=self.capability_cell_sha256,
+            capability_profile=self.capability_profile,
+            capability_evidence_expires_at=self.capability_evidence_expires_at,
+            isolated_config_sha256=self.isolated_config_sha256,
+        )
+        host_os = "linux" if sys.platform.startswith("linux") else sys.platform
+        host_cell = codex_evaluator_cell_for_platform(host_os, platform.machine())
+        if host_cell != bound_cell:
+            raise ValueError("codex_runtime_platform_unsupported")
         facts = self.executable_path.stat()
         if not stat.S_ISREG(facts.st_mode) or not (facts.st_mode & stat.S_IXUSR):
             raise ValueError("codex_runtime_executable_invalid")

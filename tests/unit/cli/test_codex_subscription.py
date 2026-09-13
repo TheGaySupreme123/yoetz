@@ -19,6 +19,7 @@ from yoetz.adapters.providers.codex_app_server import (
     CODEX_EVALUATOR_CAPABILITY_PROFILE,
     CODEX_EVALUATOR_CONFIG_SHA256,
     CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT,
+    CodexEvaluatorCell,
     CodexRuntimeStatus,
 )
 from yoetz.cli import codex_subscription as module
@@ -48,7 +49,7 @@ def _ambient_config_environment(  # pyright: ignore[reportUnusedFunction]
 def _binding(executable: Path, home: Path):
     return codex_subscription_runtime(
         executable_path=str(executable),
-        executable_sha256="sha256:" + "a" * 64,
+        executable_sha256="sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b",
         runtime_version="0.150.1",
         source_identity="openai-codex-npm-darwin-arm64-0.150.1",
         app_server_schema_sha256=CODEX_APP_SERVER_SCHEMA_SHA256,
@@ -122,6 +123,7 @@ def _write_codex_package_layout(
     root: Path,
     *,
     nested: bool,
+    platform_name: str = "darwin",
     native_manifest: Mapping[str, object] | None = None,
     wrapper_manifest: Mapping[str, object] | None = None,
     native_bytes: bytes = b"native-codex",
@@ -131,14 +133,26 @@ def _write_codex_package_layout(
     wrapper_bin.mkdir(parents=True, exist_ok=True)
     wrapper = wrapper_bin / "codex.js"
     wrapper.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    if platform_name == "linux":
+        native_package_directory = "codex-linux-x64"
+        native_package_version = f"{module.CODEX_EVALUATOR_RUNTIME_VERSION}-linux-x64"
+        native_package_spec = f"npm:@openai/codex@{native_package_version}"
+        native_relative = Path("vendor/x86_64-unknown-linux-musl/bin/codex")
+        native_os = "linux"
+        native_cpu = "x64"
+    else:
+        native_package_directory = "codex-darwin-arm64"
+        native_package_version = f"{module.CODEX_EVALUATOR_RUNTIME_VERSION}-darwin-arm64"
+        native_package_spec = f"npm:@openai/codex@{native_package_version}"
+        native_relative = Path("vendor/aarch64-apple-darwin/bin/codex")
+        native_os = "darwin"
+        native_cpu = "arm64"
     wrapper_document: Mapping[str, object] = (
         {
             "name": "@openai/codex",
             "version": module.CODEX_EVALUATOR_RUNTIME_VERSION,
             "bin": {"codex": "bin/codex.js"},
-            "optionalDependencies": {
-                "@openai/codex-darwin-arm64": module._CODEX_NATIVE_PACKAGE_SPEC  # pyright: ignore[reportPrivateUsage]
-            },
+            "optionalDependencies": {f"@openai/{native_package_directory}": native_package_spec},
         }
         if wrapper_manifest is None
         else wrapper_manifest
@@ -146,11 +160,11 @@ def _write_codex_package_layout(
     (wrapper_root / "package.json").write_text(json.dumps(wrapper_document), encoding="utf-8")
 
     native_root = (
-        wrapper_root / "node_modules" / "@openai" / "codex-darwin-arm64"
+        wrapper_root / "node_modules" / "@openai" / native_package_directory
         if nested
-        else wrapper_root.parent / "codex-darwin-arm64"
+        else wrapper_root.parent / native_package_directory
     )
-    native_bin = native_root / "vendor" / "aarch64-apple-darwin" / "bin"
+    native_bin = native_root / native_relative.parent
     native_bin.mkdir(parents=True, exist_ok=True)
     native = native_bin / "codex"
     native.write_bytes(native_bytes)
@@ -158,9 +172,9 @@ def _write_codex_package_layout(
     native_document: Mapping[str, object] = (
         {
             "name": "@openai/codex",
-            "version": module._CODEX_NATIVE_PACKAGE_VERSION,  # pyright: ignore[reportPrivateUsage]
-            "os": ["darwin"],
-            "cpu": ["arm64"],
+            "version": native_package_version,
+            "os": [native_os],
+            "cpu": [native_cpu],
         }
         if native_manifest is None
         else native_manifest
@@ -169,18 +183,22 @@ def _write_codex_package_layout(
     return wrapper, native
 
 
+def _mac_cell() -> CodexEvaluatorCell:
+    return module.codex_evaluator_cell_for_platform("darwin", "arm64")
+
+
 def test_codex_package_layout_resolves_nested_optional_dependency_before_digest(
     tmp_path: Path,
 ) -> None:
     wrapper, native = _write_codex_package_layout(tmp_path, nested=True)
 
-    assert module._resolve_codex_package_layout(wrapper) == native  # pyright: ignore[reportPrivateUsage]
+    assert module._resolve_codex_package_layout(wrapper, _mac_cell()) == native  # pyright: ignore[reportPrivateUsage]
 
 
 def test_codex_package_layout_resolves_npm_prefix_hoisted_sibling(tmp_path: Path) -> None:
     wrapper, native = _write_codex_package_layout(tmp_path, nested=False)
 
-    assert module._resolve_codex_package_layout(wrapper) == native  # pyright: ignore[reportPrivateUsage]
+    assert module._resolve_codex_package_layout(wrapper, _mac_cell()) == native  # pyright: ignore[reportPrivateUsage]
 
 
 def test_codex_package_layout_nested_candidate_has_deterministic_precedence(
@@ -192,7 +210,7 @@ def test_codex_package_layout_nested_candidate_has_deterministic_precedence(
     _, hoisted_native = _write_codex_package_layout(tmp_path, nested=False, native_bytes=b"hoisted")
 
     assert nested_native != hoisted_native
-    assert module._resolve_codex_package_layout(wrapper) == nested_native  # pyright: ignore[reportPrivateUsage]
+    assert module._resolve_codex_package_layout(wrapper, _mac_cell()) == nested_native  # pyright: ignore[reportPrivateUsage]
 
 
 def test_codex_package_layout_does_not_fall_back_after_invalid_nested_candidate(
@@ -211,7 +229,7 @@ def test_codex_package_layout_does_not_fall_back_after_invalid_nested_candidate(
     _write_codex_package_layout(tmp_path, nested=False)
 
     with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
-        module._resolve_codex_package_layout(wrapper)  # pyright: ignore[reportPrivateUsage]
+        module._resolve_codex_package_layout(wrapper, _mac_cell())  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.parametrize(
@@ -256,7 +274,7 @@ def test_codex_package_layout_rejects_mismatched_package_metadata(
         )
 
     with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
-        module._resolve_codex_package_layout(wrapper)  # pyright: ignore[reportPrivateUsage]
+        module._resolve_codex_package_layout(wrapper, _mac_cell())  # pyright: ignore[reportPrivateUsage]
 
 
 def test_codex_package_layout_does_not_search_ancestors_or_path(
@@ -274,7 +292,7 @@ def test_codex_package_layout_does_not_search_ancestors_or_path(
     monkeypatch.setenv("PATH", str(path_native.parent))
 
     with pytest.raises(ValueError, match="codex_runtime_not_found"):
-        module._resolve_codex_package_layout(wrapper)  # pyright: ignore[reportPrivateUsage]
+        module._resolve_codex_package_layout(wrapper, _mac_cell())  # pyright: ignore[reportPrivateUsage]
 
 
 def test_codex_package_layout_rejects_native_executable_symlink_escape(tmp_path: Path) -> None:
@@ -286,7 +304,7 @@ def test_codex_package_layout_rejects_native_executable_symlink_escape(tmp_path:
     native.symlink_to(outside)
 
     with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
-        module._resolve_codex_package_layout(wrapper)  # pyright: ignore[reportPrivateUsage]
+        module._resolve_codex_package_layout(wrapper, _mac_cell())  # pyright: ignore[reportPrivateUsage]
 
 
 def test_codex_package_layout_rejects_native_package_symlink_escape(tmp_path: Path) -> None:
@@ -297,7 +315,7 @@ def test_codex_package_layout_rejects_native_package_symlink_escape(tmp_path: Pa
     native_root.symlink_to(outside_root, target_is_directory=True)
 
     with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
-        module._resolve_codex_package_layout(wrapper)  # pyright: ignore[reportPrivateUsage]
+        module._resolve_codex_package_layout(wrapper, _mac_cell())  # pyright: ignore[reportPrivateUsage]
 
 
 def test_codex_package_layout_rejects_same_parent_native_package_symlink(
@@ -310,7 +328,7 @@ def test_codex_package_layout_rejects_same_parent_native_package_symlink(
     native_root.symlink_to(sibling_root, target_is_directory=True)
 
     with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
-        module._resolve_codex_package_layout(wrapper)  # pyright: ignore[reportPrivateUsage]
+        module._resolve_codex_package_layout(wrapper, _mac_cell())  # pyright: ignore[reportPrivateUsage]
 
 
 def test_codex_package_layout_rejects_intermediate_dependency_symlink_escape(
@@ -323,7 +341,7 @@ def test_codex_package_layout_rejects_intermediate_dependency_symlink_escape(
     dependency_root.symlink_to(outside_root, target_is_directory=True)
 
     with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
-        module._resolve_codex_package_layout(wrapper)  # pyright: ignore[reportPrivateUsage]
+        module._resolve_codex_package_layout(wrapper, _mac_cell())  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.parametrize("manifest_owner", ["wrapper", "native"])
@@ -338,7 +356,7 @@ def test_codex_package_layout_rejects_symlinked_manifest(
     manifest.symlink_to(outside)
 
     with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
-        module._resolve_codex_package_layout(wrapper)  # pyright: ignore[reportPrivateUsage]
+        module._resolve_codex_package_layout(wrapper, _mac_cell())  # pyright: ignore[reportPrivateUsage]
 
 
 def test_codex_package_layout_rejects_oversized_manifest_before_parsing(tmp_path: Path) -> None:
@@ -348,7 +366,7 @@ def test_codex_package_layout_rejects_oversized_manifest_before_parsing(tmp_path
     )
 
     with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
-        module._resolve_codex_package_layout(wrapper)  # pyright: ignore[reportPrivateUsage]
+        module._resolve_codex_package_layout(wrapper, _mac_cell())  # pyright: ignore[reportPrivateUsage]
 
 
 def test_direct_native_executable_support_keeps_platform_and_digest_checks(
@@ -374,6 +392,47 @@ def test_direct_native_executable_support_keeps_platform_and_digest_checks(
     assert source_identity == "openai-codex-npm-darwin-arm64-0.150.1"
 
 
+def test_linux_x64_package_layout_resolves_the_exact_musl_cell(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wrapper, native = _write_codex_package_layout(
+        tmp_path, nested=True, platform_name="linux", native_bytes=b"linux-native"
+    )
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(module.platform, "machine", lambda: "x86_64")
+    expected_digest = "sha256:abf1bb1643a79f73aa78ee627e111e02d4f8c98f25813a0cf6ce277709664386"
+
+    def linux_digest(_path: Path) -> str:
+        return expected_digest
+
+    monkeypatch.setattr(module, "_sha256_file", linux_digest)
+
+    resolved, actual_digest, source_identity = module.resolve_supported_codex_executable(wrapper)
+
+    assert resolved == native
+    assert actual_digest == expected_digest
+    assert source_identity == "openai-codex-npm-linux-x64-0.150.1"
+
+
+def test_linux_cell_cannot_be_mixed_with_the_macos_capability_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    native = tmp_path / "vendor" / "x86_64-unknown-linux-musl" / "bin" / "codex"
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"linux-native")
+    native.chmod(0o700)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(module.platform, "machine", lambda: "x86_64")
+
+    def mac_digest(_path: Path) -> str:
+        return "sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b"
+
+    monkeypatch.setattr(module, "_sha256_file", mac_digest)
+
+    with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
+        module.resolve_supported_codex_executable(native)
+
+
 def test_preview_resolves_exact_cell_without_creating_home(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -383,7 +442,7 @@ def test_preview_resolves_exact_cell_without_creating_home(
     def resolve(selected: Path) -> tuple[Path, str, str]:
         return (
             selected,
-            "sha256:" + "a" * 64,
+            "sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b",
             "openai-codex-npm-darwin-arm64-0.150.1",
         )
 
@@ -717,7 +776,11 @@ def test_cli_setup_disconnect_and_rollback_recompose_the_service(
     restarts: list[str] = []
 
     def resolve(selected: Path) -> tuple[Path, str, str]:
-        return selected, "sha256:" + "a" * 64, "openai-codex-npm-darwin-arm64-0.150.1"
+        return (
+            selected,
+            "sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b",
+            "openai-codex-npm-darwin-arm64-0.150.1",
+        )
 
     async def setup(**_kwargs: object) -> dict[str, object]:
         return {"schema": "yoetz.codex-subscription-status/1", "model_available": True}
@@ -990,7 +1053,11 @@ def test_cli_setup_discloses_reuse_and_names_its_override_before_the_confirmatio
     from yoetz.cli.app import app
 
     def resolve(selected: Path) -> tuple[Path, str, str]:
-        return selected, "sha256:" + "a" * 64, "openai-codex-npm-darwin-arm64-0.150.1"
+        return (
+            selected,
+            "sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b",
+            "openai-codex-npm-darwin-arm64-0.150.1",
+        )
 
     selected_models: list[object] = []
 
