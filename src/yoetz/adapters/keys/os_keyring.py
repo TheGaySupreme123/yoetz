@@ -151,12 +151,14 @@ def _secret_service_available() -> bool:
 
     Keyring's priority probe checks the session bus and service name. Isolate it so an
     unresponsive D-Bus cannot hold setup indefinitely; discard all backend output.
+    Isolated Python excludes workspace and PYTHONPATH modules from this trusted probe.
     """
 
     try:
         result = subprocess.run(  # noqa: S603 - fixed interpreter and probe, no shell
             [
                 sys.executable,
+                "-I",
                 "-c",
                 "from keyring.backends.SecretService import Keyring; "
                 "raise SystemExit(0 if Keyring.priority > 0 else 1)",

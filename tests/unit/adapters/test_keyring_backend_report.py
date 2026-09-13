@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 from keyring.backends.fail import Keyring as FailKeyring
@@ -84,3 +85,16 @@ def test_unavailable_secret_service_is_never_offered(
     assert report.approved is False
     assert report.reason == "keyring_unavailable"
     assert "private" not in str(report.as_json())
+
+
+def test_secret_service_probe_does_not_import_workspace_or_pythonpath_modules(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    marker = tmp_path / "imported"
+    (tmp_path / "keyring.py").write_text(
+        "from pathlib import Path; Path(" + repr(str(marker)) + ").touch()\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    describe_vault_keyring_backend(backend=SecretServiceKeyring(), system="Linux")
+    assert not marker.exists()
