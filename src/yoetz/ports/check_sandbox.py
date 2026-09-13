@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Protocol
 
 __all__ = [
+    "CheckSandboxAvailability",
     "CheckSandboxLaunch",
     "CheckSandboxPort",
     "CheckSandboxStatus",
@@ -39,6 +40,37 @@ class CheckSandboxLaunch:
             raise ValueError("check_sandbox_invalid")
         if self.status is CheckSandboxStatus.UNAVAILABLE and self.network_isolated:
             raise ValueError("check_sandbox_invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class CheckSandboxAvailability:
+    """One host-level answer to "can a network-denied check run here?" (issue #720).
+
+    ``prepare`` answers per run and fails closed; this is the same decision reported once, with
+    the dependency named, so setup diagnostics can say *why* before a check is ever approved.
+    """
+
+    status: CheckSandboxStatus
+    mechanism: str
+    reason: str
+    remediation: str
+
+    def __post_init__(self) -> None:
+        if type(self.status) is not CheckSandboxStatus:
+            raise ValueError("check_sandbox_invalid")
+        for value in (self.mechanism, self.reason, self.remediation):
+            if type(value) is not str:
+                raise ValueError("check_sandbox_invalid")
+        if not self.mechanism or not self.reason:
+            raise ValueError("check_sandbox_invalid")
+
+    def as_json(self) -> dict[str, str]:
+        return {
+            "mechanism": self.mechanism,
+            "reason": self.reason,
+            "remediation": self.remediation,
+            "status": self.status.value,
+        }
 
 
 class CheckSandboxPort(Protocol):

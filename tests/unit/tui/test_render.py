@@ -72,6 +72,21 @@ def test_detection_distinguishes_found_from_not_yet_connected(
     assert "○ Yoetz is not connected yet" in lines
 
 
+def test_detection_names_why_secure_storage_is_unavailable() -> None:
+    lines = render_detection(
+        build.detection(
+            secure_storage_available=False,
+            secure_storage_reason="no credential store is loaded; Yoetz needs macOS Keychain",
+        ),
+        WIDE,
+    )
+    # Lines are truncated to the terminal width; the reason follows the fixed statement.
+    assert any(
+        line.startswith("○ System secure storage is not available here — no credential store")
+        for line in lines
+    )
+
+
 def test_detection_without_a_harness_says_so_rather_than_claiming_one() -> None:
     lines = render_detection(build.detection(harnesses=()), WIDE)
     assert "○ No supported agent installation found" in lines
