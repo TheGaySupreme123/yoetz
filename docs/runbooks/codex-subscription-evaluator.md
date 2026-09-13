@@ -30,8 +30,12 @@ a native Windows host cell.
 
 No other platform, Codex version/build, binary digest, app-server schema, config, model, or
 reasoning setting inherits this cell. The exact identity digest covers the compatibility-critical
-cell fields and its review/expiry dates; stale evidence fails before child launch. The release
-support matrix remains authoritative about which cells have completed packaged live evidence.
+cell fields and its review/expiry dates; stale evidence fails before child launch. The cell is
+also rechecked against the host at launch: a persisted binding whose cell does not match the
+running interpreter's platform (for example a macOS arm64 binding under an x86_64 Python) fails
+with `codex_runtime_platform_unsupported`, and structural readiness reports the route as not
+ready. The release support matrix remains authoritative about which cells have completed
+packaged live evidence.
 
 ### Linux x86_64 (WSL2 Linux userspace follows this cell)
 

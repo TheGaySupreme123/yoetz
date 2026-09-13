@@ -155,6 +155,11 @@ def test_committed_linux_compatibility_cell_matches_runtime_constants() -> None:
     )
     assert cell["platform"] == {"architecture": "x86_64", "os": "linux"}
     assert cell["release_evidence"] == "pending"
+    runtime_cell = module.codex_evaluator_cell_for_platform("linux", "x86_64")
+    assert cell["native_package"] == f"@openai/{runtime_cell.native_package_directory}"
+    assert cell["native_executable_relative"] == (
+        runtime_cell.native_executable_relative.as_posix()
+    )
 
 
 def test_linux_cell_identity_binds_the_native_digest_and_package_alias() -> None:

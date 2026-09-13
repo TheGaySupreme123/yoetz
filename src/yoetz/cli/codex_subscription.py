@@ -53,15 +53,7 @@ __all__ = [
     "subscription_failure_reason",
 ]
 
-_DARWIN_ARM64_EXECUTABLE_SHA256: Final = (
-    "sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b"
-)
-_DARWIN_ARM64_SOURCE_IDENTITY: Final = "openai-codex-npm-darwin-arm64-0.150.1"
 _CODEX_PACKAGE_NAME: Final = "@openai/codex"
-_CODEX_NATIVE_PACKAGE_DIRECTORY: Final = "codex-darwin-arm64"
-_CODEX_NATIVE_PACKAGE_VERSION: Final = f"{CODEX_EVALUATOR_RUNTIME_VERSION}-darwin-arm64"
-_CODEX_NATIVE_PACKAGE_SPEC: Final = f"npm:{_CODEX_PACKAGE_NAME}@{_CODEX_NATIVE_PACKAGE_VERSION}"
-_CODEX_NATIVE_EXECUTABLE_RELATIVE: Final = Path("vendor/aarch64-apple-darwin/bin/codex")
 _CODEX_PACKAGE_JSON_MAX_BYTES: Final = 64 * 1024
 _SUPPORTED_REASONING: Final = frozenset({"low", "medium", "high", "xhigh", "max", "ultra"})
 _DEFAULT_CODEX_SUBSCRIPTION_MODEL: Final = "gpt-5.6-luna"

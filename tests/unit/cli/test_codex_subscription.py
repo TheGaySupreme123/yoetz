@@ -194,6 +194,20 @@ def _mock_macos_arm64_host(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(module.platform, "machine", lambda: "arm64")
 
 
+@pytest.mark.parametrize(
+    ("platform_os", "architecture"),
+    [("darwin", "x86_64"), ("linux", "aarch64"), ("win32", "AMD64")],
+)
+def test_unsupported_host_fails_before_any_file_access(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, platform_os: str, architecture: str
+) -> None:
+    monkeypatch.setattr(sys, "platform", platform_os)
+    monkeypatch.setattr(module.platform, "machine", lambda: architecture)
+
+    with pytest.raises(ValueError, match="^codex_runtime_platform_unsupported$"):
+        module.resolve_supported_codex_executable(tmp_path / "missing" / "codex")
+
+
 def test_codex_package_layout_resolves_nested_optional_dependency_before_digest(
     tmp_path: Path,
 ) -> None:
@@ -260,9 +274,7 @@ def test_codex_package_layout_rejects_mismatched_package_metadata(
             "name": "@openai/codex",
             "version": module.CODEX_EVALUATOR_RUNTIME_VERSION,
             "bin": {"codex": "bin/codex.js"},
-            "optionalDependencies": {
-                "@openai/codex-darwin-arm64": module._CODEX_NATIVE_PACKAGE_SPEC  # pyright: ignore[reportPrivateUsage]
-            },
+            "optionalDependencies": {"@openai/codex-darwin-arm64": _mac_cell().native_package_spec},
         }
         wrapper_manifest[field] = value
         wrapper, _ = _write_codex_package_layout(
@@ -271,7 +283,7 @@ def test_codex_package_layout_rejects_mismatched_package_metadata(
     else:
         native_manifest: dict[str, object] = {
             "name": "@openai/codex",
-            "version": module._CODEX_NATIVE_PACKAGE_VERSION,  # pyright: ignore[reportPrivateUsage]
+            "version": _mac_cell().native_package_version,
             "os": ["darwin"],
             "cpu": ["arm64"],
         }
