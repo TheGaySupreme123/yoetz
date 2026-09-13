@@ -1109,6 +1109,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         "application/json",
         True,
     ),
+    (
+        "support/codex-evaluator/0.150.1/cell-linux-x64.json",
+        "compatibility_manifest",
+        "application/json",
+        True,
+    ),
 )
 
 

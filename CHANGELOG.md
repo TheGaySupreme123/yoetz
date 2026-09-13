@@ -22,6 +22,10 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- Codex subscription setup accepts Linux x86_64 (WSL 2's Linux userspace included) through its own
+  exact evaluator cell instead of refusing with `codex_runtime_platform_unsupported`. macOS arm64
+  bindings keep their identity, and a binding whose cell does not match the host fails before
+  launch (issue #716).
 - On native Windows, `yoetz` refuses with a bounded `unsupported_platform` line naming the WSL
   path (exit 20) instead of `internal_error` from every stateful command; `version`,
   `--version`, and `--help` still answer (issue #709).
