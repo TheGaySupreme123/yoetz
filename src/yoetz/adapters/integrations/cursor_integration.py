@@ -2210,8 +2210,8 @@ def discover_cursor_ide(app_path: Path, *, system: str | None = None) -> CursorC
 
     Only the macOS application bundle layout is reviewed. A Linux Cursor (AppImage or ``.deb``)
     has no ``Contents/Info.plist``; rather than reporting it as absent, name the platform so the
-    IDE cell reads as unsupported there (issue #722). Plugin apply on any host still needs the
-    macOS LocalAuthentication authority, so this is the honest cell boundary, not a gap.
+    IDE cell reads as unsupported there (issue #722). Plugin approval and IDE discovery are
+    independent capabilities; adding a Linux presence cell does not identify a Linux IDE.
     """
 
     info_path = app_path / "Contents" / "Info.plist"

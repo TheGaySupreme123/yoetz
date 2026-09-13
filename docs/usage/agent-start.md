@@ -55,8 +55,8 @@ On Windows:
 On Linux, the same three facts apply — bubblewrap for network-denied checks, a Secret Service
 (GNOME Keyring or KWallet) for the system keyring or else a passphrase, and state on a local
 disk — and `yoetz setup status --json` reports all three under `platform` before you decide
-anything. Certified cells are macOS arm64 and Linux x86-64; other architectures install and
-report `platform_cell_untested`.
+anything. Certified cells are macOS arm64 and Linux x86-64 (glibc 2.28+); other architectures
+install and report `platform_cell_untested`.
 
 ## 1. Install — you do this
 
@@ -210,12 +210,13 @@ consequential step — no install, no `setup run`, no registration until it is a
   one. Either the user approves it once, or hand it over as a terminal step.
 - Windows: Claude Code runs natively (PowerShell or Git Bash); Yoetz does not. Run Yoetz commands
   through `wsl -e bash -lc "…"`. The Windows-side and WSL-side `~/.claude` are separate homes.
-- Linux and WSL: the plugin cannot be installed there today — its installation authority is a
-  macOS device-owner prompt, so `install` refuses `human_authority_unavailable` before changing
-  anything. Use the MCP route instead: show the user the exact `yoetz mcp serve` entry for their
-  Claude Code MCP configuration and add it only after approval.
-- Integration (macOS): `yoetz integrate claude plugin preview`, then `install` after the user
-  approves the digest.
+- Linux and WSL: inspect the plugin preview for its approval mechanism. Linux-capable builds
+  use PAM through the trusted terminal; builds without that support refuse
+  `human_authority_unavailable`. The user enters their account password only in that terminal.
+  Successful installation does not establish native Linux host coverage. Claude Code can also
+  use a `yoetz mcp serve` entry in its own MCP configuration, added only after approval.
+- Integration: `yoetz integrate claude plugin preview`, then `install` after the user approves
+  the digest and completes the supported platform's presence ceremony.
 
 **Cursor**
 
@@ -229,13 +230,13 @@ consequential step — no install, no `setup run`, no registration until it is a
   paste the guide into the chat.
 - Windows: Cursor's agent terminal is PowerShell on native Windows; run Yoetz commands through
   `wsl -e bash -lc "…"`.
-- Linux and WSL: the plugin cannot be installed there today for the same reason as Claude Code
-  (`install` refuses `human_authority_unavailable`), and a Linux Cursor is not identified as an
-  IDE cell. Use the MCP route: the exact `yoetz mcp serve` entry in Cursor's own MCP
-  configuration, added only after approval.
-- Integration (macOS): `yoetz integrate cursor plugin preview` with an explicit Cursor
-  configuration root and project, then `install` after approval. Cursor Cloud agents are not
-  supported; install from a local Cursor.
+- Linux and WSL: inspect the preview for a supported approval mechanism; builds without Linux
+  approval support refuse `human_authority_unavailable`. Linux IDE discovery remains
+  `cursor_ide_platform_unsupported`; do not claim a native host cell from installation alone.
+  Cursor can use a `yoetz mcp serve` entry in its own MCP configuration, added only after approval.
+- Integration: `yoetz integrate cursor plugin preview` with an explicit Cursor configuration root
+  and project, then `install` after approval and the supported platform's presence ceremony.
+  Cursor Cloud agents are not supported; install from a local Cursor.
 
 **Any other agent**
 

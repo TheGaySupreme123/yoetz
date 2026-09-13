@@ -26,7 +26,7 @@ from yoetz.version import (
     ],
 )
 def test_advertised_cells_are_certified(os_name: str, machine: str, cell: str) -> None:
-    result = platform_cell(os_name=os_name, machine=machine)
+    result = platform_cell(os_name=os_name, machine=machine, libc=("glibc", "2.28"))
 
     assert result.certified is True
     assert result.cell == cell
@@ -49,7 +49,7 @@ def test_advertised_cells_are_certified(os_name: str, machine: str, cell: str) -
     ],
 )
 def test_other_cells_are_untested_not_presumed_compatible(os_name: str, machine: str) -> None:
-    result = platform_cell(os_name=os_name, machine=machine)
+    result = platform_cell(os_name=os_name, machine=machine, libc=("glibc", "2.28"))
 
     assert result.certified is False
     assert result.cell is None
@@ -78,4 +78,26 @@ def test_manifest_on_a_certified_cell_carries_no_platform_limitation(
     monkeypatch.setattr(version_module.platform, "system", lambda: "Linux")
     monkeypatch.setattr(version_module.platform, "machine", lambda: "x86_64")
 
+    monkeypatch.setattr(version_module.platform, "libc_ver", lambda: ("glibc", "2.28"))
+
     assert PLATFORM_CELL_UNTESTED not in build_version_manifest().limitations
+
+
+@pytest.mark.parametrize(
+    "libc", [("musl", "1.2.5"), ("glibc", "2.27"), ("", ""), ("glibc", "invalid")]
+)
+def test_linux_libc_outside_certified_cell_stays_unproven(
+    monkeypatch: pytest.MonkeyPatch, libc: tuple[str, str]
+) -> None:
+    monkeypatch.setattr(version_module.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(version_module.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(version_module.platform, "libc_ver", lambda: libc)
+
+    assert platform_cell().certified is False
+    assert platform_cell().cell is None
+    assert PLATFORM_CELL_UNTESTED in build_version_manifest().limitations
+
+
+@pytest.mark.parametrize("release", ["2.28", "2.28.1", "2.40", "3.0"])
+def test_linux_glibc_at_or_above_floor_is_certified(release: str) -> None:
+    assert platform_cell(os_name="Linux", machine="x86_64", libc=("glibc", release)).certified

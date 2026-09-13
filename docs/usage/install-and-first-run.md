@@ -100,7 +100,7 @@ Inside WSL, the [Linux](#linux) notes above apply, with these specifics:
 
 - **Keep Yoetz on the Linux filesystem.** Install and run it from your WSL home. Windows drives
   under `/mnt/c` and the other drive letters reach Linux through a transport (`9p`, `drvfs`, or
-  `virtiofs`) that does not honour SQLite locking, so a state directory there — including one
+  `virtiofs`) whose locking and durability Yoetz has not certified, so a state directory there — including one
   named by `YOETZ_ISOLATED_ROOT` — is refused with `path_on_network_filesystem`. Your projects
   can live on a Windows drive; Yoetz's own state cannot.
 - **Choose a Yoetz passphrase.** A default WSL session has no Secret Service, so system secure
@@ -109,10 +109,11 @@ Inside WSL, the [Linux](#linux) notes above apply, with these specifics:
   checks deny network.
 - **Windows-on-ARM laptops** run an aarch64 Ubuntu, which is an untested platform cell (see
   [Linux](#linux)); Yoetz installs and says so.
-- **Claude Code and Cursor plugins** cannot be installed from WSL today: their installation
-  authority is a macOS device-owner prompt, so `install` refuses `human_authority_unavailable`
-  before changing anything. `preview` works, and both hosts can still use Yoetz over MCP with
-  the `yoetz mcp serve` entry in their own configuration.
+- **Claude Code and Cursor plugins** need a supported approval mechanism. Inspect the plugin
+  preview: Linux-capable builds name PAM through the trusted terminal and ask for your Linux
+  account password there. Builds without Linux approval support refuse
+  `human_authority_unavailable`. Linux and WSL native host coverage remains unproven; both hosts
+  can use Yoetz over MCP with a `yoetz mcp serve` entry in their own configuration.
 
 ## First run
 

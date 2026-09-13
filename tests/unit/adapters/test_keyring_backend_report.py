@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 from keyring.backends.fail import Keyring as FailKeyring
 from keyring.backends.null import Keyring as NullKeyring
 from keyring.backends.SecretService import Keyring as SecretServiceKeyring
 
+from yoetz.adapters.keys import os_keyring
 from yoetz.adapters.keys.os_keyring import describe_vault_keyring_backend
 
 
@@ -30,8 +33,10 @@ def test_unapproved_backend_is_named_not_offered() -> None:
     assert report.requirement == "macOS Keychain"
 
 
-def test_secret_service_backend_is_the_approved_linux_store() -> None:
-    # Constructing the backend does not touch D-Bus; only calls into it would.
+def test_secret_service_backend_is_the_approved_linux_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(os_keyring, "_secret_service_available", lambda: True)
     report = describe_vault_keyring_backend(backend=SecretServiceKeyring(), system="Linux")
 
     assert report.approved is True
@@ -56,3 +61,26 @@ def test_live_probe_never_raises() -> None:
 
     assert report.reason in {"approved", "keyring_unavailable", "backend_not_approved"}
     assert report.approved is (report.reason == "approved")
+
+
+@pytest.mark.parametrize(
+    "failure", [1, OSError("private backend error"), subprocess.TimeoutExpired("probe", 10)]
+)
+def test_unavailable_secret_service_is_never_offered(
+    monkeypatch: pytest.MonkeyPatch, failure: int | Exception
+) -> None:
+    def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert kwargs["timeout"] == 10
+        assert kwargs["stdin"] == subprocess.DEVNULL
+        assert kwargs["stdout"] == subprocess.DEVNULL
+        assert kwargs["stderr"] == subprocess.DEVNULL
+        if isinstance(failure, Exception):
+            raise failure
+        return subprocess.CompletedProcess("probe", failure)
+
+    monkeypatch.setattr(os_keyring.subprocess, "run", run)
+    monkeypatch.setattr(os_keyring.keyring, "get_keyring", lambda: SecretServiceKeyring())
+    report = describe_vault_keyring_backend(system="Linux")
+    assert report.approved is False
+    assert report.reason == "keyring_unavailable"
+    assert "private" not in str(report.as_json())

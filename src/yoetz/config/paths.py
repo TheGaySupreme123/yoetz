@@ -59,8 +59,8 @@ _PRIVATE_DIR_MODE: Final = 0o700
 _VCS_MARKERS: Final = frozenset({".git", ".hg", ".svn", ".jj"})
 # ``9p`` (WSL 2 Windows drives and other virtio-9p shares), ``drvfs`` (WSL 1 Windows drives), and
 # ``virtiofs`` (VM shared folders, including newer WSL and Docker/Lima mounts) all proxy file
-# locking across a VM or host boundary, so SQLite's advisory locks are not honoured end to end.
-# They are refused like a network share (issue #723): state must live on the guest's own disk.
+# operations across a VM or host boundary. Yoetz has not certified their locking and crash
+# durability, so they are refused like a network share (issue #723): use the guest's own disk.
 _NETWORK_FILESYSTEMS_LINUX: Final = frozenset(
     {
         "9p",

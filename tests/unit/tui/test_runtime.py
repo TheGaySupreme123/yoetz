@@ -263,6 +263,7 @@ def test_host_entries_report_platform_sandbox_and_storage_without_mutating(
     ready = CheckSandboxAvailability(CheckSandboxStatus.READY, "seatbelt", "ready", "")
     monkeypatch.setattr(check_sandbox, "probe_check_sandbox", lambda: ready)
     monkeypatch.setattr(version_module.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(version_module.platform, "libc_ver", lambda: ("glibc", "2.28"))
     monkeypatch.setattr(
         os_keyring,
         "describe_vault_keyring_backend",

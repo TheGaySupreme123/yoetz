@@ -299,12 +299,26 @@ class PlatformCell:
         }
 
 
-def platform_cell(*, os_name: str | None = None, machine: str | None = None) -> PlatformCell:
+def platform_cell(
+    *,
+    os_name: str | None = None,
+    machine: str | None = None,
+    libc: tuple[str, str] | None = None,
+) -> PlatformCell:
     """Classify this host (or the given one) as a certified or an untested platform cell."""
 
     resolved_os = (platform.system() or sys.platform) if os_name is None else os_name
     resolved_machine = (platform.machine() or "unknown") if machine is None else machine
     cell = _CERTIFIED_PLATFORM_CELLS.get((resolved_os, resolved_machine))
+    if cell is not None and resolved_os == "Linux":
+        libc_name, libc_version = platform.libc_ver() if libc is None else libc
+        match = re.fullmatch(r"([0-9]+)\.([0-9]+)(?:\.[0-9]+)*", libc_version)
+        if (
+            libc_name != "glibc"
+            or match is None
+            or tuple(int(part) for part in match.group(1, 2)) < (2, 28)
+        ):
+            cell = None
     return PlatformCell(
         os_name=resolved_os,
         machine=resolved_machine,

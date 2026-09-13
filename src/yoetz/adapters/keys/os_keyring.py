@@ -8,6 +8,8 @@ import errno
 import hashlib
 import hmac
 import os
+import subprocess
+import sys
 from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -144,6 +146,32 @@ class KeyringBackendReport:
         }
 
 
+def _secret_service_available() -> bool:
+    """Probe only backend availability, without reading keys or unlocking a collection.
+
+    Keyring's priority probe checks the session bus and service name. Isolate it so an
+    unresponsive D-Bus cannot hold setup indefinitely; discard all backend output.
+    """
+
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed interpreter and probe, no shell
+            [
+                sys.executable,
+                "-c",
+                "from keyring.backends.SecretService import Keyring; "
+                "raise SystemExit(0 if Keyring.priority > 0 else 1)",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    except OSError, subprocess.SubprocessError:
+        return False
+    return result.returncode == 0
+
+
 def describe_vault_keyring_backend(
     *, backend: object | None = None, system: str | None = None
 ) -> KeyringBackendReport:
@@ -164,6 +192,8 @@ def describe_vault_keyring_backend(
         return KeyringBackendReport(backend_id, False, "keyring_unavailable", requirement)
     if backend_id not in _APPROVED_BACKENDS:
         return KeyringBackendReport(backend_id, False, "backend_not_approved", requirement)
+    if backend_id == "keyring.backends.SecretService.Keyring" and not _secret_service_available():
+        return KeyringBackendReport(backend_id, False, "keyring_unavailable", requirement)
     return KeyringBackendReport(backend_id, True, "approved", requirement)
 
 

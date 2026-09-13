@@ -78,6 +78,9 @@ approved, naming its id) and what Yoetz needs on that platform; `yoetz setup run
 in its "Platform credential store unavailable" line; `yoetz setup status --json` reports
 `platform.secure_storage: {approved, backend_id, reason, requirement}`; `/doctor` shows a System
 secure storage line. Reason tokens: `approved`, `keyring_unavailable`, `backend_not_approved`.
+For Secret Service, approval also requires a successful ten-second bounded D-Bus/service
+availability probe. The probe reads no credential and never unlocks or creates a collection;
+it does not prove that a later credential operation will succeed.
 
 Headless Linux sessions and WSL 2 normally have no session D-Bus and no Secret Service daemon, so
 the vault passphrase is the supported route there; `yoetz service auto-unlock enable` remains
@@ -89,12 +92,13 @@ available only where an accepted backend is loaded. Capability CI runs `platform
 
 `config/paths.py` refuses a state directory on a network or cross-machine filesystem with
 `path_on_network_filesystem` (`STORAGE_UNSAFE`). On Linux the denylist includes `9p` (how WSL 2
-mounts Windows drives by default), `drvfs` (WSL 1), and `virtiofs` (the opt-in WSL transport
-selected with `virtiofs=true` in `.wslconfig`, and VM shared folders generally), alongside NFS,
-SMB, sshfs, and the rest. All three proxy file locking across the VM boundary, so SQLite's advisory
-locks are not honoured end to end; the decision is fail-closed and recorded in ADR-003 (issue
-#723). Inside WSL, Yoetz state must stay on the distribution's own ext4 disk — the WSL home is
-the default — never under `/mnt/<letter>`. The refusal's remediation says so, and it applies to
+mounts Windows drives by default), `drvfs` (WSL 1), and `virtiofs` (WSL and VM shared folders
+generally), alongside NFS, SMB, sshfs, and the rest. These transports
+cross a host/guest boundary whose locking and crash durability Yoetz has not certified; the
+refusal is a conservative support decision recorded in ADR-003 (issue #723), not a claim that
+all such implementations lack locks. For example,
+[virtiofsd supports configurable POSIX locks](https://virtio-fs.gitlab.io/qemu/tools/virtiofsd.html).
+Inside WSL, Yoetz state must stay on the distribution's own ext4 disk — the WSL home is the default — never under `/mnt/<letter>`. The refusal's remediation says so, and it applies to
 `YOETZ_ISOLATED_ROOT`, `yoetz instance create --root`, and `storage.data_dir` alike.
 
 Evidence state: the classifier is covered by unit tests over synthetic mount tables; a live WSL 2
@@ -104,10 +108,12 @@ reproduction on `/mnt/c` is **outstanding**.
 
 Codex CLI on Linux uses the same first-run and `yoetz integrate codex` flow as macOS; OpenAI
 publishes no Linux Codex App, so the interface labels every Linux Codex as a command-line
-installation by definition. Claude Code and Cursor are different: their plugin apply authority is
-Apple LocalAuthentication, so on Linux and WSL 2 `preview` and `status` work while every mutating
-plugin action refuses `human_authority_unavailable` before touching anything. Both hosts still work
-over MCP with a hand-added `yoetz mcp serve` entry. The per-host decisions are recorded in
+installation by definition. Claude Code and Cursor plugin mutation requires a supported
+presence mechanism, reported by the installed preview's `authorization.human_presence`. The
+Linux PAM ceremony is tracked separately in #719; builds without it refuse
+`human_authority_unavailable` on Linux and WSL 2. That ceremony alone does not prove a Linux
+native host cell. Both hosts can use a hand-added `yoetz mcp serve` entry. The per-host decisions
+are recorded in
 [`claude-code-integration.md`](claude-code-integration.md#linux-and-wsl) and
 [`cursor-integration.md`](cursor-integration.md#linux-and-wsl); the Linux x86-64 evidence cases
 for the CLI cells are **outstanding** (issue #722).

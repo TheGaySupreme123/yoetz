@@ -246,7 +246,7 @@ def _host_entries() -> tuple[DoctorEntry, ...]:
             LayerState.UNPROVEN,
             detail=f"{cell.os_name} {cell.machine} is an untested platform cell",
             remediation=(
-                "Yoetz is certified on macOS arm64 and Linux x86-64 (glibc); it installed here "
+                "Yoetz is certified on macOS arm64 and Linux x86-64 (glibc 2.28+); it installed here "
                 "but nothing has been proven on this cell, so expect no support claim"
             ),
         )
