@@ -336,7 +336,8 @@ configuration; swapping the primary keeps both bindings and both approvals.
    configured pairing (`coordinator_failure` before dispatch or during a disclosure wait,
    an uncertain started attempt retains `outcome_unknown` durably and reports the provenance-free
    public gap `receipt_persistence_unknown`). The internal attempt projection
-   exposes the existing durable `started_at` timestamp; no storage migration is introduced. An expired
+   exposes the existing durable `started_at` timestamp; usage counters are an additive nullable
+   bundle migration (0013), so legacy rows remain readable. An expired
    resumed attempt without a disclosure wait preserves `outcome_unknown`; a known undispatched
    expiry records `provider_timeout`. If provider-result provenance is unavailable on recovery,
    the public result uses `receipt_persistence_unknown` while retaining the original durable reason.

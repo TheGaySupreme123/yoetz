@@ -868,6 +868,9 @@ is exactly the receipt-document schema, including `suppressed_finding_count`, an
 post-append result frontier. An applicable semantic check contributes its selected
   `semantic_provenance`, including bounded per-attempt token usage; deterministic or historical
   receipts omit that optional field so their prior bytes remain unchanged.
+  The receipt provenance represents the applicable provider result; usage for failed, expired, or
+  late physical retries remains in the durable semantic-attempt ledger and internal accounting,
+  rather than being invented into that public provenance.
 
 `receipt_document_from_json`/`receipt_document_to_json` are the sole document codecs.
 `render_receipt_compact(document) -> str` returns one bounded string; there is no v0.1

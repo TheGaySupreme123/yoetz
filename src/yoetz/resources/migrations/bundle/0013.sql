@@ -28,6 +28,7 @@ ALTER TABLE semantic_attempts ADD COLUMN usage_total_tokens INTEGER CHECK (
     OR
     (usage_total_tokens IS NOT NULL
         AND usage_total_tokens BETWEEN 0 AND 9007199254740991
+        AND state <> 'started'
         AND usage_input_tokens IS NOT NULL
         AND usage_cached_input_tokens IS NOT NULL
         AND usage_cache_write_input_tokens IS NOT NULL

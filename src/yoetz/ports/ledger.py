@@ -963,7 +963,11 @@ class SemanticAttemptRecord:
         if self.token_usage is not None and type(self.token_usage) is not RuntimeTokenUsage:
             raise _invalid()
         if self.state == "started":
-            if self.terminal_code is not None or self.result_object_ref is not None:
+            if (
+                self.terminal_code is not None
+                or self.result_object_ref is not None
+                or self.token_usage is not None
+            ):
                 raise _invalid()
         elif self.state == "response_durable":
             if self.terminal_code is not None or self.result_object_ref is None:

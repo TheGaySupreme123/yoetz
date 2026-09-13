@@ -1903,6 +1903,22 @@ async def test_semantic_attempt_usage_survives_retry_and_sqlite_restart() -> Non
                     "UPDATE semantic_attempts SET usage_total_tokens=1 WHERE attempt_id=?",
                     (first.attempt_id,),
                 )
+            with pytest.raises(apsw.ConstraintError):
+                adapter._db.execute(  # pyright: ignore[reportPrivateUsage]
+                    "UPDATE semantic_attempts SET usage_input_tokens=?,"
+                    "usage_cached_input_tokens=?,usage_cache_write_input_tokens=?,"
+                    "usage_output_tokens=?,usage_reasoning_output_tokens=?,"
+                    "usage_total_tokens=? WHERE attempt_id=?",
+                    (
+                        usage_one.input_tokens,
+                        usage_one.cached_input_tokens,
+                        usage_one.cache_write_input_tokens,
+                        usage_one.output_tokens,
+                        usage_one.reasoning_output_tokens,
+                        usage_one.total_tokens,
+                        first.attempt_id,
+                    ),
+                )
         await adapter.record_attempt_outcome(
             first,
             AttemptOutcome.EXPIRED,
@@ -1933,6 +1949,73 @@ async def test_semantic_attempt_usage_survives_retry_and_sqlite_restart() -> Non
             ("expired", usage_one),
             ("failed", usage_two),
         ]
+
+
+@pytest.mark.anyio
+async def test_sqlite_recovery_with_queued_semantic_job_has_no_attempt_rows() -> None:
+    """Recovery keeps a queued job valid when no physical attempt was claimed yet."""
+
+    command = ledger_command(request_suffix="c")
+    adapter = sqlite_ledger(command)
+    await adapter.append_batch(command)
+    lease = await _semantic_wait_lease(adapter, command, "req_00000000-0000-4000-8000-0000000000cc")
+    case_ref = await _object_ref(
+        adapter,
+        command,
+        ObjectKind.SEMANTIC_CASE,
+        semantic_case_digest="sha256:" + "c" * 64,
+    )
+    job = await adapter.enqueue_semantic_job(lease, "sha256:" + "c" * 64, case_ref)
+    restarted = SqliteLedger(
+        db=adapter._db,  # pyright: ignore[reportPrivateUsage]
+        task_id=command.task_id,
+        ownership_fence=_fence(),
+        clock=adapter._clock,  # pyright: ignore[reportPrivateUsage]
+        ids=adapter._ids,  # pyright: ignore[reportPrivateUsage]
+        objects=adapter._objects,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    recovered = await restarted.load_semantic_job(command.writer_id, lease.operation_id)
+    assert recovered is not None and recovered.job_id == job.job_id
+    assert recovered.state == "queued"
+    assert await restarted.list_semantic_attempts(job.job_id) == ()
+
+
+@pytest.mark.anyio
+async def test_sqlite_recovery_rehydrates_disclosure_wait_with_attempt() -> None:
+    """Recovery restores the wait side table alongside its still-started attempt."""
+
+    command = ledger_command(request_suffix="d")
+    adapter = sqlite_ledger(command)
+    await adapter.append_batch(command)
+    lease = await _semantic_wait_lease(adapter, command, "req_00000000-0000-4000-8000-0000000000dd")
+    case_ref = await _object_ref(
+        adapter,
+        command,
+        ObjectKind.SEMANTIC_CASE,
+        semantic_case_digest="sha256:" + "d" * 64,
+    )
+    job = await adapter.enqueue_semantic_job(lease, "sha256:" + "d" * 64, case_ref)
+    handle = await adapter.claim_semantic_job(lease, job.job_id)
+    expiry = datetime(2026, 7, 19, 12, 1, tzinfo=UTC)
+    pending_id = "ppr_00000000-0000-4000-8000-0000000000dd"
+    await adapter.record_disclosure_wait(handle, pending_id, expiry)
+    restarted = SqliteLedger(
+        db=adapter._db,  # pyright: ignore[reportPrivateUsage]
+        task_id=command.task_id,
+        ownership_fence=_fence(),
+        clock=adapter._clock,  # pyright: ignore[reportPrivateUsage]
+        ids=adapter._ids,  # pyright: ignore[reportPrivateUsage]
+        objects=adapter._objects,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    recovered = await restarted.load_semantic_job(command.writer_id, lease.operation_id)
+    assert recovered is not None and recovered.job_id == job.job_id
+    attempts = await restarted.list_semantic_attempts(job.job_id)
+    assert len(attempts) == 1 and attempts[0].state == "started"
+    wait = await restarted.load_disclosure_wait(command.writer_id, lease.operation_id)
+    assert wait is not None
+    assert wait.state == "awaiting" and wait.pending_id == pending_id
 
 
 @pytest.mark.anyio
