@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
+from pathlib import Path
 from types import SimpleNamespace, TracebackType
 from typing import Self
 
@@ -372,6 +373,7 @@ def test_isolated_pam_uses_only_a_pipe_for_the_secret(
             self.returncode = returncode
             assert all("test-password" not in arg for arg in argv)
             assert argv[-1] == "operator"
+            assert argv[1:3] == ["-I", "-c"]
             assert kwargs["stdin"] == subprocess.PIPE
             assert kwargs["stdout"] == subprocess.DEVNULL
             assert kwargs["stderr"] == subprocess.DEVNULL
@@ -496,3 +498,23 @@ def test_pam_worker_bounds_pipe_ingress_and_wipes_it(
     assert module.pam_worker() == (0 if expected else 1)
     assert bool(observed) is expected
     assert all(value == bytearray(len(value)) for value in observed)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX PAM worker lifecycle")
+def test_pam_worker_does_not_import_workspace_or_pythonpath_modules(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    marker = tmp_path / "imported"
+    (tmp_path / "yoetz.py").write_text(
+        "from pathlib import Path; Path(" + repr(str(marker)) + ").touch()\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    # The account is deliberately not the invoking account, so no real authentication runs.
+    assert (
+        IsolatedPamAuthenticator().authenticate(
+            "not-the-invoking-account", lambda: bytearray(b"synthetic-password")
+        )
+        is False
+    )
+    assert not marker.exists()

@@ -271,10 +271,12 @@ class IsolatedPamAuthenticator:
             if not secret or len(secret) > _PASSWORD_MAX_BYTES or 0 in secret:
                 return False
             # The password crosses only an anonymous pipe, never argv, environment, or a file.
-            # The worker has no terminal access and cannot reflect PAM text or ask another prompt.
+            # Isolated Python ignores the working directory and PYTHONPATH for imports. The
+            # worker cannot reflect PAM text or ask another console prompt.
             with subprocess.Popen(  # noqa: S603 - fixed interpreter/worker, no shell
                 [
                     sys.executable,
+                    "-I",
                     "-c",
                     "from yoetz.adapters.integrations.linux_artifact_presence import pam_worker; "
                     "raise SystemExit(pam_worker())",
