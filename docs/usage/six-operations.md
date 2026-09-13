@@ -114,7 +114,10 @@ yoetz observe checks run                              # run the trusted argv und
 ```
 
 `run` refuses an untrusted digest and records a coverage gap instead. A check that asks for
-network is not run; it is reported as unsupported. Each result carries a status and outcome, the
+network is not run; it is reported as unsupported. Network denial is enforced by the platform
+sandbox — `sandbox-exec` on macOS, bubblewrap (`bwrap`) on Linux and WSL — and `status` reports
+that sandbox once under `sandbox` (`ready`, or `unavailable` with the reason and the install
+step), so a missing `bwrap` is named before a check is approved rather than per rejected run. Each result carries a status and outcome, the
 output digest and byte count, and whether it is current: a run is bound to the working tree and
 diff state captured before and after it, so a result whose tree moved while it ran is marked not
 current rather than reusable. When no enforcing sandbox is available the outcome says so.

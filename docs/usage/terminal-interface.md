@@ -84,9 +84,11 @@ line above the active one:
    planned file count.
 5. **Installation activity**, step by step. A step is only reported as done once its postcondition
    was checked.
-6. **Secure storage** — system keyring, or a Yoetz passphrase entered on the trusted terminal
-   (masked, re-prompted, 16–1024 UTF-8 bytes). Change it later with `/service` or
-   `yoetz service rotate-passphrase`.
+6. **Secure storage** — system keyring (macOS Keychain, or a running Secret Service on Linux),
+   or a Yoetz passphrase entered on the trusted terminal (masked, re-prompted, 16–1024 UTF-8
+   bytes). When the keyring is unusable — no store loaded, or a backend Yoetz does not approve for
+   the vault — the option is disabled with that reason and the passphrase is offered. Change it
+   later with `/service` or `yoetz service rotate-passphrase`.
 7. **Review mode** — Local only, or Add semantic review.
 8. **Semantic setup, when selected** — an explicit choice between OpenAI API / compatible API and
    Codex with ChatGPT subscription, followed by the matching secure API-key or Codex-owned login
@@ -253,9 +255,12 @@ terminal handoff as first-time setup: input is masked with `*`, the helper state
 UTF-8 byte contract, and it re-prompts after invalid or mismatched input. The shell equivalent is
 `yoetz service rotate-passphrase`.
 
-`/doctor` runs bounded read-only checks across runtime, package version, discovery, registration,
-managed files, hooks, consent, policy digest, service reachability, vault, provider, and privacy,
-then suggests safe next steps. When policy permits package update checks and a newer release is
+`/doctor` runs bounded read-only checks across runtime, package version, the platform cell
+(certified, or untested such as Linux aarch64), the approved-check sandbox (Seatbelt on macOS,
+bubblewrap on Linux, with the install step named when it is missing or blocked), system secure
+storage (with the reason when it is unusable), discovery, registration, managed files, hooks,
+consent, policy digest, service reachability, vault, provider, and privacy, then suggests safe
+next steps. When policy permits package update checks and a newer release is
 known, the package line is optional with remediation `uv tool upgrade yoetz`; when the check is
 allowed but fails, the line is unproven with "could not check for updates." **It never changes
 anything.**

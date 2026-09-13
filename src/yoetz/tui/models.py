@@ -109,6 +109,9 @@ class Detection:
     launched_from_subdirectory: bool
     harnesses: tuple[HarnessOption, ...] = ()
     secure_storage_available: bool = False
+    # Why system secure storage is unavailable, in one fixed sentence (issue #721); empty
+    # when it is available.
+    secure_storage_reason: str = ""
     already_connected: bool = False
     cwd: str = ""
 

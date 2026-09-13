@@ -56,6 +56,21 @@ native marketplace-installed plugin, and an explicit private directory marketpla
 claim that Claude Code consumes Agent Plugins. It also does not transfer proof to Claude Desktop,
 remote/web/cloud, synced/managed/user/local scopes, Agent SDK, or headless sessions.
 
+## Linux and WSL
+
+Decision (issue #722): the Linux and WSL 2 native Claude Code cell remains **unproven**.
+The separate Linux PAM approval work (#719) supplies the plugin mutation ceremony; builds
+without that cell refuse `human_authority_unavailable` on non-macOS hosts. Check the installed
+preview's `authorization.human_presence` before proceeding. A supported presence mechanism is
+not native host evidence: Linux CLI activation and observation still need their own evidence.
+`preview` and `status` are read-only, and the rendered artifact is host-neutral. Claude Code
+inside WSL 2 can use Yoetz over MCP with its own `yoetz mcp serve` entry; that alone establishes
+neither hook observation nor a proven cell. The reviewed evidence case stays `claude-code-cli-native-project-2.1.241-macos-arm64`;
+a Linux x86-64 evidence case for the CLI cell is outstanding and will be admitted alongside the
+macOS case, not in place of it. Windows-native Claude Code against a WSL Yoetz is untested and not
+claimed. Host facts shared with the other hosts (state location, keyring, sandbox, platform cells)
+are in [`linux-and-wsl.md`](linux-and-wsl.md).
+
 ## What Yoetz generates
 
 Claude Code keeps the native carrier's marker-bound launcher identity described below. The

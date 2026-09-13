@@ -353,6 +353,13 @@ REMEDIATION_MESSAGES: Final = MappingProxyType(
             "this runtime is already pinned to another root; dispose that instance from this "
             "runtime or provision a separate runtime for the new root"
         ),
+        "path_on_network_filesystem": (
+            "the Yoetz state directory is on a network or cross-machine filesystem (NFS, SMB, "
+            "9p, drvfs, virtiofs, sshfs, ...), where SQLite locking is unsafe; keep state on a "
+            "local disk. Inside WSL, that means the Linux filesystem (your WSL home), never a "
+            "Windows drive under /mnt/<letter>; unset YOETZ_ISOLATED_ROOT or point it at a "
+            "local path, then retry"
+        ),
         "instance_root_invalid": (
             "the instance root must be an absolute path whose parent exists, owned by the "
             "current user, outside shared temp, repositories, sync folders, and the home root, "

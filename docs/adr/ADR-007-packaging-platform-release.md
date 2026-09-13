@@ -27,6 +27,15 @@ manifests, the packaging/capability suites, and the release workflows under `.gi
    advertised only after the complete Windows service transport, peer identity, storage, keyring,
    secret-memory, native-prompt, recovery, clean-install, and cross-platform drill gates pass. A
    portable console unit test is not that proof. No musl, Windows arm64, or macOS x86-64 claims.
+   Amendment (2026-09-13, issue #724): the pinned APSW lock also resolves
+   `manylinux_2_28_aarch64` wheels, so the package installs on Linux aarch64 (WSL 2 on
+   Windows-on-ARM, Graviton, Raspberry Pi, Asahi) without any gate. Such a host is an
+   **untested platform cell**, not a supported one: `version --json` adds
+   `platform_cell_untested` to `limitations`, `setup status` reports `platform.cell`, and the
+   interface's `/doctor` shows the platform line as not proven. The install is neither refused
+   nor claimed. Certifying that cell requires a real `ubuntu-24.04-arm` release runner and
+   release evidence, at which point the certified-cell table in `yoetz.version` and this list
+   change together.
    Primary install:
    `uv tool install --managed-python --python 3.14.6 "yoetz==0.1.0"`.
 6. **Keys, semantic readiness, and compatibility extras:** the certified standard install includes

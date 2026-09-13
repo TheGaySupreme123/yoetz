@@ -31,7 +31,11 @@ fault/contention matrix on both advertised platforms.
 4. **Layout:** platform app-data `…/yoetz/` with `catalog.sqlite3` + `tasks/<task-id>/` bundles.
    One task per bundle database. Owner-only permissions; symlink/hardlink/
    traversal rejection; repo, cloud-synced, network, and world-readable paths unsupported and
-   detected where practical (`STORAGE_UNSAFE`).
+   detected where practical (`STORAGE_UNSAFE`). "Network" includes the VM-boundary transports
+   `9p`, `drvfs`, and `virtiofs` (issue #723). Yoetz has not certified locking and crash durability
+   across these host/guest shares, so state inside WSL must live on the distribution's own disk,
+   never under `/mnt/<letter>`. This is a conservative support boundary: virtiofs implementations
+   can support POSIX locks, but that alone is not Yoetz durability evidence.
 5. **Schema:** migration `0001` is the canonical initial schema for both
    catalog and bundle (STRICT tables, WITHOUT ROWID where keyed by text, CHECK-enforced state
    machines). Structural columns never contain user plaintext.

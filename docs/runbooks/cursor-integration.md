@@ -90,6 +90,22 @@ required; the pin does not replace it, and it does not prove isolated plugin dis
 The everyday Cursor profile must keep naming the everyday launcher by absolute path. See
 [`test-instances.md`](test-instances.md).
 
+## Linux and WSL
+
+Decision (issue #722): the Linux and WSL 2 native Cursor cell remains **unproven**.
+Plugin mutation requires a supported presence cell; the separate Linux PAM approval work
+(#719) supplies that ceremony, while builds without it refuse `human_authority_unavailable`
+off macOS. Inspect `authorization.human_presence` in the installed preview. Successful approval
+does not certify IDE discovery or native host activation.
+IDE discovery still reads the macOS bundle (`Contents/Info.plist` and the `CFBundleExecutable`
+digest); a Linux Cursor (AppImage or `.deb`) is reported as `cursor_ide_platform_unsupported`
+rather than as absent, and no `cursor_ide` identity is minted for it. Linux IDE discovery
+(executable digest plus the version from `resources/app/package.json`) remains unsupported.
+A Cursor inside WSL 2 can use Yoetz over MCP with a
+hand-added `yoetz mcp serve` entry; Cursor Cloud remains unsupported. The reviewed evidence case
+stays `cursor-ide-native-3.17.8-macos-arm64`; Linux x86-64 evidence for the Agent CLI cell is
+outstanding. Shared host facts are in [`linux-and-wsl.md`](linux-and-wsl.md).
+
 ## Preview and install
 
 Use an explicit isolated root; never point a test at regular `~/.cursor`. An isolated Cursor

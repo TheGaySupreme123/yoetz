@@ -43,6 +43,20 @@ On Windows:
 4. Connecting a Windows-native Codex, Claude Code, or Cursor to a Yoetz inside WSL is untested
    and not claimed. Register a host only from the same WSL environment; a Windows-side agent can
    still drive installation and local-only use through `wsl -e`.
+5. Keep Yoetz's state on the Linux filesystem: install and run from the WSL home, and never point
+   `YOETZ_ISOLATED_ROOT` or an instance root at a Windows drive under `/mnt/<letter>`. Yoetz
+   refuses such a path with `path_on_network_filesystem`; the project itself may live anywhere.
+6. Expect no system keyring in WSL: choose the Yoetz passphrase at the secure-storage question.
+   Ask the user to run `sudo apt install bubblewrap` if they will trust a check policy whose
+   checks deny network; without it those checks are rejected `sandbox_unavailable`. On a
+   Windows-on-ARM machine the Ubuntu is aarch64, an untested platform cell: `yoetz version --json`
+   lists `platform_cell_untested`, and you should say so to the user rather than claim support.
+
+On Linux, the same three facts apply — bubblewrap for network-denied checks, a Secret Service
+(GNOME Keyring or KWallet) for the system keyring or else a passphrase, and state on a local
+disk — and `yoetz setup status --json` reports all three under `platform` before you decide
+anything. Certified cells are macOS arm64 and Linux x86-64 (glibc 2.28+); other architectures
+install and report `platform_cell_untested`.
 
 ## 1. Install — you do this
 
