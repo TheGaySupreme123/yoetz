@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import ctypes
+import io
 import signal
+import subprocess
+import sys
 import time
 from collections.abc import Callable
-from types import TracebackType
+from types import SimpleNamespace, TracebackType
 from typing import Self
 
 import pytest
@@ -12,6 +15,7 @@ import pytest
 from yoetz.adapters.integrations import linux_artifact_presence as module
 from yoetz.adapters.integrations.linux_artifact_presence import (
     ConversationState,
+    IsolatedPamAuthenticator,
     LinuxArtifactUserPresence,
     LinuxPamAuthenticator,
     PamMessage,
@@ -187,15 +191,13 @@ def test_linux_presence_unavailable_pam_fails_closed(linux: None, error: BaseExc
 def test_linux_presence_deadline_fails_closed_and_restores_the_alarm(
     linux: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(f"{_MODULE}._TIMEOUT_SECONDS", 0.05)
     console = _Console()
     before = _previous_alarm()
 
     class _Stalled:
         def authenticate(self, account: str, read_password: Callable[[], bytearray]) -> bool:
-            # A bounded stand-in for an operator who never answers: the alarm must interrupt it
-            # long before the five-second ceiling.
-            time.sleep(5)
+            # Deliver the actual alarm without waiting for wall time to infer the outcome.
+            signal.raise_signal(signal.SIGALRM)
             return True
 
     started = time.monotonic()
@@ -358,3 +360,140 @@ def test_real_pam_rejects_a_wrong_password_for_the_invoking_account() -> None:
 
     assert LinuxPamAuthenticator().authenticate(account, read_password) is False
     assert prompts <= 1
+
+
+@pytest.mark.parametrize("returncode", [0, 1])
+def test_isolated_pam_uses_only_a_pipe_for_the_secret(
+    monkeypatch: pytest.MonkeyPatch, returncode: int
+) -> None:
+    secret = bytearray(b"test-password")
+
+    class Worker:
+        def __init__(self, argv: list[str], **kwargs: object) -> None:
+            self.returncode = returncode
+            assert all("test-password" not in arg for arg in argv)
+            assert argv[-1] == "operator"
+            assert kwargs["stdin"] == subprocess.PIPE
+            assert kwargs["stdout"] == subprocess.DEVNULL
+            assert kwargs["stderr"] == subprocess.DEVNULL
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+        def communicate(self, *, input: bytearray, timeout: float) -> None:
+            assert input is secret
+            assert timeout == 130
+
+        def poll(self) -> int:
+            return self.returncode
+
+        def wait(self) -> int:
+            return self.returncode
+
+    monkeypatch.setattr(module.subprocess, "Popen", Worker)
+    assert IsolatedPamAuthenticator().authenticate("operator", lambda: secret) is (returncode == 0)
+    assert secret == bytearray(len(b"test-password"))
+
+
+@pytest.mark.parametrize("error", [subprocess.TimeoutExpired("worker", 130), KeyboardInterrupt()])
+def test_isolated_pam_kills_and_reaps_worker_on_timeout_or_cancellation(
+    monkeypatch: pytest.MonkeyPatch, error: BaseException
+) -> None:
+    secret = bytearray(b"test-password")
+    cleanup: list[str] = []
+
+    class Worker:
+        returncode = None
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            assert cleanup == ["kill", "wait"]
+
+        def communicate(self, **kwargs: object) -> None:
+            raise error
+
+        def poll(self) -> None:
+            return None
+
+        def kill(self) -> None:
+            cleanup.append("kill")
+
+        def wait(self) -> int:
+            cleanup.append("wait")
+            return -9
+
+    monkeypatch.setattr(module.subprocess, "Popen", Worker)
+    with pytest.raises(type(error)):
+        IsolatedPamAuthenticator().authenticate("operator", lambda: secret)
+    assert cleanup == ["kill", "wait"]
+    assert secret == bytearray(len(b"test-password"))
+
+
+@pytest.mark.parametrize("raw", [b"", b"secret\x00suffix", b"x" * 1025])
+def test_isolated_pam_refuses_unrepresentable_passwords_before_launch(
+    monkeypatch: pytest.MonkeyPatch, raw: bytes
+) -> None:
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("invalid password must not reach PAM")
+
+    monkeypatch.setattr(module.subprocess, "Popen", forbidden)
+    secret = bytearray(raw)
+    assert IsolatedPamAuthenticator().authenticate("operator", lambda: secret) is False
+    assert secret == bytearray(len(raw))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX PAM worker lifecycle")
+def test_stalled_worker_is_actually_terminated_and_reaped(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_popen = subprocess.Popen
+    children: list[subprocess.Popen[bytes]] = []
+
+    def spawn(argv: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+        child = real_popen(
+            [sys.executable, "-c", "import signal; signal.pause()"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(module.subprocess, "Popen", spawn)
+    monkeypatch.setattr(module, "_TIMEOUT_SECONDS", 0.1)
+    secret = bytearray(b"synthetic-test-password")
+    with pytest.raises(subprocess.TimeoutExpired):
+        IsolatedPamAuthenticator().authenticate("operator", lambda: secret)
+    assert len(children) == 1
+    assert children[0].returncode is not None
+    assert children[0].returncode < 0
+    assert secret == bytearray(len(b"synthetic-test-password"))
+
+
+@pytest.mark.parametrize("raw", [b"synthetic-password", b"", b"x" * 1025, b"prefix\x00suffix"])
+def test_pam_worker_bounds_pipe_ingress_and_wipes_it(
+    linux: None, monkeypatch: pytest.MonkeyPatch, raw: bytes
+) -> None:
+    observed: list[bytearray] = []
+
+    class Pam:
+        def authenticate(self, account: str, read_password: Callable[[], bytearray]) -> bool:
+            assert account == "operator"
+            secret = read_password()
+            assert secret == b"synthetic-password"
+            observed.append(secret)
+            return True
+
+    monkeypatch.setattr(module.sys, "argv", ["-c", "operator"])
+    monkeypatch.setattr(module.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(raw)))
+    monkeypatch.setattr(module, "LinuxPamAuthenticator", Pam)
+    expected = raw == b"synthetic-password"
+    assert module.pam_worker() == (0 if expected else 1)
+    assert bool(observed) is expected
+    assert all(value == bytearray(len(value)) for value in observed)

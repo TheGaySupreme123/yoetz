@@ -177,6 +177,15 @@ documents that Yoetz cannot independently authenticate its chat provenance.
     agent recommends Expanded first for review depth and explains Assisted as the lower-disclosure
     semantic alternative before preparing the one exact combined action.
 
+### Linux PAM deadline isolation (issue #719)
+
+Linux PAM deadline implementation (issue #719): the trusted console process retains password
+input and terminal restoration, while a disposable Python worker performs the native PAM calls.
+The bounded password travels through an anonymous pipe only. The parent kills and reaps its
+worker on timeout or cancellation; a blocked PAM module cannot defer the parent deadline.
+No PAM prompt or error output is forwarded. Empty, overlong, and NUL-containing passwords are
+refused before launching the worker.
+
 ## Consequences
 
 Agents guide choices in ordinary conversation, prepare and inspect one combined request, then

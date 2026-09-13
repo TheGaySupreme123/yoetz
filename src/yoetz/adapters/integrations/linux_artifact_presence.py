@@ -18,6 +18,7 @@ from __future__ import annotations
 import ctypes
 import os
 import signal
+import subprocess
 import sys
 from collections.abc import Callable
 from types import TracebackType
@@ -260,6 +261,67 @@ class LinuxPamAuthenticator:
             del callback
 
 
+class IsolatedPamAuthenticator:
+    """Keep native PAM off the console process so its deadline can always stop the attempt."""
+
+    def authenticate(self, account: str, read_password: Callable[[], bytearray]) -> bool:
+        secret = read_password()
+        try:
+            if not secret or len(secret) > _PASSWORD_MAX_BYTES or 0 in secret:
+                return False
+            # The password crosses only an anonymous pipe, never argv, environment, or a file.
+            # The worker has no terminal access and cannot reflect PAM text or ask another prompt.
+            with subprocess.Popen(  # noqa: S603 - fixed interpreter/worker, no shell
+                [
+                    sys.executable,
+                    "-c",
+                    "from yoetz.adapters.integrations.linux_artifact_presence import pam_worker; "
+                    "raise SystemExit(pam_worker())",
+                    account,
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ) as process:
+                try:
+                    # CPython's binary communicate accepts the buffer protocol; retain the
+                    # wipeable bytearray instead of making an immutable password copy.
+                    process.communicate(input=secret, timeout=_TIMEOUT_SECONDS)  # pyright: ignore[reportArgumentType]
+                    return process.returncode == 0
+                finally:
+                    # Also runs when the whole-ceremony alarm interrupts communicate. Kill only
+                    # the worker we spawned, before Popen.__exit__ waits for it.
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait()
+        finally:
+            _overwrite(secret)
+
+
+def pam_worker() -> int:
+    """Private fixed worker entrypoint; expose only a successful/failed exit status."""
+
+    secret = bytearray(_PASSWORD_MAX_BYTES + 1)
+    used = 0
+    try:
+        if sys.platform != "linux" or len(sys.argv) != 2 or sys.argv[1] != invoking_account():
+            return 1
+        while used < len(secret):
+            with memoryview(secret)[used:] as target:
+                count = sys.stdin.buffer.readinto(target)
+            if not count:
+                break
+            used += count
+        if not 0 < used <= _PASSWORD_MAX_BYTES or 0 in memoryview(secret)[:used]:
+            return 1
+        del secret[used:]
+        return 0 if LinuxPamAuthenticator().authenticate(sys.argv[1], lambda: secret) else 1
+    except BaseException:
+        return 1
+    finally:
+        _overwrite(secret)
+
+
 def invoking_account() -> str:
     """Name of the real-UID account, the only one ``unix_chkpwd`` will verify."""
 
@@ -313,7 +375,7 @@ class LinuxArtifactUserPresence:
         try:
             signal.setitimer(signal.ITIMER_REAL, _TIMEOUT_SECONDS)
             authenticator = (
-                LinuxPamAuthenticator() if self._authenticator is None else self._authenticator
+                IsolatedPamAuthenticator() if self._authenticator is None else self._authenticator
             )
             with self._console() as console:
                 console.write(

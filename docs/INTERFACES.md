@@ -4489,6 +4489,13 @@ becomes `human_authority_unavailable` before the pending is claimed, and operati
 or error text is never reflected. An unsupported platform fails closed with the same reason.
 Neither cell is the service-wide `UserPresencePort`.
 
+Linux PAM deadline implementation (issue #719): the trusted console process retains password
+input and terminal restoration, while a disposable Python worker performs the native PAM calls.
+The bounded password travels through an anonymous pipe only. The parent kills and reaps its
+worker on timeout or cancellation; a blocked PAM module cannot defer the parent deadline.
+No PAM prompt or error output is forwarded. Empty, overlong, and NUL-containing passwords are
+refused before launching the worker.
+
 Install and remove replays are idempotent at the selected state: a committed operation whose
 result was lost reconciles instead of refusing, touching no bytes and consuming no second review.
 Replace is deliberately not reconciled — the accepted digest bound the pre-commit tree, which the
