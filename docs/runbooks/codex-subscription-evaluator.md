@@ -57,9 +57,8 @@ x86_64 runtime. A fresh installed Yoetz wheel was then exercised in an independe
 x86_64 test instance: the exact wrapper resolved to the pinned native digest, preview and
 `verify_local_binding` accepted the Linux cell, and unauthenticated `account/read` and logout
 probes completed with `cleanup: terminated` while reporting `runtime_ready: true`, no auth mode,
-and no model availability. This proves the installed Linux binding and unauthenticated lifecycle
-cleanup only; it does not prove authenticated Yoetz semantic dispatch, privacy receipts, or
-packaged release support. WSL-specific execution has not been tested.
+and no model availability. The authenticated smoke evidence is bounded to the separate Linux
+acceptance note below; WSL-specific execution has not been tested.
 The separate identity digest prevents a Linux executable or source identity from being paired with
 the macOS cell.
 
@@ -99,6 +98,25 @@ request and terminated cleanup. This proves the refusal boundary under the contr
 it does not claim that the upstream account lacks Luna. Historical Sol evidence stays unchanged;
 the broader release-support cell remains an implementation candidate with pending evidence for
 its full negative-control checklist.
+
+### Linux authenticated smoke evidence (2026-09-13)
+
+One installed Linux VM run used Yoetz wheel
+`sha256:252ca337e2f002450fc5ae0649de2dbec29b70c12f1a0a6f768024e7acb4d68d`, the exact Linux x86_64
+Codex cell above, and a fresh dedicated ChatGPT home. The VM had working user namespaces and
+bubblewrap. At `2026-09-13 17:22 UTC`, one approved synthetic `Luna/high` `semantic_required`
+check completed through the Yoetz privacy gateway with `case_disclosed=true`,
+`turn_acknowledged=true`, and `process_cleanup=terminated`; a final task receipt was present. The
+receipt conclusion was `insufficient_coverage`, with `completion_scope_declared_none`,
+`evidence_content_digest_only`, and `semantic_challenges_rejected` recorded as coverage limits.
+The check recorded a privacy-receipt identifier, but the receipt get/list service handlers were
+unavailable (`method_forbidden`), so this evidence does not include a retrieved privacy receipt. This is one authenticated semantic smoke check, not
+two-check evaluator acceptance; no live token accounting was captured in this run. The default
+gVisor sandbox failed closed on the pre-disclosure `configWarning` because user namespaces were
+unavailable; do not bypass that guard. WSL-specific smoke and the full negative and release-acceptance
+matrix remain pending. After the probe, the supported tightening operation disabled external semantic
+review; disconnect confirmed logout and removed the dedicated binding, and rollback was
+idempotent. Both test sandboxes were then terminated.
 
 ## Setup and reverse operations
 

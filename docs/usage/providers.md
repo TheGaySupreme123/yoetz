@@ -86,6 +86,12 @@ explicitly pair with it (see
 provider menu, and `/provider` can log out the
 dedicated home first when you choose to switch ChatGPT accounts.
 
+On Linux, Codex's read-only sandbox requires bubblewrap and working user namespaces. The
+verified Modal VM environment provides both. A default gVisor sandbox could not start this
+Codex sandbox and was rejected before disclosure. Use an environment that satisfies these
+prerequisites; keep the sandbox checks enabled. See the [evaluator runbook](../runbooks/codex-subscription-evaluator.md#linux-authenticated-smoke-evidence-2026-09-13)
+for the current acceptance evidence and remaining release checks.
+
 Read structural state without sending a task case:
 
 ```text
