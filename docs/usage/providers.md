@@ -45,8 +45,9 @@ New setups preselect `gpt-5.6-luna` with reasoning effort `high`. When an existi
 binding is targeted, omitting `--model` preserves its exact model, including during account
 switching. Pass `--model` to change it intentionally.
 
-The selected executable can be an npm wrapper with the native package nested below that wrapper,
-an npm-prefix wrapper with `@openai/codex-darwin-arm64` hoisted beside the wrapper package in the
+The selected executable can be an npm wrapper with the matching native package nested below that
+wrapper (`@openai/codex-darwin-arm64` on macOS arm64 or `@openai/codex-linux-x64` on Linux x86_64),
+an npm-prefix wrapper with that same platform package hoisted beside the wrapper package in the
 same prefix, or the exact native `codex` executable itself. Yoetz resolves only those bounded
 locations derived from the selected path: it does not search PATH, unrelated prefixes, or arbitrary
 parent directories. Every form still requires the supported platform, package version, native

@@ -51,10 +51,15 @@ support matrix remains authoritative about which cells have completed packaged l
 | Credential authority | `external_runtime_oauth` |
 | Upstream-body observability | `unavailable` |
 
-The Linux evidence currently covers the published npm metadata, the native executable bytes, the
-generated app-server v2 schema, and a plain Codex device-login/Luna-high execution in an isolated
-Modal Linux x86_64 runtime. WSL-specific execution has not been tested. Yoetz app-server lifecycle,
-semantic dispatch, privacy receipt, process cleanup, and packaged release support remain pending.
+The Linux evidence covers the published npm metadata, the native executable bytes, the generated
+app-server v2 schema, and a plain Codex device-login/Luna-high execution in an isolated Modal Linux
+x86_64 runtime. A fresh installed Yoetz wheel was then exercised in an independent Modal Linux
+x86_64 test instance: the exact wrapper resolved to the pinned native digest, preview and
+`verify_local_binding` accepted the Linux cell, and unauthenticated `account/read` and logout
+probes completed with `cleanup: terminated` while reporting `runtime_ready: true`, no auth mode,
+and no model availability. This proves the installed Linux binding and unauthenticated lifecycle
+cleanup only; it does not prove authenticated Yoetz semantic dispatch, privacy receipts, or
+packaged release support. WSL-specific execution has not been tested.
 The separate identity digest prevents a Linux executable or source identity from being paired with
 the macOS cell.
 
@@ -142,10 +147,11 @@ operator deleting that directory; deleting the isolation root does not remove it
 
 Pass one absolute selected path. The supported npm layouts are:
 
-1. the npm wrapper whose `@openai/codex-darwin-arm64` optional package is nested below that
-   wrapper's package root; and
-2. an npm-prefix wrapper whose native package is hoisted beside `@openai/codex` under the same
-   selected prefix.
+1. the npm wrapper whose exact platform package is nested below that wrapper's package root:
+   `@openai/codex-darwin-arm64` for macOS arm64 or `@openai/codex-linux-x64` for Linux x86_64
+   (including a Linux userspace under WSL2); and
+2. an npm-prefix wrapper whose matching platform package is hoisted beside `@openai/codex`
+   under the same selected prefix.
 
 The third supported form is the exact native `codex` executable. Resolution follows only the
 selected wrapper's package root and, for a prefix install, that same prefix. It never searches

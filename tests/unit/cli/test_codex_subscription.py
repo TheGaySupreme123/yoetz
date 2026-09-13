@@ -187,6 +187,13 @@ def _mac_cell() -> CodexEvaluatorCell:
     return module.codex_evaluator_cell_for_platform("darwin", "arm64")
 
 
+def _mock_macos_arm64_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep Mac-cell fixtures coherent when this slice runs on Linux CI."""
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(module.platform, "machine", lambda: "arm64")
+
+
 def test_codex_package_layout_resolves_nested_optional_dependency_before_digest(
     tmp_path: Path,
 ) -> None:
@@ -436,6 +443,7 @@ def test_linux_cell_cannot_be_mixed_with_the_macos_capability_identity(
 def test_preview_resolves_exact_cell_without_creating_home(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    _mock_macos_arm64_host(monkeypatch)
     executable = tmp_path / "codex"
     home = tmp_path / "dedicated-home"
 
@@ -771,6 +779,7 @@ def test_cli_setup_maps_missing_executable_without_echoing_the_path(tmp_path: Pa
 def test_cli_setup_disconnect_and_rollback_recompose_the_service(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    _mock_macos_arm64_host(monkeypatch)
     from yoetz.cli.app import app
 
     restarts: list[str] = []
@@ -1050,6 +1059,7 @@ def test_cli_setup_discloses_reuse_and_names_its_override_before_the_confirmatio
 ) -> None:
     """The `setup` notice must state reuse and the flag that forces a fresh sign-in (#534)."""
 
+    _mock_macos_arm64_host(monkeypatch)
     from yoetz.cli.app import app
 
     def resolve(selected: Path) -> tuple[Path, str, str]:
@@ -1493,6 +1503,7 @@ async def test_setup_validates_configuration_before_any_login_or_home_side_effec
 async def test_setup_probes_the_writable_binding_target_before_login(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    _mock_macos_arm64_host(monkeypatch)
     blocked = tmp_path / "blocked"
     blocked.mkdir()
     target = blocked / "config.toml"
@@ -1530,6 +1541,7 @@ async def test_setup_probes_the_writable_binding_target_before_login(
 async def test_disconnect_probes_the_removal_write_before_codex_logout(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    _mock_macos_arm64_host(monkeypatch)
     binding = _binding(tmp_path / "codex", tmp_path / "dedicated-home")
     target = _bound_config_file(tmp_path, binding)
 
