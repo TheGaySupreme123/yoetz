@@ -268,7 +268,12 @@ vault handle. The runtime may receive only the already-approved canonical case t
 configuration, executable, protocol, capability, model/reasoning selection, safe correlation,
 terminal output digest, and process cleanup. It explicitly records
 `upstream_body_observability=unavailable`; the disclosed-case commitment must never be described as
-the upstream OpenAI body.
+the upstream OpenAI body. Current runtime evidence may also record the Codex app-server's bounded
+cumulative token snapshot for that exact thread and turn: input/output/total counters plus cached
+input, cache-write input, and reasoning-output subsets. Repeated cumulative updates replace one
+another; they are never summed, and missing, malformed, unrelated, or regressing updates remain
+unknown or become a bounded `token_usage_invalid` diagnostic. Account identifiers and raw provider
+notification bodies never enter provenance.
 
 Retries remain within the durable attempt budget. A pre-`turn/start`-acknowledgement transient may
 receive a fresh one-use authorization and exact retry. After acknowledgement, transport ambiguity

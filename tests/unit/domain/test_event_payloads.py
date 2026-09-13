@@ -81,6 +81,7 @@ from yoetz.domain.findings import (
     Finding,
     ResponseDisposition,
     RuntimeAttemptEvidence,
+    RuntimeTokenUsage,
     SamplingParams,
     SemanticDispatchKind,
     SemanticProvenance,
@@ -471,10 +472,12 @@ def test_exact_schema_pair_dispatch_and_unknown_boundary() -> None:
     assert {schema.version for schema in PAYLOAD_TYPES if schema.name == "check_recorded"} == {
         SCHEMA_VERSION,
         "1.1.0",
+        "1.2.0",
     }
     assert {schema.version for schema in PAYLOAD_TYPES if schema.name == "finding_recorded"} == {
         SCHEMA_VERSION,
         "1.1.0",
+        "1.2.0",
     }
     for family in ("session_opened", "session_resumed"):
         assert {schema.version for schema in PAYLOAD_TYPES if schema.name == family} == {
@@ -1832,3 +1835,65 @@ def test_runtime_evidence_failure_stage_round_trips_and_stays_closed() -> None:
         replace(_external_runtime_evidence(), failure_stage=stage)
     with pytest.raises(ProtocolValueError, match="invalid_runtime_attempt_evidence"):
         replace(_external_runtime_evidence(), failure_stage="provider text must not land here")
+
+
+def test_runtime_evidence_token_usage_is_additive_and_omits_absent_bytes() -> None:
+    from yoetz.domain.findings import semantic_provenance_from_json, semantic_provenance_to_json
+
+    base = replace(
+        _selected_final_provenance(),
+        provider="openai-codex",
+        endpoint_profile_id="codex-chatgpt-subscription",
+        model="gpt-5.6-luna",
+        sdk_version="codex-app-server-0.150.1",
+        dispatch_kind=SemanticDispatchKind.EXTERNAL_RUNTIME_OAUTH,
+        runtime_evidence=_external_runtime_evidence(),
+    )
+    runtime_evidence = base.runtime_evidence
+    assert runtime_evidence is not None
+    without_usage = base
+    without_usage_wire = semantic_provenance_to_json(without_usage)
+    without_usage_runtime = cast(Mapping[str, object], without_usage_wire["runtime_evidence"])
+    assert "token_usage" not in without_usage_runtime
+
+    usage = RuntimeTokenUsage(
+        input_tokens=160,
+        cached_input_tokens=80,
+        cache_write_input_tokens=5,
+        output_tokens=50,
+        reasoning_output_tokens=20,
+        total_tokens=210,
+    )
+    with_usage = replace(
+        without_usage,
+        runtime_evidence=replace(runtime_evidence, token_usage=usage),
+    )
+    wire = semantic_provenance_to_json(with_usage)
+    runtime = cast(Mapping[str, object], wire["runtime_evidence"])
+    usage_wire = cast(Mapping[str, object], runtime["token_usage"])
+    assert usage_wire == {
+        "cached_input_tokens": "80",
+        "cache_write_input_tokens": "5",
+        "input_tokens": "160",
+        "output_tokens": "50",
+        "reasoning_output_tokens": "20",
+        "total_tokens": "210",
+    }
+    assert semantic_provenance_from_json(wire) == with_usage
+    validate_schema_instance("semantic-provenance", "1.2.0", wire)
+
+    with pytest.raises(ProtocolValueError, match="schema_instance_invalid"):
+        validate_schema_instance("semantic-provenance", "1.1.0", wire)
+
+    payload = cast(CheckRecordedPayload, _decode_row(_ROW_BY_FAMILY["check_recorded"]))
+    semantic = replace(
+        payload,
+        mode=CheckMode.SEMANTIC_REQUIRED,
+        semantic_status=SemanticStatus.SUCCEEDED,
+        semantic_reason=SemanticReason.SEMANTIC_COMPLETED,
+        semantic_provenance=with_usage,
+    )
+    event_wire = encode_payload(semantic)
+    assert decode_payload(EventSchema("check_recorded", "1.2.0"), event_wire) == semantic
+    with pytest.raises(ProtocolValueError, match="schema_instance_invalid"):
+        validate_schema_instance("check-recorded", "1.1.0", event_wire)

@@ -61,6 +61,7 @@ __all__ = [
     "ResponseDisposition",
     "RUNTIME_FAILURE_STAGES",
     "RuntimeAttemptEvidence",
+    "RuntimeTokenUsage",
     "SamplingParams",
     "SemanticDispatchKind",
     "SemanticFailureClass",
@@ -180,6 +181,7 @@ RUNTIME_FAILURE_STAGES: Final[frozenset[str]] = frozenset(
         "event_forbidden",
         "tool_event_forbidden",
         "rate_limits_invalid",
+        "token_usage_invalid",
         "runtime_warning",
         "turn_failed",
         "model_rerouted",
@@ -235,6 +237,7 @@ class RuntimeAttemptEvidence:
     turn_acknowledged: bool
     process_cleanup: Literal["not_started", "terminated", "killed", "failed"]
     failure_stage: str | None = None
+    token_usage: RuntimeTokenUsage | None = None
 
     def __post_init__(self) -> None:
         identity = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$", re.ASCII)
@@ -286,6 +289,8 @@ class RuntimeAttemptEvidence:
         if self.failure_stage is not None and (
             type(self.failure_stage) is not str or self.failure_stage not in RUNTIME_FAILURE_STAGES
         ):
+            raise ProtocolValueError("invalid_runtime_attempt_evidence")
+        if self.token_usage is not None and type(self.token_usage) is not RuntimeTokenUsage:
             raise ProtocolValueError("invalid_runtime_attempt_evidence")
 
 
@@ -423,6 +428,52 @@ class TokenUsage:
             for value in (self.input_tokens, self.output_tokens, self.total_tokens)
         ):
             raise ProtocolValueError("invalid_token_usage")
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeTokenUsage:
+    """Provider-reported cumulative usage for one external-runtime attempt.
+
+    The cached-input and reasoning-output values are subsets of the input/output totals. They are
+    retained separately for analysis and must never be added to ``total_tokens`` again.
+    """
+
+    input_tokens: int
+    cached_input_tokens: int
+    cache_write_input_tokens: int
+    output_tokens: int
+    reasoning_output_tokens: int
+    total_tokens: int
+
+    def __post_init__(self) -> None:
+        if not all(
+            _valid_uint53(value)
+            for value in (
+                self.input_tokens,
+                self.cached_input_tokens,
+                self.cache_write_input_tokens,
+                self.output_tokens,
+                self.reasoning_output_tokens,
+                self.total_tokens,
+            )
+        ):
+            raise ProtocolValueError("invalid_runtime_token_usage")
+        if (
+            self.cached_input_tokens > self.input_tokens
+            or self.reasoning_output_tokens > self.output_tokens
+            or self.input_tokens + self.output_tokens != self.total_tokens
+        ):
+            raise ProtocolValueError("invalid_runtime_token_usage")
+
+    @property
+    def aggregate(self) -> TokenUsage:
+        """Return the non-overlapping aggregate fields used by semantic provenance."""
+
+        return TokenUsage(
+            input_tokens=self.input_tokens,
+            output_tokens=self.output_tokens,
+            total_tokens=self.total_tokens,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -842,6 +893,39 @@ def _token_usage_from_json(value: JsonValue) -> TokenUsage:
     )
 
 
+def _runtime_token_usage_from_json(value: JsonValue) -> RuntimeTokenUsage:
+    keys = frozenset(
+        {
+            "input_tokens",
+            "cached_input_tokens",
+            "cache_write_input_tokens",
+            "output_tokens",
+            "reasoning_output_tokens",
+            "total_tokens",
+        }
+    )
+    source = _require_json_object(
+        value,
+        required=keys,
+        allowed=keys,
+        reason="runtime_attempt_evidence_json_shape_invalid",
+    )
+    return RuntimeTokenUsage(
+        input_tokens=_parse_uint53_wire(source["input_tokens"], "invalid_runtime_token_usage"),
+        cached_input_tokens=_parse_uint53_wire(
+            source["cached_input_tokens"], "invalid_runtime_token_usage"
+        ),
+        cache_write_input_tokens=_parse_uint53_wire(
+            source["cache_write_input_tokens"], "invalid_runtime_token_usage"
+        ),
+        output_tokens=_parse_uint53_wire(source["output_tokens"], "invalid_runtime_token_usage"),
+        reasoning_output_tokens=_parse_uint53_wire(
+            source["reasoning_output_tokens"], "invalid_runtime_token_usage"
+        ),
+        total_tokens=_parse_uint53_wire(source["total_tokens"], "invalid_runtime_token_usage"),
+    )
+
+
 def _cost_fields_from_json(value: JsonValue) -> CostFields:
     keys = frozenset({"currency", "input_microunits", "output_microunits", "total_microunits"})
     source = _require_json_object(
@@ -891,6 +975,7 @@ def _runtime_attempt_evidence_from_json(value: JsonValue | None) -> RuntimeAttem
             "final_output_sha256",
             "plan_type",
             "thread_id",
+            "token_usage",
             "turn_id",
         }
     )
@@ -935,6 +1020,11 @@ def _runtime_attempt_evidence_from_json(value: JsonValue | None) -> RuntimeAttem
             source["process_cleanup"],
         ),
         failure_stage=cast(str | None, source.get("failure_stage")),
+        token_usage=(
+            None if _optional_field(source, "token_usage") is None else _runtime_token_usage_from_json(
+                _optional_field(source, "token_usage")
+            )
+        ),
     )
 
 
@@ -1191,6 +1281,23 @@ def semantic_provenance_to_json(value: SemanticProvenance) -> JsonObject:
             runtime_json["final_output_sha256"] = runtime.final_output_sha256
         if runtime.failure_stage is not None:
             runtime_json["failure_stage"] = runtime.failure_stage
+        if runtime.token_usage is not None:
+            runtime_json["token_usage"] = JsonObject(
+                {
+                    "input_tokens": render_wire_sequence(runtime.token_usage.input_tokens),
+                    "cached_input_tokens": render_wire_sequence(
+                        runtime.token_usage.cached_input_tokens
+                    ),
+                    "cache_write_input_tokens": render_wire_sequence(
+                        runtime.token_usage.cache_write_input_tokens
+                    ),
+                    "output_tokens": render_wire_sequence(runtime.token_usage.output_tokens),
+                    "reasoning_output_tokens": render_wire_sequence(
+                        runtime.token_usage.reasoning_output_tokens
+                    ),
+                    "total_tokens": render_wire_sequence(runtime.token_usage.total_tokens),
+                }
+            )
         result["runtime_evidence"] = JsonObject(runtime_json)
     if value.fallback_from is not None:
         result["fallback_from"] = semantic_fallback_origin_to_json(value.fallback_from)

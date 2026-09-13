@@ -519,6 +519,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/events/check-recorded-1.2.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/events/claim-recorded-1.0.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -574,6 +580,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/events/finding-recorded-1.1.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/events/finding-recorded-1.2.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,
@@ -658,6 +670,7 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     ("schemas/findings/finding-1.0.0.schema.json", "json_schema", "application/schema+json", True),
     ("schemas/findings/finding-1.1.0.schema.json", "json_schema", "application/schema+json", True),
+    ("schemas/findings/finding-1.2.0.schema.json", "json_schema", "application/schema+json", True),
     (
         "schemas/findings/provider-judgment-1.0.0.schema.json",
         "json_schema",
@@ -677,7 +690,19 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/findings/semantic-provenance-1.2.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/findings/runtime-attempt-evidence-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/findings/runtime-attempt-evidence-1.1.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,
@@ -703,6 +728,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/operations/check-result-1.1.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/operations/check-result-1.2.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,
@@ -751,6 +782,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/operations/receipt-result-1.1.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/operations/receipt-result-1.2.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,
@@ -810,6 +847,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/operations/status-result-1.3.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/privacy/egress-receipt-1.0.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -853,6 +896,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/receipts/receipt-document-1.1.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/receipts/receipt-document-1.2.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,

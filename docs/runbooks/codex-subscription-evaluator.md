@@ -193,7 +193,12 @@ unsupported cell produces zero task-content disclosure.
 `semantic_provenance.runtime_evidence` records only exact digests and bounded structural facts. It
 never retains email, token, credential path, raw account/workspace identity, prompt, reasoning,
 stderr, or event log. `disclosed_case_sha256` is the case Yoetz passed to Codex, not Codex's
-upstream request. The explicit `upstream_body_observability=unavailable` field is mandatory.
+upstream request. The explicit `upstream_body_observability=unavailable` field is mandatory. When
+Codex emits `thread/tokenUsage/updated` for the active thread and turn, current runtime evidence
+retains one cumulative total snapshot with the non-overlapping input/output/total counters and
+cache-write, cached-input, and reasoning-output subsets. Repeated snapshots replace one another;
+they are never summed. Missing or unrelated usage stays absent, while malformed or regressing
+matching counters record `token_usage_invalid` without changing an otherwise valid judgment.
 
 Before `turn/start` acknowledgement, a transient may consume a fresh authorization and capped
 retry. After acknowledgement, ambiguous transport or unverified process-group cleanup is terminal
@@ -218,6 +223,7 @@ the same token as an owner-only diagnostic line (`semantic_composition` /
 | `capability_evidence_stale`, `launch_failed`, `initialize_invalid`, `login_required`, `model_unavailable`, `thread_invalid`, `predisclosure_event_forbidden` | Failed before the case crossed stdin. | Ordinary pre-disclosure transient/unsupported handling; nothing was disclosed. |
 | `turn_ack_invalid`, `tool_request_forbidden`, `event_forbidden`, `tool_event_forbidden` | The child broke the isolation contract. | Terminal, unavailable/unsupported profile, never an invalid model answer. A repeated forbidden event means the cell no longer matches Codex behavior: file it, do not widen the allowlist locally. |
 | `rate_limits_invalid` | Unrecognized bounded rate-limit bookkeeping. | Before disclosure: terminal unsupported profile. After acknowledgement: nonterminal diagnostic, including on an otherwise successful result; a later terminal stage replaces it. No account fields are retained. |
+| `token_usage_invalid` | A matching active-turn usage snapshot was malformed or regressed. | Nonterminal telemetry gap; preserve any earlier valid cumulative snapshot and never invalidate the semantic judgment solely for usage bookkeeping. |
 | `turn_failed`, `model_rerouted` | Codex reported an authoritative native error or a different bound model. | Usage exhaustion maps to `provider_quota_exhausted`; HTTP 429 maps to `provider_rate_limited`. Only an independently authorized fallback may handle those reasons. Model rerouting remains terminal authorization refusal. |
 | `agent_message_count`, `output_empty`, `output_oversize`, `completion_mismatch` | The completion did not yield exactly one bounded, correlated final answer. | Terminal answer/completion validation (`response_schema_invalid`). |
 | `output_not_json` | The final answer was not strict JSON (prose, fenced code, trailing text). | Terminal; not retried. |

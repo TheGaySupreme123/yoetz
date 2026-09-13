@@ -86,7 +86,7 @@ _RESOURCE_LIMIT: Final = 4_194_304
 # One independently reviewed cardinality tripwire guards the generated resource manifest. All
 # per-kind counts are derived from the manifest entries so adding a resource has exactly one
 # hand-authored count to review and the owning resource-ripple command can regenerate the rest.
-REVIEWED_RESOURCE_COUNT: Final = 188
+REVIEWED_RESOURCE_COUNT: Final = 197
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -104,7 +104,7 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("catalog", "6.0.0"),
     ("chat-user-attestation", "1.0.0"),
     ("check-request", "1.0.0"),
-    ("check-result", "1.1.0"),
+    ("check-result", "1.2.0"),
     ("client-info", "1.0.0"),
     ("control-hello", "2.6.0"),
     ("control-hello-result", "2.6.0"),
@@ -112,7 +112,7 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("control-result", "2.6.0"),
     ("coverage", "1.0.0"),
     ("egress-receipt", "1.0.0"),
-    ("finding", "1.1.0"),
+    ("finding", "1.2.0"),
     ("frontier", "1.0.0"),
     ("operation-result", "1.0.0"),
     ("outbound-case", "1.1.0"),
@@ -125,22 +125,22 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("publish-work-result", "1.0.0"),
     ("read-guidance-request", "1.0.0"),
     ("read-guidance-result", "1.0.0"),
-    ("receipt-document", "1.1.0"),
+    ("receipt-document", "1.2.0"),
     ("receipt-request", "1.0.0"),
-    ("receipt-result", "1.1.0"),
+    ("receipt-result", "1.2.0"),
     ("respond-request", "1.0.0"),
     ("respond-result", "1.0.0"),
     ("review-result", "6.0.0"),
     ("routine-read-summary", "1.0.0"),
-    ("runtime-attempt-evidence", "1.0.0"),
-    ("semantic-provenance", "1.1.0"),
+    ("runtime-attempt-evidence", "1.1.0"),
+    ("semantic-provenance", "1.2.0"),
     ("service-status", "1.0.0"),
     ("setup-wizard-contract", "1.0.0"),
     ("start-request", "1.0.0"),
     ("start-result", "1.0.0"),
     ("status", "6.0.0"),
     ("status-request", "1.1.0"),
-    ("status-result", "1.2.0"),
+    ("status-result", "1.3.0"),
     ("subject-state-ref", "1.0.0"),
 )
 _EVENT_NAMES: Final = (
@@ -697,12 +697,16 @@ def build_version_manifest(*, include_optional_probes: bool = False) -> VersionM
                 name,
                 "1.2.0"
                 if name == "evidence_recorded"
-                else "1.1.0"
+                else "1.2.0"
                 if name
                 in {
                     "check_recorded",
-                    "claim_recorded",
                     "finding_recorded",
+                }
+                else "1.1.0"
+                if name
+                in {
+                    "claim_recorded",
                     "session_opened",
                     "session_resumed",
                 }

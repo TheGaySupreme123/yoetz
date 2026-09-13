@@ -37,6 +37,7 @@ from yoetz.config.paths import ensure_owner_only_dir, verify_private_local_bundl
 from yoetz.domain.findings import (
     RUNTIME_FAILURE_STAGES,
     RuntimeAttemptEvidence,
+    RuntimeTokenUsage,
     SamplingParams,
     SemanticFailureClass,
 )
@@ -1205,6 +1206,92 @@ def _notification_item(
     )
 
 
+def _runtime_token_usage_from_notification(
+    message: Mapping[str, object], *, thread_id: str, turn_id: str
+) -> RuntimeTokenUsage | None:
+    """Read one active-turn cumulative usage snapshot without retaining native payloads.
+
+    The app-server emits both ``last`` and cumulative ``total`` breakdowns. A fresh ephemeral
+    reviewer thread has one active turn, and the cumulative snapshot is the only value that
+    remains correct if the turn internally performs more than one model request. Repeated
+    notifications replace the prior snapshot at the call site; they are never summed.
+
+    A notification for another thread or turn is unrelated bookkeeping and is ignored before its
+    body is inspected. A matching notification is strictly bounded so malformed provider data
+    cannot become telemetry or an accepted usage value.
+    """
+
+    params = message.get("params")
+    if not isinstance(params, Mapping):
+        return None
+    source = cast(Mapping[str, object], params)
+    if source.get("threadId") != thread_id or source.get("turnId") != turn_id:
+        return None
+    if set(source) != {"threadId", "turnId", "tokenUsage"}:
+        raise ValueError("codex_app_server_token_usage_invalid")
+    raw_usage = source.get("tokenUsage")
+    if not isinstance(raw_usage, Mapping):
+        raise ValueError("codex_app_server_token_usage_invalid")
+    usage = cast(Mapping[str, object], raw_usage)
+    if set(usage) != {"last", "total"} and set(usage) != {
+        "last",
+        "total",
+        "modelContextWindow",
+    }:
+        raise ValueError("codex_app_server_token_usage_invalid")
+
+    def breakdown(value: object) -> tuple[int, int, int, int, int, int]:
+        if not isinstance(value, Mapping):
+            raise ValueError("codex_app_server_token_usage_invalid")
+        source = cast(Mapping[str, object], value)
+        required = {
+            "cachedInputTokens",
+            "inputTokens",
+            "outputTokens",
+            "reasoningOutputTokens",
+            "totalTokens",
+        }
+        if not required <= set(source) or not set(source) <= required | {"cacheWriteInputTokens"}:
+            raise ValueError("codex_app_server_token_usage_invalid")
+
+        def counter(name: str, *, default: int | None = None) -> int:
+            raw = source.get(name, default)
+            if type(raw) is not int or not 0 <= raw <= 2**53 - 1:
+                raise ValueError("codex_app_server_token_usage_invalid")
+            return raw
+
+        parsed = (
+            counter("inputTokens"),
+            counter("cachedInputTokens"),
+            counter("cacheWriteInputTokens", default=0),
+            counter("outputTokens"),
+            counter("reasoningOutputTokens"),
+            counter("totalTokens"),
+        )
+        if parsed[1] > parsed[0] or parsed[4] > parsed[3] or parsed[0] + parsed[3] != parsed[5]:
+            raise ValueError("codex_app_server_token_usage_invalid")
+        return parsed
+
+    # Validate both provider snapshots even though only the cumulative total is retained. This
+    # keeps the accepted event shape bounded while avoiding accidental use of ``last`` as a
+    # second aggregate that would double-count the same turn.
+    breakdown(usage["last"])
+    total = breakdown(usage["total"])
+    context_window = usage.get("modelContextWindow")
+    if context_window is not None and (
+        type(context_window) is not int or not 0 <= context_window <= 2**53 - 1
+    ):
+        raise ValueError("codex_app_server_token_usage_invalid")
+    return RuntimeTokenUsage(
+        input_tokens=total[0],
+        cached_input_tokens=total[1],
+        cache_write_input_tokens=total[2],
+        output_tokens=total[3],
+        reasoning_output_tokens=total[4],
+        total_tokens=total[5],
+    )
+
+
 class _CodexTurnFailure(Exception):
     def __init__(
         self,
@@ -1414,6 +1501,7 @@ _FAILURE_STAGE_BY_TOKEN: Final[Mapping[str, str]] = {
     "codex_app_server_event_forbidden": "event_forbidden",
     "codex_app_server_tool_event_forbidden": "tool_event_forbidden",
     "codex_app_server_rate_limits_invalid": "rate_limits_invalid",
+    "codex_app_server_token_usage_invalid": "token_usage_invalid",
     "codex_app_server_warning_invalid": "runtime_warning",
     "codex_app_server_completion_invalid": "completion_mismatch",
     "codex_app_server_agent_message_count": "agent_message_count",
@@ -1528,6 +1616,7 @@ class CodexAppServerEvaluator:
         turn_id: str | None = None
         judgment = None
         final_output_sha256: str | None = None
+        token_usage: RuntimeTokenUsage | None = None
         failure: (
             Literal["timeout", "post_ack_unknown", "invalid", "refused", "unavailable"] | None
         ) = None
@@ -1637,6 +1726,46 @@ class CodexAppServerEvaluator:
                         # below replaces it. Event-count, byte, and deadline bounds still apply.
                         failure_stage = "rate_limits_invalid"
                     continue
+                if method == "thread/tokenUsage/updated":
+                    try:
+                        observed_usage = _runtime_token_usage_from_notification(
+                            message, thread_id=thread_id, turn_id=turn_id
+                        )
+                    except ValueError:
+                        # Usage is telemetry only. A malformed active-turn snapshot must not
+                        # turn an otherwise valid semantic judgment into a provider failure, and
+                        # it must not erase a valid earlier cumulative snapshot.
+                        failure_stage = "token_usage_invalid"
+                    else:
+                        if observed_usage is not None:
+                            # ``total`` is cumulative for the isolated thread. Replace the
+                            # snapshot instead of summing repeated updates or adding ``last``.
+                            if token_usage is not None and any(
+                                new < old
+                                for new, old in zip(
+                                    (
+                                        observed_usage.input_tokens,
+                                        observed_usage.cached_input_tokens,
+                                        observed_usage.cache_write_input_tokens,
+                                        observed_usage.output_tokens,
+                                        observed_usage.reasoning_output_tokens,
+                                        observed_usage.total_tokens,
+                                    ),
+                                    (
+                                        token_usage.input_tokens,
+                                        token_usage.cached_input_tokens,
+                                        token_usage.cache_write_input_tokens,
+                                        token_usage.output_tokens,
+                                        token_usage.reasoning_output_tokens,
+                                        token_usage.total_tokens,
+                                    ),
+                                    strict=True,
+                                )
+                            ):
+                                failure_stage = "token_usage_invalid"
+                            else:
+                                token_usage = observed_usage
+                    continue
                 if method == "warning":
                     raise _runtime_warning(message)
                 if method == "error":
@@ -1733,6 +1862,7 @@ class CodexAppServerEvaluator:
             turn_acknowledged=turn_acknowledged,
             process_cleanup=cleanup,
             failure_stage=failure_stage,
+            token_usage=token_usage,
         )
         latency_ms = max(0, int((self.clock.monotonic_seconds() - started) * 1000))
         status = (
@@ -1764,6 +1894,7 @@ class CodexAppServerEvaluator:
             latency_ms=latency_ms,
             status=status,
             provider_request_id=turn_id,
+            token_usage=None if token_usage is None else token_usage.aggregate,
             failure_class=None if failure is None else failure_class,
             runtime_evidence=evidence,
         )

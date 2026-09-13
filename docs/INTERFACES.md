@@ -716,8 +716,10 @@ usage, cost, and failure facts; semantic-attempt ID; dispatch kind; exactly one 
 authorization or local-disclosure reservation; durable privacy-receipt ID; external request
 commitment when applicable; and the validated terminal status/reason pair. The exact Python fields
 and wire conversions are frozen in `domain/findings.md` and
-`semantic-provenance-1.0.0.schema.json`; the append-only external-runtime extension is frozen in
-`semantic-provenance-1.1.0.schema.json` and `runtime-attempt-evidence-1.0.0.schema.json`. The
+`semantic-provenance-1.0.0.schema.json`; the append-only external-runtime extension is carried by
+current `semantic-provenance-1.2.0.schema.json` and `runtime-attempt-evidence-1.1.0.schema.json`,
+while the released `semantic-provenance-1.1.0.schema.json` and
+`runtime-attempt-evidence-1.0.0.schema.json` remain readable. The
 same append-only `1.1.0` carries the optional `fallback_from` object (issue #582) — `provider`,
 `endpoint_profile_id`, `endpoint_profile_version`, `model`, `attempted_count`, `reason` —
 present exactly when the declared fallback endpoint served the attempt; the top-level
@@ -740,6 +742,16 @@ attempt provenance remains valid check accounting but can never justify a semant
 `finding_from_json`/`finding_to_json` and
 `semantic_provenance_from_json`/`semantic_provenance_to_json` are the sole codecs. The finding
 event alias delegates to them; no event, port, Pydantic model, or adapter owns a parallel dump.
+
+Codex subscription-runtime attempts may carry a bounded `runtime_evidence.token_usage` object in
+the current runtime evidence schema. It records one cumulative `total` snapshot as non-overlapping
+`input_tokens`, `output_tokens`, and `total_tokens`, plus the `cached_input_tokens`,
+`cache_write_input_tokens`, and `reasoning_output_tokens` counters for analysis. Cached input and
+reasoning output are subsets and are never added again; repeated snapshots are replaced rather
+than summed. Missing usage remains absent, and malformed or regressing matching snapshots leave a
+closed `token_usage_invalid` diagnostic without invalidating an otherwise valid semantic judgment.
+Only the exact active thread and turn are accepted, and no account identifiers or raw provider
+notification body is retained.
 
 Work-integrity finding kinds (`FindingKind`):
 `completion_with_open_obligations`, `requested_item_never_attempted`,
