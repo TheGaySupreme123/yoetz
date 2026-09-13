@@ -129,6 +129,24 @@ documents that Yoetz cannot independently authenticate its chat provenance.
    them. The ADR-012 setup wizard's already-authorized digest-bound composition is a separate,
    unchanged authority and does not route through this class.
 
+   **Amendment (2026-09-13, issue #719).** The `plugin_artifact_apply` presence cell is selected
+   per platform (`select_artifact_user_presence`) for both standalone consumers, the Cursor and
+   Claude Code native lifecycles. macOS keeps the #409 LocalAuthentication adapter unchanged.
+   Linux, including a distribution running under WSL 2, uses `LinuxArtifactUserPresence`: after
+   a banner naming the exact operation, preview digest, and pending review, the invoking
+   account's operating-system password is read once through the ADR-008/ADR-015 trusted
+   foreground console with echo disabled and verified by Linux-PAM through the fixed `login`
+   service with a null password refused, followed by account management. The console is ingress
+   only; the operating-system credential check is the authority, so a pseudo-terminal, redirected
+   stdio, or same-UID process that cannot produce the password still cannot authorize, and
+   decision 4 is unchanged. Cancellation, EOF, an empty or wrong password, a locked or expired
+   account, a missing or refusing PAM stack, no verified console, an echoed, repeated, or unknown
+   prompt, and the 130-second deadline all return `human_authority_unavailable` before the pending
+   is claimed. Every other platform keeps failing closed with that reason. `preview` names the
+   selected cell as `authorization.human_presence`. This remains scoped to
+   `plugin_artifact_apply`; it is not the service-wide `UserPresencePort` and authorizes no other
+   operation.
+
    Issue #150 implements the artifact half as the exact `plugin_artifact_apply` operation. Its
    target digest is the complete portable artifact preview digest, its risk class is
    `review_only`, and agent-chat authorization is disabled. Preparation and single-shot

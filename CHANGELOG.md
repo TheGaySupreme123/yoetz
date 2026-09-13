@@ -22,6 +22,16 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- Native Cursor and Claude Code plugin install, replace, update, enable, disable, and remove no
+  longer refuse every non-macOS host. Linux, including a distribution inside WSL 2, now proves
+  the one-time `plugin_artifact_apply` approval by asking for the invoking account's Linux
+  password at your own terminal and verifying it through the operating system (PAM), with the
+  same action-bound banner, single-shot pending, and fail-closed cancellation, timeout, wrong
+  password, and missing-console paths the macOS Touch ID cell has; macOS is unchanged, any other
+  platform still fails closed with `human_authority_unavailable`, and `preview` now names the
+  mechanism and platform under `authorization.human_presence`. A refused or cancelled prompt on
+  the Claude Code path is now reported as `human_authority_unavailable` instead of escaping the
+  CLI as a traceback (issue #719).
 - On native Windows, `yoetz` refuses with a bounded `unsupported_platform` line naming the WSL
   path (exit 20) instead of `internal_error` from every stateful command; `version`,
   `--version`, and `--help` still answer (issue #709).

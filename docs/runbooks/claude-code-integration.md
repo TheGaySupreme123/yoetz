@@ -123,6 +123,13 @@ yoetz integrate claude plugin preview \
 Prepare the returned exact digest through the trusted review lane, then replay the returned request
 ID and digest with `plugin install --accept`. `--accept` is not authority by itself; the mutation
 also consumes a matching `plugin_artifact_apply` pending and fresh OS-authenticated user presence.
+The presence cell is chosen per platform and named in the preview under
+`authorization.human_presence`: macOS uses Apple LocalAuthentication; Linux, including WSL 2,
+re-verifies the invoking account's password through PAM at your own foreground terminal, so run
+install, update, enable, disable, and remove from that terminal rather than from a Claude Code
+Bash tool, which has no trusted console; any other platform fails closed with
+`human_authority_unavailable`. The [Cursor runbook](cursor-integration.md) records each cell,
+its failure paths, and the coverage actually proven.
 Install admits any Claude version at or above `2.1.233`, where the plugin and hook surfaces exist,
 and reports `host.version_provenance` on the preview (`host_version_provenance` on status):
 `tested` for the exactly proven `2.1.241` cell, `untested` for any other admitted version

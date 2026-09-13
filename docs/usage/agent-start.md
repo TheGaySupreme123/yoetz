@@ -199,7 +199,10 @@ consequential step — no install, no `setup run`, no registration until it is a
   installed and launched from the WSL terminal; the Windows-side and WSL-side `~/.claude` are
   separate homes.
 - Integration: `yoetz integrate claude plugin preview`, then `install` after the user approves
-  the digest.
+  the digest. On macOS the install shows the user an authentication dialog; on Linux and WSL 2
+  it asks for the user's Linux password at their own terminal, so hand that `install` line to
+  the user to run there rather than running it from Bash, which fails closed with
+  `human_authority_unavailable`.
 
 **Cursor**
 
@@ -214,8 +217,11 @@ consequential step — no install, no `setup run`, no registration until it is a
 - Windows: Cursor's agent terminal is PowerShell on native Windows; run Yoetz commands through
   `wsl -e bash -lc "…"`. The Cursor integration is untested on Windows and WSL.
 - Integration: `yoetz integrate cursor plugin preview` with an explicit Cursor configuration
-  root and project, then `install` after approval. Cursor Cloud agents are not supported; install
-  from a local Cursor.
+  root and project, then `install` after approval. On macOS the install shows the user an
+  authentication dialog; on Linux and WSL 2 it asks for the user's Linux password at their own
+  terminal, so hand that `install` line to the user rather than running it from the agent
+  terminal, which fails closed with `human_authority_unavailable`. Cursor Cloud agents are not
+  supported; install from a local Cursor.
 
 **Any other agent**
 
