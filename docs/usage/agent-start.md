@@ -209,14 +209,18 @@ consequential step — no install, no `setup run`, no registration until it is a
 - Install line: auto mode's classifier blocks `curl | sh` by default, and the `uv` installer is
   one. Either the user approves it once, or hand it over as a terminal step.
 - Windows: Claude Code runs natively (PowerShell or Git Bash); Yoetz does not. Run Yoetz commands
-  through `wsl -e bash -lc "…"`. The Windows-side and WSL-side `~/.claude` are separate homes.
+  through `wsl -e bash -lc "…"`. For host integration, Claude Code itself must run inside WSL 2,
+  installed and launched from the WSL terminal; the Windows-side and WSL-side `~/.claude` are
+  separate homes.
 - Linux and WSL: inspect the plugin preview for its approval mechanism. Linux-capable builds
   use PAM through the trusted terminal; builds without that support refuse
   `human_authority_unavailable`. The user enters their account password only in that terminal.
   Successful installation does not establish native Linux host coverage. Claude Code can also
   use a `yoetz mcp serve` entry in its own MCP configuration, added only after approval.
 - Integration: `yoetz integrate claude plugin preview`, then `install` after the user approves
-  the digest and completes the supported platform's presence ceremony.
+  the digest and completes the supported platform's presence ceremony. On Linux-capable builds,
+  hand the `install` line to the user for the password prompt at their own terminal; running it
+  from the agent's Bash tool fails closed with `human_authority_unavailable`.
 
 **Cursor**
 
@@ -229,13 +233,15 @@ consequential step — no install, no `setup run`, no registration until it is a
   the `curl` fails with a network error, ask the user to approve it outside the sandbox, or to
   paste the guide into the chat.
 - Windows: Cursor's agent terminal is PowerShell on native Windows; run Yoetz commands through
-  `wsl -e bash -lc "…"`.
+  `wsl -e bash -lc "…"`. The Cursor integration is untested on Windows and WSL.
 - Linux and WSL: inspect the preview for a supported approval mechanism; builds without Linux
-  approval support refuse `human_authority_unavailable`. Linux IDE discovery remains
-  `cursor_ide_platform_unsupported`; do not claim a native host cell from installation alone.
+  approval support refuse `human_authority_unavailable`. Linux IDE discovery remains unproven;
+  do not claim a native host cell from installation alone.
   Cursor can use a `yoetz mcp serve` entry in its own MCP configuration, added only after approval.
 - Integration: `yoetz integrate cursor plugin preview` with an explicit Cursor configuration root
   and project, then `install` after approval and the supported platform's presence ceremony.
+  On Linux-capable builds, hand the `install` line to the user for the password prompt at their
+  own terminal; the agent terminal fails closed with `human_authority_unavailable`.
   Cursor Cloud agents are not supported; install from a local Cursor.
 
 **Any other agent**
