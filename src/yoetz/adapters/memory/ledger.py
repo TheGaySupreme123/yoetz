@@ -52,6 +52,7 @@ from yoetz.domain.events import (
 )
 from yoetz.domain.findings import (
     RankedFindings,
+    RuntimeTokenUsage,
     SemanticProvenance,
     rank_key,
     semantic_provenance_to_json,
@@ -313,6 +314,7 @@ class _AttemptState:
     result_object_ref: ObjectRef | None = None
     terminal_code: SemanticReason | None = None
     started_at: datetime | None = None
+    token_usage: RuntimeTokenUsage | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2484,6 +2486,7 @@ class MemoryLedgerAdapter:
         outcome: AttemptOutcome,
         result_object_ref: ObjectRef | None = None,
         terminal_code: SemanticReason | None = None,
+        token_usage: RuntimeTokenUsage | None = None,
     ) -> None:
         async with self._lock:
             attempt = self._state.attempts.get(handle.attempt_id)
@@ -2492,11 +2495,16 @@ class MemoryLedgerAdapter:
             job = self._state.jobs[handle.job_id]
             if outcome is AttemptOutcome.SELECTED:
                 raise _error(PublicErrorCode.INVALID_REQUEST)
+            if token_usage is not None and type(token_usage) is not RuntimeTokenUsage:
+                raise _error(PublicErrorCode.INVALID_REQUEST)
             if outcome is AttemptOutcome.RESPONSE_DURABLE:
                 if result_object_ref is None or terminal_code is not None:
                     raise _error(PublicErrorCode.INVALID_REQUEST)
                 self._state.attempts[handle.attempt_id] = replace(
-                    attempt, state="response_durable", result_object_ref=result_object_ref
+                    attempt,
+                    state="response_durable",
+                    result_object_ref=result_object_ref,
+                    token_usage=token_usage,
                 )
                 return
             if terminal_code is None or (
@@ -2508,6 +2516,7 @@ class MemoryLedgerAdapter:
                 state=outcome.value,
                 result_object_ref=result_object_ref,
                 terminal_code=terminal_code,
+                token_usage=token_usage,
             )
             if outcome is AttemptOutcome.FAILED:
                 self._state.jobs[handle.job_id] = replace(
@@ -2647,6 +2656,7 @@ class MemoryLedgerAdapter:
                     attempt.terminal_code,
                     attempt.result_object_ref,
                     attempt.started_at,
+                    attempt.token_usage,
                 )
                 for attempt in self._state.attempts.values()
                 if attempt.handle.job_id == job_id

@@ -482,6 +482,11 @@ def _subscription_provenance() -> dict[str, Any]:
         "semantic_attempt_id": _subscription_id("att_", 1),
         "dispatch_kind": "external_runtime_oauth",
         "privacy_receipt_id": _subscription_id("egr_", 2),
+        "token_usage": {
+            "input_tokens": "103",
+            "output_tokens": "19",
+            "total_tokens": "122",
+        },
         "status": "succeeded",
         "reason": "semantic_completed",
         "egress_authorization_id": _subscription_id("aut_", 3),
@@ -511,6 +516,14 @@ def _subscription_provenance() -> dict[str, Any]:
             "thread_id": "thread-1",
             "turn_id": "turn-1",
             "final_output_sha256": _SUBSCRIPTION_DIGEST,
+            "token_usage": {
+                "cached_input_tokens": "101",
+                "cache_write_input_tokens": "17",
+                "input_tokens": "103",
+                "output_tokens": "19",
+                "reasoning_output_tokens": "11",
+                "total_tokens": "122",
+            },
         },
     }
 
@@ -647,8 +660,8 @@ def _subscription_receipt_result() -> dict[str, Any]:
                 {"policy_id": "work-integrity", "policy_version": "0.1.0"},
             ],
             "schema_versions": [
-                {"schema_id": "findings/finding", "schema_version": "1.1.0"},
-                {"schema_id": "receipts/receipt-document", "schema_version": "1.1.0"},
+                {"schema_id": "findings/finding", "schema_version": "1.2.0"},
+                {"schema_id": "receipts/receipt-document", "schema_version": "1.2.0"},
             ],
             "resource_manifest_digest": _SUBSCRIPTION_DIGEST,
         },
@@ -693,6 +706,7 @@ def _subscription_receipt_result() -> dict[str, Any]:
                 "items": [],
             },
         ],
+        "semantic_provenance": _subscription_provenance(),
     }
     return {
         "protocol_version": "0.1",

@@ -308,7 +308,7 @@ _STATUS_PAGE_DEF_BY_VIEW_FOR_TEST: tuple[tuple[str, str], ...] = (
 _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
     ("check", None): 208,
     ("publish_work", None): 57,
-    ("receipt", None): 192,
+    ("receipt", None): 260,
     ("respond", None): 53,
     ("start", None): 65,
     ("status", None): 47,
@@ -2167,6 +2167,27 @@ def test_result_field_classification_is_closed() -> None:
     )
     assert models.classify_result_leaf("receipt", receipt, "/human_text") == "public_structural"
 
+    receipt_with_provenance = _receipt_result_wire()
+    document = cast(dict[str, JsonValue], receipt_with_provenance["document"])
+    provenance = _semantic_provenance_for("succeeded", "semantic_completed")
+    provenance["token_usage"] = {
+        "input_tokens": "103",
+        "output_tokens": "19",
+        "total_tokens": "122",
+    }
+    document["semantic_provenance"] = provenance
+    receipt_with_provenance_wire = models.public_model_to_wire(
+        models.ReceiptResultModel.model_validate(receipt_with_provenance)
+    )
+    assert (
+        models.classify_result_leaf(
+            "receipt",
+            receipt_with_provenance_wire,
+            "/document/semantic_provenance/token_usage/total_tokens",
+        )
+        == "public_structural"
+    )
+
     markdown_receipt = _receipt_result_wire()
     markdown_receipt["format"] = "markdown"
     markdown_receipt["document"] = None
@@ -2229,7 +2250,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     rules = cast(tuple[Any, ...], getattr(models, "_RESULT_LEAF_RULES"))
 
     derived_patterns = _derived_result_success_patterns(catalog)
-    assert len(derived_patterns) == 933
+    assert len(derived_patterns) == 1001
 
     derived_counts = {
         context: sum(1 for method, view, _ in derived_patterns if (method, view) == context)
@@ -2238,7 +2259,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert derived_counts == _EXPECTED_RESULT_PATTERN_COUNTS
 
     assert type(rules) is tuple
-    assert len(rules) == 953
+    assert len(rules) == 1021
     assert rules == tuple(sorted(rules, key=_test_rule_sort_key))
 
     rule_keys = {
@@ -2247,7 +2268,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert len(rule_keys) == len(rules)
 
     registry_patterns = {(rule.method, rule.status_view, rule.segments) for rule in rules}
-    assert len(registry_patterns) == 933
+    assert len(registry_patterns) == 1001
     assert registry_patterns == derived_patterns
 
     content_rules = _expected_nonpublish_content_rules(models)
@@ -2909,7 +2930,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 4_775
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 4_776
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:
@@ -3144,6 +3165,29 @@ def test_schema_instance_validation_is_closed_and_bounded(
         _assert_reason(exc_info, "float_forbidden")
     finally:
         schemas_module._load_catalog_state.cache_clear()  # pyright: ignore[reportPrivateUsage]
+
+
+def test_current_receipt_document_schema_carries_optional_semantic_provenance() -> None:
+    schema_root = Path(__file__).parents[3] / "schemas"
+    old_schema = cast(
+        dict[str, Any],
+        strict_json_parse(
+            (schema_root / "receipts/receipt-document-1.1.0.schema.json").read_bytes()
+        ),
+    )
+    current_schema = cast(
+        dict[str, Any],
+        strict_json_parse(
+            (schema_root / "receipts/receipt-document-1.2.0.schema.json").read_bytes()
+        ),
+    )
+    old_properties = cast(dict[str, Any], old_schema["properties"])
+    current_properties = cast(dict[str, Any], current_schema["properties"])
+    assert "semantic_provenance" not in old_properties
+    assert current_properties["semantic_provenance"] == {
+        "$ref": "https://schemas.yoetz.dev/0.1/findings/semantic-provenance-1.2.0.schema.json"
+    }
+    assert "semantic_provenance" not in cast(list[str], current_schema["required"])
 
 
 def test_capacity_failure_forbids_attempt_provenance() -> None:

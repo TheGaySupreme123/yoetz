@@ -1305,6 +1305,24 @@ def _simple_versioned_schema(
     return _load_versioned_template(entry, source, replacements=replacements)
 
 
+def _receipt_document_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Add optional applicable semantic provenance to the current receipt document."""
+
+    document = _simple_versioned_schema(
+        entry,
+        "receipts/receipt-document-1.1.0.schema.json",
+        {
+            "finding-1.1.0": "finding-1.2.0",
+            "semantic-provenance-1.1.0": "semantic-provenance-1.2.0",
+        },
+    )
+    properties = cast(dict[str, JsonValue], document["properties"])
+    properties["semantic_provenance"] = {
+        "$ref": f"{SCHEMA_NAMESPACE}findings/semantic-provenance-1.2.0.schema.json"
+    }
+    return document
+
+
 def _event_draft_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     document = _event_draft_schema(entry)
     definitions = cast(dict[str, JsonValue], document["$defs"])
@@ -3930,14 +3948,7 @@ def build_schema_documents(
                 },
             )
         elif entry.relative_path == "receipts/receipt-document-1.2.0.schema.json":
-            normalized = _simple_versioned_schema(
-                entry,
-                "receipts/receipt-document-1.1.0.schema.json",
-                {
-                    "finding-1.1.0": "finding-1.2.0",
-                    "semantic-provenance-1.1.0": "semantic-provenance-1.2.0",
-                },
-            )
+            normalized = _receipt_document_v1_2_schema(entry)
         elif entry.relative_path in {
             "version/version-manifest-2.0.0.schema.json",
             "version/version-manifest-2.1.0.schema.json",

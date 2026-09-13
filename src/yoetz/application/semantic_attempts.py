@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Final, Literal, Protocol
 
+from yoetz.domain.findings import RuntimeTokenUsage
 from yoetz.observability.logging import record_unexpected_exception_without_raising
 from yoetz.ports.ledger import (
     AttemptOutcome,
@@ -46,6 +47,7 @@ __all__ = [
     "EndpointRole",
     "SemanticAttemptAccounting",
     "SemanticAttemptDispatch",
+    "SemanticAttemptUsage",
     "SemanticEndpointAttempts",
     "SemanticEndpointPlan",
     "SemanticFallbackPlan",
@@ -222,6 +224,8 @@ class SemanticAttemptAccounting:
     terminal_reason_counts: tuple[tuple[str, int], ...]
     # Empty for a single-endpoint job; primary then fallback for a declared pairing (#582).
     endpoint_attempts: tuple[SemanticEndpointAttempts, ...] = ()
+    # One bounded numeric usage sample for every physical attempt, including failed/retried rows.
+    attempt_usages: tuple[SemanticAttemptUsage, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.attempted_count) is not int or self.attempted_count < 0:
@@ -242,9 +246,30 @@ class SemanticAttemptAccounting:
             type(item) is not SemanticEndpointAttempts for item in self.endpoint_attempts
         ):
             raise ValueError("semantic_attempt_accounting_invalid")
+        if type(self.attempt_usages) is not tuple or any(
+            type(item) is not SemanticAttemptUsage for item in self.attempt_usages
+        ):
+            raise ValueError("semantic_attempt_accounting_invalid")
 
     def endpoint(self, role: EndpointRole) -> SemanticEndpointAttempts | None:
         return next((item for item in self.endpoint_attempts if item.role == role), None)
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticAttemptUsage:
+    """Bounded per-attempt usage recovered from the semantic-attempt ledger row."""
+
+    attempt_id: str
+    attempt_ordinal: int
+    token_usage: RuntimeTokenUsage | None
+
+    def __post_init__(self) -> None:
+        if type(self.attempt_id) is not str or not self.attempt_id.startswith("att_"):
+            raise ValueError("semantic_attempt_usage_invalid")
+        if type(self.attempt_ordinal) is not int or self.attempt_ordinal < 1:
+            raise ValueError("semantic_attempt_usage_invalid")
+        if self.token_usage is not None and type(self.token_usage) is not RuntimeTokenUsage:
+            raise ValueError("semantic_attempt_usage_invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -485,12 +510,21 @@ def attempt_accounting_from_rows(
         and job.state in {"failed", "quarantined"}
         and (attempted >= budget or (job.terminal_code is SemanticReason.RETRY_BUDGET_EXHAUSTED))
     )
+    attempt_usages = tuple(
+        SemanticAttemptUsage(
+            attempt.attempt_id,
+            attempt.attempt_ordinal,
+            attempt.token_usage,
+        )
+        for attempt in sorted(attempts, key=lambda item: item.attempt_ordinal)
+    )
     return SemanticAttemptAccounting(
         attempted_count=attempted,
         selected_attempt_id=selected,
         exhausted=exhausted,
         terminal_reason_counts=_reason_counts(codes),
         endpoint_attempts=endpoint_attempts,
+        attempt_usages=attempt_usages,
     )
 
 
@@ -522,6 +556,26 @@ def attempt_accounting_to_json(value: SemanticAttemptAccounting) -> dict[str, Js
                 "predispatch_reason": item.predispatch_reason,
             }
             for item in value.endpoint_attempts
+        )
+    if value.attempt_usages:
+        body["attempt_usages"] = tuple(
+            {
+                "attempt_id": item.attempt_id,
+                "attempt_ordinal": item.attempt_ordinal,
+                "token_usage": (
+                    None
+                    if item.token_usage is None
+                    else {
+                        "input_tokens": str(item.token_usage.input_tokens),
+                        "cached_input_tokens": str(item.token_usage.cached_input_tokens),
+                        "cache_write_input_tokens": str(item.token_usage.cache_write_input_tokens),
+                        "output_tokens": str(item.token_usage.output_tokens),
+                        "reasoning_output_tokens": str(item.token_usage.reasoning_output_tokens),
+                        "total_tokens": str(item.token_usage.total_tokens),
+                    }
+                ),
+            }
+            for item in value.attempt_usages
         )
     return body
 
@@ -591,6 +645,7 @@ class _SemanticAttemptLedger(Protocol):
         outcome: AttemptOutcome,
         result_object_ref: ObjectRef | None = None,
         terminal_code: SemanticReason | None = None,
+        token_usage: RuntimeTokenUsage | None = None,
     ) -> None: ...
 
     async def fail_semantic_job(
@@ -681,6 +736,22 @@ class _AttemptEvaluation(Protocol):
 
     @property
     def provenance(self) -> object | None: ...
+
+
+def _attempt_token_usage(evaluation: _AttemptEvaluation) -> RuntimeTokenUsage | None:
+    """Extract only bounded numeric provider usage for the durable attempt row."""
+
+    provenance = evaluation.provenance
+    if provenance is None:
+        return None
+    runtime = getattr(provenance, "runtime_evidence", None)
+    runtime_usage = getattr(runtime, "token_usage", None)
+    if type(runtime_usage) is RuntimeTokenUsage:
+        return runtime_usage
+    # Aggregate TokenUsage does not prove that cache-write or reasoning counters were zero. Keep
+    # those detailed fields unknown for providers that do not emit RuntimeTokenUsage rather than
+    # manufacturing a complete-looking sample.
+    return None
 
 
 SemanticAttemptDispatch = Callable[
@@ -783,6 +854,7 @@ async def _terminalize_after_failure(
     lease_holder: Callable[[], OperationLease],
     job_id: str,
     handle: SemanticAttemptHandle | None,
+    token_usage: RuntimeTokenUsage | None = None,
     max_retries: int,
     fallback: SemanticFallbackPlan | None = None,
 ) -> SemanticAttemptAccounting:
@@ -812,6 +884,7 @@ async def _terminalize_after_failure(
                 handle,
                 AttemptOutcome.FAILED,
                 terminal_code=SemanticReason.COORDINATOR_FAILURE,
+                token_usage=token_usage,
             )
         except Exception as exc:
             # The attempt may already have left "started" if the raise came after the outcome
@@ -861,6 +934,7 @@ async def _terminalize_cancellation_safe(
     lease_holder: Callable[[], OperationLease],
     job_id: str,
     handle: SemanticAttemptHandle | None,
+    token_usage: RuntimeTokenUsage | None = None,
     max_retries: int,
     fallback: SemanticFallbackPlan | None = None,
 ) -> tuple[SemanticAttemptAccounting, bool]:
@@ -879,6 +953,7 @@ async def _terminalize_cancellation_safe(
             lease_holder=lease_holder,
             job_id=job_id,
             handle=handle,
+            token_usage=token_usage,
             max_retries=max_retries,
             fallback=fallback,
         )
@@ -1247,9 +1322,40 @@ async def run_durable_semantic_attempts(
 
             if evaluation.status is SemanticStatus.SUCCEEDED:
                 final_stage = "response_persistence"
-                response_ref = await publish_success_response(handle, evaluation)
+                try:
+                    response_ref = await publish_success_response(handle, evaluation)
+                except BaseException as exc:
+                    record_unexpected_exception_without_raising(
+                        exc,
+                        component="semantic_attempts",
+                        operation="semantic_attempt_response_persistence_failed",
+                        request_id=current_lease.operation_id,
+                    )
+                    accounting, cancellation_received = await _terminalize_cancellation_safe(
+                        ledger=ledger,
+                        renew=_renew,
+                        lease_holder=lambda: current_lease,
+                        job_id=job.job_id,
+                        handle=handle,
+                        token_usage=_attempt_token_usage(evaluation),
+                        max_retries=max_retries,
+                        fallback=fallback,
+                    )
+                    if cancellation_received:
+                        raise asyncio.CancelledError
+                    if isinstance(exc, Exception):
+                        return build_final(
+                            SemanticStatus.FAILED,
+                            SemanticReason.COORDINATOR_FAILURE,
+                            None,
+                            accounting,
+                        )
+                    raise
                 await ledger.record_attempt_outcome(
-                    handle, AttemptOutcome.RESPONSE_DURABLE, response_ref
+                    handle,
+                    AttemptOutcome.RESPONSE_DURABLE,
+                    response_ref,
+                    token_usage=_attempt_token_usage(evaluation),
                 )
                 final_stage = "result_commit"
                 await ledger.select_attempt(current_lease, handle, response_ref)
@@ -1344,6 +1450,7 @@ async def run_durable_semantic_attempts(
                     handle,
                     AttemptOutcome.EXPIRED,
                     terminal_code=evaluation.reason,
+                    token_usage=_attempt_token_usage(evaluation),
                 )
                 await _resolve_disclosure_wait_after_terminal(
                     ledger, current_lease, job.job_id, handle.attempt_id
@@ -1369,6 +1476,7 @@ async def run_durable_semantic_attempts(
                 handle,
                 AttemptOutcome.FAILED,
                 terminal_code=terminal_reason,
+                token_usage=_attempt_token_usage(evaluation),
             )
             await _resolve_disclosure_wait_after_terminal(
                 ledger, current_lease, job.job_id, handle.attempt_id

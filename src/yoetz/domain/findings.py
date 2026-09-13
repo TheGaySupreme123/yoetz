@@ -1021,9 +1021,9 @@ def _runtime_attempt_evidence_from_json(value: JsonValue | None) -> RuntimeAttem
         ),
         failure_stage=cast(str | None, source.get("failure_stage")),
         token_usage=(
-            None if _optional_field(source, "token_usage") is None else _runtime_token_usage_from_json(
-                _optional_field(source, "token_usage")
-            )
+            None
+            if _optional_field(source, "token_usage") is None
+            else _runtime_token_usage_from_json(_optional_field(source, "token_usage"))
         ),
     )
 

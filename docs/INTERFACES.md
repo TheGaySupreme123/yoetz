@@ -747,7 +747,8 @@ Codex subscription-runtime attempts may carry a bounded `runtime_evidence.token_
 the current runtime evidence schema. It records one cumulative `total` snapshot as non-overlapping
 `input_tokens`, `output_tokens`, and `total_tokens`, plus the `cached_input_tokens`,
 `cache_write_input_tokens`, and `reasoning_output_tokens` counters for analysis. Cached input and
-reasoning output are subsets and are never added again; repeated snapshots are replaced rather
+reasoning output are subsets and are never added again; cache-write input remains a separate
+provider counter with no assumed arithmetic relationship. Repeated snapshots are replaced rather
 than summed. Missing usage remains absent, and malformed or regressing matching snapshots leave a
 closed `token_usage_invalid` diagnostic without invalidating an otherwise valid semantic judgment.
 Only the exact active thread and turn are accepted, and no account identifiers or raw provider
@@ -864,7 +865,9 @@ policy/schema version entries, obligation/response/gap/redaction records, and ca
 It owns receipt-only enums; response disposition and waiver scope reuse `domain/findings.py`, and
 the boundary `ReceiptRedactionProfile` reuses `protocol/models.py`. The document field inventory
 is exactly the receipt-document schema, including `suppressed_finding_count`, and it has no
-post-append result frontier.
+post-append result frontier. An applicable semantic check contributes its selected
+  `semantic_provenance`, including bounded per-attempt token usage; deterministic or historical
+  receipts omit that optional field so their prior bytes remain unchanged.
 
 `receipt_document_from_json`/`receipt_document_to_json` are the sole document codecs.
 `render_receipt_compact(document) -> str` returns one bounded string; there is no v0.1
@@ -1147,9 +1150,12 @@ coverage.
   versions: ReceiptVersionSlice, redaction_profile, include) -> ReceiptDocument`. Every
   nondeterministic input is explicit; the
   builder reads no clock or ID source. `ReceiptDocument` contains its identity, generation time,
-  subject frontier, and exact nonnegative `suppressed_finding_count` from the applicable latest
-  check, but not the post-append result frontier (which would create a digest
-  self-reference). `ReceiptResult` carries both subject and post-commit result frontiers.
+  subject frontier, exact nonnegative `suppressed_finding_count`, and optional
+  `semantic_provenance` from the applicable latest check, but not the post-append result frontier
+  (which would create a digest self-reference). When no applicable semantic attempt exists, the
+  receipt omits that field, preserving historical deterministic receipt bytes. `ReceiptResult`
+  carries both subject and post-commit result frontiers. The provenance and token counters name
+  that selected semantic attempt; they are not a sum across retries or recovery attempts.
 - Receipt boundary tokens are closed: `ReceiptFormat` is `json|markdown|text`, `ReceiptInclude`
   is `summary|standard|full`, and `ReceiptRedactionProfile` is
   `full_local|default_local_export|redacted_share`. `include` changes only the registered section
@@ -1162,10 +1168,11 @@ coverage.
   selected text field; `default_local_export` clears obligation summaries and receipt-gap details
   but retains finding text and response reasons; `redacted_share` additionally omits semantic
   finding rows and rejected/waived response rows while retaining deterministic ID-only findings,
-  acknowledged responses, structural IDs, conclusion, coverage, gaps, and versions. Every omitted
-  protected content leaf is counted once in the sorted `ReceiptRedaction` rows; omitted structural
-  IDs and enum/relation fields are not content-redaction counts. Sections are regenerated only
-  from retained structural values and fixed templates; they never copy omitted text. Therefore a
+  acknowledged responses, structural IDs, conclusion, coverage, gaps, versions, and the bounded
+  semantic provenance/token-usage counters. Every omitted protected content leaf is counted once
+  in the sorted `ReceiptRedaction` rows; omitted structural IDs and enum/relation fields are not
+  content-redaction counts. Sections are regenerated only from retained structural values and
+  fixed templates; they never copy omitted text. Therefore a
   profile/include transform that changes selected fields or sections changes the canonical
   document and digest; it is not a render-only rewrite. Conclusion, subject frontier, suppression,
   weakest coverage, and material gap codes are invariant and may only stay equal or weaken.

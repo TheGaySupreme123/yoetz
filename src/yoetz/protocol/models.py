@@ -3985,6 +3985,7 @@ _RECEIPT_STRUCTURAL_POINTERS: Final = (
         "/document/findings/*/provenance",
         _SEMANTIC_PROVENANCE_LEAVES,
     )
+    + _prefix_leaf_patterns("/document/semantic_provenance", _SEMANTIC_PROVENANCE_LEAVES)
     + _prefix_leaf_patterns(
         "/document/obligations/*",
         ("obligation_id", "source_refs/*", "status"),
@@ -4203,7 +4204,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 953:
+    if len(result) != 1021:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

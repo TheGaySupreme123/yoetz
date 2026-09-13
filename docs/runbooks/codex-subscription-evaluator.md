@@ -195,9 +195,10 @@ never retains email, token, credential path, raw account/workspace identity, pro
 stderr, or event log. `disclosed_case_sha256` is the case Yoetz passed to Codex, not Codex's
 upstream request. The explicit `upstream_body_observability=unavailable` field is mandatory. When
 Codex emits `thread/tokenUsage/updated` for the active thread and turn, current runtime evidence
-retains one cumulative total snapshot with the non-overlapping input/output/total counters and
-cache-write, cached-input, and reasoning-output subsets. Repeated snapshots replace one another;
-they are never summed. Missing or unrelated usage stays absent, while malformed or regressing
+retains one cumulative total snapshot with the non-overlapping input/output/total counters, cached
+input and reasoning-output subsets, and cache-write input as a separate provider counter.
+Repeated snapshots replace one another; they are never summed. Missing or unrelated usage stays
+absent, while malformed or regressing
 matching counters record `token_usage_invalid` without changing an otherwise valid judgment.
 
 Before `turn/start` acknowledgement, a transient may consume a fresh authorization and capped

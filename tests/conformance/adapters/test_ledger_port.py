@@ -27,6 +27,7 @@ from yoetz.domain.findings import (
     FindingKind,
     FindingOrigin,
     RankedFindings,
+    RuntimeTokenUsage,
     SemanticDispatchKind,
     SemanticFailureClass,
     SemanticProvenance,
@@ -1874,6 +1875,64 @@ async def test_semantic_attempt_selection_contract() -> None:
         assert attempts[0].state == "selected"
         assert attempts[0].attempt_id == selected[-1].attempt_id
     assert selected[0] == selected[1]
+
+
+@pytest.mark.anyio
+async def test_semantic_attempt_usage_survives_retry_and_sqlite_restart() -> None:
+    """Every physical attempt keeps its bounded counters, including failed/retried rows."""
+
+    command = ledger_command(request_suffix="b")
+    usage_one = RuntimeTokenUsage(120, 60, 10, 30, 8, 150)
+    usage_two = RuntimeTokenUsage(240, 120, 20, 40, 12, 280)
+    for adapter in (memory_ledger(command), sqlite_ledger(command)):
+        await adapter.append_batch(command)
+        lease = await _semantic_wait_lease(
+            adapter, command, "req_00000000-0000-4000-8000-0000000000bb"
+        )
+        case_ref = await _object_ref(
+            adapter,
+            command,
+            ObjectKind.SEMANTIC_CASE,
+            semantic_case_digest="sha256:" + "b" * 64,
+        )
+        job = await adapter.enqueue_semantic_job(lease, "sha256:" + "b" * 64, case_ref)
+        first = await adapter.claim_semantic_job(lease, job.job_id)
+        if isinstance(adapter, SqliteLedger):
+            with pytest.raises(apsw.ConstraintError):
+                adapter._db.execute(  # pyright: ignore[reportPrivateUsage]
+                    "UPDATE semantic_attempts SET usage_total_tokens=1 WHERE attempt_id=?",
+                    (first.attempt_id,),
+                )
+        await adapter.record_attempt_outcome(
+            first,
+            AttemptOutcome.EXPIRED,
+            terminal_code=SemanticReason.PROVIDER_TIMEOUT,
+            token_usage=usage_one,
+        )
+        second = await adapter.claim_semantic_job(lease, job.job_id)
+        await adapter.record_attempt_outcome(
+            second,
+            AttemptOutcome.FAILED,
+            terminal_code=SemanticReason.TRANSPORT_UNAVAILABLE,
+            token_usage=usage_two,
+        )
+
+        if isinstance(adapter, SqliteLedger):
+            restarted = SqliteLedger(
+                db=adapter._db,  # pyright: ignore[reportPrivateUsage]
+                task_id=command.task_id,
+                ownership_fence=_fence(),
+                clock=adapter._clock,  # pyright: ignore[reportPrivateUsage]
+                ids=adapter._ids,  # pyright: ignore[reportPrivateUsage]
+                objects=adapter._objects,  # pyright: ignore[reportPrivateUsage]
+            )
+        else:
+            restarted = adapter
+        rows = await restarted.list_semantic_attempts(job.job_id)
+        assert [(row.state, row.token_usage) for row in rows] == [
+            ("expired", usage_one),
+            ("failed", usage_two),
+        ]
 
 
 @pytest.mark.anyio
