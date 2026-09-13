@@ -279,10 +279,14 @@ notification bodies never enter provenance.
 For the same reason, each observed `RuntimeTokenUsage` sample is copied into the corresponding
 `semantic_attempts` ledger row as six bounded numeric counters before the attempt is closed. The
 nullable columns preserve older ledgers and keep cache-write and reasoning subsets separate; a
-partial or invariant-breaking sample fails closed. Replayed internal attempt accounting can thus
-recover usage for selected, failed, expired, and late physical attempts, while public provenance
-continues to describe only the provider result it actually represents and never invents provenance
-for a failed recovery.
+partial or invariant-breaking sample fails closed. Internal attempt accounting for an operation
+that is still in flight can thus recover usage for selected, failed, and expired physical attempts
+across a service restart, while public provenance continues to describe only the provider result
+it actually represents and never invents provenance for a failed recovery. Usage for attempts of
+already-completed operations stays in the owner ledger rows and reaches no public surface. A
+failure while persisting a successful response is terminalized as a bounded
+`coordinator_failure` with the attempt's usage retained, rather than leaving the attempt
+`started`.
 
 Retries remain within the durable attempt budget. A pre-`turn/start`-acknowledgement transient may
 receive a fresh one-use authorization and exact retry. After acknowledgement, transport ambiguity

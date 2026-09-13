@@ -1245,17 +1245,18 @@ def _runtime_token_usage_from_notification(
             raise ValueError("codex_app_server_token_usage_invalid")
         source = cast(Mapping[str, object], value)
         required = {
+            "cacheWriteInputTokens",
             "cachedInputTokens",
             "inputTokens",
             "outputTokens",
             "reasoningOutputTokens",
             "totalTokens",
         }
-        if not required <= set(source) or not set(source) <= required | {"cacheWriteInputTokens"}:
+        if set(source) != required:
             raise ValueError("codex_app_server_token_usage_invalid")
 
-        def counter(name: str, *, default: int | None = None) -> int:
-            raw = source.get(name, default)
+        def counter(name: str) -> int:
+            raw = source[name]
             if type(raw) is not int or not 0 <= raw <= 2**53 - 1:
                 raise ValueError("codex_app_server_token_usage_invalid")
             return raw
@@ -1263,7 +1264,7 @@ def _runtime_token_usage_from_notification(
         parsed = (
             counter("inputTokens"),
             counter("cachedInputTokens"),
-            counter("cacheWriteInputTokens", default=0),
+            counter("cacheWriteInputTokens"),
             counter("outputTokens"),
             counter("reasoningOutputTokens"),
             counter("totalTokens"),

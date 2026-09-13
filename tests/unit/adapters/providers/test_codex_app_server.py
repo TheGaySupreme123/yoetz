@@ -1360,6 +1360,11 @@ def test_token_usage_parser_rejects_incoherent_counters() -> None:
     incoherent_total_breakdown = cast(dict[str, object], incoherent_usage["total"])
     incoherent_total_breakdown["totalTokens"] = 1
     notices.append(incoherent_total)
+    missing_cache_write = _token_usage_notice()
+    missing_params = cast(dict[str, object], missing_cache_write["params"])
+    missing_usage = cast(dict[str, object], missing_params["tokenUsage"])
+    del cast(dict[str, object], missing_usage["total"])["cacheWriteInputTokens"]
+    notices.append(missing_cache_write)
 
     for notice in notices:
         with pytest.raises(ValueError, match="^codex_app_server_token_usage_invalid$"):

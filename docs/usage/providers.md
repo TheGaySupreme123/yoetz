@@ -100,7 +100,9 @@ When an attempt fails after the case was disclosed, the receipt keeps the closed
 `semantic_status` / `semantic_reason` pair and adds `runtime_evidence.failure_stage`: one fixed
 token such as `output_not_json`, `judgment_refs_duplicate`, `judgment_conclusion_mismatch`,
 `agent_message_count`, or `event_limit`. It tells you where validation stopped without keeping
-any of Codex's text. A `response_schema_invalid` result stays final and is not retried.
+any of Codex's text. A `response_schema_invalid` result stays final and is not retried. One
+stage, `token_usage_invalid`, can also appear on a successful review: Codex reported a token count
+that was malformed or went backwards, so the receipt keeps the judgment and leaves usage unknown.
 
 Setup, disconnect, and rollback recompose the local service afterwards. The subscription endpoint
 has unknown data-use posture, so Yoetz does not mark it as the Assisted recommendation. You may

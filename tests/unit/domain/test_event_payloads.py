@@ -1837,6 +1837,47 @@ def test_runtime_evidence_failure_stage_round_trips_and_stays_closed() -> None:
         replace(_external_runtime_evidence(), failure_stage="provider text must not land here")
 
 
+def test_current_runtime_evidence_schema_accepts_every_failure_stage() -> None:
+    """The current evidence schema must admit ``token_usage_invalid`` on a successful result.
+
+    The stage is a nonterminal telemetry diagnostic, so a valid judgment carrying it has to pass
+    every current result schema; a stale enum would make that result undeliverable on the wire.
+    """
+
+    from yoetz.domain.findings import (
+        RUNTIME_FAILURE_STAGES,
+        semantic_provenance_to_json,
+    )
+
+    schema_path = (
+        Path(__file__).resolve().parents[3]
+        / "schemas/findings/runtime-attempt-evidence-1.1.0.schema.json"
+    )
+    document = json.loads(schema_path.read_text("utf-8"))
+    assert set(document["properties"]["failure_stage"]["enum"]) == RUNTIME_FAILURE_STAGES
+
+    provenance = replace(
+        _selected_final_provenance(),
+        provider="openai-codex",
+        endpoint_profile_id="codex-chatgpt-subscription",
+        model="gpt-5.6-luna",
+        sdk_version="codex-app-server-0.150.1",
+        dispatch_kind=SemanticDispatchKind.EXTERNAL_RUNTIME_OAUTH,
+        runtime_evidence=replace(_external_runtime_evidence(), failure_stage="token_usage_invalid"),
+    )
+    wire = semantic_provenance_to_json(provenance)
+    validate_schema_instance("semantic-provenance", "1.2.0", wire)
+    payload = cast(CheckRecordedPayload, _decode_row(_ROW_BY_FAMILY["check_recorded"]))
+    semantic = replace(
+        payload,
+        mode=CheckMode.SEMANTIC_REQUIRED,
+        semantic_status=SemanticStatus.SUCCEEDED,
+        semantic_reason=SemanticReason.SEMANTIC_COMPLETED,
+        semantic_provenance=provenance,
+    )
+    validate_schema_instance("check-recorded", "1.2.0", encode_payload(semantic))
+
+
 def test_runtime_evidence_token_usage_is_additive_and_omits_absent_bytes() -> None:
     from yoetz.domain.findings import semantic_provenance_from_json, semantic_provenance_to_json
 

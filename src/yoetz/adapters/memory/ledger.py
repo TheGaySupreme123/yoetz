@@ -11,6 +11,7 @@ from enum import StrEnum
 from typing import Final, Literal, cast
 
 from yoetz.domain.events import (
+    SEMANTIC_EVENT_SCHEMA_VERSION,
     AcceptedEvent,
     ActionRecordedPayload,
     AssignmentRecordedPayload,
@@ -2923,7 +2924,7 @@ class MemoryLedgerAdapter:
             payload_ref = await self._objects.finalize(staged)
             schema = EventSchema(
                 "finding_recorded" if type(payload) is FindingRecordedPayload else "check_recorded",
-                "1.1.0",
+                SEMANTIC_EVENT_SCHEMA_VERSION,
             )
             entries.append(
                 AppendEntry(

@@ -19,7 +19,14 @@ from yoetz.adapters.memory.importer import MemoryImportState
 from yoetz.adapters.memory.ledger import MemoryLedgerAdapter, MemoryLedgerState
 from yoetz.adapters.sqlite.migrations import initialize_bundle
 from yoetz.adapters.sqlite.repository import SqliteLedger
-from yoetz.domain.events import CheckRecordedPayload, EventDraft, EventPayload, UnknownEvent
+from yoetz.domain.events import (
+    SEMANTIC_EVENT_SCHEMA_VERSION,
+    CheckRecordedPayload,
+    EventDraft,
+    EventPayload,
+    EventSchema,
+    UnknownEvent,
+)
 from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
     CheckVerdict,
@@ -1301,6 +1308,12 @@ async def test_commit_check_if_current_contract() -> None:
         )
         assert result.outcome == "committed"
         results.append(result)
+        committed = [
+            row.schema
+            async for row in adapter.load_events(command.session_id)
+            if row.schema.name == "check_recorded"
+        ]
+        assert committed == [EventSchema("check_recorded", SEMANTIC_EVENT_SCHEMA_VERSION)]
     assert results[0] == results[1]
 
 
