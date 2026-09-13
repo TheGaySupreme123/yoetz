@@ -4492,6 +4492,32 @@ policy, timeout, malformed output, nonzero exit, non-macOS hosts, or binding mis
 `UserPresencePort` and grants no authority for vault, credential, privacy, setup, or another
 plugin operation.
 
+The cell is selected per platform by `select_artifact_user_presence`
+(`adapters/integrations/artifact_presence.py`), shared by the Cursor and Claude Code lifecycles,
+and every host `preview` reports the selection as `authorization.human_presence` with `mechanism`
+(`macos_local_authentication`, `linux_pam_trusted_console`, or `unsupported`), `platform`
+(`sys.platform`), `ingress` (`os_dialog`, `trusted_console`, or null), and `supported`, next to
+the unchanged `requires_os_authenticated_prompt`. On Linux, including a distribution under WSL 2,
+`LinuxArtifactUserPresence` (`linux_artifact_presence.py`) writes a banner naming
+`plugin_artifact_apply`, the full preview digest, and the pending review ID to the ADR-008
+trusted foreground console, reads the invoking account's operating-system password there once
+with echo disabled, and verifies it through Linux-PAM (`libpam.so.0`, fixed service `login`,
+`PAM_DISALLOW_NULL_AUTHTOK`) followed by `pam_acct_mgmt`; an unprivileged process can only ever
+verify its own account through `unix_chkpwd`. The console is ingress, never authority. Exactly
+one hidden prompt is answered; an echoed, repeated, or unknown prompt, cancellation, EOF, an
+empty or wrong password, a locked or expired account, a missing PAM stack, no verified console
+(an agent's pipe, redirected stdio, or a background process group), or the 130-second deadline
+becomes `human_authority_unavailable` before the pending is claimed, and operating-system prompt
+or error text is never reflected. An unsupported platform fails closed with the same reason.
+Neither cell is the service-wide `UserPresencePort`.
+
+Linux PAM deadline implementation (issue #719): the trusted console process retains password
+input and terminal restoration, while a disposable Python worker performs the native PAM calls.
+The bounded password travels through an anonymous pipe only. The parent kills and reaps its
+worker on timeout or cancellation; a blocked PAM module cannot defer the parent deadline.
+No PAM prompt or error output is forwarded. Empty, overlong, and NUL-containing passwords are
+refused before launching the worker.
+
 Install and remove replays are idempotent at the selected state: a committed operation whose
 result was lost reconciles instead of refusing, touching no bytes and consuming no second review.
 Replace is deliberately not reconciled — the accepted digest bound the pre-commit tree, which the
@@ -4666,20 +4692,22 @@ and `host_activation` is proven only when a validated session observation coinci
 installed bytes, discovery, marketplace registration, and enabled state — a session init alone (for
 example a development `--plugin-dir` run) earns no marketplace-installed activation proof.
 
-Every mutation consumes the exact `plugin_artifact_apply` pending plus scoped OS-authenticated
-presence; `--accept` alone is not authority. Install generates/safely swaps only the private source,
-adds the project marketplace, and asks Claude to install the qualified plugin; exact read-back must
-show disabled default and matching cache/version. Update requires a marker-valid source/discovered
-install, replaces only managed source bytes, then invokes marketplace/plugin update. Enable and
-disable alter only Claude's effective project setting. Remove invokes qualified project uninstall
-with `--keep-data`, removes the project marketplace, and deletes only exact marker-valid source.
-Replacement and removal revalidate the displaced tree after it is renamed out of the public path —
-when nothing can swap it any more — and destroy only a marker-valid managed tree; content created or
-modified during the authority or host-command window is restored untouched and the mutation refused.
-Any post-mutation state the independent read-back cannot confirm is `outcome_unknown` regardless of
-the subprocess exit code (`refused` describes only safe pre-mutation rejection); status surfaces
-leftover stage/rollback material as `recovery_required` with `outcome_unknown`, and
-no host-owned settings/cache rollback is guessed.
+Every mutation consumes the exact `plugin_artifact_apply` pending plus the per-platform scoped
+OS-authenticated presence cell described for Cursor above (macOS LocalAuthentication, Linux and WSL
+2 PAM through the trusted console, otherwise fail closed); `--accept` alone is not authority.
+Install generates/safely swaps only the private source, adds the project marketplace, and asks
+Claude to install the qualified plugin; exact read-back must show disabled default and matching
+cache/version. Update requires a marker-valid source/discovered install, replaces only managed
+source bytes, then invokes marketplace/plugin update. Enable and disable alter only Claude's
+effective project setting. Remove invokes qualified project uninstall with `--keep-data`, removes
+the project marketplace, and deletes only exact marker-valid source. Replacement and removal
+revalidate the displaced tree after it is renamed out of the public path — when nothing can swap it
+any more — and destroy only a marker-valid managed tree; content created or modified during the
+authority or host-command window is restored untouched and the mutation refused. Any post-mutation
+state the independent read-back cannot confirm is `outcome_unknown` regardless of the subprocess
+exit code (`refused` describes only safe pre-mutation rejection); status surfaces leftover
+stage/rollback material as `recovery_required` with `outcome_unknown`, and no host-owned
+settings/cache rollback is guessed.
 
 `ClaudeCodeMcpSource` is exactly
 `local|project|user|plugin|claude_ai_connector`, ordered by Claude precedence. Observation reads

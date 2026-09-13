@@ -44,6 +44,7 @@ from yoetz.ports.plugin_artifacts import (
     ManagedPluginFile,
     McpOwnership,
     McpOwnershipState,
+    PluginArtifactError,
     PluginArtifactReason,
     PluginArtifactState,
     PluginFormatProfile,
@@ -1957,10 +1958,17 @@ def _consume_authority(
     if authority is None or authority.target_digest != preview_digest:
         raise _error(PluginArtifactReason.AUTHORITY_REQUIRED)
     port = _DenyStandaloneClaudeReview() if review is None else review
-    if authority.channel == "setup_composition":
-        port.consume_setup_authority(authority, preview_digest)
-    else:
-        port.consume_artifact_review(authority, preview_digest)
+    try:
+        if authority.channel == "setup_composition":
+            port.consume_setup_authority(authority, preview_digest)
+        else:
+            port.consume_artifact_review(authority, preview_digest)
+    except PluginArtifactError as exc:
+        # The shared elevated-bootstrap review port raises the neutral artifact error. Keep one
+        # error type on the Claude Code surface without inventing a reason the port did not
+        # choose, so a cancelled or unavailable presence prompt is reported, not raised through
+        # the CLI as a traceback.
+        raise _error(exc.reason) from exc
 
 
 def _run_mutation(

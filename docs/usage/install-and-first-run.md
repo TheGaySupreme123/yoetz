@@ -64,7 +64,10 @@ every command except `yoetz version`, `--version`, and `--help` then refuses wit
    ```
 
 Everything else on this page happens inside that Ubuntu window, including `yoetz service run` and
-the steps that need your own terminal. A coding agent driving the install from the Windows side
+the steps that need your own terminal. Installing the Cursor or Claude Code plugin is one of
+those steps: on Linux and inside WSL 2 it asks for your Linux account password in that terminal
+(the one you chose at first launch) before it changes anything, where macOS shows its own
+authentication dialog instead. A coding agent driving the install from the Windows side
 can run each command with `wsl -e bash -lc "..."`. Connecting a Windows-native Codex, Claude Code,
 or Cursor to a Yoetz inside WSL is untested and not claimed: connect from the same WSL
 environment, or keep Yoetz local-only through the CLI.
