@@ -10,7 +10,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 import apsw
 import pytest
@@ -863,6 +863,24 @@ async def test_ready_factory_starts_and_reads_repository_bound_setup(tmp_path: P
         )
         assert type(receipt_view) is LocalDisclosureReceiptView
         assert receipt_view.receipt.scope == setup_scope
+        # The same receipt must be reachable over ordinary control, not only through the port:
+        # the composed support-handler map used to omit both read methods (issue #730).
+        fetched = cast(
+            dict[str, Any],
+            await app.privacy_receipts_get(
+                JsonObject({"schema_version": "1.0.0", "receipt_id": receipt_id})
+            ),
+        )
+        assert fetched["outcome"] == "found"
+        assert fetched["receipt"]["kind"] == "local_disclosure"
+        assert fetched["receipt"]["receipt"]["receipt_id"] == receipt_id
+        listed = cast(
+            dict[str, Any],
+            await app.privacy_receipts_list(
+                JsonObject({"schema_version": "1.0.0", "filters": {}, "page_size": 50})
+            ),
+        )
+        assert [item["receipt"]["receipt_id"] for item in listed["receipts"]] == [receipt_id]
         request = StartRequest.model_validate(
             {
                 "protocol_version": "0.1",

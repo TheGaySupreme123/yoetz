@@ -42,6 +42,7 @@ from yoetz.domain.privacy import (
     DataClass,
     EgressAuthorization,
     EgressChannel,
+    EgressReceipt,
     LocalDisclosureApproved,
     LocalDisclosureReceipt,
     LocalDisclosureSink,
@@ -54,6 +55,7 @@ from yoetz.domain.privacy import (
     ReceiptPolicyBinding,
     ReceiptSecretScan,
     ReceiptTransformations,
+    RequestCommitment,
     ReviewContextProfile,
     ReviewSelectionPolicy,
 )
@@ -71,7 +73,9 @@ from yoetz.ports.privacy import (
     ConsumedAuthorization,
     DisclosureProposalRequest,
     HumanPolicyDecision,
+    LocalDisclosureReceiptView,
     MinimizedDisclosure,
+    NetworkEgressReceiptView,
     OutboundGatewayPort,
     PolicyOverlay,
     PolicyTransitionMember,
@@ -1129,3 +1133,121 @@ def test_catalog_consumed_disclosure_attempt_is_durable_and_one_use() -> None:
     assert recovered.request_id == _REQUEST
     assert recovered.privacy_proposal_id == _PROPOSAL
     assert asyncio.run(audit.load(_REQUEST, _DIGEST)) is None
+
+
+def _network_receipt(authorization: EgressAuthorization) -> EgressReceipt:
+    """The receipt a completed subscription review records through the gateway."""
+
+    return EgressReceipt(
+        "1.0.0",
+        _RECEIPT,
+        authorization_request_id(authorization),
+        authorization.privacy_proposal_id,
+        EgressChannel.LLM_INFERENCE,
+        PrivacyOutcome.COMPLETED,
+        _NOW,
+        authorization.scope,
+        authorization.purpose,
+        authorization.provider_binding,
+        ReceiptPolicyBinding(_POLICY, authorization.policy_version, _DIGEST, _DIGEST),
+        authorization.consent_source,
+        (DataCategory.BOUNDED_STRUCTURAL_METADATA,),
+        (),
+        ReceiptCounts(1, 1, 0, 1, 0, 32, 32, 8, 96),
+        ReceiptTransformations(0, 0, 0),
+        ReceiptSecretScan("scanner-v1", _DIGEST, 0, True),
+        None,
+        1,
+        authorization_id=authorization.authorization_id,
+        dispatch_id=_DISPATCH,
+        dispatch_started_at=_NOW - timedelta(seconds=5),
+        request_commitment=RequestCommitment(
+            "hmac-sha256/yoetz-privacy-egress-request-v1", _WORKSPACE
+        ),
+    )
+
+
+def authorization_request_id(authorization: EgressAuthorization) -> str:
+    del authorization
+    return _REQUEST
+
+
+def test_completed_network_egress_receipt_is_retrievable_and_listable() -> None:
+    """A stored network receipt reads back whole; it used to raise a deferred-codec error.
+
+    Issue #730: the only receipts a real semantic review records are network egress receipts,
+    and ``get_receipt`` refused every one of them while ``list_receipts`` silently dropped them.
+    """
+
+    db = _database()
+    _insert_task_route(db)
+    audit = CatalogPrivacyAudit(db, _StoredObjects(), _Key(), _Clock())  # type: ignore[arg-type]
+
+    async def run() -> tuple[
+        EgressReceipt, PrivacyReceiptView | None, PrivacyReceiptPage, PrivacyReceiptPage
+    ]:
+        prepared = await audit.prepare_disclosure_proposal(_external_disclosure_request())
+        authorization = await audit.authorize(
+            prepared.proposal.privacy_proposal_id,
+            prepared.proposal.prepared_case_digest,
+            _NOW,
+        )
+        await audit.consume(authorization.authorization_id, _DISPATCH, _NOW)
+        receipt = _network_receipt(authorization)
+        await audit.complete_egress(_DISPATCH, receipt)
+        fetched = await audit.get_receipt(_RECEIPT, PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL)
+        by_provider = await audit.list_receipts(
+            PrivacyReceiptQuery(
+                channel=EgressChannel.LLM_INFERENCE,
+                provider_id="provider-test",
+                endpoint_profile_id="endpoint-test",
+                outcome=PrivacyOutcome.COMPLETED,
+            ),
+            PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL,
+        )
+        other_provider = await audit.list_receipts(
+            PrivacyReceiptQuery(provider_id="someone-else"),
+            PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL,
+        )
+        return receipt, fetched, by_provider, other_provider
+
+    receipt, fetched, by_provider, other_provider = asyncio.run(run())
+
+    assert fetched == NetworkEgressReceiptView("network_egress", receipt)
+    assert by_provider.receipts == (fetched,)
+    assert other_provider.receipts == ()
+
+
+def test_stored_receipts_of_both_kinds_list_together_newest_first() -> None:
+    db = _database()
+    _insert_task_route(db)
+    audit = CatalogPrivacyAudit(db, _StoredObjects(), _Key(), _Clock())  # type: ignore[arg-type]
+    local = replace(
+        _receipt(),
+        privacy_proposal_id=_PROPOSAL_2,
+        request_id=_REQUEST_2,
+        receipt_id=_RECEIPT_2,
+        finished_at=_NOW - timedelta(minutes=1),
+    )
+
+    async def run() -> PrivacyReceiptPage:
+        prepared = await audit.prepare_disclosure_proposal(_external_disclosure_request())
+        authorization = await audit.authorize(
+            prepared.proposal.privacy_proposal_id,
+            prepared.proposal.prepared_case_digest,
+            _NOW,
+        )
+        await audit.consume(authorization.authorization_id, _DISPATCH, _NOW)
+        await audit.complete_egress(_DISPATCH, _network_receipt(authorization))
+        await audit.complete_agent_projection(_projection_request(_PROPOSAL_2, _REQUEST_2), local)
+        return await audit.list_receipts(
+            PrivacyReceiptQuery(), PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL
+        )
+
+    page = asyncio.run(run())
+
+    assert [type(view) for view in page.receipts] == [
+        NetworkEgressReceiptView,
+        LocalDisclosureReceiptView,
+    ]
+    assert [view.receipt.receipt_id for view in page.receipts] == [_RECEIPT, _RECEIPT_2]

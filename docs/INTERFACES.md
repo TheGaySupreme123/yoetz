@@ -2510,7 +2510,20 @@ sidecar must contain a valid `prepared_case_digest`: missing or malformed values
 and never authorize a fresh attempt (issue #626).
 Internal `PrivacyAuditPort.get_receipt`/`list_receipts` queries project bounded structural views
 only through the ordinary CLI/UI control methods `privacy_receipts_get` and
-`privacy_receipts_list`; the port names are not wire aliases and MCP has no access.
+`privacy_receipts_list`; the port names are not wire aliases and MCP has no access. Both methods
+are bound by `build_privacy_support_handlers` whenever the privacy application is composed, so a
+ready service answers them rather than `method_forbidden` (issue #730). Their bodies carry
+`schema_version` `1.0.0`: `get` takes `receipt_id` and answers `outcome` `found` with one
+`receipt` wrapper or `outcome` `not_found`; `list` takes `filters`, `page_size` (1–100) and an
+optional `cursor` and answers `snapshot_generation`, `receipts`, and `next_cursor` only when
+another page exists. Each wrapper names its `kind` (`local_disclosure` or `network_egress`) and
+carries the receipt in the `privacy/egress-receipt-1.0.0` vocabulary: every counter and version
+is a decimal string, optional fields are absent rather than null. Unknown or malformed keys,
+filters, page sizes, cursors, and receipt IDs are `invalid_request`; a cursor minted for a
+different query is the same non-retryable rejection. Both audit adapters project stored network
+egress receipts as well as local disclosure receipts, so a completed subscription review is
+retrievable by its recorded receipt ID and listable by `channel`, `provider_id`, or
+`endpoint_profile_id`.
 `PrivacyAuditPort.list_pending_disclosures(audience) -> PendingDisclosurePage` projects only
 `PendingDisclosureEntry(pending_id, task_id, expires_at)` for proposals in `awaiting_human` or
 `reserved` whose `expires_at` has not passed, over the ordinary CLI/UI control method

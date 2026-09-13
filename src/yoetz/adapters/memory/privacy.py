@@ -27,6 +27,7 @@ from yoetz.domain.privacy import (
     PreDispatchAuditDecision,
     PrivacyAuditSubject,
     PrivacyPolicy,
+    ProviderBinding,
 )
 from yoetz.domain.values import validate_sha256_digest
 from yoetz.ports.clock import ClockPort
@@ -41,6 +42,7 @@ from yoetz.ports.privacy import (
     EffectivePrivacyPolicy,
     HumanPolicyDecision,
     LocalDisclosureReceiptView,
+    NetworkEgressReceiptView,
     PendingDisclosureEntry,
     PendingDisclosurePage,
     PolicyCommitResult,
@@ -532,6 +534,51 @@ class MemoryPrivacyPolicyStore:
         return self._state.generation
 
 
+def _receipt_view(receipt: LocalDisclosureReceipt | EgressReceipt) -> PrivacyReceiptView:
+    if isinstance(receipt, LocalDisclosureReceipt):
+        return LocalDisclosureReceiptView("local_disclosure", receipt)
+    return NetworkEgressReceiptView("network_egress", receipt)
+
+
+def _receipt_matches(
+    receipt: LocalDisclosureReceipt | EgressReceipt, query: PrivacyReceiptQuery
+) -> bool:
+    """Apply every query filter the SQLite catalog applies, over the same receipt fields."""
+
+    if query.receipt_id is not None and receipt.receipt_id != query.receipt_id:
+        return False
+    if query.outcome is not None and receipt.outcome is not query.outcome:
+        return False
+    if query.policy_version is not None and receipt.policy.version != query.policy_version:
+        return False
+    if query.scope_kind is not None and receipt.scope.kind is not query.scope_kind:
+        return False
+    if query.finished_at_from is not None and receipt.finished_at < query.finished_at_from:
+        return False
+    if query.finished_at_through is not None and receipt.finished_at > query.finished_at_through:
+        return False
+    if isinstance(receipt, LocalDisclosureReceipt):
+        return (
+            (query.local_sink is None or receipt.sink is query.local_sink)
+            and query.channel is None
+            and query.provider_id is None
+            and query.endpoint_profile_id is None
+        )
+    if query.local_sink is not None:
+        return False
+    if query.channel is not None and receipt.channel is not query.channel:
+        return False
+    destination = receipt.destination
+    binding = destination if isinstance(destination, ProviderBinding) else None
+    if query.provider_id is not None and (
+        binding is None or binding.provider_id != query.provider_id
+    ):
+        return False
+    return query.endpoint_profile_id is None or (
+        binding is not None and binding.endpoint_profile_id == query.endpoint_profile_id
+    )
+
+
 class MemoryPrivacyAudit:
     __slots__ = ("_clock", "_key", "_lock", "_objects", "_state")
 
@@ -831,8 +878,8 @@ class MemoryPrivacyAudit:
         if audience is not PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL:
             raise ValueError("privacy_receipt_audience_invalid")
         for row in self._state.audit.values():
-            if type(row.receipt) is LocalDisclosureReceipt and row.receipt.receipt_id == receipt_id:
-                return LocalDisclosureReceiptView("local_disclosure", row.receipt)
+            if row.receipt is not None and row.receipt.receipt_id == receipt_id:
+                return _receipt_view(row.receipt)
         return None
 
     async def list_pending_disclosures(
@@ -862,21 +909,9 @@ class MemoryPrivacyAudit:
         if audience is not PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL:
             raise ValueError("privacy_receipt_audience_invalid")
         values = [
-            LocalDisclosureReceiptView("local_disclosure", row.receipt)
+            _receipt_view(row.receipt)
             for row in self._state.audit.values()
-            if type(row.receipt) is LocalDisclosureReceipt
-            and (query.receipt_id is None or row.receipt.receipt_id == query.receipt_id)
-            and (query.outcome is None or row.receipt.outcome is query.outcome)
-            and (query.local_sink is None or row.receipt.sink is query.local_sink)
-            and (query.policy_version is None or row.receipt.policy.version == query.policy_version)
-            and (query.scope_kind is None or row.receipt.scope.kind is query.scope_kind)
-            and (
-                query.finished_at_from is None or row.receipt.finished_at >= query.finished_at_from
-            )
-            and (
-                query.finished_at_through is None
-                or row.receipt.finished_at <= query.finished_at_through
-            )
+            if row.receipt is not None and _receipt_matches(row.receipt, query)
         ]
         values.sort(
             key=lambda view: (view.receipt.finished_at, view.receipt.receipt_id), reverse=True
