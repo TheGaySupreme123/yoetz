@@ -204,7 +204,7 @@ async def review_elevated() -> dict[str, JsonValue]:
     try:
         _require_action_bound_user_presence()
         with TrustedForegroundConsole() as console:
-            pending = claim_pending_for_review()
+            pending = claim_pending_for_review(for_console=True)
             _render_review(console, pending)
             selected = console.read_choice("Decision [approve/deny]: ", (b"approve", b"deny"))
             if selected == b"deny":
@@ -270,13 +270,7 @@ async def _complete_approved(
     if pending.operation == "repository_privacy_grant":
         raise ElevatedBootstrapError("repository_privacy_grant_requires_yoetz_privacy")
     if pending.operation == "project_coordination_grant":
-        authorization = record_project_coordination_authorization(pending)
-        return {
-            "project_id": authorization.project_id,
-            "membership_generation": str(authorization.membership_generation),
-            "audit_record_id": authorization.audit_record_id,
-            "outcome": "granted",
-        }
+        raise ElevatedBootstrapError("project_coordination_grant_requires_chat_authority")
     if pending.operation == "import_publication":
         authorization = record_import_publication_authorization(pending)
         return {

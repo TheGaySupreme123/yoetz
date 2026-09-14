@@ -111,6 +111,10 @@ record of native support evidence and limits.
    `membership_generation`. The pure kernel evaluates only that recorded snapshot, never a live
    child bundle. The lineage coordinator records changed child facts; receipt generation only
    reuses an already recorded manifest and never records or refreshes one (#500).
+   Compact status readiness also compares accepted catalog children with that recorded manifest.
+   Missing, stale, unavailable, or blocking child facts prevent advisory readiness; a failed
+   comparison is an explicit coverage gap. This read does not stamp a manifest or replace the
+   frozen evidence used by checks and receipts. Pending children remain annotation-only.
 
 6. **User-controlled content stays out of structure (C6).** Project titles, descriptions, and
    host labels are encrypted objects rendered through the existing disclosure policy. They never

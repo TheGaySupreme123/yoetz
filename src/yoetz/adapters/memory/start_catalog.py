@@ -1497,6 +1497,8 @@ class MemoryStartCatalogAdapter:
                 return self._resume_existing(existing, request, now)
 
             route = self._resolve_requested_route(request)
+            if route is not None and route.state is TaskRouteState.QUARANTINED:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
             if request.mode is StartMode.CREATE and route is not None:
                 raise _error(
                     PublicErrorCode.SESSION_CONFLICT,

@@ -4072,7 +4072,7 @@ class ProjectApplication:
         if own_consent is not True:
             raise ProjectCommandError(CoordinationErrorCode.CONSENT_REQUIRED)
         if not await self._coordination_source_allowed(task, workspace, descriptor.project_id):
-            raise ProjectCommandError(CoordinationErrorCode.CONSENT_REQUIRED)
+            raise ProjectCommandError(CoordinationErrorCode.SOURCE_POLICY_DENIED)
         direct_memberships = await self.catalog.list_task_project_ids(task)
         member = project in direct_memberships
         if not member:

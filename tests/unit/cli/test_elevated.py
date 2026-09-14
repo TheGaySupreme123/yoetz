@@ -34,6 +34,7 @@ from yoetz.domain.privacy import (
 from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.chat_user_authority import ChatUserAttestationModel
 from yoetz.protocol.consent import ConsentReviewResultModel
+from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.schemas import SchemaInstanceInvalid, validate_schema_instance
 from yoetz.service.confidential_client import (
     ConfidentialClientError,
@@ -50,7 +51,10 @@ from yoetz.service.elevated_bootstrap import (
     consume_import_publication_authorization,
     load_import_publication_authorization,
     load_pending,
+    load_project_coordination_authorization,
     prepare_pending,
+    project_coordination_grant_binding,
+    project_coordination_target_digest,
     repository_grant_binding,
 )
 
@@ -1250,6 +1254,45 @@ def test_pty_like_console_cannot_authorize_without_os_presence(tmp_path: Path) -
 
     anyio.run(run)
     assert load_pending(_state=tmp_path) is not None
+
+
+@pytest.mark.parametrize("decision", [b"approve", b"deny"])
+def test_console_project_grant_refuses_before_claim_or_authorization(
+    tmp_path: Path, decision: bytes
+) -> None:
+    project = new_id(IdKind.PROJECT)
+    audit = new_id(IdKind.EVENT)
+    binding = project_coordination_grant_binding(
+        project_id=project, membership_generation=1, audit_record_id=audit
+    )
+
+    async def run() -> None:
+        with _patch_state(tmp_path):
+            pending = prepare_pending(
+                "project_coordination_grant",
+                target_digest=project_coordination_target_digest(binding),
+                coordination_binding=binding,
+            )
+            with (
+                _patch_verified_presence(),
+                patch(
+                    "yoetz.cli.elevated.TrustedForegroundConsole", return_value=_Console(decision)
+                ),
+                patch("yoetz.cli.elevated._complete_approved") as complete,
+            ):
+                with pytest.raises(ElevatedBootstrapError) as error:
+                    await elevated.review_elevated()
+                assert error.value.reason == "project_coordination_grant_requires_chat_authority"
+                complete.assert_not_called()
+            assert load_pending() == pending
+            assert (
+                load_project_coordination_authorization(
+                    project_id=project, membership_generation=1, audit_record_id=audit
+                )
+                is None
+            )
+
+    anyio.run(run)
 
 
 @pytest.mark.parametrize(

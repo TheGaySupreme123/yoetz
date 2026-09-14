@@ -1682,6 +1682,12 @@ cannot select or inherit disclosure authority.
 
 ### Task lineage and project scope (ADR-027)
 
+Project admission distinguishes `coordination_consent_required` (missing source-workspace
+observation consent) from `coordination_source_policy_denied` (source disclosure policy refusal or
+unavailable policy evaluation). Both refuse disclosure; the latter never recommends obtaining
+workspace consent as sufficient authority. The additive control 2.7 error vocabulary preserves
+this distinction, while older control schemas remain frozen.
+
 The 0.3 implementation adds the wire, catalog, runtime, host-correlation, and presentation
 contracts below. `AuthorizationScopeKind` and structural `contains()` retain their existing four
 kinds; lineage and project membership are separate authority facts and never add an egress scope.
@@ -4953,8 +4959,15 @@ The compact singleton carries the same two completion-scope fields beside its cu
 both counters, and an `unanswered_findings` preview. Its `blocking_conditions` are exactly
 `obligations_open|findings_unanswered|receipt_findings_unresolved|no_plan_published|
 no_obligations_declared|projection_stale|coverage_gaps_declared|readiness_unknown`. It is derived
-per request from the compact projection: reading it records nothing, creates no verdict or IDs, and
-never strengthens coverage. `findings_unanswered` identifies response work still to do;
+per request from the compact projection and a current, read-only comparison of accepted catalog
+children with the parent's recorded dependency manifest. Child blockers, including
+`lineage_manifest_not_recorded` and `lineage_manifest_state_changed`, appear in the status envelope's
+`gaps` and coverage and set `coverage_gaps_declared` on every view, including compact. An unavailable
+comparison contributes `lineage_readiness_unavailable`; it cannot make the parent look ready.
+Pending child annotations do not block. These current advisory facts never refresh a manifest,
+open a child bundle, change a recorded check, or strengthen a receipt. Reading readiness records
+nothing, creates no verdict or IDs, and never strengthens coverage.
+`findings_unanswered` identifies response work still to do;
 `receipt_findings_unresolved` is a persistent conclusion bound, not an instruction to respond
 again. Once every readable finding is answered, the latter condition remains and tells the caller
 that a receipt may be requested but cannot conclude `no_unresolved_deterministic_findings`.

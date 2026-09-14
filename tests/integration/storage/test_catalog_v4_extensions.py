@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
-import apsw
+from pathlib import Path
 
+import apsw
+import pytest
+
+from yoetz.adapters.sqlite import migrations
 from yoetz.adapters.sqlite.migrations import initialize_catalog
 
 
@@ -57,3 +61,69 @@ def test_catalog_v4_installs_provisional_and_coordination_tables() -> None:
         assert db.execute("PRAGMA foreign_key_check").fetchone() is None
     finally:
         db.close(force=True)
+
+
+@pytest.mark.parametrize("failed_version", ["0004", "0005"])
+def test_catalog_upgrade_rolls_back_all_pending_ddl_and_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_version: str
+) -> None:
+    path = tmp_path / "catalog.sqlite3"
+    db = apsw.Connection(str(path))
+    for migration in migrations.CATALOG_MIGRATIONS[:3]:
+        db.execute(migration.ddl.decode("utf-8"))
+    db.execute("INSERT INTO catalog_meta VALUES ('storage_schema_version', '3')")
+    task = "tsk_70000000-0000-4000-8000-000000000001"
+    session = "ses_70000000-0000-4000-8000-000000000001"
+    db.execute(
+        "INSERT INTO task_routes(task_id, active_session_id, bundle_relpath, route_generation, "
+        "active_route_identity_digest, state, created_at, updated_at) "
+        "VALUES (?, ?, ?, 1, ?, 'active', ?, ?)",
+        (
+            task,
+            session,
+            f"tasks/{task}",
+            "sha256:" + "a" * 64,
+            "2026-09-05T12:00:00.000Z",
+            "2026-09-05T12:00:00.000Z",
+        ),
+    )
+    old_route = db.execute("SELECT * FROM task_routes").fetchall()
+    old_schema = db.execute("SELECT type, name, sql FROM sqlite_schema ORDER BY name").fetchall()
+    execute = migrations._execute  # pyright: ignore[reportPrivateUsage]
+
+    def fail_after_ddl(connection: apsw.Connection, migration: migrations.Migration) -> None:
+        execute(connection, migration)
+        if migration.version == failed_version:
+            raise RuntimeError("synthetic migration interruption")
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(migrations, "_execute", fail_after_ddl)
+        with pytest.raises(RuntimeError, match="synthetic migration interruption"):
+            migrations.run_migrations(db, migrations.CATALOG_MIGRATIONS, maintenance=None)
+    db.close()
+    db = apsw.Connection(str(path))
+    try:
+        assert db.pragma("user_version") == 3
+        assert db.execute("SELECT * FROM task_routes").fetchall() == old_route
+        assert (
+            db.execute("SELECT type, name, sql FROM sqlite_schema ORDER BY name").fetchall()
+            == old_schema
+        )
+        assert db.execute(
+            "SELECT value FROM catalog_meta WHERE key='storage_schema_version'"
+        ).fetchone() == ("3",)
+        report = migrations.run_migrations(db, migrations.CATALOG_MIGRATIONS, maintenance=None)
+        assert report.applied_versions == ("0004", "0005")
+        assert report.backup_manifest_digest is None
+        assert db.execute("SELECT session_id, health FROM task_sessions").fetchall() == [
+            (session, "contact_lost")
+        ]
+        assert db.execute("PRAGMA foreign_key_check").fetchone() is None
+        assert (
+            migrations.run_migrations(
+                db, migrations.CATALOG_MIGRATIONS, maintenance=None
+            ).applied_versions
+            == ()
+        )
+    finally:
+        db.close()

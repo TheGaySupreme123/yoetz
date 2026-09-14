@@ -434,6 +434,19 @@ async def test_clean_accepted_child_produces_clean_parent_receipt(
         await _drain_lineage(service)
 
         parent_check = await _check(service, parent, mode="semantic_if_configured")
+        ready = await service.app.status(
+            StatusRequest.model_validate(
+                {
+                    **_identity(),
+                    "session_id": parent.session_id,
+                    "writer_id": parent.writer_id,
+                    "view": "compact",
+                    "limit": "1",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        assert ready.closure_readiness.blocking_conditions == ()
         parent_receipt = await _receipt(service, parent, parent_check)
         assert parent_receipt.conclusion == "no_unresolved_deterministic_findings"
         assert parent_receipt.document is not None

@@ -587,7 +587,7 @@ async def test_configured_source_policy_denial_blocks_coordination_admission() -
             source_workspace_commitment=workspace,
             project=project.project_id,
         )
-    assert error.value.code is CoordinationErrorCode.CONSENT_REQUIRED
+    assert error.value.code is CoordinationErrorCode.SOURCE_POLICY_DENIED
 
     configured_categories.add(DataCategory.FINDING_SUMMARY)
     admission = await app.admit(

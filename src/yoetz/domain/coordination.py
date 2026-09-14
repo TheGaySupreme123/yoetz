@@ -170,6 +170,7 @@ class CoordinationErrorCode(str, Enum):  # noqa: UP042 - mirrors the exact wire 
     MEMBER_NOT_FOUND = "project_member_not_found"
     SELECTOR_CONFLICT = "selector_conflict"
     CONSENT_REQUIRED = "coordination_consent_required"
+    SOURCE_POLICY_DENIED = "coordination_source_policy_denied"
     GRANT_REQUIRED = "coordination_grant_required"
     GRANT_REVOKED = "coordination_generation_revoked"
     GENERATION_MISMATCH = "coordination_generation_mismatch"

@@ -81,10 +81,12 @@ def _id(kind: IdKind, value: int) -> str:
     return PREFIX_BY_KIND[kind] + str(uuid.UUID(bytes=bytes(raw)))
 
 
-def _sqlite_catalog(installation_id: str, clock: _Clock) -> SqliteStartCatalog:
+def _sqlite_catalog(
+    installation_id: str, clock: _Clock, *, schema_version: int = 3
+) -> SqliteStartCatalog:
     db = apsw.Connection(":memory:")
     root = Path(__file__).resolve().parents[3]
-    for version in ("0001", "0002", "0003"):
+    for version in (f"{number:04d}" for number in range(1, schema_version + 1)):
         db.execute((root / f"migrations/catalog/{version}.sql").read_text(encoding="utf-8"))
     db.executemany(
         "INSERT INTO catalog_meta(key, value) VALUES(?, ?)",
@@ -598,6 +600,37 @@ async def test_quarantine_and_reclaim_parity() -> None:
     sqlite_replay = await sqlite.reserve_or_resume(sqlite_request)
     assert memory_replay == sqlite_replay
     assert memory_replay.replayed_result is not None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", [StartMode.ATTACH, StartMode.CREATE_OR_ATTACH, StartMode.CREATE])
+async def test_quarantined_pair_refuses_before_new_reservation(mode: StartMode) -> None:
+    installation = _id(IdKind.INSTALLATION, 740)
+    clock = _Clock(datetime(2026, 7, 19, 11, 0, tzinfo=UTC))
+    memory, state = _memory_catalog(installation, clock)
+    sqlite = _sqlite_catalog(installation, clock, schema_version=5)
+    for catalog in (memory, sqlite):
+        original = await _command(catalog, operation_id=_id(IdKind.REQUEST, 741))
+        allocation = await catalog.reserve_or_resume(original)
+        await catalog.quarantine(allocation, SafeReason("start_bundle_invalid"))
+        route = await catalog.task_route(allocation.task_id)
+        sessions = await catalog.task_session_states(allocation.task_id)
+        replacement = await _command(catalog, operation_id=_id(IdKind.REQUEST, 742), mode=mode)
+        with pytest.raises(PublicOperationError) as error:
+            await catalog.reserve_or_resume(replacement)
+        assert error.value.code is PublicErrorCode.STORAGE_CORRUPT
+        assert await catalog.task_route(allocation.task_id) == route
+        assert await catalog.task_session_states(allocation.task_id) == sessions
+        if isinstance(catalog, MemoryStartCatalogAdapter):
+            assert len(state.operations) == 1
+        else:
+            assert catalog._db.execute(  # pyright: ignore[reportPrivateUsage]
+                "SELECT COUNT(*) FROM start_operations"
+            ).fetchone() == (1,)
+        # An exact retry still recovers the original terminal failure.
+        replayed = await catalog.reserve_or_resume(original)
+        assert replayed.outcome == "replayed"
+        assert replayed.replayed_result is not None
 
 
 @pytest.mark.anyio

@@ -3804,6 +3804,7 @@ def _control_v2_7_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
             "project_member_not_found",
             "selector_conflict",
             "coordination_consent_required",
+            "coordination_source_policy_denied",
             "coordination_grant_required",
             "coordination_generation_revoked",
             "coordination_generation_mismatch",

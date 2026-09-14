@@ -328,6 +328,7 @@ _CONTROL_ERROR_CLASSES: Final[Mapping[str, str]] = MappingProxyType(
         "project_member_not_found": "unavailable",
         "selector_conflict": "unavailable",
         "coordination_consent_required": "unavailable",
+        "coordination_source_policy_denied": "unavailable",
         "coordination_grant_required": "unavailable",
         "coordination_generation_revoked": "unavailable",
         "coordination_generation_mismatch": "unavailable",

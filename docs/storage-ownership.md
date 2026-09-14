@@ -177,6 +177,23 @@ and coordination authority. It is the only place for those shared structural tab
 coordination adapters fail with `MIGRATION_REQUIRED` when those tables are absent rather than
 creating them at runtime.
 
+### Catalog upgrade recovery boundary
+
+The catalog 0004/0005 startup upgrade applies all pending DDL and catalog version metadata in one
+SQLite transaction, then verifies schema identity and foreign keys before reopening the ordinary
+guarded writer. An exception during either migration rolls the transaction back; retry applies the
+same append-only migrations. Legacy session rows start as `contact_lost`, because an old active
+route is not proof of a current lease. Normal session attachment and lease reconciliation establish
+new activity; the migration does not infer it.
+
+This path does **not** create the machine-bound pre-migration backup or phase journal used for
+task-bundle upgrades. Transaction rollback protects an uncommitted migration, not a committed
+logical migration error, later storage loss, or binary downgrade. Backup parity is a remaining
+catalog recovery limitation tracked under #496; the bundle upgrade's backup guarantees must not be
+claimed for the catalog. Startup owns migration before READY and closes its DDL connection before
+runtime work. The transactional regression tests do not establish competing-service or power-loss
+acceptance.
+
 The `repository_grouping_preferences` table is catalog-owned repository authority keyed by the
 privacy commitment. It stores only the auto-grouping bit and update timestamp, so a pre-birth
 opt-out remains durable without materializing an implicit `projects` row; project birth consumes

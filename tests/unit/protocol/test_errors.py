@@ -70,6 +70,7 @@ coordination_recipient_mismatch
 coordination_resource_count_invalid
 coordination_route_unavailable
 coordination_runtime_unavailable
+coordination_source_policy_denied
 coordination_source_unavailable
 coordination_task_pair_invalid
 coordination_tasks_not_canonical
@@ -480,7 +481,7 @@ def test_public_error_code_membership() -> None:
 def test_protocol_reason_registry_is_exact_and_import_order_independent() -> None:
     source_values = cast(tuple[str, ...], getattr(errors_module, "_PROTOCOL_REASON_CODE_VALUES"))
     assert source_values == _EXPECTED_REASON_CODES
-    assert len(source_values) == 282
+    assert len(source_values) == 283
     assert source_values == tuple(sorted(source_values, key=str.encode))
     assert len(source_values) == len(set(source_values))
     assert PROTOCOL_REASON_CODES == frozenset(_EXPECTED_REASON_CODES)

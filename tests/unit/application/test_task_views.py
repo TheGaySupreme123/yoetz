@@ -11,6 +11,10 @@ from unittest.mock import AsyncMock, call
 
 import pytest
 
+from yoetz.application.status import (
+    Application,
+    _lineage_readiness_gaps,  # pyright: ignore[reportPrivateUsage]
+)
 from yoetz.application.task_views import lineage_status_page
 from yoetz.domain.coordination import LineageAcceptance, LineageOrigin, SessionHealth, WorkState
 from yoetz.domain.values import Frontier, Timestamp
@@ -77,6 +81,16 @@ async def test_catalog_child_without_a_manifest_is_never_verified(
     assert item.origin.value == "self_registered"
     assert item.rollup_state.value == state
     assert item.blocking_conditions == blockers
+    catalog.task_lineage.side_effect = [parent, child]
+    assert (
+        await _lineage_readiness_gaps(
+            cast(Application, SimpleNamespace(start_catalog=catalog)),
+            runtime,
+            Frontier(0, "genesis"),
+            "req_53000000-0000-4000-8000-000000000001",
+        )
+        == blockers
+    )
 
 
 @pytest.mark.parametrize("count", [1, 101, 200])

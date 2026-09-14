@@ -90,6 +90,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "coordination_resource_count_invalid",
     "coordination_route_unavailable",
     "coordination_runtime_unavailable",
+    "coordination_source_policy_denied",
     "coordination_source_unavailable",
     "coordination_task_pair_invalid",
     "coordination_tasks_not_canonical",
@@ -335,7 +336,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 282
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 283
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)

@@ -224,6 +224,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         "application/json",
         True,
     ),
+    (
+        "fixtures/canonical/control-project-policy-2.7.case.json",
+        "canonical_vector",
+        "application/json",
+        True,
+    ),
     ("fixtures/canonical/identifiers.case.json", "canonical_vector", "application/json", True),
     ("fixtures/canonical/object-envelope.case.json", "canonical_vector", "application/json", True),
     (

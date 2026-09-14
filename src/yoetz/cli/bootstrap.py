@@ -68,6 +68,10 @@ _COORDINATION_CONTROL_GUIDANCE: Final[Mapping[str, str]] = MappingProxyType(
         "coordination_consent_required": (
             "obtain current source-workspace consent before retrying"
         ),
+        "coordination_source_policy_denied": (
+            "review the source task's coordination disclosure policy; workspace consent alone "
+            "does not authorize this flow"
+        ),
         "coordination_grant_required": "obtain the current project grant before retrying",
         "coordination_generation_revoked": (
             "refresh project status and grant, then retry with the current generation"

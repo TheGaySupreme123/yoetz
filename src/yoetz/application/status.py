@@ -6,7 +6,7 @@ import base64
 import hashlib
 import hmac
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final, Literal, Protocol, cast
 
 from pydantic import BaseModel
@@ -951,6 +951,8 @@ async def _closure_readiness(
     frontier: Frontier,
     compact_page: ProjectionPage | None = None,
     request_id: str | None = None,
+    *,
+    lineage_gaps: tuple[str, ...] = (),
 ) -> StatusClosureReadinessModel:
     """Derive what currently bounds a completion conclusion, from the compact projection.
 
@@ -1003,7 +1005,7 @@ async def _closure_readiness(
         has_plan = item.current_plan_event_id is not None
         no_obligations_reason = item.no_obligations_reason
         stale = page.rebuild_state != "current" or bool(page.lag)
-        declared_gaps = bool(page.gaps)
+        declared_gaps = bool(page.gaps or lineage_gaps)
     except (AttributeError, IndexError, TypeError, ValueError) as exc:
         record_unexpected_exception_without_raising(
             exc,
@@ -1050,6 +1052,43 @@ async def _closure_readiness(
             tuple(blocking),
         ),
     )
+
+
+async def _lineage_readiness_gaps(
+    app: Application, runtime: TaskRuntime, frontier: Frontier, request_id: str
+) -> tuple[str, ...]:
+    """Compare accepted catalog children with recorded facts without opening child bundles.
+
+    These are current advisory gaps only. Checks and receipts still replay service-stamped
+    manifests, and this read never refreshes one or awards verification to a live catalog row.
+    """
+
+    from yoetz.application.task_views import lineage_status_page
+
+    try:
+        if not await app.start_catalog.list_child_task_ids(runtime.task_id):
+            return ()
+        snapshot = await lineage_status_page(app.start_catalog, runtime, frontier)
+        return tuple(
+            sorted(
+                {
+                    gap
+                    for child in snapshot.children
+                    if child.acceptance == "accepted"
+                    for gap in child.blocking_conditions
+                }
+            )
+        )
+    except Exception as exc:
+        # A secondary read must neither strand operation recovery nor turn an unreadable
+        # dependency inventory into an apparently clean parent.
+        record_unexpected_exception_without_raising(
+            exc,
+            component="application.status",
+            operation="status_lineage_readiness_unavailable",
+            request_id=request_id,
+        )
+        return ("lineage_readiness_unavailable",)
 
 
 async def execute_status(
@@ -1403,8 +1442,20 @@ async def execute_status(
             lag = raw_page.lag
             projection_version = raw_page.projection_version
             rebuild_state = raw_page.rebuild_state
+        lineage_gaps = await _lineage_readiness_gaps(app, runtime, frontier, request.request_id)
+        if lineage_gaps:
+            gaps = tuple(sorted(set(gaps) | set(lineage_gaps)))
+            coverage = replace(
+                coverage,
+                known_gaps=tuple(sorted(set(coverage.known_gaps) | set(lineage_gaps))),
+                ledger_freshness=(
+                    LedgerFreshness.PARTIAL
+                    if coverage.ledger_freshness is LedgerFreshness.CURRENT
+                    else coverage.ledger_freshness
+                ),
+            )
         closure_readiness = await _closure_readiness(
-            runtime, frontier, compact_page, request.request_id
+            runtime, frontier, compact_page, request.request_id, lineage_gaps=lineage_gaps
         )
         return StatusInternalResult(
             "0.1",
