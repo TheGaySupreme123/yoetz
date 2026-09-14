@@ -50,6 +50,7 @@ def _copy_checkout(destination: Path) -> None:
     ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
     for relative in _CHECKOUT_TREES:
         shutil.copytree(_REPO_ROOT / relative, destination / relative, ignore=ignore)
+    shutil.copy2(_REPO_ROOT / "fixtures/manifest.json", destination / "fixtures/manifest.json")
 
 
 def _synthetic_checkout(root: Path, *, inventory_count: int, reviewed_count: int) -> None:
