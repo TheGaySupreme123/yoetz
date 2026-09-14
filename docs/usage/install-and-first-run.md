@@ -25,7 +25,7 @@ The npm command, `npx yoetz`, starts setup directly.
 The supported install path is Python via [`uv`](https://docs.astral.sh/uv/):
 
 ```text
-uv tool install --managed-python --python 3.14.6 "yoetz==0.1.0"
+uv tool install --managed-python --python 3.14.6 "yoetz==0.2.1"
 yoetz
 ```
 
@@ -86,7 +86,7 @@ every command except `yoetz version`, `--version`, and `--help` then refuses wit
    ```text
    curl -LsSf https://astral.sh/uv/install.sh | sh
    source "$HOME/.local/bin/env"
-   uv tool install --managed-python --python 3.14.6 "yoetz==0.1.0"
+   uv tool install --managed-python --python 3.14.6 "yoetz==0.2.1"
    yoetz
    ```
 

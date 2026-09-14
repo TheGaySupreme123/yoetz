@@ -71,7 +71,7 @@ source "$HOME/.local/bin/env"
 Then install Yoetz:
 
 ```text
-uv tool install --managed-python --python 3.14.6 "yoetz==0.1.0"
+uv tool install --managed-python --python 3.14.6 "yoetz==0.2.1"
 yoetz version
 ```
 

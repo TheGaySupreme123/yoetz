@@ -6,6 +6,12 @@ reverse-chronological released versions.
 
 ## Unreleased
 
+## 0.2.1 — 2026-09-14
+
+Patch release in the **0.2** public-alpha line, focused on significant Linux and WSL
+compatibility fixes. See [release notes](docs/releases/v0.2.1.md) for validation boundaries
+and known privacy-receipt CLI issues.
+
 ### Changed
 
 - The agent install guide (`docs/usage/agent-start.md`) now opens with a platform check — macOS
@@ -50,7 +56,8 @@ reverse-chronological released versions.
 
 ## 0.2.0 — 2026-09-11
 
-Official public-alpha package release. See [complete release notes](docs/releases/v0.2.0.md)
+Prepared 0.2 public-alpha baseline; superseded by 0.2.1 before tag or registry publication.
+See [complete baseline notes](docs/releases/v0.2.0.md)
 for host integration, observation selection and recovery, upgrade guidance, and known limitations.
 
 ### Changed
