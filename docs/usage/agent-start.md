@@ -68,10 +68,10 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 source "$HOME/.local/bin/env"
 ```
 
-Then install Yoetz:
+Then install the latest published Yoetz version:
 
 ```text
-uv tool install --managed-python --python 3.14.6 "yoetz==0.2.1"
+uv tool install --managed-python --python 3.14.6 yoetz
 yoetz version
 ```
 

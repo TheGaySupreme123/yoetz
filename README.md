@@ -77,8 +77,8 @@ carrying them after the fix: a later clean check never erases what was caught.
 # One-off run (needs uv: https://docs.astral.sh/uv/)
 uvx yoetz
 
-# Install from PyPI — the canonical distribution
-uv tool install --managed-python --python 3.14.6 "yoetz==0.2.1"
+# Install the latest published version from PyPI — the canonical distribution
+uv tool install --managed-python --python 3.14.6 yoetz
 
 # Via npm — a dependency-free launcher for the exact same PyPI package (needs uv)
 npx yoetz
