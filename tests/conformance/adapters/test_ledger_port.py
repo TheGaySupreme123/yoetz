@@ -19,7 +19,14 @@ from yoetz.adapters.memory.importer import MemoryImportState
 from yoetz.adapters.memory.ledger import MemoryLedgerAdapter, MemoryLedgerState
 from yoetz.adapters.sqlite.migrations import initialize_bundle
 from yoetz.adapters.sqlite.repository import SqliteLedger
-from yoetz.domain.events import CheckRecordedPayload, EventDraft, EventPayload, UnknownEvent
+from yoetz.domain.events import (
+    SEMANTIC_EVENT_SCHEMA_VERSION,
+    CheckRecordedPayload,
+    EventDraft,
+    EventPayload,
+    EventSchema,
+    UnknownEvent,
+)
 from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
     CheckVerdict,
@@ -27,6 +34,7 @@ from yoetz.domain.findings import (
     FindingKind,
     FindingOrigin,
     RankedFindings,
+    RuntimeTokenUsage,
     SemanticDispatchKind,
     SemanticFailureClass,
     SemanticProvenance,
@@ -1300,6 +1308,12 @@ async def test_commit_check_if_current_contract() -> None:
         )
         assert result.outcome == "committed"
         results.append(result)
+        committed = [
+            row.schema
+            async for row in adapter.load_events(command.session_id)
+            if row.schema.name == "check_recorded"
+        ]
+        assert committed == [EventSchema("check_recorded", SEMANTIC_EVENT_SCHEMA_VERSION)]
     assert results[0] == results[1]
 
 
@@ -1874,6 +1888,147 @@ async def test_semantic_attempt_selection_contract() -> None:
         assert attempts[0].state == "selected"
         assert attempts[0].attempt_id == selected[-1].attempt_id
     assert selected[0] == selected[1]
+
+
+@pytest.mark.anyio
+async def test_semantic_attempt_usage_survives_retry_and_sqlite_restart() -> None:
+    """Every physical attempt keeps its bounded counters, including failed/retried rows."""
+
+    command = ledger_command(request_suffix="b")
+    usage_one = RuntimeTokenUsage(120, 60, 10, 30, 8, 150)
+    usage_two = RuntimeTokenUsage(240, 120, 20, 40, 12, 280)
+    for adapter in (memory_ledger(command), sqlite_ledger(command)):
+        await adapter.append_batch(command)
+        lease = await _semantic_wait_lease(
+            adapter, command, "req_00000000-0000-4000-8000-0000000000bb"
+        )
+        case_ref = await _object_ref(
+            adapter,
+            command,
+            ObjectKind.SEMANTIC_CASE,
+            semantic_case_digest="sha256:" + "b" * 64,
+        )
+        job = await adapter.enqueue_semantic_job(lease, "sha256:" + "b" * 64, case_ref)
+        first = await adapter.claim_semantic_job(lease, job.job_id)
+        if isinstance(adapter, SqliteLedger):
+            with pytest.raises(apsw.ConstraintError):
+                adapter._db.execute(  # pyright: ignore[reportPrivateUsage]
+                    "UPDATE semantic_attempts SET usage_total_tokens=1 WHERE attempt_id=?",
+                    (first.attempt_id,),
+                )
+            with pytest.raises(apsw.ConstraintError):
+                adapter._db.execute(  # pyright: ignore[reportPrivateUsage]
+                    "UPDATE semantic_attempts SET usage_input_tokens=?,"
+                    "usage_cached_input_tokens=?,usage_cache_write_input_tokens=?,"
+                    "usage_output_tokens=?,usage_reasoning_output_tokens=?,"
+                    "usage_total_tokens=? WHERE attempt_id=?",
+                    (
+                        usage_one.input_tokens,
+                        usage_one.cached_input_tokens,
+                        usage_one.cache_write_input_tokens,
+                        usage_one.output_tokens,
+                        usage_one.reasoning_output_tokens,
+                        usage_one.total_tokens,
+                        first.attempt_id,
+                    ),
+                )
+        await adapter.record_attempt_outcome(
+            first,
+            AttemptOutcome.EXPIRED,
+            terminal_code=SemanticReason.PROVIDER_TIMEOUT,
+            token_usage=usage_one,
+        )
+        second = await adapter.claim_semantic_job(lease, job.job_id)
+        await adapter.record_attempt_outcome(
+            second,
+            AttemptOutcome.FAILED,
+            terminal_code=SemanticReason.TRANSPORT_UNAVAILABLE,
+            token_usage=usage_two,
+        )
+
+        if isinstance(adapter, SqliteLedger):
+            restarted = SqliteLedger(
+                db=adapter._db,  # pyright: ignore[reportPrivateUsage]
+                task_id=command.task_id,
+                ownership_fence=_fence(),
+                clock=adapter._clock,  # pyright: ignore[reportPrivateUsage]
+                ids=adapter._ids,  # pyright: ignore[reportPrivateUsage]
+                objects=adapter._objects,  # pyright: ignore[reportPrivateUsage]
+            )
+        else:
+            restarted = adapter
+        rows = await restarted.list_semantic_attempts(job.job_id)
+        assert [(row.state, row.token_usage) for row in rows] == [
+            ("expired", usage_one),
+            ("failed", usage_two),
+        ]
+
+
+@pytest.mark.anyio
+async def test_sqlite_recovery_with_queued_semantic_job_has_no_attempt_rows() -> None:
+    """Recovery keeps a queued job valid when no physical attempt was claimed yet."""
+
+    command = ledger_command(request_suffix="c")
+    adapter = sqlite_ledger(command)
+    await adapter.append_batch(command)
+    lease = await _semantic_wait_lease(adapter, command, "req_00000000-0000-4000-8000-0000000000cc")
+    case_ref = await _object_ref(
+        adapter,
+        command,
+        ObjectKind.SEMANTIC_CASE,
+        semantic_case_digest="sha256:" + "c" * 64,
+    )
+    job = await adapter.enqueue_semantic_job(lease, "sha256:" + "c" * 64, case_ref)
+    restarted = SqliteLedger(
+        db=adapter._db,  # pyright: ignore[reportPrivateUsage]
+        task_id=command.task_id,
+        ownership_fence=_fence(),
+        clock=adapter._clock,  # pyright: ignore[reportPrivateUsage]
+        ids=adapter._ids,  # pyright: ignore[reportPrivateUsage]
+        objects=adapter._objects,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    recovered = await restarted.load_semantic_job(command.writer_id, lease.operation_id)
+    assert recovered is not None and recovered.job_id == job.job_id
+    assert recovered.state == "queued"
+    assert await restarted.list_semantic_attempts(job.job_id) == ()
+
+
+@pytest.mark.anyio
+async def test_sqlite_recovery_rehydrates_disclosure_wait_with_attempt() -> None:
+    """Recovery restores the wait side table alongside its still-started attempt."""
+
+    command = ledger_command(request_suffix="d")
+    adapter = sqlite_ledger(command)
+    await adapter.append_batch(command)
+    lease = await _semantic_wait_lease(adapter, command, "req_00000000-0000-4000-8000-0000000000dd")
+    case_ref = await _object_ref(
+        adapter,
+        command,
+        ObjectKind.SEMANTIC_CASE,
+        semantic_case_digest="sha256:" + "d" * 64,
+    )
+    job = await adapter.enqueue_semantic_job(lease, "sha256:" + "d" * 64, case_ref)
+    handle = await adapter.claim_semantic_job(lease, job.job_id)
+    expiry = datetime(2026, 7, 19, 12, 1, tzinfo=UTC)
+    pending_id = "ppr_00000000-0000-4000-8000-0000000000dd"
+    await adapter.record_disclosure_wait(handle, pending_id, expiry)
+    restarted = SqliteLedger(
+        db=adapter._db,  # pyright: ignore[reportPrivateUsage]
+        task_id=command.task_id,
+        ownership_fence=_fence(),
+        clock=adapter._clock,  # pyright: ignore[reportPrivateUsage]
+        ids=adapter._ids,  # pyright: ignore[reportPrivateUsage]
+        objects=adapter._objects,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    recovered = await restarted.load_semantic_job(command.writer_id, lease.operation_id)
+    assert recovered is not None and recovered.job_id == job.job_id
+    attempts = await restarted.list_semantic_attempts(job.job_id)
+    assert len(attempts) == 1 and attempts[0].state == "started"
+    wait = await restarted.load_disclosure_wait(command.writer_id, lease.operation_id)
+    assert wait is not None
+    assert wait.state == "awaiting" and wait.pending_id == pending_id
 
 
 @pytest.mark.anyio

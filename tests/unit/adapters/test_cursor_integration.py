@@ -22,6 +22,7 @@ from yoetz.adapters.integrations.cursor_integration import (
     apply_cursor_plugin,
     build_cursor_sdk_profile,
     discover_cursor_cli,
+    discover_cursor_ide,
     discover_cursor_sdk,
     observe_cursor_mcp,
     preview_cursor_plugin,
@@ -1446,6 +1447,18 @@ def test_cursor_cli_discovery_normalizes_empty_and_invalid_utf8_identity(
 
     with pytest.raises(ValueError, match="^cursor_cli_identity_invalid$"):
         discover_cursor_cli(executable)
+
+
+def test_cursor_ide_discovery_names_the_platform_outside_a_macos_bundle(tmp_path: Path) -> None:
+    """A Linux Cursor (AppImage or .deb) has no Info.plist; say so by platform (issue #722)."""
+
+    install_root = tmp_path / "cursor"
+    install_root.mkdir()
+
+    with pytest.raises(ValueError, match="^cursor_ide_platform_unsupported$"):
+        discover_cursor_ide(install_root, system="Linux")
+    with pytest.raises(ValueError, match="^cursor_ide_unavailable$"):
+        discover_cursor_ide(install_root, system="Darwin")
 
 
 def test_unreadable_mcp_configuration_is_ambiguous_not_absent(tmp_path: Path) -> None:

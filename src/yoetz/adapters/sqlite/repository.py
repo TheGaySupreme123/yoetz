@@ -37,7 +37,7 @@ from yoetz.domain.events import (
     accepted_record_to_json,
     decode_payload,
 )
-from yoetz.domain.findings import RankedFindings, SemanticProvenance, rank_key
+from yoetz.domain.findings import RankedFindings, RuntimeTokenUsage, SemanticProvenance, rank_key
 from yoetz.domain.values import (
     Actor,
     ActorType,
@@ -1155,7 +1155,9 @@ class SqliteLedger:
 
             for attempt_row in self._db.execute(
                 "SELECT attempt_id,job_id,attempt_ordinal,provider_request_id,owner_generation,"
-                "lease_owner_id,lease_generation,state,result_object_id,terminal_code,started_at "
+                "lease_owner_id,lease_generation,state,result_object_id,terminal_code,started_at,"
+                "usage_input_tokens,usage_cached_input_tokens,usage_cache_write_input_tokens,"
+                "usage_output_tokens,usage_reasoning_output_tokens,usage_total_tokens "
                 "FROM semantic_attempts WHERE job_id IN ("
                 "SELECT job_id FROM semantic_jobs AS jobs WHERE EXISTS ("
                 "SELECT 1 FROM operations AS operations "
@@ -1175,6 +1177,12 @@ class SqliteLedger:
                     attempt_result_object_id,
                     attempt_terminal_code,
                     attempt_started_at,
+                    usage_input_tokens,
+                    usage_cached_input_tokens,
+                    usage_cache_write_input_tokens,
+                    usage_output_tokens,
+                    usage_reasoning_output_tokens,
+                    usage_total_tokens,
                 ) = attempt_row
                 try:
                     job = self._state.jobs[cast(str, attempt_job_id)]
@@ -1191,6 +1199,22 @@ class SqliteLedger:
                             "application/vnd.yoetz.semantic-response+json",
                         )
                     )
+                    usage_values = (
+                        usage_input_tokens,
+                        usage_cached_input_tokens,
+                        usage_cache_write_input_tokens,
+                        usage_output_tokens,
+                        usage_reasoning_output_tokens,
+                        usage_total_tokens,
+                    )
+                    if all(value is None for value in usage_values):
+                        token_usage = None
+                    elif any(value is None for value in usage_values):
+                        raise ValueError("semantic_attempt_usage_partial")
+                    elif any(type(value) is not int for value in usage_values):
+                        raise ValueError("semantic_attempt_usage_type")
+                    else:
+                        token_usage = RuntimeTokenUsage(*cast(tuple[int, ...], usage_values))
                     handle = SemanticAttemptHandle(
                         job.job_id,
                         cast(str, attempt_id_value),
@@ -1213,6 +1237,7 @@ class SqliteLedger:
                         if attempt_terminal_code is None
                         else SemanticReason(cast(str, attempt_terminal_code)),
                         parse_rfc3339_millis(cast(str, attempt_started_at)),
+                        token_usage,
                     )
                 except (KeyError, TypeError, ValueError) as exc:
                     raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
@@ -1404,11 +1429,19 @@ class SqliteLedger:
             self._db.execute(
                 "INSERT INTO semantic_attempts(attempt_id,job_id,attempt_ordinal,"
                 "provider_request_id,owner_generation,lease_owner_id,lease_generation,state,"
-                "result_object_id,terminal_code,started_at,terminal_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+                "result_object_id,terminal_code,started_at,terminal_at,"
+                "usage_input_tokens,usage_cached_input_tokens,usage_cache_write_input_tokens,"
+                "usage_output_tokens,usage_reasoning_output_tokens,usage_total_tokens) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(attempt_id) DO UPDATE SET "
                 "state=excluded.state,result_object_id=excluded.result_object_id,"
                 "terminal_code=excluded.terminal_code,"
+                "usage_input_tokens=excluded.usage_input_tokens,"
+                "usage_cached_input_tokens=excluded.usage_cached_input_tokens,"
+                "usage_cache_write_input_tokens=excluded.usage_cache_write_input_tokens,"
+                "usage_output_tokens=excluded.usage_output_tokens,"
+                "usage_reasoning_output_tokens=excluded.usage_reasoning_output_tokens,"
+                "usage_total_tokens=excluded.usage_total_tokens,"
                 "terminal_at=COALESCE(semantic_attempts.terminal_at,excluded.terminal_at)",
                 (
                     handle.attempt_id,
@@ -1427,6 +1460,18 @@ class SqliteLedger:
                     if attempt.started_at is None
                     else format_rfc3339_millis(attempt.started_at),
                     now if attempt.state in {"selected", "failed", "expired", "late"} else None,
+                    None if attempt.token_usage is None else attempt.token_usage.input_tokens,
+                    None
+                    if attempt.token_usage is None
+                    else attempt.token_usage.cached_input_tokens,
+                    None
+                    if attempt.token_usage is None
+                    else attempt.token_usage.cache_write_input_tokens,
+                    None if attempt.token_usage is None else attempt.token_usage.output_tokens,
+                    None
+                    if attempt.token_usage is None
+                    else attempt.token_usage.reasoning_output_tokens,
+                    None if attempt.token_usage is None else attempt.token_usage.total_tokens,
                 ),
             )
         for wait in self._state.disclosure_waits.values():
@@ -2213,10 +2258,11 @@ class SqliteLedger:
         outcome: AttemptOutcome,
         result_object_ref: ObjectRef | None = None,
         terminal_code: SemanticReason | None = None,
+        token_usage: RuntimeTokenUsage | None = None,
     ) -> None:
         await self._ensure_recovered()
         await self._oracle().record_attempt_outcome(
-            handle, outcome, result_object_ref, terminal_code
+            handle, outcome, result_object_ref, terminal_code, token_usage
         )
         await self._sync_after_mutation()
 

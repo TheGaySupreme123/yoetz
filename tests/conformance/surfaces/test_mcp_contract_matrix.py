@@ -289,8 +289,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:11517493c1f0bbfe6c4b2a9a285ce993dbbc1d8516bcbb2fde6e7e6e62e67933",
-        "strict": "sha256:f9a479b4e0f9e771b4c29f93f6a7e7da4f4e066b02a1dab5dcc42c89b39acf6f",
+        "policy": "sha256:948fc316b409c98d76ede64cf1a4ab51e1ead1c24480e62755e349d60106fcb2",
+        "strict": "sha256:96048c04d296b24666812ce28f907655688ea3b44f782d6cf282be6624dd0de0",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -336,12 +336,12 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert publish_descriptor.input_schema_ref.endswith("publish-work-request-1.1.0.schema.json")
     assert publish_descriptor.output_schema_ref.endswith("publish-work-result-1.0.0.schema.json")
     check_descriptor = descriptor_for("check")
-    assert check_descriptor.output_schema_ref.endswith("check-result-1.1.0.schema.json")
+    assert check_descriptor.output_schema_ref.endswith("check-result-1.2.0.schema.json")
     status_descriptor = descriptor_for("status")
     assert status_descriptor.input_schema_ref.endswith("status-request-1.1.0.schema.json")
-    assert status_descriptor.output_schema_ref.endswith("status-result-1.2.0.schema.json")
+    assert status_descriptor.output_schema_ref.endswith("status-result-1.3.0.schema.json")
     receipt_descriptor = descriptor_for("receipt")
-    assert receipt_descriptor.output_schema_ref.endswith("receipt-result-1.1.0.schema.json")
+    assert receipt_descriptor.output_schema_ref.endswith("receipt-result-1.2.0.schema.json")
     for descriptors in TOOL_DESCRIPTORS.values():
         assert {item.name for item in descriptors if item.annotations.read_only} == {
             "status",
@@ -482,6 +482,11 @@ def _subscription_provenance() -> dict[str, Any]:
         "semantic_attempt_id": _subscription_id("att_", 1),
         "dispatch_kind": "external_runtime_oauth",
         "privacy_receipt_id": _subscription_id("egr_", 2),
+        "token_usage": {
+            "input_tokens": "103",
+            "output_tokens": "19",
+            "total_tokens": "122",
+        },
         "status": "succeeded",
         "reason": "semantic_completed",
         "egress_authorization_id": _subscription_id("aut_", 3),
@@ -511,6 +516,14 @@ def _subscription_provenance() -> dict[str, Any]:
             "thread_id": "thread-1",
             "turn_id": "turn-1",
             "final_output_sha256": _SUBSCRIPTION_DIGEST,
+            "token_usage": {
+                "cached_input_tokens": "101",
+                "cache_write_input_tokens": "17",
+                "input_tokens": "103",
+                "output_tokens": "19",
+                "reasoning_output_tokens": "11",
+                "total_tokens": "122",
+            },
         },
     }
 
@@ -647,8 +660,8 @@ def _subscription_receipt_result() -> dict[str, Any]:
                 {"policy_id": "work-integrity", "policy_version": "0.1.0"},
             ],
             "schema_versions": [
-                {"schema_id": "findings/finding", "schema_version": "1.1.0"},
-                {"schema_id": "receipts/receipt-document", "schema_version": "1.1.0"},
+                {"schema_id": "findings/finding", "schema_version": "1.2.0"},
+                {"schema_id": "receipts/receipt-document", "schema_version": "1.2.0"},
             ],
             "resource_manifest_digest": _SUBSCRIPTION_DIGEST,
         },
@@ -693,6 +706,7 @@ def _subscription_receipt_result() -> dict[str, Any]:
                 "items": [],
             },
         ],
+        "semantic_provenance": _subscription_provenance(),
     }
     return {
         "protocol_version": "0.1",

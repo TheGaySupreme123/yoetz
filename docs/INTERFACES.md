@@ -716,8 +716,10 @@ usage, cost, and failure facts; semantic-attempt ID; dispatch kind; exactly one 
 authorization or local-disclosure reservation; durable privacy-receipt ID; external request
 commitment when applicable; and the validated terminal status/reason pair. The exact Python fields
 and wire conversions are frozen in `domain/findings.md` and
-`semantic-provenance-1.0.0.schema.json`; the append-only external-runtime extension is frozen in
-`semantic-provenance-1.1.0.schema.json` and `runtime-attempt-evidence-1.0.0.schema.json`. The
+`semantic-provenance-1.0.0.schema.json`; the append-only external-runtime extension is carried by
+current `semantic-provenance-1.2.0.schema.json` and `runtime-attempt-evidence-1.1.0.schema.json`,
+while the released `semantic-provenance-1.1.0.schema.json` and
+`runtime-attempt-evidence-1.0.0.schema.json` remain readable. The
 same append-only `1.1.0` carries the optional `fallback_from` object (issue #582) — `provider`,
 `endpoint_profile_id`, `endpoint_profile_version`, `model`, `attempted_count`, `reason` —
 present exactly when the declared fallback endpoint served the attempt; the top-level
@@ -740,6 +742,17 @@ attempt provenance remains valid check accounting but can never justify a semant
 `finding_from_json`/`finding_to_json` and
 `semantic_provenance_from_json`/`semantic_provenance_to_json` are the sole codecs. The finding
 event alias delegates to them; no event, port, Pydantic model, or adapter owns a parallel dump.
+
+Codex subscription-runtime attempts may carry a bounded `runtime_evidence.token_usage` object in
+the current runtime evidence schema. It records one cumulative `total` snapshot as non-overlapping
+`input_tokens`, `output_tokens`, and `total_tokens`, plus the `cached_input_tokens`,
+`cache_write_input_tokens`, and `reasoning_output_tokens` counters for analysis. Cached input and
+reasoning output are subsets and are never added again; cache-write input remains a separate
+provider counter with no assumed arithmetic relationship. Repeated snapshots are replaced rather
+than summed. Missing usage remains absent, and malformed or regressing matching snapshots leave a
+closed `token_usage_invalid` diagnostic without invalidating an otherwise valid semantic judgment.
+Only the exact active thread and turn are accepted, and no account identifiers or raw provider
+notification body is retained.
 
 Work-integrity finding kinds (`FindingKind`):
 `completion_with_open_obligations`, `requested_item_never_attempted`,
@@ -852,7 +865,12 @@ policy/schema version entries, obligation/response/gap/redaction records, and ca
 It owns receipt-only enums; response disposition and waiver scope reuse `domain/findings.py`, and
 the boundary `ReceiptRedactionProfile` reuses `protocol/models.py`. The document field inventory
 is exactly the receipt-document schema, including `suppressed_finding_count`, and it has no
-post-append result frontier.
+post-append result frontier. An applicable semantic check contributes its selected
+  `semantic_provenance`, including bounded per-attempt token usage; deterministic or historical
+  receipts omit that optional field so their prior bytes remain unchanged.
+  The receipt provenance represents the applicable provider result; usage for failed, expired, or
+  late physical retries remains in the durable semantic-attempt ledger and internal accounting,
+  rather than being invented into that public provenance.
 
 `receipt_document_from_json`/`receipt_document_to_json` are the sole document codecs.
 `render_receipt_compact(document) -> str` returns one bounded string; there is no v0.1
@@ -1135,9 +1153,12 @@ coverage.
   versions: ReceiptVersionSlice, redaction_profile, include) -> ReceiptDocument`. Every
   nondeterministic input is explicit; the
   builder reads no clock or ID source. `ReceiptDocument` contains its identity, generation time,
-  subject frontier, and exact nonnegative `suppressed_finding_count` from the applicable latest
-  check, but not the post-append result frontier (which would create a digest
-  self-reference). `ReceiptResult` carries both subject and post-commit result frontiers.
+  subject frontier, exact nonnegative `suppressed_finding_count`, and optional
+  `semantic_provenance` from the applicable latest check, but not the post-append result frontier
+  (which would create a digest self-reference). When no applicable semantic attempt exists, the
+  receipt omits that field, preserving historical deterministic receipt bytes. `ReceiptResult`
+  carries both subject and post-commit result frontiers. The provenance and token counters name
+  that selected semantic attempt; they are not a sum across retries or recovery attempts.
 - Receipt boundary tokens are closed: `ReceiptFormat` is `json|markdown|text`, `ReceiptInclude`
   is `summary|standard|full`, and `ReceiptRedactionProfile` is
   `full_local|default_local_export|redacted_share`. `include` changes only the registered section
@@ -1150,10 +1171,11 @@ coverage.
   selected text field; `default_local_export` clears obligation summaries and receipt-gap details
   but retains finding text and response reasons; `redacted_share` additionally omits semantic
   finding rows and rejected/waived response rows while retaining deterministic ID-only findings,
-  acknowledged responses, structural IDs, conclusion, coverage, gaps, and versions. Every omitted
-  protected content leaf is counted once in the sorted `ReceiptRedaction` rows; omitted structural
-  IDs and enum/relation fields are not content-redaction counts. Sections are regenerated only
-  from retained structural values and fixed templates; they never copy omitted text. Therefore a
+  acknowledged responses, structural IDs, conclusion, coverage, gaps, versions, and the bounded
+  semantic provenance/token-usage counters. Every omitted protected content leaf is counted once
+  in the sorted `ReceiptRedaction` rows; omitted structural IDs and enum/relation fields are not
+  content-redaction counts. Sections are regenerated only from retained structural values and
+  fixed templates; they never copy omitted text. Therefore a
   profile/include transform that changes selected fields or sections changes the canonical
   document and digest; it is not a render-only rewrite. Conclusion, subject frontier, suppression,
   weakest coverage, and material gap codes are invariant and may only stay equal or weaken.
@@ -2488,7 +2510,20 @@ sidecar must contain a valid `prepared_case_digest`: missing or malformed values
 and never authorize a fresh attempt (issue #626).
 Internal `PrivacyAuditPort.get_receipt`/`list_receipts` queries project bounded structural views
 only through the ordinary CLI/UI control methods `privacy_receipts_get` and
-`privacy_receipts_list`; the port names are not wire aliases and MCP has no access.
+`privacy_receipts_list`; the port names are not wire aliases and MCP has no access. Both methods
+are bound by `build_privacy_support_handlers` whenever the privacy application is composed, so a
+ready service answers them rather than `method_forbidden` (issue #730). Their bodies carry
+`schema_version` `1.0.0`: `get` takes `receipt_id` and answers `outcome` `found` with one
+`receipt` wrapper or `outcome` `not_found`; `list` takes `filters`, `page_size` (1–100) and an
+optional `cursor` and answers `snapshot_generation`, `receipts`, and `next_cursor` only when
+another page exists. Each wrapper names its `kind` (`local_disclosure` or `network_egress`) and
+carries the receipt in the `privacy/egress-receipt-1.0.0` vocabulary: every counter and version
+is a decimal string, optional fields are absent rather than null. Unknown or malformed keys,
+filters, page sizes, cursors, and receipt IDs are `invalid_request`; a cursor minted for a
+different query is the same non-retryable rejection. Both audit adapters project stored network
+egress receipts as well as local disclosure receipts, so a completed subscription review is
+retrievable by its recorded receipt ID and listable by `channel`, `provider_id`, or
+`endpoint_profile_id`.
 `PrivacyAuditPort.list_pending_disclosures(audience) -> PendingDisclosurePage` projects only
 `PendingDisclosureEntry(pending_id, task_id, expires_at)` for proposals in `awaiting_human` or
 `reserved` whose `expires_at` has not passed, over the ordinary CLI/UI control method
@@ -4470,6 +4505,32 @@ policy, timeout, malformed output, nonzero exit, non-macOS hosts, or binding mis
 `UserPresencePort` and grants no authority for vault, credential, privacy, setup, or another
 plugin operation.
 
+The cell is selected per platform by `select_artifact_user_presence`
+(`adapters/integrations/artifact_presence.py`), shared by the Cursor and Claude Code lifecycles,
+and every host `preview` reports the selection as `authorization.human_presence` with `mechanism`
+(`macos_local_authentication`, `linux_pam_trusted_console`, or `unsupported`), `platform`
+(`sys.platform`), `ingress` (`os_dialog`, `trusted_console`, or null), and `supported`, next to
+the unchanged `requires_os_authenticated_prompt`. On Linux, including a distribution under WSL 2,
+`LinuxArtifactUserPresence` (`linux_artifact_presence.py`) writes a banner naming
+`plugin_artifact_apply`, the full preview digest, and the pending review ID to the ADR-008
+trusted foreground console, reads the invoking account's operating-system password there once
+with echo disabled, and verifies it through Linux-PAM (`libpam.so.0`, fixed service `login`,
+`PAM_DISALLOW_NULL_AUTHTOK`) followed by `pam_acct_mgmt`; an unprivileged process can only ever
+verify its own account through `unix_chkpwd`. The console is ingress, never authority. Exactly
+one hidden prompt is answered; an echoed, repeated, or unknown prompt, cancellation, EOF, an
+empty or wrong password, a locked or expired account, a missing PAM stack, no verified console
+(an agent's pipe, redirected stdio, or a background process group), or the 130-second deadline
+becomes `human_authority_unavailable` before the pending is claimed, and operating-system prompt
+or error text is never reflected. An unsupported platform fails closed with the same reason.
+Neither cell is the service-wide `UserPresencePort`.
+
+Linux PAM deadline implementation (issue #719): the trusted console process retains password
+input and terminal restoration, while a disposable Python worker performs the native PAM calls.
+The bounded password travels through an anonymous pipe only. The parent kills and reaps its
+worker on timeout or cancellation; a blocked PAM module cannot defer the parent deadline.
+No PAM prompt or error output is forwarded. Empty, overlong, and NUL-containing passwords are
+refused before launching the worker.
+
 Install and remove replays are idempotent at the selected state: a committed operation whose
 result was lost reconciles instead of refusing, touching no bytes and consuming no second review.
 Replace is deliberately not reconciled — the accepted digest bound the pre-commit tree, which the
@@ -4644,20 +4705,22 @@ and `host_activation` is proven only when a validated session observation coinci
 installed bytes, discovery, marketplace registration, and enabled state — a session init alone (for
 example a development `--plugin-dir` run) earns no marketplace-installed activation proof.
 
-Every mutation consumes the exact `plugin_artifact_apply` pending plus scoped OS-authenticated
-presence; `--accept` alone is not authority. Install generates/safely swaps only the private source,
-adds the project marketplace, and asks Claude to install the qualified plugin; exact read-back must
-show disabled default and matching cache/version. Update requires a marker-valid source/discovered
-install, replaces only managed source bytes, then invokes marketplace/plugin update. Enable and
-disable alter only Claude's effective project setting. Remove invokes qualified project uninstall
-with `--keep-data`, removes the project marketplace, and deletes only exact marker-valid source.
-Replacement and removal revalidate the displaced tree after it is renamed out of the public path —
-when nothing can swap it any more — and destroy only a marker-valid managed tree; content created or
-modified during the authority or host-command window is restored untouched and the mutation refused.
-Any post-mutation state the independent read-back cannot confirm is `outcome_unknown` regardless of
-the subprocess exit code (`refused` describes only safe pre-mutation rejection); status surfaces
-leftover stage/rollback material as `recovery_required` with `outcome_unknown`, and
-no host-owned settings/cache rollback is guessed.
+Every mutation consumes the exact `plugin_artifact_apply` pending plus the per-platform scoped
+OS-authenticated presence cell described for Cursor above (macOS LocalAuthentication, Linux and WSL
+2 PAM through the trusted console, otherwise fail closed); `--accept` alone is not authority.
+Install generates/safely swaps only the private source, adds the project marketplace, and asks
+Claude to install the qualified plugin; exact read-back must show disabled default and matching
+cache/version. Update requires a marker-valid source/discovered install, replaces only managed
+source bytes, then invokes marketplace/plugin update. Enable and disable alter only Claude's
+effective project setting. Remove invokes qualified project uninstall with `--keep-data`, removes
+the project marketplace, and deletes only exact marker-valid source. Replacement and removal
+revalidate the displaced tree after it is renamed out of the public path — when nothing can swap it
+any more — and destroy only a marker-valid managed tree; content created or modified during the
+authority or host-command window is restored untouched and the mutation refused. Any post-mutation
+state the independent read-back cannot confirm is `outcome_unknown` regardless of the subprocess
+exit code (`refused` describes only safe pre-mutation rejection); status surfaces leftover
+stage/rollback material as `recovery_required` with `outcome_unknown`, and no host-owned
+settings/cache rollback is guessed.
 
 `ClaudeCodeMcpSource` is exactly
 `local|project|user|plugin|claude_ai_connector`, ordered by Claude precedence. Observation reads

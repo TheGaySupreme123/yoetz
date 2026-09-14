@@ -7,13 +7,14 @@ resource is refused rather than silently accepted.
 
 Scope notes (documented rather than silently narrowed):
 
-* This host is macOS arm64 (``macosx_11_0_arm64``), one of the two v0.1 advertised platform cells.
-  The other advertised cell (``manylinux_2_28_x86_64``) and every negative Python-patch/OS/ABI/
-  filesystem mutation cell require a second real runner or fixture build this single-machine agent
-  session does not have (per this file's own spec: "cannot monkeypatch only reported strings;
-  test uses real alternate fixture builds ... whose production denial is proven"). Those cells are
-  skipped with an explicit reason rather than asserted against a fabricated environment, consistent
-  with "Unknown future patch/platform is untested, not presumed compatible."
+* The suite runs on whichever ADR-007 advertised cell hosts it — macOS arm64
+  (``macosx_11_0_arm64``) or glibc Linux x86-64 (``manylinux_2_28_x86_64``) — and proves only that
+  cell (issue #725). The complementary advertised cell and every negative Python-patch/OS/ABI/
+  filesystem mutation cell require a second real runner or fixture build that one host does not
+  have (per this file's own spec: "cannot monkeypatch only reported strings; test uses real
+  alternate fixture builds ... whose production denial is proven"). Those cells are skipped with an
+  explicit reason rather than asserted against a fabricated environment, consistent with "Unknown
+  future patch/platform is untested, not presumed compatible."
 * The negative "unsafe/unknown identity fails before durable mutation" invariant is instead proven
   for real via resource-integrity corruption: flipping one byte of an installed schema resource
   after a real install makes the installed package's own manifest-verification path fail, which is
@@ -334,19 +335,20 @@ def test_one_byte_resource_corruption_fails_deep_resource_verification(
 
 
 @pytest.mark.skipif(
-    sys.platform != "darwin" or platform.machine() != "arm64",
-    reason="only meaningful as the complementary matrix cell from a macOS arm64 runner",
+    not _is_advertised_host(),
+    reason="only meaningful as the complementary matrix cell from an advertised-cell runner",
 )
 @pytest.mark.skip(
     reason=(
-        "The manylinux_2_28_x86_64 advertised cell requires a second real Linux x86-64 runner. "
-        "This single-machine agent session has no such runner and this file must not fabricate "
-        "one via emulation/monkeypatching (spec: 'test uses real alternate fixture builds ... "
-        "whose production denial is proven'). Narrowing to the available host cell is explicitly "
-        "permitted by this suite's own 'narrowing support is allowed' policy."
+        "The complementary advertised cell (manylinux_2_28_x86_64 from a macOS arm64 runner, "
+        "macosx_11_0_arm64 from a Linux x86-64 runner) requires a second real runner. One host "
+        "cannot fabricate the other via emulation/monkeypatching (spec: 'test uses real "
+        "alternate fixture builds ... whose production denial is proven'). Narrowing to the "
+        "available host cell is explicitly permitted by this suite's own 'narrowing support is "
+        "allowed' policy."
     )
 )
-def test_manylinux_x86_64_cell_is_unavailable_on_this_runner() -> None:
+def test_complementary_advertised_cell_is_unavailable_on_this_runner() -> None:
     raise AssertionError("unreachable: skipped")
 
 

@@ -262,13 +262,43 @@ and unreviewed event failures stay terminal but are unavailable rather than inva
 The runbook records the exact new cell digest and synthetic evidence boundary. Existing bindings
 require explicit setup to accept the new identity; no privacy authority migrates implicitly.
 
+### Linux x86_64 cell amendment (2026-09-13, issue #716)
+
+The same evaluator contract now has a separate Linux x86_64 implementation cell for Codex npm
+`0.150.1-linux-x64` (`@openai/codex-linux-x64`). Its native executable, source identity, package
+layout, platform, and capability-cell digest are distinct from the macOS arm64 cell; its
+app-server v2 schema, isolated configuration, model/reasoning contract, OAuth authority, and
+privacy/cleanup fences remain identical. An x86_64 WSL2 Linux userspace is eligible for the Linux
+cell, but WSL-specific smoke evidence is pending; this amendment creates no native Windows cell.
+The Linux cell remains an implementation candidate until its packaged Yoetz lifecycle and
+semantic-receipt evidence is complete. The empty `runtime-support.json` arrays therefore remain
+unchanged.
+
 The gateway issues a secret-free, dispatch-bound `ExternalRuntimeAuthority` instead of minting a
 vault handle. The runtime may receive only the already-approved canonical case through stdin. Its
 `RuntimeAttemptEvidence` commits to the disclosed case, instruction, output schema, launcher,
 configuration, executable, protocol, capability, model/reasoning selection, safe correlation,
 terminal output digest, and process cleanup. It explicitly records
 `upstream_body_observability=unavailable`; the disclosed-case commitment must never be described as
-the upstream OpenAI body.
+the upstream OpenAI body. Current runtime evidence may also record the Codex app-server's bounded
+cumulative token snapshot for that exact thread and turn: input/output/total counters plus cached
+input and reasoning-output subsets, with cache-write input retained as a separate provider
+counter. Repeated cumulative updates replace one another; they are never summed, and missing,
+malformed, unrelated, or regressing updates remain
+unknown or become a bounded `token_usage_invalid` diagnostic. Account identifiers and raw provider
+notification bodies never enter provenance.
+
+For the same reason, each observed `RuntimeTokenUsage` sample is copied into the corresponding
+`semantic_attempts` ledger row as six bounded numeric counters before the attempt is closed. The
+nullable columns preserve older ledgers and keep cache-write and reasoning subsets separate; a
+partial or invariant-breaking sample fails closed. Internal attempt accounting for an operation
+that is still in flight can thus recover usage for selected, failed, and expired physical attempts
+across a service restart, while public provenance continues to describe only the provider result
+it actually represents and never invents provenance for a failed recovery. Usage for attempts of
+already-completed operations stays in the owner ledger rows and reaches no public surface. A
+failure while persisting a successful response is terminalized as a bounded
+`coordinator_failure` with the attempt's usage retained, rather than leaving the attempt
+`started`.
 
 Retries remain within the durable attempt budget. A pre-`turn/start`-acknowledgement transient may
 receive a fresh one-use authorization and exact retry. After acknowledgement, transport ambiguity
@@ -322,7 +352,8 @@ configuration; swapping the primary keeps both bindings and both approvals.
    configured pairing (`coordinator_failure` before dispatch or during a disclosure wait,
    an uncertain started attempt retains `outcome_unknown` durably and reports the provenance-free
    public gap `receipt_persistence_unknown`). The internal attempt projection
-   exposes the existing durable `started_at` timestamp; no storage migration is introduced. An expired
+   exposes the existing durable `started_at` timestamp; usage counters are an additive nullable
+   bundle migration (0013), so legacy rows remain readable. An expired
    resumed attempt without a disclosure wait preserves `outcome_unknown`; a known undispatched
    expiry records `provider_timeout`. If provider-result provenance is unavailable on recovery,
    the public result uses `receipt_persistence_unknown` while retaining the original durable reason.

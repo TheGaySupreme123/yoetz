@@ -2205,10 +2205,21 @@ def _digest_file(path: Path) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
-def discover_cursor_ide(app_path: Path) -> CursorCapabilityIdentity:
+def discover_cursor_ide(app_path: Path, *, system: str | None = None) -> CursorCapabilityIdentity:
+    """Identify a Cursor IDE bundle by its macOS ``Info.plist`` and main executable.
+
+    Only the macOS application bundle layout is reviewed. A Linux Cursor (AppImage or ``.deb``)
+    has no ``Contents/Info.plist``; rather than reporting it as absent, name the platform so the
+    IDE cell reads as unsupported there (issue #722). Plugin approval and IDE discovery are
+    independent capabilities; adding a Linux presence cell does not identify a Linux IDE.
+    """
+
     info_path = app_path / "Contents" / "Info.plist"
     executable_root = app_path / "Contents" / "MacOS"
     if app_path.is_symlink() or not info_path.is_file() or info_path.is_symlink():
+        resolved_system = platform.system() if system is None else system
+        if resolved_system != "Darwin" and not info_path.exists():
+            raise ValueError("cursor_ide_platform_unsupported")
         raise ValueError("cursor_ide_unavailable")
     try:
         info = plistlib.loads(info_path.read_bytes())

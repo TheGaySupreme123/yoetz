@@ -21,6 +21,10 @@ from yoetz.adapters.providers.codex_app_server import (
     CODEX_EVALUATOR_CAPABILITY_PROFILE,
     CODEX_EVALUATOR_CONFIG_SHA256,
     CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT,
+    CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256,
+    CODEX_EVALUATOR_LINUX_X64_EXECUTABLE_SHA256,
+    CODEX_EVALUATOR_LINUX_X64_SOURCE_IDENTITY,
+    CODEX_EVALUATOR_RUNTIME_VERSION,
     CodexAppServerEvaluator,
     CodexAppServerExternalFactory,
     CodexAppServerProfile,
@@ -66,9 +70,9 @@ def _profile() -> CodexAppServerProfile:
         endpoint_profile_id="codex-chatgpt-subscription",
         endpoint_profile_version="1.0.0",
         executable_path=Path("/opt/codex/0.150.1/codex"),
-        executable_sha256="sha256:" + "a" * 64,
+        executable_sha256="sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b",
         runtime_version="0.150.1",
-        source_identity="openai-codex-darwin-arm64-0.150.1",
+        source_identity="openai-codex-npm-darwin-arm64-0.150.1",
         app_server_schema_sha256=CODEX_APP_SERVER_SCHEMA_SHA256,
         capability_cell_sha256=CODEX_EVALUATOR_CAPABILITY_CELL_SHA256,
         capability_profile=CODEX_EVALUATOR_CAPABILITY_PROFILE,
@@ -116,6 +120,96 @@ def test_committed_compatibility_cell_matches_runtime_constants() -> None:
     assert config.decode("utf-8") == module.CODEX_EVALUATOR_CONFIG
     assert cell["upstream_body_observability"] == "unavailable"
     assert cell["release_evidence"] == "pending"
+
+
+def test_committed_linux_compatibility_cell_matches_runtime_constants() -> None:
+    root = Path(__file__).resolve().parents[4]
+    cell = json.loads(
+        (root / "support/codex-evaluator/0.150.1/cell-linux-x64.json").read_text("utf-8")
+    )
+    identity_keys = (
+        "schema",
+        "runtime_version",
+        "distribution_kind",
+        "distribution",
+        "platform",
+        "protocol",
+        "executable_sha256",
+        "app_server_schema_sha256",
+        "isolated_config_sha256",
+        "capability_profile",
+        "credential_authority",
+        "upstream_body_observability",
+        "evidence_reviewed_at",
+        "evidence_expires_at",
+    )
+
+    assert cell["runtime_version"] == CODEX_EVALUATOR_RUNTIME_VERSION
+    assert cell["app_server_schema_sha256"] == CODEX_APP_SERVER_SCHEMA_SHA256
+    assert cell["capability_profile"] == CODEX_EVALUATOR_CAPABILITY_PROFILE
+    assert cell["capability_cell_sha256"] == CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256
+    assert cell["executable_sha256"] == CODEX_EVALUATOR_LINUX_X64_EXECUTABLE_SHA256
+    assert cell["isolated_config_sha256"] == CODEX_EVALUATOR_CONFIG_SHA256
+    assert canonical_digest({key: cell[key] for key in identity_keys}) == (
+        CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256
+    )
+    assert cell["platform"] == {"architecture": "x86_64", "os": "linux"}
+    assert cell["release_evidence"] == "pending"
+    runtime_cell = module.codex_evaluator_cell_for_platform("linux", "x86_64")
+    assert cell["native_package"] == f"@openai/{runtime_cell.native_package_directory}"
+    assert cell["native_executable_relative"] == (
+        runtime_cell.native_executable_relative.as_posix()
+    )
+
+
+def test_linux_cell_identity_binds_the_native_digest_and_package_alias() -> None:
+    cell = module.codex_evaluator_cell_for_platform("linux", "x86_64")
+    assert module.codex_evaluator_cell_for_platform("linux2", "amd64") is cell
+
+    assert cell.source_identity == CODEX_EVALUATOR_LINUX_X64_SOURCE_IDENTITY
+    assert cell.executable_sha256 == CODEX_EVALUATOR_LINUX_X64_EXECUTABLE_SHA256
+    assert cell.capability_cell_sha256 == CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256
+    assert cell.native_package_directory == "codex-linux-x64"
+    assert cell.native_package_spec == "npm:@openai/codex@0.150.1-linux-x64"
+    assert cell.native_executable_relative.as_posix() == (
+        "vendor/x86_64-unknown-linux-musl/bin/codex"
+    )
+
+
+def test_linux_cell_rejects_mac_digest_or_source_identity() -> None:
+    with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
+        module.codex_evaluator_cell_for_binding(
+            source_identity=CODEX_EVALUATOR_LINUX_X64_SOURCE_IDENTITY,
+            executable_sha256="sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b",
+            runtime_version="0.150.1",
+            app_server_schema_sha256=CODEX_APP_SERVER_SCHEMA_SHA256,
+            capability_cell_sha256=CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256,
+            capability_profile=CODEX_EVALUATOR_CAPABILITY_PROFILE,
+            capability_evidence_expires_at=CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT,
+            isolated_config_sha256=CODEX_EVALUATOR_CONFIG_SHA256,
+        )
+
+    with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
+        module.codex_evaluator_cell_for_binding(
+            source_identity="openai-codex-npm-darwin-arm64-0.150.1",
+            executable_sha256=CODEX_EVALUATOR_LINUX_X64_EXECUTABLE_SHA256,
+            runtime_version="0.150.1",
+            app_server_schema_sha256=CODEX_APP_SERVER_SCHEMA_SHA256,
+            capability_cell_sha256=CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256,
+            capability_profile=CODEX_EVALUATOR_CAPABILITY_PROFILE,
+            capability_evidence_expires_at=CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT,
+            isolated_config_sha256=CODEX_EVALUATOR_CONFIG_SHA256,
+        )
+
+
+def test_local_binding_rejects_a_mac_cell_on_linux_before_file_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(module.sys, "platform", "linux")
+    monkeypatch.setattr(module.platform, "machine", lambda: "x86_64")
+
+    with pytest.raises(ValueError, match="codex_runtime_platform_unsupported"):
+        _profile().verify_local_binding()
 
 
 def test_codex_output_schema_omits_only_provider_rejected_uniqueness_keyword() -> None:
@@ -192,6 +286,66 @@ def _attempt(
         service_generation=1,
         monotonic_deadline=30.0,
     )
+
+
+_THREAD_ID = "019a0000-0000-7000-8000-000000000001"
+_TURN_ID = "019a0000-0000-7000-8000-000000000002"
+
+
+def _token_usage_notice(
+    *,
+    thread_id: str = _THREAD_ID,
+    turn_id: str = _TURN_ID,
+    total_input: int = 100,
+    total_cached: int = 40,
+    total_cache_write: int = 0,
+    total_output: int = 30,
+    total_reasoning: int = 10,
+    last_input: int = 100,
+    last_cached: int = 40,
+    last_cache_write: int = 0,
+    last_output: int = 30,
+    last_reasoning: int = 10,
+) -> dict[str, object]:
+    def breakdown(
+        input_tokens: int,
+        cached_input_tokens: int,
+        cache_write_input_tokens: int,
+        output_tokens: int,
+        reasoning_output_tokens: int,
+    ) -> dict[str, int]:
+        return {
+            "inputTokens": input_tokens,
+            "cachedInputTokens": cached_input_tokens,
+            "cacheWriteInputTokens": cache_write_input_tokens,
+            "outputTokens": output_tokens,
+            "reasoningOutputTokens": reasoning_output_tokens,
+            "totalTokens": input_tokens + output_tokens,
+        }
+
+    return {
+        "method": "thread/tokenUsage/updated",
+        "params": {
+            "threadId": thread_id,
+            "turnId": turn_id,
+            "tokenUsage": {
+                "last": breakdown(
+                    last_input,
+                    last_cached,
+                    last_cache_write,
+                    last_output,
+                    last_reasoning,
+                ),
+                "total": breakdown(
+                    total_input,
+                    total_cached,
+                    total_cache_write,
+                    total_output,
+                    total_reasoning,
+                ),
+            },
+        },
+    }
 
 
 class _Runtime:
@@ -1153,6 +1307,164 @@ async def test_success_records_weaker_runtime_boundary_without_identity_or_trans
     assert evidence.final_output_sha256 is not None
     assert "discard@example" not in repr(result)
     assert "no_material_discrepancy" not in repr(evidence)
+
+
+async def test_token_usage_keeps_latest_cumulative_total_and_non_overlapping_subsets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(_profile())
+    runtime.events[0:0] = [
+        _token_usage_notice(total_input=100, total_cached=40, total_output=30),
+        _token_usage_notice(
+            total_input=160,
+            total_cached=80,
+            total_cache_write=5,
+            total_output=50,
+            total_reasoning=20,
+        ),
+    ]
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultSuccess
+    evidence = result.provenance.runtime_evidence
+    assert evidence is not None and evidence.token_usage is not None
+    assert evidence.token_usage.input_tokens == 160
+    assert evidence.token_usage.cached_input_tokens == 80
+    assert evidence.token_usage.cache_write_input_tokens == 5
+    assert evidence.token_usage.output_tokens == 50
+    assert evidence.token_usage.reasoning_output_tokens == 20
+    assert evidence.token_usage.total_tokens == 210
+    assert result.provenance.token_usage is not None
+    assert result.provenance.token_usage.input_tokens == 160
+    assert result.provenance.token_usage.output_tokens == 50
+    assert result.provenance.token_usage.total_tokens == 210
+
+
+async def test_token_usage_buffered_before_turn_ack_is_attributed_after_ack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(_profile())
+    original_request = runtime.request
+
+    async def request_with_buffered_usage(
+        request_id: int, method: str, params: object, timeout: float
+    ) -> dict[str, object]:
+        if method == "turn/start":
+            runtime.pending_notifications.append(_token_usage_notice(total_cache_write=7))
+        return await original_request(request_id, method, params, timeout)
+
+    monkeypatch.setattr(runtime, "request", request_with_buffered_usage)
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultSuccess
+    evidence = result.provenance.runtime_evidence
+    assert evidence is not None and evidence.token_usage is not None
+    assert evidence.token_usage.cache_write_input_tokens == 7
+
+
+async def test_cumulative_token_usage_regression_keeps_larger_snapshot_and_marks_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(_profile())
+    runtime.events[0:0] = [
+        _token_usage_notice(total_input=160, total_cached=80, total_output=50),
+        _token_usage_notice(total_input=120, total_cached=60, total_output=40),
+    ]
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultSuccess
+    evidence = result.provenance.runtime_evidence
+    assert evidence is not None and evidence.token_usage is not None
+    assert evidence.token_usage.total_tokens == 210
+    assert evidence.failure_stage == "token_usage_invalid"
+
+
+async def test_malformed_matching_token_usage_is_nonterminal_and_stays_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(_profile())
+    runtime.events.insert(
+        0,
+        {
+            "method": "thread/tokenUsage/updated",
+            "params": {
+                "threadId": _THREAD_ID,
+                "turnId": _TURN_ID,
+                "tokenUsage": {"last": {}, "total": {}},
+            },
+        },
+    )
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultSuccess
+    evidence = result.provenance.runtime_evidence
+    assert evidence is not None
+    assert evidence.token_usage is None
+    assert evidence.failure_stage == "token_usage_invalid"
+
+
+async def test_unrelated_token_usage_is_ignored_without_retaining_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(_profile())
+    runtime.events.insert(
+        0,
+        _token_usage_notice(thread_id="other-thread", turn_id="other-turn"),
+    )
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultSuccess
+    evidence = result.provenance.runtime_evidence
+    assert evidence is not None
+    assert evidence.token_usage is None
+    assert evidence.failure_stage is None
+
+
+async def test_token_usage_survives_terminal_turn_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(_profile())
+    runtime.events[0:0] = [
+        _token_usage_notice(total_input=120, total_cached=60, total_output=40),
+        {
+            "method": "error",
+            "params": {"error": {"codexErrorInfo": "usageLimitExceeded"}},
+        },
+    ]
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultUnavailable
+    evidence = result.provenance.runtime_evidence
+    assert evidence is not None and evidence.token_usage is not None
+    assert evidence.token_usage.total_tokens == 160
+    assert result.provenance.token_usage is not None
+    assert result.provenance.token_usage.total_tokens == 160
+
+
+def test_token_usage_parser_rejects_incoherent_counters() -> None:
+    notices = [_token_usage_notice(total_cached=101), _token_usage_notice(total_reasoning=31)]
+    incoherent_total = _token_usage_notice()
+    incoherent_params = cast(dict[str, object], incoherent_total["params"])
+    incoherent_usage = cast(dict[str, object], incoherent_params["tokenUsage"])
+    incoherent_total_breakdown = cast(dict[str, object], incoherent_usage["total"])
+    incoherent_total_breakdown["totalTokens"] = 1
+    notices.append(incoherent_total)
+    missing_cache_write = _token_usage_notice()
+    missing_params = cast(dict[str, object], missing_cache_write["params"])
+    missing_usage = cast(dict[str, object], missing_params["tokenUsage"])
+    del cast(dict[str, object], missing_usage["total"])["cacheWriteInputTokens"]
+    notices.append(missing_cache_write)
+
+    for notice in notices:
+        with pytest.raises(ValueError, match="^codex_app_server_token_usage_invalid$"):
+            module._runtime_token_usage_from_notification(  # pyright: ignore[reportPrivateUsage]
+                notice, thread_id=_THREAD_ID, turn_id=_TURN_ID
+            )
 
 
 async def test_missing_model_fails_before_case_disclosure(

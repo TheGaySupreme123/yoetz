@@ -182,6 +182,15 @@ becomes host-derived.
     not consume `plugin_artifact_apply`. Using the Cursor OS-presence cell here would fail closed
     on this host and would mis-name the authority Codex activation already uses. Cache purge is
     default-off. Removal never deletes the skill tree, consent records, or the observation store.
+
+    **Amendment (2026-09-13, issue #719).** The `plugin_artifact_apply` presence cell is chosen
+    per platform through one selector shared by the Cursor and Claude Code native lifecycles:
+    macOS keeps the #409 LocalAuthentication adapter; Linux, including WSL 2, re-authenticates
+    the invoking account through Linux-PAM with the password entered only at the trusted
+    foreground console (ADR-016 amendment of the same date); every other platform fails closed
+    with `human_authority_unavailable`. Neither host inherits a proof its platform did not earn,
+    and `preview` reports the selected cell so the operator sees which ceremony the accepted
+    mutation will demand.
     After a successful activation removal, `inspect_activation` follows the #347/#387 closed
     states: `installed_not_activated` when the managed plugin source at `.agents/plugins/yoetz`
     remains, and `not_installed` only when that source is also absent.
@@ -217,8 +226,9 @@ observations conservatively; no host cell or activation claim is created by this
 
 The exact standalone mutation operation is `plugin_artifact_apply`, risk class `review_only`,
 bound to the complete preview digest. Agent-chat authorization is forbidden. The pinned macOS
-Cursor CLI uses the issue #409 LocalAuthentication adapter; a host without that exact production
-cell fails closed before target mutation. The ADR-012 setup composition remains the separate
+Cursor CLI uses the issue #409 LocalAuthentication adapter, Linux and WSL 2 use the issue #719
+PAM trusted-console adapter, and a host without a production cell fails closed before target
+mutation. The ADR-012 setup composition remains the separate
 existing authority path. The Codex native tree
 continues to ship as the active control; #150 adds the portable renderer and whole-directory
 migration/rollback implementation but makes no discovery or activation claim.

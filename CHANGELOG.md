@@ -22,6 +22,28 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- `yoetz privacy receipts list` and `yoetz privacy receipts get <receipt-id>` answer again. The
+  service never registered either read method, so every call, including one for a receipt a
+  completed semantic review had just recorded, exited 2 with `invalid_request`; and the catalog
+  could only decode local-disclosure receipts, so a network egress receipt would still have been
+  refused. Both methods are now served with their contract-shaped bodies, `get` reports
+  `not_found` for an unknown ID, malformed filters, cursors, and IDs are rejected as
+  `invalid_request`, and stored network receipts read back with their channel, destination,
+  dispatch, and commitment fields (issue #730).
+- Codex subscription setup accepts Linux x86_64 (WSL 2's Linux userspace included) through its own
+  exact evaluator cell instead of refusing with `codex_runtime_platform_unsupported`. macOS arm64
+  bindings keep their identity, and a binding whose cell does not match the host fails before
+  launch (issue #716).
+- Native Cursor and Claude Code plugin install, replace, update, enable, disable, and remove no
+  longer refuse every non-macOS host. Linux, including a distribution inside WSL 2, now proves
+  the one-time `plugin_artifact_apply` approval by asking for the invoking account's Linux
+  password at your own terminal and verifying it through the operating system (PAM), with the
+  same action-bound banner, single-shot pending, and fail-closed cancellation, timeout, wrong
+  password, and missing-console paths the macOS Touch ID cell has; macOS is unchanged, any other
+  platform still fails closed with `human_authority_unavailable`, and `preview` now names the
+  mechanism and platform under `authorization.human_presence`. A refused or cancelled prompt on
+  the Claude Code path is now reported as `human_authority_unavailable` instead of escaping the
+  CLI as a traceback (issue #719).
 - On native Windows, `yoetz` refuses with a bounded `unsupported_platform` line naming the WSL
   path (exit 20) instead of `internal_error` from every stateful command; `version`,
   `--version`, and `--help` still answer (issue #709).

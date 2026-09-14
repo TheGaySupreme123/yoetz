@@ -90,6 +90,22 @@ required; the pin does not replace it, and it does not prove isolated plugin dis
 The everyday Cursor profile must keep naming the everyday launcher by absolute path. See
 [`test-instances.md`](test-instances.md).
 
+## Linux and WSL
+
+Decision (issue #722): the Linux and WSL 2 native Cursor cell remains **unproven**.
+Plugin mutation requires a supported presence cell; the separate Linux PAM approval work
+(#719) supplies that ceremony, while builds without it refuse `human_authority_unavailable`
+off macOS. Inspect `authorization.human_presence` in the installed preview. Successful approval
+does not certify IDE discovery or native host activation.
+IDE discovery still reads the macOS bundle (`Contents/Info.plist` and the `CFBundleExecutable`
+digest); a Linux Cursor (AppImage or `.deb`) is reported as `cursor_ide_platform_unsupported`
+rather than as absent, and no `cursor_ide` identity is minted for it. Linux IDE discovery
+(executable digest plus the version from `resources/app/package.json`) remains unsupported.
+A Cursor inside WSL 2 can use Yoetz over MCP with a
+hand-added `yoetz mcp serve` entry; Cursor Cloud remains unsupported. The reviewed evidence case
+stays `cursor-ide-native-3.17.8-macos-arm64`; Linux x86-64 evidence for the Agent CLI cell is
+outstanding. Shared host facts are in [`linux-and-wsl.md`](linux-and-wsl.md).
+
 ## Preview and install
 
 Use an explicit isolated root; never point a test at regular `~/.cursor`. An isolated Cursor
@@ -134,13 +150,30 @@ yoetz consent prepare plugin_artifact_apply --target-digest <preview_digest> --j
 ```
 
 Then apply with the same request and digest plus `--accept`. `--accept` binds the digest you
-reviewed; it is not authority. On the pinned macOS cell, apply presents a fresh Apple
-LocalAuthentication device-owner prompt that names the exact operation, full preview digest, and
-pending review ID. Successful authentication consumes that pending once before install, replace,
-or remove. Cancellation, unavailable policy, timeout, stale/reused/mismatched pending, non-macOS
-hosts, TTY-only input, or `--accept` alone fails before mutation. This proof is installation
-authority only; it does not prove discovery, activation, skill delivery, MCP runtime/model use,
-hooks, observation, semantic review, or workflow completion.
+reviewed; it is not authority. Apply then proves fresh, action-bound, OS-authenticated presence
+through the cell for the platform, which the preview names under
+`authorization.human_presence.mechanism`:
+
+- **macOS** (`macos_local_authentication`): a fresh Apple LocalAuthentication device-owner
+  prompt names the exact operation, full preview digest, and pending review ID.
+- **Linux, including Ubuntu or another distribution under WSL 2**
+  (`linux_pam_trusted_console`): the command writes the same operation, digest, and review ID to
+  the terminal and asks for the invoking account's Linux password, verified through PAM
+  (`login` service). Run it from your own foreground terminal: an agent's Bash tool, a
+  redirected shell, or a background process has no trusted console and fails closed. The account
+  needs a password (`passwd`); a WSL 2 distribution sets one at first launch. Coverage: unit
+  tests drive the ceremony with a scripted PAM, and CI on Ubuntu 24.04 proves only that real
+  Linux-PAM rejects a wrong password for the runner's account. An interactive approval on a
+  certified Linux x86-64 cell and under WSL 2 is not yet recorded; WSL 2 uses the same PAM stack
+  and no difference is known.
+- **Any other platform** (`unsupported`): fails closed.
+
+Successful authentication consumes that pending once before install, replace, or remove.
+Cancellation, an unavailable policy or PAM stack, timeout, a wrong or empty password, a
+stale/reused/mismatched pending, a terminal without the password, or `--accept` alone fails
+before mutation. This proof is installation authority only; it does not prove discovery,
+activation, skill delivery, MCP runtime/model use, hooks, observation, semantic review, or
+workflow completion.
 
 Replaying the same request and digest after a committed install or remove whose result was lost
 reconciles at the already-selected state without mutating bytes or spending a second review. Pass
@@ -848,7 +881,7 @@ the 2026-08-29 measurement above recorded for a locked cell.
 | Strict route has no semantic review | expected route ceiling; authorize a separate policy route when intended |
 | Modified plugin cannot remove | preserved local change; inspect and resolve manually |
 | Install refuses `authority_required` after `--accept` | no `plugin_artifact_apply` review is prepared for that exact digest |
-| Install refuses `human_authority_unavailable` | LocalAuthentication was cancelled, unavailable, timed out, or the host is outside the pinned macOS authority cell; no mutation occurred |
+| Install refuses `human_authority_unavailable` | the platform presence cell refused: on macOS LocalAuthentication was cancelled, unavailable, or timed out; on Linux or WSL 2 the password was wrong, empty, or cancelled, the command did not run from your own foreground terminal, or PAM is unavailable; any other platform has no cell; no mutation occurred |
 | Install replay reports `preview_stale` | the inferred action became `replace`; replay with `--action install` |
 | MCP entry looks right but reads `foreign` | route recognition is key-set exact; an extra key such as `cwd`, or an `env` object other than exactly `YOETZ_ISOLATED_ROOT=<absolute printable root>`, is foreign, and an absolute `command` that is neither this runtime's launcher nor the installed marker's is another installation |
 | Hooks observe but a model-controlled `start` returns `SERVICE_UNAVAILABLE` / `service_incompatible` right after install | the plugin's MCP process is another Yoetz installation; read `launcher.executable`, `launcher.mcp_binding`, `launcher.identity`, and `mcp.runtime.executable_activation`, replace a legacy `ambient_path` tree, then fully quit Cursor |

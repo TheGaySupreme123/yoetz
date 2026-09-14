@@ -25,8 +25,11 @@ from yoetz.domain.findings import (
     FindingKind,
     FindingOrigin,
     ResponseDisposition,
+    RuntimeAttemptEvidence,
+    RuntimeTokenUsage,
     SemanticDispatchKind,
     SemanticProvenance,
+    semantic_provenance_to_json,
 )
 from yoetz.domain.receipts import (
     CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP,
@@ -40,6 +43,7 @@ from yoetz.domain.receipts import (
     ReceiptSectionKey,
     ReceiptVersionSlice,
     SchemaVersionEntry,
+    receipt_document_from_json,
     receipt_document_to_json,
     render_receipt_compact,
     render_receipt_human,
@@ -138,9 +142,14 @@ def _check(
     *,
     returned: tuple[FindingId, ...] = (),
     suppressed: int = 0,
+    semantic_provenance: SemanticProvenance | None = None,
 ) -> CheckRecordedPayload:
     return CheckRecordedPayload(
-        mode=CheckMode.DETERMINISTIC_ONLY,
+        mode=(
+            CheckMode.DETERMINISTIC_ONLY
+            if semantic_provenance is None
+            else CheckMode.SEMANTIC_IF_CONFIGURED
+        ),
         policies=(PolicyVersion("work-integrity", "0.1.0"),),
         scope=CheckScopeModel(claim_ids=(), obligation_ids=()),
         policy_executions=(
@@ -156,8 +165,17 @@ def _check(
         returned_finding_ids=returned,
         suppressed_count=suppressed,
         coverage=coverage,
-        semantic_status=SemanticStatus.NOT_REQUESTED,
-        semantic_reason=SemanticReason.DETERMINISTIC_MODE,
+        semantic_status=(
+            SemanticStatus.NOT_REQUESTED
+            if semantic_provenance is None
+            else semantic_provenance.status
+        ),
+        semantic_reason=(
+            SemanticReason.DETERMINISTIC_MODE
+            if semantic_provenance is None
+            else semantic_provenance.reason
+        ),
+        semantic_provenance=semantic_provenance,
         engine_version="0.1.0",
         projection_version="yoetz/0.1.0",
     )
@@ -981,6 +999,113 @@ def _provenance() -> SemanticProvenance:
         egress_authorization_id="aut_00000000-0000-4000-8000-000000000001",
         request_commitment="hmac-sha256:" + "b" * 64,
     )
+
+
+def _subscription_provenance() -> SemanticProvenance:
+    usage = RuntimeTokenUsage(
+        input_tokens=100,
+        cached_input_tokens=60,
+        cache_write_input_tokens=5,
+        output_tokens=20,
+        reasoning_output_tokens=8,
+        total_tokens=120,
+    )
+    runtime = RuntimeAttemptEvidence(
+        credential_authority="external_runtime_oauth",
+        runtime_version="0.150.1",
+        runtime_source_identity="openai-codex-npm-darwin-arm64-0.150.1",
+        executable_sha256=_DIGEST,
+        app_server_schema_sha256=_DIGEST,
+        capability_cell_sha256=_DIGEST,
+        capability_profile="codex-evaluator/0.150.1/v1",
+        capability_evidence_expires_at="2026-11-30T00:00:00Z",
+        launcher_sha256=_DIGEST,
+        isolated_config_sha256=_DIGEST,
+        disclosed_case_sha256=_DIGEST,
+        instruction_sha256=_DIGEST,
+        output_schema_sha256=_DIGEST,
+        selection_sha256=_DIGEST,
+        upstream_body_observability="unavailable",
+        auth_mode="chatgpt",
+        plan_type="plus",
+        reasoning_effort="high",
+        thread_id="thread-1",
+        turn_id="turn-1",
+        final_output_sha256=_DIGEST,
+        case_disclosed=True,
+        turn_acknowledged=True,
+        process_cleanup="terminated",
+        token_usage=usage,
+    )
+    return replace(
+        _provenance(),
+        dispatch_kind=SemanticDispatchKind.EXTERNAL_RUNTIME_OAUTH,
+        token_usage=usage.aggregate,
+        runtime_evidence=runtime,
+    )
+
+
+def test_receipt_carries_applicable_semantic_provenance_and_usage() -> None:
+    provenance = _subscription_provenance()
+    receipt = _build(
+        _context(
+            check=_check(
+                CheckVerdict.NO_ISSUE_DETECTED,
+                _coverage(),
+                semantic_provenance=provenance,
+            )
+        )
+    )
+
+    assert receipt.semantic_provenance == provenance
+    wire = receipt_document_to_json(receipt)
+    assert wire["semantic_provenance"] == semantic_provenance_to_json(provenance)
+    assert receipt_document_from_json(wire) == receipt
+    version_section = next(
+        section
+        for section in receipt.sections
+        if section.key is ReceiptSectionKey.VERSION_AND_POLICY_IDENTITY
+    )
+    assert (
+        "Semantic attempt usage: input=100, cached_input=60, cache_write_input=5, "
+        "output=20, reasoning_output=8, total=120 tokens."
+    ) in version_section.body
+    rendered = render_receipt_human(receipt, markdown=False)
+    assert "input=100" in rendered
+    assert "thread-1" not in rendered
+    assert "provider_request_id" not in rendered
+
+
+def test_receipt_omits_absent_semantic_provenance_for_historical_bytes() -> None:
+    receipt = _build(_context(check=_check(CheckVerdict.NO_ISSUE_DETECTED, _coverage())))
+    wire = receipt_document_to_json(receipt)
+    assert "semantic_provenance" not in wire
+    assert receipt_document_from_json(wire).semantic_provenance is None
+
+
+@pytest.mark.parametrize(
+    "profile",
+    tuple(ReceiptRedactionProfile),
+)
+def test_receipt_profiles_retain_bounded_semantic_attempt_usage(
+    profile: ReceiptRedactionProfile,
+) -> None:
+    provenance = _subscription_provenance()
+    receipt = _build(
+        _context(
+            check=_check(
+                CheckVerdict.NO_ISSUE_DETECTED,
+                _coverage(),
+                semantic_provenance=provenance,
+            )
+        ),
+        profile=profile,
+    )
+    assert receipt.semantic_provenance == provenance
+    assert receipt_document_to_json(receipt)["semantic_provenance"] == (
+        semantic_provenance_to_json(provenance)
+    )
+    assert "total=120 tokens" in render_receipt_human(receipt, markdown=False)
 
 
 def test_redacted_share_does_not_leak_omitted_resolved_finding_ids() -> None:
