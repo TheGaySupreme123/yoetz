@@ -223,8 +223,8 @@ does not claim" section, and the full changelog — and live versioned in
 
 Yoetz **0.2** is the current public-alpha release line. **0.2.1** fixes significant Linux and
 WSL compatibility bugs; see the [release notes](docs/releases/v0.2.1.md) for the fixes and
-remaining validation limits. Every public claim in [`docs/public-claims.json`](docs/public-claims.json) is bound to real checked-in
-evidence: a claim flagged `evidenced` has concrete test or fixture coverage, with its non-live
+remaining validation limits. Every public claim in
+[`docs/public-claims.json`](docs/public-claims.json) is bound to real checked-in evidence: a claim flagged `evidenced` has concrete test or fixture coverage, with its non-live
 suites exercised in per-PR CI; a claim whose own wording names still-missing capability or drill
 evidence stays `not_yet_evidenced` and is not asserted as release evidence. Every reviewed provider
 preset resolves to a real runtime
