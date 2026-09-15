@@ -468,6 +468,36 @@ async def test_captured_packet_rejects_non_native_or_mismatched_source_authority
 async def test_missing_multipart_sibling_omits_every_part_from_selected_packet(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    import yoetz.application.observation_materialize as materialize
+    from yoetz.domain.observation import ObservationContentManifest
+
+    original_drafts = materialize._captured_evidence_drafts  # pyright: ignore[reportPrivateUsage]
+
+    def descending_evidence_order(
+        envelope: ObservationEnvelope,
+        *,
+        task_id: str,
+        manifests: tuple[ObservationContentManifest, ...],
+        parents: tuple[str, ...] = (),
+    ) -> tuple[tuple[materialize.MaterializedObservationDraft, ...], tuple[str, ...]]:
+        # Force the real generated evidence IDs into descending input order. Keep the actual
+        # identity algorithm so the downstream authenticated resolver still checks real IDs.
+        ordered = tuple(
+            sorted(
+                manifests,
+                key=lambda item: materialize.stable_observation_id(
+                    kind=IdKind.EVIDENCE,
+                    task_id=task_id,
+                    source_identity=f"{envelope.source_identity}:captured:{item.object_id}",
+                    mapping_version=materialize.MATERIALIZATION_MAPPING_VERSION,
+                    role="captured_evidence",
+                ),
+                reverse=True,
+            )
+        )
+        return original_drafts(envelope, task_id=task_id, manifests=ordered, parents=parents)
+
+    monkeypatch.setattr(materialize, "_captured_evidence_drafts", descending_evidence_order)
     async with _cell(tmp_path, monkeypatch) as cell:
         envelope, chunks = cell.normalize()
         chunk = chunks[0]
