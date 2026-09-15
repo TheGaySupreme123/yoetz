@@ -27,7 +27,7 @@ from yoetz.ports.control import (
 )
 from yoetz.ports.privacy import LocalDisclosureReceiptView, PrivacyReceiptPage
 from yoetz.protocol.ids import IdKind, new_id
-from yoetz.protocol.models import ReceiptRequest
+from yoetz.protocol.models import CheckRequest, ReceiptRequest
 from yoetz.service.client import (
     GetPrivacyReceiptRequest,
     ListPrivacyReceiptsRequest,
@@ -1140,3 +1140,45 @@ async def test_supersede_signals_only_a_live_foreign_identity_holder(
         if holder.poll() is None:
             holder.kill()
             holder.wait(timeout=5)
+
+
+@pytest.mark.anyio
+async def test_cancelled_check_wait_consumes_late_result_without_cancelling_review() -> None:
+    stream = _FakeStream()
+    client = _client(stream, ControlClientKind.MCP_BRIDGE)
+    source = _receipt_request(31).model_dump(mode="json", exclude_none=True)
+    for key in ("task_id", "format", "include", "redaction_profile"):
+        source.pop(key)
+    source["mode"] = "semantic_required"
+    check = CheckRequest.model_validate(source)
+    waiting = asyncio.create_task(client.check(check))
+    await _wait_for_sent(stream, 1)
+    first = decode_control_frame(stream.sent[0])
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    # Local wait cancellation is not an explicit control cancel of the admitted review.
+    assert len(stream.sent) == 1
+    assert first["rpc_id"] in client._retired_rpc_ids  # pyright: ignore[reportPrivateUsage]
+    healthy = asyncio.create_task(client.receipt(_receipt_request(32), deadline_ms=500))
+    await _wait_for_sent(stream, 2)
+    second = decode_control_frame(stream.sent[1])
+    for frame, method in ((first, ControlMethod.CHECK), (second, ControlMethod.RECEIPT)):
+        await stream.feed(
+            encode_control_frame(
+                ControlResult(
+                    protocol_version="1.0",
+                    rpc_id=cast(str, frame["rpc_id"]),
+                    service_instance_id=_SERVICE_ID,
+                    service_generation="1",
+                    method=method,
+                    outcome="error",
+                    body=ControlError("privacy_projection_unavailable", retryable=True),
+                )
+            )
+        )
+    with pytest.raises(ControlError, match="privacy_projection_unavailable"):
+        await healthy
+    assert not stream.closed
+    assert not client._retired_rpc_ids  # pyright: ignore[reportPrivateUsage]
+    await client.close()

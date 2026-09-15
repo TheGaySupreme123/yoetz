@@ -1023,7 +1023,7 @@ async def test_terminal_succeeded_job_recovers_via_selected_callback() -> None:
 
 @pytest.mark.anyio
 async def test_attempt_loop_renews_operation_lease() -> None:
-    """Lease is renewed around claim/select so timeout_seconds can exceed the 60s TTL."""
+    """The attempt loop renews before claim and after dispatch/select mutations."""
 
     lease = _lease()
     job = SemanticJobRecord(

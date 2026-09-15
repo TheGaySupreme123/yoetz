@@ -4776,3 +4776,21 @@ provider's semantic success.
 Resolver-derived captured-content gaps downgrade current semantic-case coverage to partial, just
 like gaps found before packet selection. Existing older freshness states are preserved; an omitted
 or unavailable captured object cannot leave an otherwise current case labeled fully current.
+
+### Long semantic check waits on the 0.3 line (#746)
+
+`external_runtime.timeout_seconds` defaults to 900 seconds and accepts 1–3600. Explicit existing
+values remain effective. Primary/fallback execution deadlines are frozen before dispatch; the
+lease follows their authenticated bound plus five seconds of cleanup, never the caller's wait.
+A reclaimed started attempt keeps its physical provider request identity and reconciles exact
+admission before dispatch. Already consumed authority is not retried. An authenticated durable
+response is recovered without another provider call; missing outcome evidence stays unknown.
+
+For checks that may use semantic review, `deadline_ms` bounds a control client's wait and initial
+maintenance-gate acquisition. Once admitted, the check survives that wait or a disconnected client.
+Retry the unchanged request and `request_id`: an active handler reports `OPERATION_PENDING`, while
+a completed operation replays from its ledger with current client disclosure projection. Explicit
+control cancellation while attached and service shutdown cancel the owned work. Local coroutine
+cancellation merely stops waiting for a check. Other workflow cancellation behavior is unchanged.
+The existing maintenance gate may delay other task reads while a check runs; this change supplies
+pending/replay continuity, not new progress phases or concurrent-check scheduling (#571).

@@ -208,3 +208,17 @@ separate claims:
    byte-unchanged.
 
 Do not call login, a model listing, unit tests, or one clean judgment proof of this checklist.
+
+## Long semantic reviews on 0.3
+
+New subscription bindings use a 15-minute review budget. Set `external_runtime.timeout_seconds`
+explicitly to select 1–3600 seconds; existing explicit values are preserved. This is the total
+review execution budget, not the browser/device login timeout or a host tool's wait timeout.
+Retries and recovery do not restart it. No extra retries are enabled.
+
+A host tool wait may finish before the review. Keep the same check request and request ID: while
+the service-owned check runs, replay reports pending; after completion it recovers the recorded
+result. A host disconnect does not cancel an admitted review. Explicit control cancellation while
+attached or `yoetz service stop` stops the owned execution; service stop affects the selected
+installation, including its other active work. The maintenance gate can delay ordinary status
+reads during review. Detailed progress phases and parallel review scheduling remain separate work.

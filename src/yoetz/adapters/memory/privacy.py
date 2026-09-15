@@ -89,6 +89,8 @@ class _AuditRow:
     receipt: LocalDisclosureReceipt | EgressReceipt | None = None
     object_ref: ObjectRef | None = None
     consumed_digest: str | None = None
+    authorization_id: str | None = None
+    dispatch_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -700,9 +702,47 @@ class MemoryPrivacyAudit:
                 return PrivacyAuditState(
                     row.reservation,
                     row.status,
+                    row.authorization_id,
+                    row.dispatch_id,
                     receipt_id=None if row.receipt is None else row.receipt.receipt_id,
                 )
         return None
+
+    async def load_disclosure_attempt(
+        self, request_id: str, case_digest: str
+    ) -> PrivacyAuditState | None:
+        """Find one disclosure audit row by its physical request and prepared case digest."""
+
+        if type(request_id) is not str or type(case_digest) is not str:
+            raise TypeError("privacy_disclosure_attempt_lookup_invalid")
+        async with self._lock:
+            disclosure_rows = tuple(
+                row
+                for row in self._state.audit.values()
+                if row.reservation.request_id == request_id
+                and type(row.subject) is DisclosureProposal
+            )
+            if len(disclosure_rows) > 1:
+                raise ValueError("privacy_audit_attempt_ambiguous")
+            matches = tuple(
+                row
+                for row in disclosure_rows
+                if cast(DisclosureProposal, row.subject).prepared_case_digest == case_digest
+            )
+            if len(matches) > 1:
+                raise ValueError("privacy_audit_attempt_ambiguous")
+            if not matches:
+                if disclosure_rows:
+                    raise ValueError("privacy_audit_attempt_case_mismatch")
+                return None
+            row = matches[0]
+            return PrivacyAuditState(
+                row.reservation,
+                row.status,
+                row.authorization_id,
+                row.dispatch_id,
+                receipt_id=None if row.receipt is None else row.receipt.receipt_id,
+            )
 
     async def load_disclosure_proposal(self, proposal_id: str) -> DisclosureProposal | None:
         async with self._lock:
@@ -774,6 +814,8 @@ class MemoryPrivacyAudit:
                 receipt,
                 row.object_ref,
                 row.consumed_digest,
+                row.authorization_id,
+                row.dispatch_id,
             )
 
     async def get_receipt(

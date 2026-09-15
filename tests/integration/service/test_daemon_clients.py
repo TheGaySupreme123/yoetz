@@ -2978,3 +2978,65 @@ async def test_human_connection_cancels_secret_phase_when_terminal_disconnects()
 
     assert service.cancelled == [ceremony_id]
     assert stream.closed
+
+
+@pytest.mark.anyio
+async def test_connected_check_wait_timeout_and_disconnect_preserve_admitted_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real client timeout must not send control cancellation for a long semantic check."""
+
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    entered, release, finished, cancelled = (
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+    )
+    original = application.check
+
+    async def held_check(*args: object, **kwargs: object) -> object:
+        entered.set()
+        try:
+            await release.wait()
+            return await original(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        finally:
+            finished.set()
+
+    async def project_completed(*_args: object, **_kwargs: object) -> object:
+        # This harness intentionally supplies no public CheckResult; exercise transport lifetime
+        # without treating its unprojected stand-in as a projection regression.
+        return JsonObject({"ok": True})
+
+    monkeypatch.setattr(application, "check", held_check)
+    monkeypatch.setattr(daemon, "_project_completed_response", project_completed)
+    client_stream, server_stream = _connected_control_pair()
+    server_task = asyncio.create_task(daemon._serve_control_connection(server_stream))  # pyright: ignore[reportPrivateUsage]
+    service_client = None
+    try:
+        session = await client_handshake(client_stream, ControlClientKind.CLI, "0.3.0")
+        service_client = _connected_client(client_stream, session, ControlClientKind.CLI)  # pyright: ignore[reportArgumentType]
+        request = _check_body().model_copy(update={"mode": "semantic_required"})
+        with pytest.raises(ControlError) as timeout:
+            await service_client.check(request, deadline_ms=50)
+        assert timeout.value.reason == "request_timeout"
+        assert entered.is_set() and not cancelled.is_set()
+        await service_client.close()
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        assert not cancelled.is_set()
+        release.set()
+        await finished.wait()
+        assert application.check_requests == [request]
+        assert not cancelled.is_set()
+    finally:
+        release.set()
+        if service_client is not None:
+            await service_client.close()
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        await daemon.close()

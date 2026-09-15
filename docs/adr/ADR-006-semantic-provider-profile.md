@@ -348,3 +348,27 @@ upstream no-training claim. A fallback whose factory cannot be built or whose
 credential is absent is reported unavailable on its own row without fencing the primary. No live
 interoperability of a paired dispatch is claimed until authorized evidence records the exact
 request, response, route, and receipt for the endpoint that served.
+
+## 0.3 long-review execution and recovery (#746)
+
+The Codex subscription evaluator defaults to a 900-second total execution budget; an explicit
+`external_runtime.timeout_seconds` from 1 through 3600 is preserved. Other provider profiles keep
+their existing bounds. Primary and approved fallback endpoints retain separate frozen shares;
+the authenticated combined execution may span at most 7200 seconds. Retries never reset the clock
+or increase the configured retry count.
+
+The operation lease and active semantic-job lease cover the authenticated frozen execution expiry
+plus five seconds of local cleanup. Reclaim preserves a started or response-durable attempt's
+identity. Exact durable admission lookup precedes any gateway call: consumed/completed or uncertain
+admission never licenses a fresh dispatch. A durable authenticated response can be selected on
+recovery; otherwise the result retains uncertainty. Missing or invalid case/audit objects fail
+closed. Expired disclosure waits alone do not prove that no disclosure occurred.
+
+An admitted semantic check belongs to the service, not to one control connection's wait. A client
+wait timeout or disconnect leaves that check running under its original deadline and identity;
+an identical active retry reports `OPERATION_PENDING`, and terminal replay reads the ledger again.
+At most eight check handlers may be retained, including bounded admission waiters. Results are not
+cached across client contexts. Explicit control cancellation of an attached call cancels its check;
+service shutdown cancels and joins retained handlers before closing the application or vault.
+Maintenance and lifecycle exclusion remain in force. This does not introduce parallel semantic
+execution, new phase telemetry, or an automatic deadline-extension policy.

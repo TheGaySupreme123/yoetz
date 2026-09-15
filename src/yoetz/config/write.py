@@ -422,7 +422,7 @@ def codex_subscription_runtime(
     codex_home: str,
     model: str,
     reasoning_effort: str,
-    timeout_seconds: int = 120,
+    timeout_seconds: int = 900,
     max_retries: int = 2,
 ) -> ExternalRuntimeProfileConfig:
     """Build the exact nonsecret Codex app-server subscription binding."""
