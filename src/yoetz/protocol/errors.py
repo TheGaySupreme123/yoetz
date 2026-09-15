@@ -10,6 +10,7 @@ from types import MappingProxyType
 from typing import cast
 
 __all__ = [
+    "ADMITTED_CLAIM_REVISION_INVARIANTS",
     "ADMITTED_CONTINUATION_TOKENS",
     "PROTOCOL_REASON_CODES",
     "SAFE_DETAIL_KEYS",
@@ -243,6 +244,7 @@ SAFE_DETAIL_KEYS: tuple[str, ...] = (
     "field",
     "head_digest",
     "host_profile",
+    "invariant",
     "limit",
     "method",
     "operation",
@@ -263,6 +265,26 @@ SAFE_DETAIL_KEYS: tuple[str, ...] = (
     "task_id",
     "view",
     "writer_id",
+)
+
+# The closed claim-revision invariant vocabulary (ADR-030). ``yoetz.domain.events`` owns the rule
+# these name and cannot be imported here -- this module is a dependency root -- so the set is
+# literal and the domain fails at import if the two ever disagree. Before ADR-030 the invariant
+# travelled only inside the public error message, and the MCP text projector recovered it by
+# matching that whole sentence with a regex; carrying it as a typed detail is what retires that.
+ADMITTED_CLAIM_REVISION_INVARIANTS: frozenset[str] = frozenset(
+    {
+        "claim_id_must_be_fresh",
+        "claim_kind_must_match",
+        "limitation_refs_complete",
+        "limitation_refs_must_be_relevant_non_success_results",
+        "replacement_must_change_effective_claim",
+        "replacement_must_not_dispute",
+        "scope_overlap_required",
+        "supporting_refs_must_exclude_limitations",
+        "superseded_claim_must_be_effective",
+        "superseded_claim_must_exist",
+    }
 )
 
 _INTEGER_DETAIL_KEYS = frozenset(
@@ -416,6 +438,10 @@ def _normalize_detail(key: str, value: object) -> SafeDetailValue | None:
         return value if type(value) is str and value in tokens else None
     if key == "reason_code":
         if type(value) is str and value in PROTOCOL_REASON_CODES:
+            return value
+        return None
+    if key == "invariant":
+        if type(value) is str and value in ADMITTED_CLAIM_REVISION_INVARIANTS:
             return value
         return None
     if key == "quarantine_code":

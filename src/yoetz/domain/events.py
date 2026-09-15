@@ -78,7 +78,12 @@ from yoetz.protocol.coverage import (
     coverage_from_json,
     coverage_to_json,
 )
-from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
+from yoetz.protocol.errors import (
+    ADMITTED_CLAIM_REVISION_INVARIANTS,
+    ProtocolValueError,
+    PublicErrorCode,
+    PublicOperationError,
+)
 from yoetz.protocol.models import (
     CheckPolicyExecutionModel,
     CheckScopeModel,
@@ -902,20 +907,10 @@ _CLAIM_REVISION_FIELDS: Final = frozenset(
         "supersedes_claim_refs",
     }
 )
-_CLAIM_REVISION_INVARIANTS: Final = frozenset(
-    {
-        "claim_id_must_be_fresh",
-        "claim_kind_must_match",
-        "limitation_refs_complete",
-        "limitation_refs_must_be_relevant_non_success_results",
-        "replacement_must_change_effective_claim",
-        "replacement_must_not_dispute",
-        "scope_overlap_required",
-        "supporting_refs_must_exclude_limitations",
-        "superseded_claim_must_be_effective",
-        "superseded_claim_must_exist",
-    }
-)
+# The invariant names are the public wire vocabulary as well as a domain rule, so they are
+# allowlisted in the protocol dependency root and reused here rather than restated. A second copy
+# is how the MCP projector and this module drifted apart before ADR-030.
+_CLAIM_REVISION_INVARIANTS: Final = ADMITTED_CLAIM_REVISION_INVARIANTS
 
 
 @dataclass(frozen=True, slots=True)
@@ -973,7 +968,13 @@ def public_error_for_claim_revision_mismatch(
 
     if type(mismatch) is not ClaimRevisionMismatch:
         raise TypeError("claim_revision_mismatch_wrong_type")
-    details: dict[str, str] = {"reason_code": mismatch.reason_code}
+    # ``invariant`` rides as a typed detail (ADR-030). It was previously legible only inside the
+    # message below, which the MCP text projector does not copy, so that projector had to recover
+    # it by matching this whole sentence with a regex.
+    details: dict[str, str] = {
+        "invariant": mismatch.invariant,
+        "reason_code": mismatch.reason_code,
+    }
     if type(event_index) is int and 0 <= event_index < _MAX_EVENTS_PER_BATCH_FOR_POINTER:
         details["field"] = f"/event_drafts/{event_index}/payload/{mismatch.field}"
     return PublicOperationError(

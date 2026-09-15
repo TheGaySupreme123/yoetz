@@ -197,12 +197,22 @@ beneath the existing `CODE: message` line. Frozen command literals already allow
 `safe_details` (`prepare_command`, `review_command`, `authorize_command`) are rendered in that
 fixed order; which of them travel is decided upstream, so the clause reports what is present.
 
-For `claim_revision_mismatch`, the generic text projection additionally carries `Invariant:` and
-`Correction:` clauses when the message exactly matches the checked-in domain error shape and its
-registered invariant and field agree with `safe_details`. The clauses are generated from a closed
-MCP registry; the projector never echoes the public error message or infers an invariant from a
-field alone. A changed or unrecognized message therefore retains only the bounded `Reason:`
-clause, and this text-only repair does not add a wire field.
+For `claim_revision_mismatch`, `safe_details` carries an allowlisted `invariant` naming the closed
+domain rule that rejected the draft, and both the MCP text projection and the CLI render an
+`Invariant:` plus `Correction:` clause from it. The corrective phrases live in the shared recovery
+registry beside the continuation directives (ADR-030), so the same rejection reads the same way on
+both surfaces; the CLI previously rendered no correction at all.
+
+The invariant vocabulary is closed and gated twice: `yoetz.protocol.errors` holds
+`ADMITTED_CLAIM_REVISION_INVARIANTS` literally because it is a dependency root, `yoetz.domain.events`
+reuses that set rather than restating it, and `yoetz.protocol.recovery` fails at import unless every
+admitted invariant has a correction. An unregistered token is stripped by the normalizer and the
+clause is omitted.
+
+Until ADR-030 the invariant travelled only inside the public error message, and the projector
+recovered it by matching that whole sentence with a regex — so a reworded message silently cost the
+agent the correction. The clause is now independent of message wording, and the projector still
+never echoes the message.
 
 Every MCP result also carries a bounded ASCII text projection (at most 512 bytes) for hosts that
 drop `structuredContent`. A successful projection includes the first valid returned frontier's

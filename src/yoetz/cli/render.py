@@ -18,7 +18,7 @@ from yoetz.protocol.models import (
     StatusOperationPageModel,
     StatusSuccessModel,
 )
-from yoetz.protocol.recovery import directive_for
+from yoetz.protocol.recovery import correction_for_invariant, directive_for
 
 __all__ = [
     "render_human_awaiting_human",
@@ -185,11 +185,24 @@ def _error_recovery_lines(error: PublicErrorModel) -> list[str]:
     source = details if isinstance(details, Mapping) else None
     if source is None:
         return []
+    lines: list[str] = []
+    # A claim-revision rejection carries its correction on the invariant rather than a
+    # continuation token. The CLI rendered nothing for it before ADR-030 moved the corrective
+    # phrases into the shared registry, so the same rejection read as bare prose here while the
+    # MCP text channel explained it.
+    revision = normalize_safe_details(
+        {"invariant": source.get("invariant"), "reason_code": source.get("reason_code")}
+    )
+    if revision.get("reason_code") == "claim_revision_mismatch":
+        correction = correction_for_invariant(revision.get("invariant"))
+        if correction is not None:
+            lines.append(f"Invariant: {revision['invariant']}")
+            lines.append(f"Correction: {correction}")
     gated = normalize_safe_details({"continuation": source.get("continuation")})
     directive = directive_for(gated.get("continuation"))
     if directive is None:
-        return []
-    lines = [f"Continuation: {directive.token}", f"Next: {directive.directive}"]
+        return lines
+    lines.extend([f"Continuation: {directive.token}", f"Next: {directive.directive}"])
     gated_commands = normalize_safe_details(
         {key: source.get(key) for key in ("prepare_command", "review_command", "authorize_command")}
     )

@@ -30,17 +30,20 @@ from types import MappingProxyType
 from typing import Final
 
 from yoetz.protocol.errors import (
+    ADMITTED_CLAIM_REVISION_INVARIANTS,
     ADMITTED_CONTINUATION_TOKENS,
     PROTOCOL_REASON_CODES,
 )
 
 __all__ = [
+    "CLAIM_REVISION_CORRECTIONS",
     "CONTINUATION_TOKENS",
     "REASON_CODE_DIRECTIVE_EXEMPTIONS",
     "RECOVERY_DIRECTIVES",
     "RecoveryDirective",
     "continuation_for_local_reason",
     "continuation_for_reason",
+    "correction_for_invariant",
     "covered_reason_codes",
     "directive_for",
 ]
@@ -439,6 +442,42 @@ REASON_CODE_DIRECTIVE_EXEMPTIONS: Final[frozenset[str]] = frozenset(
 )
 
 
+# One corrective phrase per claim-revision invariant. These are directive text reconstructed from a
+# typed token, exactly like a continuation directive, so they live beside them rather than inside
+# one renderer: before ADR-030 they were reachable only from the MCP text projector, and the CLI
+# rendered no correction at all for the same rejection.
+CLAIM_REVISION_CORRECTIONS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "claim_id_must_be_fresh": "use a fresh claim_id",
+        "claim_kind_must_match": "match claim_kind with every superseded claim",
+        "limitation_refs_complete": (
+            "include every relevant partial or failed result in limitation_refs"
+        ),
+        "limitation_refs_must_be_relevant_non_success_results": (
+            "keep only relevant non-success results in limitation_refs"
+        ),
+        "replacement_must_change_effective_claim": (
+            "change the replacement's effective claim meaning"
+        ),
+        "replacement_must_not_dispute": "do not combine supersedes_claim_refs with disputes_refs",
+        "scope_overlap_required": "overlap obligation scope with every superseded claim",
+        "supporting_refs_must_exclude_limitations": (
+            "keep non-success result ids in limitation_refs rather than supporting_refs"
+        ),
+        "superseded_claim_must_be_effective": "supersede only an effective claim",
+        "superseded_claim_must_exist": "name an existing claim in supersedes_claim_refs",
+    }
+)
+
+
+def correction_for_invariant(invariant: object) -> str | None:
+    """Return the frozen corrective phrase for a claim-revision invariant, or None."""
+
+    if type(invariant) is not str:
+        return None
+    return CLAIM_REVISION_CORRECTIONS.get(invariant)
+
+
 def directive_for(token: object) -> RecoveryDirective | None:
     """Return the frozen directive for a continuation token, or None when unregistered."""
 
@@ -541,6 +580,10 @@ def _check_registry() -> None:
     # normalizer would strip.
     if CONTINUATION_TOKENS != ADMITTED_CONTINUATION_TOKENS:
         raise RuntimeError("recovery_tokens_disagree_with_safe_detail_admission")
+    # Every admitted invariant must have a correction, and no correction may name an invariant the
+    # normalizer would strip. An invariant without one would reach an agent as a bare token.
+    if frozenset(CLAIM_REVISION_CORRECTIONS) != ADMITTED_CLAIM_REVISION_INVARIANTS:
+        raise RuntimeError("claim_revision_corrections_disagree_with_admitted_invariants")
     # Coverage ratchet (issue #739). Every reason code must resolve to a directive or carry an
     # explicit exemption, so a newly registered reason can never reach an agent as a bare token
     # with nothing to do about it. Widening the reason vocabulary without deciding what an agent

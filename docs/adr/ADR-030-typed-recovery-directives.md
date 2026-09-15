@@ -41,14 +41,22 @@ token.
 
 Consequences that follow, and are the reason for this shape:
 
-- The wire stays exactly as narrow as before. No `safe_details` key was added and the
-  `public-error` schema was not versioned. The allowlist was already at its `maxProperties: 32`
-  ceiling, so this is not merely tidier — it is the only shape that adds nothing to the wire.
 - Directive text is never data. It cannot be truncated, re-encoded, or replayed by a peer, and a
-  compromised or buggy producer cannot author error prose that a renderer will repeat.
+  compromised or buggy producer cannot author error prose that a renderer will repeat. This is the
+  decisive reason: it is a property no additional wire field can provide.
+- Prose changes cost nothing on the wire. Rewording a directive is a one-line registry edit with no
+  schema, fixture, or golden-vector churn, and every surface moves together by construction.
 - A third-party consumer reading structured JSON receives the token and resolves it through
-  `docs/INTERFACES.md`. Rendering prose for such a consumer would require a schema version bump
-  and is deliberately not done here.
+  `docs/INTERFACES.md`. Serving such a consumer prose instead would mean versioning the schema for
+  text that its own renderer could reconstruct.
+
+**Not** a reason, recorded because an earlier draft of this ADR asserted it: the 32-key
+`SAFE_DETAIL_KEYS` allowlist was not at a schema ceiling. `public-error-1.0.0` sets
+`maxProperties: 32` on a `safe_details` *instance* and admits property names by pattern rather than
+by an enumerated list, so the code-side allowlist may exceed 32 without a version bump. ADR-030
+itself then added a 33rd key, `invariant`, under that unchanged schema. Adding a typed detail is
+therefore a live option for facts a consumer genuinely needs structurally; it is simply the wrong
+carrier for prose.
 
 ### Four tiers, classified at the raising site
 
@@ -110,6 +118,10 @@ never sacrificed to fit advice.
   from the Tier-4 rule. Some diagnostic nuance is genuinely lost at the agent-facing boundary and
   remains recoverable locally through the `correlation_id`, which never crosses the wire. That is
   the intended trade.
-- `_claim_revision_clause` remains message-derived until its raising site emits a typed invariant.
-  It is the one surviving instance of the pattern this ADR replaces, and closing it is tracked on
-  issue #740 rather than claimed here.
+- `_claim_revision_clause` is retired. `ClaimRevisionMismatch` already carried a closed-set
+  `invariant`, which the builder placed only inside the message, so the MCP projector matched that
+  whole sentence with a regex to recover it and validated the result against a second copy of the
+  domain's frozenset. The invariant is now an allowlisted safe detail, the regex and the duplicated
+  vocabulary are deleted, and the corrective phrases moved into the shared registry — which also
+  gave the CLI a correction it never rendered. The clause no longer depends on message integrity,
+  so rewording the message costs an agent nothing.

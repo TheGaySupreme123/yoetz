@@ -9,13 +9,20 @@ import pytest
 
 from yoetz.cli.render import render_human_error
 from yoetz.mcp.summaries import _MAX_SUMMARY_BYTES, summary_for_public_error
-from yoetz.protocol.errors import PROTOCOL_REASON_CODES, normalize_safe_details
+from yoetz.protocol.errors import (
+    ADMITTED_CLAIM_REVISION_INVARIANTS,
+    PROTOCOL_REASON_CODES,
+    SAFE_DETAIL_KEYS,
+    normalize_safe_details,
+)
 from yoetz.protocol.models import PublicErrorModel
 from yoetz.protocol.recovery import (
+    CLAIM_REVISION_CORRECTIONS,
     CONTINUATION_TOKENS,
     RECOVERY_DIRECTIVES,
     continuation_for_local_reason,
     continuation_for_reason,
+    correction_for_invariant,
     covered_reason_codes,
     directive_for,
 )
@@ -212,3 +219,58 @@ class TestCliProjection:
             }
         )
         assert render_human_error(model) == "INTERNAL_ERROR: An internal error occurred."
+
+
+class TestSafeDetailBounds:
+    """The allowlist size and the schema's per-instance cap are different limits.
+
+    ``public-error-1.0.0`` sets ``maxProperties: 32`` on a ``safe_details`` *instance* and admits
+    property names by pattern, never by an enumerated list. The code-side allowlist may therefore
+    exceed 32 -- adding ``invariant`` took it to 33 -- as long as no producer emits more than 32
+    properties on one error. These tests lock that distinction, because mistaking one limit for
+    the other is what nearly forced an unnecessary ``public-error-1.1.0``.
+    """
+
+    def test_allowlist_may_exceed_the_per_instance_cap(self) -> None:
+        assert len(SAFE_DETAIL_KEYS) > 32
+        assert tuple(SAFE_DETAIL_KEYS) == tuple(sorted(SAFE_DETAIL_KEYS))
+
+    def test_real_producers_stay_inside_the_per_instance_cap(self) -> None:
+        """Every error a producer actually builds must still validate against the schema."""
+
+        from yoetz.domain.events import (
+            ClaimRevisionMismatch,
+            public_error_for_claim_revision_mismatch,
+        )
+
+        error = public_error_for_claim_revision_mismatch(
+            ClaimRevisionMismatch("obligation_refs", "scope_overlap_required"), event_index=0
+        ).bind_correlation_id(_CORRELATION_ID)
+        public = error.as_public_dict()
+        details = public["safe_details"]
+        assert isinstance(details, dict)
+        assert len(details) <= 32
+        PublicErrorModel.model_validate(public)
+
+
+class TestClaimRevisionCorrections:
+    def test_every_admitted_invariant_has_a_correction(self) -> None:
+        assert frozenset(CLAIM_REVISION_CORRECTIONS) == ADMITTED_CLAIM_REVISION_INVARIANTS
+
+    def test_invariant_rides_as_a_typed_detail_not_only_in_the_message(self) -> None:
+        """ADR-030: the fact the MCP projector used to recover by regex is now structural."""
+
+        from yoetz.domain.events import (
+            ClaimRevisionMismatch,
+            public_error_for_claim_revision_mismatch,
+        )
+
+        error = public_error_for_claim_revision_mismatch(
+            ClaimRevisionMismatch("claim_id", "claim_id_must_be_fresh"), event_index=3
+        )
+        assert error.safe_details.get("invariant") == "claim_id_must_be_fresh"
+
+    def test_unregistered_invariant_is_stripped_by_the_normalizer(self) -> None:
+        assert normalize_safe_details({"invariant": "never_registered"}) == {}
+        assert correction_for_invariant("never_registered") is None
+        assert correction_for_invariant(None) is None
