@@ -398,7 +398,7 @@ def _case_dependency_digest(case: DeterministicCase) -> str:
 
 _OPERATION_LEASE_SECONDS: Final = 60
 _SEMANTIC_EXECUTION_CLEANUP_GRACE_SECONDS: Final = 5
-_SEMANTIC_EXECUTION_MAX_SECONDS: Final = 600
+_SEMANTIC_EXECUTION_MAX_SECONDS: Final = 7200
 
 
 async def _open_exact_object(objects: ObjectStorePort, expected: ObjectRef) -> bytes:

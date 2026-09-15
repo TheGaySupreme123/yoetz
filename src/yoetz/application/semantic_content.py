@@ -633,15 +633,15 @@ async def _session_envelopes(
             return ()
 
     list_for_session = cast(
-        Callable[[str, str], object] | None,
+        Callable[..., object] | None,
         getattr(observation, "list_envelopes_for_session", None),
     )
     try:
         if callable(list_for_session):
-            loaded = list_for_session(workspace, session_commitment)
+            loaded = list_for_session(workspace, session_commitment, limit=256)
         else:
-            list_envelopes = cast(Callable[[str], object], getattr(observation, "list_envelopes"))
-            loaded = list_envelopes(workspace)
+            list_envelopes = cast(Callable[..., object], getattr(observation, "list_envelopes"))
+            loaded = list_envelopes(workspace, limit=256)
     except Exception:
         gaps.add(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
         return ()

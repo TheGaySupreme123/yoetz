@@ -116,6 +116,26 @@ _DIRECTIVES: Final = (
         nudge="Do not mint a fresh request_id, task, or sibling to escape an ambiguous write.",
     ),
     RecoveryDirective(
+        token="start_busy_retry_ready",
+        directive=(
+            "The start reservation is retained and its lease was released. Replay the exact "
+            "start body and request_id once; no session or writer IDs are needed. If contention "
+            "persists, retain that request and report the unresolved start."
+        ),
+        guidance_uri=_WORKFLOW_RECOVERY,
+        nudge="Do not create a replacement task to escape contention.",
+    ),
+    RecoveryDirective(
+        token="start_lease_wait",
+        directive=(
+            "Start still has a live lease. Wait up to 60 seconds, then replay the exact start "
+            "body and request_id once. Do not invent session or writer IDs. If still pending, "
+            "retain the request and report the unresolved start."
+        ),
+        guidance_uri=_WORKFLOW_RECOVERY,
+        nudge="A pending start does not prove failure.",
+    ),
+    RecoveryDirective(
         token="start_timeout_same_identity",
         directive=(
             "This start timed out and MAY already have committed. A lost start returns no session "
@@ -353,6 +373,11 @@ _LOCAL_REASON_CONTINUATIONS: Final[Mapping[str, str]] = MappingProxyType(
 # reason code cannot land with nothing to say.
 REASON_CODE_DIRECTIVE_EXEMPTIONS: Final[frozenset[str]] = frozenset(
     {
+        # Internal contention labels do not prove that a first-start lease was released.
+        # The start application emits the stronger start_* tokens only after that proof.
+        "catalog_busy",
+        "catalog_maintenance_busy",
+        "runtime_rebind_busy",
         # Validation reasons: the field pointer plus the schema-derived authoring hint already
         # name the exact repair, and a generic directive would bury it.
         "accepted_record_shape_invalid",

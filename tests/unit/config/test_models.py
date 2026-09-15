@@ -350,3 +350,17 @@ def test_privacy_seed_delegate_is_atomic_idempotent_and_never_overwrites() -> No
         assert store.existing is policy
 
     asyncio.run(exercise())
+
+
+def test_codex_review_budget_default_and_explicit_limits() -> None:
+    runtime = _external_runtime()
+    assert runtime.timeout_seconds == 900
+    for seconds in (1, 120, 900, 3600):
+        values = runtime.model_dump()
+        values["timeout_seconds"] = seconds
+        assert ExternalRuntimeProfileConfig.model_validate(values).timeout_seconds == seconds
+    for seconds in (0, 3601):
+        values = runtime.model_dump()
+        values["timeout_seconds"] = seconds
+        with pytest.raises(ConfigError):
+            ExternalRuntimeProfileConfig.model_validate(values)

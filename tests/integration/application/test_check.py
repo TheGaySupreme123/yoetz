@@ -1211,3 +1211,19 @@ async def test_capacity_failure_preserves_deterministic_result_and_precise_recei
     )
     assert result.verdict.value == "incomplete_check"
     assert result.findings
+
+
+@pytest.mark.anyio
+async def test_native_resolution_omission_survives_successful_semantic_check() -> None:
+    app = _App(semantic=True)
+    app.semantic_result = replace(
+        _succeeded(SemanticJudgment("no_material_discrepancy", ())),
+        case_content_gaps=(
+            "captured_object_unavailable",
+            "content_capture_unavailable",
+            "content_unselected",
+        ),
+    )
+    result = await execute_check_commit(app, _request("semantic_if_configured"))
+    assert {"captured_object_unavailable", "content_unselected"} <= set(result.coverage.known_gaps)
+    assert result.verdict.value != "no_issue_detected"

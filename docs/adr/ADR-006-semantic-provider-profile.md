@@ -361,7 +361,7 @@ configuration; swapping the primary keeps both bindings and both approvals.
    **Lease/recovery amendment, 2026-09-07 (#616, #620):** live semantic operation and job leases
    use the authenticated execution snapshot's total expiry plus five seconds for local cleanup,
    rather than a renewable heartbeat. The current two-endpoint maximum makes that live bound
-   at most 605 seconds; a crash can consequently delay reclaim until that bound. Claim/reclaim
+   at most 7205 seconds; a crash can consequently delay reclaim until that bound. Claim/reclaim
    retains an existing `started` or `response_durable` attempt and its physical request identity.
    A saved response is selected and recovered before any new attempt is considered. After the
    execution bound, an already reclaimed ordinary operation lease may perform bounded local
@@ -414,3 +414,17 @@ uncertain execution boundary; null provenance and missing diagnostics are not no
 Provider-return, mapping and persistence faults remain distinct. Diagnostics cannot change retry
 eligibility, durable-response recovery, cancellation or lease fencing. See `docs/INTERFACES.md` for
 the public reason, coverage and owner diagnostic lookup contracts.
+
+
+### Long external Codex reviews (2026-09-16, #496 / #746)
+
+The external Codex evaluator defaults to 900 seconds and accepts explicit values from 1 to 3600
+seconds. Existing explicit shorter values are preserved. Other provider kinds keep their existing
+limits. The primary and optional fallback each retain their own frozen budget, with a combined
+execution bound of 7200 seconds and five seconds of lease cleanup. Recovery never resets that clock
+or mints a new provider request after authority was consumed.
+
+A client wait timeout or disconnect leaves an admitted semantic check running under service
+ownership. At most eight such checks can be retained; same-identity retries report pending, and a
+changed body conflicts. An explicit attached control cancellation or service shutdown cancels and
+joins the work. This does not introduce parallel semantic scheduling or phase-progress telemetry.

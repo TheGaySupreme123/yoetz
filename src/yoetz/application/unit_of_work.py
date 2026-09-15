@@ -31,6 +31,7 @@ from yoetz.ports.start_catalog import (
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 
 __all__ = [
+    "CatalogLeaseYield",
     "CatalogCompletion",
     "CatalogPhaseAdvance",
     "CatalogQuarantine",
@@ -161,6 +162,17 @@ class CommitResolution:
             "unknown": (False, False, True),
         }[self.outcome]
         if shape != expected:
+            raise _invalid()
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogLeaseYield:
+    """Relinquish a definite failed start attempt without discarding its durable state."""
+
+    allocation: StartAllocation
+
+    def __post_init__(self) -> None:
+        if type(self.allocation) is not StartAllocation:
             raise _invalid()
 
 
@@ -386,7 +398,9 @@ async def resolve_ambiguous_operation(
     return CommitResolution("pending")
 
 
-type CatalogTransition = StartCommand | CatalogPhaseAdvance | CatalogCompletion | CatalogQuarantine
+type CatalogTransition = (
+    StartCommand | CatalogPhaseAdvance | CatalogCompletion | CatalogQuarantine | CatalogLeaseYield
+)
 
 
 @overload
@@ -397,7 +411,7 @@ async def run_catalog_transition(
 
 @overload
 async def run_catalog_transition(
-    catalog: StartCatalogPort, transition: CatalogCompletion | CatalogQuarantine
+    catalog: StartCatalogPort, transition: CatalogCompletion | CatalogQuarantine | CatalogLeaseYield
 ) -> None: ...
 
 
@@ -420,6 +434,9 @@ async def run_catalog_transition(
         return None
     if type(transition) is CatalogQuarantine:
         await _await_definite(catalog.quarantine(transition.allocation, transition.reason))
+        return None
+    if type(transition) is CatalogLeaseYield:
+        await _await_definite(catalog.yield_lease(transition.allocation))
         return None
     raise _invalid()
 

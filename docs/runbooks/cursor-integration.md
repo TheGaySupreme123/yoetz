@@ -58,6 +58,13 @@ configuration root and project.
 
 ## Proof facets are independent
 
+Explicit attach uses the same service contention repair as other hosts (#744): retry-ready
+start reasons retain the operation and release its lease for an identical-request replay.
+`start_lease_pending` retains a live owner and calls for waiting up to 60 seconds before replay.
+Cursor's canonical JSON text preserves the same code, reason, and service message as structured
+output. A first start needs no invented session/writer IDs to retry. Hook deadlines and existing
+structural-only observation scope are unchanged; shared service tests are not native Cursor proof.
+
 Record these separately: Yoetz source and wheel identity; rendered artifact; installed bytes;
 Cursor product/SDK/bridge identity; plugin source; discovery; activation; skill delivery; MCP owner;
 MCP binding; raw MCP runtime; model-visible tools; correlated model-controlled use; hook capability;

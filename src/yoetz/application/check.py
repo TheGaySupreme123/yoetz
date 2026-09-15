@@ -928,12 +928,26 @@ class FinalSemanticEvaluation:
     # rather than let the shortening pass as material the author chose not to send.
     case_content_over_item_limit: bool = False
     case_reference_scope_reduced: bool = False
+    case_content_gaps: tuple[str, ...] = ()
     # Set only on the nonterminal awaiting_human branch: what the caller must do to resume this
     # exact request. Every terminal outcome leaves it None. A one-use disclosure wait keeps its
     # job and attempt open; a missing standing repository grant stops before either exists.
     continuation: SemanticContinuation | None = None
 
     def __post_init__(self) -> None:
+        if (
+            type(self.case_content_gaps) is not tuple
+            or self.case_content_gaps != tuple(sorted(set(self.case_content_gaps)))
+            or not set(self.case_content_gaps)
+            <= {
+                "captured_object_unavailable",
+                "content_capture_unavailable",
+                "truncated_payload",
+                "content_unselected",
+                "content_redacted",
+            }
+        ):
+            raise _invalid("semantic_judgment_invalid")
         validate_semantic_outcome(self.status, self.reason)
         validate_semantic_provenance_binding(
             self.status,
@@ -1958,6 +1972,7 @@ def _judgment_rejected_evaluation(
         # The rejection restates the outcome, not the case: a truncated case stays truncated.
         case_content_over_item_limit=result.case_content_over_item_limit,
         case_reference_scope_reduced=result.case_reference_scope_reduced,
+        case_content_gaps=result.case_content_gaps,
     )
 
 
@@ -2244,6 +2259,7 @@ async def execute_check_commit(
             declared_gaps.add(SEMANTIC_CHALLENGES_REJECTED_GAP)
         # Recorded prose the case could not carry whole. The reviewer answered on a fragment, and
         # the author has no other signal that the text they published never arrived (issue #177).
+        declared_gaps.update(semantic_result.case_content_gaps)
         if semantic_result.case_content_over_item_limit:
             declared_gaps.add(SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP)
         if semantic_result.case_reference_scope_reduced:

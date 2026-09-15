@@ -152,7 +152,11 @@ class _Transaction:
         try:
             self._db.execute("BEGIN IMMEDIATE")
         except apsw.BusyError as exc:
-            raise _error(PublicErrorCode.BUNDLE_BUSY, retryable=True) from exc
+            raise _error(
+                PublicErrorCode.BUNDLE_BUSY,
+                retryable=True,
+                safe_details={"reason_code": "catalog_busy"},
+            ) from exc
 
     def __exit__(
         self,
@@ -2513,6 +2517,33 @@ class SqliteStartCatalog:
                 raise _error(PublicErrorCode.STORAGE_CORRUPT)
             return _allocation(inserted, "reserved")
 
+    async def yield_lease(self, allocation: StartAllocation) -> None:
+        if type(allocation) is not StartAllocation:
+            raise _error(PublicErrorCode.INVALID_REQUEST)
+        now = self._clock.now_utc()
+        now_wire = format_rfc3339_millis(now)
+        with self._transaction():
+            row = self._operation_for(allocation)
+            self._require_lease(row, allocation, now, self._owner_generation())
+            self._db.execute(
+                """UPDATE start_operations SET lease_expires_at = ?, updated_at = ?
+                   WHERE installation_id = ? AND operation_id = ? AND state = 'pending'
+                     AND owner_generation = ? AND lease_owner_id = ?
+                     AND lease_generation = ? AND lease_expires_at = ?""",
+                (
+                    now_wire,
+                    now_wire,
+                    row.installation_id,
+                    row.operation_id,
+                    str(row.owner_generation),
+                    row.lease_owner_id,
+                    row.lease_generation,
+                    format_rfc3339_millis(cast(datetime, row.lease_expires_at)),
+                ),
+            )
+            if self._db.changes() != 1:
+                raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+
     async def advance_phase(
         self,
         allocation: StartAllocation,
@@ -2942,7 +2973,11 @@ class SqliteStartCatalog:
             and row.lease_expires_at is not None
             and row.lease_expires_at > now
         ):
-            raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+            raise _error(
+                PublicErrorCode.OPERATION_PENDING,
+                retryable=True,
+                safe_details={"reason_code": "start_lease_pending"},
+            )
         if row.lease_generation is None:
             raise _error(PublicErrorCode.STORAGE_CORRUPT)
         expires_wire = format_rfc3339_millis(now + timedelta(seconds=_LEASE_SECONDS))
@@ -3020,4 +3055,8 @@ class SqliteStartCatalog:
             (task_id,),
         )
         if rows:
-            raise _error(PublicErrorCode.BUNDLE_BUSY, retryable=True)
+            raise _error(
+                PublicErrorCode.BUNDLE_BUSY,
+                retryable=True,
+                safe_details={"reason_code": "catalog_maintenance_busy"},
+            )

@@ -3148,7 +3148,7 @@ def _execution_from_json(value: object) -> _SemanticExecution:
     if primary_expires_at > expires_at:
         raise ValueError("semantic_execution_invalid")
     fallback_timeout = source["fallback_timeout_seconds"]
-    if type(fallback_timeout) is not int or not 1 <= fallback_timeout <= 300:
+    if type(fallback_timeout) is not int or not 1 <= fallback_timeout <= 3600:
         raise ValueError("semantic_execution_invalid")
     return _SemanticExecution(
         provider,
@@ -3845,10 +3845,10 @@ def _privacy_gated_semantic_evaluator(
     lineage_source_gate: LineageSourceGate | None = None,
     local_observation: object | None = None,
 ):
-    total_timeout = float(max(1, min(int(timeout_seconds), 300)))
+    total_timeout = float(max(1, min(int(timeout_seconds), 3600)))
     # The fallback endpoint owns its own deadline share (#582): a primary that spends its whole
     # timeout failing must not leave the fallback with nothing to run in.
-    fallback_timeout = float(max(1, min(int(fallback_timeout_seconds), 300)))
+    fallback_timeout = float(max(1, min(int(fallback_timeout_seconds), 3600)))
 
     def _endpoint_plan(
         role: Literal["primary", "fallback"], binding: ProviderBinding, retries: int
@@ -3882,6 +3882,7 @@ def _privacy_gated_semantic_evaluator(
         withheld: tuple[str, ...] = ()
         over_item_limit = False
         reference_scope_reduced = False
+        content_gaps: tuple[str, ...] = ()
 
         def _on_lease_renewed(renewed: object) -> None:
             assert type(renewed) is _OpLease
@@ -4171,6 +4172,18 @@ def _privacy_gated_semantic_evaluator(
             # The builder folds the gap into the packet coverage the reviewer sees; the check
             # result is a separate coverage fold, so carry the fact rather than re-deriving it.
             reference_scope_reduced = semantic_case.omitted_reference_count > 0
+            content_gaps = tuple(
+                sorted(
+                    set(semantic_case.packet.coverage.known_gaps)
+                    & {
+                        "captured_object_unavailable",
+                        "content_capture_unavailable",
+                        "content_unselected",
+                        "content_redacted",
+                        "truncated_payload",
+                    }
+                )
+            )
             over_item_limit = (
                 SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP
                 in semantic_case.packet.coverage.known_gaps
@@ -4222,6 +4235,7 @@ def _privacy_gated_semantic_evaluator(
                     _map_egress_to_final(result, ids),
                     case_content_over_item_limit=over_item_limit,
                     case_reference_scope_reduced=reference_scope_reduced,
+                    case_content_gaps=content_gaps,
                 )
 
             # Build the packet before anything durable exists. A packet that cannot be built is a
@@ -4249,6 +4263,7 @@ def _privacy_gated_semantic_evaluator(
                     withheld_review_categories=withheld,
                     case_content_over_item_limit=over_item_limit,
                     case_reference_scope_reduced=reference_scope_reduced,
+                    case_content_gaps=content_gaps,
                 )
 
             # One durable semantic job per check: create/recover after freeze, before dispatch.
@@ -4514,6 +4529,7 @@ def _privacy_gated_semantic_evaluator(
                         withheld_review_categories=withheld,
                         case_content_over_item_limit=over_item_limit,
                         case_reference_scope_reduced=reference_scope_reduced,
+                        case_content_gaps=content_gaps,
                     )
                 return FinalSemanticEvaluation(
                     status,
@@ -4525,6 +4541,7 @@ def _privacy_gated_semantic_evaluator(
                     withheld_review_categories=withheld,
                     case_content_over_item_limit=over_item_limit,
                     case_reference_scope_reduced=reference_scope_reduced,
+                    case_content_gaps=content_gaps,
                     continuation=continuation,
                 )
 
@@ -4569,6 +4586,7 @@ def _privacy_gated_semantic_evaluator(
                 withheld_review_categories=withheld,
                 case_content_over_item_limit=over_item_limit,
                 case_reference_scope_reduced=reference_scope_reduced,
+                case_content_gaps=content_gaps,
             )
 
     return _evaluate

@@ -452,7 +452,7 @@ class ExternalRuntimeProfileConfig(StrictConfigModel):
     codex_home: str
     model: str
     reasoning_effort: str
-    timeout_seconds: int = Field(default=120, ge=1, le=300)
+    timeout_seconds: int = Field(default=900, ge=1, le=3600)
     max_retries: int = Field(default=2, ge=0, le=2)
 
     @model_validator(mode="before")

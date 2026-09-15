@@ -149,8 +149,9 @@ class _Observation:
         return SimpleNamespace(lifecycle=SimpleNamespace(value=self.lifecycle))
 
     def list_envelopes_for_session(
-        self, _workspace: str, _session_commitment: str
+        self, _workspace: str, _session_commitment: str, *, limit: int | None = None
     ) -> tuple[ObservationEnvelope, ...]:
+        assert limit == 256
         return (self.envelope,)
 
     def load_content_manifest(self, _object_id: str) -> ObservationContentManifest:

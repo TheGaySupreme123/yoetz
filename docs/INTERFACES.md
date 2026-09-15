@@ -1701,6 +1701,7 @@ historical session of the same task),
 `list_workspace_task_ids(workspace_ref_commitment) -> tuple[str, ...]` (task ids only, ascending,
 non-quarantined; no public MCP surface yet),
 `advance_phase(allocation, phase, result: EncryptedResultRef | None = None) -> StartAllocation`,
+`yield_lease(allocation) -> None`,
 `complete(allocation,
 EncryptedResultRef, StartCompletionEvidence)`, and `quarantine(allocation, SafeReason)`. `StartPhase` is
 `route_reserved`, `bundle_ready`, `lifecycle_committed`, `result_published`, `terminal`. IDs and
@@ -1729,6 +1730,33 @@ When a `result_published` allocation resumes, a deterministic verification or bi
 quarantines the allocation as `STORAGE_CORRUPT`; environmental object I/O remains pending and is
 returned as retryable `STORAGE_UNSAFE` so the same request can retry without losing the pinned
 result.
+
+An ordinary start that returns `BUNDLE_BUSY` after reservation attempts the shielded
+`CatalogLeaseYield` transition. `yield_lease` compares the pending row's exact owner generation,
+lease owner, lease generation, and unexpired expiry inside the catalog transaction, then sets
+only the expiry and update time to the current clock. It preserves the request digest, all
+allocated identities, phase, lifecycle event and pinned result. An exact replay reclaims that
+same allocation with a higher lease generation; a changed body still conflicts. Completed,
+quarantined, expired, and superseded leases cannot be yielded. Cancellation and ambiguous failures
+do not take this path, because they do not establish a stopped attempt. If yielding itself fails,
+the original busy error remains and no immediate-replay guarantee is made.
+
+`LocalBundleRuntime.provision_start` waits at most five seconds for a same-bundle, same-authority
+session rebind to drain active usages and pending fence validations. This is below the 60-second
+start lease. The condition releases the cache lock while waiting, bounds waiter admission by
+`max_pending_leases_per_task`, rejects new ordinary acquisitions of the old session while a start
+waits, and keeps waited entries out of idle eviction. Release, failed pending validation and
+shutdown wake the waiters; cancellation removes only the affected waiter. On wake, ordinary
+service readiness, route identity and ownership-fence checks still apply. Other route/authority
+conflicts retain their existing immediate refusal. `runtime_rebind_busy` identifies exhaustion of
+this wait or an ordinary acquisition held back by it; `catalog_busy` identifies an actual SQLite
+transaction lock and `catalog_maintenance_busy` identifies exclusive maintenance admission.
+After successful yield the reason becomes `start_runtime_rebind_retry_ready`,
+`start_catalog_retry_ready`, or conservatively `start_busy_retry_ready` for another producer.
+`start_lease_pending` identifies an exact replay while the same-generation lease is still live.
+These closed tokens support public recovery without publishing paths or caller content. They
+identify reproduced producers; they do not establish which producer caused historical native
+failures recorded in issue #744.
 
 `StartIdentityInput(task_title, workspace_ref?, external_ref?)` is a redacted one-shot value;
 `StartIdentityCommitments(title_commitment, workspace_ref_commitment?,
@@ -5548,3 +5576,40 @@ ADR-030 recovery coverage includes every 0.3 lineage/project reason: invalid att
 require parent review, pending operations preserve their request identity, authority refusals
 require explicit owner review, and terminal or invalid stored state is never automatically
 replaced. These reasons have registered directives and are not coverage exemptions.
+
+
+### Long semantic check waits on the 0.3 line (#746)
+
+`external_runtime.timeout_seconds` defaults to 900 seconds and accepts 1–3600. Explicit existing
+values remain effective. Primary/fallback execution deadlines are frozen before dispatch; the
+lease follows their authenticated bound plus five seconds of cleanup, never the caller's wait.
+A reclaimed started attempt keeps its physical provider request identity and reconciles exact
+admission before dispatch. Already consumed authority is not retried. An authenticated durable
+response is recovered without another provider call; missing outcome evidence stays unknown.
+
+For checks that may use semantic review, `deadline_ms` bounds a control client's wait and initial
+maintenance-gate acquisition. Once admitted, the check survives that wait or a disconnected client.
+Retry the unchanged request and `request_id`: an active handler reports `OPERATION_PENDING`, while
+a completed operation replays from its ledger with current client disclosure projection. Explicit
+control cancellation while attached and service shutdown cancel the owned work. Local coroutine
+cancellation merely stops waiting for a check. Other workflow cancellation behavior is unchanged.
+The existing maintenance gate may delay other task reads while a check runs; this change supplies
+pending/replay continuity, not new progress phases or concurrent-check scheduling (#571).
+
+
+`FinalSemanticEvaluation.case_content_gaps` carries bounded native-resolution omissions from the
+semantic packet into check and receipt coverage, even when the provider succeeds. Native capture
+metadata is not an excerpt: without an authenticated captured group, the builder omits the excerpt
+and retains `captured_object_unavailable`, including when the omission list limit is zero. The
+current consent-generation fence is still checked immediately before disclosure or recovered
+admission; larger review budgets do not change that authority.
+
+ADR-030 recovery also applies to first-start contention. The three `start_*_retry_ready` reasons
+carry `start_busy_retry_ready` only after the catalog lease was yielded; `start_lease_pending`
+carries `start_lease_wait`. Internal busy labels alone do not establish either condition.
+
+The native resolver reads at most the latest 256 retained envelopes from its mapped session.
+`list_envelopes_for_session(workspace, session_commitment, limit=None)` and
+`list_envelopes(workspace, limit=None)` preserve unbounded historical reader defaults for other
+callers; a supplied integer in `1..256` bounds the SQL query before decoding and returns the window
+in chronological order. Evidence outside that window cannot become an authenticated excerpt.

@@ -91,6 +91,19 @@ policy owner can make `agent_route_semantic_ready` true.
 
 ## 2. Prerequisites and exact supported scope
 
+### Explicit attach under observation contention
+
+An explicit `start mode=attach` can meet an existing observation/advisory runtime lease.
+The service waits at most five seconds for same-bundle use to drain. A retry-ready start
+reason retains the reserved operation and releases only its lease; replay the identical
+request body and ID once. `start_lease_pending` instead means a live owner still holds the
+operation: wait up to 60 seconds before the same replay. A repeated busy/pending answer remains
+unresolved. No returned writer ID is needed for this recovery, and no replacement task should
+be created. Both structured errors and the compact MCP text carry the bounded continuation.
+Hook auto-attachment uses the same service path; a hook deadline may expire before the service
+wait finishes, so a lost response remains an exact-request recovery case, never proof of failure.
+These runtime tests do not qualify a new native Codex version or prove source-content delivery.
+
 Check `yoetz version --json`, the installed resource set, and the current compatibility/capability
 matrix. Confirm owner permissions on the target project, that you trust this repository, and the
 expected Codex version. Codex support is the exact tested set in the packaged manifest; an empty

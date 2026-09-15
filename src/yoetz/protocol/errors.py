@@ -65,6 +65,8 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "attach_handle_revoked",
     "attach_result_invalid",
     "byte_order_mark_forbidden",
+    "catalog_busy",
+    "catalog_maintenance_busy",
     "child_check_frontier_ahead_of_child",
     "child_check_frontier_missing",
     "child_check_frontier_without_check",
@@ -297,6 +299,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "response_projection_failed",
     "runtime_attempt_evidence_json_shape_invalid",
     "runtime_opening_authority",
+    "runtime_rebind_busy",
     "schema_artifact_role_invalid",
     "schema_artifact_role_mismatch",
     "schema_bytes_invalid",
@@ -326,6 +329,10 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "session_lineage_fields_incomplete",
     "session_superseded",
     "set_member_not_ascii",
+    "start_busy_retry_ready",
+    "start_catalog_retry_ready",
+    "start_lease_pending",
+    "start_runtime_rebind_retry_ready",
     "stored_result_shape_invalid",
     "timestamp_not_utc",
     "timestamp_out_of_range",
@@ -340,7 +347,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 283
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 290
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)
@@ -434,6 +441,8 @@ ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
         "session_rebind_required",
         "sorted_set_required",
         "start_timeout_same_identity",
+        "start_busy_retry_ready",
+        "start_lease_wait",
         "storage_root_unsafe",
         "vault_initialization_required",
         "write_timeout_same_identity",
@@ -458,6 +467,10 @@ ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
 # boundary that knows it (``continuation_for_reason``).
 REASON_CODE_CONTINUATIONS: Mapping[str, str] = MappingProxyType(
     {
+        "start_busy_retry_ready": "start_busy_retry_ready",
+        "start_catalog_retry_ready": "start_busy_retry_ready",
+        "start_runtime_rebind_retry_ready": "start_busy_retry_ready",
+        "start_lease_pending": "start_lease_wait",
         "duplicate_set_member": "sorted_set_required",
         "endpoint_unsafe": "storage_root_unsafe",
         "expected_frontier_required": "frontier_refresh_required",

@@ -78,9 +78,17 @@ Act only when Yoetz reports a missing repository grant. If chat authorization is
 
 ## Retry and runtime boundaries
 
-`awaiting_human` is nonterminal, so it is neither a gap to disclose nor a retry to spend. Other unsuccessful semantic review is a coverage gap: `not_configured`, `blocked_by_policy`, and `human_denied` need owner action; `unavailable` and `timeout` spent that job's attempt; `refused`, `failed`, and invalid reasons other than `response_content_invalid` are not retried inside the job. The latter gets at most one in-job repair retry. After a second job in one session returns no judgment, run `deterministic_only` and disclose the recorded status and reason. On `OPERATION_PENDING`, read `status view=operation` once and replay the same request once; if it remains pending, continue with a new deterministic-only request and say so.
+`awaiting_human` is nonterminal, so it is neither a gap to disclose nor a retry to spend. Other unsuccessful semantic review is a coverage gap: `not_configured`, `blocked_by_policy`, and `human_denied` need owner action; `unavailable` and `timeout` spent that job's attempt; `refused`, `failed`, and invalid reasons other than `response_content_invalid` are not retried inside the job. The latter gets at most one in-job repair retry. After a second job in one session returns no judgment, run `deterministic_only` and disclose the recorded status and reason. For a pending check with returned session/writer IDs, read `status view=operation` once and replay the same request once; if it remains pending, continue with a new deterministic-only check and say so. First-start recovery follows the separate rule below.
 
 `blocked_by_policy` or `route_semantic_ceiling` describes this MCP process, not installed plugin bytes. Compare the initialize `Route profile`, `status view=versions`, and installed runtime. `full_restart_required` is an activation mismatch: request a full application quit and do not mint a fresh semantic check against the stale process. Recovery never authorizes egress or changes privacy settings.
+
+First-start recovery is separate from check recovery. A `start` busy error with reason
+`start_runtime_rebind_retry_ready`, `start_catalog_retry_ready`, or `start_busy_retry_ready`
+retains the reservation and releases its lease: replay the identical body and request ID once.
+For `start_lease_pending`, wait up to 60 seconds before that exact replay. If still unresolved,
+retain the request and correlation ID and say so. Never invent session/writer IDs for status,
+create a replacement task, or issue a check before start has returned usable IDs. An unclassified
+busy error does not prove lease release. See the workflow stop rules for the bounded continuation.
 
 # Canonical values and honest state
 

@@ -2150,7 +2150,18 @@ class SqliteObservationStore:
             advice_frontier=advice_frontier,
         )
 
-    def list_envelopes(self, workspace: str) -> tuple[ObservationEnvelope, ...]:
+    def list_envelopes(
+        self, workspace: str, *, limit: int | None = None
+    ) -> tuple[ObservationEnvelope, ...]:
+        if limit is not None:
+            if type(limit) is not int or not 1 <= limit <= 256:
+                raise ValueError("observation_envelope_limit_invalid")
+            rows = self._db.execute(
+                "SELECT structural_json FROM observation_events "
+                "WHERE workspace_commitment = ? ORDER BY id DESC LIMIT ?",
+                (workspace, limit),
+            ).fetchall()
+            return self._envelopes_from_rows(reversed(rows))
         rows = self._db.execute(
             "SELECT structural_json FROM observation_events "
             "WHERE workspace_commitment = ? ORDER BY id ASC",
@@ -2159,7 +2170,7 @@ class SqliteObservationStore:
         return self._envelopes_from_rows(rows)
 
     def list_envelopes_for_session(
-        self, workspace: str, session_commitment: str
+        self, workspace: str, session_commitment: str, *, limit: int | None = None
     ) -> tuple[ObservationEnvelope, ...]:
         """Return only the mapped session's retained envelopes (#352).
 
@@ -2170,6 +2181,15 @@ class SqliteObservationStore:
         layer down.
         """
 
+        if limit is not None:
+            if type(limit) is not int or not 1 <= limit <= 256:
+                raise ValueError("observation_envelope_limit_invalid")
+            rows = self._db.execute(
+                "SELECT structural_json FROM observation_events "
+                "WHERE workspace_commitment = ? AND session_commitment = ? ORDER BY id DESC LIMIT ?",
+                (workspace, session_commitment, limit),
+            ).fetchall()
+            return self._envelopes_from_rows(reversed(rows))
         rows = self._db.execute(
             "SELECT structural_json FROM observation_events "
             "WHERE workspace_commitment = ? AND session_commitment = ? ORDER BY id ASC",

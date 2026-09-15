@@ -505,3 +505,28 @@ def test_workspace_routes_keep_unrelated_sessions_active() -> None:
         ("ses_10000000-0000-4000-8000-000000000001", 1),
         ("ses_10000000-0000-4000-8000-000000000002", 1),
     ]
+
+
+def test_bounded_envelope_window_filters_session_before_selecting_latest_rows() -> None:
+    async def run() -> None:
+        store = _store()
+        store.grant_consent(_WORKSPACE, _TIME)
+        store.bind_session(_WORKSPACE, _SESSION)
+        store.bind_session(_WORKSPACE, _SESSION_B)
+        for ordinal in range(1, 5):
+            for session, prefix in ((_SESSION, "a"), (_SESSION_B, "b")):
+                result = await store.ingest(
+                    _session_envelope(session, f"hook:{prefix}-{ordinal}", ordinal)
+                )
+                assert result.disposition is ObservationIngestDisposition.ACCEPTED
+        selected = store.list_envelopes_for_session(_WORKSPACE, _SESSION, limit=2)
+        assert [item.source_identity for item in selected] == ["hook:a-3", "hook:a-4"]
+        assert len(store.list_envelopes_for_session(_WORKSPACE, _SESSION)) == 4
+        assert [item.source_identity for item in store.list_envelopes(_WORKSPACE, limit=2)] == [
+            "hook:a-4",
+            "hook:b-4",
+        ]
+        with pytest.raises(ValueError, match="observation_envelope_limit_invalid"):
+            store.list_envelopes_for_session(_WORKSPACE, _SESSION, limit=257)
+
+    asyncio.run(run())

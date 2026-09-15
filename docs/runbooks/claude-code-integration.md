@@ -960,3 +960,13 @@ returned.
 
 No Claude-specific behavior is configured: the projection is host-neutral and lives in
 `yoetz.mcp.summaries`.
+
+
+### First-start contention and long review recovery
+
+Native and explicit MCP startup share the catalog lease-yield repair. A released start lease
+carries the typed same-request retry directive; an active lease carries the bounded wait directive.
+Both retain the original body and request identity. The shared service keeps an admitted semantic
+check running after an ordinary client wait timeout or disconnect; an explicit control cancellation
+or service shutdown still cancels it. This is shared service behavior, not proof of a new native
+Claude dogfood run.

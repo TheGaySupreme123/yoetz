@@ -270,6 +270,9 @@ def test_persisted_predecessor_pending_row_drains_after_successor_attach(tmp_pat
             stdout=io.BytesIO(),
             workspace=locator,
             _state=tmp_path,
+            # This is a routing/recovery test with a fake client. Freeze its foreground clock
+            # so runner contention cannot exhaust the drain budget between the two rows.
+            _monotonic=lambda: 0.0,
             connect=_connector(client),
         )
         == 0

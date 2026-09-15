@@ -183,3 +183,13 @@ ad-hoc `migrate execute` continue to use their own exact review and plan-digest 
 
 Platform wheels (not pure-Python) on macOS arm64 + manylinux_2_28 x86_64; Yoetz owns security
 patching for the shipped SQLite; every dependency bump reruns the storage matrix.
+
+## 0.3 projection query execution (#747)
+
+Projection pages reuse an immutable exact-frontier snapshot and bounded transient row indexes.
+The cache is not persisted or shared across transaction clones, and replacing the record tuple
+invalidates it. Historical replay and row selection run off the event loop with no SQLite handle
+or mutable ledger state in the worker. Cancellation joins the worker before returning. Query
+results retain the same frontier, cursor, filtering, coverage and privacy contracts; small page
+limits do not require replaying the entire ledger on every call. Lineage views retain their
+existing recorded-fact semantics.

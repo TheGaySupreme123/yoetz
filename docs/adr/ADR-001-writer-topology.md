@@ -85,6 +85,16 @@ mandatory because stale or duplicate service processes must fail safely.
 - Maintenance runs inside the same service and uses the same writer queues and fences. There is no
   separate maintenance process with a hidden direct-storage path.
 
+For a same-bundle session rebind, the service may wait for existing runtime users to drain under
+a bounded condition wait; it must release the lock needed by those users, preserve admission
+limits, and recheck generation and fence authority before use. A definitively returned start
+contention failure may yield only its exact pending catalog lease under the existing generation
+and lease compare-and-swap. Yield never removes the reservation, changes the request identity,
+rewinds a durable milestone, or implies that no write occurred. Cancellation, crash, stale-owner
+and response-loss recovery retain their existing fenced replay rules. Issue #744 specifies the
+five-second wait and exact replay recovery in `docs/INTERFACES.md`; it adds no client writer or
+ownership bypass.
+
 ## Lifecycle contract
 
 v0.1 ships a foreground `yoetz service run` entrypoint suitable for an explicit terminal or

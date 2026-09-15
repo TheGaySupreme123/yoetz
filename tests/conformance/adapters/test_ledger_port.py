@@ -2272,7 +2272,8 @@ async def test_short_semantic_execution_does_not_get_a_sixty_second_floor() -> N
 
 
 @pytest.mark.anyio
-async def test_real_attempt_loop_crosses_old_lease_without_duplicate_dispatch() -> None:
+@pytest.mark.parametrize("budget", [120, 900, 3600])
+async def test_real_attempt_loop_crosses_old_lease_without_duplicate_dispatch(budget: int) -> None:
     """The shipped attempt loop dispatches once beyond 60s under the frozen semantic cap."""
 
     from yoetz.application.semantic_attempts import run_durable_semantic_attempts
@@ -2295,6 +2296,8 @@ async def test_real_attempt_loop_crosses_old_lease_without_duplicate_dispatch() 
         def monotonic_seconds(self) -> float:
             return (self.now - datetime(2026, 7, 19, 12, 0, tzinfo=UTC)).total_seconds()
 
+    expiry = datetime(2026, 7, 19, 12, 0, tzinfo=UTC) + timedelta(seconds=budget)
+    expiry_wire = expiry.isoformat(timespec="milliseconds").replace("+00:00", "Z")
     command = ledger_command(request_suffix="c")
     operation_id = "req_00000000-0000-4000-8000-0000000000ac"
     for adapter in (memory_ledger(command), sqlite_ledger(command)):
@@ -2308,14 +2311,16 @@ async def test_real_attempt_loop_crosses_old_lease_without_duplicate_dispatch() 
             command,
             ObjectKind.SEMANTIC_CASE,
             semantic_case_digest=case_digest,
+            semantic_case_primary_expires_at=expiry_wire,
+            semantic_case_expires_at=expiry_wire,
         )
         job = await adapter.enqueue_semantic_job(lease, case_digest, case_ref)
         dispatches: list[str] = []
 
         async def dispatch(handle: SemanticAttemptHandle, deadline: Deadline) -> _Eval:
             dispatches.append(handle.provider_request_id)
-            assert deadline.monotonic_deadline == 120.0
-            clock.now += timedelta(seconds=90)
+            assert deadline.monotonic_deadline == float(budget)
+            clock.now += timedelta(seconds=budget * 0.75)
             return _Eval(SemanticStatus.SUCCEEDED, SemanticReason.SEMANTIC_COMPLETED)
 
         async def publish(_handle: SemanticAttemptHandle, _evaluation: object) -> ObjectRef:
@@ -2333,7 +2338,7 @@ async def test_real_attempt_loop_crosses_old_lease_without_duplicate_dispatch() 
             ledger=adapter,
             lease=lease,
             job=job,
-            deadline=Deadline(datetime(2026, 7, 19, 12, 2, tzinfo=UTC), 120.0),
+            deadline=Deadline(expiry, float(budget)),
             max_retries=0,
             now_monotonic=clock.monotonic_seconds,
             dispatch=dispatch,

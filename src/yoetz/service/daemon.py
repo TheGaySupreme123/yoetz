@@ -121,6 +121,7 @@ from yoetz.protocol.canonical import (
 from yoetz.protocol.errors import ProtocolValueError, PublicOperationError, SafeDetailValue
 from yoetz.protocol.ids import IdKind, new_id, validate_id
 from yoetz.protocol.models import (
+    CheckRequest,
     CheckResult,
     PublishWorkAcceptedProjectionUnavailableModel,
     PublishWorkDryRunModel,
@@ -132,6 +133,7 @@ from yoetz.protocol.models import (
     StartResult,
     StatusResult,
 )
+from yoetz.service.check_waits import EXPLICIT_CONTROL_CANCEL, CheckWaits
 from yoetz.service.confidential_protocol import (
     HUMAN_PROTOCOL_MAGIC,
     HUMAN_PROTOCOL_VERSION,
@@ -675,6 +677,7 @@ class ServiceDaemon:
         self._activation_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
         self._connection_tasks: set[asyncio.Task[None]] = set()
+        self._check_waits = CheckWaits()
         self._ready_maintenance_task: asyncio.Task[None] | None = None
 
     @property
@@ -1004,6 +1007,7 @@ class ServiceDaemon:
                 self._stop_event.set()
                 return
             self._stopping = True
+            await self._check_waits.close()
             self._state_reason = reason if reason == "internal_error" else "shutdown_requested"
             lifecycle = self._composition.lifecycle
             if self._started:
@@ -1065,6 +1069,32 @@ class ServiceDaemon:
         request: ControlCallRequest,
         repository_privacy_context: RepositoryPrivacyContext | None,
     ) -> object:
+        body = request.body
+        if (
+            request.method is ControlMethod.CHECK
+            and type(body) is CheckRequest
+            and body.mode != "deterministic_only"
+        ):
+            return await self._check_waits.run(
+                (body.writer_id, body.request_id),
+                hashlib.sha256(canonical_encode(body.model_dump(mode="json"))).hexdigest(),
+                lambda: self._dispatch_ready_once(
+                    projection_context, request, repository_privacy_context, detached_check=True
+                ),
+                request.deadline_ms,
+            )
+        return await self._dispatch_ready_once(
+            projection_context, request, repository_privacy_context
+        )
+
+    async def _dispatch_ready_once(
+        self,
+        projection_context: ClientProjectionContext,
+        request: ControlCallRequest,
+        repository_privacy_context: RepositoryPrivacyContext | None,
+        *,
+        detached_check: bool = False,
+    ) -> object:
         # A recovery ceremony holds this same lock across an unbounded human wait, so an
         # unbounded acquire would hang every ordinary call for as long as someone stares at a
         # confirmation prompt. The caller's own deadline decides how long it is willing to wait.
@@ -1091,6 +1121,7 @@ class ServiceDaemon:
                 projection_context,
                 request,
                 repository_privacy_context,
+                detached_check=detached_check,
             )
         finally:
             if maintenance_acquired:
@@ -1103,6 +1134,8 @@ class ServiceDaemon:
         projection_context: ClientProjectionContext,
         request: ControlCallRequest,
         repository_privacy_context: RepositoryPrivacyContext | None,
+        *,
+        detached_check: bool = False,
     ) -> object:
         application = self._application
         if application is None:
@@ -1123,7 +1156,7 @@ class ServiceDaemon:
             handler = getattr(application, request.method.value, None)
             if not callable(handler):
                 raise ControlError("method_forbidden")
-            if request.deadline_ms is None:
+            if request.deadline_ms is None or detached_check:
                 internal = await self._invoke_ready_handler(
                     handler, request, repository_privacy_context
                 )
@@ -1407,7 +1440,7 @@ class ServiceDaemon:
                 if not isinstance(request, ControlCallRequest):
                     target = calls.get(request.target_rpc_id)
                     if target is not None:
-                        target.cancel()
+                        target.cancel(EXPLICIT_CONTROL_CANCEL)
                     continue
                 task = asyncio.create_task(self._serve_call(stream, session, request, write_lock))
                 calls[request.rpc_id] = task

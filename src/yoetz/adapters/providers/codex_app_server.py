@@ -500,7 +500,7 @@ class CodexAppServerProfile:
             validate_sha256_digest(digest)
         if not self.executable_path.is_absolute() or not self.codex_home.is_absolute():
             raise ValueError("codex_runtime_path_invalid")
-        if type(self.timeout_seconds) is not int or not 1 <= self.timeout_seconds <= 300:
+        if type(self.timeout_seconds) is not int or not 1 <= self.timeout_seconds <= 3600:
             raise ValueError("codex_runtime_timeout_invalid")
         if type(self.data_use_profile) is not ProviderDataUseProfile:
             raise ValueError("codex_runtime_data_use_invalid")

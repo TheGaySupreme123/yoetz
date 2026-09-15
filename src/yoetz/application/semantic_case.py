@@ -1462,6 +1462,20 @@ def build_semantic_case(
                         _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
                     )
                     continue
+            if (
+                captured_group is None
+                and payload.captured_object_id is not None
+                and payload.digest_binding is not None
+                and payload.digest_binding.provenance
+                is EvidenceDigestProvenance.OBSERVATION_CAPTURED
+            ):
+                # A structural capture description is never a substitute for authenticated bytes.
+                # Preserve the coverage gap even when the omission list itself is capped away.
+                omissions.append(
+                    _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_recorded")
+                )
+                capture_gap_set.add("captured_object_unavailable")
+                continue
             digest_provenance: ExcerptDigestProvenance | None = None
             if captured_group is not None:
                 # The service-authenticated inner bytes are the only source that may populate a
