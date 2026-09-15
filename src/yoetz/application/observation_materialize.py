@@ -494,7 +494,8 @@ def _captured_evidence_drafts(
                 ),
             )
         )
-    return tuple(drafts), tuple(refs)
+    # Object order does not imply evidence-ID order; result references are a canonical set.
+    return tuple(drafts), tuple(sorted(refs, key=str.encode))
 
 
 def materialize_observation_inspection_snapshot(
