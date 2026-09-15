@@ -18,7 +18,7 @@ import typer
 from yoetz import __version__
 from yoetz.domain.values import JsonObject, JsonValue
 from yoetz.ports.control import ControlError, ProjectionRenderMode
-from yoetz.protocol.ids import IdKind, new_id
+from yoetz.protocol.ids import IdKind, new_id, validate_id
 from yoetz.protocol.models import (
     StatusRequest,
     StatusResultModel,
@@ -37,6 +37,13 @@ _JSON = Annotated[bool, typer.Option("--json", help="Emit canonical JSON.")]
 _DEADLINE = Annotated[
     int | None,
     typer.Option("--deadline-ms", min=1, max=86_400_000),
+]
+_REQUEST_ID = Annotated[
+    str | None,
+    typer.Option(
+        "--request-id",
+        help="Stable request id for retrying a timed-out or lost-response mutation.",
+    ),
 ]
 
 
@@ -76,7 +83,7 @@ def _emit(value: Mapping[str, JsonValue], *, json_output: bool) -> None:
         generation = project.get("membership_generation", "")
         typer.echo(f"project {project_id} ({kind}) generation {generation}")
         coverage = project.get("coverage")
-        if isinstance(coverage, (list, tuple)):
+        if isinstance(coverage, list | tuple):
             for row in coverage:
                 if isinstance(row, Mapping):
                     typer.echo(
@@ -107,12 +114,12 @@ async def _invoke(
         # The project support body is a closed control-protocol envelope.  Keep the CLI command
         # builders focused on user-facing fields while binding the protocol version at this one
         # service-client boundary.
-        request = JsonObject(
-            {
-                "schema_version": "1.0.0",
-                **cast(Mapping[str, JsonValue], body),
-            }
-        )
+        body_values = dict(cast(Mapping[str, JsonValue], body))
+        # One invocation owns one stable mutation identity.  A caller that must retry after the
+        # process exits can pass --request-id and receive the same durable response later.
+        if body_values.get("request_id") is None:
+            body_values["request_id"] = new_id(IdKind.REQUEST)
+        request = JsonObject({"schema_version": "1.0.0", **body_values})
         return await cast(_ProjectClient, client).project(request, deadline_ms=deadline_ms)
     finally:
         await client.close()
@@ -164,8 +171,22 @@ async def _invoke_status(
 def _run(body: Mapping[str, object], *, json_output: bool, deadline_ms: int | None) -> None:
     from yoetz.cli.app import run_async
 
+    # Mint before opening the service connection so a timeout or lost response can surface the
+    # exact identity needed for a later ``--request-id`` retry.  The body is local to this CLI
+    # process; an explicit caller value remains unchanged.
+    request_body = dict(body)
+    if request_body.get("request_id") is None:
+        request_body["request_id"] = new_id(IdKind.REQUEST)
+    request_id = request_body.get("request_id")
     try:
-        result = run_async(lambda: _invoke(body, deadline_ms=deadline_ms, json_output=json_output))
+        # Validate before connection failures can echo the retry token to a human terminal.
+        # A caller-supplied string is not trusted terminal output until it is a canonical ID.
+        if type(request_id) is not str:
+            raise ValueError("project_request_id_invalid")
+        validate_id(IdKind.REQUEST, request_id)
+        result = run_async(
+            lambda: _invoke(request_body, deadline_ms=deadline_ms, json_output=json_output)
+        )
         _emit(result, json_output=json_output)
     except Exception as error:
         # The existing app owns the full control-error rendering and exit taxonomy.  Delegate to
@@ -173,6 +194,11 @@ def _run(body: Mapping[str, object], *, json_output: bool, deadline_ms: int | No
         from yoetz.cli.app import control_failure, usage_failure
 
         if isinstance(error, ControlError):
+            if error.retryable and type(request_id) is str:
+                typer.echo(
+                    f"request_id {request_id} retained; retry with --request-id {request_id}",
+                    err=True,
+                )
             raise typer.Exit(control_failure(error, json_output=json_output))
         raise typer.Exit(usage_failure())
 
@@ -224,6 +250,7 @@ def project_create(
         bool,
         typer.Option("--auto-grouping/--no-auto-grouping"),
     ] = False,
+    request_id: _REQUEST_ID = None,
     json_output: _JSON = False,
     deadline_ms: _DEADLINE = None,
 ) -> None:
@@ -234,6 +261,7 @@ def project_create(
             "description": description,
             "owner_task_id": owner_task_id,
             "auto_grouping": auto_grouping,
+            "request_id": request_id,
         },
         json_output=json_output,
         deadline_ms=deadline_ms,
@@ -252,6 +280,7 @@ def project_link(
         str | None, typer.Option("--member-repository-commitment")
     ] = None,
     expected_generation: Annotated[int | None, typer.Option("--expected-generation", min=1)] = None,
+    request_id: _REQUEST_ID = None,
     json_output: _JSON = False,
     deadline_ms: _DEADLINE = None,
 ) -> None:
@@ -264,6 +293,7 @@ def project_link(
             "source_workspace_commitment": source_workspace_commitment,
             "member_repository_commitment": member_repository_commitment,
             "expected_generation": expected_generation,
+            "request_id": request_id,
         },
         json_output=json_output,
         deadline_ms=deadline_ms,
@@ -276,6 +306,7 @@ def project_unlink(
     member_kind: Annotated[str, typer.Option("--member-kind")],
     member_commitment_or_id: Annotated[str, typer.Option("--member")],
     expected_generation: Annotated[int | None, typer.Option("--expected-generation", min=1)] = None,
+    request_id: _REQUEST_ID = None,
     json_output: _JSON = False,
     deadline_ms: _DEADLINE = None,
 ) -> None:
@@ -286,6 +317,7 @@ def project_unlink(
             "member_kind": member_kind,
             "member_commitment_or_id": member_commitment_or_id,
             "expected_generation": expected_generation,
+            "request_id": request_id,
         },
         json_output=json_output,
         deadline_ms=deadline_ms,
@@ -304,6 +336,7 @@ def project_amend(
     ],
     title: Annotated[str | None, typer.Option("--title")] = None,
     description: Annotated[str | None, typer.Option("--description")] = None,
+    request_id: _REQUEST_ID = None,
     json_output: _JSON = False,
     deadline_ms: _DEADLINE = None,
 ) -> None:
@@ -314,6 +347,7 @@ def project_amend(
             "title": title,
             "description": description,
             "owner_task_id": owner_task_id,
+            "request_id": request_id,
         },
         json_output=json_output,
         deadline_ms=deadline_ms,
@@ -324,6 +358,7 @@ def project_amend(
 def project_dissolve(
     project_id: Annotated[str, typer.Option("--project-id")],
     expected_generation: Annotated[int | None, typer.Option("--expected-generation", min=1)] = None,
+    request_id: _REQUEST_ID = None,
     json_output: _JSON = False,
     deadline_ms: _DEADLINE = None,
 ) -> None:
@@ -332,6 +367,7 @@ def project_dissolve(
             "operation": "dissolve",
             "project_id": project_id,
             "expected_generation": expected_generation,
+            "request_id": request_id,
         },
         json_output=json_output,
         deadline_ms=deadline_ms,
@@ -343,9 +379,14 @@ def _project_opt(
     repository_commitment: str,
     json_output: bool,
     deadline_ms: int | None,
+    request_id: str | None,
 ) -> None:
     _run(
-        {"operation": operation, "repository_commitment": repository_commitment},
+        {
+            "operation": operation,
+            "repository_commitment": repository_commitment,
+            "request_id": request_id,
+        },
         json_output=json_output,
         deadline_ms=deadline_ms,
     )
@@ -354,19 +395,21 @@ def _project_opt(
 @project_app.command("opt-out")
 def project_opt_out(
     repository_commitment: Annotated[str, typer.Option("--repository-commitment")],
+    request_id: _REQUEST_ID = None,
     json_output: _JSON = False,
     deadline_ms: _DEADLINE = None,
 ) -> None:
-    _project_opt("opt_out", repository_commitment, json_output, deadline_ms)
+    _project_opt("opt_out", repository_commitment, json_output, deadline_ms, request_id)
 
 
 @project_app.command("opt-in")
 def project_opt_in(
     repository_commitment: Annotated[str, typer.Option("--repository-commitment")],
+    request_id: _REQUEST_ID = None,
     json_output: _JSON = False,
     deadline_ms: _DEADLINE = None,
 ) -> None:
-    _project_opt("opt_in", repository_commitment, json_output, deadline_ms)
+    _project_opt("opt_in", repository_commitment, json_output, deadline_ms, request_id)
 
 
 @project_app.command("grant")
@@ -374,6 +417,7 @@ def project_grant(
     project_id: Annotated[str, typer.Option("--project-id")],
     membership_generation: Annotated[int, typer.Option("--membership-generation", min=1)],
     audit_record_id: Annotated[str | None, typer.Option("--audit-record-id")] = None,
+    request_id: _REQUEST_ID = None,
     json_output: _JSON = False,
     deadline_ms: _DEADLINE = None,
 ) -> None:
@@ -383,6 +427,7 @@ def project_grant(
             "project_id": project_id,
             "membership_generation": membership_generation,
             "audit_record_id": audit_record_id,
+            "request_id": request_id,
         },
         json_output=json_output,
         deadline_ms=deadline_ms,
@@ -394,6 +439,7 @@ def project_revoke(
     project_id: Annotated[str, typer.Option("--project-id")],
     membership_generation: Annotated[int, typer.Option("--membership-generation", min=1)],
     audit_record_id: Annotated[str | None, typer.Option("--audit-record-id")] = None,
+    request_id: _REQUEST_ID = None,
     json_output: _JSON = False,
     deadline_ms: _DEADLINE = None,
 ) -> None:
@@ -403,6 +449,7 @@ def project_revoke(
             "project_id": project_id,
             "membership_generation": membership_generation,
             "audit_record_id": audit_record_id,
+            "request_id": request_id,
         },
         json_output=json_output,
         deadline_ms=deadline_ms,

@@ -24,8 +24,8 @@ _MANIFEST_PATH = "manifest.json"
 _SCHEMA_NAMESPACE = "https://schemas.yoetz.dev/0.1/"
 _EXPECTED_SCHEMA_MANIFEST_SCHEMA = "yoetz.schema-manifest/1.0.0"
 _EXPECTED_SCHEMA_MANIFEST_VERSION = "1.0.0"
-_EXPECTED_MEMBER_COUNT = 168
-_EXPECTED_REQUEST_RESULT_VERSION_COUNT = 45
+_EXPECTED_MEMBER_COUNT = 187
+_EXPECTED_REQUEST_RESULT_VERSION_COUNT = 46
 _EXPECTED_EVENT_VERSION_COUNT = 29
 
 
@@ -211,20 +211,16 @@ def test_schema_registry_is_complete() -> None:
                 "consent/review-result-3.0.0.schema.json",
                 "consent/status-3.0.0.schema.json",
             }
+            else "2.7.0"
+            if path.endswith("-2.7.0.schema.json")
+            else "2.6.0"
+            if path.endswith("-2.6.0.schema.json")
             else "2.5.0"
-            if path
-            in {
-                "service/control-hello-2.5.0.schema.json",
-                "service/control-hello-result-2.5.0.schema.json",
-                "service/control-request-2.5.0.schema.json",
-                "service/control-result-2.5.0.schema.json",
-            }
+            if path.endswith("-2.5.0.schema.json")
             else "2.4.0"
             if path.endswith("-2.4.0.schema.json")
             else "2.3.0"
             if path.endswith("-2.3.0.schema.json")
-            else "2.4.0"
-            if path.endswith("-2.4.0.schema.json")
             else "2.2.0"
             if path.endswith("-2.2.0.schema.json")
             else "2.1.0"
@@ -235,10 +231,17 @@ def test_schema_registry_is_complete() -> None:
                 and path != "consent/chat-user-attestation-1.0.0.schema.json"
             )
             or path.endswith("-2.0.0.schema.json")
+            else "1.4.0"
+            if path.endswith("-1.4.0.schema.json")
             else "1.3.0"
             if path
             in {
                 "config/yoetz-config-1.3.0.schema.json",
+                "events/finding-recorded-1.3.0.schema.json",
+                "findings/finding-1.3.0.schema.json",
+                "operations/check-result-1.3.0.schema.json",
+                "operations/receipt-result-1.3.0.schema.json",
+                "receipts/receipt-document-1.3.0.schema.json",
                 "operations/status-result-1.3.0.schema.json",
             }
             else "1.2.0"
@@ -248,6 +251,8 @@ def test_schema_registry_is_complete() -> None:
                 "events/event-draft-1.2.0.schema.json",
                 "events/evidence-recorded-1.2.0.schema.json",
                 "events/finding-recorded-1.2.0.schema.json",
+                "events/check-recorded-1.2.0.schema.json",
+                "findings/semantic-provenance-1.2.0.schema.json",
                 "events/opaque-unknown-event-draft-1.2.0.schema.json",
                 "events/session-opened-1.2.0.schema.json",
                 "findings/finding-1.2.0.schema.json",
@@ -259,13 +264,16 @@ def test_schema_registry_is_complete() -> None:
                 "receipts/receipt-document-1.2.0.schema.json",
             }
             else (
-                "1.2.0"
+                "1.3.0"
+                if path == "operations/status-result-1.3.0.schema.json"
+                else "1.2.0"
                 if path == "operations/status-result-1.2.0.schema.json"
                 else "1.1.0"
                 if path
                 in {
                     "config/yoetz-config-1.1.0.schema.json",
                     "events/check-recorded-1.1.0.schema.json",
+                    "findings/runtime-attempt-evidence-1.1.0.schema.json",
                     "events/claim-recorded-1.1.0.schema.json",
                     "events/event-draft-1.1.0.schema.json",
                     "events/evidence-recorded-1.1.0.schema.json",
@@ -450,12 +458,12 @@ def test_released_version_manifest_2_1_stays_frozen_at_its_released_snapshot() -
     assert root_bytes == packaged.read_bytes()
 
 
-def test_live_version_manifest_2_2_tracks_the_current_inventory() -> None:
+def test_live_version_manifest_2_3_tracks_the_current_inventory() -> None:
     from yoetz.version import REVIEWED_RESOURCE_COUNT
 
-    document = _version_manifest_document("2.2.0")
+    document = _version_manifest_document("2.3.0")
 
-    assert document["properties"]["schema_version"]["const"] == "2.2.0"
+    assert document["properties"]["schema_version"]["const"] == "2.3.0"
     counts = _version_manifest_consts(document, "resource_counts")
     assert int(counts["total"]) == REVIEWED_RESOURCE_COUNT
     assert sum(int(count) for name, count in counts.items() if name != "total") == int(

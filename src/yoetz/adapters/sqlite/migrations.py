@@ -11,6 +11,10 @@ from typing import TYPE_CHECKING, Final, cast
 
 import apsw
 
+from yoetz.adapters.sqlite.connection import (  # pyright: ignore[reportPrivateUsage]
+    _migration_authorizer,  # pyright: ignore[reportPrivateUsage]
+)
+
 if TYPE_CHECKING:
     from yoetz.ports.maintenance import MaintenanceHandle
 
@@ -69,6 +73,7 @@ CATALOG_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration("0002", _load_resource("catalog", "0002")),
     Migration("0003", _load_resource("catalog", "0003")),
     Migration("0004", _load_resource("catalog", "0004")),
+    Migration("0005", _load_resource("catalog", "0005")),
 )
 BUNDLE_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration("0001", _load_resource("bundle", "0001")),
@@ -81,6 +86,10 @@ BUNDLE_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration("0008", _load_resource("bundle", "0008")),
     Migration("0009", _load_resource("bundle", "0009")),
     Migration("0010", _load_resource("bundle", "0010")),
+    Migration("0011", _load_resource("bundle", "0011")),
+    Migration("0012", _load_resource("bundle", "0012")),
+    Migration("0013", _load_resource("bundle", "0013")),
+    Migration("0014", _load_resource("bundle", "0014")),
 )
 
 
@@ -138,73 +147,6 @@ def _execute(db: apsw.Connection, migration: Migration) -> None:
     db.execute(migration.ddl.decode("utf-8"))
 
 
-_RUNTIME_WRITER_ALLOWED_PRAGMAS: Final[frozenset[str]] = frozenset(
-    {
-        "application_id",
-        "compile_options",
-        "foreign_key_check",
-        "integrity_check",
-        "query_only",
-        "quick_check",
-        "schema_version",
-        "user_version",
-        "wal_checkpoint",
-    }
-)
-_RUNTIME_WRITER_SAFE_PRAGMAS: Final[dict[str, frozenset[str | None]]] = {
-    "defer_foreign_keys": frozenset({None, "ON", "1"}),
-    "foreign_keys": frozenset({None, "ON", "1"}),
-    "trusted_schema": frozenset({None, "OFF", "0"}),
-}
-
-
-def _runtime_writer_authorizer(
-    action: int,
-    first: str | None,
-    second: str | None,
-    database: str | None,
-    trigger: str | None,
-) -> int:
-    """Private copy of the reviewed runtime authorizer used after the migration window."""
-
-    del database, trigger
-    if action in {
-        apsw.SQLITE_ATTACH,
-        apsw.SQLITE_CREATE_VTABLE,
-        apsw.SQLITE_DETACH,
-        apsw.SQLITE_DROP_VTABLE,
-    }:
-        return apsw.SQLITE_DENY
-    if action == apsw.SQLITE_FUNCTION and second == "load_extension":
-        return apsw.SQLITE_DENY
-    if action == apsw.SQLITE_PRAGMA:
-        if first in _RUNTIME_WRITER_ALLOWED_PRAGMAS:
-            return apsw.SQLITE_OK
-        if first in _RUNTIME_WRITER_SAFE_PRAGMAS and second in _RUNTIME_WRITER_SAFE_PRAGMAS[first]:
-            return apsw.SQLITE_OK
-        return apsw.SQLITE_DENY
-    return apsw.SQLITE_OK
-
-
-def _migration_authorizer(
-    action: int,
-    first: str | None,
-    second: str | None,
-    database: str | None,
-    trigger: str | None,
-) -> int:
-    """Allow migration-only PRAGMAs while retaining the normal writer deny list."""
-
-    # The ordinary writer authorizer deliberately accepts only safe configuration PRAGMAs.
-    # 0010 needs a narrowly scoped foreign-key/legacy-alter window to replace an FK-referenced
-    # table; this callback is installed only for the migration transaction and is restored in
-    # the context manager below.  It is never the runtime writer authorizer.
-    if action == apsw.SQLITE_PRAGMA and first in {"foreign_keys", "legacy_alter_table"}:
-        if second in {None, "ON", "OFF", "1", "0"}:
-            return apsw.SQLITE_OK
-    return _runtime_writer_authorizer(action, first, second, database, trigger)
-
-
 @contextmanager
 def _migration_authorization_window(db: apsw.Connection):
     """Temporarily grant migration DDL PRAGMAs, then restore runtime write policy."""
@@ -217,10 +159,70 @@ def _migration_authorization_window(db: apsw.Connection):
         db.set_authorizer(previous_authorizer)
 
 
-def _requires_event_summary_rebuild(pending: Sequence[Migration]) -> bool:
-    """Return whether a pending migration rebuilds the FK-referenced events table."""
+def _requires_foreign_keys_disabled(pending: Sequence[Migration]) -> bool:
+    """Return whether pending migrations include the isolated events-table rebuild."""
 
-    return any(item.version == "0010" for item in pending)
+    return any(item.version == "0014" for item in pending)
+
+
+def _validate_v10_bundle_layout(
+    db: apsw.Connection,
+    current: int,
+    pending: Sequence[Migration],
+) -> None:
+    """Refuse ambiguous pre-refresh bundles before any upgrade writes.
+
+    Released v0.2 v10 has the native-content consent column and the original events CHECK.
+    The short-lived 0.3 development v10 used the same user_version for its events CHECK
+    rebuild and therefore lacks that consent column.  There is no safe way to infer whether
+    that development schema has user data that can be replayed into the released frontier.
+    Only the released layout may continue through 0011-0014; every other combination fails
+    closed before opening a migration transaction.
+    """
+
+    if current not in {10, 11, 12, 13} or not any(item.version == "0014" for item in pending):
+        return
+    profile_columns = {
+        cast(str, row[1])
+        for row in db.execute("PRAGMA table_info(observation_consent)")
+        if len(row) > 1 and type(row[1]) is str
+    }
+    event_row = db.execute(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'events'"
+    ).fetchone()
+    event_sql = event_row[0].casefold() if event_row and type(event_row[0]) is str else ""
+    has_content_profiles = "content_capture_profiles_json" in profile_columns
+    has_lineage_summary = "delegation_declared" in event_sql
+    required_v12_tables: set[str] = {"observation_capture_tickets"} if current >= 11 else set()
+    if current >= 12:
+        required_v12_tables.add("observation_advice_semantic_attempts")
+    tables = {
+        cast(str, row[0])
+        for row in db.execute(
+            "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        )
+        if len(row) == 1 and type(row[0]) is str
+    }
+    usage_columns = {
+        cast(str, row[1]) for row in db.execute("PRAGMA table_info(semantic_attempts)")
+    }
+    required_usage_columns = {
+        "usage_input_tokens",
+        "usage_cached_input_tokens",
+        "usage_cache_write_input_tokens",
+        "usage_output_tokens",
+        "usage_reasoning_output_tokens",
+        "usage_total_tokens",
+    }
+    usage_layout_valid = current < 13 or required_usage_columns <= usage_columns
+    if (
+        has_content_profiles
+        and not has_lineage_summary
+        and required_v12_tables <= tables
+        and usage_layout_valid
+    ):
+        return
+    raise RuntimeError("schema_upgrade_path_unknown")
 
 
 def _set_event_summary_rebuild_mode(db: apsw.Connection) -> None:
@@ -294,7 +296,7 @@ def initialize_bundle(db: apsw.Connection, bundle_meta_seed: Mapping[str, str]) 
     target_version = current_schema_version(BUNDLE_MIGRATIONS)
     seed["storage_schema_version"] = str(target_version)
 
-    # Fresh installation has no dependent event rows, but 0010 still uses the same narrowly
+    # Fresh installation has no dependent event rows, but 0014 still uses the same narrowly
     # scoped migration authorization window as an upgrade.  The runtime writer authorizer is
     # restored before this function returns.
     with _migration_authorization_window(db):
@@ -361,7 +363,8 @@ def run_migrations(
         pending = tuple(item for item in registry if int(item.version) > current)
         if not pending or int(pending[0].version) != current + 1:
             raise RuntimeError("schema_version_unknown")
-        rebuild_mode = _requires_event_summary_rebuild(pending)
+        _validate_v10_bundle_layout(db, current, pending)
+        rebuild_mode = _requires_foreign_keys_disabled(pending)
         with _migration_authorization_window(db):
             if rebuild_mode:
                 _set_event_summary_rebuild_mode(db)

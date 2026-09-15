@@ -12,6 +12,7 @@ from typing import Final, Literal, Protocol, cast
 
 from yoetz.domain.coordination import CoordinationErrorCode
 from yoetz.domain.values import JsonObject, validate_commitment
+from yoetz.ports.control_reasons import CONTROL_ERROR_REASONS
 from yoetz.protocol.canonical import parse_canonical_integer_string
 from yoetz.protocol.errors import SafeDetailValue, normalize_safe_details
 from yoetz.protocol.ids import IdKind, validate_id
@@ -31,6 +32,7 @@ from yoetz.protocol.models import (
 )
 
 __all__ = [
+    "CONTROL_ERROR_REASONS",
     "ControlCallRequest",
     "ControlCancelRequest",
     "ControlClientKind",
@@ -40,6 +42,7 @@ __all__ = [
     "ProjectionRenderMode",
     "ControlRequest",
     "ControlResult",
+    "McpHostProfile",
     "McpRouteProfile",
     "ServiceState",
     "ServiceStopResult",
@@ -74,6 +77,7 @@ class ProjectionRenderMode(str, Enum):  # noqa: UP042 - exact wire enum base
 
 
 type RepositoryIdentityKind = Literal["git_common_root", "directory"]
+type McpHostProfile = Literal["generic", "codex", "claude", "cursor"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +246,7 @@ class ControlCallRequest:
     body: ControlCallBody
     deadline_ms: int | None = None
     route_profile: McpRouteProfile | None = None
+    host_profile: McpHostProfile | None = None
 
     def __post_init__(self) -> None:
         if self.kind != "call":
@@ -261,6 +266,11 @@ class ControlCallRequest:
             or self.method not in {ControlMethod.CHECK, ControlMethod.STATUS}
         ):
             raise ValueError("control_route_profile_invalid")
+        if self.host_profile is not None and (
+            self.host_profile not in {"generic", "codex", "claude", "cursor"}
+            or self.method is not ControlMethod.CHECK
+        ):
+            raise ValueError("control_host_profile_invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -357,7 +367,7 @@ class ControlError(Exception):
         accepted_state: Mapping[str, SafeDetailValue] | None = None,
         correlation_id: str | None = None,
     ) -> None:
-        if type(reason) is not str or reason not in _CONTROL_ERROR_REASONS:
+        if type(reason) is not str or reason not in CONTROL_ERROR_REASONS:
             raise TypeError("control_error_reason_invalid")
         if type(retryable) is not bool:
             raise TypeError("control_error_retryable_invalid")

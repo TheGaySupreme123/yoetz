@@ -181,6 +181,7 @@ def _state_payload(state: RecommendationState) -> dict[str, object]:
     return {
         "schema": state.schema,
         "last_evaluated_version": state.last_evaluated_version,
+        "pending_package_version": state.pending_package_version,
         "pending": [
             {
                 "id": item.id,
@@ -196,6 +197,7 @@ def _state_payload(state: RecommendationState) -> dict[str, object]:
                 "decision": row.decision,
                 "decided_at": row.decided_at.isoformat(),
                 "version": row.version,
+                "release_version": row.release_version,
                 "recommendation_id": row.recommendation_id or key,
                 "target_digest": None if row.target is None else row.target.target_digest,
             }
@@ -224,9 +226,14 @@ def _render_state(state: RecommendationState, *, json_output: bool) -> None:
         typer.echo(f"    {item.summary}")
         if (target := state.pending_targets.get(item.id)) is not None:
             typer.echo(f"    Target digest: {target.target_digest}")
+        suffix = (
+            f" --release-version {state.pending_package_version}"
+            if recommendation_id == "package-update" and state.pending_package_version
+            else ""
+        )
         typer.echo(
-            f"    Accept: yoetz recommend accept {item.id}  |  "
-            f"Decline: yoetz recommend decline {item.id}"
+            f"    Accept: yoetz recommend accept {item.id}{suffix}  |  "
+            f"Decline: yoetz recommend decline {item.id}{suffix}"
         )
 
 
@@ -494,13 +501,16 @@ def _apply_recommendation(
             record_approval=record_activation_approval,
         )
     if recommendation_id == "package-update":
-        return f"run: {PACKAGE_UPDATE_UPGRADE_COMMAND}", None
+        return f"run: yoetz upgrade (package command: {PACKAGE_UPDATE_UPGRADE_COMMAND})", None
     raise _RecommendationCliError("recommendation_unknown")
 
 
 @recommend_app.command("accept")
 def recommend_accept(
     recommendation_id: Annotated[str, typer.Argument(help="Exact recommendation id.")],
+    release_version: Annotated[
+        str | None, typer.Option("--release-version", help="Exact advertised package release.")
+    ] = None,
     codex_path: Annotated[
         Path | None,
         typer.Option(
@@ -539,6 +549,11 @@ def recommend_accept(
         current = anyio.run(refresh_exact)
         if recommendation_id not in current.pending:
             raise _RecommendationCliError("recommendation_not_pending")
+        if release_version is not None and (
+            recommendation_id != "package-update"
+            or release_version != current.pending_package_version
+        ):
+            raise _RecommendationCliError("recommendation_release_changed")
 
         # The command itself is the approval. Re-preview at this point binds activation to fresh
         # bytes; activation additionally confirms that displayed digest before it mutates trust.
@@ -560,7 +575,14 @@ def recommend_accept(
             # cannot exhaust the bounded target history; preserve the existing partial-apply report.
             try:
                 record_recommendation_decision(
-                    recommendation_id, "accepted", target=decision_target
+                    recommendation_id,
+                    "accepted",
+                    target=decision_target,
+                    release_version=(
+                        current.pending_package_version
+                        if recommendation_id == "package-update"
+                        else None
+                    ),
                 )
             except RecommendationStoreError as exc:
                 typer.echo(f"applied {recommendation_id}: {outcome}")
@@ -576,6 +598,9 @@ def recommend_accept(
     except ConfigError as exc:
         typer.echo(f"invalid_request: {exc.reason_code}", err=True)
         raise typer.Exit(2) from exc
+    except ValueError as exc:
+        typer.echo(f"recommendation_error: {exc}", err=True)
+        raise typer.Exit(2) from exc
     except _RecommendationCliError as exc:
         if activation_decision_recorded:
             typer.echo(
@@ -590,6 +615,9 @@ def recommend_accept(
 @recommend_app.command("decline")
 def recommend_decline(
     recommendation_id: Annotated[str, typer.Argument(help="Exact recommendation id.")],
+    release_version: Annotated[
+        str | None, typer.Option("--release-version", help="Exact advertised package release.")
+    ] = None,
     codex_path: Annotated[
         Path | None,
         typer.Option(
@@ -618,7 +646,7 @@ def recommend_decline(
     # or force a fresh evaluation: the hook-advertised `yoetz recommend decline <id>` line
     # has to be honorable exactly as printed.
     try:
-        decline_cached_recommendation(recommendation_id)
+        decided = decline_cached_recommendation(recommendation_id, release_version=release_version)
     except RecommendationStoreError as exc:
         typer.echo(f"recommendation_error: {exc.reason_code}", err=True)
         raise typer.Exit(2) from exc
@@ -627,5 +655,10 @@ def recommend_decline(
         raise typer.Exit(2) from exc
     if recommendation_id == "codex-plugin-activation":
         typer.echo(f"declined {recommendation_id} for this exact target and activation digest")
+    elif (
+        recommendation_id == "package-update"
+        and decided.decisions[recommendation_id].release_version
+    ):
+        typer.echo("declined this release; later releases may be recommended")
     else:
         typer.echo(f"declined {recommendation_id}; this recommendation will not be shown again")

@@ -6,6 +6,110 @@ reverse-chronological released versions.
 
 ## Unreleased
 
+### Added
+
+- Multiple agents can work in independent tasks within one repository. Parents can delegate
+  work, children can register for explicit acceptance, and lineage views and receipts retain
+  each child's findings, unfinished work, and observation gaps. Requesting a receipt does not
+  close a task or erase a child dependency (issues #494–#504, #509).
+- Projects group concurrent tasks and surface declared overlaps under each source workspace's
+  existing consent. The CLI supports project creation, membership changes, grouping opt-out and
+  opt-in, and generation-bound coordination grants. Retrying a project mutation recovers its
+  recorded operation without creating a second project or repeating a membership change
+  (issues #505–#508).
+
+### Changed
+
+- Updating from 0.2 preserves existing tasks, settings, permissions, and host registrations.
+  On ordinary service startup after unlock, supported task ledgers receive a verified backup
+  and automatic schema upgrade before new work is admitted. Interrupted upgrades resume from
+  recorded progress; failed verification keeps the service unavailable for writes and retains
+  recovery evidence (issue #496).
+- The 0.3 functionality uses additive control contracts and migrations while retaining the
+  released 0.2 schemas and migration bytes. Observation selection, runtime isolation, and
+  recovery improvements from 0.2 remain in effect.
+## 0.2.1 — 2026-09-14
+
+Patch release in the **0.2** public-alpha line, focused on significant Linux and WSL
+compatibility fixes. See [release notes](docs/releases/v0.2.1.md) for validation boundaries
+and known privacy-receipt CLI issues.
+
+### Changed
+
+- The agent install guide (`docs/usage/agent-start.md`) now opens with a platform check — macOS
+  and Linux, Windows only inside WSL 2, with the exact WSL and `uv` installation steps and which
+  side of Windows each command runs on — tells an agent whose host has no structured question
+  tool (Cursor's agent, for one) to put each decision in plain chat and wait for the answer
+  instead of choosing, and hands the terminal over as if the user has never opened one.
+  [Install and first run](docs/usage/install-and-first-run.md) gains the Windows section the CLI
+  and README link to. Host notes checked against the September 2026 documentation of Codex,
+  Claude Code, and Cursor record what each does differently: where its question tool
+  is unavailable or non-blocking, what blocks the guide fetch or the `uv` installer, and what
+  native Windows means for it. The copied setup prompt now tells the agent to ask for approval
+  or a pasted guide when its sandbox blocks the fetch (issue #709).
+
+### Fixed
+
+- `yoetz privacy receipts list` and `yoetz privacy receipts get <receipt-id>` answer again. The
+  service never registered either read method, so every call, including one for a receipt a
+  completed semantic review had just recorded, exited 2 with `invalid_request`; and the catalog
+  could only decode local-disclosure receipts, so a network egress receipt would still have been
+  refused. Both methods are now served with their contract-shaped bodies, `get` reports
+  `not_found` for an unknown ID, malformed filters, cursors, and IDs are rejected as
+  `invalid_request`, and stored network receipts read back with their channel, destination,
+  dispatch, and commitment fields (issue #730).
+- Codex subscription setup accepts Linux x86_64 (WSL 2's Linux userspace included) through its own
+  exact evaluator cell instead of refusing with `codex_runtime_platform_unsupported`. macOS arm64
+  bindings keep their identity, and a binding whose cell does not match the host fails before
+  launch (issue #716).
+- Native Cursor and Claude Code plugin install, replace, update, enable, disable, and remove no
+  longer refuse every non-macOS host. Linux, including a distribution inside WSL 2, now proves
+  the one-time `plugin_artifact_apply` approval by asking for the invoking account's Linux
+  password at your own terminal and verifying it through the operating system (PAM), with the
+  same action-bound banner, single-shot pending, and fail-closed cancellation, timeout, wrong
+  password, and missing-console paths the macOS Touch ID cell has; macOS is unchanged, any other
+  platform still fails closed with `human_authority_unavailable`, and `preview` now names the
+  mechanism and platform under `authorization.human_presence`. A refused or cancelled prompt on
+  the Claude Code path is now reported as `human_authority_unavailable` instead of escaping the
+  CLI as a traceback (issue #719).
+- On native Windows, `yoetz` refuses with a bounded `unsupported_platform` line naming the WSL
+  path (exit 20) instead of `internal_error` from every stateful command; `version`,
+  `--version`, and `--help` still answer (issue #709).
+
+## 0.2.0 — 2026-09-11
+
+Prepared 0.2 public-alpha baseline; superseded by 0.2.1 before tag or registry publication.
+See [complete baseline notes](docs/releases/v0.2.0.md)
+for host integration, observation selection and recovery, upgrade guidance, and known limitations.
+
+### Changed
+
+- New Codex, Claude Code, and Cursor sessions read guidance and discover tool schemas, then
+  call Yoetz `start` before substantive research, commands, edits, or delegation. Failed starts
+  follow exact continuations and same-request recovery, including a named one-time repair,
+  before asking for intro and guidance if startup remains blocked. A first non-retryable failure
+  alone does not permit continuing without a task. The rule is in the 512-byte intake cue,
+  MCP initialize instructions, host skills, mapped and unmapped SessionStart context, and the
+  `start` tool description. Compaction in an already-started session retains status recovery.
+  It is instruction delivery, not a PreToolUse deny gate (issue #692 instruction slice).
+
+### Added
+
+- Independent permanent installs and test snapshots (ADR-028, issue #604). An isolated root can now
+  carry a sealed `instance-identity.json` naming its lifecycle (`persistent` or `disposable`),
+  exact source revision, wheel digest, and bounded expiry, and a snapshot's own runtime can be
+  pinned to its root with `yoetz instance create --bind-runtime`: the pinned launcher resolves
+  that root even when a host, hook, or shell drops `YOETZ_ISOLATED_ROOT`, a different root in the
+  environment is refused as `isolation_root_conflict`, and a re-pointed pin, an expired snapshot,
+  or a labeled marker in ambient state refuses to serve before the singleton is taken. New
+  connection-free commands `yoetz instance create|status|dispose` create, inspect (digest-only,
+  with `binding`, `lifecycle`, and provenance), and remove exactly one marked root, stopping only
+  the service that holds that root's lock; `yoetz service isolation --json` reports `binding` and
+  `lifecycle`, and the singleton lock stamp names the holder's instance lifecycle and source ref.
+  Contributors provision snapshots from an exact checkout revision with
+  `scripts/provision_test_instance.py` (see `docs/runbooks/test-instances.md`). The everyday
+  install is unchanged: it carries no marker and no pin, and `dispose` can never target it.
+
 ### Fixed
 
 - Hook observation no longer reports a live task mapping as stale after every Claude Code

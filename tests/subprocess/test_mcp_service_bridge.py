@@ -8,18 +8,20 @@ import logging
 import sys
 from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
+import anyio
 import pytest
 from mcp import types
-from pydantic import BaseModel
+from mcp.shared.message import SessionMessage
+from pydantic import BaseModel, FileUrl
 
 import yoetz.mcp.server as bridge
 from yoetz.config.models import LoggingConfig
 from yoetz.mcp.resources import read_resource
 from yoetz.observability.diagnostics import append_diagnostic_record, lookup_diagnostic_records
 from yoetz.observability.logging import LogMode, configure_logging
-from yoetz.ports.control import ControlError
+from yoetz.ports.control import ControlError, WorkspaceLocator
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.models import (
@@ -148,6 +150,7 @@ class _FakeClient:
         self.failure = failure
         self.calls: list[tuple[str, object]] = []
         self.route_profiles: list[tuple[str, str | None]] = []
+        self.host_profiles: list[str | None] = []
         self.deadlines: list[tuple[str, int | None]] = []
         self.closed = False
 
@@ -179,9 +182,11 @@ class _FakeClient:
         *,
         deadline_ms: int | None = None,
         route_profile: str | None = None,
+        host_profile: str | None = None,
     ) -> CheckResult:
         self.deadlines.append(("check", deadline_ms))
         self.route_profiles.append(("check", route_profile))
+        self.host_profiles.append(host_profile)
         return await self._call("check", request, CheckResult)
 
     async def respond(
@@ -209,6 +214,20 @@ class _FakeClient:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class _RootsSession:
+    def __init__(self, result: types.ListRootsResult) -> None:
+        self.result = result
+        self.calls = 0
+
+    async def list_roots(self) -> types.ListRootsResult:
+        self.calls += 1
+        return self.result
+
+
+def _root(uri: str) -> types.Root:
+    return types.Root(uri=FileUrl(uri))
 
 
 @pytest.fixture
@@ -323,11 +342,13 @@ async def test_exact_six_dispatchers_use_one_ordinary_client(
 
 @pytest.mark.anyio
 async def test_cursor_host_profile_copies_exact_wire_json_into_model_visible_text(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     client = _FakeClient()
     _install_clients(monkeypatch, [client])
-    runtime = bridge.build_bridge_runtime(host_profile="cursor")
+    runtime = bridge.build_bridge_runtime(
+        host_profile="cursor", workspace_locator=WorkspaceLocator(str(tmp_path))
+    )
 
     result = await bridge.dispatch_status(_requests()["status"], runtime)
 
@@ -338,6 +359,224 @@ async def test_cursor_host_profile_copies_exact_wire_json_into_model_visible_tex
     assert block.text == canonical_encode(cast(JsonValue, result.structuredContent)).decode("utf-8")
     assert json.loads(block.text) == result.structuredContent
     await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_cursor_native_handler_binds_root_before_service_handshake(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    client = _FakeClient()
+    observed_locators: list[object] = []
+    _install_clients(monkeypatch, [client], observed_locators)
+    runtime = bridge.build_bridge_runtime(host_profile="cursor")
+    session = _RootsSession(types.ListRootsResult(roots=[_root(tmp_path.as_uri())]))
+    arguments = {**_requests()["start"], "external_ref": "cursor-root", "workspace_ref": "/other"}
+    request = types.CallToolRequest(
+        params=types.CallToolRequestParams(name="start", arguments=arguments)
+    )
+
+    response = await bridge._handle_call_tool_request(  # pyright: ignore[reportPrivateUsage]
+        request, runtime, session=session
+    )
+
+    result = response.root
+    assert isinstance(result, types.CallToolResult)
+    assert result.structuredContent is not None
+    assert result.structuredContent["ok"] is False
+    assert session.calls == 1
+    assert observed_locators == [WorkspaceLocator(str(tmp_path))]
+    assert runtime._slot.workspace_locator == WorkspaceLocator(str(tmp_path))  # pyright: ignore[reportPrivateUsage]
+
+    # Cursor 3.19.7 advertises roots.listChanged=false, so the bridge also revalidates on the next
+    # workflow call when no notification arrives.
+    other = tmp_path / "other"
+    other.mkdir()
+    session.result = types.ListRootsResult(roots=[_root(other.as_uri())])
+    changed = await bridge._handle_call_tool_request(  # pyright: ignore[reportPrivateUsage]
+        request, runtime, session=session
+    )
+    changed_result = changed.root
+    assert isinstance(changed_result, types.CallToolResult)
+    assert changed_result.structuredContent is not None
+    assert changed_result.structuredContent["error"]["code"] == "SESSION_CONFLICT"
+    assert session.calls == 2
+    assert len(client.calls) == 1
+    assert client.closed is True
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_cursor_native_protocol_requests_roots_before_service_handshake(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    client = _FakeClient()
+    observed_locators: list[object] = []
+    _install_clients(monkeypatch, [client], observed_locators)
+    runtime = bridge.build_bridge_runtime(host_profile="cursor")
+    active = bridge._build_server(runtime)  # pyright: ignore[reportPrivateUsage]
+    client_to_server_send, client_to_server_receive = anyio.create_memory_object_stream[
+        SessionMessage
+    ](20)
+    server_to_client_send, server_to_client_receive = anyio.create_memory_object_stream[
+        SessionMessage
+    ](20)
+
+    async def roots(context: object) -> types.ListRootsResult:
+        del context
+        return types.ListRootsResult(roots=[_root(tmp_path.as_uri())])
+
+    from mcp.client.session import ClientSession
+
+    peer = ClientSession(
+        client_to_server_receive,
+        server_to_client_send,
+        list_roots_callback=roots,
+    )
+    result: types.CallToolResult | None = None
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(
+            active.run,
+            server_to_client_receive,
+            client_to_server_send,
+            bridge._initialization_options(  # pyright: ignore[reportPrivateUsage]
+                runtime, active
+            ),
+        )
+        async with peer:
+            await peer.initialize()
+            result = await peer.call_tool("start", _requests()["start"])
+        tasks.cancel_scope.cancel()
+
+    assert result is not None
+    assert result.isError is True
+    assert observed_locators == [WorkspaceLocator(str(tmp_path))]
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_cursor_native_handler_refuses_missing_or_ambiguous_roots_without_connecting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    client = _FakeClient()
+    observed_locators: list[object] = []
+    _install_clients(monkeypatch, [client], observed_locators)
+    runtime = bridge.build_bridge_runtime(host_profile="cursor")
+    first = _RootsSession(types.ListRootsResult(roots=[]))
+    request = types.CallToolRequest(
+        params=types.CallToolRequestParams(name="start", arguments=_requests()["start"])
+    )
+
+    missing = await bridge._handle_call_tool_request(  # pyright: ignore[reportPrivateUsage]
+        request, runtime, session=first
+    )
+    missing_result = missing.root
+    assert isinstance(missing_result, types.CallToolResult)
+    assert missing_result.structuredContent is not None
+    missing_error = cast(dict[str, object], missing_result.structuredContent["error"])
+    assert missing_error["code"] == "SESSION_CONFLICT"
+    assert cast(dict[str, object], missing_error["safe_details"])["reason_code"] == (
+        "repository_identity_required"
+    )
+    message = cast(str, missing_error["message"])
+    for recovery_fact in ("roots/list", "project-mcp", ".cursor/mcp.json", "CLI CWD", "Hook"):
+        assert recovery_fact in message
+    assert first.calls == 1
+    assert observed_locators == []
+
+    # A second root-list response is never consulted after the session failed closed.
+    second = _RootsSession(
+        types.ListRootsResult(
+            roots=[
+                _root(tmp_path.as_uri()),
+                _root((tmp_path / "nested").as_uri()),
+            ]
+        )
+    )
+    repeated = await bridge._handle_call_tool_request(  # pyright: ignore[reportPrivateUsage]
+        request, runtime, session=second
+    )
+    repeated_result = repeated.root
+    assert isinstance(repeated_result, types.CallToolResult)
+    assert repeated_result.structuredContent is not None
+    repeated_error = cast(dict[str, object], repeated_result.structuredContent["error"])
+    assert repeated_error["code"] == "SESSION_CONFLICT"
+    assert repeated_error["correlation_id"] == missing_error["correlation_id"]
+    assert second.calls == 0
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_cursor_native_handler_retires_binding_when_roots_change(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    client = _FakeClient()
+    _install_clients(monkeypatch, [client])
+    runtime = bridge.build_bridge_runtime(host_profile="cursor")
+    session = _RootsSession(types.ListRootsResult(roots=[_root(tmp_path.as_uri())]))
+    request = types.CallToolRequest(
+        params=types.CallToolRequestParams(name="start", arguments=_requests()["start"])
+    )
+
+    first = await bridge._handle_call_tool_request(  # pyright: ignore[reportPrivateUsage]
+        request, runtime, session=session
+    )
+    assert isinstance(first.root, types.CallToolResult)
+    assert runtime._slot.workspace_binding_state == "bound"  # pyright: ignore[reportPrivateUsage]
+    assert client.closed is False
+
+    active = bridge._build_server(runtime)  # pyright: ignore[reportPrivateUsage]
+    await active.notification_handlers[types.RootsListChangedNotification](
+        types.RootsListChangedNotification()
+    )
+    assert runtime._slot.workspace_binding_state == "failed"  # pyright: ignore[reportPrivateUsage]
+    assert runtime._slot.workspace_locator is None  # pyright: ignore[reportPrivateUsage]
+    assert client.closed is True
+    await bridge.close_bridge_runtime(runtime)
+
+
+def test_cursor_root_binding_rejects_remote_query_and_distinct_repositories(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    encoded = tmp_path / "with space"
+    unicode_encoded = tmp_path / "café"
+    first.mkdir()
+    second.mkdir()
+    encoded.mkdir()
+    unicode_encoded.mkdir()
+
+    assert (
+        bridge._cursor_workspace_locator(  # pyright: ignore[reportPrivateUsage]
+            types.ListRootsResult(roots=[_root(first.as_uri()), _root(second.as_uri())])
+        )
+        is None
+    )
+    assert (
+        bridge._cursor_workspace_locator(  # pyright: ignore[reportPrivateUsage]
+            types.ListRootsResult(roots=[_root("file://remote.example/project")])
+        )
+        is None
+    )
+    assert (
+        bridge._cursor_workspace_locator(  # pyright: ignore[reportPrivateUsage]
+            types.ListRootsResult(roots=[_root(f"{first.as_uri()}?untrusted=1")])
+        )
+        is None
+    )
+    assert bridge._cursor_workspace_locator(  # pyright: ignore[reportPrivateUsage]
+        types.ListRootsResult(roots=[_root(encoded.as_uri())])
+    ) == WorkspaceLocator(str(encoded))
+    assert bridge._cursor_workspace_locator(  # pyright: ignore[reportPrivateUsage]
+        types.ListRootsResult(roots=[_root(unicode_encoded.as_uri())])
+    ) == WorkspaceLocator(str(unicode_encoded))
+    for escape in ("%", "%2", "%ZZ"):
+        assert (
+            bridge._cursor_workspace_locator(  # pyright: ignore[reportPrivateUsage]
+                types.ListRootsResult(roots=[_root(f"{first.as_uri()}{escape}")])
+            )
+            is None
+        )
 
 
 @pytest.mark.anyio
@@ -432,6 +671,23 @@ async def test_strict_bridge_attaches_private_route_profile_after_public_validat
 
     assert result.isError is True
     assert client.route_profiles == [("check", "strict")]
+    assert client.host_profiles == ["generic"]
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_bridge_attaches_explicit_host_identity_to_check_rpc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient()
+    _install_clients(monkeypatch, [client])
+    runtime = bridge.build_bridge_runtime("strict", host_profile="codex")
+
+    result = await bridge.dispatch_check(_requests()["check"], runtime)
+
+    assert result.isError is True
+    assert client.route_profiles == [("check", "strict")]
+    assert client.host_profiles == ["codex"]
     await bridge.close_bridge_runtime(runtime)
 
 
@@ -439,6 +695,19 @@ async def test_strict_bridge_attaches_private_route_profile_after_public_validat
 async def test_agent_cannot_supply_or_clear_the_private_route_profile() -> None:
     runtime = bridge.build_bridge_runtime("strict")
     arguments = {**_requests()["check"], "route_profile": "policy"}
+
+    result = await bridge.dispatch_check(arguments, runtime)
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    assert result.structuredContent["error"]["code"] == "INVALID_REQUEST"
+    assert runtime._slot.client is None  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.anyio
+async def test_agent_cannot_supply_the_private_serving_host_identity() -> None:
+    runtime = bridge.build_bridge_runtime("strict", host_profile="generic")
+    arguments = {**_requests()["check"], "host_profile": "codex"}
 
     result = await bridge.dispatch_check(arguments, runtime)
 
@@ -468,9 +737,11 @@ async def test_response_loss_reconnects_once_with_identical_request(
 
 
 @pytest.mark.anyio
-async def test_write_timeout_preserves_unknown_outcome_and_same_request_remedy(
+async def test_start_timeout_directs_an_exact_replay_not_an_operation_query(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A lost first start returns no session or writer id, so the operation view is unusable."""
+
     client = _FakeClient(ControlError("request_timeout", retryable=True))
     _install_clients(monkeypatch, [client])
     runtime = bridge.build_bridge_runtime()
@@ -483,12 +754,52 @@ async def test_write_timeout_preserves_unknown_outcome_and_same_request_remedy(
     error = cast(dict[str, JsonValue], result.structuredContent["error"])
     assert error["code"] == "SERVICE_UNAVAILABLE"
     assert error["retryable"] is True
-    assert cast(dict[str, object], error["safe_details"])["reason_code"] == "request_timeout"
+    assert error["safe_details"] == {
+        "continuation": "start_timeout_same_identity",
+        "reason_code": "request_timeout",
+    }
+    assert error["message"] == (
+        "The local start timed out and may still have committed. Replay the exact same "
+        "start body once with the same request_id; the idempotent start path returns the "
+        "stored result or a typed boundary. Do not fabricate session or writer ids for a "
+        "status query."
+    )
+    text = cast(str, cast(list[Any], result.content)[0].text)
+    assert "Continuation: start_timeout_same_identity." in text
+    assert "view=operation" not in text
+    assert result.structuredContent["request_id"] == request["request_id"]
+    assert client.closed is False
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_write_timeout_preserves_unknown_outcome_and_same_request_remedy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient(ControlError("request_timeout", retryable=True))
+    _install_clients(monkeypatch, [client])
+    runtime = bridge.build_bridge_runtime()
+    request = _requests()["publish_work"]
+
+    result = await bridge.dispatch_publish_work(request, runtime)
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    error = cast(dict[str, JsonValue], result.structuredContent["error"])
+    assert error["code"] == "SERVICE_UNAVAILABLE"
+    assert error["retryable"] is True
+    assert error["safe_details"] == {
+        "continuation": "write_timeout_same_identity",
+        "reason_code": "request_timeout",
+    }
     assert error["message"] == (
         "The local operation timed out and may still have committed. Retry with the same "
         "request_id to recover the stored outcome; for an existing Yoetz session, status "
         "view=operation can inspect that request_id."
     )
+    text = cast(str, cast(list[Any], result.content)[0].text)
+    assert "Continuation: write_timeout_same_identity." in text
+    assert "view=operation" in text
     assert result.structuredContent["request_id"] == request["request_id"]
     assert client.closed is False
     await bridge.close_bridge_runtime(runtime)
@@ -565,7 +876,10 @@ async def test_public_operation_error_keeps_event_invalid_not_internal_error(
     assert result.structuredContent is not None
     error = result.structuredContent["error"]
     assert error["code"] == "EVENT_INVALID"
-    assert error["safe_details"] == {"reason_code": "unsorted_set_field"}
+    assert error["safe_details"] == {
+        "continuation": "sorted_set_required",
+        "reason_code": "unsorted_set_field",
+    }
     assert error["code"] != "INTERNAL_ERROR"
     assert result.structuredContent["request_id"] == _requests()["publish_work"]["request_id"]
     await bridge.close_bridge_runtime(runtime)

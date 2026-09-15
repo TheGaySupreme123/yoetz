@@ -1,0 +1,30 @@
+"""One private instance boundary for all capability MCP subprocess transports."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+from yoetz.config.paths import ensure_owner_only_dir
+
+
+def child_environment(tmp_path: Path) -> dict[str, str]:
+    """Replace ambient instance selection; a conflicting candidate pin still fails closed.
+
+    The candidate interpreter is deliberately not replaced or unpinned. A pinned candidate
+    must be provisioned for this root or refuse it before touching its original instance.
+    """
+    home = tmp_path.resolve() / "mcp-home"
+    ensure_owner_only_dir(home)
+    for directory in ("cache", "config", "data", "runtime", "state", "yoetz/state"):
+        ensure_owner_only_dir(home / directory)
+    return {
+        **{name: value for name, value in os.environ.items() if not name.startswith("YOETZ_")},
+        "HOME": str(home),
+        "XDG_CACHE_HOME": str(home / "cache"),
+        "XDG_CONFIG_HOME": str(home / "config"),
+        "XDG_DATA_HOME": str(home / "data"),
+        "XDG_RUNTIME_DIR": str(home / "runtime"),
+        "XDG_STATE_HOME": str(home / "state"),
+        "YOETZ_ISOLATED_ROOT": str(home / "yoetz" / "state"),
+    }

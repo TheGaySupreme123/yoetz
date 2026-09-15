@@ -72,10 +72,15 @@ coordination_recipient_mismatch
 coordination_resource_count_invalid
 coordination_route_unavailable
 coordination_runtime_unavailable
+coordination_source_policy_denied
 coordination_source_unavailable
 coordination_task_pair_invalid
 coordination_tasks_not_canonical
 cross_repository_lineage_requires_grant
+cursor_mcp_route_invalid
+cursor_project_mcp_command_invalid
+cursor_project_mcp_invalid
+cursor_project_mcp_preview_required
 dependency_changed
 duplicate_object_key
 duplicate_set_member
@@ -234,6 +239,7 @@ object_key_not_string
 obligation_change_invalid
 obligation_resolution_invalid
 obligation_resolution_mismatch
+observation_selection_session_limit
 operation_recovery_unavailable
 ownership_contended
 payload_redaction_mismatch
@@ -482,7 +488,7 @@ def test_public_error_code_membership() -> None:
 def test_protocol_reason_registry_is_exact_and_import_order_independent() -> None:
     source_values = cast(tuple[str, ...], getattr(errors_module, "_PROTOCOL_REASON_CODE_VALUES"))
     assert source_values == _EXPECTED_REASON_CODES
-    assert len(source_values) == 284
+    assert len(source_values) == 290
     assert source_values == tuple(sorted(source_values, key=str.encode))
     assert len(source_values) == len(set(source_values))
     assert PROTOCOL_REASON_CODES == frozenset(_EXPECTED_REASON_CODES)
@@ -618,7 +624,10 @@ def test_registered_refusal_reason_survives_public_error_projection() -> None:
             False,
             safe_details={"reason_code": reason},
         )
-        assert error.safe_details == {"reason_code": reason}
+        expected_details = {"reason_code": reason}
+        if reason in errors_module.REASON_CODE_CONTINUATIONS:
+            expected_details["continuation"] = errors_module.REASON_CODE_CONTINUATIONS[reason]
+        assert error.safe_details == expected_details
 
 
 def test_operation_error_is_bounded() -> None:
@@ -744,6 +753,7 @@ def test_safe_details_allowlist_and_types_are_exact() -> None:
         "field",
         "head_digest",
         "host_profile",
+        "invariant",
         "limit",
         "method",
         "operation",
@@ -810,6 +820,7 @@ def test_safe_details_allowlist_and_types_are_exact() -> None:
             "component": _SafeEnum.READY,
             "continuation": "vault_initialization_required",
             "count": 0,
+            "invariant": "scope_overlap_required",
             "expected_version": "V2-rc.1",
             "field": "/payload/~0/~1//",
             "head_digest": "genesis",

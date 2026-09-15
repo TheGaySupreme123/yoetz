@@ -1,13 +1,19 @@
 # ADR-027 — Task lineage and project scope identity
 
-**Status:** Accepted (2026-09-05), owner-directed in
-[issue #494](https://github.com/TheGaySupreme123/yoetz/issues/494). This is a docs-only
-ratification. Wire fields, catalog storage, admission, rollup, coordination grants, and host
-mapping remain separately owned by issues #495–#508.
+**Status:** Accepted design (2026-09-05), tracked by
+[issue #494](https://github.com/TheGaySupreme123/yoetz/issues/494). The recorded foundation
+[PR #591](https://github.com/TheGaySupreme123/yoetz/pull/591) is merged; the 0.3 candidate now
+implements the Increment-A lineage/project primitives and Increment-B admission, rollup,
+coordination-grant, and host-mapping surfaces described here. This ADR records durable design and
+implementation scope; native capability evidence and limits are maintained in the host integration
+runbooks.
 **Implemented by:** this ADR, [`docs/INTERFACES.md`](../INTERFACES.md), and the corresponding
-entries in [`docs/OPEN_QUESTIONS.md`](../OPEN_QUESTIONS.md). No module generates `prj_`, stores
-lineage, admits multiple automatic tasks, or retires `workspace_task_exists` as a result of this
-decision.
+entries in [`docs/OPEN_QUESTIONS.md`](../OPEN_QUESTIONS.md), plus the candidate's lineage/project
+application and kernel modules, SQLite catalog/lineage/host-mapping/project-operation adapters,
+catalog migrations `0004` and `0005`, the bundle events-family and observation migrations, schemas,
+and focused tests. Generated mirrors are
+produced by the resource ripple. These source and test paths describe implementation scope; they do
+not broaden a host capability profile, whose evidence and limits remain in the host runbooks.
 **Relates to:** ADR-003 (layout and one-task-per-bundle), ADR-008 (clients never open bundles),
 ADR-009 (privacy and local coordination boundaries), ADR-010 (harness evidence), ADR-022
 (observation writer and task-local state), and the #250/#352 no-cross-task-state posture this
@@ -15,33 +21,58 @@ decision bounds.
 
 ## Context
 
-Yoetz has no identity for work that is part of a larger effort. Subagent work is invisible for
-some hosts or is retained only as metadata, automatic attachment has historically refused a second
-task in one workspace, and a receipt currently speaks for one task ledger. A 2026-08-31 maintainer
-design session, reviewed and amended on 2026-09-05 in issue #494, chose the model below.
+Before the 0.3 implementation, Yoetz had no identity for work that was part of a larger effort.
+Subagent work was invisible for some hosts or retained only as metadata, automatic attachment
+historically refused a second task in one workspace, and a receipt spoke for one task ledger. A
+2026-08-31 maintainer design session, recorded and amended on 2026-09-05 in issue #494, chose the
+model below.
 
 The model must keep four facts separate: grouping (which tasks share a project), work lifecycle
 (whether a task is open or closed), session health (whether a host session is still in contact),
 and receipt history (which recorded frontier a receipt describes). It must also preserve the
 privacy and attribution boundaries that make a task ledger meaningful.
 
-This decision does not change the on-disk layout, open a shared writable task ledger, add an MCP
-tool, or populate a host capability cell.
+The implementation preserves the one-bundle-per-task layout, does not open a shared writable task
+ledger, and does not add an MCP tool. Native host capability claims remain separately evidence-
+gated; implementing a host mapping path does not populate or upgrade a capability cell.
+
+## Current 0.3 implementation state
+
+The candidate carries the behavior ratified here through durable source paths. Child tasks have
+their own catalog and bundle identity, parent and self-registered lineage use separate origin and
+acceptance facts, and parent checks/receipts consume service-stamped frozen dependency manifests.
+The project registry stores `prj_` identities, append-only membership generations, repository and
+workspace members, and generation-bound coordination grants. Existing `status`/`check`/`receipt`
+surfaces carry the lineage and project views; project management remains CLI-only.
+Cross-repository child admission is part of the candidate's Increment-B path and requires the
+current project-generation coordination grant at both admission and delivery; an ungranted or
+stale generation remains refused.
+
+Automatic admission uses the persisted-binding decision table: the automatic
+`create_or_attach` path can recover a validated ended-session mapping, while explicit `mode=create`
+still rejects an identical identity pair with `workspace_task_exists`. Recovery rechecks workspace,
+task, mapping, and pending-row state under the documented locks and preserves predecessor routing.
+Host adapters can retain provisional child annotations and bind them only through validated native
+or cooperative identities; unsupported or ambiguous host signals remain explicit attribution gaps.
+
+The implementation preserves the existing privacy, attribution, and coverage boundaries. A source
+path or focused test does not broaden a host capability profile; the host runbooks remain the durable
+record of native support evidence and limits.
 
 ## Decisions
 
 ### Cross-cutting constraints
 
-1. **No new MCP tools (C1/D11).** Lineage and project behavior uses the existing seven model-facing
-   operations (`start`, `publish_work`, `check`, `status`, `receipt`, `respond`, and
-   `read_guidance`): delegation is a `start` mode; lifecycle, acceptance, cancellation, and
-   write-off are `publish_work` event kinds; lineage and project views are `status` views; child
-   preview is a `check` section; and rollup is a `receipt` section. The 2026-09-05 pre-trim
+1. **No new MCP tools (C1/D11).** Lineage and project behavior uses the six workflow operations
+   (`start`, `publish_work`, `check`, `status`, `receipt`, and `respond`) plus the existing
+   read-only `read_guidance` support tool: delegation is a `start` mode; lifecycle, acceptance,
+   cancellation, and write-off are `publish_work` event kinds; lineage and project views are
+   `status` views; child preview is a `check` section; and rollup is a `receipt` section. The
+   2026-09-05 pre-trim
    measurement recorded an advertised surface of 204,404 bytes for the policy profile and 204,658
    bytes for the strict profile against the reviewed 205,000-byte ceiling. Those numbers are a
-   reviewed budget snapshot, not a claim about the current post-merge surface. Descriptor/instruction
-   trimming in #504 step 0 lands before schema growth, and every later increase names the bytes it
-   consumes. Project management verbs remain CLI-only.
+   dated budget snapshot; descriptor/instruction trimming in #504 step 0 precedes schema growth,
+   and every later increase names the bytes it consumes. Project management verbs remain CLI-only.
 
 2. **Three independent task facts (C2/D13).**
    - **Work lifecycle**, held per task, is `open | closed | cancelled | abandoned | written_off`.
@@ -80,6 +111,10 @@ tool, or populate a host capability cell.
    `membership_generation`. The pure kernel evaluates only that recorded snapshot, never a live
    child bundle. The lineage coordinator records changed child facts; receipt generation only
    reuses an already recorded manifest and never records or refreshes one (#500).
+   Compact status readiness also compares accepted catalog children with that recorded manifest.
+   Missing, stale, unavailable, or blocking child facts prevent advisory readiness; a failed
+   comparison is an explicit coverage gap. This read does not stamp a manifest or replace the
+   frozen evidence used by checks and receipts. Pending children remain annotation-only.
 
 6. **User-controlled content stays out of structure (C6).** Project titles, descriptions, and
    host labels are encrypted objects rendered through the existing disclosure policy. They never
@@ -94,7 +129,9 @@ tool, or populate a host capability cell.
 8. **Guidance follows behavior (C8).** Agent-facing guidance and generated trees change with the
    issue that adds the behavior an agent performs: #499 owns delegation guidance and #504 owns the
    descriptor/instruction trim. #566 remains the fixed-point consolidation issue for committed
-   `.agents` trees. This ratification does not rewrite packaged guidance or claim a host capability.
+   `.agents` trees. The 0.3 candidate updates the source guidance for the implemented behavior;
+   generated mirrors must still be produced by the resource ripple, and guidance never claims a
+   host capability without its exact evidence cell.
 
 9. **Lineage has bounded disclosure authority (C9/D14).** An accepted parent–child relationship
    authorizes exactly three service-mediated channels:
@@ -162,10 +199,12 @@ than implementation notes.
 
 5. **A project is a grouping object, not an egress scope.** `IdKind.project` uses server-generated
    `prj_` identifiers under the same lowercase UUIDv4 rule as the other server kinds. The project
-   registry is implemented by #495/#496. Its initial kinds are `repository` (implicit) and
-   `general` (explicit and amendable); membership kinds are `repository`, `workspace`, and `task`.
-   Membership rows are append-only and carry a monotonic `membership_generation`. A repository
-   commitment or workspace commitment is a membership fact, never the project's identity.
+   registry is implemented in the candidate through the #495/#496-owned surfaces. Its initial kinds
+   are `repository` (implicit) and `general` (explicit and amendable); membership kinds are
+   `repository`, `workspace`, and `task`. Membership rows are append-only and carry a monotonic
+   `membership_generation`. A repository commitment or workspace commitment is a membership fact,
+   never the project's identity. Membership generations remain the authority for coordination
+   delivery.
 
 6. **Project birth and opt-out are repository-scoped.** With `projects.auto_grouping` enabled, the
    second concurrent live task in one repository materializes an implicit repository project.
@@ -173,7 +212,8 @@ than implementation notes.
    multi-repository project is created explicitly. An implicit project persists when concurrency drops to one. A repository
    may opt out through `projects.auto_grouping` of automatic grouping and cross-task disclosure;
    opting out never erases accepted
-   delegations, obligations, or recorded receipt dependencies. Project management is #505.
+   delegations, obligations, or recorded receipt dependencies. Project management is implemented in
+   the #505-owned CLI surface.
 
 7. **Coordination is local and generation-bound.** A fact from a member task enters coordination
    only when that source workspace's own observation consent is active. Consent for one worktree
@@ -183,33 +223,67 @@ than implementation notes.
    generation and stop queued flow at admission/delivery. External semantic dispatch that bundles
    content from two repositories is outside this series.
 
-8. **Only shared-mutable state moves out of task bundles.** The #498 inventory classifies every
-   table and cache by owner, key, provenance, object root, retention, and concurrency rule before
-   #496 writes a catalog migration. Task-owned provenance remains in its task bundle. The expected
-   shared-mutable candidates are workspace-to-session routing from `0004` and the verification-job
-   scheduling authority from `0003` (including its per-workspace running-job uniqueness). Job
-   results, inspection snapshots, and session advice remain task-owned unless the inventory proves
-   otherwise. No blanket relocation of every workspace-keyed table is authorized, and no shared
-   writable ledger is introduced.
+8. **Only shared-mutable state moves out of task bundles.** The #498 inventory records each table
+   and cache by owner, key, provenance, object root, retention, and concurrency rule. The candidate's
+   catalog migration `0004` moves only the shared-mutable workspace-to-session routing and the
+   lineage/project authorities that need catalog scope; task-owned provenance remains in its task
+   bundle. Verification-job scheduling retains its existing ownership and per-workspace running-job
+   uniqueness. No blanket relocation of every workspace-keyed table is authorized, and no shared
+   writable ledger is introduced. The catalog and bundle migrations apply this ownership boundary;
+   compatibility and rollback follow ADR-003 and the storage/recovery runbooks.
 
-9. **Admission preserves continuity boundaries.** `workspace_task_exists` remains executable on
-   the automatic `create_or_attach` path until #497's decision table is implemented. Explicit
-   `mode=create` already admits a sibling. Attach uniqueness remains the pair
-   `(workspace_ref_commitment, external_ref_commitment)`, and a persisted same-host binding or
-   explicit selector is the only continuity proof. Repository or project membership never selects
-   a task for resume. The service-wide assumptions audit is #498.
+9. **Admission preserves continuity boundaries.** The candidate implements #497's persisted
+   binding/selector decision table on automatic `create_or_attach`: a validated ended-session
+   mapping may recover a task, while explicit `mode=create` still admits a sibling only when its
+   identity pair is new and retains `workspace_task_exists` for an identical pair. Attach uniqueness
+   remains the pair `(workspace_ref_commitment, external_ref_commitment)`, and a persisted same-host
+   binding or explicit selector is the only continuity proof. Repository or project membership never
+   selects a task for resume. Recovery and migration compatibility follow the durable contracts in
+   ADR-003, ADR-022, and the storage/recovery runbooks; native host limits remain in the host
+   integration runbooks.
 
-10. **Bounded membership reversal.** Once the project membership and status projection exist,
-    membership in a live, consented project may authorize a service-rendered `status` view of
-    sibling task identity and state. It never authorizes attaching to, resuming, or selecting a
-    sibling task, and it never widens content or egress authority. Until that implementation lands,
-    possession of a workspace reference alone remains insufficient to discover or attach another
-    task.
+10. **Bounded membership reversal.** The candidate's project membership and status projection
+    authorize a service-rendered `status` view of bounded sibling task identity and state only when
+    the workspace and membership generations are current. They never authorize attaching to,
+    resuming, or selecting a sibling task, and never widen content or egress authority. Possession
+    of a workspace reference alone remains insufficient to discover or attach another task.
 
-11. **Host mapping stays evidence-gated.** Claude Code Task-tool children, Codex
-    `SubagentStart` / `SubagentStop` correlation, and Cursor delegate mapping are #506, #507, and
-    #508. E-013 is not flipped by this ADR. No host event name alone earns `host_observed`, a child
-    task, or `hook_observed` coverage.
+11. **Host mapping stays evidence-gated.** The candidate implements a generic provisional host
+    annotation registry and validated binding paths consumed by the Claude Code and Codex child
+    signals; Cursor's current native path records unsupported or unbound delegate signals unless a
+    cooperative task/session identity is supplied. Issues #506, #507, and #508 remain responsible
+    for host-specific acceptance. E-013 and exact capability cells are not flipped by this ADR. No
+   host event name alone earns `host_observed`, a child task, or `hook_observed` coverage.
+
+12. **Project mutations have a durable retry journal.** Catalog migration `0005` adds
+    `project_operations`, keyed by `(installation_id, request_id)`. The application boundary binds
+    the canonical operation identity with an installation-keyed HMAC before reserving the row
+    through `ProjectOperationJournalPort`; unkeyed title or description digests are not stored.
+    `SqliteProjectOperationJournal` applies those
+    reservations and phase changes in `BEGIN IMMEDIATE` transactions. The closed operation set is
+    `create`, `link`, `unlink`, `amend`, `dissolve`, `opt_out`, `opt_in`, `grant`, and `revoke`.
+
+    A journaled request advances monotonically through `reserved`, `text_ready`, `effect_pending`,
+    and `completed`. Create and amend reserve the source task and route generation before the
+    text store is called, alongside their object identities; create also reserves its project
+    identity. Later phases record only `ProjectTextRef` structural pointers. The
+    journal never stores title or description plaintext. Completion stores one canonical structural
+    response and its digest, so a lost response can return the exact prior result without applying
+    the catalog effect twice. Reusing a request ID with a different digest or operation is a
+    conflict, and a stale phase or source/route identity remains refused.
+
+    An authenticated retry of a completed request returns only its saved structural response
+    before rechecking mutable route admission. This narrow recovery exception reports the earlier
+    outcome even if its route or grant has since changed; it produces no new effect or plaintext
+    disclosure and does not describe current authority. Incomplete requests must still satisfy
+    current admission, route, and effect fences before making progress.
+
+    The project catalog's membership-generation and route compare-and-swap checks remain the effect
+    fence. A journal row is catalog-shared retry authority for the project command only; it does not
+    select a task, move task-owned observation data, or grant workspace consent, disclosure,
+    provider, semantic, or egress authority. Direct pre-journal application callers may omit the
+    request ID and retain the compatibility seam; durable control composition supplies the journal
+    when retry identity is required.
 
 ## Resolved questions
 
@@ -219,21 +293,23 @@ than implementation notes.
 | Q2: Can a live-child gap clear? | Only in a new receipt after a new frozen manifest and qualifying recheck. The old receipt is immutable. |
 | Q3: How many general projects may contain one task? | In v1, the implicit repository project plus at most one general project. Detection identities are project-scoped. |
 | Q4: Who declares coordination obligations? | An agent declares or accepts them explicitly. Detectors provide advice; automatic obligations require a separately ratified standing policy. |
-| Q5: Where does automatic admission land? | #497 is Increment B. Increment A proves explicit sibling and delegation safety while preserving recovery. |
+| Q5: Where does automatic admission land? | The 0.3 candidate implements the Increment-B persisted-binding decision table while retaining explicit sibling admission and ended-session recovery. Its recovery and compatibility boundaries follow ADR-003, ADR-022, and the storage/recovery runbooks. |
 | Q6: Can a repository opt out of implicit grouping? | Yes. Opt-out stops automatic grouping and cross-task disclosure but never erases accepted delegations, obligations, or recorded receipt dependencies. |
 
 ## Consequences
 
-Agents and contributors have one public identity model, while later issues can add wire fields,
-catalog columns, admission, rollup, coordination grants, and host adapters without reopening the
-meaning of a child or project. The current executable contract remains unchanged: the four-kind
-`AuthorizationScope`, `workspace_task_exists`, one task per bundle, and the existing observation
-ownership continue to govern until their owning issues land.
+Agents and contributors have one public identity model, and the 0.3 candidate carries its wire
+fields, catalog records, admission, rollup, coordination grants, and host-mapping paths without
+changing the meaning of a child or project. The four-kind `AuthorizationScope` remains unchanged;
+project membership and lineage do not widen egress authority. A child still has its own bundle, and
+parent receipts remain coverage-bounded and consume frozen manifests.
 
-The bounded reversal is limited to a future service-side status projection. It does not grant task
-attachment, task resume, content disclosure, or external semantic dispatch. A parent receipt that
-later rolls up children remains coverage-bounded, and a live or abandoned child is an explicit gap,
-never a silent pass.
+The bounded membership reversal is implemented as a service-rendered status projection. It permits
+bounded sibling identity and state after current workspace and membership checks, but does not grant
+task attachment, task resume, content disclosure, or external semantic dispatch. A live, abandoned,
+cancelled, or written-off child remains an explicit parent gap according to its recorded state.
+Automatic admission recovery and migration compatibility follow the storage and recovery contracts.
+Exact native-host capability evidence and limits are maintained in the host integration runbooks.
 
 ## Alternatives considered
 

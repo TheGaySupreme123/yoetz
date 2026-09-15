@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from enum import Enum
 
+from yoetz.protocol.errors import normalize_safe_details
 from yoetz.protocol.models import (
     CheckAwaitingHumanModel,
     CheckProjectedFindingModel,
@@ -13,12 +14,19 @@ from yoetz.protocol.models import (
     PublicErrorModel,
     ReceiptSuccessModel,
     StatusAdvicePageModel,
+    StatusFindingsPageModel,
     StatusLineagePageModel,
+    StatusObligationsPageModel,
     StatusOperationPageModel,
     StatusProjectPageModel,
     StatusSuccessModel,
 )
-from yoetz.protocol.start_recovery import start_recovery_guidance
+from yoetz.protocol.recovery import (
+    RecoveryDirective,
+    continuation_for_local_reason,
+    correction_for_invariant,
+    directive_for,
+)
 
 __all__ = [
     "render_human_awaiting_human",
@@ -27,6 +35,8 @@ __all__ = [
     "render_human_findings",
     "render_human_receipt",
     "render_human_status",
+    "render_local_recovery_lines",
+    "render_recovery_directive_lines",
 ]
 
 
@@ -83,6 +93,13 @@ def render_human_check(result: CheckSuccessModel) -> str:
         f"Semantic review: {_token(result.semantic_status)} ({_token(result.semantic_reason)})",
         render_human_findings(result.findings),
     ]
+    if _token(result.semantic_reason) == "case_capacity_exceeded":
+        lines.append("No provider attempt was made. Narrow claim/obligation scope for a new check.")
+    elif _token(result.semantic_reason) == "coordinator_failure":
+        lines.append(
+            f"Inspect yoetz service diagnostics --request-id {result.request_id}. "
+            "Null provenance does not prove that no provider call occurred."
+        )
     suppressed = int(result.suppressed_count)
     if suppressed:
         lines.append(f"Suppressed findings: {suppressed}")
@@ -215,6 +232,23 @@ def render_human_status(result: StatusSuccessModel) -> str:
             lines.append(f"- {receipt.task_id}: {receipt.conclusion} ({receipt.receipt_id})")
         if page.next_cursor is not None:
             lines.append(f"Next page: {page.next_cursor}")
+    if isinstance(result.page, StatusFindingsPageModel):
+        for finding in result.page.items:
+            lines.append(
+                f"{finding.finding_id} resolved={finding.resolved}: "
+                + _projected_text(finding.detail)
+            )
+    if isinstance(result.page, StatusObligationsPageModel):
+        for obligation in result.page.items:
+            for attempt in obligation.command_attempts[:3]:
+                lines.append(
+                    f"{obligation.obligation_id} command item {attempt.requested_item_index}: {attempt.relation} (attempt only, not success)"
+                )
+            remaining = len(obligation.command_attempts) - 3
+            if remaining > 0:
+                lines.append(
+                    f"{obligation.obligation_id}: {remaining} more command attempts; use JSON status for all items"
+                )
     gaps = tuple(result.gaps) + tuple(result.coverage.known_gaps)
     lines.append("Gaps: " + (", ".join(dict.fromkeys(gaps)) if gaps else "none"))
     return "\n".join(lines)
@@ -254,14 +288,92 @@ def render_human_receipt(result: ReceiptSuccessModel) -> str:
     return "\n".join(lines)
 
 
+def render_recovery_directive_lines(
+    directive: RecoveryDirective, *, commands: Sequence[str] = ()
+) -> list[str]:
+    """Render one frozen directive the way every CLI error surface shows it.
+
+    The CLI has no 512-byte ceiling, so unlike the MCP text projection it renders the whole
+    directive, any carried commands, its guidance pointer, and its nudge on separate lines.
+    """
+
+    lines = [f"Continuation: {directive.token}", f"Next: {directive.directive}"]
+    if commands:
+        lines.append("Commands: " + "; ".join(commands))
+    if directive.guidance_uri is not None:
+        lines.append(f"Guidance: {directive.guidance_uri}")
+    if directive.nudge is not None:
+        lines.append(directive.nudge)
+    return lines
+
+
+def render_local_recovery_lines(reason: object) -> list[str]:
+    """Return the directive lines for a CLI lifecycle, instance, or ceremony reason, or [].
+
+    These reasons never become a public error envelope: the CLI prints a bounded token line and
+    exits. Before ADR-030 the line carried a remediation sentence and nothing else, so the same
+    condition that gets a typed directive over MCP got none here. The lookup is the local-reason
+    vocabulary only; a protocol reason code deliberately resolves to nothing through it.
+    """
+
+    directive = directive_for(continuation_for_local_reason(reason))
+    if directive is None:
+        return []
+    return render_recovery_directive_lines(directive)
+
+
+def _error_recovery_lines(error: PublicErrorModel) -> list[str]:
+    """Return the frozen recovery directive lines for a typed continuation, or an empty list.
+
+    The directive is reconstructed locally from the continuation token (issue #739); nothing is
+    read from the error message, and no line is rendered for a token the protocol normalizer does
+    not admit. The CLI has no 512-byte ceiling, so unlike the MCP text projection it renders the
+    whole directive, its guidance pointer, and its nudge on separate lines.
+    """
+
+    details = error.safe_details
+    if details is None:
+        return []
+    source = details if isinstance(details, Mapping) else None
+    if source is None:
+        return []
+    lines: list[str] = []
+    # A claim-revision rejection carries its correction on the invariant rather than a
+    # continuation token. The CLI rendered nothing for it before ADR-030 moved the corrective
+    # phrases into the shared registry, so the same rejection read as bare prose here while the
+    # MCP text channel explained it.
+    revision = normalize_safe_details(
+        {"invariant": source.get("invariant"), "reason_code": source.get("reason_code")}
+    )
+    if revision.get("reason_code") == "claim_revision_mismatch":
+        correction = correction_for_invariant(revision.get("invariant"))
+        if correction is not None:
+            lines.append(f"Invariant: {revision['invariant']}")
+            lines.append(f"Correction: {correction}")
+    gated = normalize_safe_details({"continuation": source.get("continuation")})
+    directive = directive_for(gated.get("continuation"))
+    if directive is None:
+        return lines
+    gated_commands = normalize_safe_details(
+        {key: source.get(key) for key in ("prepare_command", "review_command", "authorize_command")}
+    )
+    commands = [
+        str(gated_commands[key])
+        for key in ("prepare_command", "review_command", "authorize_command")
+        if type(gated_commands.get(key)) is str
+    ]
+    lines.extend(render_recovery_directive_lines(directive, commands=commands))
+    return lines
+
+
 def render_human_error(error: PublicErrorModel) -> str:
-    """Render only the bounded public error fields."""
+    """Render the bounded public error fields plus any typed recovery directive."""
 
     if type(error) is not PublicErrorModel:
         raise TypeError("public_error_invalid")
     suffix = " (retryable)" if error.retryable else ""
-    recovery = start_recovery_guidance(error.code, error.retryable, error.safe_details)
-    return f"{_token(error.code)}: {error.message}{suffix}{recovery}"
+    head = f"{_token(error.code)}: {error.message}{suffix}"
+    return "\n".join([head, *_error_recovery_lines(error)])
 
 
 def render_human_awaiting_human(result: CheckAwaitingHumanModel) -> str:

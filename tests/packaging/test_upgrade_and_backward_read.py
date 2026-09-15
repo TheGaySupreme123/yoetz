@@ -1,19 +1,9 @@
-"""Prior-release data upgrade preservation.
+"""Candidate migration invariants, without claiming prior-release upgrade certification.
 
-Scope note (verbatim, not guessed around): this spec's matrix is "each supported old release ×
-advertised platform × normal upgrade, interrupted migration, rollback/restore, ...". Yoetz v0.1.0
-is the first release: ``support/runtime-support.json`` records ``"release_version": "0.1.0"`` with
-every capability cell still empty (``development_unverified``), there is no golden fixture directory
-for a prior release anywhere in the repository, and ``docs/protocol/compatibility.md`` documents
-only the current release's axes. There is therefore no real prior artifact/bundle for this file to
-install, migrate, or replay against, and this file does not fabricate one. What it proves for real
-instead, against the installed candidate package (never the source checkout), is every structural
-invariant this suite's own spec states that a genuine future upgrade will depend on: the migration
-registries are exactly contiguous and match the advertised schema versions, a fresh catalog/bundle
-initializes at exactly that version, re-running the migration runner against an already-current
-database is an inert, verified replay (not a silent no-op that skips verification), and a
-newer-than-candidate schema is refused for both reads/writes and migration -- never silently
-accepted, never downgraded, never partially applied.
+The runtime-support inventory still has no evidenced supported-old-release cell or golden
+prior-release bundles. This suite tests the newly built candidate's migration registries,
+fresh initialization, idempotent migration replay, and refusal of newer schemas. Those checks
+do not substitute for an artifact-bound upgrade/restore drill from a previous public release.
 """
 
 from __future__ import annotations
@@ -21,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -67,7 +58,7 @@ def installed(tmp_path_factory: pytest.TempPathFactory) -> _Installed:
             str(venv_dir / "bin" / "python"),
             "--find-links",
             str(dist_dir),
-            "yoetz==0.1.0",
+            str(wheels[0]),
         ],
         capture_output=True,
         timeout=180,
@@ -86,16 +77,17 @@ def _run_probe(installed: _Installed, probe: str) -> dict[str, object]:
 
 
 # ---------------------------------------------------------------------------
-# First-release status is explicit, not fabricated
+# Unsupported upgrade coverage remains explicit
 # ---------------------------------------------------------------------------
 
 
-def test_first_release_has_no_prior_supported_version_and_no_golden_fixture() -> None:
+def test_current_release_has_no_evidenced_prior_supported_cell_or_golden_fixture() -> None:
     support = json.loads(
         (_REPO_ROOT / "support" / "runtime-support.json").read_text(encoding="utf-8")
     )
-    assert support["release_version"] == "0.1.0"
-    # No supported-old-release cell has been populated yet; there is nothing to upgrade from.
+    project = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert support["release_version"] == project["project"]["version"]
+    # No supported-old-release cell has been evidenced; do not infer one from a package tag.
     for cell_key in ("runtime_cells", "local_service_cells"):
         assert support[cell_key] == []
     assert not (_REPO_ROOT / "fixtures" / "compat").exists()
@@ -150,7 +142,7 @@ def test_each_migration_family_has_contiguous_versions(installed: _Installed) ->
         "}))\n"
     )
     payload = _run_probe(installed, probe)
-    assert payload["catalog_versions"] == ["0001", "0002", "0003", "0004"]
+    assert payload["catalog_versions"] == ["0001", "0002", "0003", "0004", "0005"]
     assert payload["bundle_versions"] == [
         "0001",
         "0002",
@@ -162,17 +154,36 @@ def test_each_migration_family_has_contiguous_versions(installed: _Installed) ->
         "0008",
         "0009",
         "0010",
+        "0011",
+        "0012",
+        "0013",
+        "0014",
     ]
-    assert payload["catalog_current"] == 4
-    assert payload["bundle_current"] == 10
+    assert payload["catalog_current"] == 5
+    assert payload["bundle_current"] == 14
 
 
 def test_migration_ddl_contains_only_reviewed_table_rebuilds(installed: _Installed) -> None:
     for family, versions in (
-        ("catalog", ("0001", "0002", "0003", "0004")),
+        ("catalog", ("0001", "0002", "0003", "0004", "0005")),
         (
             "bundle",
-            ("0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0010"),
+            (
+                "0001",
+                "0002",
+                "0003",
+                "0004",
+                "0005",
+                "0006",
+                "0007",
+                "0008",
+                "0009",
+                "0010",
+                "0011",
+                "0012",
+                "0013",
+                "0014",
+            ),
         ),
     ):
         for version in versions:
@@ -197,10 +208,10 @@ def test_migration_ddl_contains_only_reviewed_table_rebuilds(installed: _Install
                     assert upper.count(drop) == 1
                     assert upper.index(copy) < upper.index(drop) < upper.index(rename)
                     upper = upper.replace(drop, "", 1)
-            if (family, version) == ("bundle", "0010"):
-                copy = "INSERT INTO EVENTS_V10_NEW ("
+            if (family, version) == ("bundle", "0014"):
+                copy = "INSERT INTO EVENTS_V14_NEW ("
                 drop = "DROP TABLE EVENTS;"
-                rename = "ALTER TABLE EVENTS_V10_NEW RENAME TO EVENTS;"
+                rename = "ALTER TABLE EVENTS_V14_NEW RENAME TO EVENTS;"
                 assert upper.count(drop) == 1
                 assert upper.index(copy) < upper.index(drop) < upper.index(rename)
                 upper = upper.replace(drop, "", 1)
@@ -254,9 +265,9 @@ def test_fresh_catalog_and_bundle_initialize_at_current_schema_version(
     payload = _run_probe(installed, probe)
     assert payload == {
         "catalog_state": "current",
-        "catalog_version": 4,
+        "catalog_version": 5,
         "bundle_state": "current",
-        "bundle_version": 10,
+        "bundle_version": 14,
     }
 
 
@@ -276,7 +287,7 @@ def test_replaying_migrations_on_an_already_current_database_is_a_verified_noop(
         "}))\n"
     )
     payload = _run_probe(installed, probe)
-    assert payload == {"from_version": 4, "to_version": 4, "applied_versions": []}
+    assert payload == {"from_version": 5, "to_version": 5, "applied_versions": []}
 
 
 def test_uninitialized_database_reports_uninitialized_not_current(installed: _Installed) -> None:
@@ -301,7 +312,7 @@ def test_newer_than_candidate_schema_fails_migration_and_identity_checks_honestl
         "from yoetz.adapters.sqlite.connection import verify_schema_identity, StorageUnsafeError\n"
         "catalog = apsw.Connection(':memory:')\n"
         "initialize_catalog(catalog)\n"
-        "catalog.execute('PRAGMA user_version = 5')\n"
+        "catalog.execute('PRAGMA user_version = 6')\n"
         "identity_reason = None\n"
         "try:\n"
         "    verify_schema_identity(catalog)\n"

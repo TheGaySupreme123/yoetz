@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -121,10 +122,10 @@ def test_dedup_bound_is_deterministic_and_lane_aware(
     assert reopened.ingest(busy_envelopes[2]).disposition is ObservationIngestDisposition.DUPLICATE
 
 
-def test_new_lane_gets_outbox_slot_and_busy_lane_keeps_fifo(
+def test_new_lane_cannot_evict_protected_outbox_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A full busy queue admits a new sibling by quarantining one busy head."""
+    """A full queue of accepted rows fails closed without mutating the backlog."""
 
     monkeypatch.setattr(local_mod, "_MAX_OUTBOX", 3)
     store, workspace, quiet, busy = _store(tmp_path)
@@ -143,18 +144,19 @@ def test_new_lane_gets_outbox_slot_and_busy_lane_keeps_fifo(
         "session-quiet",
         _envelope(session=quiet, identity="quiet:1"),
     )
-    assert quiet_result is None
+    assert quiet_result == ObservationGapCode.OUTBOX_OVERFLOW.value
     pending = store.list_pending_outbox_rows(workspace)
     assert [(row.codex_session_id, row.envelope.source_identity) for row in pending] == [
+        ("session-busy", "busy:1"),
         ("session-busy", "busy:2"),
         ("session-busy", "busy:3"),
-        ("session-quiet", "quiet:1"),
     ]
-    assert [entry[1].source_identity for entry in store.list_quarantine(workspace)] == ["busy:1"]
-    assert ObservationGapCode.OUTBOX_OVERFLOW.value in store.session_gap_codes(workspace, busy)
+    assert store.list_quarantine(workspace) == ()
+    assert ObservationGapCode.OUTBOX_OVERFLOW.value in store.session_gap_codes(workspace, quiet)
 
     # Existing-lane overflow leaves that lane's remaining rows in FIFO order
-    # and reports a typed overflow instead of skipping its head.
+    # and reports a typed overflow instead of skipping its head or evicting a
+    # protected row.
     assert (
         store.enqueue_outbox(
             workspace,
@@ -166,7 +168,59 @@ def test_new_lane_gets_outbox_slot_and_busy_lane_keeps_fifo(
     assert [
         row.envelope.source_identity
         for row in store.list_pending_outbox_rows(workspace, codex_session_id="session-busy")
-    ] == ["busy:2", "busy:3"]
+    ] == ["busy:1", "busy:2", "busy:3"]
+
+
+def test_new_lane_may_reclaim_disposable_row_after_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fairness can reclaim an optional row only after the new lane is admissible."""
+
+    store, workspace, quiet, busy = _store(tmp_path)
+    for ordinal in range(1, 3):
+        assert (
+            store.enqueue_outbox(
+                workspace,
+                "session-busy",
+                _envelope(session=busy, identity=f"busy:{ordinal}", ordinal=ordinal),
+            )
+            is None
+        )
+    disposable = replace(
+        _envelope(session=busy, identity="busy:summary", ordinal=3),
+        event_kind="RoutineReadSummary",
+    )
+    # This row represents an input accepted under the prior larger profile;
+    # lowering the active bound must preserve it until the fair candidate
+    # check below decides whether it may be reclaimed.
+    assert (
+        store.enqueue_outbox(
+            workspace,
+            "session-busy",
+            disposable,
+            accepted_transfer=True,
+        )
+        is None
+    )
+    monkeypatch.setattr(local_mod, "_MAX_OUTBOX", 3)
+
+    assert (
+        store.enqueue_outbox(
+            workspace,
+            "session-quiet",
+            _envelope(session=quiet, identity="quiet:1"),
+        )
+        is None
+    )
+    pending = store.list_pending_outbox_rows(workspace)
+    assert [(row.codex_session_id, row.envelope.source_identity) for row in pending] == [
+        ("session-busy", "busy:1"),
+        ("session-busy", "busy:2"),
+        ("session-quiet", "quiet:1"),
+    ]
+    assert [entry[1].source_identity for entry in store.list_quarantine(workspace)] == [
+        "busy:summary"
+    ]
 
 
 def test_quarantine_one_lane_leaves_sibling_pending_rows_isolated(tmp_path: Path) -> None:

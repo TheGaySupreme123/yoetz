@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -326,6 +327,7 @@ class _App:
         self.ledger = _Ledger(_case())
         self.crash_semantic = crash_semantic
         self.semantic_calls = 0
+        self.reconcile_observation_capture: Callable[[TaskRuntime], Awaitable[None]] | None = None
         capabilities = {
             RuntimeCapability.WRITE,
             RuntimeCapability.PAYLOAD_READ,
@@ -602,6 +604,7 @@ async def test_strict_route_ceiling_never_requests_or_dispatches_semantic_capabi
         app,
         _request("semantic_required"),
         route_profile="strict",
+        host_profile="codex",
         _state=tmp_path,
     )
 
@@ -639,6 +642,7 @@ async def test_strict_ceiling_with_applied_policy_carries_drift_gap(tmp_path: Pa
         app,
         _request("semantic_required"),
         route_profile="strict",
+        host_profile="codex",
         _state=tmp_path,
     )
 
@@ -651,6 +655,36 @@ async def test_strict_ceiling_with_applied_policy_carries_drift_gap(tmp_path: Pa
     # The drift is a structural coverage detail alongside the ceiling gap, never instead.
     assert OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP in result.coverage.known_gaps
     assert OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP in result.coverage.known_gaps
+
+
+@pytest.mark.parametrize("host_profile", ["generic", "claude", "cursor"])
+@pytest.mark.anyio
+async def test_strict_ceiling_does_not_apply_codex_record_to_other_hosts(
+    host_profile: str, tmp_path: Path
+) -> None:
+    """A Codex applied route cannot identify a generic, Claude, or Cursor serving process."""
+
+    from yoetz.application.applied_mcp_route import record_applied_route
+    from yoetz.ports.harness_mcp import MCP_SERVE_COMMAND
+
+    record_applied_route(
+        "policy",
+        list(MCP_SERVE_COMMAND),
+        None,
+        "sha256:" + "a" * 64,
+        _state=tmp_path,
+    )
+
+    result = await execute_check_commit(
+        _App(semantic=True),
+        _request("semantic_required"),
+        route_profile="strict",
+        host_profile=host_profile,  # type: ignore[arg-type]
+        _state=tmp_path,
+    )
+
+    assert result.semantic_reason is SemanticReason.ROUTE_SEMANTIC_CEILING
+    assert result.coverage.known_gaps == ("optional_semantic_review_blocked_by_policy",)
 
 
 @pytest.mark.anyio
@@ -675,6 +709,7 @@ async def test_strict_ceiling_with_applied_strict_keeps_terminal_wording(
         app,
         _request("semantic_required"),
         route_profile="strict",
+        host_profile="codex",
         _state=tmp_path,
     )
 
@@ -696,6 +731,7 @@ async def test_strict_ceiling_without_applied_record_keeps_terminal_wording(
         app,
         _request("semantic_required"),
         route_profile="strict",
+        host_profile="codex",
         _state=tmp_path,
     )
 
@@ -737,6 +773,7 @@ async def test_drift_gap_is_reread_live_never_carried_after_remove(tmp_path: Pat
         _App(semantic=True),
         _request("semantic_required"),
         route_profile="strict",
+        host_profile="codex",
         _state=tmp_path,
     )
     assert OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP in drifted.coverage.known_gaps
@@ -749,6 +786,7 @@ async def test_drift_gap_is_reread_live_never_carried_after_remove(tmp_path: Pat
         _App(semantic=True),
         _request("semantic_required"),
         route_profile="strict",
+        host_profile="codex",
         _state=tmp_path,
     )
     assert reread.coverage.known_gaps == ("optional_semantic_review_blocked_by_policy",)
@@ -1153,11 +1191,38 @@ async def test_partial_rejection_keeps_accepted_challenges_and_declares_the_gap(
 
 
 @pytest.mark.anyio
+async def test_capacity_failure_preserves_deterministic_result_and_precise_receipt_gap() -> None:
+    from yoetz.domain.receipts import semantic_coverage_gap_code
+
+    app = _App(semantic=True)
+    app.semantic_result = FinalSemanticEvaluation(
+        SemanticStatus.FAILED,
+        SemanticReason.CASE_CAPACITY_EXCEEDED,
+        case_reference_scope_reduced=True,
+    )
+    result = await execute_check_commit(app, _request("semantic_required"))
+    assert result.semantic_reason is SemanticReason.CASE_CAPACITY_EXCEEDED
+    assert result.semantic_provenance is None
+    assert "semantic_case_capacity_exceeded" in result.coverage.known_gaps
+    assert "semantic_reference_scope_reduced" in result.coverage.known_gaps
+    assert (
+        semantic_coverage_gap_code(result.semantic_status, result.semantic_reason)
+        == "semantic_case_capacity_exceeded"
+    )
+    assert result.verdict.value == "incomplete_check"
+    assert result.findings
+
+
+@pytest.mark.anyio
 async def test_native_resolution_omission_survives_successful_semantic_check() -> None:
     app = _App(semantic=True)
     app.semantic_result = replace(
         _succeeded(SemanticJudgment("no_material_discrepancy", ())),
-        case_content_gaps=("captured_object_unavailable", "content_unselected"),
+        case_content_gaps=(
+            "captured_object_unavailable",
+            "content_capture_unavailable",
+            "content_unselected",
+        ),
     )
     result = await execute_check_commit(app, _request("semantic_if_configured"))
     assert {"captured_object_unavailable", "content_unselected"} <= set(result.coverage.known_gaps)

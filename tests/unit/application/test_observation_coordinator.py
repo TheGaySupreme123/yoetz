@@ -8,16 +8,19 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
+import apsw
 import pytest
 
 from yoetz.adapters.integrations.codex_lifecycle import LifecycleMapping
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
-from yoetz.adapters.sqlite.migrations import initialize_bundle
+from yoetz.adapters.sqlite import connection as connection_module
+from yoetz.adapters.sqlite.migrations import initialize_bundle as initialize_schema
 from yoetz.adapters.sqlite.observation import SqliteObservationStore
 from yoetz.application.observation_control import build_observation_support_handlers
 from yoetz.application.observation_coordinator import ObservationCoordinator
@@ -35,9 +38,12 @@ from yoetz.application.observation_materialize import (
     materialize_observation_outcome_correction,
     observation_operation_digest,
     observation_writer_id,
+    stable_observation_id,
 )
 from yoetz.domain.findings import Finding
 from yoetz.domain.observation import (
+    ObservationContentChunk,
+    ObservationContentKind,
     ObservationCursor,
     ObservationEnvelope,
     ObservationGapCode,
@@ -49,12 +55,21 @@ from yoetz.domain.observation import (
     observation_ingest_request_from_json,
     observation_ingest_request_to_json,
 )
+from yoetz.domain.observation_profiles import CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
 from yoetz.domain.values import Frontier, JsonObject, Timestamp, finding_id
 from yoetz.ports.ledger import CheckPhase, OperationKind, OperationRecord, OperationState
+from yoetz.ports.observation import TaskObservationPort
 from yoetz.ports.runtime import TaskRuntime
-from yoetz.protocol.canonical import canonical_encode
+from yoetz.protocol.canonical import canonical_digest, canonical_encode
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
+
+
+def initialize_bundle(db: apsw.Connection, seed: Mapping[str, str]) -> None:
+    """Stage a fixture schema, then enforce the production writer SQL policy (#616)."""
+
+    initialize_schema(db, seed)
+    db.set_authorizer(connection_module._writer_authorizer)  # pyright: ignore[reportPrivateUsage]
 
 
 def _task_id() -> str:
@@ -72,6 +87,7 @@ def _envelope(
     corr: str = "c1",
     exit_status: int | None = None,
     source: ObservationSource = ObservationSource.CODEX_HOOK,
+    generation: int = 1,
 ) -> ObservationEnvelope:
     structural: dict[str, object] = {
         "tool_name": tool,
@@ -85,7 +101,9 @@ def _envelope(
         event_kind=kind,
         source_identity=identity,
         source=source,
-        cursor=ObservationCursor(1, 0, ordinal, f"hmac-sha256:{'ab' * 32}", "codex-obs-hook/1.0.0"),
+        cursor=ObservationCursor(
+            generation, 0, ordinal, f"hmac-sha256:{'ab' * 32}", "codex-obs-hook/1.0.0"
+        ),
         receipt_time=Timestamp("2026-01-01T00:00:00.000Z"),
         structural_payload=JsonObject(structural),
         content_object_refs=(),
@@ -159,7 +177,157 @@ def test_materialize_pre_post_and_unpaired() -> None:
     assert ObservationGapCode.CONTENT_UNSELECTED.value in unselected.coverage.known_gaps
 
 
-def test_successful_routine_reads_stay_observation_only_but_failures_materialize() -> None:
+def test_materialization_uses_ledger_mapping_independent_of_transport_cursor() -> None:
+    """New IDs use obs-ledger/1.6 while explicit replay can select a legacy map."""
+
+    task = _task_id()
+    session = f"hmac-sha256:{'74' * 32}"
+    envelope = _envelope(session=session, kind="PreToolUse", identity="hook:mapping-source")
+    stream_cursor = replace(envelope.cursor, mapping_version="codex-obs-stream/1.4.0")
+    stream_transport = replace(envelope, cursor=stream_cursor)
+
+    current = materialize_observation_envelope(envelope, task_id=task)
+    current_from_stream = materialize_observation_envelope(stream_transport, task_id=task)
+    action_source = (
+        f"pre-event:codex:{envelope.session_commitment}:"
+        f"{envelope.cursor.source_generation}:{envelope.source_identity}"
+    )
+    current_event = stable_observation_id(
+        kind=IdKind.EVENT,
+        task_id=task,
+        source_identity=action_source,
+        mapping_version=MATERIALIZATION_MAPPING_VERSION,
+        role="action_event",
+    )
+    assert current.drafts[0].draft.event_id == current_event
+    assert current_from_stream.drafts[0].draft.event_id == current_event
+
+    legacy_mapping = MATERIALIZATION_LEGACY_MAPPING_VERSIONS[0]
+    replay = materialize_observation_envelope(
+        envelope,
+        task_id=task,
+        mapping_version=legacy_mapping,
+    )
+    legacy_event = stable_observation_id(
+        kind=IdKind.EVENT,
+        task_id=task,
+        source_identity=action_source,
+        mapping_version=legacy_mapping,
+        role="action_event",
+    )
+    assert replay.drafts[0].draft.event_id == legacy_event
+    assert replay.drafts[0].draft.event_id != current_event
+
+
+def test_materialize_post_only_profiles_never_invent_a_pre_pair() -> None:
+    from yoetz.domain.events import ActionRecordedPayload
+
+    task = _task_id()
+    session = f"hmac-sha256:{'73' * 32}"
+    claude = _envelope(
+        session=session,
+        kind="PostToolUse",
+        identity="claude:post-only",
+        source=ObservationSource.CLAUDE_HOOK,
+        exit_status=0,
+    )
+    claude = replace(
+        claude,
+        structural_payload=JsonObject(
+            {
+                **claude.structural_payload,
+                "pairing_mode": "post_only",
+                "correlation_kind": "tool_call_id",
+            }
+        ),
+    )
+    claude_batch = materialize_observation_envelope(claude, task_id=task)
+    assert [item.role for item in claude_batch.drafts] == ["action", "result"]
+    assert ObservationGapCode.UNPAIRED_EVENT.value not in claude_batch.gaps
+    action_payload = cast(ActionRecordedPayload, claude_batch.drafts[0].draft.payload)
+    assert "post-only hook" in action_payload.description
+
+    cursor = _envelope(
+        session=session,
+        kind="PostToolUse",
+        identity="cursor:post-only-generation",
+        source=ObservationSource.CURSOR_HOOK,
+        exit_status=0,
+    )
+    cursor_structural = {
+        key: value
+        for key, value in cursor.structural_payload.items()
+        if key not in {"tool_call_id", "correlation_id"}
+    }
+    cursor = replace(
+        cursor,
+        structural_payload=JsonObject(
+            {
+                **cursor_structural,
+                "pairing_mode": "post_only",
+                "correlation_kind": "generation_id",
+                "generation_id": "generation-1",
+            }
+        ),
+    )
+    cursor_batch = materialize_observation_envelope(cursor, task_id=task)
+    assert [item.role for item in cursor_batch.drafts] == ["post_only_evidence"]
+    assert ObservationGapCode.UNPAIRED_EVENT.value not in cursor_batch.gaps
+    assert ObservationGapCode.UNPAIRED_EVENT.value not in cursor_batch.coverage.known_gaps
+
+    forged_codex = replace(
+        _envelope(
+            session=session,
+            kind="PostToolUse",
+            identity="codex:forged-post-only",
+            gaps=(ObservationGapCode.UNPAIRED_EVENT.value,),
+        ),
+        structural_payload=JsonObject(
+            {
+                "tool_name": "shell",
+                "tool_call_id": "forged-call",
+                "correlation_id": "forged-call",
+                "pairing_mode": "post_only",
+                "correlation_kind": "generation_id",
+                "generation_id": "generation-forged",
+            }
+        ),
+    )
+    forged_batch = materialize_observation_envelope(forged_codex, task_id=task)
+    assert [item.role for item in forged_batch.drafts] == ["unpaired_evidence"]
+    assert ObservationGapCode.UNPAIRED_EVENT.value in forged_batch.gaps
+
+    # An unreviewed native profile is conservative and must retain a
+    # host-specific action description if it is later widened to paired.
+    for source, label in (
+        (ObservationSource.CLAUDE_HOOK, "Claude Code hook"),
+        (ObservationSource.CURSOR_HOOK, "Cursor hook"),
+    ):
+        native = _envelope(
+            session=session,
+            kind="PostToolUse",
+            identity=f"{source.value}:paired-profile",
+            source=source,
+            exit_status=0,
+        )
+        native = replace(
+            native,
+            structural_payload=JsonObject(
+                {
+                    **native.structural_payload,
+                    "capability_profile_id": "future-paired-profile",
+                    "pairing_mode": "paired",
+                    "correlation_kind": "tool_call_id",
+                }
+            ),
+        )
+        native_batch = materialize_observation_envelope(native, task_id=task)
+        native_action = cast(ActionRecordedPayload, native_batch.drafts[0].draft.payload)
+        assert label in native_action.description
+        assert "Codex hook" not in native_action.description
+
+
+def test_individually_admitted_routine_reads_materialize_but_summaries_do_not() -> None:
     task = _task_id()
     session = f"hmac-sha256:{'ed' * 32}"
     pre = _envelope(session=session, kind="PreToolUse", identity="hook:read-pre")
@@ -167,8 +335,8 @@ def test_successful_routine_reads_stay_observation_only_but_failures_materialize
     deferred = materialize_observation_envelope(
         replace(pre, structural_payload=pre_structural), task_id=task
     )
-    assert deferred.drafts == ()
-    assert deferred.skip_reason == "routine_read_deferred"
+    assert deferred.skip_reason is None
+    assert [item.draft.schema.name for item in deferred.drafts] == ["action_recorded"]
 
     post = _envelope(
         session=session,
@@ -180,8 +348,11 @@ def test_successful_routine_reads_stay_observation_only_but_failures_materialize
     coalesced = materialize_observation_envelope(
         replace(post, structural_payload=post_structural), task_id=task
     )
-    assert coalesced.drafts == ()
-    assert coalesced.skip_reason == "routine_read_coalesced"
+    assert coalesced.skip_reason is None
+    assert [item.draft.schema.name for item in coalesced.drafts] == [
+        "action_recorded",
+        "result_recorded",
+    ]
 
     failed = materialize_observation_envelope(
         replace(
@@ -467,7 +638,7 @@ async def test_live_upgrade_finds_legacy_mapping_under_legacy_writer(tmp_path: P
         async def lookup_operation(self, writer_id: str, operation_id: str):
             lookups.append((writer_id, operation_id))
             return (
-                object()
+                SimpleNamespace(request_digest=legacy_digest)
                 if writer_id == legacy_writer_id and operation_id == expected_operation_id
                 else None
             )
@@ -1461,7 +1632,7 @@ def test_local_outbox_v1_compatibility_and_v2_attempt_round_trip(tmp_path: Path)
     assert durable.last_attempt_at == attempted_at
     assert durable.consecutive_reason_attempts == 1
     assert json.loads(state_path.read_text(encoding="utf-8"))["schema"] == (
-        "yoetz.observation-local/11"
+        "yoetz.observation-local/15"
     )
 
     raw = json.loads(state_path.read_text(encoding="utf-8"))
@@ -1600,7 +1771,7 @@ def test_enqueue_refuses_projected_oversize_without_losing_consent(
     )
 
 
-def test_size_compaction_accounts_for_distinct_same_source_rows(
+def test_size_save_preserves_distinct_same_source_rows_when_bound_cannot_fit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import yoetz.adapters.integrations.observation_local as local_mod
@@ -1615,20 +1786,27 @@ def test_size_compaction_accounts_for_distinct_same_source_rows(
             "sess-compact",
             _envelope(session=session, identity="hook:same", ordinal=ordinal),
         )
-    monkeypatch.setattr(local_mod, "_MAX_STATE_BYTES", 2_100)
+    state_path = next((tmp_path / "observation" / "workspaces").glob("*.json"))
+    before = state_path.read_bytes()
+    state = store._load(workspace)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    assert state.stream_partials is not None
+    state.stream_partials[session] = b"x" * 128
+    # /11 persists pairing-history provenance, adding a small fixed envelope to
+    # the authority state. Keep the bound tight enough that the accepted rows
+    # cannot fit after optional cache shedding. The save must fail closed,
+    # leaving both the prior file and the caller's mutable state untouched.
+    monkeypatch.setattr(local_mod, "_MAX_STATE_BYTES", 2_400)
 
-    store.note_coverage_gap(workspace, ObservationGapCode.SERVICE_UNAVAILABLE.value)
+    with pytest.raises(PublicOperationError) as raised:
+        store._save(workspace, state)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    assert raised.value.code is PublicErrorCode.STORAGE_UNSAFE
+    assert state_path.read_bytes() == before
+    assert state.stream_partials == {session: b"x" * 128}
+    assert len(state.pending_outbox or ()) == 2
 
     reopened = LocalObservationStore(_state=tmp_path)
-    state_path = next((tmp_path / "observation" / "workspaces").glob("*.json"))
-    persisted = json.loads(state_path.read_text(encoding="utf-8"))
-    accounted = (
-        reopened.pending_outbox_count(workspace)
-        + reopened.quarantined_count(workspace)
-        + int(persisted["quarantine_evicted_count"])
-    )
-    assert accounted == 2
-    assert state_path.stat().st_size <= 2_100
+    assert reopened.pending_outbox_count(workspace) == 2
+    assert reopened.quarantined_count(workspace) == 0
 
 
 def test_monotonic_samples_fenced_across_simulated_reboot(tmp_path: Path) -> None:
@@ -2135,6 +2313,50 @@ async def test_nonretryable_post_route_session_conflict_is_ledger_rejected(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    "code", [PublicErrorCode.SESSION_NOT_FOUND, PublicErrorCode.SESSION_CONFLICT]
+)
+async def test_retryable_session_route_errors_stay_pending_as_service_unavailable(
+    tmp_path: Path, code: PublicErrorCode
+) -> None:
+    """#554: no ingest authority raises these codes retryable, and the removed
+    per-code branches must not come back by accident. A retryable answer, should
+    one ever appear, is transient coordination that keeps the row pending under
+    the generic retryable class; it is never `mapping_missing`, which would
+    retire the lane and terminalize an ended session."""
+
+    class _RetryableRuntime:
+        async def route(self, command: object) -> object:
+            del command
+            raise PublicOperationError(code, "Observation route is busy.", True)
+
+        async def release(self, runtime: object) -> None:
+            raise AssertionError(f"unrouted runtime released: {runtime!r}")
+
+    local, _workspace, session, mapping = _mapped_local(tmp_path, f"retryable-{code.value}")
+    coordinator = ObservationCoordinator(
+        runtime=_RetryableRuntime(),  # type: ignore[arg-type]
+        local=local,
+        clock=object(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
+
+    result = await coordinator.ingest_request(
+        ObservationIngestRequest(
+            codex_session_id=mapping.codex_session_id,
+            envelope=_envelope(session=session),
+        )
+    )
+
+    assert result.disposition is ObservationIngestDisposition.REJECTED
+    assert result.reason == ObservationGapCode.SERVICE_UNAVAILABLE.value
+    assert result.reason != ObservationGapCode.MAPPING_MISSING.value
+    assert route_observation_ingest(result).action is ObservationDrainAction.RETRY
+
+
+@pytest.mark.anyio
 async def test_ledger_event_invalid_is_terminal_not_service_unavailable(tmp_path: Path) -> None:
     """#540: a ledger validation refusal quarantines its envelope immediately."""
 
@@ -2143,6 +2365,11 @@ async def test_ledger_event_invalid_is_terminal_not_service_unavailable(tmp_path
     local, _workspace, session, mapping = _mapped_local(tmp_path, "ledger-event-invalid")
 
     class _Store:
+        def load_capture_ticket(self, *, workspace: str, logical_identity: str) -> None:
+            # This structural-only fixture has no staged native capture to recover.
+            del workspace, logical_identity
+            return None
+
         def grant_consent(self, *args: object, **kwargs: object) -> None:
             del args, kwargs
 
@@ -2282,7 +2509,9 @@ async def test_storage_corrupt_blocks_session_for_coordinator_generation(tmp_pat
 
 
 @pytest.mark.anyio
-async def test_coordinator_rejects_disabled_before_mapping_or_runtime(tmp_path: Path) -> None:
+async def test_coordinator_rejects_disabled_stream_before_mapping_or_runtime(
+    tmp_path: Path,
+) -> None:
     class _NoRuntime:
         async def route(self, command: object) -> object:
             raise AssertionError("disabled observation must not route")
@@ -2313,7 +2542,9 @@ async def test_coordinator_rejects_disabled_before_mapping_or_runtime(tmp_path: 
     result = await coordinator.ingest_request(
         ObservationIngestRequest(
             codex_session_id="disabled-sess",
-            envelope=_envelope(session=session),
+            envelope=replace(
+                _envelope(session=session), source=ObservationSource.CODEX_SESSION_STREAM
+            ),
         )
     )
     assert result.disposition is ObservationIngestDisposition.REJECTED
@@ -2399,6 +2630,74 @@ def test_hook_and_stream_copies_share_one_logical_operation() -> None:
         kind="SessionStart",
     )
     assert canonical_logical_identity(opaque_hook) != canonical_logical_identity(opaque_stream)
+
+
+def test_reused_call_id_isolated_by_source_session_and_generation() -> None:
+    """A host call id is meaningful only inside its source generation lane."""
+
+    from yoetz.application.observation_materialize import materialize_observation_envelope
+    from yoetz.domain.events import ActionRecordedPayload, ResultRecordedPayload
+
+    task = "task_identity_scope"
+    base = _envelope(
+        session=f"hmac-sha256:{'71' * 32}",
+        kind="PostToolUse",
+        identity="hook:post:reused",
+        corr="reused-call",
+        exit_status=0,
+        generation=1,
+    )
+    same_codex_stream = replace(
+        base,
+        source=ObservationSource.CODEX_SESSION_STREAM,
+        event_kind="item.completed",
+        source_identity="stream:post:reused",
+    )
+    next_generation = replace(
+        base,
+        cursor=replace(base.cursor, source_generation=2),
+        source_identity="hook:post:reused-generation-2",
+    )
+    different_session = replace(
+        base,
+        session_commitment=f"hmac-sha256:{'72' * 32}",
+        source_identity="hook:post:reused-session-2",
+    )
+    different_host = replace(
+        base,
+        source=ObservationSource.CLAUDE_HOOK,
+        session_commitment=f"hmac-sha256:{'71' * 32}",
+        source_identity="claude:post:reused",
+    )
+
+    assert canonical_logical_identity(base) == canonical_logical_identity(same_codex_stream)
+    assert (
+        len(
+            {
+                canonical_logical_identity(item)
+                for item in (base, next_generation, different_session, different_host)
+            }
+        )
+        == 4
+    )
+    batches = [
+        materialize_observation_envelope(item, task_id=task)
+        for item in (base, next_generation, different_session, different_host)
+    ]
+    action_ids = {
+        cast(ActionRecordedPayload, item.draft.payload).action_id
+        for batch in batches
+        for item in batch.drafts
+        if item.draft.schema.name == "action_recorded"
+    }
+    result_ids = {
+        cast(ResultRecordedPayload, item.draft.payload).result_id
+        for batch in batches
+        for item in batch.drafts
+        if item.draft.schema.name == "result_recorded"
+    }
+    assert len(action_ids) == 4
+    assert len(result_ids) == 4
 
 
 @pytest.mark.anyio
@@ -2893,10 +3192,8 @@ async def test_deferred_verification_uses_a_dedicated_runtime_lease(tmp_path: Pa
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("failed_lane", (False, True))
 async def test_rediscovery_drains_pending_repositories_for_every_bound_session(
     tmp_path: Path,
-    failed_lane: bool,
 ) -> None:
     from types import SimpleNamespace
 
@@ -2964,8 +3261,6 @@ async def test_rediscovery_drains_pending_repositories_for_every_bound_session(
 
     class _RuntimePort:
         async def route(self, command: object) -> object:
-            if failed_lane and command.session_id == session_ids[0]:  # type: ignore[attr-defined]
-                raise ValueError("isolated lane failure")
             return runtimes[command.session_id]  # type: ignore[attr-defined]
 
         async def release(self, runtime: object) -> None:
@@ -2994,20 +3289,14 @@ async def test_rediscovery_drains_pending_repositories_for_every_bound_session(
     )
 
     await coordinator.rediscover_pending_verification()
-    assert supervisor.has_handle(workspace, task_ids[0]) is (not failed_lane)
+    # Multi-task discovery keeps one supervisor lane per routed task.  Both sibling repositories
+    # must be visible before a drain round; the old workspace-only key would hide the second lane.
+    assert supervisor.has_handle(workspace, task_ids[0])
     assert supervisor.has_handle(workspace, task_ids[1])
-    assert len(supervisor._handles) == (1 if failed_lane else 2)  # pyright: ignore[reportPrivateUsage]
-    assert local.session_gap_codes(workspace, local.session_commitment(codex_ids[1])) == ()
-    if failed_lane:
-        assert local.session_gap_codes(workspace, local.session_commitment(codex_ids[0])) == (
-            ObservationGapCode.VERIFICATION_STALE.value,
-        )
-
-    # Each task owns a separate verification repository even though both observe the same source
-    # workspace.  A fair round drains both lanes and releases both dedicated runtimes.
-    assert await supervisor._drain_once() is False  # pyright: ignore[reportPrivateUsage]
+    assert len(supervisor._handles) == 2  # pyright: ignore[reportPrivateUsage]
+    await supervisor._drain_once()  # pyright: ignore[reportPrivateUsage]
     assert supervisor.has_handle(workspace) is False
-    assert sorted(released) == sorted(session_ids[1:] if failed_lane else session_ids)
+    assert sorted(released) == sorted(session_ids)
 
 
 @pytest.mark.anyio
@@ -3168,6 +3457,11 @@ async def test_duplicate_ingest_reconciles_ledger_instead_of_early_return(tmp_pa
     calls = {"append": 0, "advice": 0}
 
     class _DuplicateStore:
+        def load_capture_ticket(self, *, workspace: str, logical_identity: str) -> None:
+            # This structural-only fixture has no staged native capture to recover.
+            del workspace, logical_identity
+            return None
+
         def grant_consent(self, *args: object) -> None:
             return None
 
@@ -3286,6 +3580,11 @@ async def test_check_barrier_deferral_is_designed_backpressure(
     local, _workspace, session, mapping = _mapped_local(tmp_path, f"barrier-{code.value.lower()}")
 
     class _BarrierStore:
+        def load_capture_ticket(self, *, workspace: str, logical_identity: str) -> None:
+            # This structural-only fixture has no staged native capture to recover.
+            del workspace, logical_identity
+            return None
+
         def grant_consent(self, *args: object, **kwargs: object) -> None:
             del args, kwargs
 
@@ -3584,6 +3883,158 @@ def _mapped_local(
 
 
 @pytest.mark.anyio
+async def test_native_content_requires_matching_local_and_task_profile_grants(
+    tmp_path: Path,
+) -> None:
+    """Native chunks need the same explicit host profile at both consent boundaries."""
+
+    from types import SimpleNamespace
+
+    import apsw
+
+    codex_id = "native-content-profile"
+    local, workspace, session, mapping = _mapped_local(tmp_path, codex_id)
+    local.enable_content_capture(workspace, CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID)
+
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": mapping.yoetz_task_id, "owner_generation": "1"})
+    task_store = SqliteObservationStore(db)
+    runtime = SimpleNamespace(
+        task_id=mapping.yoetz_task_id,
+        session_id=mapping.yoetz_session_id,
+        writer_id=observation_writer_id(mapping.yoetz_task_id, mapping.yoetz_session_id),
+        observation=task_store,
+    )
+
+    class _RuntimePort:
+        def __init__(self) -> None:
+            self.disable_before_capture = False
+
+        async def route(self, command: object) -> object:
+            del command
+            if self.disable_before_capture:
+                self.disable_before_capture = False
+                # Model a queued request whose runtime gate is disabled after
+                # the coordinator's initial consent read but before capture.
+                local.set_runtime_enabled(False)
+            return runtime
+
+        async def release(self, released: object) -> None:
+            assert released is runtime
+
+    captured: list[tuple[ObservationContentChunk, ...]] = []
+
+    class _Coordinator(ObservationCoordinator):
+        async def _capture_content(  # type: ignore[override]
+            self, runtime: object, store: object, **kwargs: object
+        ) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...], bool, bool]:
+            del runtime, store
+            captured.append(cast(tuple[ObservationContentChunk, ...], kwargs["chunks"]))
+            return (), (), False, False
+
+        async def _append_materialized(  # type: ignore[override]
+            self, *args: object, **kwargs: object
+        ) -> None:
+            del args, kwargs
+            return None
+
+        async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+        async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+    class _Clock:
+        def now_utc(self) -> datetime:
+            return datetime(2026, 1, 1, tzinfo=UTC)
+
+    async def bootstrap(workspace: str, runtime: TaskRuntime, store: TaskObservationPort) -> bool:
+        # This fixture owns exactly one task bundle. Capture authority still
+        # needs a complete budget inventory independently of its profile grant.
+        assert runtime.task_id == mapping.yoetz_task_id
+        assert store is task_store
+        return local.bootstrap_capture_reservations(
+            workspace,
+            {runtime.task_id: store.capture_backlog(workspace)},
+        )
+
+    runtime_port = _RuntimePort()
+    coordinator = _Coordinator(
+        runtime=runtime_port,  # type: ignore[arg-type]
+        local=local,
+        clock=_Clock(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+        capture_budget_bootstrap=bootstrap,
+    )
+    chunk = ObservationContentChunk(
+        content_kind=ObservationContentKind.TOOL_OUTPUT,
+        correlation_identity="hook:native-content:tool-output",
+        source_commitment="hmac-sha256:" + "ab" * 32,
+        media_type="text/plain",
+        part_index=0,
+        part_count=1,
+        content=b"bounded native output",
+        redacted=False,
+    )
+
+    def request(
+        identity: str, *, profile: str | None = CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+    ) -> ObservationIngestRequest:
+        return ObservationIngestRequest(
+            codex_session_id=codex_id,
+            envelope=_envelope(
+                session=session,
+                kind="PostToolUse",
+                identity=identity,
+                ordinal=len(captured) + 1,
+                source=ObservationSource.CLAUDE_HOOK,
+                corr=identity,
+            ),
+            content_chunks=(chunk,),
+            content_capture_profile=profile,
+        )
+
+    # A native request without the profile is retained structurally, but no
+    # plaintext chunk reaches the service capture hook and the gap is explicit.
+    omitted = await coordinator.ingest_request(request("hook:native-content-omitted", profile=None))
+    assert omitted.disposition is ObservationIngestDisposition.ACCEPTED
+    assert captured == [()]
+    assert (
+        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+        in task_store.list_envelopes(workspace)[0].gap_codes
+    )
+
+    selected = await coordinator.ingest_request(request("hook:native-content-selected"))
+    assert selected.disposition is ObservationIngestDisposition.ACCEPTED
+    assert captured[-1] == (chunk,)
+    assert task_store.content_capture_profiles(workspace) == (
+        CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+    )
+
+    mismatch = await coordinator.ingest_request(
+        request(
+            "hook:native-content-mismatch",
+            profile="cursor-ordinary-observation-v1",
+        )
+    )
+    assert mismatch.disposition is ObservationIngestDisposition.REJECTED
+    assert mismatch.reason == ObservationGapCode.CONTENT_CAPTURE_PROFILE_MISMATCH.value
+    assert captured[-1] == (chunk,)
+
+    # A direct/queued native request still admits its structural envelope, but
+    # the authoritative runtime fence blocks the plaintext capture path.
+    runtime_port.disable_before_capture = True
+    before_blocked_capture_count = len(captured)
+    queued = await coordinator.ingest_request(request("hook:native-content-runtime-off"))
+    assert queued.disposition is ObservationIngestDisposition.ACCEPTED
+    assert len(captured) == before_blocked_capture_count
+    retained = task_store.list_envelopes(workspace)
+    assert ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value in retained[-1].gap_codes
+
+
+@pytest.mark.anyio
 async def test_duplicate_ingest_reconstructed_append_detects_same_task_rewind(
     tmp_path: Path,
 ) -> None:
@@ -3787,10 +4238,21 @@ async def test_pre_post_and_stream_copies_claim_without_storage_corrupt(tmp_path
             envelope: ObservationEnvelope,
             batch: MaterializedObservationBatch,
             *,
+            legacy_session_id: str | None = None,
             legacy_writer_id: str | None = None,
+            legacy_writer_routes: tuple[tuple[str, str], ...] = (),
+            replay_required: bool = False,
+            replay_claims: tuple[tuple[tuple[str, str, str], tuple[str, ...]], ...] = (),
             replay_draft_role_sets: tuple[tuple[str, ...], ...] = (),
         ) -> tuple[str, str, None, str, tuple[str, ...]]:
-            del legacy_writer_id, replay_draft_role_sets
+            del (
+                legacy_session_id,
+                legacy_writer_id,
+                legacy_writer_routes,
+                replay_required,
+                replay_claims,
+                replay_draft_role_sets,
+            )
             roles = tuple(item.role for item in batch.drafts)
             digest = _digest(
                 task_id=runtime.task_id,  # type: ignore[attr-defined]
@@ -3855,6 +4317,139 @@ async def test_pre_post_and_stream_copies_claim_without_storage_corrupt(tmp_path
     # stream coverage into source_mask == 3 (previously dead code, issue #309).
     assert [row[0] for row in rows] == [1, 3]
     assert {row[1] for row in rows} == {MATERIALIZATION_LEGACY_MAPPING_VERSIONS[0]}
+
+
+@pytest.mark.anyio
+async def test_post_only_replay_includes_historical_unpaired_role_set(tmp_path: Path) -> None:
+    """A native post-only retry can find the old unpaired-evidence operation."""
+
+    from types import SimpleNamespace
+
+    local, _workspace, session, mapping = _mapped_local(tmp_path, "legacy-post-only-replay")
+    replay_sets: list[tuple[tuple[str, ...], ...]] = []
+
+    class _Store:
+        def load_capture_ticket(self, **kwargs: object) -> None:
+            del kwargs
+
+        def grant_consent(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        def bind_session(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        async def ingest(self, envelope: ObservationEnvelope) -> ObservationIngestResult:
+            return ObservationIngestResult(
+                ObservationIngestDisposition.ACCEPTED, None, envelope.cursor
+            )
+
+        def record_logical_identity_claim(self, **kwargs: object) -> None:
+            del kwargs
+
+    runtime = SimpleNamespace(
+        task_id=mapping.yoetz_task_id,
+        session_id=mapping.yoetz_session_id,
+        writer_id=observation_writer_id(mapping.yoetz_task_id, mapping.yoetz_session_id),
+        observation=_Store(),
+    )
+
+    class _RuntimePort:
+        async def route(self, command: object) -> object:
+            del command
+            return runtime
+
+        async def release(self, released: object) -> None:
+            del released
+
+    class _Clock:
+        def now_utc(self) -> datetime:
+            return datetime(2026, 1, 1, tzinfo=UTC)
+
+    class _Coordinator(ObservationCoordinator):
+        async def _capture_content(  # type: ignore[override]
+            self, runtime: object, store: object, **kwargs: object
+        ) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...], bool, bool]:
+            del runtime, store, kwargs
+            return (), (), False, False
+
+        async def _append_materialized(  # type: ignore[override]
+            self,
+            runtime: object,
+            envelope: ObservationEnvelope,
+            batch: MaterializedObservationBatch,
+            *,
+            legacy_session_id: str | None = None,
+            legacy_writer_id: str | None = None,
+            legacy_writer_routes: tuple[tuple[str, str], ...] = (),
+            replay_required: bool = False,
+            replay_claims: tuple[tuple[tuple[str, str, str], tuple[str, ...]], ...] = (),
+            replay_draft_role_sets: tuple[tuple[str, ...], ...] = (),
+        ) -> tuple[str, str, None, str, tuple[str, ...]]:
+            del (
+                legacy_session_id,
+                legacy_writer_id,
+                legacy_writer_routes,
+                replay_required,
+                replay_claims,
+            )
+            replay_sets.append(replay_draft_role_sets)
+            roles = tuple(item.role for item in batch.drafts)
+            digest = observation_operation_digest(
+                task_id=runtime.task_id,  # type: ignore[attr-defined]
+                logical_identity=canonical_logical_identity(envelope),
+                draft_roles=roles,
+            )
+            return (
+                self._stable_operation_id(digest),
+                digest,
+                None,
+                MATERIALIZATION_MAPPING_VERSION,
+                roles,
+            )
+
+        async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+        async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+    coordinator = _Coordinator(
+        runtime=_RuntimePort(),  # type: ignore[arg-type]
+        local=local,
+        clock=_Clock(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
+    base_envelope = _envelope(
+        session=session,
+        kind="PostToolUse",
+        identity="claude:historical-unpaired",
+        source=ObservationSource.CLAUDE_HOOK,
+        exit_status=0,
+        corr="historical-call",
+        gaps=(ObservationGapCode.UNPAIRED_EVENT.value,),
+    )
+    envelope = replace(
+        base_envelope,
+        structural_payload=JsonObject(
+            {
+                **base_envelope.structural_payload,
+                "capability_profile_id": "claude-code-cli-local-project-2.1.241",
+                "pairing_mode": "post_only",
+                "correlation_kind": "tool_call_id",
+            }
+        ),
+    )
+
+    result = await coordinator.ingest_request(
+        ObservationIngestRequest(
+            codex_session_id="legacy-post-only-replay",
+            envelope=envelope,
+        )
+    )
+    assert result.disposition is ObservationIngestDisposition.ACCEPTED
+    assert replay_sets == [(("action", "result"), ("unpaired_evidence",))]
 
 
 @pytest.mark.anyio
@@ -4002,11 +4597,22 @@ async def test_later_stream_failure_correction_projection_policy(
             envelope: ObservationEnvelope,
             batch: MaterializedObservationBatch,
             *,
+            legacy_session_id: str | None = None,
             legacy_writer_id: str | None = None,
+            legacy_writer_routes: tuple[tuple[str, str], ...] = (),
+            replay_required: bool = False,
+            replay_claims: tuple[tuple[tuple[str, str, str], tuple[str, ...]], ...] = (),
             replay_draft_role_sets: tuple[tuple[str, ...], ...] = (),
         ) -> tuple[str, str, AppendResult, str, tuple[str, ...]]:
             nonlocal core_unknown
-            del legacy_writer_id, replay_draft_role_sets
+            del (
+                legacy_session_id,
+                legacy_writer_id,
+                legacy_writer_routes,
+                replay_required,
+                replay_claims,
+                replay_draft_role_sets,
+            )
             roles = tuple(item.role for item in batch.drafts)
             appended_roles.append(roles)
             appended_batches.append(batch)
@@ -4156,6 +4762,11 @@ async def test_identity_claim_conflict_rejects_one_envelope_without_latching(
     ingested: list[str] = []
 
     class _ConflictStore:
+        def load_capture_ticket(self, *, workspace: str, logical_identity: str) -> None:
+            # This structural-only fixture has no staged native capture to recover.
+            del workspace, logical_identity
+            return None
+
         def grant_consent(self, *args: object, **kwargs: object) -> None:
             del args, kwargs
 
@@ -4416,21 +5027,11 @@ async def test_host_hook_row_refused_by_ledger_schema_quarantines_then_delivers_
     the service reported ready. After the bundle migrates, the identical envelope delivers.
     """
 
-    import apsw
-
     from yoetz.adapters.sqlite.migrations import BUNDLE_MIGRATIONS, run_migrations
 
     cell = _reattach_fixture(tmp_path, f"host-{source.value}")
     db, cell.store = _schema_eight_store()
-    # Native Claude/Cursor hooks are post-only: their admitted result
-    # materializes as evidence_recorded rather than a fabricated action.
-    envelope = _envelope(
-        session=cell.session,
-        kind="PostToolUse",
-        identity=f"hook:{source.value}:1",
-        exit_status=1,
-        source=source,
-    )
+    envelope = _envelope(session=cell.session, identity=f"hook:{source.value}:1", source=source)
 
     rejected = await cell.ingest(envelope)
 
@@ -4612,6 +5213,23 @@ async def test_advice_findings_reuse_operation_committed_by_predecessor_session(
         SimpleNamespace(event_id=draft.draft.event_id, schema=draft.draft.schema)
         for draft in materialize_observation_envelope(envelope, task_id=task_id).drafts
     ]
+    advice_subject_refs = tuple(
+        sorted((str(record.event_id) for record in ledger_events), key=str.encode)[:64]
+    )
+    advice_request_digest = canonical_digest(
+        JsonObject(
+            {
+                "format": "yoetz.observation-advice-findings/1",
+                "task_id": task_id,
+                "findings": (
+                    {
+                        "finding_id": str(item.finding_id),
+                        "subject_refs": advice_subject_refs,
+                    },
+                ),
+            }
+        )
+    )
     committed_result = canonical_encode(
         {
             "accepted": (
@@ -4632,7 +5250,7 @@ async def test_advice_findings_reuse_operation_committed_by_predecessor_session(
         predecessor_writer,
         PREFIX_BY_KIND[IdKind.REQUEST] + str(uuid.uuid4()),
         OperationKind.PUBLISH_WORK,
-        "sha256:" + "e" * 64,
+        advice_request_digest,
         OperationState.COMPLETE,
         CheckPhase.TERMINAL,
         None,
@@ -4825,6 +5443,383 @@ async def test_session_superseded_without_followable_binding_is_not_ledger_rejec
     assert result.reason != ObservationGapCode.LEDGER_REJECTED.value
     assert result.reason != ObservationGapCode.MAPPING_MISSING.value
     assert route_observation_ingest(result).action is ObservationDrainAction.QUARANTINE
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("hop_count", "seed_index"),
+    [(1, 0), (2, 1)],
+    ids=["single-hop-predecessor", "multi-hop-intermediate"],
+)
+async def test_ingest_replays_legacy_operation_through_every_route_writer(
+    tmp_path: Path, hop_count: int, seed_index: int
+) -> None:
+    """Legacy observation operations remain reachable after bounded reattach chains.
+
+    The lifecycle mapping stores the cooperative start writer, while the old
+    observation materializer used the deterministic writer derived from each
+    routed session.  Exercise real ``ingest_request`` routing with an old 1.4
+    operation under that derived writer, including an intermediate writer in a
+    two-hop retirement chain.
+    """
+
+    from types import SimpleNamespace
+
+    from builders.ledger_adapters import FixedClock
+
+    cell = _reattach_fixture(tmp_path, f"legacy-replay-{hop_count}")
+    predecessor = cell.mapping
+    sessions = [predecessor.yoetz_session_id]
+    cooperative_writers = [predecessor.yoetz_writer_id]
+    for _ in range(hop_count):
+        sessions.append(PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4()))
+        cooperative_writers.append(PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4()))
+    derived_writers = [observation_writer_id(cell.task_id, session) for session in sessions]
+
+    envelope = _envelope(
+        session=cell.session,
+        kind="PreToolUse",
+        identity=f"hook:legacy-replay:{hop_count}",
+        corr=f"legacy-replay-call-{hop_count}",
+    )
+    batch = materialize_observation_envelope(envelope, task_id=cell.task_id)
+    roles = tuple(item.role for item in batch.drafts)
+    mapping_version = MATERIALIZATION_LEGACY_MAPPING_VERSIONS[0]
+    seeded_digest = observation_operation_digest(
+        task_id=cell.task_id,
+        logical_identity=canonical_logical_identity(envelope, mapping_version=mapping_version),
+        draft_roles=roles,
+        mapping_version=mapping_version,
+        session_id=sessions[seed_index],
+        writer_id=derived_writers[seed_index],
+    )
+    seeded_operation_id = ""
+    lookup_routes: list[tuple[str, str]] = []
+
+    class _Ledger:
+        async def lookup_task_operation(self, writer_id: str, operation_id: str):
+            del writer_id, operation_id
+            return None
+
+        async def lookup_operation(self, writer_id: str, operation_id: str):
+            lookup_routes.append((writer_id, operation_id))
+            if writer_id == derived_writers[seed_index] and operation_id == seeded_operation_id:
+                return SimpleNamespace(request_digest=seeded_digest)
+            return None
+
+    ledger = _Ledger()
+    current_runtime = SimpleNamespace(
+        task_id=cell.task_id,
+        session_id=sessions[-1],
+        writer_id=derived_writers[-1],
+        ledger=ledger,
+        observation=cell.store,
+        objects=object(),
+    )
+
+    class _RuntimePort:
+        async def route(self, command: object) -> object:
+            session_id = cast(str, getattr(command, "session_id"))
+            hop = sessions.index(session_id)
+            if hop < hop_count:
+                raise PublicOperationError(
+                    PublicErrorCode.SESSION_NOT_FOUND,
+                    "The requested session was replaced.",
+                    retryable=False,
+                    safe_details={
+                        "reason_code": "session_superseded",
+                        "task_id": cell.task_id,
+                        "session_id": sessions[hop + 1],
+                        "writer_id": cooperative_writers[hop + 1],
+                    },
+                )
+            return current_runtime
+
+        async def release(self, released: object) -> None:
+            assert released is current_runtime
+
+    class _Coordinator(ObservationCoordinator):
+        async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+        async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+    coordinator = _Coordinator(
+        runtime=_RuntimePort(),  # type: ignore[arg-type]
+        local=cell.local,
+        clock=FixedClock(),
+        ids=object(),  # type: ignore[arg-type]
+        state_root=cell.local_root,
+        mapping_loader=lambda *_args, **_kwargs: predecessor,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+        mapping_storer=lambda *_args, **_kwargs: None,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
+    seeded_operation_id = coordinator._stable_operation_id(seeded_digest)  # pyright: ignore[reportPrivateUsage]
+
+    first = await coordinator.ingest_request(ObservationIngestRequest(cell.codex_id, envelope))
+    replayed = await coordinator.ingest_request(ObservationIngestRequest(cell.codex_id, envelope))
+
+    assert first.disposition is ObservationIngestDisposition.ACCEPTED, first.reason
+    assert replayed.disposition is ObservationIngestDisposition.DUPLICATE, replayed.reason
+    assert lookup_routes
+    assert (derived_writers[seed_index], seeded_operation_id) in lookup_routes
+    # The route history includes both the cooperative and deterministic writer
+    # for every predecessor needed before the seeded operation is found.
+    expected_operation_ids = {
+        (
+            writer,
+            coordinator._stable_operation_id(  # pyright: ignore[reportPrivateUsage]
+                observation_operation_digest(
+                    task_id=cell.task_id,
+                    logical_identity=canonical_logical_identity(
+                        envelope, mapping_version=mapping_version
+                    ),
+                    draft_roles=roles,
+                    mapping_version=mapping_version,
+                    session_id=session_id,
+                    writer_id=writer,
+                )
+            ),
+        )
+        for index in range(seed_index + 1)
+        for session_id, writer in (
+            (sessions[index], cooperative_writers[index]),
+            (sessions[index], derived_writers[index]),
+        )
+    }
+    assert expected_operation_ids.issubset(set(lookup_routes))
+
+
+@pytest.mark.anyio
+async def test_ingest_replays_legacy_operation_after_route_cache_restart(tmp_path: Path) -> None:
+    """A route-cache replacement keeps predecessor replay reachable after a crash."""
+
+    from types import SimpleNamespace
+
+    from builders.ledger_adapters import FixedClock
+    from yoetz.adapters.integrations.codex_lifecycle import (
+        load_mapping,
+        load_route_history,
+        store_mapping,
+    )
+
+    cell = _reattach_fixture(tmp_path, "legacy-replay-restart")
+    predecessor = cell.mapping
+    successor = replace(
+        predecessor,
+        yoetz_session_id=PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4()),
+        yoetz_writer_id=PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4()),
+    )
+    store_mapping(predecessor, _state=tmp_path)
+    envelope = _envelope(
+        session=cell.session,
+        kind="PreToolUse",
+        identity="hook:legacy-replay-restart",
+        corr="legacy-replay-restart-call",
+    )
+    batch = materialize_observation_envelope(envelope, task_id=cell.task_id)
+    roles = tuple(item.role for item in batch.drafts)
+    mapping_version = MATERIALIZATION_LEGACY_MAPPING_VERSIONS[0]
+    predecessor_derived_writer = observation_writer_id(cell.task_id, predecessor.yoetz_session_id)
+    seeded_digest = observation_operation_digest(
+        task_id=cell.task_id,
+        logical_identity=canonical_logical_identity(envelope, mapping_version=mapping_version),
+        draft_roles=roles,
+        mapping_version=mapping_version,
+        session_id=predecessor.yoetz_session_id,
+        writer_id=predecessor_derived_writer,
+    )
+    seeded_operation_id = ""
+    lookup_routes: list[tuple[str, str]] = []
+
+    class _Ledger:
+        async def lookup_task_operation(self, writer_id: str, operation_id: str):
+            del writer_id, operation_id
+            return None
+
+        async def lookup_operation(self, writer_id: str, operation_id: str):
+            lookup_routes.append((writer_id, operation_id))
+            if writer_id == predecessor_derived_writer and operation_id == seeded_operation_id:
+                return SimpleNamespace(request_digest=seeded_digest)
+            return None
+
+    current_runtime = SimpleNamespace(
+        task_id=cell.task_id,
+        session_id=successor.yoetz_session_id,
+        writer_id=observation_writer_id(cell.task_id, successor.yoetz_session_id),
+        ledger=_Ledger(),
+        observation=cell.store,
+        objects=object(),
+    )
+
+    class _RuntimePort:
+        async def route(self, command: object) -> object:
+            session_id = cast(str, getattr(command, "session_id"))
+            if session_id == predecessor.yoetz_session_id:
+                raise PublicOperationError(
+                    PublicErrorCode.SESSION_NOT_FOUND,
+                    "The requested session was replaced.",
+                    retryable=False,
+                    safe_details={
+                        "reason_code": "session_superseded",
+                        "task_id": cell.task_id,
+                        "session_id": successor.yoetz_session_id,
+                        "writer_id": successor.yoetz_writer_id,
+                    },
+                )
+            assert session_id == successor.yoetz_session_id
+            return current_runtime
+
+        async def release(self, released: object) -> None:
+            assert released is current_runtime
+
+    class _Interrupted(ObservationCoordinator):
+        async def _capture_content(self, *args: object, **kwargs: object):  # type: ignore[override]
+            del args, kwargs
+            raise RuntimeError("simulated interrupted ingest")
+
+    class _Recovered(ObservationCoordinator):
+        async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+        async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+    common = {
+        "runtime": _RuntimePort(),
+        "local": cell.local,
+        "clock": FixedClock(),
+        "ids": object(),
+        "state_root": tmp_path,
+        "mapping_loader": load_mapping,
+        "mapping_storer": store_mapping,
+    }
+    interrupted = _Interrupted(**common)  # type: ignore[arg-type]
+    seeded_operation_id = interrupted._stable_operation_id(seeded_digest)  # pyright: ignore[reportPrivateUsage]
+
+    failed = await interrupted.ingest_request(ObservationIngestRequest(cell.codex_id, envelope))
+    assert failed.disposition is ObservationIngestDisposition.REJECTED
+    assert failed.reason == ObservationGapCode.SERVICE_UNAVAILABLE.value
+    cached = load_mapping(cell.codex_id, _state=tmp_path)
+    assert cached is not None
+    assert cached.yoetz_session_id == successor.yoetz_session_id
+    history = load_route_history(cached, _state=tmp_path)
+    assert history is not None
+    assert history.routes == ((predecessor.yoetz_session_id, predecessor.yoetz_writer_id),)
+    assert history.truncated is False
+
+    recovered = _Recovered(**common)  # type: ignore[arg-type]
+    accepted = await recovered.ingest_request(ObservationIngestRequest(cell.codex_id, envelope))
+    assert accepted.disposition is ObservationIngestDisposition.ACCEPTED, accepted.reason
+    assert (predecessor_derived_writer, seeded_operation_id) in lookup_routes
+
+
+@pytest.mark.anyio
+async def test_truncated_route_history_uses_claim_or_rejects_without_reminting(
+    tmp_path: Path,
+) -> None:
+    """An evicted legacy route can recover from its durable claim, or fails closed."""
+
+    from types import SimpleNamespace
+
+    from builders.ledger_adapters import FixedClock
+
+    task_id = _task_id()
+    current_session = PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4())
+    current_writer = observation_writer_id(task_id, current_session)
+    envelope = _envelope(
+        session=f"hmac-sha256:{'d1' * 32}",
+        kind="PreToolUse",
+        identity="hook:truncated-route",
+        corr="truncated-route-call",
+    )
+    batch = materialize_observation_envelope(envelope, task_id=task_id)
+    roles = tuple(item.role for item in batch.drafts)
+    mapping_version = MATERIALIZATION_LEGACY_MAPPING_VERSIONS[0]
+    legacy_session = PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4())
+    legacy_writer = observation_writer_id(task_id, legacy_session)
+    digest = observation_operation_digest(
+        task_id=task_id,
+        logical_identity=canonical_logical_identity(envelope, mapping_version=mapping_version),
+        draft_roles=roles,
+        mapping_version=mapping_version,
+        session_id=legacy_session,
+        writer_id=legacy_writer,
+    )
+
+    class _Ledger:
+        async def lookup_task_operation(self, writer_id: str, operation_id: str):
+            del writer_id
+            if operation_id == operation_id_for_claim:
+                return SimpleNamespace(operation_id=operation_id, request_digest=digest)
+            return None
+
+        async def lookup_operation(self, writer_id: str, operation_id: str):
+            del writer_id, operation_id
+            return None
+
+    coordinator = ObservationCoordinator(
+        runtime=object(),  # type: ignore[arg-type]
+        local=LocalObservationStore(_state=tmp_path),
+        clock=FixedClock(),
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+    )
+    operation_id_for_claim = coordinator._stable_operation_id(  # pyright: ignore[reportPrivateUsage]
+        digest
+    )
+    runtime = cast(
+        TaskRuntime,
+        SimpleNamespace(
+            task_id=task_id,
+            session_id=current_session,
+            writer_id=current_writer,
+            ledger=_Ledger(),
+            objects=object(),
+        ),
+    )
+    claim = ((digest, operation_id_for_claim, mapping_version), roles)
+    recovered = await coordinator._append_materialized(  # pyright: ignore[reportPrivateUsage]
+        runtime,
+        envelope,
+        batch,
+        replay_required=True,
+        replay_claims=(claim,),
+    )
+    assert recovered is not None
+    assert recovered[0] == operation_id_for_claim
+    assert recovered[1] == digest
+    assert recovered[3] == mapping_version
+    assert recovered[4] == roles
+
+    class _MissingLedger:
+        async def lookup_task_operation(self, writer_id: str, operation_id: str):
+            del writer_id, operation_id
+            return None
+
+        async def lookup_operation(self, writer_id: str, operation_id: str):
+            del writer_id, operation_id
+            return None
+
+    missing_runtime = cast(
+        TaskRuntime,
+        SimpleNamespace(
+            task_id=task_id,
+            session_id=current_session,
+            writer_id=current_writer,
+            ledger=_MissingLedger(),
+            objects=object(),
+        ),
+    )
+    with pytest.raises(PublicOperationError) as missing:
+        await coordinator._append_materialized(  # pyright: ignore[reportPrivateUsage]
+            missing_runtime,
+            envelope,
+            batch,
+            replay_required=True,
+        )
+    assert missing.value.code is PublicErrorCode.SESSION_NOT_FOUND
+    assert missing.value.safe_details["reason_code"] == "session_superseded"
 
 
 @pytest.mark.anyio

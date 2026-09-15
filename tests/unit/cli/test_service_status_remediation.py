@@ -88,6 +88,65 @@ def test_other_control_failures_keep_their_existing_guidance(
     assert "yoetz service unlock" in guidance
 
 
+@pytest.mark.parametrize("failure_stage", ["connect", "status"])
+def test_closure_prepare_uses_control_remediation_and_closes_client(
+    monkeypatch: pytest.MonkeyPatch, failure_stage: str
+) -> None:
+    closed = False
+
+    class RefusingClient:
+        async def status(self, _request: object) -> None:
+            raise ControlError("vault_locked")
+
+        async def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    async def connect() -> ServiceClient:
+        if failure_stage == "connect":
+            raise ControlError("vault_locked")
+        return cast(ServiceClient, RefusingClient())
+
+    monkeypatch.setattr(cli, "build_service_client", connect)
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "closure-prepare",
+            "--session-id",
+            "ses_0f62968e-d590-4a19-90c0-a6a0deea32ac",
+            "--writer-id",
+            "wri_27cc27e7-45c1-490b-8a98-8132de8c4840",
+        ],
+    )
+    assert result.exit_code == 20
+    assert result.stderr.startswith("vault_locked:")
+    assert "yoetz service unlock" in result.stderr
+    assert closed is (failure_stage == "status")
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        ("closure_obligation_not_open", "Remove the non-open obligation"),
+        ("closure_unattempted_items", "Account for genuine attempts"),
+        ("private unexpected exception text", "invalid_request: the command input is invalid"),
+    ],
+)
+def test_closure_prepare_renders_only_registered_remediations(
+    monkeypatch: pytest.MonkeyPatch, reason: str, expected: str
+) -> None:
+    async def refuse() -> ServiceClient:
+        raise ValueError(reason)
+
+    monkeypatch.setattr(cli, "build_service_client", refuse)
+    result = CliRunner().invoke(
+        cli.app, ["closure-prepare", "--session-id", "session", "--writer-id", "writer"]
+    )
+    assert result.exit_code == 2
+    assert expected in result.stderr
+    assert "private unexpected exception text" not in result.stderr
+
+
 def test_incompatible_service_status_json_names_reason_holder_and_correlation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

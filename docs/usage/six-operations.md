@@ -5,8 +5,10 @@ contracts on the CLI and over MCP — same names, same fields, same errors
 ([ADR-002](../adr/ADR-002-canonical-protocol.md),
 [ADR-010](../adr/ADR-010-harness-integration-port.md)).
 
-Everything else the CLI offers — `import`, `review`, `backup`, `restore`, `migrate`, `integrate`,
-`version`, `service`, `mcp`, `state` — is a bounded support surface, not a seventh operation.
+Everything else the CLI offers — `setup`, `recommend`, `provider`, `privacy`, `consent`
+(alias `elevated-bootstrap`), `integrate`, `hooks`, `observe`, `import`, `review`, `backup`,
+`restore`, `migrate`, `version`, `service`, `mcp`, `state`, `menu` — is a bounded support surface,
+not a seventh operation.
 
 ## Calling them
 
@@ -75,13 +77,50 @@ coverage vector. `mode` selects how much:
 
 | Mode | Use it when |
 |---|---|
-| `semantic_if_configured` | Most material implementation or review claims. Runs semantic review if it is available; degrades honestly if not. |
-| `semantic_required` | Completion depends on qualitative correctness, design conformance, security or privacy reasoning, interoperability, or whether the code satisfies the ask. |
-| `deterministic_only` | Explicitly local or structural checks, semantic-disabled policy, or a deliberate no-egress choice — and the limitation gets disclosed. |
+| Omitted | You intend to use the configured verification default. |
+| `semantic_if_configured` | Review is known to be optional. Runs semantic review if it is available; degrades honestly if not. |
+| `semantic_required` | The user, effective verification policy, or a named acceptance criterion requires independent semantic review. Preserve this choice for subsequent final checks. |
+| `deterministic_only` | Explicitly local or structural checks, or a user-authorized deliberate no-egress choice. Disclose `semantic_review_not_requested` and any unmet required review. |
+
+The configured `verification.semantic` default applies only when `mode` is omitted. An explicit
+mode is honored by the runtime; the default is not a persistent task-level enforcement rule.
+Do not choose a weaker mode to shorten a repair check. Qualitative work alone does not make
+optional review mandatory, and none of these modes widens durable privacy authority.
 
 `semantic_required` never erases deterministic truth. If the provider is absent, denied by policy,
 refuses, times out, or returns stale or invalid output, you get the deterministic findings back with
 verdict `incomplete_check`, an explicit reason, and no semantic findings.
+
+An unavailable required review remains an unmet requirement. Report completed implementation and
+tests separately; do not silently replace required semantic review with deterministic coverage.
+Optional terminal review gaps may be disclosed while continuing the task. Pending approvals must
+follow their exact continuation.
+
+#### Approved workspace checks
+
+`check` reads the ledger; it does not run your test suite. A project may declare fixed commands
+it is willing to have run on its behalf in `.yoetz/checks.toml` — an exact argv, a timeout, and
+whether network is requested. Those bytes grant nothing by themselves. Trust is given per
+workspace to one exact policy digest by a local human (first-run setup offers it for the policy
+present at that time), and revoked the same way; if the file changes afterwards, the old trust no
+longer matches and nothing runs until the new digest is trusted.
+
+```text
+yoetz observe checks preview                          # policy digest and each proposed argv, without activating
+yoetz observe checks trust --policy-digest <digest>   # trust only the exact digest currently present
+yoetz observe checks status                           # trusted or untrusted, and which checks may run
+yoetz observe checks revoke                           # withdraw this workspace's check-policy trust
+yoetz observe checks run                              # run the trusted argv under the enforcing sandbox
+```
+
+`run` refuses an untrusted digest and records a coverage gap instead. A check that asks for
+network is not run; it is reported as unsupported. Network denial is enforced by the platform
+sandbox — `sandbox-exec` on macOS, bubblewrap (`bwrap`) on Linux and WSL — and `status` reports
+that sandbox once under `sandbox` (`ready`, or `unavailable` with the reason and the install
+step), so a missing `bwrap` is named before a check is approved rather than per rejected run. Each result carries a status and outcome, the
+output digest and byte count, and whether it is current: a run is bound to the working tree and
+diff state captured before and after it, so a result whose tree moved while it ran is marked not
+current rather than reusable. When no enforcing sandbox is available the outcome says so.
 
 ### `respond`
 Answers a finding: accept and act, supply evidence, revise the claim, dispute with evidence, or
@@ -148,7 +187,7 @@ See [Receipts and coverage](receipts-and-coverage.md) for how to read one.
 
 | Operation | How often |
 | --- | --- |
-| `start` | Once per task, before substantive work. On resume, attach to the existing task instead of starting a second one. |
+| `start` | Once per task, before substantive work. In a new session, read guidance and discover tool schemas first, then call `start` before other workflow operations. On failure, follow exact continuations and same-request recovery, including a named one-time repair; if startup remains blocked without an applicable recovery path, ask for intro and guidance. On resume, attach to the existing task instead of starting a second one. |
 | `publish_work` | One batch per material transition, roughly one to eight events. A normal session is a handful of batches, never one per file, tool call, or message. |
 | `status` | After resume, compaction, or delegate handoff, and before any completion claim. Not between routine tool calls. |
 | `check` | After publishing the completion claim and its evidence, and again after any material edit or new evidence. A readable response to a finding returned by that check needs no recheck; a redacted or unreadable response does. A check with no new events since the last one adds nothing. |

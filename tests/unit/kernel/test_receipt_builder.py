@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from yoetz.domain.events import (
     CheckMode,
     CheckRecordedPayload,
+    LedgerRecord,
     NoObligationsReason,
     ObligationPublishedPayload,
     ObligationStatus,
@@ -25,8 +27,11 @@ from yoetz.domain.findings import (
     FindingKind,
     FindingOrigin,
     ResponseDisposition,
+    RuntimeAttemptEvidence,
+    RuntimeTokenUsage,
     SemanticDispatchKind,
     SemanticProvenance,
+    semantic_provenance_to_json,
 )
 from yoetz.domain.receipts import (
     CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP,
@@ -40,12 +45,15 @@ from yoetz.domain.receipts import (
     ReceiptSectionKey,
     ReceiptVersionSlice,
     SchemaVersionEntry,
+    receipt_document_from_json,
     receipt_document_to_json,
     render_receipt_compact,
+    render_receipt_human,
     resolved_finding_ids_for_render,
     unresolved_findings_for_render,
 )
 from yoetz.domain.values import (
+    ActorType,
     FindingId,
     Frontier,
     event_id,
@@ -69,6 +77,7 @@ from yoetz.kernel.projections import (
     empty_projection_state,
 )
 from yoetz.kernel.receipt_builder import (
+    CheckSuffixClass,
     ReceiptBuildContext,
     ReceiptFindingState,
     build_receipt,
@@ -136,9 +145,14 @@ def _check(
     *,
     returned: tuple[FindingId, ...] = (),
     suppressed: int = 0,
+    semantic_provenance: SemanticProvenance | None = None,
 ) -> CheckRecordedPayload:
     return CheckRecordedPayload(
-        mode=CheckMode.DETERMINISTIC_ONLY,
+        mode=(
+            CheckMode.DETERMINISTIC_ONLY
+            if semantic_provenance is None
+            else CheckMode.SEMANTIC_IF_CONFIGURED
+        ),
         policies=(PolicyVersion("work-integrity", "0.1.0"),),
         scope=CheckScopeModel(claim_ids=(), obligation_ids=()),
         policy_executions=(
@@ -154,8 +168,17 @@ def _check(
         returned_finding_ids=returned,
         suppressed_count=suppressed,
         coverage=coverage,
-        semantic_status=SemanticStatus.NOT_REQUESTED,
-        semantic_reason=SemanticReason.DETERMINISTIC_MODE,
+        semantic_status=(
+            SemanticStatus.NOT_REQUESTED
+            if semantic_provenance is None
+            else semantic_provenance.status
+        ),
+        semantic_reason=(
+            SemanticReason.DETERMINISTIC_MODE
+            if semantic_provenance is None
+            else semantic_provenance.reason
+        ),
+        semantic_provenance=semantic_provenance,
         engine_version="0.1.0",
         projection_version="yoetz/0.1.0",
     )
@@ -464,9 +487,61 @@ def test_applicable_check_at_earlier_subject_frontier_builds() -> None:
     assert receipt.suppressed_finding_count == 0
 
 
+def _earlier_frontier_limitations(check_suffix: CheckSuffixClass | None) -> tuple[str, str]:
+    code = CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP
+    coverage = _coverage(gaps=(code,))
+    check = replace(
+        _check(CheckVerdict.NO_ISSUE_DETECTED, coverage),
+        subject_frontier=Frontier(1, _DIGEST),
+    )
+    context = replace(
+        _context(coverage=coverage, gaps=(CaseGap(code, code, ()),), check=check),
+        check_suffix=check_suffix,
+    )
+    receipt = _build(context)
+    assert receipt.conclusion is ReceiptConclusion.INSUFFICIENT_COVERAGE
+    limitations = next(
+        section.body
+        for section in receipt.sections
+        if section.key is ReceiptSectionKey.LIMITATIONS_AND_COVERAGE
+    )
+    return limitations, receipt.conclusion.value
+
+
 def test_check_current_as_of_earlier_frontier_names_the_tested_frontier() -> None:
     """The attributed-check gap must read as a qualification, never as a clean re-check: it names
-    the frontier the verdict is current as of and still blocks the strong conclusion."""
+    the frontier the verdict is current as of and still blocks the strong conclusion. With a
+    response-only suffix it may say so (issue #657)."""
+
+    limitations, _ = _earlier_frontier_limitations(CheckSuffixClass.RESPONSES_ONLY)
+    assert "A check is recorded at subject frontier 1 and still contributes here" in limitations
+    assert "only responses to the findings it returned were published after it" in limitations
+    assert "Its verdict is current as of subject frontier 1, not frontier 2." in limitations
+    assert "host observations" not in limitations
+
+
+def test_check_current_as_of_earlier_frontier_names_observation_suffix() -> None:
+    """Issue #657: finding-free host observations keep the check attributable through the same
+    gap, and the explanation must say observations, never invent finding responses."""
+
+    limitations, _ = _earlier_frontier_limitations(CheckSuffixClass.OBSERVATIONS_ONLY)
+    assert "A check is recorded at subject frontier 1 and still contributes here" in limitations
+    assert "finding-free host observations" in limitations
+    assert "through frontier 2" in limitations
+    assert "not evaluated by that check" in limitations
+    assert "only responses to the findings it returned" not in limitations
+    assert "Its verdict is current as of subject frontier 1, not frontier 2." in limitations
+    assert "routine observation can advance the ledger again" in limitations
+    assert "Ingestion order does not establish when observed work occurred." in limitations
+
+
+def test_manifest_only_suffix_is_named_as_engine_derived_lineage() -> None:
+    """A recorded child manifest is service lineage, not a host observation.
+
+    The receipt must describe only the frozen parent records it received.  A lineage manifest
+    after an attributable check therefore gets its own bounded wording and cannot be presented as
+    a host-authored observation.
+    """
 
     code = CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP
     coverage = _coverage(gaps=(code,))
@@ -474,16 +549,68 @@ def test_check_current_as_of_earlier_frontier_names_the_tested_frontier() -> Non
         _check(CheckVerdict.NO_ISSUE_DETECTED, coverage),
         subject_frontier=Frontier(1, _DIGEST),
     )
-    receipt = _build(_context(coverage=coverage, gaps=(CaseGap(code, code, ()),), check=check))
-    assert receipt.conclusion is ReceiptConclusion.INSUFFICIENT_COVERAGE
+    check_record = SimpleNamespace(
+        event_id=_CHECK_EVENT_ID,
+        schema=SimpleNamespace(name="check_recorded"),
+        ledger=SimpleNamespace(ingestion_sequence=2),
+    )
+    manifest_record = SimpleNamespace(
+        event_id=event_id("evt_00000000-0000-4000-8000-000000000004"),
+        schema=SimpleNamespace(name="child_dependencies_recorded"),
+        author=SimpleNamespace(
+            actor_id="yoetz:observation-coordinator",
+            actor_type=ActorType.HARNESS,
+            assurance=AuthorshipAssurance.HARNESS_OBSERVED,
+        ),
+        publication_channel=PublicationChannel.ENGINE_DERIVED,
+        ledger=SimpleNamespace(ingestion_sequence=3),
+    )
+    context = replace(
+        _context(coverage=coverage, gaps=(CaseGap(code, code, ()),), check=check),
+        check_suffix=CheckSuffixClass.OBSERVATIONS_ONLY,
+        records=cast(tuple[LedgerRecord, ...], (check_record, manifest_record)),
+    )
+
+    receipt = _build(context)
     limitations = next(
         section.body
         for section in receipt.sections
         if section.key is ReceiptSectionKey.LIMITATIONS_AND_COVERAGE
     )
-    assert "A check is recorded at subject frontier 1 and still contributes here" in limitations
-    assert "only responses to the findings it returned were published after it" in limitations
+    assert "service-generated child-dependency manifests" in limitations
+    assert "finding-free host observations" not in limitations
+    assert "not evaluated by that check" in limitations
+
+
+def test_check_current_as_of_earlier_frontier_names_mixed_suffix() -> None:
+    limitations, _ = _earlier_frontier_limitations(CheckSuffixClass.MIXED)
+    assert "responses to the findings it returned and finding-free host observations" in (
+        limitations
+    )
+    assert "only responses" not in limitations
     assert "Its verdict is current as of subject frontier 1, not frontier 2." in limitations
+
+
+def test_check_current_as_of_earlier_frontier_without_suffix_class_stays_neutral() -> None:
+    """An unclassified suffix gets neutral wording rather than a guessed event class."""
+
+    limitations, _ = _earlier_frontier_limitations(None)
+    assert "no cooperative material work superseded it through frontier 2" in limitations
+    assert "only responses" not in limitations
+    assert "host observations" not in limitations
+    assert "Its verdict is current as of subject frontier 1, not frontier 2." in limitations
+
+
+def test_check_suffix_class_requires_an_attributable_earlier_check() -> None:
+    """The class describes what followed an attributable check; without the gap and check it
+    describes nothing and the context is rejected."""
+
+    coverage = _coverage()
+    check = _check(CheckVerdict.NO_ISSUE_DETECTED, coverage)
+    with pytest.raises(ValueError, match="receipt_build_context_invalid"):
+        replace(_context(coverage=coverage, check=check), check_suffix=CheckSuffixClass.MIXED)
+    with pytest.raises(ValueError, match="receipt_build_context_invalid"):
+        replace(_context(), check_suffix=CheckSuffixClass.OBSERVATIONS_ONLY)
 
 
 def test_check_current_as_of_earlier_frontier_without_a_check_is_rejected() -> None:
@@ -924,6 +1051,113 @@ def _provenance() -> SemanticProvenance:
     )
 
 
+def _subscription_provenance() -> SemanticProvenance:
+    usage = RuntimeTokenUsage(
+        input_tokens=100,
+        cached_input_tokens=60,
+        cache_write_input_tokens=5,
+        output_tokens=20,
+        reasoning_output_tokens=8,
+        total_tokens=120,
+    )
+    runtime = RuntimeAttemptEvidence(
+        credential_authority="external_runtime_oauth",
+        runtime_version="0.150.1",
+        runtime_source_identity="openai-codex-npm-darwin-arm64-0.150.1",
+        executable_sha256=_DIGEST,
+        app_server_schema_sha256=_DIGEST,
+        capability_cell_sha256=_DIGEST,
+        capability_profile="codex-evaluator/0.150.1/v1",
+        capability_evidence_expires_at="2026-11-30T00:00:00Z",
+        launcher_sha256=_DIGEST,
+        isolated_config_sha256=_DIGEST,
+        disclosed_case_sha256=_DIGEST,
+        instruction_sha256=_DIGEST,
+        output_schema_sha256=_DIGEST,
+        selection_sha256=_DIGEST,
+        upstream_body_observability="unavailable",
+        auth_mode="chatgpt",
+        plan_type="plus",
+        reasoning_effort="high",
+        thread_id="thread-1",
+        turn_id="turn-1",
+        final_output_sha256=_DIGEST,
+        case_disclosed=True,
+        turn_acknowledged=True,
+        process_cleanup="terminated",
+        token_usage=usage,
+    )
+    return replace(
+        _provenance(),
+        dispatch_kind=SemanticDispatchKind.EXTERNAL_RUNTIME_OAUTH,
+        token_usage=usage.aggregate,
+        runtime_evidence=runtime,
+    )
+
+
+def test_receipt_carries_applicable_semantic_provenance_and_usage() -> None:
+    provenance = _subscription_provenance()
+    receipt = _build(
+        _context(
+            check=_check(
+                CheckVerdict.NO_ISSUE_DETECTED,
+                _coverage(),
+                semantic_provenance=provenance,
+            )
+        )
+    )
+
+    assert receipt.semantic_provenance == provenance
+    wire = receipt_document_to_json(receipt)
+    assert wire["semantic_provenance"] == semantic_provenance_to_json(provenance)
+    assert receipt_document_from_json(wire) == receipt
+    version_section = next(
+        section
+        for section in receipt.sections
+        if section.key is ReceiptSectionKey.VERSION_AND_POLICY_IDENTITY
+    )
+    assert (
+        "Semantic attempt usage: input=100, cached_input=60, cache_write_input=5, "
+        "output=20, reasoning_output=8, total=120 tokens."
+    ) in version_section.body
+    rendered = render_receipt_human(receipt, markdown=False)
+    assert "input=100" in rendered
+    assert "thread-1" not in rendered
+    assert "provider_request_id" not in rendered
+
+
+def test_receipt_omits_absent_semantic_provenance_for_historical_bytes() -> None:
+    receipt = _build(_context(check=_check(CheckVerdict.NO_ISSUE_DETECTED, _coverage())))
+    wire = receipt_document_to_json(receipt)
+    assert "semantic_provenance" not in wire
+    assert receipt_document_from_json(wire).semantic_provenance is None
+
+
+@pytest.mark.parametrize(
+    "profile",
+    tuple(ReceiptRedactionProfile),
+)
+def test_receipt_profiles_retain_bounded_semantic_attempt_usage(
+    profile: ReceiptRedactionProfile,
+) -> None:
+    provenance = _subscription_provenance()
+    receipt = _build(
+        _context(
+            check=_check(
+                CheckVerdict.NO_ISSUE_DETECTED,
+                _coverage(),
+                semantic_provenance=provenance,
+            )
+        ),
+        profile=profile,
+    )
+    assert receipt.semantic_provenance == provenance
+    assert receipt_document_to_json(receipt)["semantic_provenance"] == (
+        semantic_provenance_to_json(provenance)
+    )
+    assert "total=120 tokens" in render_receipt_human(receipt, markdown=False)
+
+
 def test_redacted_share_does_not_leak_omitted_resolved_finding_ids() -> None:
     """A profile that omits a finding row must not name its id as resolved history either."""
 
@@ -1009,3 +1243,62 @@ def test_genuine_strict_ceiling_keeps_generic_limitations_wording() -> None:
         f"Coverage is limited by: {OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP}."
     )
     assert section.items == (OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,)
+
+
+def test_selection_summary_and_input_loss_remain_distinct_in_all_receipt_formats() -> None:
+    gaps = ("observation_input_loss", "routine_read_detail_omitted")
+    coverage = _coverage(gaps=gaps)
+    receipt = _build(
+        _context(
+            coverage=coverage,
+            gaps=tuple(CaseGap(code, code, ()) for code in gaps),
+            check=_check(CheckVerdict.NO_ISSUE_DETECTED, coverage),
+        )
+    )
+    assert receipt.conclusion is ReceiptConclusion.INSUFFICIENT_COVERAGE
+    serialized = str(receipt_document_to_json(receipt))
+    for rendered in (
+        serialized,
+        render_receipt_human(receipt, markdown=True),
+        render_receipt_human(receipt, markdown=False),
+    ):
+        assert "bounded source summaries" in rendered
+        assert "historical loss remains a limitation after queue recovery" in rendered
+        assert "new time and state only" in rendered
+
+
+def test_child_receipt_retains_provider_usage_under_the_combined_contract() -> None:
+    from yoetz.domain.receipts import ReceiptChildOutcome, ReceiptChildren
+    from yoetz.protocol.canonical import JsonValue
+    from yoetz.protocol.schemas import validate_schema_instance
+
+    provenance = _subscription_provenance()
+    receipt = _build(
+        _context(
+            check=_check(
+                CheckVerdict.NO_ISSUE_DETECTED, _coverage(), semantic_provenance=provenance
+            )
+        )
+    )
+    child = ReceiptChildOutcome(
+        child_task_id=task_id("tsk_00000000-0000-4000-8000-000000000099"),
+        outcome="unavailable",
+        later_manifest_ref=None,
+        tested_manifest_ref=None,
+        freshness="unknown",
+        findings=(),
+    )
+    receipt = replace(
+        receipt,
+        versions=replace(
+            receipt.versions,
+            schema_versions=(SchemaVersionEntry("receipts/receipt-document", "1.3.0"),),
+        ),
+        children=ReceiptChildren((child,)),
+    )
+    wire = receipt_document_to_json(receipt)
+    validate_schema_instance("receipt-document", "1.3.0", cast(JsonValue, wire))
+    restored = receipt_document_from_json(wire)
+    assert restored.children.children == (child,)
+    assert restored.semantic_provenance == provenance
+    assert restored == receipt

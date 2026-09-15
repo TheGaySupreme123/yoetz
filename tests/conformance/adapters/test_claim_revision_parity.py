@@ -172,7 +172,10 @@ async def test_claim_revision_mismatch_is_identical_on_durable_adapters() -> Non
 
     for error in failures:
         assert error.code is PublicErrorCode.EVENT_INVALID
+        # ADR-030: the invariant is carried structurally, not only inside the message, so both
+        # adapters must agree on the typed detail as well as the prose.
         assert error.safe_details == {
+            "invariant": "limitation_refs_complete",
             "reason_code": "claim_revision_mismatch",
             "field": "/event_drafts/0/payload/limitation_refs",
         }

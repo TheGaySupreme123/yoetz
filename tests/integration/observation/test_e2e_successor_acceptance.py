@@ -453,6 +453,10 @@ async def test_approved_check_materialization_is_service_owned_and_idempotent(
     assert evidence.payload.digest_binding.provenance is EvidenceDigestProvenance.APPROVED_CHECK
     assert evidence.payload.digest_binding.approval_commitment == approval_digest
     assert evidence.payload.digest_binding.approved_check_result_digest == result.result_digest
+    assert evidence.artifact_refs
+    receipt_ref = ledger._state.object_refs[evidence.artifact_refs[0]]  # pyright: ignore[reportPrivateUsage]
+    assert receipt_ref.metadata.kind is ObjectKind.CAPTURED_CONTENT
+    assert receipt_ref.metadata.media_type == "application/vnd.yoetz.approved-check-evidence+json"
 
 
 @pytest.mark.anyio

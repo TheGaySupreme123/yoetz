@@ -102,12 +102,28 @@ ordinary cooperative publication cannot claim.
     never borrows a stronger eligible label.
 
 12. **Retention is not disclosure authority.** Observation materialization records generic
-    structural descriptions and typed digest provenance; it does not open or copy captured object
-    bytes into semantic review. A later semantic selection can carry those bounded facts and
-    descriptions only through ADR-009's independent classification, minimization, authorization,
-    and egress path. Migration 0008 adds nullable digest/byte bindings to observation manifests and
-    inspection snapshots plus durable inspection redaction/truncation flags. Existing NULL rows
-    stay weak history and are never upgraded by inference.
+    structural descriptions and typed digest provenance; materialization itself does not open or
+    copy captured object bytes into semantic review. A later semantic selection may carry retained
+    bytes only when the service resolves the current consent arm for the exact closed host profile,
+    task, session, and workspace, matches the durable evidence source event to the envelope's
+    phase identity, verifies the object envelope/media type, the canonical inner wrapper, and its
+    `text/plain` inner media, and proves the digest, byte count, source commitment, correlation,
+    and complete multipart group. Redacted sanitized bytes remain usable with `content_redacted`;
+    selection clipping remains visible as `truncated_payload`. The local consent store supplies a
+    plaintext-free generation/runtime fence that combines a durable per-workspace epoch with a
+    persisted runtime-gate nonce. Every real consent or runtime transition advances that fence,
+    including transitions that return visible fields to their earlier values; legacy state is
+    upgraded to a fresh epoch before the authority is accepted. The fence is rechecked before each
+    object read and at the final provider gateway boundary whenever retained bytes are in the case,
+    so a pause, disable, or revoke that wins before either boundary prevents a new captured-content
+    disclosure even when task-store propagation is stale. A disclosure already in progress cannot
+    be retracted.
+    The resulting bounded values still pass ADR-009's independent classification, minimization,
+    authorization, and egress path; the pre-approval case envelope remains metadata-only, and an
+    arbitrary object reference never authorizes a read. Migration 0008 adds nullable digest/byte
+    bindings to observation manifests and inspection snapshots plus durable inspection
+    redaction/truncation flags. Existing NULL rows stay weak history and are never upgraded by
+    inference.
 
 ## Consequences
 

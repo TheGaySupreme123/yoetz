@@ -25,7 +25,11 @@ from yoetz.ports.control import (
 )
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.errors import PublicErrorCode
-from yoetz.protocol.schemas import load_schema_catalog, validate_schema_instance
+from yoetz.protocol.schemas import (
+    SchemaInstanceInvalid,
+    load_schema_catalog,
+    validate_schema_instance,
+)
 from yoetz.service.control_protocol import (
     CONTROL_PROTOCOL_VERSION,
     MAX_ACTIVE_REQUESTS_PER_SESSION,
@@ -384,12 +388,22 @@ def test_private_mcp_route_profile_round_trips_only_for_check_and_status() -> No
         method=ControlMethod.CHECK,
         body=check,
         route_profile="strict",
+        host_profile="codex",
     )
 
-    parsed = parse_control_request(decode_control_frame(encode_control_frame(request)))
+    wire = decode_control_frame(encode_control_frame(request))
+    parsed = parse_control_request(wire)
 
     assert isinstance(parsed, ControlCallRequest)
     assert parsed.route_profile == "strict"
+    assert parsed.host_profile == "codex"
+    legacy_wire = dict(wire)
+    legacy_wire.pop("host_profile")
+    for version in ("1.0.0", "2.0.0", "2.1.0", "2.2.0", "2.3.0"):
+        validate_schema_instance("control-request", version, legacy_wire)
+        with pytest.raises(SchemaInstanceInvalid):
+            validate_schema_instance("control-request", version, wire)
+    validate_schema_instance("control-request", "2.4.0", wire)
     with pytest.raises(ValueError, match="control_route_profile_invalid"):
         ControlCallRequest(
             kind="call",
@@ -400,6 +414,17 @@ def test_private_mcp_route_profile_round_trips_only_for_check_and_status() -> No
             method=ControlMethod.SERVICE_STATUS,
             body=JsonObject({}),
             route_profile="strict",
+        )
+    with pytest.raises(ValueError, match="control_host_profile_invalid"):
+        ControlCallRequest(
+            kind="call",
+            protocol_version="1.0",
+            rpc_id=_rpc_id(12),
+            service_instance_id=_SERVICE_ID,
+            service_generation="1",
+            method=ControlMethod.CHECK,
+            body=check,
+            host_profile="vscode",  # type: ignore[arg-type]
         )
 
 
@@ -586,6 +611,9 @@ def test_wire_only_errors_map_to_existing_public_codes() -> None:
     assert public_error_code_for_control_reason("vault_locked") is PublicErrorCode.VAULT_LOCKED
     assert public_error_code_for_control_reason("frame_invalid") is PublicErrorCode.INVALID_REQUEST
     assert (
+        public_error_code_for_control_reason("invalid_request") is PublicErrorCode.INVALID_REQUEST
+    )
+    assert (
         public_error_code_for_control_reason("endpoint_unsafe")
         is PublicErrorCode.SERVICE_UNAVAILABLE
     )
@@ -649,7 +677,9 @@ def test_server_answers_hello_result_then_refuses_a_foreign_manifest() -> None:
             await server_handshake(server, client_peer, _status())
         _assert_reason(refused, "manifest_mismatch")
         result = await read_control_frame(client)
-        validate_schema_instance("control-hello-result", "2.5.0", result)
+        # The refusal is emitted by the active 2.7 service.  The released 2.5/2.6
+        # hello-result schemas remain byte-frozen and cannot describe the new project method.
+        validate_schema_instance("control-hello-result", "2.7.0", result)
         assert result["schema_manifest_digest"] == load_schema_catalog().manifest_digest
         assert result["service_instance_id"] == _SERVICE_ID
 

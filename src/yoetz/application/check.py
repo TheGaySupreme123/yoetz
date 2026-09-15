@@ -73,6 +73,7 @@ from yoetz.observability.logging import (
     record_unexpected_exception_without_raising,
 )
 from yoetz.ports.clock import ClockPort
+from yoetz.ports.control import McpHostProfile
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
@@ -926,7 +927,7 @@ class FinalSemanticEvaluation:
     # prose bound had already accepted. The reviewer judged a fragment; coverage must say so
     # rather than let the shortening pass as material the author chose not to send.
     case_content_over_item_limit: bool = False
-    # Per-item native resolution omissions also constrain the final check and receipt.
+    case_reference_scope_reduced: bool = False
     case_content_gaps: tuple[str, ...] = ()
     # Set only on the nonterminal awaiting_human branch: what the caller must do to resume this
     # exact request. Every terminal outcome leaves it None. A one-use disclosure wait keeps its
@@ -940,6 +941,8 @@ class FinalSemanticEvaluation:
             or not set(self.case_content_gaps)
             <= {
                 "captured_object_unavailable",
+                "content_capture_unavailable",
+                "truncated_payload",
                 "content_unselected",
                 "content_redacted",
             }
@@ -979,6 +982,7 @@ class FinalSemanticEvaluation:
 # record) or a strict reinstall on a later deterministic-only successor (issue #537).
 _SEMANTIC_ATTEMPT_GAPS: Final = frozenset(
     {
+        "semantic_case_capacity_exceeded",
         OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
         SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
         SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
@@ -986,7 +990,9 @@ _SEMANTIC_ATTEMPT_GAPS: Final = frozenset(
 )
 
 
-def _strict_ceiling_route_drift(*, _state: Path | None) -> bool:
+def _strict_ceiling_route_drift(
+    *, host_profile: McpHostProfile = "generic", _state: Path | None
+) -> bool:
     """Fail-soft applied-policy probe for the strict route ceiling (issue #537).
 
     True only when the durable applied-route record says the last install applied the
@@ -996,6 +1002,11 @@ def _strict_ceiling_route_drift(*, _state: Path | None) -> bool:
     status/reason/provenance — the caller only adds a structural coverage gap.
     """
 
+    # A bare or otherwise generic serving command does not prove that Codex owns the process.
+    # The applied-route record is Codex-specific, so comparing it against another host would
+    # manufacture a registration-drift claim (issue #548).
+    if host_profile != "codex":
+        return False
     try:
         from yoetz.application.applied_mcp_route import read_applied_route
 
@@ -1056,6 +1067,11 @@ class Application(Protocol):
 
     @property
     def verification_policy(self) -> _VerificationPolicy: ...
+
+    @property
+    def reconcile_observation_capture(
+        self,
+    ) -> Callable[[TaskRuntime], Awaitable[None]] | None: ...
 
     async def evaluate_semantic_check(
         self,
@@ -1955,6 +1971,7 @@ def _judgment_rejected_evaluation(
         withheld_review_categories=result.withheld_review_categories,
         # The rejection restates the outcome, not the case: a truncated case stays truncated.
         case_content_over_item_limit=result.case_content_over_item_limit,
+        case_reference_scope_reduced=result.case_reference_scope_reduced,
         case_content_gaps=result.case_content_gaps,
     )
 
@@ -1964,6 +1981,7 @@ async def execute_check_commit(
     request: CheckRequest,
     *,
     route_profile: Literal["policy", "strict"] = "policy",
+    host_profile: McpHostProfile = "generic",
     _state: Path | None = None,
 ) -> CheckCommitResult | CheckAwaitingHuman:
     """Freeze, evaluate, rank, and atomically commit one check operation.
@@ -2013,13 +2031,33 @@ async def execute_check_commit(
                 False,
             )
         digest = _request_digest(request, scope, packs, route_profile=route_profile)
-        frozen_or_replay = await runtime.ledger.freeze_case(
-            request.session_id,
-            request.writer_id,
-            int(request.expected_frontier.sequence),
-            request.request_id,
-            digest,
-        )
+        try:
+            frozen_or_replay = await runtime.ledger.freeze_case(
+                request.session_id,
+                request.writer_id,
+                int(request.expected_frontier.sequence),
+                request.request_id,
+                digest,
+            )
+        except PublicOperationError as exc:
+            # A completed same-request replay must return before consulting newer capture state:
+            # a corrupt or unrelated ticket cannot turn an idempotent result into STORAGE_CORRUPT.
+            # A new CHECK that hit the capture barrier gets one task-local authority reconciliation
+            # and one retry; active tickets remain pending and every other error keeps its original
+            # disposition.
+            if exc.code is not PublicErrorCode.OPERATION_PENDING or not exc.retryable:
+                raise
+            reconcile_capture = getattr(app, "reconcile_observation_capture", None)
+            if not callable(reconcile_capture):
+                raise
+            await cast(Callable[[TaskRuntime], Awaitable[None]], reconcile_capture)(runtime)
+            frozen_or_replay = await runtime.ledger.freeze_case(
+                request.session_id,
+                request.writer_id,
+                int(request.expected_frontier.sequence),
+                request.request_id,
+                digest,
+            )
         if isinstance(frozen_or_replay, CheckCommitResult):
             replayed = await _attach_replayed_lineage_preview(runtime, frozen_or_replay)
             # The ledger replay is frozen; only the additive project-advice projection is current.
@@ -2199,7 +2237,7 @@ async def execute_check_commit(
             route_profile == "strict"
             and semantic_result.status is SemanticStatus.BLOCKED_BY_POLICY
             and semantic_result.reason is SemanticReason.ROUTE_SEMANTIC_CEILING
-            and _strict_ceiling_route_drift(_state=_state)
+            and _strict_ceiling_route_drift(host_profile=host_profile, _state=_state)
         ):
             # The ceiling still blocks this process with the same status, reason, and null
             # provenance. The extra gap is the structural route_drift detail — applied policy
@@ -2224,6 +2262,8 @@ async def execute_check_commit(
         declared_gaps.update(semantic_result.case_content_gaps)
         if semantic_result.case_content_over_item_limit:
             declared_gaps.add(SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP)
+        if semantic_result.case_reference_scope_reduced:
+            declared_gaps.add("semantic_reference_scope_reduced")
         new_gaps = declared_gaps - set(coverage.known_gaps)
         if new_gaps:
             gaps = set(coverage.known_gaps) | new_gaps
@@ -2338,6 +2378,7 @@ async def execute_check(
     request: CheckRequest,
     *,
     route_profile: Literal["policy", "strict"] = "policy",
+    host_profile: McpHostProfile = "generic",
     _state: Path | None = None,
 ) -> CheckCommitResult | CheckAwaitingHuman:
     """Return the closed sink-independent result for the facade's sole projection step."""
@@ -2345,4 +2386,10 @@ async def execute_check(
     # Omitted mode resolves via policy so recorded check events always carry a concrete mode.
     if request.mode is None:
         request = request.model_copy(update={"mode": app.verification_policy.default_check_mode})
-    return await execute_check_commit(app, request, route_profile=route_profile, _state=_state)
+    return await execute_check_commit(
+        app,
+        request,
+        route_profile=route_profile,
+        host_profile=host_profile,
+        _state=_state,
+    )

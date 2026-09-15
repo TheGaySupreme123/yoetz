@@ -20,6 +20,7 @@ from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.cli import observe_hooks
 from yoetz.cli.observe_hooks import ServiceConnector, handle_observe
 from yoetz.domain.observation import (
+    OBSERVATION_CONTENT_CAPTURE_PENDING_REASON,
     ObservationIngestDisposition,
     ObservationIngestResult,
     observation_cursor_from_json,
@@ -70,6 +71,7 @@ class _ContinuityClient:
         self.predecessor = predecessor
         self.task_id = task_id
         self.start_requests: list[StartRequest] = []
+        self.capture_bodies: list[JsonObject] = []
         self.ingest_bodies: list[JsonObject] = []
 
     async def start(self, request: object, *, deadline_ms: int | None = None) -> object:
@@ -110,6 +112,15 @@ class _ContinuityClient:
     async def observation_ingest(self, body: JsonValue, *, deadline_ms: int) -> JsonValue:
         del deadline_ms
         assert isinstance(body, JsonObject)
+        if body.get("capture_only") is True:
+            self.capture_bodies.append(body)
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(
+                    ObservationIngestDisposition.REJECTED,
+                    OBSERVATION_CONTENT_CAPTURE_PENDING_REASON,
+                    None,
+                )
+            )
         self.ingest_bodies.append(body)
         envelope = body["envelope"]
         assert isinstance(envelope, JsonObject)
@@ -277,6 +288,8 @@ def test_persisted_predecessor_pending_row_drains_after_successor_attach(tmp_pat
     # the second delivery and must remain addressable by its original host
     # session until the route rewrite has completed.
     assert len(client.ingest_bodies) == 2
+    assert len(client.capture_bodies) == 1
+    assert client.capture_bodies[0]["envelope"] == client.ingest_bodies[0]["envelope"]
     predecessor_body = next(
         body for body in client.ingest_bodies if body["codex_session_id"] == predecessor
     )

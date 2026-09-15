@@ -9,10 +9,11 @@ from typing import Final, cast
 
 from pydantic import BaseModel
 
+from yoetz.mcp.errors import VALIDATION_REASON_TOKENS
 from yoetz.protocol.canonical import JsonValue, ensure_canonical_value
 from yoetz.protocol.errors import PublicErrorCode, normalize_safe_details
 from yoetz.protocol.ids import IdKind, is_valid_id
-from yoetz.protocol.start_recovery import start_recovery_guidance
+from yoetz.protocol.recovery import RecoveryDirective, correction_for_invariant, directive_for
 
 __all__ = [
     "render_safe_compact_summary",
@@ -23,6 +24,13 @@ __all__ = [
 ]
 
 _MAX_SUMMARY_BYTES: Final = 512
+# A validation location pointer as ``yoetz.mcp.errors`` builds it: at most eight frozen
+# presentation-schema segments or bounded indexes. Re-gated here so a list member that is not that
+# exact shape is never rendered, whatever put it on the envelope.
+_VALIDATION_POINTER: Final = re.compile(
+    r"^(?:/(?:[a-z][a-z0-9_]{0,63}|0|[1-9][0-9]?)){1,8}$", re.ASCII
+)
+_MAX_NAMED_VALIDATION_LOCATIONS: Final = 2
 _SAFE_TOKEN: Final = re.compile(r"^[A-Za-z0-9_+.-]{1,128}$", re.ASCII)
 _GAP_CODE: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)
 # Closed shape for the frozen field and family tokens the repair clause may carry (issue #266).
@@ -233,6 +241,80 @@ def _repair_clause(error: Mapping[str, JsonValue]) -> str:
     return f" Repair: {field} is admitted only by the {owner} payload, not {selected}."
 
 
+# Frozen command keys whose values are repository literals gated by ``_TOKEN_DETAIL_VALUES``.
+# Rendered in this fixed order so the same continuation always reads the same way.
+_CONTINUATION_COMMAND_KEYS: Final = ("prepare_command", "review_command", "authorize_command")
+
+
+def _continuation_directive(error: Mapping[str, JsonValue]) -> RecoveryDirective | None:
+    """Return the registered directive for this error's continuation token, or None."""
+
+    details = error.get("safe_details")
+    if not isinstance(details, Mapping):
+        return None
+    typed = cast(Mapping[str, JsonValue], details)
+    # Re-gate through the protocol normalizer rather than trusting the envelope: the token must
+    # still be a member of the closed continuation set before anything is rendered from it.
+    gated = normalize_safe_details({"continuation": typed.get("continuation")})
+    return directive_for(gated.get("continuation"))
+
+
+def _continuation_command_clause(error: Mapping[str, JsonValue], *, byte_budget: int) -> str:
+    """Render whichever frozen commands this continuation carries, within the byte budget.
+
+    Which commands travel is decided upstream (a Cursor bridge carries no authorize command, for
+    instance), so the clause reports what is present rather than restating the directive's own
+    wording. Every value was admitted by the closed command token sets, so none is caller-derived.
+    """
+
+    details = error.get("safe_details")
+    if not isinstance(details, Mapping) or byte_budget <= 0:
+        return ""
+    typed = cast(Mapping[str, JsonValue], details)
+    candidate = {key: typed.get(key) for key in _CONTINUATION_COMMAND_KEYS}
+    gated = normalize_safe_details(candidate)
+    commands = [
+        str(gated[key]) for key in _CONTINUATION_COMMAND_KEYS if type(gated.get(key)) is str
+    ]
+    if not commands:
+        return ""
+    clause = " Commands: " + "; ".join(commands) + "."
+    if len(clause.encode("ascii", errors="replace")) > byte_budget:
+        return ""
+    return clause
+
+
+def _continuation_clause(error: Mapping[str, JsonValue], *, byte_budget: int) -> str:
+    """Render the frozen recovery directive for a typed continuation (issues #669, #739, #740).
+
+    Nothing here is copied from the public error message. The token is re-gated, the text is
+    looked up from the checked-in registry, and each optional part is added only when it still
+    fits. Parts are dropped from the least load-bearing end -- nudge, then guidance pointer, then
+    commands -- so a tight budget costs advice rather than the instruction itself.
+    """
+
+    directive = _continuation_directive(error)
+    if directive is None or byte_budget <= 0:
+        return ""
+    clause = f" Continuation: {directive.token}. {directive.directive}"
+    if len(clause.encode("ascii", errors="replace")) > byte_budget:
+        return ""
+    remaining = byte_budget - len(clause.encode("ascii", errors="replace"))
+    commands = _continuation_command_clause(error, byte_budget=remaining)
+    clause += commands
+    remaining -= len(commands.encode("ascii", errors="replace"))
+    if directive.guidance_uri is not None:
+        guidance = f" Guidance: {directive.guidance_uri}."
+        if len(guidance.encode("ascii", errors="replace")) <= remaining:
+            clause += guidance
+            remaining -= len(guidance.encode("ascii", errors="replace"))
+    if directive.nudge is not None:
+        nudge = f" {directive.nudge}"
+        if len(nudge.encode("ascii", errors="replace")) <= remaining:
+            clause += nudge
+    return clause
+
+
 def _reason_location_clause(error: Mapping[str, JsonValue]) -> str:
     """Render frozen reason_code and field pointer tokens, or "" when none travel on the error.
 
@@ -262,13 +344,81 @@ def _reason_location_clause(error: Mapping[str, JsonValue]) -> str:
     return f" Reason: {gated_reason}."
 
 
+def _validation_location_clause(error: Mapping[str, JsonValue]) -> str:
+    """Render the frozen location tokens of a schema rejection, or "" when none travel.
+
+    A tool-argument rejection carries ``fields`` and ``reasons`` lists rather than a single
+    ``reason_code``/``field`` pair, and those lists are not members of the protocol allowlist, so
+    the text channel previously dropped them entirely: an agent that sent a malformed actor id was
+    told only ``Error INVALID_REQUEST; retryable: no`` (issue #739). Every rendered token is
+    re-gated against the closed reason set and the pointer shape; the two lists must agree in
+    length, and at most two locations are named with the remainder counted.
+    """
+
+    details = error.get("safe_details")
+    if not isinstance(details, Mapping):
+        return ""
+    typed = cast(Mapping[str, JsonValue], details)
+    fields = typed.get("fields")
+    reasons = typed.get("reasons")
+    if not isinstance(fields, Sequence) or not isinstance(reasons, Sequence):
+        return ""
+    if isinstance(fields, str) or isinstance(reasons, str) or len(fields) != len(reasons):
+        return ""
+    named: list[str] = []
+    for field, reason in zip(
+        cast(Sequence[JsonValue], fields), cast(Sequence[JsonValue], reasons), strict=True
+    ):
+        if type(reason) is not str or reason not in VALIDATION_REASON_TOKENS:
+            return ""
+        if type(field) is not str or _VALIDATION_POINTER.fullmatch(field) is None:
+            return ""
+        named.append(f"{reason} at {field}")
+    if not named:
+        return ""
+    shown = "; ".join(named[:_MAX_NAMED_VALIDATION_LOCATIONS])
+    remainder = len(named) - _MAX_NAMED_VALIDATION_LOCATIONS
+    if remainder > 0:
+        shown += f" (+{remainder} more)"
+    return f" Rejected: {shown}."
+
+
+def _claim_revision_clause(error: Mapping[str, JsonValue]) -> str:
+    """Render the closed claim-revision invariant and its correction from typed details.
+
+    Until ADR-030 the invariant reached this projector only inside the public error message, so
+    this clause matched that whole sentence with a regex and re-derived a token the domain had
+    already validated. ``invariant`` is now an allowlisted safe detail: it is re-gated through the
+    protocol normalizer here, and the corrective phrase comes from the shared recovery registry
+    that the CLI renders from too.
+    """
+
+    details = error.get("safe_details")
+    if not isinstance(details, Mapping):
+        return ""
+    typed = cast(Mapping[str, JsonValue], details)
+    gated = normalize_safe_details(
+        {
+            "invariant": typed.get("invariant"),
+            "reason_code": typed.get("reason_code"),
+        }
+    )
+    if gated.get("reason_code") != "claim_revision_mismatch":
+        return ""
+    correction = correction_for_invariant(gated.get("invariant"))
+    if correction is None:
+        return ""
+    return f" Invariant: {gated['invariant']}. Correction: {correction}."
+
+
 def summary_for_public_error(envelope: object) -> str:
     """Render only the stable public error identity, never message or rejected input.
 
-    Bounded exceptions are the field-ownership repair fact (issue #266) and the frozen
-    ``reason_code``/``field`` location clause (issue #579). Both are schema or registry tokens,
-    never caller input. A host that drops structured content on ``isError`` would otherwise lose
-    the only correction that names which draft and which kernel rule to fix.
+    Bounded exceptions are the field-ownership repair fact (issue #266), the frozen
+    ``reason_code``/``field`` location clause (issue #579), and the exact-shape claim-revision
+    invariant clause. All projected values come from schema or registry tokens, never caller
+    input. A host that drops structured content on ``isError`` would otherwise lose the only
+    correction that names which draft and which kernel rule to fix.
     """
 
     source = _mapping(envelope)
@@ -286,9 +436,16 @@ def summary_for_public_error(envelope: object) -> str:
         else "unavailable"
     )
     prefix = f"Error {code}; retryable: {retry_text}; correlation: {correlation_text}."
-    extra = f"{_repair_clause(error)}{_reason_location_clause(error)}" + start_recovery_guidance(
-        code, retryable, error.get("safe_details")
+    extra = (
+        f"{_repair_clause(error)}{_reason_location_clause(error)}"
+        f"{_validation_location_clause(error)}{_claim_revision_clause(error)}"
     )
+    # Priority order (issue #739): identity, then what was wrong, then what to do about it. The
+    # continuation is budgeted against what the identity and location clauses already spent, so a
+    # long field pointer costs advice rather than silently dropping the whole projection to bare
+    # identity through the except branch below.
+    spent = len((prefix + extra).encode("ascii", errors="replace"))
+    extra += _continuation_clause(error, byte_budget=_MAX_SUMMARY_BYTES - spent)
     try:
         return _bounded(prefix + extra)
     except ValueError:
@@ -322,6 +479,10 @@ def summary_for_check(envelope: object) -> str:
     if isinstance(notes, (list, tuple)) and notes:
         prefix += f"project advice (non-verdict): {len(notes)}; "
     suffix = f"semantic status/reason: {status}/{reason}; {_frontier_clause(source)}."
+    if reason == "case_capacity_exceeded":
+        suffix += " No provider attempt; narrow claim/obligation scope for a new check."
+    elif reason == "coordinator_failure":
+        suffix += " Inspect service diagnostics by this check request ID; provider outcome may be unknown."
     clause = _finding_identity_clause(
         source,
         byte_budget=_MAX_SUMMARY_BYTES - len((prefix + suffix).encode("ascii")),

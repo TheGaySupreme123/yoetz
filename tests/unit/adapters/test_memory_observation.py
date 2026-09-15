@@ -18,6 +18,10 @@ from yoetz.domain.observation import (
     ObservationSource,
     ObservationStatusQuery,
 )
+from yoetz.domain.observation_profiles import (
+    CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+    CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+)
 from yoetz.domain.values import JsonObject, Timestamp
 from yoetz.protocol.errors import PublicOperationError
 
@@ -107,6 +111,27 @@ def test_resume_without_consent_fails() -> None:
             await store.resume(ObservationControlCommand(_WORKSPACE))
 
     asyncio.run(run())
+
+
+def test_content_profiles_are_idempotent_and_revoke_clears_them() -> None:
+    store = MemoryObservationStore()
+    store.grant_consent(
+        _WORKSPACE,
+        _TIME,
+        content_capture_profiles=(CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,),
+    )
+    store.enable_content_capture(_WORKSPACE, CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID)
+    store.enable_content_capture(_WORKSPACE, CURSOR_ORDINARY_OBSERVATION_PROFILE_ID)
+    store.enable_content_capture(_WORKSPACE, CURSOR_ORDINARY_OBSERVATION_PROFILE_ID)
+    assert store.content_capture_profiles(_WORKSPACE) == (
+        CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+        CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+    )
+
+    store.disable_content_capture(_WORKSPACE, CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID)
+    assert store.content_capture_profiles(_WORKSPACE) == (CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,)
+    asyncio.run(store.revoke(ObservationRevokeCommand(_WORKSPACE)))
+    assert store.content_capture_profiles(_WORKSPACE) == ()
 
 
 def test_successful_cursor_advance_clears_stale_gap_despite_future_receipt_time() -> None:

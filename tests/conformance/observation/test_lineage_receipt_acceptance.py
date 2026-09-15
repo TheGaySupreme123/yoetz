@@ -434,6 +434,19 @@ async def test_clean_accepted_child_produces_clean_parent_receipt(
         await _drain_lineage(service)
 
         parent_check = await _check(service, parent, mode="semantic_if_configured")
+        ready = await service.app.status(
+            StatusRequest.model_validate(
+                {
+                    **_identity(),
+                    "session_id": parent.session_id,
+                    "writer_id": parent.writer_id,
+                    "view": "compact",
+                    "limit": "1",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        assert ready.closure_readiness.blocking_conditions == ()
         parent_receipt = await _receipt(service, parent, parent_check)
         assert parent_receipt.conclusion == "no_unresolved_deterministic_findings"
         assert parent_receipt.document is not None
@@ -904,14 +917,13 @@ async def test_parent_receipt_reconstructs_from_copied_parent_bundle_without_chi
             Mapping[str, ObjectRef],
             getattr(getattr(getattr(runtime.ledger, "_value"), "_state"), "object_refs"),
         )
-        for record in records:
-            object_ref = parent_object_refs[record.payload_ref.object_id]
+        owned_refs = dict(parent_object_refs)
+        owned_refs[receipt_ref.object_id] = receipt_ref
+        assert {record.payload_ref.object_id for record in records} <= owned_refs.keys()
+        for object_ref in owned_refs.values():
             owned_objects[object_ref.object_id] = b"".join(
                 [chunk async for chunk in runtime.objects.open_verified(object_ref)]
             )
-        owned_objects[receipt_ref.object_id] = b"".join(
-            [chunk async for chunk in runtime.objects.open_verified(receipt_ref)]
-        )
         source_bundle = service.root / route.bundle_relpath
         assert source_bundle.is_dir()
         await service.app.close()
@@ -929,6 +941,13 @@ async def test_parent_receipt_reconstructs_from_copied_parent_bundle_without_chi
             class _CopiedObjects:
                 def __init__(self, *, reject_object_id: str | None = None) -> None:
                     self._reject_object_id = reject_object_id
+
+                async def resolve_verified(self, object_id: str, envelope_digest: str) -> ObjectRef:
+                    ref = owned_refs[object_id]
+                    if ref.envelope_digest != envelope_digest:
+                        raise ValueError("object_verification_failed")
+                    assert (owned_root / f"{object_id}.bin").is_file()
+                    return ref
 
                 def open_verified(self, ref: object):
                     async def _read() -> object:

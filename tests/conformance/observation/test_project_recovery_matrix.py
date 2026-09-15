@@ -133,6 +133,7 @@ class _RestartableReadyInstallation:
             generation_store=self.generations,
             process_start_identity_commitment="sha256:" + "a" * 64,
             instance_id=_INSTANCE_ID,
+            singleton_lock_path=self.root / "service.lock",
         )
         await lifecycle.acquire_singleton()
         await lifecycle.transition(ServiceState.LOCKED)
@@ -494,6 +495,7 @@ async def _grant_general_project(
         {
             "schema_version": "1.0.0",
             "operation": "grant",
+            "request_id": new_id(IdKind.REQUEST),
             "project_id": project_id,
             "membership_generation": generation,
         }
@@ -506,7 +508,7 @@ async def _grant_general_project(
         audit = pending.coordination_binding["audit_record_id"]
         assert isinstance(audit, str)
         record_project_coordination_authorization(pending, _state=service.root / "state")
-        body = JsonObject({**body, "audit_record_id": audit})
+        # The durable operation owns the approved audit identity; retry the exact request.
     granted = await service.app.project(body, repository_privacy_context=_REPOSITORY)
     assert granted["state"] == "active"
 
@@ -520,6 +522,7 @@ async def _create_granted_general_project(
             {
                 "schema_version": "1.0.0",
                 "operation": "create",
+                "request_id": new_id(IdKind.REQUEST),
                 "title": "Recovery matrix general project",
                 "owner_task_id": tasks[0].task_id,
             }
@@ -537,6 +540,7 @@ async def _create_granted_general_project(
                 {
                     "schema_version": "1.0.0",
                     "operation": "link",
+                    "request_id": new_id(IdKind.REQUEST),
                     "project_id": project,
                     "member_kind": "task",
                     "member_commitment_or_id": task.task_id,
@@ -885,6 +889,7 @@ async def test_public_dissolve_preserves_parent_manifest_and_receipt_replay_dige
                 {
                     "schema_version": "1.0.0",
                     "operation": "dissolve",
+                    "request_id": new_id(IdKind.REQUEST),
                     "project_id": project,
                     "expected_generation": state.membership_generation,
                 }
@@ -996,6 +1001,7 @@ async def test_public_optout_preserves_accepted_delegation_and_rejects_second_ge
                 {
                     "schema_version": "1.0.0",
                     "operation": "opt_out",
+                    "request_id": new_id(IdKind.REQUEST),
                     "repository_commitment": repository_commitment,
                 }
             ),
@@ -1013,6 +1019,7 @@ async def test_public_optout_preserves_accepted_delegation_and_rejects_second_ge
                 {
                     "schema_version": "1.0.0",
                     "operation": "create",
+                    "request_id": new_id(IdKind.REQUEST),
                     "title": "Recovery matrix second project",
                     "owner_task_id": parent.task_id,
                 }
@@ -1095,6 +1102,7 @@ async def test_public_ready_automatic_cross_repository_sweep_reports_coverage_wi
                     "schema_version": "1.0.0",
                     "operation": "create",
                     "title": "Recovery matrix research project",
+                    "request_id": new_id(IdKind.REQUEST),
                     "owner_task_id": task_a.task_id,
                 }
             ),
@@ -1108,6 +1116,7 @@ async def test_public_ready_automatic_cross_repository_sweep_reports_coverage_wi
                 {
                     "schema_version": "1.0.0",
                     "operation": "link",
+                    "request_id": new_id(IdKind.REQUEST),
                     "project_id": project,
                     "member_kind": "repository",
                     "member_commitment_or_id": repository_a.commitment,
@@ -1124,6 +1133,7 @@ async def test_public_ready_automatic_cross_repository_sweep_reports_coverage_wi
                 {
                     "schema_version": "1.0.0",
                     "operation": "link",
+                    "request_id": new_id(IdKind.REQUEST),
                     "project_id": project,
                     "member_kind": "repository",
                     "member_commitment_or_id": repository_b.commitment,

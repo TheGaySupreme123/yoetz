@@ -197,7 +197,7 @@ separately.** A bare `command: "yoetz"` let Cursor's sanitized desktop PATH reso
 ambient runtime (control schema 2.1.0) behind a marker-valid then-current plugin (2.3.0); the model's
 `start` then reached an incompatible bridge and no task, evidence, or receipt could exist. Cursor's
 MCP reference admits a full path in `command`, so the native entry is now `launcher[0]` plus
-`[*launcher[1:], "mcp", "serve", "--host", "cursor", …]` from the same `/2` marker launcher the
+`[*launcher[1:], "mcp", "serve", "--host", "cursor", …]` from the same `/3` marker launcher the
 hooks use; the entry is a managed member, so carrier bytes bind it. Route recognition accepts a
 bare `yoetz` or a known launcher (this artifact's or the installed marker's) with the exact serve
 arguments. `CursorPluginStatus.launcher` reports executable state (`matched|drifted|missing|
@@ -216,6 +216,42 @@ The append-only local-control schema `2.1.0` admits `cursor_hook`, a keyed HMAC
 Cursor's documented `afterMCPExecution` result is content and is discarded; because the host does
 not publish a validated `success` or `result_status` field for that event, ingress never fabricates
 either value.
+
+**Amendment (2026-09-05, issue #596): native Cursor MCP binds the service handshake to the active
+MCP session's roots.** A native Cursor helper may start from the user's home directory, so its
+process CWD cannot select repository privacy authority. The `--host cursor` bridge asks the MCP
+client for `roots/list` on the first workflow call, decodes only local `file:` roots, bounds their
+URI/path input, and canonicalizes each through the shared safe workspace resolver. It accepts one
+canonical repository (equivalent roots in that repository are aliases); missing, unsupported,
+remote, malformed, unsafe, oversized, or distinct-repository roots fail closed with the existing
+`SESSION_CONFLICT` / `repository_identity_required` boundary before connecting to the service.
+The locator is retained only in the bridge's private client slot, revalidated before each workflow
+call, and is never derived from public `workspace_ref`, model arguments, or transcript content. The
+reviewed Cursor 3.19.7 host bundle advertises `roots.listChanged: false`, so revalidation runs on
+every workflow call even when no change notification is available. A changed or unusable roots/list
+result, or a roots-list-changed notification, retires the slot and
+its service client; the host must create a fresh MCP session to bind again, preventing one process
+from crossing repository authorities. Generic MCP bridges keep their existing process
+CWD behavior. The server still advertises only tools/resources: roots are a standard client-to-
+server handshake input, not a Yoetz tool or new server capability.
+
+**Amendment (2026-09-07, issue #616): Cursor root compatibility and explicit project selection.**
+The reviewed Cursor implementation emits absolute local filesystem paths in `roots/list.uri`,
+where the MCP SDK expects file URIs, and its shared MCP process can include roots from other open
+projects. The Cursor adapter accepts a strictly absolute local path as that host's compatibility
+shape, alongside local file URIs; every root still passes the same bounded safe canonicalization.
+Other URI schemes, malformed paths, unsafe roots, and invalid response shapes remain refusals.
+
+An owned project MCP registration renders `--project-root ${workspaceFolder}`. This is a startup
+selector, validated against the exact project registration, launcher, route, and directory/config
+identity. It selects one canonical repository from the active client's validated root inventory;
+the selected repository must be present in that inventory. It cannot supply authority when the
+client has no usable roots. Without a validated selector, the one-canonical-repository rule still
+applies. Empty or unsupported responses, request failure or timeout, mismatches, and changed
+registrations fail before the service handshake. Registration and selected-root identity are
+revalidated before each workflow call, and a change retires the bridge's client slot. Public
+workflow fields, hook payloads, environment guesses, and process CWD remain outside this decision.
+This adds no privacy grant or semantic admission: those checks retain their independent scope.
 
 **Amendment (ADR-012, 2026-07-21):** MCP server registration is added as a *sibling* port,
 `HarnessMcpPort` (`ports/harness_mcp.py`), with its own Codex adapters
@@ -338,6 +374,11 @@ private SQL.
 Observation consent is workspace-level and separate from egress consent. The plaintext local boundary
 records a private workspace commitment, structural outbox/quarantine evidence, and encrypted object
 identities—never raw task content or a raw path in logs/status/SQLite.
+Semantic composition keeps this observation workspace commitment separate from the
+`TaskRoute.repository_privacy_commitment`: it derives the observation key only through the durable
+workspace-to-Yoetz-session route, verifies the route is for the exact runtime task, and repeats that
+check before disclosure. Missing or contradictory route membership is an explicit content gap; the
+privacy commitment is never used as an observation-workspace fallback.
 Hook ingress and every consent/control lifecycle entry point derive that commitment from one shared
 workspace canonicalizer: the nearest safe Git root for a Git subdirectory, or the exact safe
 directory for non-Git workspaces. Authority never searches ancestor commitments. Pre-existing
@@ -449,3 +490,41 @@ operation schema and adds no MCP tool. An exact successful scoped `start` `PostT
 Claude host session to that cooperative task by transiently extracting and validating only the
 start result's structural task/session/writer identifiers and frontier. Raw result content is not
 retained or admitted into observation evidence.
+
+
+## Instruction loading clarification (issue #613)
+
+Tier 0 remains the intake cue and safety floor. The skill routes through the existing five
+registered guidance resources: workflow before start, publication policy before publish, and
+coverage/receipts before check. Setup, consent, credential/vault and import procedures live in
+request templates and load only for those operations; recovery details load on a corresponding
+error or continuation. They remain available through MCP and installed reference copies.
+
+This changes instruction placement and authoring guidance, not runtime authority or wire schemas.
+Required semantic review follows an explicit user requirement, effective verification policy,
+or a named acceptance criterion requiring independent semantic judgment. Qualitative work alone
+does not turn an optional review into a requirement. A required review cannot be silently
+replaced with deterministic coverage, and every host and Yoetz approval boundary still applies.
+
+## Compatible host upgrade amendment (2026-09-08, issue #656)
+
+Decision 3 is clarified: "support is never inferred across neighboring host versions" governs
+*certification*, not the decision to perform an already-understood operation.
+
+- **Claude Code plugin admission** uses a compatibility floor instead of a one-element exact list.
+  Any parseable version at or above `CLAUDE_CODE_MINIMUM_VERSION` (`2.1.233`, where the plugin and
+  hook surfaces exist) previews and applies. The preview and status carry
+  `version_provenance`: `tested` for an exactly proven cell in
+  `CLAUDE_CODE_HARNESS_PROFILE.supported_versions` (currently `2.1.241`), `untested` otherwise.
+  A version below the floor or unparseable is refused as `format_unsupported` with
+  `version_unsupported` and `minimum_version`. `supported_versions`, the capability profile, and
+  the hook cell are unchanged: an admitted `untested` host earns no proven cell.
+- **Hook version mapping** (Claude and Cursor) keeps its exact tables. A supplied unknown version
+  maps to the `untested` profile token and ingests compatible events under the conservative
+  paired contract; an omitted version takes the legacy post-only carrier for that host. No
+  unknown version is aliased to a proven profile. For Cursor, the Agent CLI build resolves to
+  `untested` because only the IDE cell owns the reviewed hook set.
+- **Codex** session-stream admission follows the ADR-005 structural admission amendment.
+
+Exact evidence remains required before a version, cell, or arm is promoted; this amendment only
+stops a routine compatible host release from disabling capabilities Yoetz already understands.

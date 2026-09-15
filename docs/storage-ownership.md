@@ -16,12 +16,14 @@ open another task bundle.
 
 The catalog DDL source and generated mirror are part of the durable schema contract:
 
-* `migrations/catalog/0004.sql` is the only hand-authored source for the catalog 0004 schema.
-* `src/yoetz/resources/migrations/catalog/0004.sql` is the byte mirror produced by the resource
-  ripple. It is never edited independently.
-* The bundle migrations `0003`, `0004`, `0008`, and `0009` remain separate sources. Catalog 0004
-  does not move or recreate bundle tables.
-* Project, lineage, host-annotation, and coordination tables are migration-owned. Adapters only
+* `migrations/catalog/0004.sql` and `migrations/catalog/0005.sql` are the hand-authored sources for
+  the catalog 0004 and 0005 schemas. Catalog 0005 adds the project-operation request journal; it
+  does not relocate project text or task evidence.
+* `src/yoetz/resources/migrations/catalog/0004.sql` and `0005.sql` are byte mirrors produced by the
+  resource ripple. They are never edited independently.
+* The bundle migrations `0003`, `0004`, `0008`, `0009`, `0010`, `0011`, and `0012` remain separate
+  sources. Catalog 0004 and 0005 do not move or recreate bundle tables.
+* Project, project-operation, lineage, host-annotation, and coordination tables are migration-owned. Adapters only
   validate their presence and issue reads or writes; they do not execute runtime `CREATE TABLE`
   or `ALTER TABLE` statements.
 
@@ -48,10 +50,12 @@ The source tree and its generated mirror must be compared at the same revision b
 
 ## Bundle migration inventory
 
-Every table created or rebuilt by bundle migrations 0003, 0004, 0008, and 0009 is listed below.
-Indexes follow the table owner and are included in the table's concurrency and retention rule.
-Migration 0008 adds columns and migration 0009 rebuilds two tables; neither migration creates a
-new ownership domain.
+Every table created or rebuilt, and every ownership-bearing column added, by bundle migrations
+0003, 0004, 0008, 0009, 0010, 0011, and 0012 is listed below. Indexes follow the table owner and
+are included in the table's concurrency and retention rule. Migration 0008 adds content bindings,
+0009 rebuilds two tables, 0010 adds the ordinary-content consent profile column, 0011 adds the
+capture handoff table, and 0012 adds the asynchronous semantic-advice attempt table; none creates
+a shared catalog ownership domain.
 
 | Bundle table or migration surface | Owner and key | Object owner and retention root | Concurrency and migration rule | Disposition |
 |---|---|---|---|---|
@@ -70,26 +74,42 @@ new ownership domain.
 | `observation_inspection_snapshots.facts_content_digest`, `.facts_content_bytes`, `.excerpt_content_digest`, `.excerpt_content_bytes`, `.excerpt_redacted`, and `.excerpt_truncated` (0008) | Same snapshot owner and key as 0004 | Nullable digest/size and redaction facts never own plaintext; object references remain the roots | Nullable, bounded checks preserve older snapshots and prevent inferred capture strength | stay |
 | `observation_cursors` (0009 rebuild) | Task/workspace source cursor; `(workspace_commitment, source, session_commitment)` | Cursor is structural replay state; its owning task bundle is the retention root | 0009 rebuilds the closed source check to admit `claude_hook` and `cursor_hook` while preserving every row and id | stay; tested for N session lanes |
 | `observation_events` (0009 rebuild) | Task/workspace observation envelope; integer `id` plus workspace/session/source identity | Structural envelope and content references are rooted by the task ledger and referenced object manifests | 0009 rebuilds only the source check and receipt index; accepted rows are never rewritten or reinterpreted | stay; tested for sibling isolation |
+| `observation_consent.content_capture_profiles_json` (0010) | Task-bundle observation consent row; workspace commitment | No content root; the consent row carries the bounded, versioned ordinary-profile selection and the task bundle retains its observation authority | `NOT NULL DEFAULT '[]'` backfills existing consent rows without granting legacy content capture; consent/runtime fences serialize profile changes; profile selection remains separate from profileless Codex structural observation | stay; tested for legacy/default and profile transitions |
+| `observation_capture_tickets` (0011) | Task-owned native-capture handoff; `ticket_id`, with unique `(workspace_commitment, logical_identity)` | `expected_parts_json` and `object_ids_json` contain bounded structural identities; captured bytes remain in task-owned encrypted objects and `observation_content_manifests`. A staging/pending ticket is temporary coordination state, while a revoked ticket is a cleanup tombstone; ticket deletion after a committed envelope does not delete historical content | A ticket binds task/session/source identity, source and authority generations, mapping/profile, expected parts, and object identities. Staging, pending, and revocation transitions are idempotent and consent-fenced; a retry must present the same binding and complete expected parts before the ledger cursor advances | stay; tested for exact retry, independent ticket budget, and consent cleanup |
+| `observation_advice_semantic_attempts` (0012) | Task-owned asynchronous semantic-advice attempt; `attempt_id`, unique `(workspace_commitment, yoetz_session_id, basis_digest)` | The minimized packet, scoped coverage gaps, terminal summaries/details, finding identities, provider identity, attempt receipt, and evidence digest remain bounded task-bundle rows. The row records semantic-attempt evidence; it is not a new observation/content root and does not become catalog authority | `state_token` orders attempts and leases are fenced by `service_generation`, owner, and expiry. Identical workspace/session/basis requests coalesce; a newer basis supersedes only unattempted pending rows; only validated `succeeded` output may add semantic advice, and interrupted/unavailable/failed/cancelled rows retain honest coverage gaps | stay; tested for per-task queue bounds, lease recovery, and session-lane isolation |
 
 The bundle's task ledger, object directory, projection rows, maintenance pins, and privacy root
 sets remain one retention graph. A catalog pointer to a bundle object carries the owning task and
 route generation; it is never copied into a shared project row as plaintext.
 
+The 0010–0012 observation additions preserve three independent task-local lanes. Consent selects
+an allowed ordinary-content profile; a capture ticket stages one authenticated handoff to the
+existing content-manifest/object graph; and a semantic-advice attempt records a bounded,
+frontier-bound asynchronous review. `projection_state`, `p1_projection_state`, and the query
+snapshot frontiers remain task-ledger projections, while `basis_digest`, `subject_digest`, and
+`state_token` on an advice attempt are replay/staleness fences rather than shared frontier
+authority. None of these rows is copied into the catalog, and no catalog project or operation row
+can advance a task bundle frontier.
+
 ## Catalog migration inventory
 
-Catalog 0004 is the durable owner of shared installation state. The rows below name every table
-it alters or creates, including the delegation, host-lineage, and coordination surfaces. Catalog
-rows contain structural identifiers, commitments, bounded state, and encrypted-object pointers;
-the encrypted bytes remain rooted by the owning task bundle.
+Catalog 0004 and 0005 are the durable owners of shared installation state. The rows below name
+every table they alter or create, including the delegation, host-lineage, coordination, and
+project-operation surfaces. The existing 0001 `maintenance_operations` row is included because it
+is also the restart marker for the automatic bundle-upgrade phase. Catalog rows contain structural
+identifiers, commitments, bounded state, and encrypted-object pointers; the encrypted bytes remain
+rooted by the owning task bundle.
 
 | Catalog table or migration surface | Owner and key | Encrypted owner and GC root | Concurrency and migration rule | Disposition |
 |---|---|---|---|---|
 | `task_routes` (0004 alters) | Catalog route authority; `task_id` | `bundle_relpath` identifies the task bundle and its current or retained route generation | One catalog writer; route generation and the root attach pair are fenced; 0004 backfills lineage columns and keeps delegated children out of root-pair uniqueness | catalog; tested |
 | `start_operations` (0004 rebuild) | Catalog start lifecycle; `(installation_id, operation_id)` | Terminal result bytes and response object reference remain tied to the task route and its bundle retention | Lease/CAS phase transitions; 0004 widens the mode set and copies rows failure-atomically | catalog; tested |
+| `maintenance_operations` (0001, migration extension) | Catalog-shared backup/restore/migration journal; `(installation_id, operation_id)` and task route | Backup manifest and migration result are structural digests; the task bundle and retained route own the encrypted objects and frontier snapshot | `BundleUpgradeCoordinator` reserves `kind='migration'` with `requested_target_version='13'`, a request digest, plan digest, route/frontier/privacy bindings, and a lease; `SqliteBundleUpgradeJournal` advances `reserved → backup_ready → schema_applied → replay_verified → terminal`, then records `complete` or `quarantined`. It is the automatic-upgrade marker; no second marker table or lazy writer upgrade is permitted | catalog |
 | `task_sessions` (0004) | Catalog session liveness; `session_id` and `task_id` | None; the route and task bundle own task evidence | Health transitions are serialized and lease-fenced; 0004 creates the shared liveness projection | catalog; tested |
 | `projects` (0004) | Catalog grouping authority; `project_id` | Title/description pointers remain rooted by their owner task and route generation | Membership generation and dissolution are catalog transactions; 0004 creates the grouping row | catalog; relocate; tested |
 | `repository_grouping_preferences` (0004) | Catalog repository opt-out; `repository_commitment` | None; only the structural bit and timestamp are stored | Upsert is serialized; pre-birth preference does not create a project row | catalog; tested |
 | `project_memberships` (0004) | Catalog membership graph; `(project_id, membership_generation, member_kind, member_commitment_or_id)` | None; task members point to task routes | Append-only membership rows and one-active-member index; generation changes are catalog writes | catalog; tested |
+| `project_operations` (0005) | Catalog-shared project mutation journal; `(installation_id, request_id)` with request digest and operation name | `reserved_*_object_id` and canonical title/description refs point to encrypted text owned by the source task and route generation; `result_canonical` is the bounded structural response replay, not a plaintext content root | `BEGIN IMMEDIATE` reserves one request, rejects request-id/digest or operation conflicts, advances only through `reserved → text_ready → effect_pending → completed`, and stores one exact canonical result. Replaying the same request/digest returns the stored record/result; generation/CAS in the project tables remains the effect fence | catalog |
 | `coordination_grants` (0004) | Catalog generation-bound grant; `(project_id, membership_generation)` | None; audit id is structural | Grant activation and revocation are monotonic and generation-fenced | catalog; tested |
 | `lineage_task_meta` (0004) | Catalog lineage lifecycle; `task_id` | Task route and task bundle retain lineage evidence | Revision and abandonment fields are updated with the route authority; migration requires the route FK | catalog; tested |
 | `lineage_operations` (0004) | Catalog delegation phases; `(installation_id, operation_id)` and handle digest, with optional `(project_id, membership_generation)` admission pair | Opaque handle material is private catalog state; child bundle is rooted by its task route and the original project grant remains structural | Lease owner/generation and phase CAS make reservation retryable; cross-repository admission is immutable across replay; 0004 creates the durable operation table | catalog; tested |
@@ -103,6 +123,18 @@ the encrypted bytes remain rooted by the owning task bundle.
 | `coordination_coverage` (0004) | Catalog per-task observability coverage; `(project_id, task_id, membership_generation)` and `coverage_id` | None; only bounded coverage and gap vocabulary is stored | Idempotent insert by coverage identity plus generation-scoped lookup; 0004 creates the durable table | catalog; tested |
 | `coordination_obligations` (0004) | Catalog obligation disposition; `(detection_id, task_id)` | Obligation event identity remains rooted in the task ledger | Declared/addressed/resolved transitions are checked; nullable `obligation_id` preserves empty legacy rows | catalog; tested |
 
+New coordination detection identities bind the project generation, resource commitments, and
+both task route snapshots. Task identifiers and their route generations/identity digests are
+canonicalized together, so reversing the pair preserves the identity. A route replacement produces
+a successor detection; it cannot overwrite the previous immutable participant rows. A retained
+legacy detection can be retried under its original identity only while its recorded participant
+snapshots still match. Delivery and projection revalidate those snapshots against current source
+authority before exposing advice or encrypted detail.
+
+Coordination declarations remain historical ledger facts after their obligations close. Only
+declarations for currently open obligations participate in later detection sweeps; a closed
+declaration cannot prevent unrelated overlaps from being considered.
+
 ## Hook-side local observation store
 
 `LocalObservationStore` is an owner-only, workspace-keyed fallback and capture spool under
@@ -113,7 +145,7 @@ container, not a second ledger and not shared project authority.
 |---|---|---|---|---|
 | Consent and routing (`consent`, `session_workspaces`, `codex_session_bindings`, `pending_lifecycles`) | Workspace commitment; session commitments and raw host-session IDs are lane keys | Owner-only state file; no transcript content; pending lifecycle intents retain the event until the session lock converges | Interprocess state lock plus workspace recovery lock and per-session lifecycle lock; JSON schemas 1–10 remain readable, and schema 11 adds pairing/retention provenance | stay; tested for N lanes |
 | Replay state (`cursors`, `dedup`, `dedup_order`, `dedup_lanes`, `envelopes`) | Workspace commitment and session/source lane | Envelopes are bounded structural observations; dedup and cursor fences remain for deterministic replay; no plaintext transcript; any envelope eviction persists `envelopes_truncated` | One state-file transaction under the interprocess lock; bounded deterministic eviction marks the affected lane and blocks claims based on incomplete history | stay; tested for replay bounds |
-| Hook pairing (`open_pre`, `unpaired_scopes`, `pairing_history_complete`) | Workspace plus source/session/generation/correlation scope; host call IDs never cross lanes | Codex paired calls retain scoped open-pre and orphan identities; Claude/Cursor post-only calls retain no synthetic missing-pre gap; the bounded orphan set remains structural; unknown legacy aggregate provenance stays unresolved | Pairing admission stages envelope and pairing mutation in one rollback-on-exception transaction; duplicate/reordered delivery cannot erase a real orphan; legacy false-gap retirement requires explicit complete provenance and intact retention | stay; tested for pairing/replay faults |
+| Hook pairing (`open_pre`, `unpaired_scopes`, `pairing_state_unknown`) | Workspace plus source/session/generation/correlation scope; host call IDs never cross lanes | Codex paired calls retain scoped open-pre and orphan identities; Claude/Cursor post-only calls retain no synthetic missing-pre gap; the bounded orphan set remains structural; unknown legacy aggregate provenance stays unresolved | Pairing admission stages envelope and pairing mutation in one rollback-on-exception transaction; duplicate/reordered delivery cannot erase a real orphan; `pairing_state_unknown` remains true when scoped provenance is absent or incomplete; a legacy `/11` `pairing_history_complete` marker is accepted only as a read-compatibility migration signal | stay; tested for pairing/replay faults |
 | Gap and unsupported-event state (`gaps`, `session_gaps`, `unsupported_events`) | Workspace commitment, with scoped gap sets by session | Gap history is structural and bounded; it is evidence of loss, never a content root; incomplete retention keeps `unpaired_event` active | Gap activation/resolution is serialized with state writes; unknown codes are not copied into structural errors; legacy post-only false gaps are retired only with complete retained history | stay; tested for scoped gaps |
 | Advice (`advice_snapshot`, `session_advice`, `last_advice_suppression`, `session_advice_suppression`) | Workspace plus task/session delivery scope | Snapshot is structural; user-controlled detail is absent or encrypted elsewhere | Delivery selection is read-only; commit happens after output; session scope prevents one lane suppressing another | stay; tested for session isolation |
 | Stream replay (`stream_cursors`, `stream_partials`, `stream_call_tools`, `stream_source_identities`, `stream_profiles`, `stream_partial_dropped_sessions`) | Workspace and Codex session commitment | Partial tails are bounded read-cache data; dropped tails produce a source-lag gap and are reread from the cursor | Cursor/profile/source generation updates are atomic under the state lock; maps and partial bytes are bounded | stay; tested for stream bounds |
@@ -145,10 +177,36 @@ and coordination authority. It is the only place for those shared structural tab
 coordination adapters fail with `MIGRATION_REQUIRED` when those tables are absent rather than
 creating them at runtime.
 
+### Catalog upgrade recovery boundary
+
+The catalog 0004/0005 startup upgrade applies all pending DDL and catalog version metadata in one
+SQLite transaction, then verifies schema identity and foreign keys before reopening the ordinary
+guarded writer. An exception during either migration rolls the transaction back; retry applies the
+same append-only migrations. Legacy session rows start as `contact_lost`, because an old active
+route is not proof of a current lease. Normal session attachment and lease reconciliation establish
+new activity; the migration does not infer it.
+
+This path does **not** create the machine-bound pre-migration backup or phase journal used for
+task-bundle upgrades. Transaction rollback protects an uncommitted migration, not a committed
+logical migration error, later storage loss, or binary downgrade. Backup parity is a remaining
+catalog recovery limitation tracked under #496; the bundle upgrade's backup guarantees must not be
+claimed for the catalog. Startup owns migration before READY and closes its DDL connection before
+runtime work. The transactional regression tests do not establish competing-service or power-loss
+acceptance.
+
 The `repository_grouping_preferences` table is catalog-owned repository authority keyed by the
 privacy commitment. It stores only the auto-grouping bit and update timestamp, so a pre-birth
 opt-out remains durable without materializing an implicit `projects` row; project birth consumes
 the preference and keeps the project row as the later mutable generation authority.
+
+`project_operations` is catalog-shared retry authority for project lifecycle commands, not a
+replacement for task-owned project text or observation evidence. Its request digest authenticates
+the complete operation identity before any text/object side effect; only object IDs and canonical
+references cross into the journal. A completed row is the durable response for that request, so a
+lost response can be replayed without applying the project effect twice. A request-id reuse with a
+different digest, an invalid phase transition, a stale membership/route generation, or a missing
+source authorization remains a conflict/refusal; the journal cannot grant egress, observation,
+consent, or disclosure authority.
 
 ## Catalog pointer and recovery rules
 
@@ -170,8 +228,15 @@ The storage tests pin the executable side of this matrix:
 
 * `tests/integration/storage/test_migration_0001.py` pins the ordered bundle and catalog migration
   registries and replay behavior.
-* `tests/integration/storage/test_catalog_v4_extensions.py` pins catalog 0004 table ownership and
-  `user_version = 4`.
+* `tests/integration/storage/test_catalog_v4_extensions.py` pins the catalog 0004 extension and its
+  historical `user_version = 4` fixture; catalog 0005 is the current project-operation extension
+  described in the inventory above.
+* `tests/integration/storage/test_migration_0010_observation.py`,
+  `tests/integration/storage/test_migration_0011_observation.py`,
+  `tests/integration/storage/test_codex_capture_ticket_sqlite.py`,
+  `tests/integration/storage/test_capture_ticket_consent_cleanup.py`, and
+  `tests/unit/application/test_observation_advice_semantic.py` pin the 0010 consent default,
+  0011 capture-ticket shape/cleanup, and 0012 semantic-attempt scheduling/lease behavior.
 * `tests/integration/storage/test_start_catalog_state_machine.py`,
   `tests/unit/application/test_lineage_coordinator.py`,
   `tests/unit/adapters/test_sqlite_host_lineage.py`, and

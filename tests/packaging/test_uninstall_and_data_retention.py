@@ -92,7 +92,9 @@ def _tool_install(
 
     tool_dir = root / "tool"
     bin_dir = root / "bin"
-    spec = "yoetz" + (f"[{','.join(extras)}]" if extras else "") + "==0.1.0"
+    wheels = sorted(dist_dir.glob("*.whl"))
+    assert len(wheels) == 1
+    spec = str(wheels[0]) + (f"[{','.join(extras)}]" if extras else "")
     # Overriding HOME isolates the *application's* paths (bundle_root() etc.), but uv's own
     # download cache must keep resolving to the real, already-warm shared cache -- otherwise an
     # --offline install has nothing to install from. Pin UV_CACHE_DIR to the real cache explicitly.

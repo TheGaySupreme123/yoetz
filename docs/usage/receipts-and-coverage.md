@@ -65,8 +65,11 @@ A clean `deterministic_only` check is **not** an implementation review. When mod
 `semantic_review_not_requested` and completeness is coverage-incomplete — even when the verdict
 reads `no_issue_detected`.
 
-Prefer `semantic_if_configured` for material claims. Reserve `deterministic_only` for genuinely
-structural checks, and disclose the limitation when you use it.
+Omit `mode` to retain the configured verification default. Use `semantic_if_configured` only when
+review is known to be optional. If the user, policy, or acceptance requires semantic review, select
+`semantic_required` for the final check and subsequent final rechecks. Reserve `deterministic_only`
+for explicitly local or structural checks, or a user-authorized deliberate no-egress choice;
+disclose the limitation and keep any required review unmet.
 
 When you fall back to `deterministic_only` because a semantic attempt was blocked or unavailable,
 that earlier gap is carried forward next to `semantic_review_not_requested`, so the receipt records
@@ -162,6 +165,9 @@ finding-free suffix made entirely of service-stamped observation records. The re
 check's coverage, including `semantic_model_derived`, and carries the gap
 `check_current_as_of_earlier_frontier` naming the subject frontier that was tested. The verdict is
 current as of that earlier frontier, not the receipt's, so the receipt is still coverage-incomplete.
+The limitations text says which kind of record followed the check: responses to its findings,
+finding-free host observations, or both. Observation records are retained but were not evaluated by
+that check; a re-check evaluates them, and routine observation can move the ledger again afterwards.
 
 Any other material event after the check — published work, a new finding (including an
 observation-authored finding), a response to a finding the check did not return, or a response whose

@@ -12,10 +12,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import platform
 import shutil
 import signal
 import stat
+import sys
 import tempfile
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -36,6 +39,7 @@ from yoetz.config.paths import ensure_owner_only_dir, verify_private_local_bundl
 from yoetz.domain.findings import (
     RUNTIME_FAILURE_STAGES,
     RuntimeAttemptEvidence,
+    RuntimeTokenUsage,
     SamplingParams,
     SemanticFailureClass,
 )
@@ -78,12 +82,18 @@ __all__ = [
     "CODEX_EVALUATOR_CONFIG",
     "CODEX_EVALUATOR_CONFIG_SHA256",
     "CODEX_EVALUATOR_RUNTIME_VERSION",
+    "CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256",
+    "CODEX_EVALUATOR_LINUX_X64_EXECUTABLE_SHA256",
+    "CODEX_EVALUATOR_LINUX_X64_SOURCE_IDENTITY",
     "CodexAppServerExternalFactory",
     "CodexAppServerProfile",
+    "CodexEvaluatorCell",
     "CodexLoginChallenge",
     "CodexRuntimeStatus",
     "codex_account_status",
     "codex_binding_from_config",
+    "codex_evaluator_cell_for_binding",
+    "codex_evaluator_cell_for_platform",
     "codex_factory_builders_from_config",
     "codex_login",
     "codex_logout",
@@ -94,11 +104,18 @@ CODEX_EVALUATOR_RUNTIME_VERSION: Final = "0.150.1"
 CODEX_APP_SERVER_SCHEMA_SHA256: Final = (
     "sha256:8cdccfc35582696d7141e7f916e0d5a664ab5b5e90b732f104284d2507f369f8"
 )
-CODEX_EVALUATOR_CAPABILITY_PROFILE: Final = "codex-evaluator/0.150.1/v1"
+CODEX_EVALUATOR_CAPABILITY_PROFILE: Final = "codex-evaluator/0.150.1/v2"
 CODEX_EVALUATOR_CAPABILITY_CELL_SHA256: Final = (
-    "sha256:ad3e9a354ce29dd459e7549ac77db4425f6f1a41c4bc8dfd62316103c2897e28"
+    "sha256:c04d2dd111c85d323c3f96c7041bb598f047fff9f73b84f916d38b5321d32cfa"
 )
 CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT: Final = "2026-11-30T00:00:00Z"
+CODEX_EVALUATOR_LINUX_X64_EXECUTABLE_SHA256: Final = (
+    "sha256:abf1bb1643a79f73aa78ee627e111e02d4f8c98f25813a0cf6ce277709664386"
+)
+CODEX_EVALUATOR_LINUX_X64_SOURCE_IDENTITY: Final = "openai-codex-npm-linux-x64-0.150.1"
+CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256: Final = (
+    "sha256:3fac9e18eca7395b14166114ebf49eaaae5fe3061e86c0d5b76eb17b54488cab"
+)
 _CAPABILITY_EVIDENCE_EXPIRES_AT: Final = datetime(2026, 11, 30, tzinfo=UTC)
 CODEX_EVALUATOR_CONFIG: Final = """approval_policy = "never"
 cli_auth_credentials_store = "file"
@@ -143,6 +160,113 @@ CODEX_EVALUATOR_CONFIG_SHA256: Final = _CONFIG_SHA256
 _INSTRUCTION_SHA256: Final = (
     "sha256:" + hashlib.sha256(SEMANTIC_REVIEW_INSTRUCTION.encode()).hexdigest()
 )
+
+
+@dataclass(frozen=True, slots=True)
+class CodexEvaluatorCell:
+    """One exact Codex subscription runtime cell.
+
+    The app-server protocol and Yoetz-owned configuration are shared by the two supported
+    cells, but the native executable, package layout, and capability identity remain bound to
+    the selected platform.  Keeping these facts together prevents a persisted Linux source
+    identity from being paired with the macOS digest (or vice versa).
+    """
+
+    platform_os: Literal["darwin", "linux"]
+    platform_architecture: Literal["arm64", "x86_64"]
+    source_identity: str
+    executable_sha256: str
+    app_server_schema_sha256: str
+    capability_cell_sha256: str
+    capability_profile: str
+    capability_evidence_expires_at: str
+    isolated_config_sha256: str
+    native_package_directory: str
+    native_package_version: str
+    native_executable_relative: Path
+
+    @property
+    def native_package_spec(self) -> str:
+        # The platform package is the optional-dependency key, while npm resolves the alias
+        # through the canonical @openai/codex package name (the upstream package metadata uses
+        # ``npm:@openai/codex@0.150.1-linux-x64`` and its darwin equivalent).
+        return f"npm:@openai/codex@{self.native_package_version}"
+
+
+_MACOS_ARM64_CELL: Final = CodexEvaluatorCell(
+    platform_os="darwin",
+    platform_architecture="arm64",
+    source_identity="openai-codex-npm-darwin-arm64-0.150.1",
+    executable_sha256="sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b",
+    app_server_schema_sha256=CODEX_APP_SERVER_SCHEMA_SHA256,
+    capability_cell_sha256=CODEX_EVALUATOR_CAPABILITY_CELL_SHA256,
+    capability_profile=CODEX_EVALUATOR_CAPABILITY_PROFILE,
+    capability_evidence_expires_at=CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT,
+    isolated_config_sha256=_CONFIG_SHA256,
+    native_package_directory="codex-darwin-arm64",
+    native_package_version=f"{CODEX_EVALUATOR_RUNTIME_VERSION}-darwin-arm64",
+    native_executable_relative=Path("vendor/aarch64-apple-darwin/bin/codex"),
+)
+_LINUX_X64_CELL: Final = CodexEvaluatorCell(
+    platform_os="linux",
+    platform_architecture="x86_64",
+    source_identity=CODEX_EVALUATOR_LINUX_X64_SOURCE_IDENTITY,
+    executable_sha256=CODEX_EVALUATOR_LINUX_X64_EXECUTABLE_SHA256,
+    app_server_schema_sha256=CODEX_APP_SERVER_SCHEMA_SHA256,
+    capability_cell_sha256=CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256,
+    capability_profile=CODEX_EVALUATOR_CAPABILITY_PROFILE,
+    capability_evidence_expires_at=CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT,
+    isolated_config_sha256=_CONFIG_SHA256,
+    native_package_directory="codex-linux-x64",
+    native_package_version=f"{CODEX_EVALUATOR_RUNTIME_VERSION}-linux-x64",
+    native_executable_relative=Path("vendor/x86_64-unknown-linux-musl/bin/codex"),
+)
+_EVALUATOR_CELLS_BY_PLATFORM: Final = {
+    ("darwin", "arm64"): _MACOS_ARM64_CELL,
+    ("linux", "x86_64"): _LINUX_X64_CELL,
+}
+
+
+def codex_evaluator_cell_for_platform(platform_os: str, architecture: str) -> CodexEvaluatorCell:
+    """Return the exact reviewed cell for one normalized host platform."""
+
+    normalized_os = "linux" if platform_os.startswith("linux") else platform_os
+    normalized_architecture = "x86_64" if architecture == "amd64" else architecture
+    try:
+        return _EVALUATOR_CELLS_BY_PLATFORM[(normalized_os, normalized_architecture)]
+    except KeyError as error:
+        raise ValueError("codex_runtime_platform_unsupported") from error
+
+
+def codex_evaluator_cell_for_binding(
+    *,
+    source_identity: str,
+    executable_sha256: str,
+    runtime_version: str,
+    app_server_schema_sha256: str,
+    capability_cell_sha256: str,
+    capability_profile: str,
+    capability_evidence_expires_at: str,
+    isolated_config_sha256: str,
+) -> CodexEvaluatorCell:
+    """Validate every compatibility-critical field against one exact platform cell."""
+
+    cell: CodexEvaluatorCell | None = None
+    if source_identity == _MACOS_ARM64_CELL.source_identity:
+        cell = _MACOS_ARM64_CELL
+    elif source_identity == _LINUX_X64_CELL.source_identity:
+        cell = _LINUX_X64_CELL
+    if cell is None or (
+        executable_sha256 != cell.executable_sha256
+        or runtime_version != CODEX_EVALUATOR_RUNTIME_VERSION
+        or app_server_schema_sha256 != cell.app_server_schema_sha256
+        or capability_cell_sha256 != cell.capability_cell_sha256
+        or capability_profile != cell.capability_profile
+        or capability_evidence_expires_at != cell.capability_evidence_expires_at
+        or isolated_config_sha256 != cell.isolated_config_sha256
+    ):
+        raise ValueError("codex_runtime_capability_unsupported")
+    return cell
 
 
 def _codex_output_schema(value: JsonValue) -> JsonValue:
@@ -357,15 +481,16 @@ class CodexAppServerProfile:
         )
 
     def __post_init__(self) -> None:
-        if (
-            self.runtime_version != CODEX_EVALUATOR_RUNTIME_VERSION
-            or self.app_server_schema_sha256 != CODEX_APP_SERVER_SCHEMA_SHA256
-            or self.capability_cell_sha256 != CODEX_EVALUATOR_CAPABILITY_CELL_SHA256
-            or self.capability_profile != CODEX_EVALUATOR_CAPABILITY_PROFILE
-            or self.capability_evidence_expires_at != CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT
-            or self.isolated_config_sha256 != _CONFIG_SHA256
-        ):
-            raise ValueError("codex_runtime_capability_unsupported")
+        codex_evaluator_cell_for_binding(
+            source_identity=self.source_identity,
+            executable_sha256=self.executable_sha256,
+            runtime_version=self.runtime_version,
+            app_server_schema_sha256=self.app_server_schema_sha256,
+            capability_cell_sha256=self.capability_cell_sha256,
+            capability_profile=self.capability_profile,
+            capability_evidence_expires_at=self.capability_evidence_expires_at,
+            isolated_config_sha256=self.isolated_config_sha256,
+        )
         for digest in (
             self.executable_sha256,
             self.app_server_schema_sha256,
@@ -403,6 +528,20 @@ class CodexAppServerProfile:
         return canonical_digest({"argv": list(self.launcher_argv), "version": 1})
 
     def verify_local_binding(self) -> None:
+        bound_cell = codex_evaluator_cell_for_binding(
+            source_identity=self.source_identity,
+            executable_sha256=self.executable_sha256,
+            runtime_version=self.runtime_version,
+            app_server_schema_sha256=self.app_server_schema_sha256,
+            capability_cell_sha256=self.capability_cell_sha256,
+            capability_profile=self.capability_profile,
+            capability_evidence_expires_at=self.capability_evidence_expires_at,
+            isolated_config_sha256=self.isolated_config_sha256,
+        )
+        host_os = "linux" if sys.platform.startswith("linux") else sys.platform
+        host_cell = codex_evaluator_cell_for_platform(host_os, platform.machine())
+        if host_cell != bound_cell:
+            raise ValueError("codex_runtime_platform_unsupported")
         facts = self.executable_path.stat()
         if not stat.S_ISREG(facts.st_mode) or not (facts.st_mode & stat.S_IXUSR):
             raise ValueError("codex_runtime_executable_invalid")
@@ -465,7 +604,7 @@ class _CodexProcess:
     process: asyncio.subprocess.Process
     workdir: Path
     stderr_task: asyncio.Task[bool]
-    pending_notifications: list[Mapping[str, object]]
+    pending_notifications: deque[Mapping[str, object]]
 
     async def send(self, value: Mapping[str, object]) -> None:
         stdin = self.process.stdin
@@ -488,7 +627,11 @@ class _CodexProcess:
             raise ValueError("codex_app_server_message_invalid")
         if self.stderr_task.done() and self.stderr_task.result():
             raise ValueError("codex_app_server_stderr_limit")
-        return _object(strict_json_parse(line[:-1]))
+        try:
+            return _object(strict_json_parse(line[:-1]))
+        except ProtocolValueError, ValueError:
+            # A malformed JSONL envelope is transport failure, not a malformed final answer.
+            raise ValueError("codex_app_server_message_invalid") from None
 
     async def request(
         self,
@@ -581,7 +724,7 @@ async def _launch(profile: CodexAppServerProfile) -> _CodexProcess:
                 process=process,
                 workdir=workdir,
                 stderr_task=asyncio.create_task(_drain_stderr(process.stderr)),
-                pending_notifications=[],
+                pending_notifications=deque(),
             )
             try:
                 await _cleanup_guaranteed(owned)
@@ -594,7 +737,7 @@ async def _launch(profile: CodexAppServerProfile) -> _CodexProcess:
             process=process,
             workdir=workdir,
             stderr_task=asyncio.create_task(_drain_stderr(process.stderr)),
-            pending_notifications=[],
+            pending_notifications=deque(),
         )
     except BaseException:
         # Spawn cancellation above owns and cleans a returned process before it reaches here.
@@ -950,7 +1093,7 @@ def _take_account_updated(runtime: _CodexProcess) -> bool:
 
     updated = False
     pending = runtime.pending_notifications
-    runtime.pending_notifications = []
+    runtime.pending_notifications = deque()
     for message in pending:
         notification = _login_notification(message, "")
         if notification == "account_updated":
@@ -1058,7 +1201,7 @@ async def codex_login(
                     break
                 try:
                     message = (
-                        runtime.pending_notifications.pop(0)
+                        runtime.pending_notifications.popleft()
                         if runtime.pending_notifications
                         else await runtime.read(remaining)
                     )
@@ -1089,7 +1232,7 @@ async def codex_login(
                         raise TimeoutError
                     try:
                         message = (
-                            runtime.pending_notifications.pop(0)
+                            runtime.pending_notifications.popleft()
                             if runtime.pending_notifications
                             else await runtime.read(remaining)
                         )
@@ -1200,6 +1343,93 @@ def _notification_item(
     )
 
 
+def _runtime_token_usage_from_notification(
+    message: Mapping[str, object], *, thread_id: str, turn_id: str
+) -> RuntimeTokenUsage | None:
+    """Read one active-turn cumulative usage snapshot without retaining native payloads.
+
+    The app-server emits both ``last`` and cumulative ``total`` breakdowns. A fresh ephemeral
+    reviewer thread has one active turn, and the cumulative snapshot is the only value that
+    remains correct if the turn internally performs more than one model request. Repeated
+    notifications replace the prior snapshot at the call site; they are never summed.
+
+    A notification for another thread or turn is unrelated bookkeeping and is ignored before its
+    body is inspected. A matching notification is strictly bounded so malformed provider data
+    cannot become telemetry or an accepted usage value.
+    """
+
+    params = message.get("params")
+    if not isinstance(params, Mapping):
+        return None
+    source = cast(Mapping[str, object], params)
+    if source.get("threadId") != thread_id or source.get("turnId") != turn_id:
+        return None
+    if set(source) != {"threadId", "turnId", "tokenUsage"}:
+        raise ValueError("codex_app_server_token_usage_invalid")
+    raw_usage = source.get("tokenUsage")
+    if not isinstance(raw_usage, Mapping):
+        raise ValueError("codex_app_server_token_usage_invalid")
+    usage = cast(Mapping[str, object], raw_usage)
+    if set(usage) != {"last", "total"} and set(usage) != {
+        "last",
+        "total",
+        "modelContextWindow",
+    }:
+        raise ValueError("codex_app_server_token_usage_invalid")
+
+    def breakdown(value: object) -> tuple[int, int, int, int, int, int]:
+        if not isinstance(value, Mapping):
+            raise ValueError("codex_app_server_token_usage_invalid")
+        source = cast(Mapping[str, object], value)
+        required = {
+            "cacheWriteInputTokens",
+            "cachedInputTokens",
+            "inputTokens",
+            "outputTokens",
+            "reasoningOutputTokens",
+            "totalTokens",
+        }
+        if set(source) != required:
+            raise ValueError("codex_app_server_token_usage_invalid")
+
+        def counter(name: str) -> int:
+            raw = source[name]
+            if type(raw) is not int or not 0 <= raw <= 2**53 - 1:
+                raise ValueError("codex_app_server_token_usage_invalid")
+            return raw
+
+        parsed = (
+            counter("inputTokens"),
+            counter("cachedInputTokens"),
+            counter("cacheWriteInputTokens"),
+            counter("outputTokens"),
+            counter("reasoningOutputTokens"),
+            counter("totalTokens"),
+        )
+        if parsed[1] > parsed[0] or parsed[4] > parsed[3] or parsed[0] + parsed[3] != parsed[5]:
+            raise ValueError("codex_app_server_token_usage_invalid")
+        return parsed
+
+    # Validate both provider snapshots even though only the cumulative total is retained. This
+    # keeps the accepted event shape bounded while avoiding accidental use of ``last`` as a
+    # second aggregate that would double-count the same turn.
+    breakdown(usage["last"])
+    total = breakdown(usage["total"])
+    context_window = usage.get("modelContextWindow")
+    if context_window is not None and (
+        type(context_window) is not int or not 0 <= context_window <= 2**53 - 1
+    ):
+        raise ValueError("codex_app_server_token_usage_invalid")
+    return RuntimeTokenUsage(
+        input_tokens=total[0],
+        cached_input_tokens=total[1],
+        cache_write_input_tokens=total[2],
+        output_tokens=total[3],
+        reasoning_output_tokens=total[4],
+        total_tokens=total[5],
+    )
+
+
 class _CodexTurnFailure(Exception):
     def __init__(
         self,
@@ -1218,17 +1448,35 @@ class _CodexRuntimeWarning(Exception):
 
 
 def _discard_rate_limits_notification(message: Mapping[str, object]) -> None:
-    """Validate the exact account-rate shape and retain none of its mutable account state."""
+    """Validate bounded 0.150.1 sparse bookkeeping and retain no account state."""
+
+    def invalid() -> None:
+        raise ValueError("codex_app_server_rate_limits_invalid")
+
+    def bounded_object(
+        value: object, allowed: set[str], required: set[str]
+    ) -> Mapping[str, object]:
+        if type(value) is not dict:
+            invalid()
+        source = cast(dict[str, object], value)
+        if not required <= set(source) <= allowed:
+            invalid()
+        return source
+
+    def nullable_text(value: object, limit: int) -> None:
+        if value is not None and (type(value) is not str or len(value) > limit):
+            invalid()
+
+    def integer(value: object, bits: int) -> None:
+        if type(value) is not int or not -(2 ** (bits - 1)) <= value < 2 ** (bits - 1):
+            invalid()
 
     if set(message) not in ({"method", "params"}, {"method", "params", "emittedAtMs"}):
-        raise ValueError("codex_app_server_rate_limits_invalid")
-    if "emittedAtMs" in message and type(message["emittedAtMs"]) is not int:
-        raise ValueError("codex_app_server_rate_limits_invalid")
-    params = _object(message.get("params"))
-    if set(params) != {"rateLimits"}:
-        raise ValueError("codex_app_server_rate_limits_invalid")
-    rate_limits = _object(params.get("rateLimits"))
-    if set(rate_limits) != {
+        invalid()
+    if "emittedAtMs" in message:
+        integer(message["emittedAtMs"], 64)
+    params = bounded_object(message.get("params"), {"rateLimits"}, {"rateLimits"})
+    allowed = {
         "credits",
         "individualLimit",
         "limitId",
@@ -1238,43 +1486,59 @@ def _discard_rate_limits_notification(message: Mapping[str, object]) -> None:
         "rateLimitReachedType",
         "secondary",
         "spendControlReached",
-    }:
-        raise ValueError("codex_app_server_rate_limits_invalid")
-    if rate_limits.get("limitId") != "codex":
-        raise ValueError("codex_app_server_rate_limits_invalid")
+    }
+    rate_limits = bounded_object(params["rateLimits"], allowed, set())
+    nullable_text(rate_limits.get("limitId"), 128)
+    nullable_text(rate_limits.get("limitName"), 128)
     plan_type = rate_limits.get("planType")
     if plan_type is not None and (type(plan_type) is not str or plan_type not in _SAFE_PLAN_TYPES):
-        raise ValueError("codex_app_server_rate_limits_invalid")
-    if rate_limits.get("individualLimit") is not None:
-        raise ValueError("codex_app_server_rate_limits_invalid")
-    limit_name = rate_limits.get("limitName")
-    if limit_name is not None and (type(limit_name) is not str or len(limit_name) > 128):
-        raise ValueError("codex_app_server_rate_limits_invalid")
+        invalid()
     reached_type = rate_limits.get("rateLimitReachedType")
-    if reached_type is not None and (type(reached_type) is not str or len(reached_type) > 64):
-        raise ValueError("codex_app_server_rate_limits_invalid")
+    if reached_type is not None and (
+        type(reached_type) is not str
+        or reached_type
+        not in {
+            "rate_limit_reached",
+            "workspace_owner_credits_depleted",
+            "workspace_member_credits_depleted",
+            "workspace_owner_usage_limit_reached",
+            "workspace_member_usage_limit_reached",
+        }
+    ):
+        invalid()
     spend_control = rate_limits.get("spendControlReached")
     if spend_control is not None and type(spend_control) is not bool:
-        raise ValueError("codex_app_server_rate_limits_invalid")
+        invalid()
 
     for name in ("primary", "secondary"):
         window = rate_limits.get(name)
         if window is None:
             continue
-        source = _object(window)
-        if set(source) != {"resetsAt", "usedPercent", "windowDurationMins"} or any(
-            type(source.get(key)) not in {int, float}
-            for key in ("resetsAt", "usedPercent", "windowDurationMins")
-        ):
-            raise ValueError("codex_app_server_rate_limits_invalid")
-    credits = _object(rate_limits.get("credits"))
-    if set(credits) != {"balance", "hasCredits", "unlimited"}:
-        raise ValueError("codex_app_server_rate_limits_invalid")
-    if type(credits.get("hasCredits")) is not bool or type(credits.get("unlimited")) is not bool:
-        raise ValueError("codex_app_server_rate_limits_invalid")
-    balance = credits.get("balance")
-    if balance is not None and (type(balance) is not str or len(balance) > 64):
-        raise ValueError("codex_app_server_rate_limits_invalid")
+        source = bounded_object(
+            window, {"resetsAt", "usedPercent", "windowDurationMins"}, {"usedPercent"}
+        )
+        integer(source["usedPercent"], 32)
+        for key in ("resetsAt", "windowDurationMins"):
+            if source.get(key) is not None:
+                integer(source[key], 64)
+    if rate_limits.get("credits") is not None:
+        credits = bounded_object(
+            rate_limits["credits"],
+            {"balance", "hasCredits", "unlimited"},
+            {"hasCredits", "unlimited"},
+        )
+        if type(credits["hasCredits"]) is not bool or type(credits["unlimited"]) is not bool:
+            invalid()
+        nullable_text(credits.get("balance"), 64)
+    if rate_limits.get("individualLimit") is not None:
+        keys = {"limit", "remainingPercent", "resetsAt", "used"}
+        individual = bounded_object(rate_limits["individualLimit"], keys, keys)
+        for key in ("limit", "used"):
+            if type(individual[key]) is not str:
+                invalid()
+            nullable_text(individual[key], 64)
+        integer(individual["remainingPercent"], 32)
+        integer(individual["resetsAt"], 64)
 
 
 def _runtime_warning(message: Mapping[str, object]) -> _CodexRuntimeWarning:
@@ -1375,6 +1639,7 @@ _FAILURE_STAGE_BY_TOKEN: Final[Mapping[str, str]] = {
     "codex_app_server_event_forbidden": "event_forbidden",
     "codex_app_server_tool_event_forbidden": "tool_event_forbidden",
     "codex_app_server_rate_limits_invalid": "rate_limits_invalid",
+    "codex_app_server_token_usage_invalid": "token_usage_invalid",
     "codex_app_server_warning_invalid": "runtime_warning",
     "codex_app_server_completion_invalid": "completion_mismatch",
     "codex_app_server_agent_message_count": "agent_message_count",
@@ -1438,11 +1703,20 @@ def _classify_runtime_exception(
             else ("timeout", SemanticFailureClass.TIMEOUT)
         )
     if isinstance(error, ValueError) and not isinstance(error, _CodexRuntimeWarning):
-        return (
-            ("invalid", SemanticFailureClass.RESPONSE_SCHEMA)
-            if turn_acknowledged
-            else ("unavailable", SemanticFailureClass.UNSUPPORTED_PROFILE)
-        )
+        stage = _failure_stage(error, turn_acknowledged=turn_acknowledged, launched=True)
+        if turn_acknowledged and (
+            stage.startswith(("output_", "judgment_"))
+            or stage in {"completion_mismatch", "agent_message_count"}
+        ):
+            return "invalid", SemanticFailureClass.RESPONSE_SCHEMA
+        if stage not in {
+            "transport_failed",
+            "request_failed",
+            "event_limit",
+            "runtime_warning",
+            "unclassified",
+        }:
+            return "unavailable", SemanticFailureClass.UNSUPPORTED_PROFILE
     return (
         ("post_ack_unknown", SemanticFailureClass.TRANSPORT)
         if turn_acknowledged
@@ -1480,6 +1754,7 @@ class CodexAppServerEvaluator:
         turn_id: str | None = None
         judgment = None
         final_output_sha256: str | None = None
+        token_usage: RuntimeTokenUsage | None = None
         failure: (
             Literal["timeout", "post_ack_unknown", "invalid", "refused", "unavailable"] | None
         ) = None
@@ -1567,11 +1842,11 @@ class CodexAppServerEvaluator:
             # the fallback candidate set. Exactly one candidate must remain.
             final_texts: list[str] = []
             untagged_texts: list[str] = []
-            messages = list(runtime.pending_notifications)
-            runtime.pending_notifications.clear()
+            messages = runtime.pending_notifications
+            runtime.pending_notifications = deque()
             for _ in range(_MAX_EVENT_COUNT):
                 message = (
-                    messages.pop(0)
+                    messages.popleft()
                     if messages
                     else await runtime.read(_remaining(deadline, self.clock))
                 )
@@ -1581,7 +1856,53 @@ class CodexAppServerEvaluator:
                 if type(method) is not str or method not in _ALLOWED_NOTIFICATION_METHODS:
                     raise ValueError("codex_app_server_event_forbidden")
                 if method == "account/rateLimits/updated":
-                    _discard_rate_limits_notification(message)
+                    try:
+                        _discard_rate_limits_notification(message)
+                    except ValueError:
+                        # Bookkeeping cannot overrule the eventual answer or authoritative
+                        # native error. Keep only this closed diagnostic; a terminal failure
+                        # below replaces it. Event-count, byte, and deadline bounds still apply.
+                        failure_stage = "rate_limits_invalid"
+                    continue
+                if method == "thread/tokenUsage/updated":
+                    try:
+                        observed_usage = _runtime_token_usage_from_notification(
+                            message, thread_id=thread_id, turn_id=turn_id
+                        )
+                    except ValueError:
+                        # Usage is telemetry only. A malformed active-turn snapshot must not
+                        # turn an otherwise valid semantic judgment into a provider failure, and
+                        # it must not erase a valid earlier cumulative snapshot.
+                        failure_stage = "token_usage_invalid"
+                    else:
+                        if observed_usage is not None:
+                            # ``total`` is cumulative for the isolated thread. Replace the
+                            # snapshot instead of summing repeated updates or adding ``last``.
+                            if token_usage is not None and any(
+                                new < old
+                                for new, old in zip(
+                                    (
+                                        observed_usage.input_tokens,
+                                        observed_usage.cached_input_tokens,
+                                        observed_usage.cache_write_input_tokens,
+                                        observed_usage.output_tokens,
+                                        observed_usage.reasoning_output_tokens,
+                                        observed_usage.total_tokens,
+                                    ),
+                                    (
+                                        token_usage.input_tokens,
+                                        token_usage.cached_input_tokens,
+                                        token_usage.cache_write_input_tokens,
+                                        token_usage.output_tokens,
+                                        token_usage.reasoning_output_tokens,
+                                        token_usage.total_tokens,
+                                    ),
+                                    strict=True,
+                                )
+                            ):
+                                failure_stage = "token_usage_invalid"
+                            else:
+                                token_usage = observed_usage
                     continue
                 if method == "warning":
                     raise _runtime_warning(message)
@@ -1679,6 +2000,7 @@ class CodexAppServerEvaluator:
             turn_acknowledged=turn_acknowledged,
             process_cleanup=cleanup,
             failure_stage=failure_stage,
+            token_usage=token_usage,
         )
         latency_ms = max(0, int((self.clock.monotonic_seconds() - started) * 1000))
         status = (
@@ -1710,6 +2032,7 @@ class CodexAppServerEvaluator:
             latency_ms=latency_ms,
             status=status,
             provider_request_id=turn_id,
+            token_usage=None if token_usage is None else token_usage.aggregate,
             failure_class=None if failure is None else failure_class,
             runtime_evidence=evidence,
         )

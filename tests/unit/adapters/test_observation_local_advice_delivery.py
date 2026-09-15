@@ -772,9 +772,11 @@ def test_unmapped_session_start_joins_attach_advisory_with_standing_advice(
     _compose(monkeypatch, _STANDING)
 
     started = _run(tmp_path, "SessionStart", "joined", source="startup")
-    assert "Call start to attach a task." in started
+    bootstrap = "call start to attach a task before substantive material work."
+    assert "After guidance reads, tool/schema discovery" in started
+    assert bootstrap in started
     assert "connect_provider" in started
-    assert started.index("Call start to attach a task.") < started.index("connect_provider")
+    assert started.index(bootstrap) < started.index("connect_provider")
 
 
 def test_delivery_in_task_a_does_not_suppress_same_condition_in_task_b(

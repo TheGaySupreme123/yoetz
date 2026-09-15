@@ -25,6 +25,7 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.shared.exceptions import McpError
 from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
 from pydantic import AnyUrl
+from tests.capability.child_environment import child_environment
 from tests.capability.evidence import (
     CapabilityCase,
     EvidenceOutcome,
@@ -35,9 +36,9 @@ from tests.capability.evidence import (
     runtime_capability_context,
 )
 
-from yoetz.mcp.descriptors import TOOL_DESCRIPTORS
+from yoetz.mcp.descriptors import TOOL_DESCRIPTORS, server_instructions
 from yoetz.mcp.resources import GUIDANCE_RESOURCES, read_resource
-from yoetz.mcp.server import BRIDGE_RUNTIME
+from yoetz.mcp.semantic_destination import disclose_semantic_destination
 from yoetz.protocol.canonical import JsonValue, canonical_digest
 from yoetz.protocol.errors import PublicErrorCode
 
@@ -186,13 +187,15 @@ def test_candidate_python_is_the_server_entrypoint(monkeypatch: pytest.MonkeyPat
     ]
 
 
-def _run_raw(*frames: Mapping[str, object]) -> tuple[list[dict[str, object]], bytes, bytes]:
+def _run_raw(
+    tmp_path: Path, *frames: Mapping[str, object]
+) -> tuple[list[dict[str, object]], bytes, bytes]:
     process = subprocess.Popen(
         _serve_command(),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env={**os.environ},
+        env=child_environment(tmp_path),
     )
     assert process.stdin is not None
     assert process.stdout is not None
@@ -222,19 +225,7 @@ async def _sdk_session(
     tmp_path: Path,
 ) -> AsyncGenerator[tuple[ClientSession, types.InitializeResult]]:
     command = _serve_command()
-    home = tmp_path / "mcp-home"
-    home.mkdir(mode=0o700, exist_ok=True)
-    for directory in ("cache", "config", "data", "runtime", "state"):
-        (home / directory).mkdir(mode=0o700, exist_ok=True)
-    environment = {
-        **os.environ,
-        "HOME": str(home),
-        "XDG_CACHE_HOME": str(home / "cache"),
-        "XDG_CONFIG_HOME": str(home / "config"),
-        "XDG_DATA_HOME": str(home / "data"),
-        "XDG_RUNTIME_DIR": str(home / "runtime"),
-        "XDG_STATE_HOME": str(home / "state"),
-    }
+    environment = child_environment(tmp_path)
     params = StdioServerParameters(command=command[0], args=command[1:], env=environment)
     async with stdio_client(params) as (read_stream, write_stream):
         async with ClientSession(read_stream, write_stream) as session:
@@ -327,7 +318,7 @@ def test_mcp_initialize_all_supported_versions(tmp_path: Path) -> None:
 
     negotiated: list[str] = []
     for index, version in enumerate(SUPPORTED_PROTOCOL_VERSIONS, start=1):
-        frames, _stdout, _stderr = _run_raw(_initialize_frame(version, request_id=index))
+        frames, _stdout, _stderr = _run_raw(tmp_path, _initialize_frame(version, request_id=index))
         assert len(frames) == 1
         assert "error" not in frames[0]
         result = cast(dict[str, object], frames[0]["result"])
@@ -348,7 +339,7 @@ def test_mcp_initialize_all_supported_versions(tmp_path: Path) -> None:
 def test_mcp_unknown_version_fallback(tmp_path: Path) -> None:
     """This gate proves protocol conformance and conduit behavior only; it says nothing about model activation."""
 
-    frames, _stdout, _stderr = _run_raw(_initialize_frame("1900-01-01"))
+    frames, _stdout, _stderr = _run_raw(tmp_path, _initialize_frame("1900-01-01"))
     assert len(frames) == 1
     assert "error" not in frames[0]
     result = cast(dict[str, object], frames[0]["result"])
@@ -374,7 +365,9 @@ async def test_mcp_capability_declaration_exact(tmp_path: Path) -> None:
         assert capabilities.experimental is None
         assert capabilities.prompts is None
         assert capabilities.logging is None
-        assert initialize.instructions == BRIDGE_RUNTIME.instructions
+        assert initialize.instructions == server_instructions(
+            semantic_destination=disclose_semantic_destination(None)
+        )
         assert initialize.protocolVersion == types.LATEST_PROTOCOL_VERSION
     _record_pass(
         tmp_path,
@@ -503,6 +496,7 @@ def test_mcp_unknown_tool_sanitized(tmp_path: Path) -> None:
 
     injected = "evil\n\x1b[31m" + ("A" * 200) + "\nTOOL_NAME_INJECTION_MARKER"
     frames, _stdout, stderr = _run_raw(
+        tmp_path,
         _initialize_frame(types.LATEST_PROTOCOL_VERSION),
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
         {
@@ -559,7 +553,7 @@ anyio.run(main)
         input=data,
         capture_output=True,
         check=False,
-        env={**os.environ, "PYTHONPATH": "src"},
+        env={**child_environment(tmp_path), "PYTHONPATH": "src"},
         timeout=5,
     )
     assert result.returncode == 0
@@ -623,7 +617,7 @@ def test_mcp_cancellation_eof_clean(tmp_path: Path) -> None:
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env={**os.environ},
+        env=child_environment(tmp_path),
     )
     assert process.stdin is not None
     assert process.stdout is not None
@@ -666,7 +660,7 @@ def test_mcp_pending_responses_flush_on_eof(tmp_path: Path) -> None:
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env={**os.environ},
+        env=child_environment(tmp_path),
     )
     assert process.stdin is not None
     assert process.stdout is not None
@@ -707,6 +701,7 @@ def test_mcp_stdout_purity(tmp_path: Path) -> None:
     """This gate proves protocol conformance and conduit behavior only; it says nothing about model activation."""
 
     frames, stdout_bytes, _stderr = _run_raw(
+        tmp_path,
         _initialize_frame(types.LATEST_PROTOCOL_VERSION),
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},

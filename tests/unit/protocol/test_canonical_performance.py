@@ -6,8 +6,8 @@ implement string validation/escaping made those operations ~70x slower than
 the stdlib on the same bytes, which dominated the hook 'store' stage. A
 fixture-sized document passes any implementation trivially, so this fence
 measures a ~1 MiB document and bounds the cost relative to the stdlib codec
-on the same machine — immune to CI hardware variance, generous enough to
-never flap, and far below the regressed ratio.
+on the same machine. Paired CPU-time samples exclude runner descheduling,
+and the median limits the influence of an isolated noisy sample.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable
+from statistics import median
 
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 
@@ -23,9 +24,6 @@ from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_pa
 # and far below the regressed one, so it catches a return to per-character
 # work without flapping on ordinary hardware variance.
 _MAX_STDLIB_RATIO = 20.0
-# Below this absolute cost the ratio is noise-dominated and irrelevant to the
-# hook budget either way.
-_ABSOLUTE_FLOOR_SECONDS = 0.080
 
 
 def _realistic_document() -> dict[str, JsonValue]:
@@ -54,13 +52,23 @@ def _realistic_document() -> dict[str, JsonValue]:
     }
 
 
-def _best_of(operation: Callable[[], object], runs: int = 3) -> float:
-    best = float("inf")
-    for _ in range(runs):
-        started = time.perf_counter()
-        operation()
-        best = min(best, time.perf_counter() - started)
-    return best
+def _paired_cpu_ratio(reference: Callable[[], object], candidate: Callable[[], object]) -> float:
+    # Warm both paths before measuring. Each adjacent pair sees similar CPU/cache
+    # conditions; alternate order so neither path always pays the first-run cost.
+    reference()
+    candidate()
+    ratios: list[float] = []
+    for sample in range(5):
+        durations: dict[str, int] = {}
+        pair = (("reference", reference), ("candidate", candidate))
+        for name, operation in pair if sample % 2 == 0 else reversed(pair):
+            started = time.process_time_ns()
+            for _ in range(3):
+                operation()
+            durations[name] = time.process_time_ns() - started
+        assert durations["reference"] > 0
+        ratios.append(durations["candidate"] / durations["reference"])
+    return median(ratios)
 
 
 def test_parse_and_encode_stay_within_ratio_of_stdlib_on_large_state() -> None:
@@ -68,15 +76,18 @@ def test_parse_and_encode_stay_within_ratio_of_stdlib_on_large_state() -> None:
     raw = canonical_encode(document)
     assert len(raw) > 700_000
 
-    stdlib_parse = _best_of(lambda: json.loads(raw))
-    strict_parse = _best_of(lambda: strict_json_parse(raw))
-    assert strict_parse <= max(stdlib_parse * _MAX_STDLIB_RATIO, _ABSOLUTE_FLOOR_SECONDS)
-
-    stdlib_encode = _best_of(
-        lambda: json.dumps(document, separators=(",", ":"), sort_keys=True).encode()
+    assert (
+        _paired_cpu_ratio(lambda: json.loads(raw), lambda: strict_json_parse(raw))
+        <= _MAX_STDLIB_RATIO
     )
-    canonical = _best_of(lambda: canonical_encode(document))
-    assert canonical <= max(stdlib_encode * _MAX_STDLIB_RATIO, _ABSOLUTE_FLOOR_SECONDS)
+
+    assert (
+        _paired_cpu_ratio(
+            lambda: json.dumps(document, separators=(",", ":"), sort_keys=True).encode(),
+            lambda: canonical_encode(document),
+        )
+        <= _MAX_STDLIB_RATIO
+    )
 
 
 def test_fast_string_paths_are_output_identical() -> None:

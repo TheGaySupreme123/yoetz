@@ -3,11 +3,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import threading
 from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol, cast
+from types import SimpleNamespace
+from typing import Any, Protocol, cast
 
 import apsw
 import pytest
@@ -20,13 +23,18 @@ from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.adapters.keys.encrypted_vault import EncryptedVaultStore
 from yoetz.adapters.keys.secret_memory import LocalSecretMemory
 from yoetz.adapters.sqlite.connection import open_catalog_writer
-from yoetz.adapters.sqlite.migrations import CATALOG_MIGRATIONS, Migration, initialize_catalog
+from yoetz.adapters.sqlite.migrations import (
+    BUNDLE_MIGRATIONS,
+    CATALOG_MIGRATIONS,
+    Migration,
+    initialize_catalog,
+)
 from yoetz.application.service import ClientProjectionContext, ControlProjectionBinding
 from yoetz.config.models import YoetzConfig
 from yoetz.config.write import fireworks_provider
 from yoetz.domain.observation import ObservationLifecycle
 from yoetz.domain.privacy import AuthorizationScope, AuthorizationScopeKind
-from yoetz.domain.values import JsonObject
+from yoetz.domain.values import Frontier, JsonObject, format_rfc3339_millis, task_id
 from yoetz.kernel.policies.observation_advice import (
     ObservationAdviceContext,
     ObservationCompositionFact,
@@ -41,15 +49,19 @@ from yoetz.ports.control import (
     ServiceState,
 )
 from yoetz.ports.diagnostics import StartupCheckResult
+from yoetz.ports.keys import BundleKeys, WrapKeyHandle
 from yoetz.ports.ledger import CheckCommitResult
 from yoetz.ports.privacy import (
     EffectivePrivacyPolicy,
     HumanAuthorityCapability,
     LocalDisclosureReceiptView,
     OutboundGatewayPort,
+    PrivacyAuditObjectRoots,
     PrivacyReceiptAudience,
 )
+from yoetz.ports.runtime import BundleProvisionCommand, OwnershipFence, RouteAccess
 from yoetz.ports.secret_memory import HumanAuthorizationProof, SecretPurpose
+from yoetz.ports.start_catalog import TaskRoute, TaskRouteState
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import (
@@ -59,6 +71,14 @@ from yoetz.protocol.models import (
     PublishWorkRequest,
     StartRequest,
     StartResult,
+)
+from yoetz.service.bundle_upgrade import (
+    BackupEvidence,
+    BundleIntegrity,
+    BundleUpgradeError,
+    BundleUpgradeReason,
+    BundleUpgradeReport,
+    BundleUpgradeTarget,
 )
 from yoetz.service.daemon import ServiceComposition, ServiceDaemon
 from yoetz.service.lifecycle import ServiceLifecycle
@@ -127,6 +147,32 @@ class _Paths:
         return self._bundle / "state"
 
 
+class _StartupLifecycle:
+    instance = SimpleNamespace(instance_id=_INSTANCE_ID)
+
+    def assert_singleton_held(self) -> None:
+        return None
+
+
+def _runtime_route() -> TaskRoute:
+    task_id = new_id(IdKind.TASK)
+    session_id = new_id(IdKind.SESSION)
+    return TaskRoute(
+        task_id=task_id,
+        session_id=session_id,
+        bundle_relpath=f"tasks/{task_id}",
+        route_generation=1,
+        state=TaskRouteState.ACTIVE,
+        route_identity_digest=canonical_digest(
+            {"task_id": task_id, "bundle_relpath": f"tasks/{task_id}", "route_generation": 1}
+        ),
+    )
+
+
+async def _wait_thread_event(event: threading.Event) -> None:
+    assert await asyncio.to_thread(event.wait, 5.0)
+
+
 class _Diagnostics:
     def record(self, result: StartupCheckResult) -> None:
         assert type(result) is StartupCheckResult
@@ -175,6 +221,490 @@ def _sqlite_policy(  # pyright: ignore[reportUnusedFunction]
     )
     yield
     installer(None)
+
+
+@pytest.mark.anyio
+async def test_route_inspection_is_off_loop_and_closes_private_catalog_after_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancelled route probe cannot strand the private read-only catalog connection."""
+
+    catalog_started = threading.Event()
+    catalog_release = threading.Event()
+    catalog_closed = threading.Event()
+    inspection_started = threading.Event()
+    inspection_release = threading.Event()
+    inspection_done = threading.Event()
+
+    class _Cursor:
+        def fetchall(self) -> list[tuple[object, ...]]:
+            return []
+
+    class _Catalog:
+        def execute(self, _sql: str, _params: tuple[str, ...]) -> _Cursor:
+            catalog_started.set()
+            assert catalog_release.wait(5.0)
+            return _Cursor()
+
+        def close(self, *, force: bool = False) -> None:
+            assert force
+            catalog_closed.set()
+
+    catalog = _Catalog()
+
+    def fake_open_read_only(_path: Path) -> _Catalog:
+        return catalog
+
+    monkeypatch.setattr(ready_composition_module, "open_read_only", fake_open_read_only)
+
+    def inspect_common(**_kwargs: object) -> object:
+        inspection_started.set()
+        assert inspection_release.wait(5.0)
+        inspection_done.set()
+        return object()
+
+    monkeypatch.setattr(ready_composition_module, "_inspect_common", inspect_common)
+    factories = ready_composition_module.build_runtime_adapter_factories(
+        paths=_Paths(tmp_path),
+        service_instance_id=_INSTANCE_ID,
+        service_generation=1,
+        clock=_Clock(),
+        ids=IdPort(),
+        secret_memory=object(),
+    )
+    route = _runtime_route()
+
+    async def inspect_route_task() -> object:
+        return await factories.inspect_route(route, RouteAccess.WRITE)
+
+    task = asyncio.create_task(inspect_route_task())
+
+    await _wait_thread_event(catalog_started)
+    heartbeat = asyncio.Event()
+    asyncio.get_running_loop().call_soon(heartbeat.set)
+    await asyncio.wait_for(heartbeat.wait(), timeout=1.0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    catalog_release.set()
+    await _wait_thread_event(catalog_closed)
+    inspection_release.set()
+    await _wait_thread_event(inspection_started)
+    await _wait_thread_event(inspection_done)
+
+
+@pytest.mark.anyio
+async def test_joined_blocking_worker_cleans_up_late_resource_after_cancellation() -> None:
+    """A cancelled writer-open wait closes a resource returned by its joined worker."""
+
+    started = threading.Event()
+    release = threading.Event()
+    cleaned = threading.Event()
+
+    class _Resource:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+            cleaned.set()
+
+    resource = _Resource()
+
+    def open_resource() -> _Resource:
+        started.set()
+        assert release.wait(5.0)
+        return resource
+
+    def close_resource(value: _Resource) -> None:
+        value.close()
+
+    task = asyncio.create_task(
+        ready_composition_module._run_blocking_joined(  # pyright: ignore[reportPrivateUsage]
+            open_resource,
+            operation="joined_resource_open_failed",
+            cleanup_result=close_resource,
+        )
+    )
+    await _wait_thread_event(started)
+    task.cancel()
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await _wait_thread_event(cleaned)
+    assert resource.closed
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("recovery_failure", [False, True])
+async def test_replay_cancellation_joins_shielded_ledger_recovery_before_close(
+    tmp_path: Path, recovery_failure: bool
+) -> None:
+    """Replay teardown waits for SqliteLedger recovery before the fenced DB can be closed."""
+
+    started = threading.Event()
+    cancellation_seen = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    class _Ledger:
+        _recovery_task: asyncio.Task[None] | None = None
+
+        async def load_frontier(self) -> Frontier:
+            async def recover() -> None:
+                started.set()
+                await asyncio.to_thread(release.wait, 5.0)
+                finished.set()
+                if recovery_failure:
+                    raise RuntimeError("synthetic_recovery_failure")
+
+            self._recovery_task = asyncio.create_task(recover())
+            try:
+                # ``asyncio.wait`` keeps the recovery task alive on cancellation without the
+                # late-exception warning produced by a cancelled ``shield`` wrapper on Python
+                # 3.14.  This is the same non-cancelling contract that the production adapter
+                # must join before releasing its fenced connection.
+                await asyncio.wait((self._recovery_task,))
+            except asyncio.CancelledError:
+                cancellation_seen.set()
+                raise
+            return Frontier.genesis()
+
+        async def rebuild_projection(self, _projection: str) -> None:
+            return None
+
+    route = _runtime_route()
+    target = BundleUpgradeTarget(
+        task_id=task_id(route.task_id),
+        session_id=route.session_id,
+        bundle_path=tmp_path / "ledger.sqlite3",
+        route_generation=route.route_generation,
+        route_identity_digest=route.route_identity_digest,
+        frontier=Frontier.genesis(),
+        catalog_owner_generation=1,
+    )
+    digest = "sha256:" + "0" * 64
+    after = BundleIntegrity(
+        task_id=task_id(route.task_id),
+        schema_version=14,
+        frontier=Frontier.genesis(),
+        history_digest=digest,
+        event_count=0,
+        object_digest=digest,
+        object_count=0,
+        preserved_digest=digest,
+        projection_digest=digest,
+    )
+    backup = BackupEvidence(task_id(route.task_id), Frontier.genesis(), digest)
+    ledger = _Ledger()
+    adapter = ready_composition_module._BundleUpgradeReplayLedger(  # pyright: ignore[reportPrivateUsage]
+        cast(ready_composition_module.SqliteLedger, ledger),
+        cast(apsw.Connection, object()),
+    )
+    task = asyncio.create_task(
+        adapter.verify_replay(target=target, before=None, after=after, backup=backup)
+    )
+    await _wait_thread_event(started)
+    task.cancel()
+    assert not task.done()
+    await _wait_thread_event(cancellation_seen)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await _wait_thread_event(finished)
+
+
+@pytest.mark.anyio
+async def test_provision_inspection_is_off_loop_and_joins_fresh_bundle_worker_on_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancelled fresh start waits for mkdir/schema inspection to finish before returning."""
+
+    started = threading.Event()
+    release = threading.Event()
+    initialized = threading.Event()
+    inspected = threading.Event()
+
+    def initialize(_path: Path, *, command: object, clock: object) -> None:
+        del command, clock
+        started.set()
+        assert release.wait(5.0)
+        initialized.set()
+
+    def inspect_common(**_kwargs: object) -> object:
+        inspected.set()
+        return object()
+
+    monkeypatch.setattr(ready_composition_module, "_initialize_fresh_bundle", initialize)
+    monkeypatch.setattr(ready_composition_module, "_inspect_common", inspect_common)
+    factories = ready_composition_module.build_runtime_adapter_factories(
+        paths=_Paths(tmp_path),
+        service_instance_id=_INSTANCE_ID,
+        service_generation=1,
+        clock=_Clock(),
+        ids=IdPort(),
+        secret_memory=object(),
+    )
+    route = _runtime_route()
+    command = SimpleNamespace(
+        task_id=route.task_id,
+        session_id=route.session_id,
+        writer_id=new_id(IdKind.WRITER),
+        bundle_relpath=route.bundle_relpath,
+        route_generation=route.route_generation,
+        route_identity_digest=route.route_identity_digest,
+    )
+    provision_command = cast(BundleProvisionCommand, command)
+
+    async def inspect_provision_task() -> object:
+        return await factories.inspect_provision(provision_command)
+
+    task = asyncio.create_task(inspect_provision_task())
+
+    await _wait_thread_event(started)
+    heartbeat = asyncio.Event()
+    asyncio.get_running_loop().call_soon(heartbeat.set)
+    await asyncio.wait_for(heartbeat.wait(), timeout=1.0)
+
+    task.cancel()
+    task.cancel()
+    # Cancellation is intentionally held until the side-effecting worker joins.
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert initialized.is_set()
+    assert inspected.is_set()
+
+
+@pytest.mark.anyio
+async def test_fence_verification_is_off_loop_and_cancellation_leaves_no_worker_resource(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fence verification remains cancellable while its read-only worker finishes independently."""
+
+    started = threading.Event()
+    release = threading.Event()
+    done = threading.Event()
+
+    class _Backend:
+        def verify_fence(self, _state: object, _fence: OwnershipFence) -> None:
+            started.set()
+            assert release.wait(5.0)
+            done.set()
+
+    monkeypatch.setattr(recovery_module, "_backend", lambda: _Backend())
+    factories = ready_composition_module.build_runtime_adapter_factories(
+        paths=_Paths(tmp_path),
+        service_instance_id=_INSTANCE_ID,
+        service_generation=1,
+        clock=_Clock(),
+        ids=IdPort(),
+        secret_memory=object(),
+    )
+    route = _runtime_route()
+    inspection = ready_composition_module._BundleInspection(  # pyright: ignore[reportPrivateUsage]
+        route,
+        tmp_path,
+        tmp_path / "ledger.sqlite3",
+        tmp_path / "catalog.sqlite3",
+        frozenset(),
+        False,
+        object(),
+        object(),
+    )
+    fence = OwnershipFence(_INSTANCE_ID, 1, 1, "nonce_value_123456")
+
+    async def validate_fence_task() -> None:
+        await factories.validate_fence(inspection, fence)
+
+    task = asyncio.create_task(validate_fence_task())
+
+    await _wait_thread_event(started)
+    heartbeat = asyncio.Event()
+    asyncio.get_running_loop().call_soon(heartbeat.set)
+    await asyncio.wait_for(heartbeat.wait(), timeout=1.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    release.set()
+    await _wait_thread_event(done)
+
+
+@pytest.mark.anyio
+async def test_legacy_spool_replay_is_off_loop_and_finishes_claim_after_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stalled legacy spool cannot starve control callbacks or strand its claimed file."""
+
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    calls = 0
+
+    class _Spool:
+        def __init__(self, *, _state: Path) -> None:
+            assert _state == tmp_path
+
+        def pending_workspaces(self) -> tuple[str, ...]:
+            nonlocal calls
+            calls += 1
+            started.set()
+            assert release.wait(5.0)
+            finished.set()
+            return ()
+
+    monkeypatch.setattr(ready_composition_module, "HookSpool", _Spool)
+    forwarder = ready_composition_module._LegacyHookSpoolForwarder(  # pyright: ignore[reportPrivateUsage]
+        tmp_path
+    )
+    task = asyncio.create_task(forwarder.replay())
+    await _wait_thread_event(started)
+
+    heartbeat = asyncio.Event()
+    asyncio.get_running_loop().call_soon(heartbeat.set)
+    await asyncio.wait_for(heartbeat.wait(), timeout=1.0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The retained worker owns the in-flight claim after its awaiter is gone.
+    release.set()
+    await _wait_thread_event(finished)
+    assert calls == 1
+    forwarder.close()
+
+
+@pytest.mark.anyio
+async def test_legacy_spool_retries_after_an_observed_worker_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One failed filesystem pass must not poison every later maintenance pass."""
+
+    calls = 0
+
+    def replay(_state: Path, **_kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("test_spool_temporarily_unavailable")
+
+    monkeypatch.setattr(ready_composition_module, "_replay_legacy_hook_spool", replay)
+    forwarder = ready_composition_module._LegacyHookSpoolForwarder(  # pyright: ignore[reportPrivateUsage]
+        tmp_path
+    )
+    try:
+        with pytest.raises(OSError, match="test_spool_temporarily_unavailable"):
+            await forwarder.replay()
+        await forwarder.replay()
+        assert calls == 2
+    finally:
+        forwarder.close()
+
+
+@pytest.mark.anyio
+async def test_legacy_spool_reports_a_late_failure_once_then_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def replay(_state: Path, **_kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            assert release.wait(5.0)
+            raise OSError("test_late_spool_failure")
+
+    monkeypatch.setattr(ready_composition_module, "_replay_legacy_hook_spool", replay)
+    forwarder = ready_composition_module._LegacyHookSpoolForwarder(  # pyright: ignore[reportPrivateUsage]
+        tmp_path
+    )
+    task = asyncio.create_task(forwarder.replay())
+    try:
+        await _wait_thread_event(started)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        # Join the retained worker rather than start a competing replay. Its late failure
+        # remains observable, but consuming that failure permits a subsequent retry.
+        with pytest.raises(OSError, match="test_late_spool_failure"):
+            await forwarder.replay()
+        await forwarder.replay()
+        assert calls == 2
+    finally:
+        release.set()
+        forwarder.close()
+
+
+@pytest.mark.anyio
+async def test_legacy_spool_close_requests_stop_after_the_active_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    stop_seen = threading.Event()
+
+    def replay(_state: Path, *, stop: threading.Event) -> None:
+        started.set()
+        assert release.wait(5.0)
+        if stop.is_set():
+            stop_seen.set()
+
+    monkeypatch.setattr(ready_composition_module, "_replay_legacy_hook_spool", replay)
+    forwarder = ready_composition_module._LegacyHookSpoolForwarder(  # pyright: ignore[reportPrivateUsage]
+        tmp_path
+    )
+    task = asyncio.create_task(forwarder.replay())
+    try:
+        await _wait_thread_event(started)
+        forwarder.close()
+        release.set()
+        await task
+        assert stop_seen.is_set()
+    finally:
+        release.set()
+        forwarder.close()
+
+
+def test_legacy_spool_replay_stops_at_one_bounded_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claimed: list[tuple[str, int]] = []
+    handled = 0
+
+    class _Spool:
+        def __init__(self, *, _state: Path) -> None:
+            assert _state == tmp_path
+
+        def pending_workspaces(self) -> tuple[str, ...]:
+            return tuple(f"hmac-sha256:{index:064x}" for index in range(100))
+
+        @contextmanager
+        def claim(self, workspace: str, *, limit: int):
+            nonlocal handled
+            claimed.append((workspace, limit))
+            handled += 1
+            yield (SimpleNamespace(event_name="PostToolUse", payload={"session_id": "s"}),)
+
+    monkeypatch.setattr(ready_composition_module, "HookSpool", _Spool)
+    import yoetz.cli.observe_hooks as observe_hooks_module
+
+    def handle_observe(**_kwargs: object) -> int:
+        return 0
+
+    monkeypatch.setattr(observe_hooks_module, "handle_observe", handle_observe)
+    ready_composition_module._replay_legacy_hook_spool(tmp_path)  # pyright: ignore[reportPrivateUsage]
+
+    assert handled == ready_composition_module._LEGACY_HOOK_SPOOL_BATCH_LIMIT  # pyright: ignore[reportPrivateUsage]
+    assert claimed[0][1] == ready_composition_module._LEGACY_HOOK_SPOOL_BATCH_LIMIT  # pyright: ignore[reportPrivateUsage]
+    assert claimed[-1][1] == 1
 
 
 def test_open_catalog_writer_allows_unfenced_catalog_initialization(tmp_path: Path) -> None:
@@ -228,10 +758,10 @@ async def test_open_ready_catalog_transactionally_migrates_v2_before_runtime_use
         ids=IdPort(),
     )
     try:
-        assert catalog._db.execute("PRAGMA user_version").fetchone() == (4,)  # pyright: ignore[reportPrivateUsage]
+        assert catalog._db.execute("PRAGMA user_version").fetchone() == (5,)  # pyright: ignore[reportPrivateUsage]
         assert catalog._db.execute(  # pyright: ignore[reportPrivateUsage]
             "SELECT value FROM catalog_meta WHERE key = 'storage_schema_version'"
-        ).fetchone() == ("4",)
+        ).fetchone() == ("5",)
         assert (
             catalog._db.execute(  # pyright: ignore[reportPrivateUsage]
                 "SELECT repository_privacy_commitment FROM task_routes LIMIT 1"
@@ -386,6 +916,422 @@ def test_ready_factory_synchronizes_observation_gate_from_loaded_config(tmp_path
 
 
 @pytest.mark.anyio
+async def test_startup_bundle_upgrade_precedes_lineage_and_runtime_composition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The startup upgrade callback is complete before any ready graph client is built."""
+
+    events: list[str] = []
+
+    class _DB:
+        def close(self, *, force: bool = False) -> None:
+            assert force
+
+    class _Catalog:
+        _db = _DB()
+
+    class _Vault:
+        ready = True
+        generation = 2
+        _installation_id = _INSTALLATION_ID
+
+        def installation_mac_handle(self, _purpose: object) -> _Lookup:
+            return _Lookup()
+
+    catalog = _Catalog()
+
+    async def open_catalog(_path: Path, **_kwargs: object) -> _Catalog:
+        return catalog
+
+    async def upgrade(**_kwargs: object) -> None:
+        events.append("upgrade")
+
+    def lineage(*_args: object, **_kwargs: object) -> object:
+        events.append("lineage")
+        raise RuntimeError("stop_after_order_probe")
+
+    monkeypatch.setattr(ready_composition_module, "ensure_owner_only_dir", _accept_private_path)
+    monkeypatch.setattr(ready_composition_module, "open_ready_catalog", open_catalog)
+    monkeypatch.setattr(ready_composition_module, "SqliteLineageStore", lineage)
+
+    with pytest.raises(RuntimeError, match="stop_after_order_probe"):
+        await ready_composition_module.provide_service_ready_context(
+            1,
+            2,
+            lifecycle=_StartupLifecycle(),
+            vault=_Vault(),  # type: ignore[arg-type]
+            config=YoetzConfig(),
+            paths=_Paths(tmp_path),
+            clock=_Clock(),
+            secret_memory=object(),
+            startup_bundle_upgrade=upgrade,
+        )
+
+    assert events == ["upgrade", "lineage"]
+
+
+@pytest.mark.anyio
+async def test_startup_bundle_upgrade_failure_closes_catalog_and_blocks_ready_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed upgrade cannot leak the catalog or compose a partially ready generation."""
+
+    events: list[str] = []
+
+    class _DB:
+        close_count = 0
+
+        def close(self, *, force: bool = False) -> None:
+            assert force
+            self.close_count += 1
+
+    class _Catalog:
+        def __init__(self, db: _DB) -> None:
+            self._db = db
+
+    class _Vault:
+        ready = True
+        generation = 2
+        _installation_id = _INSTALLATION_ID
+
+        def installation_mac_handle(self, _purpose: object) -> _Lookup:
+            return _Lookup()
+
+    db = _DB()
+    catalog = _Catalog(db)
+
+    async def open_catalog(_path: Path, **_kwargs: object) -> _Catalog:
+        return catalog
+
+    async def upgrade(**_kwargs: object) -> None:
+        events.append("upgrade")
+        raise BundleUpgradeError(BundleUpgradeReason.BACKUP_FAILED, True)
+
+    def lineage(*_args: object, **_kwargs: object) -> object:
+        events.append("lineage")
+        raise AssertionError("lineage must not run after startup upgrade failure")
+
+    monkeypatch.setattr(ready_composition_module, "ensure_owner_only_dir", _accept_private_path)
+    monkeypatch.setattr(ready_composition_module, "open_ready_catalog", open_catalog)
+    monkeypatch.setattr(ready_composition_module, "SqliteLineageStore", lineage)
+
+    with pytest.raises(BundleUpgradeError) as raised:
+        await ready_composition_module.provide_service_ready_context(
+            1,
+            2,
+            lifecycle=_StartupLifecycle(),
+            vault=_Vault(),  # type: ignore[arg-type]
+            config=YoetzConfig(),
+            paths=_Paths(tmp_path),
+            clock=_Clock(),
+            secret_memory=object(),
+            startup_bundle_upgrade=upgrade,
+        )
+
+    assert raised.value.reason is BundleUpgradeReason.BACKUP_FAILED
+    assert raised.value.retryable is True
+    assert events == ["upgrade"]
+    assert db.close_count == 1
+
+
+@pytest.mark.anyio
+async def test_startup_bundle_upgrade_retry_reenters_before_ready_composition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retry gets a fresh catalog and can proceed after a bounded startup failure."""
+
+    attempts = 0
+    catalogs: list[object] = []
+
+    class _DB:
+        def close(self, *, force: bool = False) -> None:
+            assert force
+
+    class _Catalog:
+        def __init__(self) -> None:
+            self._db = _DB()
+
+    class _Vault:
+        ready = True
+        generation = 2
+        _installation_id = _INSTALLATION_ID
+
+        def installation_mac_handle(self, _purpose: object) -> _Lookup:
+            return _Lookup()
+
+    async def open_catalog(_path: Path, **_kwargs: object) -> _Catalog:
+        catalog = _Catalog()
+        catalogs.append(catalog)
+        return catalog
+
+    async def upgrade(**_kwargs: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise BundleUpgradeError(BundleUpgradeReason.MAINTENANCE_BUSY, True)
+        raise RuntimeError("stop_after_retry_probe")
+
+    monkeypatch.setattr(ready_composition_module, "ensure_owner_only_dir", _accept_private_path)
+    monkeypatch.setattr(ready_composition_module, "open_ready_catalog", open_catalog)
+
+    for _ in range(2):
+        with pytest.raises((BundleUpgradeError, RuntimeError)):
+            await ready_composition_module.provide_service_ready_context(
+                1,
+                2,
+                lifecycle=_StartupLifecycle(),
+                vault=_Vault(),  # type: ignore[arg-type]
+                config=YoetzConfig(),
+                paths=_Paths(tmp_path),
+                clock=_Clock(),
+                secret_memory=object(),
+                startup_bundle_upgrade=upgrade,
+            )
+
+    assert attempts == 2
+    assert len(catalogs) == 2
+
+
+@pytest.mark.anyio
+async def test_startup_bundle_upgrade_skips_legacy_route_and_keeps_v12_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unsupported dormant route is reported while a supported route remains migratable."""
+
+    legacy = _runtime_route()
+    supported = _runtime_route()
+    routes = (legacy, supported)
+    schemas = {legacy.task_id: 9, supported.task_id: 12}
+
+    class _Cursor:
+        def fetchall(self) -> list[tuple[object, ...]]:
+            return []
+
+    class _DB:
+        def execute(self, _sql: str, _params: tuple[object, ...]) -> _Cursor:
+            return _Cursor()
+
+    class _Catalog:
+        _db = _DB()
+        _lookup = _Lookup()
+        generation = 7
+
+        async def recovery_routes(self) -> tuple[TaskRoute, ...]:
+            return routes
+
+    class _PrivacyStore:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def live_object_roots(
+            self, task_id: str, route_identity_digest: str
+        ) -> PrivacyAuditObjectRoots:
+            assert task_id == supported.task_id
+            assert route_identity_digest == supported.route_identity_digest
+            return PrivacyAuditObjectRoots(
+                supported.task_id,
+                supported.route_identity_digest,
+                4,
+                (),
+                canonical_digest(()),
+            )
+
+    diagnostics: list[StartupCheckResult] = []
+
+    class _Diagnostics:
+        def record(self, result: StartupCheckResult) -> None:
+            diagnostics.append(result)
+
+    def schema_and_frontier(path: Path) -> tuple[int, Frontier]:
+        return schemas[path.parent.name], Frontier.genesis()
+
+    monkeypatch.setattr(
+        ready_composition_module,
+        "_bundle_upgrade_schema_and_frontier",
+        schema_and_frontier,
+    )
+    monkeypatch.setattr(ready_composition_module, "CatalogPrivacyAudit", _PrivacyStore)
+
+    _routes, targets = await ready_composition_module._bundle_upgrade_targets(  # pyright: ignore[reportPrivateUsage, reportArgumentType]
+        _Catalog(),  # pyright: ignore[reportArgumentType]
+        bundle_root=tmp_path,
+        installation_id=_INSTALLATION_ID,
+        clock=_Clock(),
+        diagnostics=_Diagnostics(),
+    )
+
+    assert tuple(target.task_id for target in targets) == (supported.task_id,)
+    assert len(diagnostics) == 1
+    assert diagnostics[0].reason_code == BundleUpgradeReason.SCHEMA_UPGRADE_PATH_UNKNOWN.value
+    assert diagnostics[0].safe_details["route_identity_digest"] == legacy.route_identity_digest
+    assert diagnostics[0].safe_details["schema_version"] == 9
+
+
+@pytest.mark.anyio
+async def test_default_startup_bundle_upgrade_runs_real_effects_on_isolated_v12_fixture(
+    tmp_path: Path,
+) -> None:
+    """Exercise the production backup, migration, and replay glue against an isolated bundle."""
+
+    tmp_path.chmod(0o700)
+    route = _runtime_route()
+    bundle_dir = tmp_path / "tasks" / route.task_id
+    bundle_dir.mkdir(mode=0o700, parents=True)
+    bundle = bundle_dir / "ledger.sqlite3"
+    bundle_db = apsw.Connection(str(bundle))
+    bundle_db.execute("PRAGMA foreign_keys = ON")
+    bundle_db.execute("PRAGMA trusted_schema = OFF")
+    with bundle_db:
+        for migration in BUNDLE_MIGRATIONS[:12]:
+            bundle_db.execute(migration.ddl.decode("utf-8"))
+        bundle_db.execute(
+            "INSERT INTO bundle_meta(key,value) VALUES"
+            "('task_id',?),('owner_generation','2'),('owner_nonce','fixture_nonce_0001'),"
+            "('route_generation','1'),('route_identity_digest',?),"
+            "('storage_schema_version','12'),('protocol_version','0.1'),"
+            "('import_schema_version','1'),('updated_at',?)",
+            (route.task_id, route.route_identity_digest, format_rfc3339_millis(_Clock().now_utc())),
+        )
+        bundle_db.execute("INSERT INTO counters(name,next_value) VALUES('ingestion_sequence',1)")
+    bundle_db.close()
+    bundle.chmod(0o600)
+
+    catalog = await open_ready_catalog(
+        tmp_path / "catalog.sqlite3",
+        installation_id=_INSTALLATION_ID,
+        service_generation=2,
+        lookup=_Lookup(),
+        clock=_Clock(),
+        ids=IdPort(),
+    )
+    catalog_db = catalog._db  # pyright: ignore[reportPrivateUsage]
+    catalog_db.execute(
+        "INSERT INTO task_routes(task_id,active_session_id,bundle_relpath,route_generation,"
+        "active_route_identity_digest,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+        (
+            route.task_id,
+            route.session_id,
+            route.bundle_relpath,
+            route.route_generation,
+            route.route_identity_digest,
+            "active",
+            format_rfc3339_millis(_Clock().now_utc()),
+            format_rfc3339_millis(_Clock().now_utc()),
+        ),
+    )
+
+    class _Mac:
+        def mac(self, domain: bytes, message: bytes) -> str:
+            del domain, message
+            return "hmac-sha256:" + "c" * 64
+
+    class _Vault:
+        def installation_mac_handle(self, _purpose: object) -> _Mac:
+            return _Mac()
+
+        async def load_bundle_keys(self, _task: str) -> BundleKeys:
+            return BundleKeys("fixture-slot", cast(WrapKeyHandle, object()), _Mac())
+
+    class _Recovery:
+        def __init__(self, _catalog_path: Path, _clock: _Clock) -> None:
+            pass
+
+        def inspect(
+            self,
+            bundle_root: Path,
+            *,
+            catalog_path: Path,
+            task_id: str,
+            route_generation: int,
+            route_identity_digest: str,
+        ) -> object:
+            return recovery_module.RecoveryState(
+                bundle_root=bundle_root,
+                catalog_path=catalog_path,
+                task_id=task_id,
+                route_generation=route_generation,
+                route_identity_digest=route_identity_digest,
+                storage_schema_version=14,
+                owner_generation=2,
+                owner_nonce="fixture_nonce_0001",
+                last_verified_frontier=Frontier.genesis(),
+                tail_state=recovery_module.RecoveryTailState.CLEAN,
+                object_state=recovery_module.RecoveryObjectState.VERIFIED,
+                key_state=recovery_module.RecoveryKeyState.READY,
+                marker_state=recovery_module.RecoveryMarkerState.ABSENT,
+                projection_state=recovery_module.RecoveryProjectionState.CURRENT,
+                privacy_root_generation=0,
+                privacy_root_digest=canonical_digest(()),
+            )
+
+    class _Diagnostics:
+        def record(self, result: StartupCheckResult) -> None:
+            assert type(result) is StartupCheckResult
+
+    old_recovery_persistence = getattr(ready_composition_module, "_RecoveryPersistence")
+    old_install_recovery_persistence = getattr(
+        ready_composition_module, "_install_recovery_persistence"
+    )
+    journal_row: tuple[object, ...] | None = None
+
+    def ignore_recovery(_value: object) -> None:
+        return None
+
+    try:
+        # The real callback still uses the production temporary fence and effects. The recovery
+        # state itself is supplied by an isolated fixture adapter so this test does not mutate a
+        # user installation or depend on a preexisting recovery sidecar.
+        setattr(ready_composition_module, "_RecoveryPersistence", _Recovery)
+        setattr(ready_composition_module, "_install_recovery_persistence", ignore_recovery)
+        builder = cast(
+            Callable[..., Callable[..., Awaitable[object]]],
+            getattr(ready_composition_module, "_build_default_startup_bundle_upgrade"),
+        )
+        upgrade = builder(
+            lifecycle=_StartupLifecycle(),
+            vault=_Vault(),  # type: ignore[arg-type]
+            config=YoetzConfig(),
+            paths=_Paths(tmp_path),
+            secret_memory=object(),
+        )
+        report = await upgrade(
+            catalog=catalog,
+            bundle_root=tmp_path,
+            installation_id=_INSTALLATION_ID,
+            service_generation=2,
+            vault_generation=2,
+            clock=_Clock(),
+            ids=IdPort(),
+            diagnostics=_Diagnostics(),
+        )
+        journal_row = catalog_db.execute(
+            "SELECT state, phase, backup_manifest_digest FROM maintenance_operations"
+        ).fetchone()
+    finally:
+        setattr(ready_composition_module, "_RecoveryPersistence", old_recovery_persistence)
+        setattr(
+            ready_composition_module,
+            "_install_recovery_persistence",
+            old_install_recovery_persistence,
+        )
+        catalog_db.close(force=True)
+
+    assert type(report) is BundleUpgradeReport
+    assert len(report.migrated) == 1
+    assert journal_row is not None
+    assert journal_row[0:2] == ("complete", "terminal")
+    assert type(journal_row[2]) is str and journal_row[2].startswith("sha256:")
+    backup_sets = tuple((tmp_path / "backups" / route.task_id).iterdir())
+    assert len(backup_sets) == 1
+    assert (backup_sets[0] / "backup-manifest.json").is_file()
+    inspection = apsw.Connection(str(bundle), flags=apsw.SQLITE_OPEN_READONLY)
+    try:
+        assert inspection.execute("PRAGMA user_version").fetchone() == (14,)
+    finally:
+        inspection.close(force=True)
+
+
+@pytest.mark.anyio
 async def test_ready_factory_starts_and_reads_repository_bound_setup(tmp_path: Path) -> None:
     tmp_path.chmod(0o700)
     clock = _Clock()
@@ -476,6 +1422,24 @@ async def test_ready_factory_starts_and_reads_repository_bound_setup(tmp_path: P
         )
         assert type(receipt_view) is LocalDisclosureReceiptView
         assert receipt_view.receipt.scope == setup_scope
+        # The same receipt must be reachable over ordinary control, not only through the port:
+        # the composed support-handler map used to omit both read methods (issue #730).
+        fetched = cast(
+            dict[str, Any],
+            await app.privacy_receipts_get(
+                JsonObject({"schema_version": "1.0.0", "receipt_id": receipt_id})
+            ),
+        )
+        assert fetched["outcome"] == "found"
+        assert fetched["receipt"]["kind"] == "local_disclosure"
+        assert fetched["receipt"]["receipt"]["receipt_id"] == receipt_id
+        listed = cast(
+            dict[str, Any],
+            await app.privacy_receipts_list(
+                JsonObject({"schema_version": "1.0.0", "filters": {}, "page_size": 50})
+            ),
+        )
+        assert [item["receipt"]["receipt_id"] for item in listed["receipts"]] == [receipt_id]
         request = StartRequest.model_validate(
             {
                 "protocol_version": "0.1",

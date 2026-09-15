@@ -106,8 +106,16 @@ repository_identity_required` (the control handshake carried no workspace locato
 `repository_identity_mismatch` (the locator resolved to a different repository than the route, or
 the route holds no repository binding); neither discloses a commitment, and a hook uses the reason
 to keep a live mapping out of the `mapping_stale` class (issue #578).
+The repository-fence message names missing context or the current closed identity kind
+(`git_common_root` or `directory`) and directs the operator to the original workspace. It exposes
+no path or commitment. Read-only operation status retains the same fence: when that workspace is
+unavailable, the task workflow cannot inspect the operation (issue #444).
 `workspace_task_exists` identifies an explicit `mode=create` colliding with an identical
-workspace/external pair. It never refuses a new pair on the automatic admission path.
+workspace/external pair. It never refuses a new pair on the automatic admission path. The conflict
+deliberately carries no task selector or count: possession of a workspace reference alone is not
+authority to discover or attach another task. Automatic host hooks preflight a validated selector
+from the private local lifecycle store instead of waiting for this conflict; any attach still
+requires that selector, and the public error remains unchanged and reveals no binding.
 Workspace membership alone never authorizes discovery,
 attachment, or task selection. A live, consented project status may disclose bounded sibling
 identity and state; attachment still requires a held session selector or the exact identity pair.
@@ -166,12 +174,90 @@ as a `Repair:` clause on the compatible text summary channel, because MCP hosts 
 to surface `structuredContent`.
 
 The same text channel also carries a bounded `Reason:` clause when `safe_details` holds a frozen
-protocol `reason_code`, optionally followed by a JSON-pointer `field` (issue #579). Both tokens are already
-allowlisted structural content; the projector re-gates them and never copies caller prose. Claude
-Code's generic MCP profile delivers only the text `content` for `isError` results, so without this
-clause an `EVENT_INVALID` set-order rejection arrives as a bare code. The native Cursor profile
-repeats the exact canonical JSON wire body in text `content`, which already includes those
-`safe_details`; tests lock both projections.
+protocol `reason_code`, optionally followed by a JSON-pointer `field` (issue #579), and a bounded
+`Rejected:` clause naming up to two `reasons`/`fields` validation locations (with the remainder
+counted) when a schema rejection carries those lists instead. Every token is re-gated against the
+closed validation-reason set and the frozen pointer shape; the projector never copies caller prose.
+Claude Code's generic MCP profile delivers only the text `content` for `isError` results, so
+without these clauses an `EVENT_INVALID` set-order rejection arrived as a bare code and a malformed
+`actor_id` arrived without its field. The native Cursor profile repeats the exact canonical JSON
+wire body in text `content`, which already includes those `safe_details`; tests lock both
+projections.
+
+Every agent-facing surface additionally renders a **typed recovery directive** when
+`safe_details` holds a registered `continuation` token (ADR-030, issue #739). The token is the only
+part that travels: `yoetz.protocol.recovery` holds the frozen directive sentence, an optional
+`yoetz://guidance/...` pointer with a section anchor, and an optional bounded nudge, and each
+renderer reconstructs them locally. No `safe_details` key and no `public-error` schema version was
+added to carry that prose, and a third-party consumer reading structured JSON resolves the token
+through this section.
+
+`yoetz.protocol.errors` is a dependency root and holds the admitted token set literally as
+`ADMITTED_CONTINUATION_TOKENS`, and the reason-to-token map literally as
+`REASON_CODE_CONTINUATIONS`; `yoetz.protocol.recovery` fails at import if its registry and those
+disagree, so a token can never be admitted onto the wire without a directive behind it. The token
+is attached where every public error is built: `PublicOperationError` adds the continuation its
+`reason_code` maps to at construction, unless the producer already chose one, so a kernel,
+application, service, bridge, or CLI producer that names a mapped reason ships the directive
+without naming it. Two disjoint reason vocabularies resolve to tokens: protocol reason codes
+through that map (and `continuation_for_reason`), and local lifecycle, instance, and ceremony
+reasons through `continuation_for_local_reason`. An overlap between them is an import-time
+failure.
+
+`request_timeout` is the one reason whose directive depends on the operation kind, which only the
+boundary that issued the request knows (`timeout_operation_kind`): a timed-out read
+(`read_timeout_new_identity`) proves nothing committed and directs a new read identity; a timed-out
+write (`write_timeout_same_identity`) leaves the outcome unknown and directs `status
+view=operation` under the same `request_id`; and a timed-out `start`
+(`start_timeout_same_identity`) leaves it unknown without the session and writer ids that view
+requires, so it directs one exact replay of the same start body, as the shipped recovery table's
+lost-start branch has always required (issue #669). When the caller cannot say which it was, no
+continuation travels rather than the wrong one.
+
+A body the schema validator rejected before any write is a **correction, not a retry**. The MCP
+bridge's argument validator is the only producer of location-shaped `safe_details` (`fields` and
+`reasons` lists), and it attaches `input_correction_new_identity` to every such rejection: the
+field pointer and authoring hint say what to fix, and the directive says the corrected body is
+submitted once under a new `request_id` rather than resent or treated as an ambiguous write. The
+`publish_work` draft validator attaches the same token to every non-retryable `EVENT_INVALID`
+whose reason has no directive of its own; it is classified at that producer rather than mapped
+from the reason, because the same validation reasons also name corrupt stored records elsewhere,
+where "correct your input" would be false. Two
+facts a boundary knows beyond the locations override that token: a unique field-ownership repair
+(issue #266) attaches `field_ownership_repair`, and an unreachable recovery oracle
+(`operation_recovery_unavailable`) attaches `recovery_check_then_correct`, which requires the
+original `request_id` to have a known outcome before any corrected submission.
+
+A coverage ratchet requires every member of `PROTOCOL_REASON_CODES` to resolve to a directive or
+carry an explicit exemption, so a newly registered reason code cannot reach an agent as a bare
+token with nothing to do about it.
+
+On the 512-byte MCP text channel the directive is budgeted after the identity and reason clauses,
+and optional parts are dropped from the least load-bearing end — nudge, then guidance pointer, then
+carried commands. The error identity is never dropped to fit advice. The CLI has no such ceiling
+and renders `Continuation:`, `Next:`, `Commands:`, `Guidance:`, and the nudge on separate lines
+beneath the existing `CODE: message` line, and appends the same lines to a bounded lifecycle,
+instance, or ceremony refusal line whose local reason has a registered directive. Frozen command
+literals already allowlisted on `safe_details` (`prepare_command`, `review_command`,
+`authorize_command`) are rendered in that fixed order; which of them travel is decided upstream, so
+the clause reports what is present.
+
+For `claim_revision_mismatch`, `safe_details` carries an allowlisted `invariant` naming the closed
+domain rule that rejected the draft, and both the MCP text projection and the CLI render an
+`Invariant:` plus `Correction:` clause from it. The corrective phrases live in the shared recovery
+registry beside the continuation directives (ADR-030), so the same rejection reads the same way on
+both surfaces; the CLI previously rendered no correction at all.
+
+The invariant vocabulary is closed and gated twice: `yoetz.protocol.errors` holds
+`ADMITTED_CLAIM_REVISION_INVARIANTS` literally because it is a dependency root, `yoetz.domain.events`
+reuses that set rather than restating it, and `yoetz.protocol.recovery` fails at import unless every
+admitted invariant has a correction. An unregistered token is stripped by the normalizer and the
+clause is omitted.
+
+Until ADR-030 the invariant travelled only inside the public error message, and the projector
+recovered it by matching that whole sentence with a regex — so a reworded message silently cost the
+agent the correction. The clause is now independent of message wording, and the projector still
+never echoes the message.
 
 Every MCP result also carries a bounded ASCII text projection (at most 512 bytes) for hosts that
 drop `structuredContent`. A successful projection includes the first valid returned frontier's
@@ -193,12 +279,17 @@ The host-facing MCP `outputSchema` also projects fixed `prefixItems` tuples into
 only the declaration used by the host: every returned result is first validated against the exact
 immutable catalogue schema, which retains tuple order, length, and member identity.
 
-The native Cursor profile starts the same bridge with `--host cursor`. Cursor `3.17.x` does not
+The bridge accepts a serving host identity with `--host generic|codex|claude|cursor`. `generic`
+leaves the host unproven and is the default for portable/manual carriers; it never implies Codex.
+The native Codex and Claude carriers use `--host codex` and `--host claude` respectively, while the
+native Cursor profile starts the same bridge with `--host cursor`. Cursor `3.17.x` does not
 reliably deliver `structuredContent` to its model, so this explicit host profile repeats the exact
 canonical JSON wire body as the single text `content` item while retaining `structuredContent`
 unchanged. It adds no field and grants no additional read authority: payload-bearing fields appear
 only when the ordinary service route already returned them. Generic and portable Agent Plugin
-routes keep the bounded weaker projection above, preserving the shared portable bundle bytes.
+routes keep the bounded weaker projection above, preserving the shared portable bundle bytes. Host
+identity is a serving and diagnostic fact; it does not grant host admission or agent-chat
+attestation, which retain their independent client allowlists and authorization checks.
 
 Protocol reason
 `expected_frontier_required` marks a state-sensitive `publish_work` batch that omitted
@@ -387,7 +478,8 @@ The independent exhaustive path-to-`SchemaKind` map is: `events/* -> event`,
 `config/* -> config`, `version/* -> version_manifest`, and
 `common/*|operations/*|findings/*|receipts/*|privacy/*|service/* -> request_result`. The manifest
 records both typed values and the catalog re-derives each from its own map. These prefixes exhaust
-the 96 v0.1 schema artifacts; no `support_manifest` kind or support-manifest schema exists.
+every member of `schemas/manifest.json` (the reviewed manifest, not this prose, owns the count);
+no `support_manifest` kind or support-manifest schema exists.
 
 ## 5. Coverage (`protocol/coverage.py`)
 
@@ -659,7 +751,7 @@ Every status is paired with one required closed `SemanticReason`, never prose or
 `provider_rate_limited`, `provider_quota_exhausted`, `retry_budget_exhausted`,
 `audit_reservation_unavailable`, `receipt_persistence_unknown`, `deadline_authority_lost`,
 `lease_authority_lost`, `frontier_changed`, `dependency_changed`, `route_semantic_ceiling`,
-`coordinator_failure`. `route_semantic_ceiling` is paired with `blocked_by_policy` when a strict
+`case_capacity_exceeded`, `coordinator_failure`. `route_semantic_ceiling` is paired with `blocked_by_policy` when a strict
 MCP process receives a semantic check request; it is a route-local ceiling, not a durable-policy
 decision.
 `protocol/models.py` owns both enum objects, the immutable exhaustive status/reason relation, and
@@ -710,8 +802,10 @@ usage, cost, and failure facts; semantic-attempt ID; dispatch kind; exactly one 
 authorization or local-disclosure reservation; durable privacy-receipt ID; external request
 commitment when applicable; and the validated terminal status/reason pair. The exact Python fields
 and wire conversions are frozen in `domain/findings.md` and
-`semantic-provenance-1.0.0.schema.json`; the append-only external-runtime extension is frozen in
-`semantic-provenance-1.1.0.schema.json` and `runtime-attempt-evidence-1.0.0.schema.json`. The
+`semantic-provenance-1.0.0.schema.json`; the append-only external-runtime extension is carried by
+current `semantic-provenance-1.2.0.schema.json` and `runtime-attempt-evidence-1.1.0.schema.json`,
+while the released `semantic-provenance-1.1.0.schema.json` and
+`runtime-attempt-evidence-1.0.0.schema.json` remain readable. The
 same append-only `1.1.0` carries the optional `fallback_from` object (issue #582) — `provider`,
 `endpoint_profile_id`, `endpoint_profile_version`, `model`, `attempted_count`, `reason` —
 present exactly when the declared fallback endpoint served the attempt; the top-level
@@ -734,6 +828,17 @@ attempt provenance remains valid check accounting but can never justify a semant
 `finding_from_json`/`finding_to_json` and
 `semantic_provenance_from_json`/`semantic_provenance_to_json` are the sole codecs. The finding
 event alias delegates to them; no event, port, Pydantic model, or adapter owns a parallel dump.
+
+Codex subscription-runtime attempts may carry a bounded `runtime_evidence.token_usage` object in
+the current runtime evidence schema. It records one cumulative `total` snapshot as non-overlapping
+`input_tokens`, `output_tokens`, and `total_tokens`, plus the `cached_input_tokens`,
+`cache_write_input_tokens`, and `reasoning_output_tokens` counters for analysis. Cached input and
+reasoning output are subsets and are never added again; cache-write input remains a separate
+provider counter with no assumed arithmetic relationship. Repeated snapshots are replaced rather
+than summed. Missing usage remains absent, and malformed or regressing matching snapshots leave a
+closed `token_usage_invalid` diagnostic without invalidating an otherwise valid semantic judgment.
+Only the exact active thread and turn are accepted, and no account identifiers or raw provider
+notification body is retained.
 
 Work-integrity finding kinds (`FindingKind`):
 `completion_with_open_obligations`, `requested_item_never_attempted`,
@@ -854,7 +959,12 @@ policy/schema version entries, obligation/response/gap/redaction records, and ca
 It owns receipt-only enums; response disposition and waiver scope reuse `domain/findings.py`, and
 the boundary `ReceiptRedactionProfile` reuses `protocol/models.py`. The document field inventory
 is exactly the receipt-document schema, including `suppressed_finding_count`, and it has no
-post-append result frontier.
+post-append result frontier. An applicable semantic check contributes its selected
+  `semantic_provenance`, including bounded per-attempt token usage; deterministic or historical
+  receipts omit that optional field so their prior bytes remain unchanged.
+  The receipt provenance represents the applicable provider result; usage for failed, expired, or
+  late physical retries remains in the durable semantic-attempt ledger and internal accounting,
+  rather than being invented into that public provenance.
 
 `receipt_document_from_json`/`receipt_document_to_json` are the sole document codecs.
 `render_receipt_compact(document) -> str` returns one bounded string; there is no v0.1
@@ -865,11 +975,12 @@ top-level known-gap set, and the fold must equal that top-level coverage.
 Shared structural gap codes for optional semantic relevance review (distinct families):
 
 - `optional_semantic_review_blocked_by_policy` — blocked before dispatch by network-egress policy;
-- `optional_semantic_review_registration_drift` — the strict route ceiling blocked this process
-  while the durable applied-route record says the last install applied the policy route. The
-  disagreement is the whole claim: a strict route reached outside the install ceremony is a
-  legitimate owner action, so the gap offers the recovery rather than asserting a stale
-  process. Carried alongside the ceiling gap above, never instead of it, so the terminal
+- `optional_semantic_review_registration_drift` — the explicit Codex strict route ceiling blocked
+  this process while the durable applied-route record says the last install applied the policy
+  route. The disagreement is the whole claim: a strict route reached outside the install ceremony
+  is a legitimate owner action, so the gap offers the recovery rather than asserting a stale
+  process. Generic, Claude, and Cursor serving identities cannot be attributed to that Codex
+  record. Carried alongside the ceiling gap above, never instead of it, so the terminal
   status/reason/provenance binding is unchanged;
 - `semantic_review_not_configured` — evaluator/provider not configured;
 - `semantic_relevance_review_not_run` — evaluation failed/timed out/unavailable without a clean pass;
@@ -950,8 +1061,12 @@ publishing new cooperative work on the participant's behalf. An observation-auth
 `finding_recorded` still invalidates the older check. `check_current_as_of_earlier_frontier` is the
 qualified attribution in this family: when only check-answering responses and/or finding-free
 observation records follow the check, its coverage still contributes while the receipt names the
-subject frontier its verdict is current as of. `kernel/reducers.invalidates_recorded_check` is the
-single predicate deciding between the two, shared by the receipt and by compact status coverage.
+subject frontier its verdict is current as of. The application also classifies that suffix
+(`kernel/receipt_builder.CheckSuffixClass`: responses only, observations only, or mixed) so the
+limitations sentence names what actually followed the check instead of assuming responses; the
+class is render context, not a wire field or gap code (#657). `kernel/reducers.invalidates_recorded_check`
+is the single predicate deciding between the two, shared by the receipt and by compact status
+coverage.
 
 ## 9. Kernel (`kernel/`)
 
@@ -1132,9 +1247,12 @@ single predicate deciding between the two, shared by the receipt and by compact 
   versions: ReceiptVersionSlice, redaction_profile, include) -> ReceiptDocument`. Every
   nondeterministic input is explicit; the
   builder reads no clock or ID source. `ReceiptDocument` contains its identity, generation time,
-  subject frontier, and exact nonnegative `suppressed_finding_count` from the applicable latest
-  check, but not the post-append result frontier (which would create a digest
-  self-reference). `ReceiptResult` carries both subject and post-commit result frontiers.
+  subject frontier, exact nonnegative `suppressed_finding_count`, and optional
+  `semantic_provenance` from the applicable latest check, but not the post-append result frontier
+  (which would create a digest self-reference). When no applicable semantic attempt exists, the
+  receipt omits that field, preserving historical deterministic receipt bytes. `ReceiptResult`
+  carries both subject and post-commit result frontiers. The provenance and token counters name
+  that selected semantic attempt; they are not a sum across retries or recovery attempts.
 - Receipt boundary tokens are closed: `ReceiptFormat` is `json|markdown|text`, `ReceiptInclude`
   is `summary|standard|full`, and `ReceiptRedactionProfile` is
   `full_local|default_local_export|redacted_share`. `include` changes only the registered section
@@ -1147,10 +1265,11 @@ single predicate deciding between the two, shared by the receipt and by compact 
   selected text field; `default_local_export` clears obligation summaries and receipt-gap details
   but retains finding text and response reasons; `redacted_share` additionally omits semantic
   finding rows and rejected/waived response rows while retaining deterministic ID-only findings,
-  acknowledged responses, structural IDs, conclusion, coverage, gaps, and versions. Every omitted
-  protected content leaf is counted once in the sorted `ReceiptRedaction` rows; omitted structural
-  IDs and enum/relation fields are not content-redaction counts. Sections are regenerated only
-  from retained structural values and fixed templates; they never copy omitted text. Therefore a
+  acknowledged responses, structural IDs, conclusion, coverage, gaps, versions, and the bounded
+  semantic provenance/token-usage counters. Every omitted protected content leaf is counted once
+  in the sorted `ReceiptRedaction` rows; omitted structural IDs and enum/relation fields are not
+  content-redaction counts. Sections are regenerated only from retained structural values and
+  fixed templates; they never copy omitted text. Therefore a
   profile/include transform that changes selected fields or sections changes the canonical
   document and digest; it is not a render-only rewrite. Conclusion, subject frontier, suppression,
   weakest coverage, and material gap codes are invariant and may only stay equal or weaken.
@@ -1168,7 +1287,14 @@ single predicate deciding between the two, shared by the receipt and by compact 
 
 ### Ledger, projection, and durable check orchestration
 
-`LedgerPort` is the shared memory/SQLite contract. Its methods are:
+`LedgerPort` is the shared memory/SQLite contract.
+
+`AppendCommand.artifact_object_refs` is an internal application-to-ledger port field. It carries
+the exact authenticated object descriptors for artifact ids already present in the draft so the
+ledger can inventory them atomically with the event; it is not part of the public append request,
+accepted-event wire record, or any schema digest.
+
+Its methods are:
 
 - `append_batch(command: AppendCommand) -> AppendResult`;
 - `load_frontier() -> Frontier` (task-ledger truth without requiring a pre-existing session;
@@ -1190,8 +1316,9 @@ single predicate deciding between the two, shared by the receipt and by compact 
 - `advance_check_phase(lease, expected_phase, next_phase, durable_object_ref?) -> OperationLease`;
 - `enqueue_semantic_job(lease, case_digest, case_object_ref) -> SemanticJobRecord`;
 - `claim_semantic_job(lease, job_id) -> SemanticAttemptHandle` (same-owner live lease resumes the
-  active started attempt; expired lease closes the prior attempt as `expired` then mints the next
-  ordinal — never reuses a consumed authorization identity);
+  active started attempt; an expired operation lease rebinds an existing `started` attempt and
+  preserves its provider request id, while a queued job or a job with no active started attempt
+  mints the next ordinal);
 - `record_attempt_outcome(handle, outcome, result_object_ref?, terminal_code?) -> None`;
 - `fail_semantic_job(lease, job_id, terminal_code) -> SemanticJobRecord` (terminally closes a
   queued job when the total deadline or retry budget expires before another physical attempt can
@@ -1200,7 +1327,10 @@ single predicate deciding between the two, shared by the receipt and by compact 
 - `load_semantic_job(writer_id, operation_id) -> SemanticJobRecord | None`;
 - `list_semantic_attempts(job_id) -> tuple[SemanticAttemptRecord, ...]` (ordinal-sorted bounded
   audit rows; no raw provider text);
-- `renew_leases(lease) -> OperationLease`;
+- `renew_leases(lease) -> OperationLease` — pending semantic jobs derive their live ownership
+  bound from the authenticated `yoetz.semantic-case/2` execution expiry plus five seconds,
+  with operation/job renewal committed atomically. Reclaim preserves started or response-durable
+  attempt identity. Local terminal recovery after that bound does not extend provider authority;
 - `reclaim_operation(writer_id, operation_id, request_digest) -> OperationLease | PendingVerdict`;
 - `commit_check_if_current(frozen, findings, policy_executions, semantic_status, semantic_reason,
   semantic_provenance, request_id, *, scope=None) -> CheckCommitResult` (`scope` is the request's
@@ -1294,11 +1424,15 @@ physical attempt, the repair attempt included. Attempt accounting (`attempted_co
 `enqueue_semantic_job` recovers an already-terminal job (`succeeded` / `failed` /
 `quarantined`), the attempt loop must not call `claim_semantic_job`; it rebuilds the final
 status/reason (and selected judgment/provenance from the durable `SEMANTIC_RESPONSE` object on
-success) so crash-after-select or crash-after-final-failure remains reproducible. Because the
-check operation lease TTL is 60 seconds while `timeout_seconds` may be up to 300, the durable
-attempt coordinator renews the operation lease around claim/select and returns the renewed lease
-for later phase advance/commit — a valid provider result must not become `operation_pending`
-solely because the 60-second lease expired inside the semantic deadline.
+success) so crash-after-select or crash-after-final-failure remains reproducible. The operation
+lease starts with the existing 60-second floor. Once a `semantic-case/2` job is present, renewal
+reads that authenticated frozen object and extends both the operation and its active semantic job
+to the persisted total execution expiry plus the fixed five-second cleanup grace. A shorter
+execution therefore narrows the lease to its own expiry plus grace; a longer execution is
+extended once and later renewals preserve that same bounded expiry. The caller's process deadline
+and provider admission/approval deadlines remain unchanged. A valid provider result must not
+become `operation_pending` solely because the old 60-second floor elapsed inside the frozen
+semantic deadline, and renewal never extends authority past the authenticated bound.
 
 These field sets are closed: `OperationLease` and `SemanticAttemptHandle` carry the complete
 owner/lease/frontier/dependency compare-and-swap fence, while job, selected-attempt, and pending
@@ -1448,7 +1582,18 @@ five seconds ahead of acceptance and `ahead_of_forward_skew_allowance` beyond it
 outside clock. Ordering remains ingestion sequence and caller time is never a sort or filter key.
 New check cases carry both clocks and this classification in their bounded frozen timelines;
 versions is one verified runtime manifest; compact uses exact structural counters and bounded
-summaries. The compact singleton's `freshness` follows the same weaker-of-two rule as the evidence
+summaries. The versions slice reuses `version.py` (`build_status_version_slice_facts`): live
+Python/APSW/SQLite/source-id values are the same probes as `version --json`, and a missing or
+unrepresentable probe serializes as the token `unavailable` rather than a historical constant.
+Protocol, engine, projection (`yoetz/0.1.0`), object format, policy-pack ids, and
+`storage_schema` (`1`, the slice's static storage identity — not catalog/bundle counters and not
+SQLite `user_version`) are package contract facts. `provider_profiles` is the packaged
+`support/runtime-support.json` inventory, not a live semantic-evaluator census; an empty catalog
+in `development_unverified` support does not prove an evaluator is absent. MCP and CLI
+`status view=versions` share this producer; `route_profile` remains an application overlay of the
+serving process. Kernel evaluation does not read this live environment. Historical check/receipt
+engine identities stay the recorded event values and are not rewritten by this diagnostic.
+The compact singleton's `freshness` follows the same weaker-of-two rule as the evidence
 view: it is the weaker of the projection scalar and the `ledger_freshness` of the applicable-check
 coverage reported in the same item, so the summary line an agent reads can never claim the ledger
 is cleaner than the coverage vector beside it. `StatusCompactItemModel` rejects the inverse
@@ -1627,7 +1772,8 @@ worktree is its own root), and guidance uses the same root rather than a remote 
 SessionStart context names the mapped `session_id` and `writer_id`; an agent continues that task
 with the held session selector. With no selector or stored binding, a new pair creates new work,
 even beside a dormant task. An identical pair attaches and rotates to a fresh session and writer.
-Concurrent requests for one new pair converge on one task; different pairs admit separate tasks.
+Concurrent requests for one new pair converge on one task; without a host-recovery selector,
+different pairs admit separate tasks.
 An initializing route reserves its exact pair while recovery remains possible.
 
 Historical sessions remain valid `mode=attach` selectors, while ordinary routing accepts only the
@@ -1656,6 +1802,12 @@ Raw refs never enter structural durable state; only their commitments do. The ca
 cannot select or inherit disclosure authority.
 
 ### Task lineage and project scope (ADR-027)
+
+Project admission distinguishes `coordination_consent_required` (missing source-workspace
+observation consent) from `coordination_source_policy_denied` (source disclosure policy refusal or
+unavailable policy evaluation). Both refuse disclosure; the latter never recommends obtaining
+workspace consent as sufficient authority. The additive control 2.7 error vocabulary preserves
+this distinction, while older control schemas remain frozen.
 
 The 0.3 implementation adds the wire, catalog, runtime, host-correlation, and presentation
 contracts below. `AuthorizationScopeKind` and structural `contains()` retain their existing four
@@ -1707,7 +1859,9 @@ to build the frozen manifest, (2) disclosure of bounded structural manifest fact
 agent context, and (3) child-derived structural input to a parent semantic check. Each channel
 keeps the child's provenance, category, never-send, task-scope, minimization, and authorization
 restrictions. Project membership is unnecessary for lineage; cross-repository lineage is
-prohibited in increment A. `AuthorizationScope.contains()` stays unchanged.
+prohibited in increment A. The candidate's Increment-B cross-repository path requires an explicit
+current project-generation coordination grant at admission and delivery; `AuthorizationScope.contains()`
+stays unchanged.
 
 `HostLineageRegistryPort.find_host_lineage_observation` resolves an already recorded host
 observation within its installation, parent task, and host. It returns the persisted annotation,
@@ -1721,8 +1875,9 @@ is admitted without creating a project row (#497). General or multi-repository p
 and amendable; implicit projects persist when concurrency drops to one. A repository may opt out through
 `projects.auto_grouping` of automatic grouping and cross-task disclosure without erasing accepted
 delegations, obligations, or receipt
-dependencies. A fact enters coordination only when its source workspace consent is active; consent
-for one worktree never covers another. General or cross-repository coordination requires a
+dependencies. A fact enters coordination only when its source workspace's workspace-level
+observation consent is active; consent for one worktree never covers another. General or
+cross-repository coordination requires a
 generation-bound `coordination_grants` authorization checked at admission and delivery. External
 semantic dispatch bundling content from two repositories is outside this series.
 
@@ -1753,26 +1908,34 @@ selector; its resource field follows the same sink-bound hydration and omission 
 **Bounded reversal and retired guards.** Live, consented project membership may disclose bounded
 sibling task identity and state through the service status projection. It never authorizes attach,
 resume, or task selection. Possession of a workspace reference alone remains insufficient to
-discover or attach another task. Automatic `create_or_attach` admits a new pair beside an existing
-task. Task-owned inspection snapshots and session advice remain bundle-resident; installation
-coordination uses the catalog without transferring their content or authority.
+discover or attach another task. When no usable persisted recovery selector applies, automatic
+`create_or_attach` admits a new pair beside an existing task. Task-owned inspection snapshots and
+session advice remain bundle-resident; installation coordination uses the catalog without
+transferring their content or authority.
 
-**No new tools and future boundaries.** The series adds no MCP tool. Its seven existing model-facing
-operations are `start`, `publish_work`, `check`, `status`, `receipt`, `respond`, and `read_guidance`;
-lineage/project behavior composes those operations without adding another one. The 2026-09-05
+**No new tools and future boundaries.** The series adds no MCP tool. Its six workflow operations
+are `start`, `publish_work`, `check`, `status`, `receipt`, and `respond`, plus the existing
+read-only `read_guidance` support tool; lineage/project behavior composes those surfaces without
+adding another one. The 2026-09-05
 pre-trim snapshot was 204,404 bytes (policy) and 204,658 bytes (strict) against 205,000 bytes.
 After #504 step 0, the source baseline is 148,308 bytes (policy) and 148,562 bytes (strict),
 including 12,385/12,409-byte initialize instructions and 8,218/8,304 bytes of descriptions; it
 leaves 56,692/56,438 bytes for later schema growth. These are reviewed baselines, measured before
 later series changes. Installed host capability claims remain separately evidence-bounded.
 
-The consolidated 0.3 descriptors advertise `start-request/1.1.0`,
-`publish-work-request/1.2.0`, `check-request/1.1.0`, and `status-request/1.2.0`, including separate
-child attach, self-registration, lifecycle, and coordination declaration and disposition examples. With those
-additions and conditional multi-agent guidance, the replicated surface is 168,941 bytes (policy)
-and 169,195 bytes (strict): 20,633 bytes above each step-0 baseline, leaving 36,059/35,805 bytes below the unchanged
-205,000-byte aggregate ceiling. Public lifecycle families are advertised; service-stamped
-delegation declarations and child manifests remain excluded from ordinary publication.
+The earlier consolidated 0.3 descriptor measurement was 168,941 bytes (policy) and 169,195 bytes
+(strict), below the then-reviewed 205,000-byte ceiling. That is a historical pre-integration
+measurement: it predates the current-main guidance and descriptor text carried by the merge.
+
+The current 0.3 descriptors advertise `start-request/1.1.0`, `publish-work-request/1.2.0`,
+`check-request/1.1.0`, and `status-request/1.2.0`, including separate child attach,
+self-registration, lifecycle, and coordination declaration and disposition examples. The current
+packaged measurement is 215,519 bytes (policy) and 215,773 bytes (strict), comprising 18,714/18,738
+bytes of initialize instructions, 12,958/13,044 bytes of tool descriptions, and 71,563 bytes of
+advertised input schemas. The reviewed aggregate ceiling is 220,000 bytes; the policy route's
+longest 1,000-byte destination disclosure measures 222,526 bytes and the derived disclosure ceiling
+is 227,000 bytes. Public lifecycle families are advertised; service-stamped delegation declarations
+and child manifests remain excluded from ordinary publication.
 
 ### Immutable objects and keys
 
@@ -1975,7 +2138,9 @@ operation request models, and is rejected on every other control method. `strict
 weaken or select this field.
 
 `ControlError` carries one bounded reason, a `retryable` flag, and an optional service-minted
-`correlation_id`. The closed reason set includes `endpoint_unsafe` (local AF_UNIX path/mode/peer
+`correlation_id`. The port and hook diagnostics share one lightweight closed reason vocabulary;
+`invalid_request` denotes a malformed local request and is terminal for observation draining.
+The closed reason set includes `endpoint_unsafe` (local AF_UNIX path/mode/peer
 safety refusal). The ordinary client preserves that token instead of folding it into
 `service_unavailable`. The MCP bridge maps it to public `SERVICE_UNAVAILABLE`, `retryable=false`,
 and `safe_details.reason_code=endpoint_unsafe`, with copy that names the endpoint-safety class and
@@ -2597,9 +2762,35 @@ gateway, completes structural decision receipts for pre-dispatch terminal outcom
 one terminal structural attempt receipt per physical attempt, including taskless channels, and
 atomically consumes/completes receipt-bound local disclosures. Agent projection subjects contain
 only installation-keyed result/projection commitments and field decisions, never copied plaintext.
+Internal `PrivacyAuditPort.load_disclosure_attempt(request_id, case_digest)` resolves one physical
+disclosure attempt to its real audit state and HMAC subject identity. It authenticates the
+structural sidecar, rejects conflicting/ambiguous request bindings, and distinguishes exact
+absence from unavailable or corrupt storage. Admitted recovery preserves the proposal/request
+identity; consumed or completed admission cannot authorize another dispatch. This lookup is not
+an MCP or control-wire method.
+Both audit adapters require an exact string request ID in the `req_` UUID-v4 vocabulary and a
+lowercase `sha256:` digest. Wrong Python types raise `TypeError`; malformed strings raise
+`ValueError`, both with `privacy_disclosure_attempt_lookup_invalid`. The authenticated catalog
+sidecar must contain a valid `prepared_case_digest`: missing or malformed values are
+`privacy_audit_attempt_corrupt`, while a valid different digest is
+`privacy_audit_attempt_case_mismatch`. Only exact absence returns `None`; storage errors propagate
+and never authorize a fresh attempt (issue #626).
 Internal `PrivacyAuditPort.get_receipt`/`list_receipts` queries project bounded structural views
 only through the ordinary CLI/UI control methods `privacy_receipts_get` and
-`privacy_receipts_list`; the port names are not wire aliases and MCP has no access.
+`privacy_receipts_list`; the port names are not wire aliases and MCP has no access. Both methods
+are bound by `build_privacy_support_handlers` whenever the privacy application is composed, so a
+ready service answers them rather than `method_forbidden` (issue #730). Their bodies carry
+`schema_version` `1.0.0`: `get` takes `receipt_id` and answers `outcome` `found` with one
+`receipt` wrapper or `outcome` `not_found`; `list` takes `filters`, `page_size` (1–100) and an
+optional `cursor` and answers `snapshot_generation`, `receipts`, and `next_cursor` only when
+another page exists. Each wrapper names its `kind` (`local_disclosure` or `network_egress`) and
+carries the receipt in the `privacy/egress-receipt-1.0.0` vocabulary: every counter and version
+is a decimal string, optional fields are absent rather than null. Unknown or malformed keys,
+filters, page sizes, cursors, and receipt IDs are `invalid_request`; a cursor minted for a
+different query is the same non-retryable rejection. Both audit adapters project stored network
+egress receipts as well as local disclosure receipts, so a completed subscription review is
+retrievable by its recorded receipt ID and listable by `channel`, `provider_id`, or
+`endpoint_profile_id`.
 `PrivacyAuditPort.list_pending_disclosures(audience) -> PendingDisclosurePage` projects only
 `PendingDisclosureEntry(pending_id, task_id, expires_at)` for proposals in `awaiting_human` or
 `reserved` whose `expires_at` has not passed, over the ordinary CLI/UI control method
@@ -2667,6 +2858,10 @@ for that outcome. `blocked_by_policy` admits the direct policy/scope/category/pu
 reasons plus `insufficient_approved_context`; `approval_expired` admits
 `authorization_expired|authorization_stale|authorization_reused`; all other pairings are exactly
 the table in the privacy protocol/receipt schema. Cross-pairs and missing failure reasons are invalid.
+At the final approved-dispatch guard, an expired disclosure proposal remains
+`approval_expired/authorization_expired`, while an exhausted in-process `Deadline` is
+`timeout/deadline_expired`. Both block provider dispatch; the distinction identifies whether human
+approval or the execution budget expired.
 
 Shared privacy values are `ProviderBinding`, `AuthorizationScope`, `ChannelPolicy`,
 `PrivacyPolicy`, `PolicyOverlay`, `CandidateContext`, `ClassifiedContext`, `PrivacyDecision`,
@@ -2681,10 +2876,14 @@ Shared privacy values are `ProviderBinding`, `AuthorizationScope`, `ChannelPolic
 `CandidateContext`, and closed composition supplies reviewed bundled adapters no repository,
 bundle, transcript, environment, log, database, or keyring handle. Third-party/dynamic adapters are
 absent; this is not an OS sandbox against malicious code already inside the trusted service. Policy
-widening requires a reauthenticated local human bound to the exact diff/digest and shown the
-complete `before → after` change set that produced the widening classification; tightening is
-immediate after an ordinary explicit confirmation and revokes affected
-authorizations/transports. The never-send set is non-overridable even by that human.
+widening requires a reauthenticated decision by the user: either the trusted local ceremony, bound
+to the exact diff/digest and shown the complete `before → after` change set that produced the
+widening classification, or the user's explicit current-chat instruction for one exact prepared,
+previewed, expiring consent target relayed by a capable agent through the consent lane (ADR-009
+"Human required?" table; ADR-016 decision 5), which is an agent attestation Yoetz cannot
+independently authenticate; tightening is immediate after an ordinary explicit confirmation and
+revokes affected authorizations/transports. The never-send set is non-overridable under either
+path.
 
 `PreDispatchAuditDecision` is structural-only and terminal; it permits no prepared bytes,
 authorization, or dispatch. A v0.1 content-bearing `DisclosureProposal` has one owning `task_id` and
@@ -2818,7 +3017,10 @@ endpoint bindings, initial readiness, retry budgets, and cutoffs. `endpoint_role
 the endpoint from this frozen plan and durable prior rows, so changed configuration cannot relabel
 an attempt on replay. Legacy terminal cases recover their stored result; a legacy pending case
 without frozen execution authority terminates without dispatch: `coordinator_failure` before
-dispatch or during a disclosure wait. An uncertain started attempt retains `outcome_unknown`
+dispatch or during a disclosure wait. A task-local `awaiting` row can lag the independent privacy
+audit and does not prove an expired started attempt was never admitted. Deadline recovery keeps
+that attempt `outcome_unknown` without re-entering authorization, retry, or fallback; a new,
+unattempted job still reports `provider_timeout` (issue #625). An uncertain started attempt retains `outcome_unknown`
 in its durable row; without reconstructable provider provenance its public gap is
 `receipt_persistence_unknown`. Each
 fallback attempt is a fresh physical attempt with its own authorization, dispatch id, credential
@@ -2858,7 +3060,23 @@ events. `structural` emits only event identity/order/digest/visibility as
 scanned, authorized, and receipted; the frozen slice grants no egress authority.
 Its reference allowlist is the union of `frontier_refs` (IDs present at frozen frontier F) and
 `local_check_refs` (new deterministic finding IDs already pinned in this check's durable local
-result); both sets and their union are case-digest inputs.
+result); both sets and their union are case-digest inputs. The semantic `frontier_refs` set is the
+dependency closure of retained packet metadata, canonical payload items, recorded findings, and
+their typed recorded dependencies/source-event identities. It may be smaller than the deterministic
+case's complete allowlist. `omitted_reference_count` counts the excluded frontier IDs, is bound into
+the case digest, and travels as a canonical integer string in the envelope and assembled packet.
+`semantic_reference_scope_reduced` marks the packet, check, status and receipt coverage as partial;
+selection grants no additional content/disclosure authority. Captured prose is not scanned to
+invent structural dependencies. The complete deterministic case and its integrity checks remain
+unchanged.
+
+If the retained required structure still exceeds 131,072 bytes, semantic composition returns
+`failed/case_capacity_exceeded` before creating a semantic job or invoking a provider.
+This additive reason belongs to the current 1.1 check/provenance schemas; released 1.0 schemas
+retain their original bytes. Deterministic findings remain recorded; no provider attempt is consumed and provenance stays null. The shared
+check/receipt gap is `semantic_case_capacity_exceeded`. A narrower claim/obligation scope is a new
+check, not a replay of the terminal request. Changing a text length or finding limit alone does not
+guarantee enough capacity.
 
 `TargetedExcerptRef` identifies a bounded excerpt already captured or agent-published inside the
 frozen case and links it mechanically to a claim, obligation, finding, action, result, or evidence
@@ -3170,12 +3388,14 @@ start operation. Observation-derived lifecycle records are evidence under that w
 on the cooperative agent's behalf. Materialization emits `evidence_recorded` unless the structural
 payload itself carries an explicitly admitted `claim_kind`. Mapping `obs-ledger/1.4.0` additionally
 materializes trusted eligible capture manifests as `evidence_recorded/1.2.0`. Mapping
-`obs-ledger/1.5.0` makes the idempotent operation digest task-scoped (task, canonical logical
+`obs-ledger/1.6.0` makes the idempotent operation digest task-scoped (task, canonical logical
 identity, draft-role tuple, mapping version; no session or writer), matching the stable event ids
 it commits, and the coordinator resolves it task-wide through `lookup_task_operation` so a
 workflow reattach that rotates the session and writer still replays the committed operation
-(issue #560). Legacy 1.4/1.3/1.2 operation identities stay session-bound and remain replay-only
-upgrade candidates from the session that committed them.
+(issue #560). Its canonical identity includes the source lane, host session commitment, and source
+generation, so a reused call id cannot alias another session or generation; Codex hook and
+session-stream copies in the same lane still coalesce. Legacy 1.5/1.4/1.3/1.2 operation identities
+remain replay-only upgrade candidates with their historical identity shape.
 
 Shared closed types:
 
@@ -3189,6 +3409,18 @@ Shared closed types:
   closed identifier from the capability cell, or an opaque unsupported token), stable source
   identity, `ObservationCursor`, receipt time, bounded allowlisted structural payload, content-
   object references (encrypted object IDs/commitments only), and gap codes.
+  Host hook profiles also declare a pairing contract: `pairing_mode` is `paired` or `post_only`,
+  and `correlation_kind` is `tool_call_id`, `generation_id`, or `none`. Claude Code and Cursor's
+  installed legacy hook profiles are post-only; Claude may use a retained `tool_use_id`, while
+  Cursor's `generation_id` is metadata only and never a tool identity. Codex remains paired even
+  when an input tries to carry a different marker. The source-qualified Codex hook content arm is
+  profileless and is selected by `codex_hook` source identity plus active observation consent
+  authority/generation; it never borrows a Claude/Cursor content profile. The source plus exact
+  capability-profile table is
+  authoritative for historical envelopes and omitted host-version fields; a future paired
+  Claude/Cursor profile must register an exact profile cell. Pairing state is admitted under one
+  local-store lock with deduplication, so a duplicate cannot consume a pre-event and a concurrent
+  second post remains an explicit orphan.
 - `ObservationContentChunk` — ordinary-control-only bounded visible content carrying exact
   `content_kind`, correlation identity, source commitment, media type, part index/count, redaction
   flag, and bytes. At most 16 chunks and 700,000 aggregate input bytes keep the request below the
@@ -3196,14 +3428,27 @@ Shared closed types:
 - `ObservationContentManifest` — trusted-local binding from an encrypted captured-object envelope
   to the SHA-256 digest and byte count of its secret-scanned inner bytes. A row created before
   migration 0008 has NULL bindings and cannot earn capture provenance by inference.
+- `ObservationCaptureTicket` — metadata-only service-side handoff for Claude Code and Cursor
+  native content and the source-qualified profileless Codex hook arm. It binds the encrypted
+  object IDs and complete expected content groups/parts to the exact workspace/task, Yoetz and
+  host sessions, source cursor/generation, selected native profile when applicable, and
+  content-authority generation. For `codex_hook`, active consent authority/generation, workspace
+  commitment, source identity/commitment, tool-call correlation, object kinds, and object/content
+  digests are also fenced; no Codex content profile is inferred. `staging` means the ticket is
+  reserved before object publication; `pending` means its complete encrypted manifest set is durable
+  and awaits
+  the structural FIFO ingest; `revoked` is a retained ABA-protection tombstone. The ticket never
+  carries plaintext or a local spool path.
 - `ObservationInspectionSnapshot` — one current subject-state/changed-path selection with optional
   independently encrypted facts and bounded-excerpt objects, each carrying its own inner-content
   digest and byte count. Durable redaction/truncation flags preserve weakening without reopening
   the object.
 - `ObservationCursor` — source generation, byte/event position, last source commitment, and
-  mapping version. Codex session-stream cursors use `codex-obs-stream/1.3.0` (rollout JSONL
-  grammar, paired with the exact profile id the generation's header admitted; a `1.2.0` or older
-  cursor is mapping-reset and replays from its header rather than inheriting a default profile).
+  mapping version. Codex session-stream cursors use `codex-obs-stream/1.4.0` (rollout JSONL
+  grammar, paired with the profile id the generation's header admitted — an exact certified
+  profile or `codex-rollout-jsonl/compatible/v1`; a `1.3.0` or older cursor is mapping-reset and
+  replays from its header, so a stream durably refused under the exact-version policy is read
+  once under the structural policy with no duplicate publication, issue #656).
   Cursors are crash-stable and generation-fenced. A private HMAC of the source
   device/inode detects same-or-larger file replacement across reconcile processes; ordinary safe
   integers retain their numeric encoding and larger filesystem values use a bounded hexadecimal
@@ -3217,11 +3462,19 @@ Shared closed types:
 - `ObservationGapCode` — closed coverage tokens. `session_superseded` is a mapped host session
   whose Yoetz route was retired and whose successor binding could not be followed; it is never
   `ledger_rejected` and never `mapping_missing` (issue #577). `unsupported_event` is an admitted profile with
-  an unrecognized wrapper or item; `unsupported_format` is a wrong surface (exec JSONL, a
-  `cli_version` without an exact profile in `SUPPORTED_ROLLOUT_PROFILES` — currently `0.148.0`
-  and `0.150.1`, never a semver neighbour — an absent/unknown `history_mode`, or compressed
-  `rollout-*.jsonl.zst` that the hook pass does not decompress). A refused header holds for the
-  whole source generation: bytes are consumed, no event is admitted, and the cursor is kept. When exact-session `.jsonl` and `.jsonl.zst` siblings both
+  an unrecognized wrapper or nested item, or a known wrapper with an incompatible payload shape
+  (`wrapper_shape_unsupported`); `unsupported_format` is a structurally refused surface (exec
+  JSONL, a header that is not `session_meta`, a non-object payload, a non-string `cli_version`,
+  an absent/unknown `history_mode`, or compressed `rollout-*.jsonl.zst` that the hook pass does
+  not decompress). The `cli_version` itself is diagnostic provenance, never a refusal (issue
+  #656): an exactly proven release (`SUPPORTED_ROLLOUT_PROFILES`, currently `0.148.0` and
+  `0.150.1`) admits under its certified profile with provenance `exact`; any other release admits
+  under the structural compatibility profile `codex-rollout-jsonl/compatible/v1` (union
+  vocabulary) with provenance `structural`. The reconcile result names a closed `admission` state
+  (`structurally_supported`, `partially_understood`, `incompatible`, `unadmitted`), its
+  `admission_provenance`, and the bounded `admission_reasons` tokens; none of these is host
+  support. A refused header holds for the whole source generation: bytes are consumed, no event
+  is admitted, and the cursor is kept. When exact-session `.jsonl` and `.jsonl.zst` siblings both
   exist, the admitted uncompressed file wins; compressed-only remains explicitly unsupported.
   Every string semantic type present at `payload.type` and nested `payload.item.type` must belong
   to the admitted profile before a nested item is selected; one known field cannot mask an unknown
@@ -3287,13 +3540,40 @@ Shared closed types:
   internal `PostToolUse` advice cadence. At `Stop`, Claude Code documents `additionalContext` as
   non-error feedback that continues through the same loop guard; the Claude ingress therefore
   never emits `decision: block`, and its `SessionEnd` emits `{}`. The renderer also knows Claude's
-  `SubagentStart` / `SubagentStop` output shapes, but the current native hook profile does not
-  advertise either event; adding them requires a separately reviewed profile expansion and proof.
+  `SubagentStart` / `SubagentStop` output shapes. The conservative 0.2 structural profile does not
+  advertise either event; the 0.3 capability profile may add them only with an exact reviewed cell
+  and native evidence. An observed neighboring Claude version never upgrades that profile claim.
   Cursor has a separate native contract: raw `sessionStart` emits `additional_context`; raw `stop`
   advice is disabled because `followup_message` auto-submits a user message; and `afterFileEdit`,
   `afterMCPExecution`, and `sessionEnd` emit `{}`. Cursor leases and commits advice only for a
   nonempty `sessionStart` object after its bytes are written successfully. Output-less events never
   lease or consume advice or frontier-motion notices.
+  Advice projection is bounded by the domain wire limits: each item carries at most 16 evidence
+  refs and a snapshot carries at most 64 ranked findings. The evidence-basis digest still commits
+  to every policy candidate, ref, semantic coverage input, and discarded condition. When a
+  projection limit is reached, the visible coverage carries `advice_evidence_refs_truncated` or
+  `advice_ranked_findings_truncated`; if those markers would exceed the 64-gap coverage bound,
+  `advice_coverage_gaps_truncated` remains visible and the complete gap set stays committed in
+  the basis digest. Invalid semantic finding ids are discarded, invalid semantic text falls back
+  to service-authored safe text, and `advice_semantic_output_invalid` weakens coverage. Length-capped
+  semantic summaries/details carry `advice_semantic_text_truncated` so the clipping is explicit. A
+  host/tool `result_status=completed` outcome is not an authored completion claim; completion advice
+  requires an explicit `claim_kind` value such as `completion`, `done`, or `finished`.
+  Observation semantic advice is asynchronous (issue #619): the advice build never calls a
+  provider. `application/observation_advice_semantic.ObservationAdviceSemanticScheduler` looks up
+  or enqueues one durable attempt row in `observation_advice_semantic_attempts` (migration 0012),
+  keyed by (workspace commitment, Yoetz session, pre-semantic evidence basis), storing the exact
+  scoped observation gap tuple and the minimized packet that carries it. Repeated identical builds
+  coalesce onto that row; a newer basis for the same session supersedes that session's
+  unattempted pending rows (`cancelled` / `superseded`) and keeps every completed row's receipt. At
+  most 16 rows may be pending or running per task bundle; the next schedule is recorded
+  `unavailable` / `queue_full` with no attempt. A row that is `pending` or `running` adds the
+  coverage gap `advice_semantic_pending`; a `failed`, `unavailable`, or `cancelled` row adds
+  `advice_semantic_unavailable` with its closed reason (`authorization_missing`,
+  `provider_unavailable`, `provider_failed`, `output_invalid`, `queue_full`, `superseded`,
+  `cancelled`, `interrupted`). Only a `succeeded` row with validated finding ids adds
+  `semantic_model_derived`; a succeeded attempt that returned no challenges is an honest receipt
+  and no finding.
 
 Independent verification support (local control, not MCP):
 
@@ -3332,8 +3612,14 @@ Independent verification support (local control, not MCP):
   freshness. It uses `evidence_recorded/1.1.0` with `approved_check` provenance; no cooperative
   request can mint that provenance.
 - Eligible observation capture is narrower than retention: tool output, selected changed-file
-  bytes, and workspace-diff bytes become `observation_captured` immutable evidence. Visible
-  messages, tool input, locators, unsupported visible payloads, and approved-check output do not.
+  bytes, and workspace-diff bytes become `observation_captured` immutable evidence. For the
+  source-qualified profileless Codex hook arm, those bytes must be explicitly linked to the hook
+  event. Session-stream records are a separate source and are excluded from semantic selection;
+  tool input and path/locator content are also excluded from semantic selection. The Codex hook
+  extractor omits raw tool-input bytes but keeps the encrypted workspace locator needed by local
+  inspection and verification; existing structural evidence remains intact (issue #623). Visible messages, unsupported visible payloads,
+  and approved-check output do not enter this capture path. The repository privacy authority and
+  each provider attempt authorize semantic selection independently of local encrypted capture.
   Inspection fact/excerpt objects materialize through their own idempotent evidence operation.
   Missing, deleted, or pre-0008 bindings add `content_capture_unavailable`; deliberately excluded
   retained kinds add `content_unselected`; retained redacted bytes add `content_redacted`; and a
@@ -3344,11 +3630,63 @@ Independent verification support (local control, not MCP):
   the enforcing sandbox, and gives each registered lane one fair round before revisiting a busy
   lane. Unrelated sibling lanes may run concurrently; each lane still has at most one active
   worker lease. It reclaims expired leases and stops before vault/runtime closure. Hook ingest
-  never executes approved checks inside the hook RPC budget. Pure-ingress hook handlers declare
+  never executes approved checks inside the hook RPC budget.
+- `ObservationAdviceSemanticSupervisor` / `ObservationAdviceSemanticWorker` — the same shape for
+  observation semantic advice (issue #619). The coordinator registers a per-workspace drain when
+  an advice build leaves `advice_semantic_pending`, and rediscovers pending rows after service
+  start. The worker claims one row at a time under a generation-fenced two-minute lease, resolves
+  the task route, repository authority, and provider binding at dispatch time (never from the
+  READY snapshot), runs the privacy-gated attempt with a 60-second deadline, records the closed
+  outcome, and re-runs advice for that workspace. A lease held by a previous service generation
+  or past its expiry is reclaimed as `pending` and re-attempted; a row reclaimed three times
+  terminates as `failed` / `interrupted`. An interrupted, cancelled, or unattempted row is never
+  a semantic success. The advice worker is separate from approved-check workers and does not
+  execute semantic work inside a hook RPC budget. Pure-ingress hook handlers declare
   `"async": true` only when the exact probed Codex version supports registration; older or unknown
   hosts run them synchronously with the declared 10-second budget so no event is dropped. Handlers
   that return `additionalContext` or a Stop `decision: block` stay synchronous with the same bound,
-  and `SessionEnd` keeps the host-clamped 3 seconds (ingest/drain only; it is not an advice channel).
+  and `SessionEnd` keeps the host-clamped 3 seconds for local ingest only; its outbox intent is
+  retried by a later hook or the service sweeper, and it is not an advice channel.
+
+Native ordinary-work capture adds a separate, closed profile selection to that workspace consent.
+`LocalObservationConsent.content_capture_profiles` is a sorted set containing at most
+`claude-code-ordinary-observation-v1` and `cursor-ordinary-observation-v1`; absent legacy fields
+mean no native content authorization. `ObservationIngestRequest.content_capture_profile` is an
+optional selector in current control-request `2.6.0`, bound to the envelope's host source. The
+selector cannot grant capture: ingress requires the active local selection and synchronizes its
+bounded profile set to the mapped task store. Structural subscriptions and native content consent
+are independent. The source-qualified `codex_hook` capture arm is deliberately profileless: it
+requires active observation consent and exact Codex source binding, but does not add a Codex entry
+to this ordinary-profile set or accept a Claude/Cursor selector. Profile-free Codex observation
+retains its structural contract, while its eligible hook content uses the fenced native handoff
+below.
+
+`yoetz observe content-enable`, `content-disable`, and `content-status` operate on the same canonical
+workspace as observation consent. Their JSON responses and `observe status` identify
+`content_capture_scope: ordinary_profiles` and `codex_hook_capture_scope: observation_consent`.
+The profile list, effective profile list, and `enabled`/`content_capture_enabled` describe only the
+Claude Code and Cursor ordinary profiles. An empty list does not disable profileless Codex hooks,
+whose local authority follows observation consent and the runtime gate. Text status names the same
+scope. These are configuration facts, not proof of actual capture, successful execution, or
+semantic selection; those require evidence and the check/receipt (issue #622).
+The local content fence combines a durable per-workspace epoch
+with a persisted runtime-gate nonce; every real consent or runtime transition advances it, including
+pause/resume and off/on ABA cycles, and legacy state receives a fresh epoch before authority is
+accepted. Pause, disable, and revoke must fence retained native content reads and subsequent
+semantic disclosure as well as future capture. A task-store snapshot is not independent authority
+after a local consent change. Selection into a semantic case additionally
+requires authenticated captured-object provenance, case membership, source/session/phase binding,
+and the effective privacy selection. Captured bytes remain bounded advisory evidence; they do not
+prove that a command passed, a file was independently inspected, or a reviewer acted on the bytes.
+
+The repository privacy commitment on a `TaskRoute` is an egress-policy key, not an observation
+workspace key. Semantic composition resolves the observation workspace only from the durable
+workspace-to-Yoetz-session route, verifies that route's task matches the exact runtime task, and
+rechecks that binding before disclosure. An inactive historical route is usable only for the same
+task. An absent, ambiguous, or mismatched route leaves captured content unavailable; the privacy
+commitment cannot substitute for the observation workspace.
+The coordinator records the accepted completed-tool session route before optional verification
+policy setup. Native captured-content selection does not require an approved-check policy.
 
 Observation consent is one workspace-level confirmation recorded as a private workspace commitment.
 Consent, status, pause, resume, revoke, setup probes, and hook ingress all canonicalize an explicit
@@ -3376,19 +3714,104 @@ Unrecognized visible events accept an opaque stable envelope plus encrypted cont
 or a compressed `.jsonl.zst` rollout records `unsupported_format` instead. Unknown semantics never
 infer success.
 
+Native service-side staging and FIFO handoff (ADR-003 and ADR-022 decision 22) applies to the
+Claude Code and Cursor ordinary native profiles and to the source-qualified profileless `codex_hook`
+arm. A capture-only control request enters a separate bounded lane, reserves an
+`ObservationCaptureTicket`. Global observation disable retires matching unfinished tickets for
+Codex, Claude Code, and Cursor through the authenticated session/workspace cleanup path. Repeated
+cleanup is idempotent; a later consent generation cannot revive a revoked ticket. Session-stream
+requests do not enter this cleanup lane, and ticket retirement does not delete historical content
+(issue #624). The enabled capture lane reserves an
+`ObservationCaptureTicket`, secret-scans and encrypts eligible chunks, publishes the objects and
+manifests, and marks the ticket pending before the host's structural envelope advances the FIFO
+cursor. For Codex, selection additionally requires the reviewed cursor mapping
+`codex-obs-hook/1.0.0`. Unknown, future, and other-source mappings are rejected before resolving or
+opening a captured object; no legacy mapping is implicitly accepted (issue #621).
+Active observation consent selects the profileless arm; no Claude/Cursor content
+profile is accepted. The structural retry must present the same exact source/session/cursor
+identity, workspace/task binding, tool-call correlation, and original source and authority
+generations, and the service accepts the ticket only when every expected content group and part is
+present, readable, and digest-bound. A complete retry binds the existing manifests to the envelope
+and removes the ticket after the ledger append; it never remints an equivalent capture.
+
+Native chunks and recovered manifests must also match the envelope's source commitment and its
+admitted host correlation or native source/label identity before they can become captured evidence.
+For `codex_hook`, only explicitly linked tool output, selected changed-file/code bytes, and
+workspace-diff bytes are eligible for semantic selection. Session-stream records remain outside
+this native handoff and are excluded from semantic selection. Tool input and path/locator content
+are excluded from semantic selection too. The Codex hook extractor omits raw `TOOL_INPUT` bytes
+while retaining structural tool identity and correlation. It keeps the encrypted
+`WORKSPACE_LOCATOR` from SessionStart because the local inspection and verification scheduler
+opens that locator to resolve the workspace and its approved-check policy. Removing it would
+break a supported local consumer. Neither kind becomes semantic content; ordinary Claude/Cursor
+profile contracts remain unchanged (issue #623). Missing or conflicting native binding metadata retains
+`content_capture_unavailable`, including when materialization is called independently of semantic
+review. A terminal structural rejection retires only its exact admitted capture ticket so it
+cannot permanently block later checks; retryable coordination retains that ticket for the next
+attempt.
+
+`content_capture_pending` means encrypted staging is durable while structural ledger ingest is
+still pending. It is separate from `operation_pending`, which is generic observation back-pressure
+and makes no claim that content was retained. Up to 512 `staging`/`pending` tickets may be
+outstanding per workspace; revoked tombstones are excluded from that quota but retained to fence
+ABA reuse. A new check/frozen-case acquisition sees an outstanding ticket in the same bundle
+transaction and returns retryable `OPERATION_PENDING`; retrying the same request is idempotent.
+When a new CHECK encounters this barrier, READY performs a bounded listing for the exact routed
+task and reconciles each ticket against current local content authority before one freeze retry.
+This task-local preflight retires tickets
+whose authority is absent, inactive, revoked, runtime-disabled, profile-unselected, or from an old
+authority generation, including tickets left without a structural outbox row; matching active
+tickets retain the retryable barrier. A completed same-request replay returns without inspecting
+newer tickets. It does not rewrite captured history or encrypted objects.
+The capture lane can stage while a heavy append runs, while its bounded object/manifest writes stay
+serialized. This boundary provides local encrypted durability only: there is no plaintext spool or
+offline guarantee, and a host kill or service failure before authenticated staging may leave the
+honest `content_capture_unavailable` gap. Captured-content staging does not authorize semantic
+egress: repository privacy selection and provider-attempt authorization remain independent. Codex's
+historical session-stream path is unchanged and excluded from this native ticket lane; shared
+replay, generation-fence, and teardown behavior applies across hosts.
+
+Admission-independent recovery (#695) uses private application methods, not a new RPC:
+`LocalObservationStore.capture_inventory_recovery_needed(workspace)` reports unknown scope or
+an unreconciled reservation. `pending_workspaces()` includes that durable demand even with an
+empty outbox. `ObservationCoordinator.recover_capture_inventory(workspace)` returns
+`ObservationCaptureRecoveryOutcome` or `None` when recovery is not needed. It routes only existing,
+unambiguous lifecycle mappings and invokes the same complete inventory callback under the shared
+capture lock. The READY `ObservationOutboxSweeper.capture_recovery` callback runs before per-workspace
+drain leases and outside the workflow-control gate. It rotates at most four workspace candidates
+per pass with a five-second cooperative budget, and tries at most eight mapping candidates per
+workspace before yielding. Started synchronous metadata/publication workers are joined on
+cancellation; a timed-out operation cannot publish after its capture lock has been released.
+The service callback verifies opened runtime task/session identities and supplies an internal
+`proof_guard` to `bootstrap_capture_reservations`; it rechecks the READY service/vault generation
+under the local-store publication lock. A false or failed guard leaves accounting unknown.
+
+The closed internal recovery outcomes are `capture_inventory_recovered`,
+`capture_inventory_mapping_missing`, `capture_inventory_route_unavailable`,
+`capture_inventory_unknown`, `capture_inventory_disabled`, `capture_inventory_busy`, and
+`capture_inventory_timeout`. They contribute only fixed reason counts to
+`ObservationDrainSummary.reasons`, not row delivery/attempt counts, coverage gaps, or raw
+exception text. No new diagnostic/RPC schema or task-loss event is introduced. A successful
+inventory does not clear loss identity/count history or bypass a real hard capacity limit.
+
 Outcome semantics and back-pressure vocabulary (ADR-022 decisions 12–13):
 
 - Paired `PostToolUse` materialization consumes `exit_status`, `denied`, boolean `success`, and a
   closed `result_status` spelling table. Rollout `exit_code` preserves the structural wire range
   `-1..255` exactly (including `-1` as a nonzero failure); a present value outside that range or of
-  another JSON type is unsupported evidence, never a clean `completed` success. A payload with no
-  outcome fact records `UNKNOWN` and its
-  ledger entries carry the `host_outcome_unavailable` known gap. Check coverage and receipts fold
-  that gap into one bounded code regardless of how many observed calls lack outcome semantics; the
-  deterministic research-evidence policy does not mint one `material_limitation_omitted` candidate
-  per such record. Observed work facts (durable per-call action/result records), the acquisition
-  limitation (`host_outcome_unavailable` coverage gap), actionable findings (explicit
-  `FAILURE`/`PARTIAL`, cooperative `UNKNOWN`), and receipt gaps stay distinct surfaces.
+  another JSON type is unsupported evidence, never a clean `completed` success. The Claude ordinary
+  `claude-code-hooks-ordinary-v2` mapping also treats Claude's documented `PostToolUse` event as
+  an explicit host-tool success fact, without fabricating `exit_status: 0`; `PostToolUseFailure`
+  and explicit failure, denial, interruption, invalid/unknown status, or conflicting facts retain
+  their failure/partial/unknown meaning. A background Bash launch remains partial without
+  completion evidence. For mappings without such an event contract, a payload with no outcome fact
+  records `UNKNOWN` and its ledger entries carry the `host_outcome_unavailable` known gap. Check
+  coverage and receipts fold that gap into one bounded code regardless of how many observed calls
+  lack outcome semantics; the deterministic research-evidence policy does not mint one
+  `material_limitation_omitted` candidate per such record. Observed work facts (durable per-call
+  action/result records), the acquisition limitation (`host_outcome_unavailable` coverage gap),
+  actionable findings (explicit `FAILURE`/`PARTIAL`, cooperative `UNKNOWN`), and receipt gaps stay
+  distinct surfaces.
 - `operation_pending` is the retryable ingest-rejection reason for designed observation
   back-pressure (check-acquisition/frozen-case barriers and adjacent transient bundle/frontier
   contention). It keeps the outbox row pending and annotated, but is never a current observation
@@ -3445,6 +3868,14 @@ but only after atomically acquiring its lifecycle lock so an attach already in f
 The service sweeper yields with its partial summary once a pass has run for its 20-second budget,
 under the daemon's 30-second sweep deadline, so rows it resolved license the immediate re-sweep
 instead of being discarded as a deadline timeout. The
+installation maintenance gate covers one coordinator ingest at a time rather than the whole
+pass, so a backlog cannot hold ordinary workflow control behind local outbox bookkeeping; the
+workspace lease and the routed task fence still serialize each row against recovery and bundle
+rotation. Legacy hook-spool normalization uses one generation-owned worker, advances a durable
+byte cursor in bounded batches, and retains its claim future across cancellation, so a later pass
+cannot overlap the same rename-and-replay operation; generation close stops between batches. The
+route inspection and fence verification callbacks keep their synchronous SQLite snapshots off the
+control event loop. The
 manual `yoetz observe drain` repeats full FIFO passes while the previous pass resolved at least one
 row, bounded by the backlog size at entry, and reports `passes`, `pending_after`, and a closed
 `terminal`: `drained` (nothing pending), `retry_pending` (a pass resolved nothing; `reasons`
@@ -3458,20 +3889,34 @@ canonical workspace locator the hook already bound consent to as `workspace_ref`
 host-session identity as `external_ref`; the service persists only HMAC commitments of both, and a
 hook that reached consent through the legacy session→workspace map without a canonical locator
 never sends an unpaired request (issue #459). The request validates through the public
-`StartRequest` contract before dispatch. Before a new admission, the shared Claude Code/Codex/
-Cursor hook path checks the private local store for a held mapping from a durably recorded
-same-host `SessionEnd`. Every eligible mapping must belong to the consented workspace alone and
-name one task; ambiguity refuses. The newest eligible mapping-file write selects among bindings
-for that same task. The hook holds the workspace and predecessor lifecycle locks while rechecking
-the candidate set and issuing `mode=attach` with the stored selector plus the new host pair.
-Repository privacy is checked from the trusted control handshake. The response must retain the
-candidate task ID. Recovery records the new mapping, rewrites eligible ended predecessor mappings,
-and drains pending rows. Without a persisted selector, the new pair creates new work. A contended
-or changed recovery binding retries without falling back to creation. Predecessor rows still pending
+`StartRequest` contract before dispatch. Before automatic new-pair admission, the shared Claude
+Code/Codex/Cursor hook path checks the private local store for a held mapping from a durably recorded
+same-host `SessionEnd`. A unique eligible mapping is the only automatic recovery selector: the hook
+holds the workspace and predecessor lifecycle locks, revalidates ownership and state, and sends one
+`mode=attach` request carrying that selector together with the new host pair. Every eligible mapping
+must name one task; within it, the newest mapping-file write wins and the host session ID breaks
+timestamp ties. The trusted control handshake carries the canonical workspace for repository privacy.
+The catalog requires the selector to remain active, the task to be the workspace's sole
+non-quarantined route, and no start for that route to be pending. Both calls share one five-second
+deadline. The response must retain the candidate task ID. Recovery first takes a nonblocking
+workspace reservation and then holds ordered locks for every eligible ended same-host session
+through full candidate revalidation, the service RPC, authorized rewrites, and pruning; no
+observation-store lock spans the RPC. Revalidation includes unmapped sessions, cross-workspace
+ownership, mapping identities, and mapping recency. A busy workspace reservation returns
+`auto_attach_recovery_busy` without a service request; a busy candidate lock or changed snapshot
+returns the same closed `auto_attach_recovery_busy` boundary rather than creating work while the
+selector is unstable. If eligible mappings name more than one task, admission returns the closed
+`auto_attach_binding_ambiguous` reason with only a bounded candidate count and does not guess. A
+successful recovery records the new mapping, rewrites every ended same-host predecessor mapping for
+that task to the rotated session and writer, and drains pending rows without publishing an
+intermediate conflict. With no usable persisted selector, automatic `create_or_attach` admits the
+new pair as independent work, including beside a dormant task. `workspace_task_exists` identifies
+only explicit `mode=create` colliding with an identical pair; workspace membership never supplies a
+selector. Predecessor rows still pending
 at rotation follow the `session_superseded` binding on ingest (the current task session and the
 observation writer derived for it) so they are acknowledged on the successor route rather than
-quarantined. With no eligible local selector, or
-when that attach fails, the ordinary typed failure path remains. Every failed attempt records a
+quarantined. When no eligible local selector exists, the ordinary `create_or_attach` path admits
+new work; when recovery attach fails, the ordinary typed failure path remains. Every failed attempt records a
 closed hook-diagnostic
 reason instead of a silent absent mapping: `auto_attach_workspace_unbound`,
 `auto_attach_request_invalid`, `auto_attach_conflict` (session, idempotency, or request-identity
@@ -3479,7 +3924,18 @@ conflict), `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_map
 `privacy_authority_required`, or the shared `service_unavailable`, `vault_locked`, `timeout`,
 `storage_unsafe`, and `storage_corrupt` tokens. Turn-boundary hooks retry auto-attach under a
 bounded budget and record the same typed cause next to the `auto_attach_retry_failed` path marker
-when no mapping results. The resume/compact status read for a mapped session connects through the same consented
+when no mapping results. Busy lifecycle mutations are durable: observation-local schema `/11` adds
+a bounded `pending_lifecycles` queue and source/session/generation-scoped paired-orphan identities,
+and hook or READY drains reconcile them under the same workspace and session reservations before
+routing rows. Historical false post-only diagnostics are retired only when retained envelope
+history is complete; their gap-history rows remain. Busy mapping writes use an atomic per-session handoff. Applying a handoff claims a separate
+file, retains concurrently queued updates, and replays an interrupted claim on the next attempt.
+A deferred clear superseded by a later generation cannot remove that generation's mapping.
+The `/11` extension requires a quiesced upgrade: stop the older Yoetz service and all host hooks,
+install the new runtime, then restart the service and every host integration before writing the new
+state. Mixed old and new writers are unsupported because a `/10` writer ignores the new fields and can
+erase pairing provenance when it saves.
+The resume/compact status read for a mapped session connects through the same consented
 workspace locator as the auto-attach `start` (`yoetz hooks session-start` derives it from
 `--workspace` or, absent that, the hook's own working directory), so the daemon's repository
 fence admits a live mapping (issue #578). A `SESSION_NOT_FOUND` answer (`session_superseded`, whose
@@ -3490,7 +3946,13 @@ the hook preserves the mapping, tells the agent to continue with the named ids o
 authority for replacement ids. A `SESSION_CONFLICT` carrying `repository_identity_required` or
 `repository_identity_mismatch` is a live mapping the daemon could not bind to a repository: it
 records `status_workspace_unbound` / `status_workspace_mismatch`, keeps the mapping, and its
-advisory says not to re-attach. The active-mapping context names the task, frontier, `session_id`,
+advisory says not to re-attach. `cli/hooks.resolve_session_workspace` selects the probe's locator
+in a fixed order — explicit project path (not the bare `.`), host payload `cwd`, hook cwd — and
+returns a closed `SessionWorkspace.source`; beside a fence refusal the hook records the companion
+row `locator_source_explicit` / `locator_source_host_payload` / `locator_source_cwd` /
+`locator_absent` / `locator_unresolvable` (issue #659). An explicit path that fails
+canonicalization never falls through, and the daemon's fence still decides admission, so a derived
+locator can produce a typed mismatch but never access to another repository. The active-mapping context names the task, frontier, `session_id`,
 and `writer_id`, and says to continue the task with `start mode=attach` by that session id rather
 than a new ref pair (issue #580). The scoped `start` post-hook binder admits three host shapes —
 an object carrying `structuredContent` (Codex), a single-text-block content list whose text is the
@@ -3557,10 +4019,16 @@ save resolves its active flag only when that save evicts nothing and leaves one-
 budget free. Merely landing under the cap cannot clear the same loss it just recorded; the durable
 gap history remains after recovery, and renewed shedding reactivates it (issue #310).
 
-Public ingest failures use their `retryable` contract, not a spelling fallback. A non-retryable
-failure that is not already a narrower terminal class (`dedup_conflict` or
-`observation_storage_corrupt`) becomes `ledger_rejected`; drain and sweep quarantine that one row,
-record the reason once, and continue its lane. `SESSION_NOT_FOUND` with
+Public ingest failures use their `retryable` contract and the stage that refused the request.
+A non-retryable `SESSION_CONFLICT` while acquiring the task runtime becomes `mapping_missing`:
+the envelope stays pending so a later drain can recover its lifecycle mapping, subject to the
+same route ownership checks. A non-retryable conflict after runtime acquisition, or a
+`SESSION_NOT_FOUND` without a followable binding, becomes `ledger_rejected`. Other non-retryable
+failures outside the narrower `dedup_conflict` and `observation_storage_corrupt` classes take
+that same terminal path: drain and sweep quarantine the row, record the reason once, and continue
+its lane (issue #554). A retryable public failure outside the designed back-pressure set and
+`VAULT_LOCKED`, including a retryable session-route conflict, is `service_unavailable` and stays
+pending. `SESSION_NOT_FOUND` with
 `reason_code: session_superseded` is not that class: ingest follows the current binding carried in
 `safe_details` (same task, successor session, observation writer derived for it), persists the
 updated lifecycle mapping on each hop only while holding the lifecycle lock and the stored
@@ -3584,13 +4052,56 @@ and quarantined delivery failures so terminal causes remain visible after the ro
 outbox. Hook-driven drains also write the bounded hook diagnostic, while manual and supervisor
 drains are visible through status rather than being mislabeled as hook activity (issue #540).
 
-Routine-read materialization follows ADR-022's rate policy. A service-owned structural
-`action=routine_read` label is derived only for the closed direct-read tool set or a conservatively
-parsed, single read-only shell command; host-supplied action text cannot select it. Path-qualified
-executables, Git `--output` / `--ext-diff`, explicit `success=false` or `denied=true`, and other
-ambiguous shell input stay ordinary observations. Both the pre-event and a successful or
-status-unknown post-event remain in the bounded local observation store but do not append
-task-ledger events. A failed post-event materializes normally.
+Observation selection follows ADR-029 and retains ADR-022's individual outcome rules. The shared
+`ObservationClassification` derives `routine_candidate`, `proven_routine_success`, protection and
+closed reason tokens from supported host structure and conservative single-command parsing.
+Caller action labels cannot select `routine_read`. Unknown outcomes, nonzero read results,
+denials, cancellation, ambiguous shell syntax, mutation flags and declared verification remain
+individual observations. An unknown result is never treated as a successful read.
+
+Focused is the default detail mode. `AdmissionBuffer` retains minimum pre identities and proven
+routine successes before optional content extraction and outbox admission. At most 16 completed
+calls or 32 inputs contribute to one `RoutineReadSummary`. Summary members retain exact native
+identity, source cursor, phase and observation time; the summary binds their digest, original
+route, authority generation, selection fence, and explicit structural-only content scope. It
+cannot cross source, session, delegate, generation, authority or material-state boundaries.
+Summary delivery creates one metadata-only evidence record with `routine_read_detail_omitted`
+coverage, not a per-call content or verification claim. A changed task route is rejected before
+the observation cursor advances.
+
+`ObservationSelection` separates Focused/Detailed from the 512/2,048/8,192 count profiles.
+`ObservationSelectionSettings` resolves a live session override, then an explicit workspace
+selection, then the default. Each profile also has finite queue/state byte bounds and protected
+reserves. `PressureSnapshot` drives future optional-content reduction and temporary Detailed to
+Focused behavior from count, bytes, age, pending attempts and capture backlog. Recovery requires
+low pressure for the policy dwell and a still-valid owner selection. Status reads do not start
+recovery or write notices. Background maintenance flushes due accounts and advances recovery.
+The optional `ObservationStatus.selection_runtime` local-control projection carries selected and
+effective values, scope/expiry, finite budgets and separate observed, admitted, summarized,
+delivered and intentionally omitted counters. The CLI and terminal interface expose this
+workspace-bound projection. Ordinary cooperative MCP `status` remains task-ledger scoped and
+does not expose or mutate workspace observation selection; use the local observation controls.
+
+Local control schema `2.6.0` adds this bounded observation projection. The frozen `2.5.0`
+schemas remain available for local validation and historical fixtures. A client and service with
+different schema manifests are rejected during the authenticated handshake, so both peers must
+run the `2.6.0` manifest to exchange the new projection; the service does not silently
+down-convert it to `2.5.0`. Selection state upgrades preserve pending delivery and default
+historical counters to zero, so the new accounting describes locally ingested inputs since the
+selection upgrade and never estimates older traffic.
+
+`protect_next_reads` is a bounded request to retain read evidence linked to an obligation, claim
+or finding; it grants no content or disclosure authority. `promote_buffered_observation` can retain
+an individual native identity while its successful routine account remains buffered. It reports
+historical content as `not_retained`; reacquired content is new evidence at a new state and time.
+After the buffer is delivered, promotion reports `promotion_window_closed` rather than inventing
+historical evidence.
+
+The stages observed, buffered/retained, summarized, delivered and selected for a check are
+distinct. Intentional detail omission is separate from non-replayable rejection. Bounded loss
+ranges, their aggregate commitment and historical count survive current-pressure recovery.
+Capture-ticket count and byte limits remain independent from structural capacity; partial or
+unknown per-task backlog projections never assert complete workspace capture coverage.
 
 Yoetz-owned tool observation follows ADR-022 decision 18 (issue #564). The hook ingress for every
 host and the Codex stream reconciler recognize Yoetz's own tools under every host spelling
@@ -3603,11 +4114,20 @@ host failure or denial in either phase, or the post-event of `start`, `publish_w
 content. Codex hooks are the paired carrier: `tool_call_id` is scoped to source, session, and
 generation, and an orphan post retains `unpaired_event` until explicitly repaired. The currently
 installed Claude and Cursor native profiles are post-only carriers: their post observations never
-diagnose a missing pre-event, and they materialize metadata-only evidence rather than inventing an
-action/result pair. Cursor `generation_id` is retained as metadata only and never serves as a tool
-identity. A legacy false `unpaired_event` from a post-only profile may be retired from the current
-projection only when retained history is complete and contains no true paired orphan; its gap
+diagnose a missing pre-event. A post with an actual tool-call identity, such as Claude's
+`tool_use_id`, can materialize an observed action/result pair with a distinct post-only action
+identity; it does not assert that a pre-event was observed. A generation-only Cursor post
+materializes metadata-only evidence. Cursor `generation_id` is retained as metadata only and
+never serves as a tool identity. A legacy false `unpaired_event` from a post-only profile may be
+retired from the current projection only when retained history is complete and contains no true paired orphan; its gap
 history remains auditable.
+For Yoetz-owned calls, local pairing is unaffected, so a delivered post-event carries no
+`unpaired_event` gap and
+the service materializes its action from the post alone. No coverage gap is recorded: the service
+already holds the authoritative record of every Yoetz-owned call it served. The same complete
+host-spelling set gates advice delivery: without an explicit failure, a Yoetz-owned hook does not
+lease pending frontier or recommendation context for the call being observed. An explicit
+self-call failure remains eligible for pending advice as well as retention and delivery.
 
 The local observation state also owns a sparse, one-shot `FrontierMotionNotice` per Codex session:
 `from_sequence`, `to_sequence`, final `head_digest`, and exact accepted observation-record count.
@@ -3835,9 +4355,9 @@ MCP server registration is a sibling port, never an `IntegrationsPort` overload 
 `apply_registration`, `preview_unregistration`, and `apply_unregistration`, each taking a
 `HarnessBinary` (harness ID, redacted-repr executable path,
 optional reported version, `supported|untested` compatibility). Shared names are
-`MCP_SERVER_NAME` (exactly `yoetz`), `MCP_SERVE_COMMAND` (exactly `("yoetz", "mcp", "serve")`),
-`MCP_STRICT_SERVE_COMMAND` (exactly
-`("yoetz", "mcp", "serve", "--semantic", "off")`),
+`MCP_SERVER_NAME` (exactly `yoetz`), `MCP_SERVE_COMMAND` (exactly
+`("yoetz", "mcp", "serve", "--host", "codex")`), `MCP_STRICT_SERVE_COMMAND` (exactly
+`("yoetz", "mcp", "serve", "--host", "codex", "--semantic", "off")`),
 `McpRegistrationState` (`absent|yoetz_owned|foreign_present`), `McpRegistrationAction`
 (`register|reregister|unregister|noop`), `McpRegistrationReason` (`confirmation_required|preview_stale|
 harness_unavailable|parse_failed|timeout|registration_failed|foreign_entry_present|isolation_invalid`),
@@ -3846,7 +4366,8 @@ harness_unavailable|parse_failed|timeout|registration_failed|foreign_entry_prese
 `McpRegistrationResult`, and
 `McpRegistrationError`. `McpRegistrationObservation` carries `harness_id`, `state`,
 `route_profile` (`policy|strict|null`), and `isolation_binding`
-(`ambient|isolated_exact|missing|different|null`); route and binding are non-null only when the
+(`ambient|isolated_exact|missing|different|null`), plus optional internal `serve_command` carrying
+the exact observed owned argv for the applied-route record; route and binding are non-null only when the
 state is `yoetz_owned`, because a foreign or absent entry has no Yoetz route to describe.
 `observe_registration` reads exactly what `status_registration` reads, mutates nothing, and shares
 its `status` diagnostic phase. Each observation starts with `codex mcp get yoetz --json`; because a
@@ -3875,7 +4396,8 @@ success. The interactive approval surface prints the exact command, route, isola
 and preview digest. The preview binds the exact command, `policy|strict` route profile, and exact
 ADR-026 isolated root when present. Ambient external registrations carry no environment. Isolated
 external Codex registrations carry exactly one native `--env` pair,
-`YOETZ_ISOLATED_ROOT=<validated-root>`; a missing or different known root is re-registration drift,
+`YOETZ_ISOLATED_ROOT=<validated-root>`; a missing root is re-registration drift, as is a different
+known root on a legacy bare registration,
 while any arbitrary key, inherited-variable declaration, or malformed root makes the same-name
 entry foreign and preserves it. The route profile is
 explicit input:
@@ -3889,12 +4411,39 @@ is surfaced before mutation: the wizard preview and report carry `route_profile_
 ordinary digest-bound re-registration.
 The setup-wizard
 schema tokens are `yoetz.setup-wizard-marker/1`, `yoetz.setup-wizard-report/1`,
-`yoetz.setup-status/1`, `yoetz.mcp-registration-preview/1` (ambient) / `2` (isolated), and
-`yoetz.mcp-unregistration-preview/1` (ambient) / `2` (isolated); the marker lives at
+`yoetz.setup-status/1`, `yoetz.mcp-registration-preview/1` (ambient) / `2` (isolated) / `3`
+(installed absolute launcher), and `yoetz.mcp-unregistration-preview/1` (ambient) / `2`
+(isolated) / `3` (installed absolute launcher); the marker lives at
 `state_dir()/setup-wizard.json` via
 `config.paths.setup_marker_path`. The CLI surfaces are
 `yoetz setup run|status` and
 `yoetz integrate <harness> mcp status|preview|preview-remove|install|remove` (ADR-012).
+
+For issue #654, `mcp_command_profile` validates the shape of a bare or absolute console-script
+command with the exact current or legacy Codex serving suffix; it establishes no ownership.
+`adapters/integrations/codex_launcher.installed_launcher` supplies the adapter's ownership proof:
+the console script in the current interpreter's scripts directory must match exactly one SHA-256
+and size entry in that runtime's installed Yoetz RECORD. The executable and its ancestors must be
+non-symlink, owned by the current user or root, and not writable by group/others. For a pinned
+runtime, the validated root, instance identity, pin, lifetime, package version, and runtime prefix
+must agree. An absolute registration is owned only when its exact launcher matches that proof,
+its serving suffix is recognized, its transport is unambiguous and enabled, and its environment
+contains no unreviewed binding. A different root on an absolute registration is foreign, not a
+repair target. No candidate from host configuration is executed to establish this proof.
+
+New previews prefer that proven absolute console script. An installed CLI without valid proof
+refuses registration instead of falling back to PATH; embedded callers without an invoking
+launcher retain bare-command compatibility. Existing bare and legacy registrations remain
+recognizable for removal or an explicit migration to the absolute current command. Absolute
+preview digests bind the launcher bytes and proposed command/root; registration also binds the
+observed command/root so drift invalidates approval. Applied-route records preserve the exact
+observed argv, including its absolute launcher; their command validator checks shape, never
+confers ownership. Older records remain readable, and an older reader that cannot parse an
+absolute record retains its existing fail-soft missing-record behavior. CLI and terminal previews
+display that exact argv; provider status and preflight consume the shared ownership observation.
+This changes no workflow request/result schema, hook contract, or receipt format. The proof is
+installation-local integrity, not authentication against a machine owner who can rewrite both
+the installed script and RECORD.
 Standalone `yoetz provider endpoint` retains its explicit credential next command. When endpoint
 binding is embedded in the composed setup wizard, that standalone handoff is suppressed because
 the wizard still owns privacy consent and confidential ingress. Every visible yes/no prompt near
@@ -3989,10 +4538,14 @@ overwrite the record — including an accepted install that had nothing to write
 clears it, so absence with no record reads as no drift. A strict ceiling check served while the
 applied record says `policy` keeps the same
 `blocked_by_policy` / `route_semantic_ceiling` status, reason, and null provenance, and carries
-the `optional_semantic_review_registration_drift` coverage gap alongside the ceiling gap; its
+the `optional_semantic_review_registration_drift` coverage gap alongside the ceiling gap only when
+the serving command declares `--host codex`; generic, Claude, and Cursor processes cannot be
+attributed to the Codex record. Its
 receipt names the recovery (re-run `mcp preview` / `mcp install --route-profile policy`, start
 a fresh Codex process) as a conditional, because a strict route reached outside the ceremony is
-a legitimate owner action. A ceiling with no applied-policy record keeps the terminal wording.
+a legitimate owner action. A ceiling with no applied-policy record keeps the terminal wording. The
+bridge emits `registration_drift` at startup only for an explicit Codex serving identity; generic
+legacy invocations remain unknown and keep the strict ceiling without a Codex drift claim.
 MCP `status view=versions` and the `mcp serve` descriptor intentionally stay serving-only: they
 name the live route of the serving process, and the applied-vs-serving drift join lives in the
 CLI status surfaces — so the omission there reads as decided, not missing. The closed
@@ -4184,35 +4737,50 @@ unpopulated evidence cell.
 It is redacted in representations and never inferred from regular Cursor, `$HOME`, caches, or a
 single installed candidate. The managed destination is `plugins/local/yoetz` below that selected
 root. `CursorPluginArtifact` contains one `PortablePluginPlan`, one sorted member mapping, and one
-artifact digest. Its format is exactly `agent_plugins_1` or `cursor_plugin_native`; one artifact
-never contains both root `plugin.json` and `.cursor-plugin/plugin.json`.
+artifact digest. Native artifacts also carry the validated `YOETZ_ISOLATED_ROOT` binding when the
+invoking runtime is isolated; portable artifacts never carry a host isolation binding. Its format
+is exactly `agent_plugins_1` or `cursor_plugin_native`; one artifact never contains both root
+`plugin.json` and `.cursor-plugin/plugin.json`. The host may still consult the regular shared
+`~/.cursor/plugins/local/yoetz` during discovery when launched with another user-data directory;
+an isolated Cursor home does not prove isolated plugin discovery. The explicit target, child root
+binding, and host discovery observation remain separate proof facets.
 
 `CursorPluginPreview` carries request ID, effective action, before state, exact format, target
 identity digest, current-state digest, artifact digest, preview digest, intended MCP ownership,
-observed `McpOwnershipState`, optional exact route, and sorted warnings. `CursorPluginStatus`
-carries artifact/operation state, detected format, artifact/installed digests, marker validity,
-rollback availability, one `CursorMcpObservation`, one `CursorMcpRuntimeObservation`, one
-`CursorLauncherStatus`, and every independent `PluginProofFacet`.
+observed `McpOwnershipState`, optional exact route, proposed isolated root or null, and sorted
+warnings. `CursorPluginStatus` carries artifact/operation state, detected format,
+artifact/installed digests, marker validity, rollback availability, one `CursorMcpObservation`,
+one `CursorMcpRuntimeObservation`, one `CursorLauncherStatus`, the Cursor-specific isolation
+binding (`ambient|isolated_exact|missing|different|unobserved`), and every independent
+`PluginProofFacet`. `ambient` and `isolated_exact` require both a marker root match and intact
+root-bearing MCP/hook members; a marker alone never proves that the child launch binding remains
+intact. `different` covers a changed root or a root-bearing member whose binding no longer matches.
 `CursorPluginResult` carries request/action/operation, before/after states, format,
 preview/artifact/installed digests, and sorted changed members. Portable artifacts retain marker
 schema `yoetz.cursor-plugin-install/1`. Newly rendered native artifacts use
-`yoetz.cursor-plugin-install/2`, which adds the resolved absolute invoking `yoetz` executable path
+`yoetz.cursor-plugin-install/3`, which adds the resolved absolute invoking `yoetz` executable path
 (never a different ambient-PATH installation when the CLI was invoked by an explicit absolute or
 relative path) to the
-format, renderer/Yoetz versions, hook mapping version, MCP owner/route, artifact digest, exact
-managed inventory, and marker digest. A valid legacy native `/1` marker remains managed but reports
-`modified` against the `/2` desired artifact, so an exact previewed replace or remove remains
-reachable. Neither schema carries a project path, content, credential, transcript, timestamp,
-activation, coverage, or receipt claim.
+format, renderer/Yoetz versions, hook mapping version, MCP owner/route, exact isolated-root
+binding (or null for ambient mode), artifact digest, exact managed inventory, and marker digest.
+A valid legacy native `/1` or `/2` marker remains managed but reports `modified` against the
+current desired artifact when its binding is absent, so an exact previewed replace or remove
+remains reachable. Neither schema carries a project path, content, credential, transcript,
+timestamp, activation, coverage, or receipt claim.
 
 Native hooks **and the plugin-owned `mcp.json`** launch that one recorded launcher (issue #468):
 the MCP entry is `command = launcher[0]`, `args = [*launcher[1:], "mcp", "serve", "--host",
 "cursor"(, "--semantic", "off")]`, never a bare `yoetz` that Cursor's sanitized desktop PATH may
-resolve to another installation. Because the entry is a managed member, its bytes are part of the
-artifact digest and the marker inventory. Route recognition (`observe_cursor_mcp`) accepts an
-exact Yoetz route as a hand-written bare `yoetz` or one of the known launchers — this artifact's
-and the installed marker's — followed by the exact serve arguments; any other command, prefix, or
-key set is `foreign`. `CursorLauncherStatus` reports `artifact_launcher`, `installed_launcher`,
+resolve to another installation. In isolated mode the entry carries exactly
+`env = {"YOETZ_ISOLATED_ROOT": "<validated-root>"}` and every native hook command carries the
+same shell-safe assignment; ambient artifacts omit both. Because these entries are managed
+members, their bytes are part of the artifact digest and marker inventory. Route-shape recognition
+accepts a hand-written bare `yoetz` or one of the known launchers — this artifact's and the
+installed marker's — followed by the exact serve arguments, optionally with that one structurally
+valid environment binding. Lifecycle ownership passes the artifact's exact expected root into the
+same classifier; a different valid root is therefore `foreign` and cannot count as owned or
+admitted. Any other command, prefix, or key set is `foreign`. `CursorLauncherStatus` reports
+`artifact_launcher`, `installed_launcher`,
 `executable` (`matched|drifted|missing|unbound|unobserved`: the installed launcher versus the one
 this runtime would render, and whether it still exists), `mcp_binding`
 (`exact_launcher|ambient_path|absent|foreign|unobserved`: what the installed plugin entry spawns),
@@ -4240,6 +4808,32 @@ policy, timeout, malformed output, nonzero exit, non-macOS hosts, or binding mis
 `human_authority_unavailable` before mutation. This scoped adapter is not the service-wide
 `UserPresencePort` and grants no authority for vault, credential, privacy, setup, or another
 plugin operation.
+
+The cell is selected per platform by `select_artifact_user_presence`
+(`adapters/integrations/artifact_presence.py`), shared by the Cursor and Claude Code lifecycles,
+and every host `preview` reports the selection as `authorization.human_presence` with `mechanism`
+(`macos_local_authentication`, `linux_pam_trusted_console`, or `unsupported`), `platform`
+(`sys.platform`), `ingress` (`os_dialog`, `trusted_console`, or null), and `supported`, next to
+the unchanged `requires_os_authenticated_prompt`. On Linux, including a distribution under WSL 2,
+`LinuxArtifactUserPresence` (`linux_artifact_presence.py`) writes a banner naming
+`plugin_artifact_apply`, the full preview digest, and the pending review ID to the ADR-008
+trusted foreground console, reads the invoking account's operating-system password there once
+with echo disabled, and verifies it through Linux-PAM (`libpam.so.0`, fixed service `login`,
+`PAM_DISALLOW_NULL_AUTHTOK`) followed by `pam_acct_mgmt`; an unprivileged process can only ever
+verify its own account through `unix_chkpwd`. The console is ingress, never authority. Exactly
+one hidden prompt is answered; an echoed, repeated, or unknown prompt, cancellation, EOF, an
+empty or wrong password, a locked or expired account, a missing PAM stack, no verified console
+(an agent's pipe, redirected stdio, or a background process group), or the 130-second deadline
+becomes `human_authority_unavailable` before the pending is claimed, and operating-system prompt
+or error text is never reflected. An unsupported platform fails closed with the same reason.
+Neither cell is the service-wide `UserPresencePort`.
+
+Linux PAM deadline implementation (issue #719): the trusted console process retains password
+input and terminal restoration, while a disposable Python worker performs the native PAM calls.
+The bounded password travels through an anonymous pipe only. The parent kills and reaps its
+worker on timeout or cancellation; a blocked PAM module cannot defer the parent deadline.
+No PAM prompt or error output is forwarded. Empty, overlong, and NUL-containing passwords are
+refused before launching the worker.
 
 Install and remove replays are idempotent at the selected state: a committed operation whose
 result was lost reconciles instead of refusing, touching no bytes and consuming no second review.
@@ -4272,8 +4866,21 @@ a surviving Cursor-helper child on the strict argv is `full_restart_required`, a
 stays `not_observed`. Reload Window is not a sufficient activation proof. SDK precedence is exactly that enum order. A higher-precedence or duplicate
 same-name source cannot create a plugin-managed pass: plugin plus external is `dual`, multiple
 same-class sources are `ambiguous`, and any non-exact same-name entry is `foreign`. Route
-recognition is key-set exact — exactly `command`, `type`, `args` — so an entry carrying any
-additional key such as `env` or `cwd` is foreign however compatible its values look.
+recognition is key-set exact — exactly `command`, `type`, `args`, or those three plus the one
+`env` binding above; arbitrary additional keys such as `cwd` remain foreign.
+
+`CursorProjectMcpTarget` names an explicit absolute project root and Cursor configuration root.
+The POSIX project-registration adapter exposes preview, status, apply, and removal through
+`integrate cursor project-mcp`; its only owned file entry is project `.cursor/mcp.json` key
+`mcpServers.yoetz` with the exact invoking launcher, native Cursor serve suffix, and isolated-root
+binding. It refuses any same-name user or plugin source, duplicate source, or foreign project
+entry. A preview binds target directory identities, all three configuration preimages, route,
+launcher, and replacement digest. Apply rereads the inputs, atomically replaces through a pinned
+directory, and verifies the resulting configuration before reporting success. Host writers do
+not participate in compare-and-swap, so that limitation remains explicit. Status proves only
+configuration ownership; host trust remains unknown and runtime binding unobserved. This route
+lets Cursor supply native project roots without widening the bridge's workspace authority.
+Removal and strict registration compose the existing project admission reverse sweep.
 
 `CursorSdkBinding` is exactly `typescript|python`. `CursorArtifactIdentity` carries binding,
 package version/digest, bridge protocol exactly `sdk.v1`, and optional bridge digest.
@@ -4297,7 +4904,13 @@ loading has no independent installed-artifact, event-delivery, privacy-filtering
 or accepted-observation proof. Native IDE rendering or schema validity cannot populate those
 neighboring cells.
 Cursor ingress maps only bounded session/generation/tool IDs, exact Cursor/model/effort tokens,
-duration, capability profile, and an installation-keyed HMAC changed-path commitment. It discards
+duration, capability profile, and an installation-keyed HMAC changed-path commitment. Cursor's
+`afterMCPExecution` duration is admitted as a finite decimal millisecond value only at this host
+boundary and truncated to the canonical integer `duration_ms`; the canonical parser remains
+float-free. Discarded vendor-field floats are replaced transiently, and malformed or unsafe Cursor
+envelopes remain fail-open while recording the payload-free `cursor_payload_invalid` diagnostic.
+The `model` spelling from execution/file-edit events normalizes to `model_id`; a valid `model_id`
+spelling wins when both are present. It discards
 prompt, reasoning, response text, paths, file contents/edits, MCP/tool inputs/results, transcripts,
 commands/output, and email before storage and never reconciles a Cursor transcript stream. It uses
 `workspace_roots` transiently, then `CURSOR_PROJECT_DIR`, then the explicit hook argument to choose
@@ -4311,6 +4924,30 @@ The selected locator retains its exact filesystem-encoded spelling through looku
 Unicode normalization never aliases distinct directories. A grant created under a differently
 normalized spelling does not authorize its sibling and requires an explicit regrant.
 
+The native Cursor MCP bridge has an additional session binding: on the first workflow call it asks
+the MCP client for the standard `roots/list` result. The Cursor-specific adapter accepts local file
+URIs and the strict absolute local path shape emitted by the reviewed host, then safely canonicalizes
+every root. Without a validated project selector, the roots must canonicalize to one repository.
+An owned project registration renders `--project-root ${workspaceFolder}` and binds that startup
+selector to the exact project entry, launcher, route, and directory/configuration identity. The
+selected repository must occur in the active client's validated root inventory. Registration
+identity is revalidated before each workflow call; a changed registration retires the bridge.
+The selector resolves a multi-repository inventory but cannot substitute for missing host roots.
+Process CWD, hook payloads, and public workflow `workspace_ref` are not authority inputs. Missing,
+unsupported, remote, malformed, oversized, nonmatching, or unresolved multi-repository roots fail as
+`SESSION_CONFLICT` with `reason_code: repository_identity_required` before the service handshake;
+the bound locator is retained only in that bridge's private client slot and revalidated before
+each workflow call. A `notifications/roots/list_changed` notification retires the slot and requires
+a fresh MCP session,
+so one process cannot cross repository authorities. The bridge continues to advertise the same
+tools/resources surface; roots are a client-to-server locator exchange, not a new Yoetz tool or
+server capability. The public `workspace_ref` remains the caller's task-attachment selector and
+the guidance convention is still to set it to the open repository root; the native roots binding
+does not rewrite or reject a mismatching public ref. Such a mismatch can leave a session safely
+bound to the host root while normal create/attach lookup semantics continue to use the caller's
+ref pair. Hook auto-attach, queue admission, and mapping failures remain separate host lifecycle
+concerns.
+
 ### Claude Code local project harness contract (issue #154)
 
 Claude Code is a native dual target and is not an Agent Plugins consumer. The initial cell is
@@ -4323,9 +4960,12 @@ synced, managed/user/local scope, Agent SDK, or headless support.
 resolved executable paths; exact `ClaudeCodeCapabilityIdentity(version, executable_digest,
 os_name, architecture)`; scope exactly `project`; and marketplace name exactly `yoetz-local`.
 Representations redact every path. The cache root must equal `<claude_config_root>/plugins/cache`.
-Preview admits only exactly proven Claude versions (`CLAUDE_CODE_HARNESS_PROFILE.supported_versions`,
-currently `2.1.241`); a neighboring version stays explicitly untested rather than running under an
-unearned profile. Preview also re-hashes the executable to detect stale identity, and refuses with
+Preview admits any parseable Claude version at or above `CLAUDE_CODE_MINIMUM_VERSION` (`2.1.233`)
+and reports `version_provenance`: `tested` for an exactly proven cell
+(`CLAUDE_CODE_HARNESS_PROFILE.supported_versions`, currently `2.1.241`), `untested` otherwise
+(issue #656); a version below the floor is refused as `format_unsupported` with
+`version_unsupported`/`minimum_version`. An `untested` host is admitted but never promoted to a
+proven cell. Preview also re-hashes the executable to detect stale identity, and refuses with
 `recovery_required` while interrupted stage/rollback material remains beside the marketplace source,
 before any mutation.
 
@@ -4369,20 +5009,22 @@ and `host_activation` is proven only when a validated session observation coinci
 installed bytes, discovery, marketplace registration, and enabled state — a session init alone (for
 example a development `--plugin-dir` run) earns no marketplace-installed activation proof.
 
-Every mutation consumes the exact `plugin_artifact_apply` pending plus scoped OS-authenticated
-presence; `--accept` alone is not authority. Install generates/safely swaps only the private source,
-adds the project marketplace, and asks Claude to install the qualified plugin; exact read-back must
-show disabled default and matching cache/version. Update requires a marker-valid source/discovered
-install, replaces only managed source bytes, then invokes marketplace/plugin update. Enable and
-disable alter only Claude's effective project setting. Remove invokes qualified project uninstall
-with `--keep-data`, removes the project marketplace, and deletes only exact marker-valid source.
-Replacement and removal revalidate the displaced tree after it is renamed out of the public path —
-when nothing can swap it any more — and destroy only a marker-valid managed tree; content created or
-modified during the authority or host-command window is restored untouched and the mutation refused.
-Any post-mutation state the independent read-back cannot confirm is `outcome_unknown` regardless of
-the subprocess exit code (`refused` describes only safe pre-mutation rejection); status surfaces
-leftover stage/rollback material as `recovery_required` with `outcome_unknown`, and
-no host-owned settings/cache rollback is guessed.
+Every mutation consumes the exact `plugin_artifact_apply` pending plus the per-platform scoped
+OS-authenticated presence cell described for Cursor above (macOS LocalAuthentication, Linux and WSL
+2 PAM through the trusted console, otherwise fail closed); `--accept` alone is not authority.
+Install generates/safely swaps only the private source, adds the project marketplace, and asks
+Claude to install the qualified plugin; exact read-back must show disabled default and matching
+cache/version. Update requires a marker-valid source/discovered install, replaces only managed
+source bytes, then invokes marketplace/plugin update. Enable and disable alter only Claude's
+effective project setting. Remove invokes qualified project uninstall with `--keep-data`, removes
+the project marketplace, and deletes only exact marker-valid source. Replacement and removal
+revalidate the displaced tree after it is renamed out of the public path — when nothing can swap it
+any more — and destroy only a marker-valid managed tree; content created or modified during the
+authority or host-command window is restored untouched and the mutation refused. Any post-mutation
+state the independent read-back cannot confirm is `outcome_unknown` regardless of the subprocess
+exit code (`refused` describes only safe pre-mutation rejection); status surfaces leftover
+stage/rollback material as `recovery_required` with `outcome_unknown`, and no host-owned
+settings/cache rollback is guessed.
 
 `ClaudeCodeMcpSource` is exactly
 `local|project|user|plugin|claude_ai_connector`, ordered by Claude precedence. Observation reads
@@ -4479,8 +5121,15 @@ The compact singleton carries the same two completion-scope fields beside its cu
 both counters, and an `unanswered_findings` preview. Its `blocking_conditions` are exactly
 `obligations_open|findings_unanswered|receipt_findings_unresolved|no_plan_published|
 no_obligations_declared|projection_stale|coverage_gaps_declared|readiness_unknown`. It is derived
-per request from the compact projection: reading it records nothing, creates no verdict or IDs, and
-never strengthens coverage. `findings_unanswered` identifies response work still to do;
+per request from the compact projection and a current, read-only comparison of accepted catalog
+children with the parent's recorded dependency manifest. Child blockers, including
+`lineage_manifest_not_recorded` and `lineage_manifest_state_changed`, appear in the status envelope's
+`gaps` and coverage and set `coverage_gaps_declared` on every view, including compact. An unavailable
+comparison contributes `lineage_readiness_unavailable`; it cannot make the parent look ready.
+Pending child annotations do not block. These current advisory facts never refresh a manifest,
+open a child bundle, change a recorded check, or strengthen a receipt. Reading readiness records
+nothing, creates no verdict or IDs, and never strengthens coverage.
+`findings_unanswered` identifies response work still to do;
 `receipt_findings_unresolved` is a persistent conclusion bound, not an instruction to respond
 again. Once every readable finding is answered, the latter condition remains and tells the caller
 that a receipt may be requested but cannot conclude `no_unresolved_deterministic_findings`.
@@ -4599,6 +5248,12 @@ facade and are never MCP tools.
 
 ## 13. Surfaces
 
+- `cli/entry.py`: the installed console entry. It runs the `hooks observe|claude-observe|
+  cursor-observe|spool` fast paths without loading typer, then refuses native Windows
+  (`os.name == "nt"`) with the fixed `unsupported_platform` line and exit 20 — the exit an absent
+  service already carries, because no Yoetz service can be reached from that process — before the
+  full CLI loads; `version`, `--version`, `--help`, and `-h` are exempt (issue #709). Everything else
+  falls through to `cli/app.py` unchanged.
 - `service/daemon.py`: sole application/runtime/vault/privacy/provider composition owner and
   ordinary-control dispatcher; starts into explicit `ready` or `locked`. Its private canonical
   installation marker owns immutable vault-mode publication. Unlock calls only
@@ -4618,12 +5273,24 @@ facade and are never MCP tools.
   operations plus read-only `read_guidance`), dispatch, prevalidated fallbacks
   (`LAST_RESORT_INTERNAL_ERROR_RESULT`), the initialize `instructions` string, a read-only
   guidance resource registry, and one `ServiceClient`; it owns no runtime/application/provider/key
-  state. `read_guidance` does not use the service client.
+  state. `read_guidance` does not use the service client. On the policy route
+  `build_bridge_runtime` reads the service configuration once at startup, through the same
+  tolerant loader the logging sink uses, only to render the semantic destination disclosure
+  (issue #479); it keeps no configuration state and the strict route never reads it.
 - `mcp/descriptors.py`: the one owner of every agent-read string on the MCP surface — the six
   workflow tool names, `read_guidance`, descriptions, and annotations, plus the `instructions`
   text. All are loaded from the
   packaged `guidance/` resources and verified against the resource manifest before use; none is
-  composed at runtime from user, task, provider, or environment values. Shared values are
+  composed at runtime from user, task, provider, or environment values, with one typed exception:
+  the policy-route semantic destination disclosure (issue #479, ADR-018 destination-disclosure
+  amendment), which `mcp/semantic_destination.py` renders from validated configuration through a
+  closed catalog (`BUNDLED_ENDPOINT_HOSTS`, `DISCLOSABLE_PROVIDER_IDS`, `DISCLOSURE_PREFIX`,
+  `MAX_DISCLOSURE_ENCODED_BYTES`, `disclose_semantic_destination()`,
+  `read_semantic_destination_disclosure()`) and hands to `server_instructions()` only as a
+  `SemanticDestinationDisclosure`. Absent or invalid configuration renders as unknown, an
+  off-catalog endpoint profile as an unknown host, an unlisted provider id as unlisted, and a
+  configured fallback endpoint beside the primary; strict instructions never carry it. Shared
+  values are
   `ToolDescriptor`, `TOOL_DESCRIPTORS` (frozen `policy|strict` sets, each in the same order
   `tools/list` returns), `TOOL_DESCRIPTOR_DIGESTS`, `TOOL_DESCRIPTOR_SET_DIGEST`,
   `INITIALIZE_GUIDANCE_URIS`, `server_instructions()`, `ORDINARY_MCP_PUBLISH_EVENT_FAMILIES`,
@@ -4634,7 +5301,11 @@ facade and are never MCP tools.
   `instructions` string once per advertised tool — Codex copies it into every tool `description` —
   so `SERVER_INSTRUCTIONS_BUDGET` bounds that string per route profile and
   `ADVERTISED_SURFACE_BUDGET` bounds the aggregate of instructions-per-tool plus every description
-  plus every advertised input schema (issue #300). `ToolDescriptor.input_schema` is the tools/list presentation
+  plus every advertised input schema (issue #300). Each budget carries `packaged_max_encoded_bytes`
+  for the packaged text alone and `max_encoded_bytes`, which adds the disclosure ceiling (once per
+  advertised tool in the aggregate); `advertised_surface_metrics()` accepts the disclosure so the
+  longest admissible passage can be measured. `ToolDescriptor.input_schema` is the tools/list
+  presentation
   projection (inlined common shapes, ordinary publish event families, minimal examples), preserving
   every catalogued schema-version branch for each advertised ordinary event family. Every shipped
   worked example validates against that presentation schema as well as catalog admission;
@@ -4647,7 +5318,8 @@ facade and are never MCP tools.
   tool carries an explicit `idempotentHint=true`. Policy `check` carries `openWorldHint=true`;
   strict `check` carries `openWorldHint=false` and names the external-semantic ceiling. The hint is
   inspectable metadata, not enforcement; the route constraint above is authoritative. Initialize
-  instructions and MCP-originated `status(view=versions)` disclose the active profile. No
+  instructions and MCP-originated `status(view=versions)` disclose the active profile; policy-route
+  initialize instructions additionally disclose the startup-read semantic destination. No
   descriptor carries a
   `destructiveHint`, because no Yoetz operation deletes recorded evidence. Descriptor and
   instruction text is bound by the same honesty lint as the guidance references: it may not say
@@ -4709,7 +5381,44 @@ facade and are never MCP tools.
   closed as `PathSafetyError("isolation_root_invalid")` or the precise existing path-safety
   reason, never by falling back to ambient platform directories. `YOETZ_STORAGE_DATA_DIR` and
   `storage.data_dir` alone are storage relocation, not isolation. The connection-free proof
-  surface is `yoetz service isolation --json` (`cli/isolation_status.py`), digest-only.
+  surface is `yoetz service isolation --json` (`cli/isolation_status.py`), digest-only; it also
+  reports `binding` (`IsolationBinding` = `ambient|environment|runtime_pin|environment_and_pin`)
+  and `lifecycle` (`ReportedLifecycle` = `permanent|persistent|disposable|unlabeled`).
+  The runtime pin (ADR-028, issue #604) is the second, executable-bound source of the same root:
+  `read_runtime_pin()` reads `RUNTIME_PIN_NAME` = `yoetz-instance-pin.json`
+  (`RUNTIME_PIN_SCHEMA` = `yoetz.runtime-instance-pin/1`: exact `isolated_root` plus
+  `installation_id`) from this process's `sys.prefix` into a `RuntimePin`; `isolated_root()`
+  prefers the variable, falls back to the pin, and fails closed on a difference
+  (`isolation_root_conflict`) or an unreadable, foreign-owned, group/world-writable, or
+  malformed pin (`runtime_pin_invalid`); `isolation_binding()` names the selected source.
+- `config/installation.py`: instance identity for independent installations (ADR-028).
+  `InstanceIdentity` is the sealed `INSTANCE_IDENTITY_NAME` = `instance-identity.json`
+  (`INSTANCE_IDENTITY_SCHEMA` = `yoetz.instance-identity/1`) beneath the state directory:
+  `installation_id` (`ins_`), `lifecycle` (`InstanceLifecycle` = `persistent|disposable`; the
+  everyday install is `permanent` by the marker's absence), `created_at`, optional `expires_at`
+  (disposable only, ≤ 30 days), `source_ref` (exact 40/64-hex commit or null), `source_state`
+  (`SourceState` = `clean|modified|unknown`), `package_version`, optional `package_digest`, and
+  `runtime_prefix_digest`; canonical JSON, owner-only, domain-separated `record_digest`.
+  `read_instance_identity()` returns `None` when absent and raises `InstanceIdentityError`
+  (closed `reason`: `instance_identity_invalid|instance_expired|instance_exists|instance_absent|
+  instance_not_disposable|instance_root_invalid|instance_root_too_long|instance_expiry_invalid|
+  instance_lifecycle_requires_isolated_root|installation_identity_mismatch|
+  instance_service_running|runtime_pin_conflict|runtime_pin_invalid`) otherwise;
+  `write_instance_identity()` never overwrites; `verify_instance_binding()` is the service-start
+  gate `service/daemon.py` runs before `acquire_singleton()`; `write_runtime_pin()` /
+  `remove_runtime_pin()` own the pin file. `cli/exits.py` maps the reasons through
+  `INSTANCE_PUBLIC_CODES` (usage-shaped refusals exit 2, untrusted identity 20 as
+  `STORAGE_UNSAFE`, `instance_expired` 20 as `SERVICE_UNAVAILABLE`, `instance_service_running`
+  20 as `BUNDLE_BUSY`) and carries their remediation lines.
+- `cli/instance.py`: `yoetz instance create|status|dispose` (ADR-028). `create_instance()`
+  creates one owner-only root (parent must exist; same path-safety gate; socket path bound
+  `MAX_SOCKET_PATH_BYTES` = 100), seals the marker, and with `--bind-runtime` pins `sys.prefix`;
+  it echoes the exact root once. `instance_status()` is connection-free and digest-only: mode,
+  binding, lifecycle, marker fields, `expired`, `runtime_provenance`
+  (`matched|drifted|unrecorded`), `runtime_pin` (`bound|none`), and the lock-stamped
+  `service_holder`. `dispose_instance()` removes exactly one marked persistent/disposable root:
+  flock probe, SIGTERM to the stamped holder only, bounded wait (`STOP_WAIT_SECONDS` = 35),
+  optional log retention to `<dir>/<installation_id>/`, `rmtree`, pin removal; repeat is a no-op.
 - `observability/logging.py`: structured stderr logging, allowlisted fields only; shared `LogMode`
   is exactly `service|cli|mcp_stdio|confidential_helper` so each process installs only its bounded
   sink/filter profile.
@@ -4724,9 +5433,18 @@ facade and are never MCP tools.
 
 `version.py` exposes `VersionManifest`: package, protocol (`0.1`), local control protocol (`1.0`),
 privacy-policy schema (`1.1.0`), egress-receipt schema (`1.0.0`), engine (`0.1.0`), policy pack
-versions, projection (`yoetz/0.1.0`), object format (`yoetz-object/1`), storage schema
-(`user_version` bundle 2, catalog 3), Python, APSW/SQLite source ID, MCP SDK, provider adapter
-versions.
+versions, projection (`yoetz/0.1.0`), object format (`yoetz-object/1`), storage schema identities
+(`catalog_schema_version` `5`, `bundle_schema_version` `14` — hand-versioned positive-decimal
+counters stamped into every receipt's version block and pinned as `const` in the current
+version-manifest schema), Python, APSW/SQLite source ID, MCP SDK, provider adapter versions.
+Those two identities are not the SQLite `user_version`: that axis is owned by the ordered migration
+registries under `migrations/` (`catalog/` and `bundle/`, one file per step), and
+`adapters/sqlite/connection.py` compares a file's `user_version` against the registry head it was
+built with — currently catalog 5 and bundle 14 — reporting `migration_required` when the file is
+older and refusing `schema_newer_than_binary` when it is newer. A compatible package update runs
+the storage-owned `BundleUpgradeCoordinator.run_before_ready` phase before READY; the existing
+catalog `maintenance_operations` row records the `package_upgrade_migration` operation and its
+backup/replay phases. Lazy bundle opening remains fail-closed until that phase completes.
 Its shared support values are frozen `ResourceIdentity(name, media_type, size_bytes,
 sha256_digest)` and `CapabilitySet(name, supported_versions, tested_versions, denied_versions)`.
 Every capability collection is an exact ASCII-sorted set: membership is literal, with no SemVer
@@ -4742,7 +5460,9 @@ SQLite `application_id`: `0x594F4554` ("YOET", ADR-003).
 
 `version --json` returns the resource-manifest digest and counts by default; explicit
 `--resources` returns the bounded full per-resource identity list. Optional unavailable components
-serialize as `{status:"absent"}`, not overloaded `null`. `release-probe` is CI-only via explicit
+serialize as `{status:"absent"}`, not overloaded `null`. MCP and CLI `status view=versions` reuse
+the same live APSW/SQLite/Python/source-id probes via `build_status_version_slice_facts`; that
+slice cannot represent `{status:"absent"}` so it uses the token `unavailable`. `release-probe` is CI-only via explicit
 service-start environment/override authority and is invalid in user configuration files.
 
 ## 15. Registry ownership rule
@@ -4754,28 +5474,109 @@ modules, if memory and SQLite must both implement it, or if a value is serialize
 this registry first. This scope keeps one source of truth without turning the registry into an
 index of private implementation details.
 
-### Native semantic content resolution (#509)
 
-`application.semantic_content.ResolvedSemanticContent` carries authenticated immutable bytes or
-one typed per-item omission and coverage gap. `SemanticContentResolution` binds the evidence-ID
-mapping to one exact frozen case frontier. `resolve_semantic_content` is the application I/O seam:
-it reads only selected native Codex evidence through the mapped task's observation/object ports,
-authenticates complete bounded multipart groups, and applies current local observation consent.
-It grants no outbound authority. The pure `build_semantic_case` accepts this value, verifies the
-frozen evidence digest/length, and retains explicit omissions; ordinary caller-authored evidence
-narratives keep their existing behavior. Source snapshots retain unknown relation to current files.
+### Status projection snapshots and semantic diagnostics (issues #674–#676)
 
-`TaskObservationPort.list_envelopes(workspace, limit=None)` preserves its historical unbounded
-reader default; a supplied integer limit in `1..256` returns the latest bounded task-owned window
-in chronological order. The semantic resolver always supplies `256`. It authenticates at most
-64 distinct objects of at most 4096 decoded bytes each, including all sibling parts, and applies
-the review policy's final count and aggregate excerpt byte limits. `FinalSemanticEvaluation` carries
-`case_content_gaps` so resolver omissions constrain check/receipt coverage independently of the
-provider's semantic success.
+Status row queries reuse the already validated immutable current projection. Historical queries
+replay immutable prefixes off the event loop and retain at most eight frontier/view/session row
+indexes per ledger snapshot. The exact frontier digest and projection version are checked before
+reuse. A replacement record tuple invalidates the cache, including content/redaction reloads;
+SQLite clones do not inherit it. The cache is transient and stores no independently authoritative
+state. Workers never receive SQLite handles. Cancellation joins the worker, and filtering/cursor
+selection stops after the requested limit plus one matching row. First access to a view still
+builds its row index; large-query CPU cost and append/receipt cost are separate from responsiveness.
 
-Resolver-derived captured-content gaps downgrade current semantic-case coverage to partial, just
-like gaps found before packet selection. Existing older freshness states are preserved; an omitted
-or unavailable captured object cannot leave an otherwise current case labeled fully current.
+Every exceptional semantic attempt diagnostic uses the original check request ID, an allowlisted
+exception category and a structural stage. Stages distinguish claim/recovery, privacy admission,
+dispatch entered (outcome uncertain), response mapping, response persistence and result commit.
+Provider invocation catches preserve their existing unknown-outcome semantics. Primary exception
+evidence is emitted before cleanup; cleanup records carry the same request join. Neither missing
+diagnostics nor null provenance proves that no provider executed. Diagnostics are best-effort;
+absence can mean that the sink was unavailable, and never licenses a retry.
+
+`yoetz service diagnostics --request-id req_…` reads matching owner-only records for the request
+returned by check/operation status. `--correlation-id err_…` remains supported; exactly one selector
+is required. Both use the same bounded, payload-free record projection and require no ledger
+inspection. No new retry, lease, cancellation, network or credential authority is introduced.
+
+
+### Evidence-aware closure preparation (issues #569, #618, #657, #660, #666)
+
+`yoetz closure-prepare` is a read-only CLI support command, not a seventh workflow operation.
+It reads privacy-projected `status` pages at one pinned frontier, preserving cursor query identity.
+It exposes inventory and composes one explicit selection into an existing `publish_work`, `respond`,
+or `receipt` request. `yoetz closure-schema` exposes the closed selection-input schema. IDs it
+creates are lowercase UUID v4. Publication drafts use `dry_run=true`; preparation is non-evidential.
+No selection defaults to attempted, acknowledged, resolved, or complete. Failed, partial and unknown
+selected results belong to claim limitations. The existing append validator remains authoritative
+for relevance, revisions, evidence admissibility and frontier conflicts. A timeout uses the emitted
+operation query and the same original request identity, never a newly composed write.
+
+The obligations status row adds optional `command_attempts` (at most 64 rows). Each row contains
+`requested_item_index` (canonical string 0–63), `relation`, `asserted_action_ids`, and
+`observed_event_ids` (each at most 64 unique IDs). Indexes refer to the current obligation's exact
+`requested_items`; no raw command or path enters structural fields. Existing `unattempted_items`
+continues to describe caller-asserted accounting. Relations are:
+
+- `matching_observed_attempt`: one distinct readable command equals the requested UTF-8 text;
+- `asserted_observed_mismatch`: an assertion names the requested command, but explicitly linked
+  readable observation describes a different command;
+- `unknown`: observation is absent, omitted, redacted, ambiguous, or exceeds the displayed bound.
+
+Only service-stamped observation authorship is eligible. Explicit correlation is an action's
+causal parent naming an observed action, or an obligation's resolution result naming that action.
+Temporal proximity, string similarity and an observation-shaped caller payload are insufficient.
+Wrappers, environment changes, whitespace changes and changed test targets are not normalized;
+exact bytes are the reviewed rule, not shell equivalence. Several different linked commands are
+ambiguous, even if one matches. An observed attempt never proves success. A supported obligation
+revision records a replacement and rationale without retrospectively asserting the original ran.
+The relation is derived at read time, so memory, SQLite, replay, CLI/MCP and receipt use one rule.
+Current native profiles often omit command text: that limitation stays unknown.
+
+Finding status `detail` appends a bounded explanation of the latest recorded check's actual failed
+resolution requirements. Receipt findings/dispositions use the same explanation. Original finding
+payloads, proof qualification, `resolved`, blockers and historical identity are unchanged. A
+non-repeated finding with suppressed results, wrong policy/scope, weak freshness, unavailable proof,
+failed semantic review or disqualifying gaps is not described as repaired. Deterministic exceptions
+do not extend to semantic findings. Explanation text is under existing finding-content projection.
+
+Earlier-check receipt wording uses the recorded suffix classification: responses, finding-free
+observations, or a mixture. An unavailable classification stays neutral. It names the tested
+frontier without inventing finding responses. Later ingestion is not later occurrence; asynchronous
+observation can advance a frontier while the old check remains attributable. A new check evaluates
+later material and does not promise to remove every gap.
+
+At completion or resolved-obligation frontiers, asserted command relations contribute
+`command_attempt_mismatch` or `command_attempt_uncorroborated` to the existing deterministic
+case/receipt gap vector. This prevents uncorroborated accounting from becoming execution proof.
+The latter means unknown observation, not non-execution. Receipt capacity computes the same union.
+
+
+### Observation drain control provenance
+
+An adapter-local `ObservationControlFailure` is distinct from an `ObservationIngestResult`
+returned by the service. Its `control_<reason>` token identifies a bounded control error, never
+an inferred ledger refusal. Original control retryability and optional `err_` correlation remain
+separate from the drain's retry/quarantine decision. All rows after a failed control attempt are
+left unattempted on that connection. Invalid/oversized requests are terminal; uncertain protocol
+and transport outcomes retain exact replay identity within the bounded attempt policy. Service
+stage is unknown unless independently evidenced; local encode/decode stages are named explicitly.
+The CLI's bounded diagnostic projection uses opaque session/source commitments and cursor
+positions, with null absent correlation and explicit incomplete-history coverage.
+
+### 0.3 integration with the 0.2.1 contracts
+
+Released artifacts remain byte-identical. The current lineage extensions use finding and
+finding-recorded `1.3.0`, check-result `1.3.0`, status-result `1.4.0`, receipt-document and
+receipt-result `1.3.0`, and version-manifest `2.3.0`. Receipt documents retain optional semantic
+provenance and provider usage alongside their required child-outcome section. Older receipt
+documents keep their original shape when decoded and serialized.
+
+ADR-030 recovery coverage includes every 0.3 lineage/project reason: invalid attach capabilities
+require parent review, pending operations preserve their request identity, authority refusals
+require explicit owner review, and terminal or invalid stored state is never automatically
+replaced. These reasons have registered directives and are not coverage exemptions.
+
 
 ### Long semantic check waits on the 0.3 line (#746)
 
@@ -4794,3 +5595,21 @@ control cancellation while attached and service shutdown cancel the owned work. 
 cancellation merely stops waiting for a check. Other workflow cancellation behavior is unchanged.
 The existing maintenance gate may delay other task reads while a check runs; this change supplies
 pending/replay continuity, not new progress phases or concurrent-check scheduling (#571).
+
+
+`FinalSemanticEvaluation.case_content_gaps` carries bounded native-resolution omissions from the
+semantic packet into check and receipt coverage, even when the provider succeeds. Native capture
+metadata is not an excerpt: without an authenticated captured group, the builder omits the excerpt
+and retains `captured_object_unavailable`, including when the omission list limit is zero. The
+current consent-generation fence is still checked immediately before disclosure or recovered
+admission; larger review budgets do not change that authority.
+
+ADR-030 recovery also applies to first-start contention. The three `start_*_retry_ready` reasons
+carry `start_busy_retry_ready` only after the catalog lease was yielded; `start_lease_pending`
+carries `start_lease_wait`. Internal busy labels alone do not establish either condition.
+
+The native resolver reads at most the latest 256 retained envelopes from its mapped session.
+`list_envelopes_for_session(workspace, session_commitment, limit=None)` and
+`list_envelopes(workspace, limit=None)` preserve unbounded historical reader defaults for other
+callers; a supplied integer in `1..256` bounds the SQL query before decoding and returns the window
+in chronological order. Evidence outside that window cannot become an authenticated excerpt.

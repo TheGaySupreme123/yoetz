@@ -23,7 +23,11 @@ from yoetz.adapters.integrations.codex_marketplace import (
 from yoetz.adapters.integrations.codex_mcp import CodexMcpAdapter, CommandOutput
 from yoetz.application.harness_mcp import HarnessMcpService
 from yoetz.ports.control import ControlClientKind, ControlError
-from yoetz.ports.harness_mcp import HarnessBinary
+from yoetz.ports.harness_mcp import (
+    MCP_SERVE_COMMAND,
+    MCP_STRICT_SERVE_COMMAND,
+    HarnessBinary,
+)
 from yoetz.ports.integrations import (
     HarnessId,
     IntegrationError,
@@ -74,11 +78,11 @@ class _ScriptedRunner:
 
 def _yoetz_entry(
     route_profile: Literal["policy", "strict"] = "strict",
+    *,
+    launcher: str = "yoetz",
 ) -> CommandOutput:
-    args = ["mcp", "serve"]
-    if route_profile == "strict":
-        args.extend(["--semantic", "off"])
-    return CommandOutput(0, json.dumps({"command": "yoetz", "args": args}).encode())
+    command = MCP_STRICT_SERVE_COMMAND if route_profile == "strict" else MCP_SERVE_COMMAND
+    return CommandOutput(0, json.dumps({"command": launcher, "args": list(command[1:])}).encode())
 
 
 def _absent_mcp() -> list[CommandOutput]:
@@ -90,6 +94,11 @@ def _absent_mcp() -> list[CommandOutput]:
 @pytest.fixture
 def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, object]:
     """Fake discovery, adapter subprocesses, service client, and marker path."""
+
+    # These scripted entries model the legacy embedded/bare-launcher cell, not whichever
+    # wheel happens to host pytest. Absolute installation proof is supplied explicitly in
+    # the absolute CLI regression below and exercised for real by the packaged Codex test.
+    monkeypatch.setattr("yoetz.adapters.integrations.codex_mcp.installed_launcher", lambda: None)
 
     state: dict[str, object] = {
         "binaries": (_binary(),),
@@ -446,6 +455,28 @@ def _wire_composed_provider_setup(
     return state
 
 
+def test_wizard_ambient_configuration_resolves_inside_the_hermetic_home() -> None:
+    """The wizard's ``load_config({}, os.environ, None)`` reads never reach a developer's config.
+
+    ``setup run`` decides the route profile, the credential-probe prompt, and semantic readiness
+    from ambient configuration on purpose; the suite, not the product, owns keeping that read
+    inside the per-test tree (issue #551). This pins the contract the ``tests/subprocess``
+    ``conftest`` provides so a regression fails here rather than three unrelated cases below.
+    """
+
+    from yoetz.config.load import default_config_file_path, load_config
+
+    config_home = Path(os.environ["XDG_CONFIG_HOME"])
+    assert default_config_file_path() == config_home / "yoetz" / "config.toml"
+    assert not default_config_file_path().exists()
+    assert Path.home() == Path(os.environ["HOME"])
+    assert Path(os.environ["HOME"]).parent == config_home.parent
+    assert not [name for name in os.environ if name.startswith("YOETZ_")]
+    config = load_config({}, os.environ, None)
+    assert config.external_runtime is None
+    assert config.provider is None
+
+
 def test_non_interactive_without_accept_is_a_dry_run(wizard_env: dict[str, object]) -> None:
     result = _RUNNER.invoke(cli.app, ["setup", "run", "--non-interactive", "--json"])
     assert result.exit_code == 0, (result.output, result.exception)
@@ -738,13 +769,9 @@ async def test_a_preview_and_apply_on_the_same_route_register(
     record = read_applied_route(_state=cast(Path, wizard_env["isolated_state"]))
     assert record is not None
     assert record["applied_profile"] == "strict"
-    assert record["applied_serve_command"] == ["yoetz", "mcp", "serve", "--semantic", "off"]
+    assert record["applied_serve_command"] == list(MCP_STRICT_SERVE_COMMAND)
     assert record["observed_serve_command_post_write"] == [
-        "yoetz",
-        "mcp",
-        "serve",
-        "--semantic",
-        "off",
+        *MCP_STRICT_SERVE_COMMAND,
     ]
 
 
@@ -794,7 +821,7 @@ def test_interactive_wizard_selects_harness_then_installation_and_requires_y_or_
     assert "Choose how Yoetz should review work:" in result.stdout
     assert "complete Yoetz Codex project integration" in result.stdout
     assert "MCP server name: yoetz" in result.stdout
-    assert "Command: yoetz mcp serve --semantic off" in result.stdout
+    assert "Command: yoetz mcp serve --host codex --semantic off" in result.stdout
     assert "Codex executable: /b/codex" in result.stdout
     assert "Confirm Codex project setup? [Y/N]" in result.stdout
     assert "Observation consent for this workspace" in result.stdout
@@ -1160,6 +1187,29 @@ def test_setup_status_is_read_only(wizard_env: dict[str, object]) -> None:
     assert report["discovered"][0]["registered_route_profile"] == "strict"
     assert report["marker_present"] is False
     assert report["service"]["reachable"] is False
+    # Host facts are named once here rather than per rejected check (issues #720, #721, #724).
+    platform_report = report["platform"]
+    assert set(platform_report) == {"cell", "check_sandbox", "secure_storage"}
+    assert set(platform_report["cell"]) == {
+        "cell",
+        "certified",
+        "certified_cells",
+        "machine",
+        "os_name",
+    }
+    assert platform_report["check_sandbox"]["status"] in {"ready", "unavailable"}
+    assert set(platform_report["check_sandbox"]) == {
+        "mechanism",
+        "reason",
+        "remediation",
+        "status",
+    }
+    assert set(platform_report["secure_storage"]) == {
+        "approved",
+        "backend_id",
+        "reason",
+        "requirement",
+    }
     assert report["integration"] == {
         "hooks": {
             "presence": "absent",
@@ -1298,7 +1348,7 @@ def test_integrate_mcp_remove_owned_entry(wizard_env: dict[str, object]) -> None
     preview = json.loads(previewed.stdout)
     assert preview["action"] == "unregister"
     assert preview["route_profile"] == "strict"
-    assert preview["serve_command"] == ["yoetz", "mcp", "serve", "--semantic", "off"]
+    assert preview["serve_command"] == list(MCP_STRICT_SERVE_COMMAND)
     assert preview["warnings"] == ["host_remove_not_compare_and_swap"]
     assert preview["preview_digest"].startswith("sha256:")
 
@@ -1357,7 +1407,7 @@ def test_integrate_mcp_interactive_remove_surfaces_complete_warning_bound_previe
     result = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "remove"])
 
     assert result.exit_code == 0, (result.output, result.exception)
-    assert "Command: yoetz mcp serve --semantic off" in result.output
+    assert "Command: yoetz mcp serve --host codex --semantic off" in result.output
     assert "MCP route profile: strict" in result.output
     assert "Warning: host_remove_not_compare_and_swap" in result.output
     assert "Preview digest: sha256:" in result.output
@@ -1487,7 +1537,7 @@ def test_non_interactive_accept_preserves_existing_policy_route(
     assert report["registration"]["outcome"] == "already_registered"
     assert report["registration"]["route_profile"] == "policy"
     assert report["registration"]["route_profile_before"] == "policy"
-    assert report["registration"]["serve_command"] == ["yoetz", "mcp", "serve"]
+    assert report["registration"]["serve_command"] == list(MCP_SERVE_COMMAND)
     # No mutating ``mcp add`` ever ran: the existing policy route survives.
     for calls in cast(list[list[tuple[str, ...]]], wizard_env["calls"]):
         assert all(call[1:3] == ("mcp", "get") for call in calls)
@@ -1679,6 +1729,48 @@ def test_integrate_mcp_explicit_route_profile_reregisters(
     body = json.loads(result.stdout)
     assert body["action"] == "reregister"
     assert body["state_after"] == "yoetz_owned"
+
+
+def test_absolute_mcp_cli_preserves_launcher_and_route(
+    wizard_env: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launcher = "/test/Yoetz Runtime/bin/yoetz"
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.codex_mcp.installed_launcher",
+        lambda: (launcher, "sha256:" + "e" * 64),
+    )
+    monkeypatch.setattr("yoetz.adapters.integrations.codex_mcp.isolated_root", lambda: None)
+    wizard_env["outputs"] = _absent_mcp()
+    preview = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "preview", "--json"])
+    assert preview.exit_code == 0, (preview.output, preview.exception)
+    assert json.loads(preview.stdout)["serve_command"][0] == launcher
+    wizard_env["outputs"] = [
+        *_absent_mcp(),
+        *_absent_mcp(),
+        CommandOutput(0, b""),
+        _yoetz_entry(launcher=launcher),
+        _yoetz_entry(launcher=launcher),
+    ]
+    installed = _RUNNER.invoke(
+        cli.app, ["integrate", "codex", "mcp", "install", "--accept", "--json"]
+    )
+    assert installed.exit_code == 0, (installed.output, installed.exception)
+    assert json.loads(installed.stdout)["state_after"] == "yoetz_owned"
+    calls = [
+        call for group in cast(list[list[tuple[str, ...]]], wizard_env["calls"]) for call in group
+    ]
+    additions = [call for call in calls if call[1:3] == ("mcp", "add")]
+    assert additions[0][additions[0].index("--") + 1] == launcher
+
+    # No explicit route input must retain the existing policy route, even though setup's
+    # configured default in this fixture is strict.
+    wizard_env["outputs"] = [
+        _yoetz_entry("policy", launcher=launcher),
+        _yoetz_entry("policy", launcher=launcher),
+    ]
+    noop = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "install", "--accept", "--json"])
+    assert noop.exit_code == 0, (noop.output, noop.exception)
+    assert json.loads(noop.stdout)["action"] == "noop"
 
 
 def test_setup_surfaces_no_secret_shaped_option() -> None:

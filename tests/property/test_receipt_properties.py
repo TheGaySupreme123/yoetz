@@ -157,7 +157,7 @@ def _build(
 
 
 def test_no_child_receipt_matches_frozen_pre_lineage_bytes() -> None:
-    """The additive 1.2 artifact preserves the frozen 1.1 no-child document byte-for-byte.
+    """The additive 1.3 artifact preserves the frozen 1.1 no-child document byte-for-byte.
 
     The digest is the independently recorded output of this fixed context from pre-lineage
     commit ``95aa2065`` using the frozen child-free receipt-document 1.1 artifact.  The current
@@ -183,7 +183,7 @@ def test_no_child_receipt_matches_frozen_pre_lineage_bytes() -> None:
             context,
             ReceiptRedactionProfile.FULL_LOCAL,
             ReceiptInclude.FULL,
-            receipt_schema_version="1.2.0",
+            receipt_schema_version="1.3.0",
         )
     )
     assert current["children"] == {"children": []}

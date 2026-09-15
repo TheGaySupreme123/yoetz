@@ -187,7 +187,10 @@ async def test_runtime_wait_bound_yields_reserved_start_and_mcp_exact_replay_com
         result = await bridge.dispatch_start(request, transport)
         error = cast(dict[str, object], _structured(result)["error"])
         assert error["code"] == "BUNDLE_BUSY" and error["retryable"] is True
-        assert error["safe_details"] == {"reason_code": "start_runtime_rebind_retry_ready"}
+        assert error["safe_details"] == {
+            "reason_code": "start_runtime_rebind_retry_ready",
+            "continuation": "start_busy_retry_ready",
+        }
         assert "start_runtime_rebind_retry_ready" in _text(result)
     finally:
         await app.runtime.release(held)
@@ -227,7 +230,10 @@ async def test_real_catalog_busy_after_reservation_yields_and_recovers_through_m
         result = await bridge.dispatch_start(request, transport)
         error = cast(dict[str, object], _structured(result)["error"])
         assert error["code"] == "BUNDLE_BUSY"
-        assert error["safe_details"] == {"reason_code": "start_catalog_retry_ready"}
+        assert error["safe_details"] == {
+            "reason_code": "start_catalog_retry_ready",
+            "continuation": "start_busy_retry_ready",
+        }
         assert "start_catalog_retry_ready" in _text(result)
         recovered = _structured(await bridge.dispatch_start(request, transport))
         assert recovered["ok"] is True
@@ -266,7 +272,10 @@ async def test_catalog_lock_preserves_pending_when_lease_yield_cannot_commit(
         pending_result = await bridge.dispatch_start(request, transport)
         pending = cast(dict[str, object], _structured(pending_result)["error"])
         assert pending["code"] == "OPERATION_PENDING"
-        assert pending["safe_details"] == {"reason_code": "start_lease_pending"}
+        assert pending["safe_details"] == {
+            "reason_code": "start_lease_pending",
+            "continuation": "start_lease_wait",
+        }
         assert "start_lease_pending" in _text(pending_result)
         # Only a clock advance, never deletion or a fresh request, enables reclaim.
         clock = catalog._clock  # pyright: ignore[reportPrivateUsage]

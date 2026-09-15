@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import asyncio
+from collections.abc import Awaitable, Callable, Mapping
 from typing import cast
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from yoetz.cli import project as project_cli
 from yoetz.cli.render import render_human_status
 from yoetz.domain.values import JsonValue
+from yoetz.ports.control import ControlError
 from yoetz.protocol.models import StatusResultModel, StatusSuccessModel, public_model_to_wire
 
 pytestmark = pytest.mark.anyio
@@ -173,3 +175,64 @@ def test_shared_status_renderer_includes_coordination_coverage_for_tui() -> None
     assert isinstance(result, StatusSuccessModel)
     rendered = render_human_status(result)
     assert f"- {TASK_ID}: unobservable (not_observable)" in rendered
+
+
+def test_project_mutation_surfaces_generated_request_id_for_retry(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seen: list[Mapping[str, object]] = []
+
+    async def invoke(
+        body: Mapping[str, object], *, deadline_ms: int | None, json_output: bool
+    ) -> object:
+        del deadline_ms, json_output
+        seen.append(dict(body))
+        raise ControlError("request_timeout", retryable=True)
+
+    def run_async(factory: Callable[[], Awaitable[object]]) -> object:
+        return asyncio.run(factory())
+
+    monkeypatch.setattr(project_cli, "_invoke", invoke)
+    monkeypatch.setattr("yoetz.cli.app.run_async", run_async)
+
+    with pytest.raises(project_cli.typer.Exit):
+        project_cli._run(  # pyright: ignore[reportPrivateUsage]
+            {
+                "operation": "dissolve",
+                "project_id": PROJECT_ID,
+                "request_id": None,
+            },
+            json_output=False,
+            deadline_ms=1,
+        )
+
+    assert len(seen) == 1
+    request_id = seen[0].get("request_id")
+    assert isinstance(request_id, str) and request_id.startswith("req_")
+    assert f"request_id {request_id} retained; retry with --request-id {request_id}" in (
+        capsys.readouterr().err
+    )
+
+
+@pytest.mark.parametrize("request_id", ("req_\nunsafe-marker", "req_\x1b[31munsafe-marker"))
+def test_project_mutation_rejects_unsafe_request_id_before_connection(
+    request_id: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    connections: list[object] = []
+
+    def run_async(factory: Callable[[], Awaitable[object]]) -> object:
+        connections.append(factory)
+        raise ControlError("request_timeout", retryable=True)
+
+    monkeypatch.setattr("yoetz.cli.app.run_async", run_async)
+    with pytest.raises(project_cli.typer.Exit) as caught:
+        project_cli._run(  # pyright: ignore[reportPrivateUsage]
+            {"operation": "dissolve", "project_id": PROJECT_ID, "request_id": request_id},
+            json_output=False,
+            deadline_ms=1,
+        )
+    assert caught.value.exit_code == 2
+    assert connections == []
+    output = capsys.readouterr()
+    assert "unsafe-marker" not in output.out + output.err
+    assert "\x1b" not in output.out + output.err

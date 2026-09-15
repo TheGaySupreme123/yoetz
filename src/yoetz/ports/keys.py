@@ -14,6 +14,7 @@ from yoetz.protocol.canonical import canonical_encode, strict_json_parse
 
 REPOSITORY_PRIVACY_MAC_DOMAIN = b"yoetz/repository-privacy/v1\x00"
 LINEAGE_ATTACH_MAC_DOMAIN = b"yoetz/lineage-attach/v1\x00"
+PROJECT_OPERATION_MAC_DOMAIN = b"yoetz/project-operation/v1\x00"
 
 __all__ = [
     "BundleKeys",
@@ -23,6 +24,7 @@ __all__ = [
     "LINEAGE_ATTACH_MAC_DOMAIN",
     "MacKeyHandle",
     "MacKeyPurpose",
+    "PROJECT_OPERATION_MAC_DOMAIN",
     "RecoveryArtifact",
     "RecoveryKeyMaterialHandle",
     "RecoverySecret",

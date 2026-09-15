@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import contextlib
+import contextvars
 import hashlib
 import inspect
 import io
 import os
-from collections.abc import Awaitable, Callable, Mapping
+import sys
+import threading
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast
 
@@ -18,8 +26,14 @@ import apsw
 import yoetz.adapters.sqlite.connection as connection_module
 import yoetz.adapters.sqlite.recovery as recovery_module
 from yoetz.adapters.importers.codex_plan import CodexImportPlans
-from yoetz.adapters.integrations.hook_spool import HookSpool
-from yoetz.adapters.integrations.observation_local import LocalObservationStore
+from yoetz.adapters.integrations.hook_spool import (
+    DEFAULT_HOOK_SPOOL_CLAIM_LIMIT,
+    HookSpool,
+)
+from yoetz.adapters.integrations.observation_local import (
+    LocalContentCaptureAuthority,
+    LocalObservationStore,
+)
 from yoetz.adapters.objects.encrypted_files import EncryptedFilesObjectStore
 from yoetz.adapters.privacy.catalog import CatalogPrivacyAudit, CatalogPrivacyPolicyStore
 from yoetz.adapters.privacy.gateway import PolicyEnforcingOutboundGateway
@@ -48,6 +62,7 @@ from yoetz.adapters.sqlite.migrations import (
     initialize_catalog,
     run_migrations,
 )
+from yoetz.adapters.sqlite.project_operations import SqliteProjectOperationJournal
 from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.adapters.sqlite.start_catalog import SqliteStartCatalog
 from yoetz.application.check import FinalSemanticEvaluation
@@ -77,9 +92,13 @@ from yoetz.application.lineage_coordinator import (
 )
 from yoetz.application.observation_advice import (
     ObservationAdviceContextBuilder,
-    ObservationAdviceSemanticAddon,
-    minimized_semantic_evidence_packet,
     stable_advice_finding_id,
+)
+from yoetz.application.observation_advice_semantic import (
+    ObservationAdviceSemanticAttempt,
+    ObservationAdviceSemanticOutcome,
+    ObservationAdviceSemanticScheduler,
+    ObservationAdviceSemanticSupervisor,
 )
 from yoetz.application.observation_control import build_observation_support_handlers
 from yoetz.application.observation_coordinator import ObservationCoordinator
@@ -110,14 +129,13 @@ from yoetz.application.semantic_attempts import (
     status_for_semantic_reason,
 )
 from yoetz.application.semantic_case import (
+    MAX_CAPTURED_SEMANTIC_CONTENT_PARTS,
+    MAX_CAPTURED_SEMANTIC_INPUT_BYTES,
     SemanticCaseTooLarge,
     build_semantic_case,
     semantic_case_to_candidate_context,
 )
-from yoetz.application.semantic_content import (
-    SemanticContentResolution,
-    resolve_semantic_content,
-)
+from yoetz.application.semantic_content import resolve_captured_semantic_content
 from yoetz.application.service import (
     ControlProjectionBinding,
     ReadyApplicationFactory,
@@ -152,6 +170,11 @@ from yoetz.domain.findings import (
     semantic_provenance_to_json,
 )
 from yoetz.domain.host_lineage import HostLineageHost
+from yoetz.domain.observation import (
+    ObservationCaptureBacklog,
+    ObservationCaptureTicket,
+    observation_capture_ticket_id,
+)
 from yoetz.domain.privacy import (
     AuthorizationScope,
     AuthorizationScopeKind,
@@ -178,34 +201,45 @@ from yoetz.domain.receipts import (
 from yoetz.domain.values import (
     Frontier,
     JsonObject,
+    Timestamp,
     disclosure_continuation,
     format_rfc3339_millis,
     parse_rfc3339_millis,
     repository_grant_continuation,
+    task_id,
+    timestamp_from_datetime,
+    validate_commitment,
 )
 from yoetz.domain.values import (
     JsonValue as DomainJsonValue,
 )
 from yoetz.kernel.lineage import LineageEvaluation
-from yoetz.kernel.policies.observation_advice import (
-    ObservationAdviceCandidate,
-    ObservationCompositionFact,
-)
+from yoetz.kernel.policies.observation_advice import ObservationCompositionFact
 from yoetz.observability.logging import (
+    record_bounded_counts_without_raising,
     record_bounded_event_without_raising,
     record_unexpected_exception_without_raising,
 )
+from yoetz.observability.semantic_context import semantic_check_request
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.control import ControlError, ControlMethod
-from yoetz.ports.diagnostics import DiagnosticsPort, RuntimeCapability, StartupCheckResult
+from yoetz.ports.diagnostics import (
+    DiagnosticsPort,
+    RuntimeCapability,
+    StartupCheckArea,
+    StartupCheckOutcome,
+    StartupCheckResult,
+)
 from yoetz.ports.importer import ImporterPort
 from yoetz.ports.keys import (
     LINEAGE_ATTACH_MAC_DOMAIN,
+    PROJECT_OPERATION_MAC_DOMAIN,
     BundleKeys,
     MacKeyHandle,
     MacKeyPurpose,
 )
 from yoetz.ports.ledger import FrozenCase, LedgerPort
+from yoetz.ports.maintenance import PrivacyAuditBackupSnapshot
 from yoetz.ports.objects import (
     ObjectKind,
     ObjectMetadata,
@@ -215,8 +249,10 @@ from yoetz.ports.objects import (
     ObjectStorePort,
     StagedObject,
 )
-from yoetz.ports.privacy import HumanAuthorityCapability
+from yoetz.ports.observation import TaskObservationPort
+from yoetz.ports.privacy import HumanAuthorityCapability, PrivacyAuditObjectRoots
 from yoetz.ports.runtime import (
+    BundleRuntimePort,
     OwnershipFence,
     RouteAccess,
     RouteCommand,
@@ -226,7 +262,11 @@ from yoetz.ports.runtime import (
     StartMilestoneExpectation,
     TaskRuntime,
 )
-from yoetz.ports.secret_memory import ProviderAttemptAuthBinding, ProviderCredentialHandle
+from yoetz.ports.secret_memory import (
+    ProviderAttemptAuthBinding,
+    ProviderCredentialHandle,
+    SecretMemoryPort,
+)
 from yoetz.ports.semantic import (
     Deadline,
     SemanticResultInvalid,
@@ -251,6 +291,19 @@ from yoetz.protocol.models import (
     SemanticStatus,
     validate_semantic_provenance_binding,
 )
+from yoetz.service.bundle_upgrade import (
+    BUNDLE_UPGRADE_SOURCE_VERSION,
+    BUNDLE_UPGRADE_TARGET_VERSION,
+    BackupEvidence,
+    BundleIntegrity,
+    BundleUpgradeCoordinator,
+    BundleUpgradeEffects,
+    BundleUpgradeError,
+    BundleUpgradeReason,
+    BundleUpgradeTarget,
+    capture_sqlite_integrity,
+)
+from yoetz.service.bundle_upgrade_effects import BundleUpgradeFencedLedger
 from yoetz.service.import_publication_authority import ImportPublicationAuthority
 from yoetz.service.project_coordination_authority import ProjectCoordinationGrantAuthority
 from yoetz.service.vault import ProviderCredentialBinding, provider_credential_profile_binding
@@ -269,11 +322,20 @@ __all__ = [
 _CATALOG_NAME = "catalog.sqlite3"
 _LEDGER_NAME = "ledger.sqlite3"
 _ZERO_DIGEST = "sha256:" + "0" * 64
+_LEGACY_HOOK_SPOOL_BATCH_LIMIT: Final = DEFAULT_HOOK_SPOOL_CLAIM_LIMIT
 
 
 class _Lifecycle(Protocol):
     @property
     def instance(self) -> object: ...
+
+    def assert_singleton_held(self) -> None: ...
+
+
+class _PrivacyRootsStore(Protocol):
+    async def live_object_roots(
+        self, task_id: str, route_identity_digest: str
+    ) -> PrivacyAuditObjectRoots: ...
 
 
 class _Vault(Protocol):
@@ -305,6 +367,28 @@ class _Paths(Protocol):
 
     @property
     def state(self) -> Path: ...
+
+
+class _StartupBundleUpgrade(Protocol):
+    """Storage-owned installation upgrade invoked before a generation becomes READY.
+
+    The ready composer owns the ordering guarantee, while the SQLite adapter owns backup,
+    migration, replay, and recovery details. Keeping this as one private callback prevents a
+    stale task bundle from being silently upgraded by the ordinary lazy runtime opener.
+    """
+
+    def __call__(
+        self,
+        *,
+        catalog: SqliteStartCatalog,
+        bundle_root: Path,
+        installation_id: str,
+        service_generation: int,
+        vault_generation: int,
+        clock: ClockPort,
+        ids: IdPort,
+        diagnostics: DiagnosticsPort | None,
+    ) -> Awaitable[object]: ...
 
 
 class _SqliteSupportPolicyFactory(Protocol):
@@ -399,6 +483,171 @@ class _BundleInspection:
     recovery_verdict: object
 
 
+@dataclass(frozen=True, slots=True)
+class _ReadyObservationSweep:
+    """Callable sweep with an explicit per-row maintenance-gate contract."""
+
+    callback: Callable[[], Awaitable[ObservationDrainSummary]]
+    row_gate_bound: bool
+
+    async def __call__(self) -> ObservationDrainSummary:
+        return await self.callback()
+
+
+def _replay_legacy_hook_spool(state: Path, *, stop: threading.Event | None = None) -> None:
+    """Normalize one bounded crash-safe legacy-hook spool pass off the service loop."""
+
+    spool = HookSpool(_state=state)
+    from yoetz.cli.observe_hooks import handle_observe
+
+    remaining = _LEGACY_HOOK_SPOOL_BATCH_LIMIT
+    for workspace_commitment in spool.pending_workspaces():
+        if remaining <= 0 or (stop is not None and stop.is_set()):
+            return
+        with spool.claim(workspace_commitment, limit=remaining) as records:
+            for record in records:
+                handle_observe(
+                    event_name=record.event_name,
+                    stdin_bytes=canonical_encode(cast(DomainJsonValue, record.payload)),
+                    stdout=io.BytesIO(),
+                    _state=state,
+                    skip_service=True,
+                    _workspace_commitment=workspace_commitment,
+                )
+        # Invalid structural lines are consumed too, even though they produce no record. Count
+        # an empty batch as one unit so malformed workspaces cannot make this pass unbounded.
+        remaining -= max(1, len(records))
+        # A claim commits its cursor for the complete bounded batch only after this context exits.
+        # Stop between claims so generation close cannot leave a partially committed batch.
+        if stop is not None and stop.is_set():
+            return
+
+
+class _LegacyHookSpoolForwarder:
+    """Own one serialized spool worker for the lifetime of a READY generation.
+
+    The spool claim renames a file and the local hook adapter opens its own short-lived state
+    handles. One replay pass claims at most one bounded batch. A cancelled await therefore cannot
+    safely start a second claim until the first worker has finished; retaining the future also lets
+    the next maintenance pass join that worker. ``close`` asks the worker to stop between claims
+    during generation teardown but lets its active batch finish its owned local writes.
+    """
+
+    def __init__(self, state: Path) -> None:
+        self._state = state
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yoetz-hook-spool")
+        self._stop = threading.Event()
+        self._future: asyncio.Future[None] | None = None
+        self._closed = False
+
+    async def replay(self) -> None:
+        if self._closed:
+            return
+        future = self._future
+        if future is None:
+            future = asyncio.get_running_loop().run_in_executor(
+                self._executor,
+                partial(_replay_legacy_hook_spool, self._state, stop=self._stop),
+            )
+            self._future = future
+        elif future.done():
+            # Propagate the prior worker's failure before allowing another pass to begin.  A
+            # persistent spool error must remain observable and must not be converted into a
+            # false successful drain merely because a fresh worker was started.
+            self._future = None
+            future.result()
+            future = asyncio.get_running_loop().run_in_executor(
+                self._executor,
+                partial(_replay_legacy_hook_spool, self._state, stop=self._stop),
+            )
+            self._future = future
+        try:
+            # wait() leaves its input future running when this caller is cancelled. Unlike
+            # shield(), it does not report a retained worker's late exception as unhandled
+            # before the next pass can observe that exception (Python 3.14).
+            await asyncio.wait((future,))
+            future.result()
+        except asyncio.CancelledError:
+            # The worker still owns its claim. Keep it joinable by the next pass.
+            raise
+        except BaseException:
+            if self._future is future:
+                self._future = None
+            raise
+        else:
+            if self._future is future:
+                self._future = None
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._stop.set()
+        future = self._future
+        if future is not None:
+
+            def observe_closed_worker(done: asyncio.Future[None]) -> None:
+                if done.cancelled():
+                    return
+                error = done.exception()
+                if isinstance(error, Exception):
+                    record_unexpected_exception_without_raising(
+                        error,
+                        component="service.ready_composition",
+                        operation="legacy_hook_spool_replay_failed",
+                    )
+
+            future.add_done_callback(observe_closed_worker)
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+
+async def _run_blocking_joined[ResultT](
+    call: Callable[[], ResultT],
+    *,
+    operation: str,
+    cleanup_result: Callable[[ResultT], None] | None = None,
+) -> ResultT:
+    """Run a side-effecting local operation off-loop and join it before cancellation returns."""
+
+    worker = asyncio.create_task(asyncio.to_thread(call))
+    try:
+        await asyncio.wait((worker,))
+        return worker.result()
+    except asyncio.CancelledError:
+        # ``asyncio.wait`` does not cancel its input.  Provisioning may have created a bundle or
+        # opened a writer before the caller's deadline, so do not release the route/gate while
+        # that worker can still mutate the same path.  Preserve the caller's cancellation after
+        # the worker has been joined, recording a bounded identity if the worker failed late.
+        while not worker.done():
+            try:
+                await asyncio.wait((worker,))
+            except asyncio.CancelledError:
+                # A second deadline/caller cancellation must not release the route while the
+                # side-effecting worker is still active. Keep joining until it reaches a terminal
+                # state, then propagate the original cancellation below.
+                continue
+        try:
+            result = worker.result()
+        except BaseException as worker_error:
+            if not isinstance(worker_error, asyncio.CancelledError):
+                record_unexpected_exception_without_raising(
+                    worker_error,
+                    component="service.ready_composition",
+                    operation=operation,
+                )
+        else:
+            if cleanup_result is not None:
+                try:
+                    cleanup_result(result)
+                except BaseException as cleanup_error:
+                    record_unexpected_exception_without_raising(
+                        cleanup_error,
+                        component="service.ready_composition",
+                        operation=f"{operation}_cleanup_failed",
+                    )
+        raise
+
+
 def _install_sqlite_support_policy() -> None:
     db = apsw.Connection(":memory:")
     try:
@@ -474,6 +723,840 @@ def _safe_bundle_root(base: Path, relpath: str, task_id: str) -> Path:
     if root.parent != (base / "tasks").resolve(strict=False):
         raise ValueError("bundle_relpath_invalid")
     return root
+
+
+def _bundle_upgrade_route_identity(route: TaskRoute) -> tuple[str | int, ...]:
+    """Return the catalog facts that must stay fixed for startup migration."""
+
+    return (
+        route.task_id,
+        route.session_id,
+        route.bundle_relpath,
+        route.route_generation,
+        route.route_identity_digest,
+        route.state.value,
+    )
+
+
+def _bundle_upgrade_active_route_identity(
+    routes: tuple[TaskRoute, ...],
+) -> tuple[tuple[str | int, ...], ...]:
+    """Sort the active route inventory for deterministic pre/post migration comparison."""
+
+    return tuple(
+        sorted(
+            (
+                _bundle_upgrade_route_identity(route)
+                for route in routes
+                if route.state is TaskRouteState.ACTIVE
+            ),
+            key=lambda item: cast(str, item[0]).encode("ascii"),
+        )
+    )
+
+
+def _bundle_upgrade_schema_and_frontier(path: Path) -> tuple[int, Frontier]:
+    """Read only the event tail needed to bind a target plan.
+
+    ``open_read_only`` intentionally permits inspection of a schema newer than this binary so
+    the coordinator can report ``schema_newer_than_binary``.  Reading the tail here therefore
+    must not call ``verify_schema_identity`` a second time: unsupported schemas still need a
+    deterministic target binding, while missing/invalid event tables are diagnosed by the
+    coordinator's full inspection pass.
+    """
+
+    db: apsw.Connection | None = None
+    try:
+        db = open_read_only(path)
+        row = db.execute(
+            "SELECT ingestion_seq, entry_digest FROM events ORDER BY ingestion_seq DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            frontier = Frontier.genesis()
+        elif len(row) != 2 or type(row[0]) is not int or type(row[1]) is not str:
+            frontier = Frontier.genesis()
+        else:
+            frontier = Frontier(row[0], row[1])
+        version_row = db.execute("PRAGMA user_version").fetchone()
+        version = version_row[0] if version_row is not None and type(version_row[0]) is int else 0
+        return version, frontier
+    except connection_module.StorageUnsafeError as exc:
+        if exc.reason_code == "database_missing":
+            raise BundleUpgradeError(BundleUpgradeReason.BUNDLE_MISSING, False) from exc
+        raise BundleUpgradeError(
+            {
+                "schema_newer_than_binary": BundleUpgradeReason.SCHEMA_NEWER_THAN_BINARY,
+                "schema_metadata_disagrees": BundleUpgradeReason.SCHEMA_METADATA_DISAGREES,
+            }.get(exc.reason_code, BundleUpgradeReason.BUNDLE_MISSING),
+            False,
+        ) from exc
+    except apsw.Error, OSError:
+        return 0, Frontier.genesis()
+    finally:
+        _close_db(db)
+
+
+def _bundle_upgrade_has_pending(catalog: apsw.Connection, installation_id: str, task: str) -> bool:
+    """Return whether a v13 route still needs the durable coordinator's full resume proof."""
+
+    try:
+        rows = catalog.execute(
+            "SELECT state FROM maintenance_operations "
+            "WHERE installation_id=? AND task_id=? AND kind='migration' "
+            "AND requested_target_version=? ORDER BY created_at DESC LIMIT 2",
+            (installation_id, task, "13"),
+        ).fetchall()
+    except apsw.Error:
+        # A missing/corrupt maintenance table must take the conservative path.  The coordinator
+        # will then emit its typed schema/operation diagnosis rather than skipping a possibly
+        # interrupted migration on the basis of an inventory shortcut.
+        return True
+    return any(len(row) == 1 and row[0] in {"pending", "quarantined"} for row in rows)
+
+
+def _record_unsupported_bundle_route(
+    diagnostics: DiagnosticsPort | None,
+    *,
+    route: TaskRoute,
+    schema_version: int,
+    clock: ClockPort,
+) -> None:
+    """Report one legacy route while keeping unrelated routes eligible for startup.
+
+    Bundle migrations are deliberately bounded to the v12 source schema.  A dormant v9-v11
+    route therefore remains unavailable and untouched, while a current or v12 route can still
+    bring the installation READY.  The route identity digest is the safe join key: it binds the
+    recovery fact to the catalog route without exposing task titles or paths in diagnostics.
+    """
+
+    if diagnostics is None:
+        return
+    diagnostics.record(
+        StartupCheckResult(
+            "service.bundle_upgrade.route",
+            StartupCheckArea.SQLITE_SCHEMA,
+            StartupCheckOutcome.DEGRADED,
+            BundleUpgradeReason.SCHEMA_UPGRADE_PATH_UNKNOWN.value,
+            frozenset(),
+            {
+                "route_identity_digest": route.route_identity_digest,
+                "schema_version": schema_version,
+            },
+            clock.now_utc(),
+        )
+    )
+
+
+class _BundleUpgradeReplayLedger:
+    """Adapt the normal fenced SQLite ledger to the effects replay contract."""
+
+    def __init__(self, ledger: SqliteLedger, db: apsw.Connection) -> None:
+        self._ledger = ledger
+        self._db = db
+
+    async def _join_recovery_after_cancellation(self) -> None:
+        """Join SqliteLedger's shielded recovery task before its fenced connection is closed."""
+
+        recovery_task_value = getattr(self._ledger, "_recovery_task", None)
+        if not isinstance(recovery_task_value, asyncio.Task):
+            return
+        recovery_task = cast(asyncio.Task[object], recovery_task_value)
+        while not recovery_task.done():
+            try:
+                # ``wait`` observes completion without creating a shield wrapper whose late
+                # exception can be reported as unhandled after the caller's cancellation.  The
+                # task itself remains uncancelled, so this still joins the recovery that owns the
+                # fenced connection before teardown.
+                await asyncio.wait((recovery_task,))
+            except asyncio.CancelledError:
+                # Teardown can deliver a second cancellation while the shielded DB worker is
+                # still running. Keep joining until it reaches a terminal state; the caller's
+                # original cancellation remains the result of verify_replay below.
+                continue
+            except BaseException:
+                # A recovery task may finish with a storage error while the caller is being
+                # cancelled. The exception is observed by ``result`` below, but must not replace
+                # the cancellation that caused teardown or let the fenced DB close early.
+                continue
+        try:
+            recovery_task.result()
+        except BaseException:
+            # Preserve the cancellation that caused teardown. A failed recovery task remains
+            # visible through the ledger's next operation/restart, while this method's contract
+            # is only to prevent it from touching a connection after the fence is released.
+            pass
+
+    async def verify_replay(
+        self,
+        *,
+        target: BundleUpgradeTarget,
+        before: BundleIntegrity | None,
+        after: BundleIntegrity,
+        backup: BackupEvidence,
+    ) -> str:
+        del before, backup
+        if target.task_id != after.task_id:
+            raise BundleUpgradeError(
+                BundleUpgradeReason.VERIFICATION_FAILED,
+                False,
+                {"check": "replay_binding"},
+            )
+        try:
+            # ``load_frontier`` joins SqliteLedger's shielded recovery task.  The explicit
+            # projection rebuild then records the deterministic replay under the temporary
+            # ownership fence before the effects layer compares its digest with ``after``.
+            frontier = await self._ledger.load_frontier()
+            if frontier != after.frontier:
+                raise BundleUpgradeError(
+                    BundleUpgradeReason.VERIFICATION_FAILED,
+                    False,
+                    {"check": "replay_frontier"},
+                )
+            await self._ledger.rebuild_projection("work")
+            integrity = capture_sqlite_integrity(self._db)
+        except asyncio.CancelledError:
+            await self._join_recovery_after_cancellation()
+            raise
+        except BundleUpgradeError:
+            raise
+        except Exception as exc:
+            raise BundleUpgradeError(
+                BundleUpgradeReason.VERIFICATION_FAILED,
+                False,
+                {"check": "replay"},
+            ) from exc
+        if (
+            integrity.task_id != target.task_id
+            or integrity.frontier != after.frontier
+            or integrity.projection_digest != after.projection_digest
+        ):
+            raise BundleUpgradeError(
+                BundleUpgradeReason.VERIFICATION_FAILED,
+                False,
+                {"check": "replay_digest"},
+            )
+        return integrity.projection_digest
+
+
+class _BundleUpgradeNoReplayLedger:
+    """Marker yielded while backup snapshots a pre-migration bundle."""
+
+    async def verify_replay(
+        self,
+        *,
+        target: BundleUpgradeTarget,
+        before: BundleIntegrity | None,
+        after: BundleIntegrity,
+        backup: BackupEvidence,
+    ) -> str:
+        del target, before, after, backup
+        raise BundleUpgradeError(
+            BundleUpgradeReason.VERIFICATION_FAILED,
+            False,
+            {"check": "replay_before_schema"},
+        )
+
+
+_PRIVACY_AUDIT_COLUMNS: Final[tuple[str, ...]] = (
+    "proposal_id",
+    "request_id",
+    "originating_workflow_request_id",
+    "control_rpc_id",
+    "control_method",
+    "service_instance_id",
+    "service_generation",
+    "control_request_commitment",
+    "subject_lookup_identity",
+    "subject_kind",
+    "destination_kind",
+    "channel",
+    "local_sink",
+    "provider_id",
+    "model_id",
+    "endpoint_profile_id",
+    "endpoint_profile_version",
+    "purpose",
+    "scope_kind",
+    "scope_digest",
+    "policy_id",
+    "policy_version",
+    "policy_digest",
+    "subject_structural_canonical",
+    "task_id",
+    "route_identity_digest",
+    "content_object_id",
+    "content_object_kind",
+    "content_plaintext_size",
+    "content_commitment",
+    "content_envelope_digest",
+    "content_encryption_format",
+    "content_key_slot",
+    "content_media_type",
+    "content_created_at",
+    "state",
+    "consent_source",
+    "decision_structural_canonical",
+    "decision_commitment",
+    "approval_binding_commitment",
+    "authorization_id",
+    "authorization_structural_canonical",
+    "authorization_commitment",
+    "dispatch_id",
+    "dispatch_started_at",
+    "consumed_at",
+    "attempt_result_structural_canonical",
+    "attempt_result_commitment",
+    "receipt_id",
+    "receipt_outcome",
+    "receipt_reason",
+    "receipt_canonical",
+    "receipt_digest",
+    "receipt_finished_at",
+    "audit_store_version",
+    "expires_at",
+    "created_at",
+    "updated_at",
+)
+
+
+def _privacy_snapshot_cell(value: object) -> CanonicalJsonValue:
+    """Encode one catalog scalar without allowing raw SQLite bytes into the sidecar."""
+
+    if value is None or type(value) in {bool, int, str}:
+        return cast(CanonicalJsonValue, value)
+    if type(value) is bytes:
+        # Catalog canonical fields are structural and may be needed for later audit restoration.
+        # The sidecar remains JSON-only while retaining their exact bytes losslessly.
+        return base64.b64encode(value).decode("ascii")
+    raise ValueError("privacy_snapshot_scalar_invalid")
+
+
+def _privacy_snapshot_row(columns: tuple[str, ...], row: tuple[object, ...]) -> JsonObject:
+    if len(columns) != len(row):
+        raise ValueError("privacy_snapshot_row_invalid")
+    values = {
+        column: _privacy_snapshot_cell(value) for column, value in zip(columns, row, strict=True)
+    }
+    return JsonObject(values)
+
+
+async def _load_privacy_audit_snapshot(
+    catalog: apsw.Connection,
+    *,
+    installation_id: str,
+    target: BundleUpgradeTarget,
+    roots: PrivacyAuditObjectRoots,
+) -> PrivacyAuditBackupSnapshot:
+    """Build the existing machine-bound privacy sidecar from the current catalog transaction view."""
+
+    if (
+        roots.task_id != target.task_id
+        or roots.route_identity_digest != target.route_identity_digest
+        or roots.privacy_root_generation != target.privacy_root_generation
+        or roots.root_set_digest != target.privacy_root_digest
+    ):
+        raise BundleUpgradeError(BundleUpgradeReason.PLAN_STALE, True)
+    catalog_version_row = catalog.execute("PRAGMA user_version").fetchone()
+    if (
+        catalog_version_row is None
+        or len(catalog_version_row) != 1
+        or type(catalog_version_row[0]) is not int
+        or catalog_version_row[0] <= 0
+    ):
+        raise BundleUpgradeError(
+            BundleUpgradeReason.VERIFICATION_FAILED, False, {"check": "catalog_version"}
+        )
+    columns = _PRIVACY_AUDIT_COLUMNS
+    rows = catalog.execute(
+        "SELECT "
+        + ",".join(columns)
+        + " FROM privacy_audit_records WHERE task_id=? ORDER BY proposal_id",
+        (str(target.task_id),),
+    ).fetchall()
+    audit_rows: list[JsonObject] = []
+    terminal_receipts: list[JsonObject] = []
+    for raw in rows:
+        row = cast(tuple[object, ...], raw)
+        structural = _privacy_snapshot_row(columns, row)
+        receipt_id = row[columns.index("receipt_id")]
+        if receipt_id is None:
+            audit_rows.append(structural)
+        elif type(receipt_id) is str:
+            receipt_indices = (
+                "proposal_id",
+                "task_id",
+                "receipt_id",
+                "receipt_outcome",
+                "receipt_reason",
+                "receipt_canonical",
+                "receipt_digest",
+                "receipt_finished_at",
+            )
+            terminal_receipts.append(
+                JsonObject(
+                    {
+                        column: _privacy_snapshot_cell(row[columns.index(column)])
+                        for column in receipt_indices
+                    }
+                )
+            )
+        else:
+            raise BundleUpgradeError(
+                BundleUpgradeReason.VERIFICATION_FAILED,
+                False,
+                {"check": "privacy_receipt_id"},
+            )
+    audit_rows.sort(key=lambda item: cast(str, item["proposal_id"]).encode("ascii"))
+    terminal_receipts.sort(key=lambda item: cast(str, item["receipt_id"]).encode("ascii"))
+    audit_versions = {row[columns.index("audit_store_version")] for row in rows}
+    if audit_versions - {1}:
+        raise BundleUpgradeError(
+            BundleUpgradeReason.VERIFICATION_FAILED,
+            False,
+            {"check": "audit_store_version"},
+        )
+    return PrivacyAuditBackupSnapshot(
+        origin_installation_id=installation_id,
+        origin_task_id=target.task_id,
+        catalog_version=str(catalog_version_row[0]),
+        audit_store_version="1",
+        privacy_root_generation=roots.privacy_root_generation,
+        privacy_root_digest=roots.root_set_digest,
+        audit_rows=tuple(audit_rows),
+        terminal_receipts=tuple(terminal_receipts),
+        privacy_audit_objects=roots.object_refs,
+    )
+
+
+async def _bundle_upgrade_targets(
+    catalog: SqliteStartCatalog,
+    *,
+    bundle_root: Path,
+    installation_id: str,
+    clock: ClockPort,
+    diagnostics: DiagnosticsPort | None = None,
+) -> tuple[tuple[TaskRoute, ...], tuple[BundleUpgradeTarget, ...]]:
+    """Capture every stable active route and its frontier before touching any bundle writer."""
+
+    routes = await catalog.recovery_routes()
+    active_identity = _bundle_upgrade_active_route_identity(routes)
+    catalog_db = cast(apsw.Connection, getattr(catalog, "_db"))
+    catalog_generation = catalog.generation
+    privacy_store = cast(
+        _PrivacyRootsStore,
+        CatalogPrivacyAudit(
+            catalog_db,
+            cast(ObjectStorePort, _PrivacyContentObjectStore(IdPort())),
+            cast(MacKeyHandle, getattr(catalog, "_lookup")),
+            clock,
+            service_generation=catalog_generation,
+        ),
+    )
+    targets: list[BundleUpgradeTarget] = []
+    for route in sorted(
+        (item for item in routes if item.state is TaskRouteState.ACTIVE),
+        key=lambda item: item.task_id.encode("ascii"),
+    ):
+        try:
+            bundle_path = (
+                _safe_bundle_root(
+                    bundle_root,
+                    route.bundle_relpath,
+                    route.task_id,
+                )
+                / _LEDGER_NAME
+            )
+            schema_version, frontier = await _run_blocking_joined(
+                partial(_bundle_upgrade_schema_and_frontier, bundle_path),
+                operation="bundle_upgrade_route_inventory_failed",
+            )
+            if schema_version < BUNDLE_UPGRADE_SOURCE_VERSION:
+                _record_unsupported_bundle_route(
+                    diagnostics,
+                    route=route,
+                    schema_version=schema_version,
+                    clock=clock,
+                )
+                continue
+            # Current bundles without a pending upgrade do not need their privacy object set
+            # re-hashed merely to prove that startup can skip them.  A stale source or an
+            # interrupted v14 operation still gets the exact roots that enter the coordinator's
+            # plan digest and CAS checks.
+            needs_privacy_roots = schema_version in {12, 13} or (
+                schema_version == BUNDLE_UPGRADE_TARGET_VERSION
+                and _bundle_upgrade_has_pending(catalog_db, installation_id, route.task_id)
+            )
+            if needs_privacy_roots:
+                roots = await privacy_store.live_object_roots(
+                    route.task_id,
+                    route.route_identity_digest,
+                )
+                privacy_root_generation = roots.privacy_root_generation
+                privacy_root_digest = roots.root_set_digest
+            else:
+                privacy_root_generation = 0
+                privacy_root_digest = _ZERO_DIGEST
+            targets.append(
+                BundleUpgradeTarget(
+                    task_id=task_id(route.task_id),
+                    session_id=route.session_id,
+                    bundle_path=bundle_path,
+                    route_generation=route.route_generation,
+                    route_identity_digest=route.route_identity_digest,
+                    frontier=frontier,
+                    catalog_owner_generation=catalog_generation,
+                    privacy_root_generation=privacy_root_generation,
+                    privacy_root_digest=privacy_root_digest,
+                )
+            )
+        except BundleUpgradeError:
+            raise
+        except (apsw.Error, OSError, TypeError, ValueError) as exc:
+            raise BundleUpgradeError(
+                BundleUpgradeReason.VERIFICATION_FAILED,
+                False,
+                {"check": "startup_route_inventory"},
+            ) from exc
+    latest_routes = await catalog.recovery_routes()
+    if _bundle_upgrade_active_route_identity(latest_routes) != active_identity:
+        raise BundleUpgradeError(BundleUpgradeReason.PLAN_STALE, True)
+    return routes, tuple(targets)
+
+
+def _bundle_upgrade_effects_factory(
+    *,
+    bundle_root: Path,
+    vault: _Vault,
+    installation_id: str,
+    secret_memory: SecretMemoryPort,
+    ids: IdPort,
+    clock: ClockPort,
+    version_manifest: JsonObject | None,
+    open_temporary_fenced_ledger: Callable[
+        [BundleUpgradeTarget], AbstractAsyncContextManager[BundleUpgradeFencedLedger]
+    ],
+    load_privacy_snapshot: Callable[
+        [BundleUpgradeTarget, BundleIntegrity], Awaitable[PrivacyAuditBackupSnapshot]
+    ],
+) -> BundleUpgradeEffects:
+    """Build the storage-backed automatic-upgrade effects only when a stale route is found."""
+
+    # Keep this import lazy.  The common fresh-install path has no task bundle to migrate and must
+    # not make startup depend on an optional effects implementation being imported while locked.
+    from yoetz.service.bundle_upgrade_effects import SqliteBundleUpgradeEffects
+
+    return SqliteBundleUpgradeEffects(
+        backup_root=bundle_root / "backups",
+        installation_id=installation_id,
+        load_bundle_keys=vault.load_bundle_keys,
+        secret_memory=secret_memory,
+        ids=ids,
+        clock=clock,
+        open_temporary_fenced_ledger=open_temporary_fenced_ledger,
+        load_privacy_snapshot=load_privacy_snapshot,
+        version_manifest=version_manifest,
+    )
+
+
+def _build_default_startup_bundle_upgrade(
+    *,
+    lifecycle: _Lifecycle,
+    vault: _Vault,
+    config: YoetzConfig,
+    paths: _Paths,
+    secret_memory: object,
+) -> _StartupBundleUpgrade:
+    """Compose the automatic v12->v13 upgrade at the single READY admission boundary."""
+
+    del config  # The schema-only operation deliberately does not vary with user policy.
+    startup_lock = asyncio.Lock()
+    version_manifest = JsonObject(_version_json())
+
+    async def upgrade(
+        *,
+        catalog: SqliteStartCatalog,
+        bundle_root: Path,
+        installation_id: str,
+        service_generation: int,
+        vault_generation: int,
+        clock: ClockPort,
+        ids: IdPort,
+        diagnostics: DiagnosticsPort | None,
+    ) -> object:
+        del vault_generation
+        catalog_db = cast(apsw.Connection, getattr(catalog, "_db"))
+        service_instance_id = cast(str, getattr(lifecycle.instance, "instance_id"))
+
+        def assert_lifecycle_holder() -> None:
+            assertion = getattr(lifecycle, "assert_singleton_held", None)
+            if not callable(assertion):
+                raise BundleUpgradeError(BundleUpgradeReason.HOLDER_REQUIRED, False)
+            try:
+                assertion()
+            except BundleUpgradeError:
+                raise
+            except Exception as exc:
+                raise BundleUpgradeError(BundleUpgradeReason.HOLDER_CONFLICT, True) from exc
+
+        route_snapshot, targets = await _bundle_upgrade_targets(
+            catalog,
+            bundle_root=bundle_root,
+            installation_id=installation_id,
+            clock=clock,
+            diagnostics=diagnostics,
+        )
+        if not targets:
+            return None
+        record_bounded_counts_without_raising(
+            component="service.ready_composition",
+            operation="bundle_upgrade_startup_progress",
+            outcome="upgrade_pending",
+            counts={"operation_count": len(targets)},
+        )
+
+        # The recovery backend is also used by the temporary replay ledger.  Install it before
+        # effects run, after the catalog is current and while this process still owns the
+        # singleton.  The effects layer never mutates the bundle during read-only inspection.
+        recovery_persistence = _RecoveryPersistence(_catalog_path(paths), clock)
+        _install_recovery_persistence(recovery_persistence)
+
+        @contextlib.asynccontextmanager
+        async def acquire_exclusive_holder(
+            candidates: tuple[BundleUpgradeTarget, ...],
+        ) -> AsyncGenerator[None]:
+            if type(candidates) is not tuple or not candidates:
+                raise BundleUpgradeError(BundleUpgradeReason.HOLDER_REQUIRED, False)
+            try:
+                assert_lifecycle_holder()
+                async with startup_lock:
+                    assert_lifecycle_holder()
+                    yield
+                    assert_lifecycle_holder()
+            except BundleUpgradeError:
+                raise
+            except Exception as exc:
+                raise BundleUpgradeError(BundleUpgradeReason.HOLDER_CONFLICT, True) from exc
+
+        @contextlib.asynccontextmanager
+        async def temporary_fenced_ledger(
+            target: BundleUpgradeTarget,
+        ) -> AsyncGenerator[BundleUpgradeFencedLedger]:
+            """Open one replay ledger under the current bundle metadata fence, then erase it."""
+
+            assert_lifecycle_holder()
+            schema_version, _frontier = await _run_blocking_joined(
+                partial(_bundle_upgrade_schema_and_frontier, target.bundle_path),
+                operation="bundle_upgrade_replay_inventory_failed",
+            )
+            if schema_version != BUNDLE_UPGRADE_TARGET_VERSION:
+                # The backup effect enters this context before the source v12 schema is migrated.
+                # It only needs the service holder fence during that phase; opening the normal
+                # runtime writer would correctly reject the stale schema and strand the backup.
+                yield _BundleUpgradeNoReplayLedger()
+                assert_lifecycle_holder()
+                return
+            bundle_dir = target.bundle_path.parent
+            state = await _run_blocking_joined(
+                partial(
+                    recovery_persistence.inspect,
+                    bundle_dir,
+                    catalog_path=_catalog_path(paths),
+                    task_id=str(target.task_id),
+                    route_generation=target.route_generation,
+                    route_identity_digest=target.route_identity_digest,
+                ),
+                operation="bundle_upgrade_recovery_inventory_failed",
+            )
+            if type(state) is not recovery_module.RecoveryState:
+                raise BundleUpgradeError(BundleUpgradeReason.VERIFICATION_FAILED, False)
+            route = TaskRoute(
+                task_id=str(target.task_id),
+                session_id=target.session_id,
+                bundle_relpath=f"tasks/{target.task_id}",
+                route_generation=target.route_generation,
+                state=TaskRouteState.ACTIVE,
+                route_identity_digest=target.route_identity_digest,
+            )
+            inspection = _BundleInspection(
+                route,
+                bundle_dir,
+                target.bundle_path,
+                _catalog_path(paths),
+                frozenset(),
+                False,
+                state,
+                recovery_module.validate_recovery_tail(state),
+            )
+            fence = OwnershipFence(
+                service_instance_id=service_instance_id,
+                service_generation=service_generation,
+                owner_generation=state.owner_generation,
+                nonce=state.owner_nonce,
+            )
+            registrar = cast(
+                Callable[[Path, OwnershipFence], None],
+                getattr(connection_module, "_register_active_fence"),
+            )
+            clearer = cast(
+                Callable[[Path, OwnershipFence | None], None],
+                getattr(connection_module, "_clear_active_fence"),
+            )
+            db: apsw.Connection | None = None
+            registered = False
+            try:
+                registrar(target.bundle_path, fence)
+                registered = True
+                db = await _run_blocking_joined(
+                    partial(open_writer, target.bundle_path),
+                    operation="bundle_upgrade_replay_writer_open_failed",
+                    cleanup_result=_close_db,
+                )
+                keys = await vault.load_bundle_keys(str(target.task_id))
+                objects = EncryptedFilesObjectStore(
+                    bundle_root=bundle_dir,
+                    bundle_keys=keys,
+                    secret_memory=secret_memory,  # pyright: ignore[reportArgumentType]
+                    id_port=ids,
+                    current_root_snapshot=lambda: _root_snapshot(inspection, db, clock, catalog_db),
+                )
+                ledger = SqliteLedger(
+                    db=db,
+                    task_id=str(target.task_id),
+                    ownership_fence=fence,
+                    clock=clock,
+                    ids=ids,
+                    objects=objects,
+                )
+                yield _BundleUpgradeReplayLedger(ledger, db)
+            except BundleUpgradeError:
+                raise
+            except Exception as exc:
+                raise BundleUpgradeError(BundleUpgradeReason.VERIFICATION_FAILED, False) from exc
+            finally:
+                primary_error = sys.exc_info()[1]
+
+                def report_holder_loss() -> None:
+                    record_bounded_event_without_raising(
+                        component="service.ready_composition",
+                        operation="bundle_upgrade_holder_lost_during_cleanup",
+                        reason="singleton_not_held",
+                    )
+
+                _close_db(db)
+                if registered:
+                    cleanup_error: BaseException | None = None
+                    holder_error: BaseException | None = None
+                    try:
+                        assert_lifecycle_holder()
+                    except BaseException as exc:
+                        holder_error = exc
+                        cleanup_error = exc
+                    try:
+                        clearer(target.bundle_path, fence)
+                    except BaseException as exc:
+                        if cleanup_error is None:
+                            cleanup_error = exc
+                    registered = False
+                    if cleanup_error is not None:
+                        if holder_error is not None:
+                            report_holder_loss()
+                        if primary_error is None:
+                            raise cleanup_error
+                try:
+                    assert_lifecycle_holder()
+                except BaseException:
+                    if primary_error is None:
+                        raise
+                    report_holder_loss()
+
+        async def privacy_snapshot(
+            target: BundleUpgradeTarget, before: BundleIntegrity
+        ) -> PrivacyAuditBackupSnapshot:
+            if before.task_id != target.task_id or before.frontier != target.frontier:
+                raise BundleUpgradeError(BundleUpgradeReason.PLAN_STALE, True)
+            roots_store = cast(
+                _PrivacyRootsStore,
+                CatalogPrivacyAudit(
+                    catalog_db,
+                    cast(ObjectStorePort, _PrivacyContentObjectStore(ids)),
+                    vault.installation_mac_handle(MacKeyPurpose.PRIVACY_AUDIT),
+                    clock,
+                    service_generation=service_generation,
+                ),
+            )
+            roots = await roots_store.live_object_roots(
+                str(target.task_id),
+                target.route_identity_digest,
+            )
+            return await _load_privacy_audit_snapshot(
+                catalog_db,
+                installation_id=installation_id,
+                target=target,
+                roots=roots,
+            )
+
+        try:
+            effects = _bundle_upgrade_effects_factory(
+                bundle_root=bundle_root,
+                vault=vault,
+                secret_memory=cast(SecretMemoryPort, secret_memory),
+                installation_id=installation_id,
+                ids=ids,
+                clock=clock,
+                version_manifest=version_manifest,
+                open_temporary_fenced_ledger=temporary_fenced_ledger,
+                load_privacy_snapshot=privacy_snapshot,
+            )
+            coordinator = BundleUpgradeCoordinator(
+                catalog=catalog_db,
+                installation_id=installation_id,
+                service_instance_id=service_instance_id,
+                clock=clock,
+                effects=effects,
+                acquire_exclusive_holder=acquire_exclusive_holder,
+                assert_exclusive_holder=assert_lifecycle_holder,
+                ids=ids,
+            )
+            report = await coordinator.run_before_ready(targets)
+            record_bounded_counts_without_raising(
+                component="service.ready_composition",
+                operation="bundle_upgrade_startup_progress",
+                outcome="upgrade_complete",
+                counts={
+                    "operation_count": len(report.migrated) + len(report.already_current),
+                },
+            )
+            latest_routes = await catalog.recovery_routes()
+            if _bundle_upgrade_active_route_identity(
+                latest_routes
+            ) != _bundle_upgrade_active_route_identity(route_snapshot):
+                raise BundleUpgradeError(BundleUpgradeReason.PLAN_STALE, True)
+            return report
+        except BundleUpgradeError as exc:
+            record_bounded_event_without_raising(
+                component="service.ready_composition",
+                operation="bundle_upgrade_startup_failed",
+                reason=exc.reason.value,
+            )
+            if diagnostics is not None:
+                diagnostics.record(
+                    StartupCheckResult(
+                        "service.bundle_upgrade",
+                        StartupCheckArea.SQLITE_SCHEMA,
+                        (
+                            StartupCheckOutcome.DEGRADED
+                            if exc.retryable
+                            else StartupCheckOutcome.BLOCKED
+                        ),
+                        exc.reason.value,
+                        frozenset(),
+                        {},
+                        clock.now_utc(),
+                    )
+                )
+            raise
+
+    return upgrade
 
 
 def _seed_catalog_meta(
@@ -826,6 +1909,24 @@ async def _root_snapshot(
             if len(row) != 2:
                 raise ValueError("project_text_root_row_invalid")
             refs.extend(row)
+        # A response-loss or process crash can leave encrypted project text referenced only by a
+        # pending operation row until the catalog effect is replayed. Keep those exact refs rooted
+        # across orphan sweeps; otherwise recovery would have to mint a second object (or fail
+        # after the original ciphertext was collected). Older catalogs have no journal table, so
+        # probe it just like the coordination-detail table below.
+        if (
+            catalog_db.execute(
+                "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='project_operations'"
+            ).fetchone()
+            is not None
+        ):
+            for row in catalog_db.execute(
+                "SELECT title_ref_canonical, description_ref_canonical FROM project_operations "
+                "WHERE title_ref_canonical IS NOT NULL OR description_ref_canonical IS NOT NULL"
+            ).fetchall():
+                if len(row) != 2:
+                    raise ValueError("project_text_root_row_invalid")
+                refs.extend(row)
         # Coordination detail pointers use TEXT because the coordination adapter's structural
         # JSON columns are canonical UTF-8.  Older catalogs may predate the table entirely, so
         # probe the schema before reading it rather than turning a valid upgrade into a root
@@ -922,6 +2023,18 @@ def _admitted_writers_for_session(
     return writers
 
 
+def _admitted_writers_for_session_from_path(
+    catalog_path: Path, task_id: str, session_id: str
+) -> frozenset[str]:
+    """Read session writer admission through a short-lived private inspection connection."""
+
+    catalog_db = open_read_only(catalog_path)
+    try:
+        return _admitted_writers_for_session(catalog_db, task_id, session_id)
+    finally:
+        _close_db(catalog_db)
+
+
 def _inspect_common(
     *,
     catalog_path: Path,
@@ -966,7 +2079,7 @@ def build_runtime_adapter_factories(
     clock: ClockPort,
     ids: IdPort,
     secret_memory: object,
-    catalog_db: apsw.Connection,
+    catalog_db: apsw.Connection | None = None,
 ) -> RuntimeAdapterFactories:
     """Build durable local runtime adapter callbacks for one ready generation."""
 
@@ -980,53 +2093,63 @@ def build_runtime_adapter_factories(
     async def inspect_route(route: object, access: RouteAccess) -> object:
         del access
         session_id = cast(str, getattr(route, "session_id"))
-        return _inspect_common(
-            catalog_path=catalog_path,
-            bundle_base=paths.bundle,
-            route=route,
-            admitted_writer_ids=_admitted_writers_for_session(
-                catalog_db, cast(str, getattr(route, "task_id")), session_id
-            ),
-            fresh_allocation=False,
-        )
+
+        def inspect() -> object:
+            # Catalog and recovery inspection are synchronous APSW/file operations. Keep the
+            # entire route snapshot off the control event loop; runtime.route() already exposes
+            # this seam as async, so callers retain their normal deadline/cancellation contract.
+            return _inspect_common(
+                catalog_path=catalog_path,
+                bundle_base=paths.bundle,
+                route=route,
+                admitted_writer_ids=_admitted_writers_for_session_from_path(
+                    catalog_path, cast(str, getattr(route, "task_id")), session_id
+                ),
+                fresh_allocation=False,
+            )
+
+        return await asyncio.to_thread(inspect)
 
     async def inspect_provision(command: object) -> object:
-        route = TaskRoute(
-            task_id=cast(str, getattr(command, "task_id")),
-            session_id=cast(str, getattr(command, "session_id")),
-            bundle_relpath=cast(str, getattr(command, "bundle_relpath")),
-            route_generation=cast(int, getattr(command, "route_generation")),
-            route_identity_digest=cast(str, getattr(command, "route_identity_digest")),
-            state=TaskRouteState.ACTIVE,
-            repository_privacy_commitment=cast(
-                str | None, getattr(command, "repository_privacy_commitment", None)
-            ),
-            parent_task_id=cast(str | None, getattr(command, "parent_task_id", None)),
-            depth=cast(int, getattr(command, "depth", 0)),
-            lineage_digest=cast(str | None, getattr(command, "lineage_digest", None)),
-            origin=cast(LineageOrigin | None, getattr(command, "origin", None)),
-            acceptance=cast(LineageAcceptance | None, getattr(command, "acceptance", None)),
-            work_state=cast(WorkState, getattr(command, "work_state", WorkState.OPEN)),
-        )
-        bundle_root = _safe_bundle_root(
-            paths.bundle,
-            cast(str, getattr(command, "bundle_relpath")),
-            cast(str, getattr(command, "task_id")),
-        )
-        ledger_path = bundle_root / _LEDGER_NAME
-        fresh = not ledger_path.exists()
-        if fresh:
-            bundle_root.mkdir(mode=0o700, parents=True, exist_ok=False)
-            bundle_root.chmod(0o700)
-            _initialize_fresh_bundle(ledger_path, command=command, clock=clock)
-        writer_id = cast(str, getattr(command, "writer_id"))
-        return _inspect_common(
-            catalog_path=catalog_path,
-            bundle_base=paths.bundle,
-            route=route,
-            admitted_writer_ids=frozenset({writer_id}),
-            fresh_allocation=fresh,
-        )
+        def inspect() -> object:
+            route = TaskRoute(
+                task_id=cast(str, getattr(command, "task_id")),
+                session_id=cast(str, getattr(command, "session_id")),
+                bundle_relpath=cast(str, getattr(command, "bundle_relpath")),
+                route_generation=cast(int, getattr(command, "route_generation")),
+                route_identity_digest=cast(str, getattr(command, "route_identity_digest")),
+                state=TaskRouteState.ACTIVE,
+                repository_privacy_commitment=cast(
+                    str | None, getattr(command, "repository_privacy_commitment", None)
+                ),
+                parent_task_id=cast(str | None, getattr(command, "parent_task_id", None)),
+                depth=cast(int, getattr(command, "depth", 0)),
+                lineage_digest=cast(str | None, getattr(command, "lineage_digest", None)),
+                origin=cast(LineageOrigin | None, getattr(command, "origin", None)),
+                acceptance=cast(LineageAcceptance | None, getattr(command, "acceptance", None)),
+                work_state=cast(WorkState, getattr(command, "work_state", WorkState.OPEN)),
+            )
+            bundle_root = _safe_bundle_root(
+                paths.bundle,
+                cast(str, getattr(command, "bundle_relpath")),
+                cast(str, getattr(command, "task_id")),
+            )
+            ledger_path = bundle_root / _LEDGER_NAME
+            fresh = not ledger_path.exists()
+            if fresh:
+                bundle_root.mkdir(mode=0o700, parents=True, exist_ok=False)
+                bundle_root.chmod(0o700)
+                _initialize_fresh_bundle(ledger_path, command=command, clock=clock)
+            writer_id = cast(str, getattr(command, "writer_id"))
+            return _inspect_common(
+                catalog_path=catalog_path,
+                bundle_base=paths.bundle,
+                route=route,
+                admitted_writer_ids=frozenset({writer_id}),
+                fresh_allocation=fresh,
+            )
+
+        return await _run_blocking_joined(inspect, operation="runtime_inspect_provision_failed")
 
     async def acquire_fence(inspection: object, write: bool) -> OwnershipFence:
         if type(inspection) is not _BundleInspection:
@@ -1043,10 +2166,11 @@ def build_runtime_adapter_factories(
                 Callable[[Path, OwnershipFence], None],
                 getattr(connection_module, "_register_active_fence"),
             )
-            registrar(inspection.ledger_path, fence)
+            await asyncio.to_thread(registrar, inspection.ledger_path, fence)
             return fence
         try:
-            return recovery_module.acquire_bundle_ownership(
+            return await asyncio.to_thread(
+                recovery_module.acquire_bundle_ownership,
                 cast(recovery_module.RecoveryState, inspection.recovery_state),
                 cast(recovery_module.RecoveryTailVerdict, inspection.recovery_verdict),
                 service_instance_id=service_instance_id,
@@ -1067,10 +2191,11 @@ def build_runtime_adapter_factories(
     async def validate_fence(inspection: object, fence: OwnershipFence) -> None:
         if type(inspection) is not _BundleInspection:
             raise ValueError("runtime_inspection_invalid")
-        cast(_RecoveryPersistence, recovery_module._backend()).verify_fence(  # pyright: ignore[reportPrivateUsage]
-            inspection.recovery_state,
-            fence,
+        backend = cast(
+            _RecoveryPersistence,
+            recovery_module._backend(),  # pyright: ignore[reportPrivateUsage]
         )
+        await asyncio.to_thread(backend.verify_fence, inspection.recovery_state, fence)
 
     async def open_objects(
         inspection: object,
@@ -1081,7 +2206,10 @@ def build_runtime_adapter_factories(
         del fence, access
         if type(inspection) is not _BundleInspection or keys is None:
             raise ValueError("runtime_object_store_invalid")
-        db = open_read_only(inspection.ledger_path)
+        # ``LocalBundleRuntime._open_entry`` shields this opening task and waits for it during
+        # generation teardown, so the returned connection remains owned even if the requesting
+        # control call is cancelled while the worker performs schema verification.
+        db = await asyncio.to_thread(open_read_only, inspection.ledger_path)
         try:
             store = EncryptedFilesObjectStore(
                 bundle_root=inspection.bundle_root,
@@ -1105,7 +2233,9 @@ def build_runtime_adapter_factories(
         del access
         if type(inspection) is not _BundleInspection:
             raise ValueError("runtime_ledger_invalid")
-        db = open_writer(inspection.ledger_path)
+        # The opening task is shielded by LocalBundleRuntime and joined by close(); this keeps the
+        # writer and its fence lifetime paired when the caller's deadline expires.
+        db = await asyncio.to_thread(open_writer, inspection.ledger_path)
         try:
             ledger = SqliteLedger(
                 db=db,
@@ -1138,7 +2268,9 @@ def build_runtime_adapter_factories(
             clock=clock,
             ids=ids,
         )
-        writer = SqliteWriterThread(inspection.ledger_path)
+        # SqliteWriterThread is likewise created inside the shielded opening task; teardown waits
+        # for that task before closing the returned entry.
+        writer = await asyncio.to_thread(SqliteWriterThread, inspection.ledger_path)
         try:
             importer = SqliteImporter(
                 task_id=cast(str, getattr(route, "task_id")),
@@ -1885,7 +3017,10 @@ def _map_egress_to_final(
             ),
         )
     if type(result) is SemanticEgressAttemptUnknown:
-        return FinalSemanticEvaluation(SemanticStatus.UNAVAILABLE, SemanticReason.OUTCOME_UNKNOWN)
+        return FinalSemanticEvaluation(
+            SemanticStatus.UNAVAILABLE,
+            SemanticReason.OUTCOME_UNKNOWN,
+        )
     if type(result) is SemanticEgressBlocked:
         return _map_blocked(result.outcome, result.reason)
     if type(result) is SemanticEgressProviderOutcome:
@@ -2335,6 +3470,364 @@ async def _recover_response_evaluation(
     return FinalSemanticEvaluation(status, reason, judgment=judgment, provenance=provenance)
 
 
+def _observation_workspace_for_runtime(runtime: TaskRuntime) -> str | None:
+    """Resolve the task's observation workspace through its durable session route.
+
+    ``TaskRoute.repository_privacy_commitment`` authorizes egress and is deliberately a
+    different commitment domain from the observation store's workspace key.  The latter is
+    selected only by the durable session route, then checked against the exact runtime task
+    before it is handed to the local consent fence.  An unavailable or contradictory route is
+    an observation-content gap, never a reason to try the privacy commitment as a fallback.
+    """
+
+    observation = runtime.observation
+    if observation is None:
+        return None
+    workspace_lookup = getattr(observation, "workspace_for_yoetz_session", None)
+    route_lookup = getattr(observation, "observation_route_for_session", None)
+    if not callable(workspace_lookup) or not callable(route_lookup):
+        return None
+    try:
+        workspace = workspace_lookup(runtime.session_id)
+    except Exception:
+        return None
+    if type(workspace) is not str:
+        return None
+    try:
+        validate_commitment(workspace)
+    except TypeError, ValueError:
+        return None
+    try:
+        route = route_lookup(workspace=workspace, yoetz_session_id=runtime.session_id)
+    except Exception:
+        return None
+    if type(route) is not tuple:
+        return None
+    route_values = cast(tuple[object, ...], route)
+    if (
+        len(route_values) != 3
+        or type(route_values[0]) is not str
+        or type(route_values[1]) is not str
+        or type(route_values[2]) is not bool
+        or route_values[1] != runtime.task_id
+    ):
+        return None
+    try:
+        validate_commitment(route_values[0])
+    except TypeError, ValueError:
+        return None
+    return workspace
+
+
+async def _run_capture_inventory_joined[ResultT](
+    call: Callable[[], ResultT], *, operation: str
+) -> ResultT:
+    """Keep the executor future owned until metadata/publication actually settles.
+
+    READY teardown may cancel all Tasks, including a to_thread intermediary.
+    Await the executor Future directly so that cancellation of such a Task
+    cannot orphan an active proof mutation and release capture exclusion early.
+    """
+
+    worker = asyncio.get_running_loop().run_in_executor(
+        None, partial(contextvars.copy_context().run, call)
+    )
+    try:
+        await asyncio.wait((worker,))
+        return worker.result()
+    except asyncio.CancelledError:
+        while not worker.done():
+            try:
+                await asyncio.wait((worker,))
+            except asyncio.CancelledError:
+                continue
+        try:
+            worker.result()
+        except BaseException as worker_error:
+            if not isinstance(worker_error, asyncio.CancelledError):
+                record_unexpected_exception_without_raising(
+                    worker_error,
+                    component="service.ready_composition",
+                    operation=operation,
+                )
+        raise
+
+
+async def _bootstrap_capture_reservations(
+    workspace: str,
+    current_runtime: TaskRuntime,
+    current_store: TaskObservationPort,
+    *,
+    catalog: StartCatalogPort,
+    runtime: BundleRuntimePort,
+    local_observation: LocalObservationStore,
+    clock: ClockPort,
+    generation_is_current: Callable[[], bool],
+) -> bool:
+    """Read the complete catalog inventory before central admission.
+
+    The coordinator invokes this callback while its process-wide capture
+    lock is held.  The current route's repository commitment scopes the
+    inventory; matching routes are all accounted for, while an unreadable
+    or inactive route fails closed instead of being silently omitted.
+    """
+
+    try:
+        if not generation_is_current():
+            raise ValueError("capture_generation_changed")
+        current_route = await catalog.resolve_route(current_runtime.session_id)
+        if (
+            current_route is None
+            or current_route.state is not TaskRouteState.ACTIVE
+            or current_route.task_id != current_runtime.task_id
+            or current_route.repository_privacy_commitment is None
+        ):
+            raise ValueError("capture_current_route_unavailable")
+        repository = current_route.repository_privacy_commitment
+        recovery_routes = getattr(catalog, "recovery_routes", None)
+        if not callable(recovery_routes):
+            raise ValueError("capture_catalog_inventory_unavailable")
+        raw_routes = await cast(Callable[[], Awaitable[tuple[TaskRoute, ...]]], recovery_routes)()
+        if type(raw_routes) is not tuple:
+            raise ValueError("capture_catalog_inventory_invalid")
+        if any(type(route) is not TaskRoute for route in raw_routes):
+            raise ValueError("capture_catalog_inventory_invalid")
+        all_routes = raw_routes
+        if len({route.task_id for route in all_routes}) != len(all_routes):
+            raise ValueError("capture_catalog_inventory_duplicate")
+        routes = tuple(
+            route
+            for route in all_routes
+            if route.repository_privacy_commitment in {repository, None}
+        )
+        if not routes or len(routes) > 256:
+            raise ValueError("capture_catalog_inventory_incomplete")
+        if any(route.state is not TaskRouteState.ACTIVE for route in routes):
+            raise ValueError("capture_catalog_inventory_inactive")
+        if current_route.task_id not in {route.task_id for route in routes}:
+            raise ValueError("capture_catalog_inventory_incomplete")
+        inventory: dict[str, ObservationCaptureBacklog] = {}
+        ticket_ids_by_task: dict[str, tuple[str, ...]] = {}
+        for route in sorted(routes, key=lambda item: item.task_id.encode()):
+            task_runtime: TaskRuntime | None = None
+            release = False
+            try:
+                if route.task_id == current_runtime.task_id:
+                    task_runtime = current_runtime
+                    task_store = current_store
+                else:
+                    binding = await catalog.session_binding(route.session_id)
+                    if (
+                        binding is None
+                        or binding.task_id != route.task_id
+                        or binding.session_id != route.session_id
+                    ):
+                        raise ValueError("capture_route_binding_unavailable")
+                    task_runtime = await runtime.route(
+                        RouteCommand(
+                            session_id=route.session_id,
+                            writer_id=binding.writer_id,
+                            access=RouteAccess.WRITE,
+                            required_capabilities=frozenset({RuntimeCapability.WRITE}),
+                        )
+                    )
+                    release = True
+                    task_store = task_runtime.observation
+                if (
+                    task_runtime.task_id != route.task_id
+                    or task_runtime.session_id != route.session_id
+                ):
+                    raise ValueError("capture_task_route_changed")
+                if task_store is None:
+                    raise ValueError("capture_task_observation_unavailable")
+                reader = getattr(task_store, "capture_backlog", None)
+                if not callable(reader):
+                    raise ValueError("capture_task_backlog_unavailable")
+                # Task metadata adapters are synchronous and may encounter
+                # a SQLite busy wait. Keep that wait off the control loop,
+                # joining before releasing the runtime on cancellation.
+                backlog = await _run_capture_inventory_joined(
+                    partial(reader, workspace), operation="capture_inventory_backlog_read_failed"
+                )
+                if type(backlog) is not ObservationCaptureBacklog:
+                    raise ValueError("capture_task_backlog_invalid")
+                inventory[route.task_id] = backlog
+                list_pending = getattr(task_store, "list_pending_capture_tickets", None)
+                if callable(list_pending):
+                    raw_tickets = await _run_capture_inventory_joined(
+                        partial(list_pending, route.task_id),
+                        operation="capture_inventory_ticket_read_failed",
+                    )
+                    tickets = cast(tuple[object, ...], raw_tickets)
+                    if type(raw_tickets) is not tuple or any(
+                        type(ticket) is not ObservationCaptureTicket for ticket in tickets
+                    ):
+                        raise ValueError("capture_task_ticket_inventory_invalid")
+                    scoped_ids: list[str] = []
+                    typed_tickets = cast(tuple[ObservationCaptureTicket, ...], tickets)
+                    for ticket in typed_tickets:
+                        if ticket.task_id != route.task_id:
+                            raise ValueError("capture_task_ticket_owner_invalid")
+                        if ticket.workspace_commitment == workspace:
+                            ticket_id = observation_capture_ticket_id(ticket)
+                            if ticket_id in scoped_ids:
+                                raise ValueError("capture_task_ticket_duplicate")
+                            scoped_ids.append(ticket_id)
+                    if len(scoped_ids) == backlog.count and all(
+                        ticket.workspace_commitment == workspace for ticket in typed_tickets
+                    ):
+                        ticket_ids_by_task[route.task_id] = tuple(
+                            sorted(scoped_ids, key=str.encode)
+                        )
+            finally:
+                if release and task_runtime is not None:
+                    with contextlib.suppress(Exception):
+                        await runtime.release(task_runtime)
+        # Re-read the catalog after all bundle reads.  A route change while
+        # the inventory was in flight must not mint a proof for a stale set.
+        final_raw_routes = await cast(
+            Callable[[], Awaitable[tuple[TaskRoute, ...]]], recovery_routes
+        )()
+        if not generation_is_current():
+            raise ValueError("capture_generation_changed")
+        if final_raw_routes != raw_routes:
+            raise ValueError("capture_catalog_inventory_changed")
+        bootstrap = getattr(local_observation, "bootstrap_capture_reservations", None)
+        if not callable(bootstrap):
+            raise ValueError("capture_bootstrap_unavailable")
+        observed_at = timestamp_from_datetime(clock.now_utc())
+        return bool(
+            await _run_capture_inventory_joined(
+                partial(
+                    bootstrap,
+                    workspace,
+                    inventory,
+                    observed_at=observed_at,
+                    complete=True,
+                    proof_guard=generation_is_current,
+                    ticket_ids_by_task=ticket_ids_by_task or None,
+                ),
+                operation="observation_capture_inventory_publish",
+            )
+        )
+    except Exception:
+        mark_unknown = getattr(local_observation, "mark_capture_backlog_scope_unknown", None)
+        if callable(mark_unknown):
+            with contextlib.suppress(Exception):
+                await _run_capture_inventory_joined(
+                    partial(mark_unknown, workspace),
+                    operation="observation_capture_inventory_unknown",
+                )
+        return False
+
+
+async def _reconcile_observation_capture(
+    runtime: TaskRuntime,
+    local_observation: LocalObservationStore,
+    clock: ClockPort | None = None,
+) -> None:
+    """Retire stale native handoffs and publish the task backlog to local pressure state."""
+
+    store = runtime.observation
+    if store is None:
+        return
+    list_pending = getattr(store, "list_pending_capture_tickets", None)
+    tombstone = getattr(store, "tombstone_capture_ticket", None)
+    if not callable(list_pending) or not callable(tombstone):
+        return
+    tickets_raw = list_pending(runtime.task_id)
+    if type(tickets_raw) is not tuple:
+        raise PublicOperationError(
+            PublicErrorCode.STORAGE_CORRUPT,
+            "Observation capture ticket listing is invalid.",
+            retryable=False,
+        )
+    tickets = cast(tuple[object, ...], tickets_raw)
+    if any(type(ticket) is not ObservationCaptureTicket for ticket in tickets):
+        raise PublicOperationError(
+            PublicErrorCode.STORAGE_CORRUPT,
+            "Observation capture ticket listing is invalid.",
+            retryable=False,
+        )
+    authorities: dict[str, LocalContentCaptureAuthority | None] = {}
+    retired_ids: set[str] = set()
+    for ticket in cast(tuple[ObservationCaptureTicket, ...], tickets):
+        if ticket.task_id != runtime.task_id:
+            raise PublicOperationError(
+                PublicErrorCode.STORAGE_CORRUPT,
+                "Observation capture ticket task ownership is invalid.",
+                retryable=False,
+            )
+        if ticket.workspace_commitment not in authorities:
+            authorities[ticket.workspace_commitment] = local_observation.content_capture_authority(
+                ticket.workspace_commitment
+            )
+        authority = authorities[ticket.workspace_commitment]
+        if (
+            authority is None
+            or not authority.active
+            or not authority.runtime_enabled
+            or ticket.authority_generation != authority.generation
+            or (
+                ticket.content_capture_profile is not None
+                and ticket.content_capture_profile not in authority.profiles
+            )
+        ):
+            tombstone(ticket)
+            retired_ids.add(observation_capture_ticket_id(ticket))
+    reader = getattr(store, "capture_backlog", None)
+    updater = getattr(local_observation, "update_capture_backlog", None)
+    workspace = _observation_workspace_for_runtime(runtime)
+    if workspace is None and len(authorities) == 1:
+        workspace = next(iter(authorities))
+    if workspace is None:
+        return
+    reconcile = getattr(local_observation, "reconcile_capture_ticket_reservations", None)
+    if callable(reconcile):
+        with contextlib.suppress(Exception):
+            reconcile(
+                workspace,
+                runtime.task_id,
+                tuple(
+                    observation_capture_ticket_id(ticket)
+                    for ticket in cast(tuple[ObservationCaptureTicket, ...], tickets)
+                    if observation_capture_ticket_id(ticket) not in retired_ids
+                ),
+            )
+    if not callable(reader) or not callable(updater):
+        return
+    try:
+        if clock is None:
+            observed_at = local_observation._wall_timestamp()  # pyright: ignore[reportPrivateUsage]
+        else:
+            raw_now = cast(object, clock.now_utc())
+            observed_at = (
+                raw_now if type(raw_now) is Timestamp else timestamp_from_datetime(raw_now)
+            )
+    except Exception:
+        return
+    try:
+        backlog = reader(workspace)
+        count = getattr(backlog, "count")
+        byte_count = getattr(backlog, "byte_count")
+        oldest_receipt_time = getattr(backlog, "oldest_receipt_time")
+    except Exception:
+        # A task read failure must retain conservative unknown scope rather
+        # than make a zero-valued snapshot look complete.
+        with contextlib.suppress(Exception):
+            updater(workspace, 0, 0, None, observed_at)
+        return
+    with contextlib.suppress(Exception):
+        updater(
+            workspace,
+            count,
+            byte_count,
+            oldest_receipt_time,
+            observed_at,
+            route_id=runtime.task_id,
+        )
+
+
 def _privacy_gated_semantic_evaluator(
     privacy: PrivacyCoordinator,
     clock: ClockPort,
@@ -2350,11 +3843,7 @@ def _privacy_gated_semantic_evaluator(
     fallback_max_retries: int = 2,
     configured_primary: ProviderBinding | None = None,
     lineage_source_gate: LineageSourceGate | None = None,
-    resolve_native_content: Callable[
-        [FrozenCase, TaskRuntime, ReviewSelectionPolicy, frozenset[str]],
-        Awaitable[SemanticContentResolution],
-    ]
-    | None = None,
+    local_observation: object | None = None,
 ):
     total_timeout = float(max(1, min(int(timeout_seconds), 3600)))
     # The fallback endpoint owns its own deadline share (#582): a primary that spends its whole
@@ -2392,6 +3881,7 @@ def _privacy_gated_semantic_evaluator(
         # an unbound name there would turn a reportable failure into a second one.
         withheld: tuple[str, ...] = ()
         over_item_limit = False
+        reference_scope_reduced = False
         content_gaps: tuple[str, ...] = ()
 
         def _on_lease_renewed(renewed: object) -> None:
@@ -2608,6 +4098,52 @@ def _privacy_gated_semantic_evaluator(
                     reason=SemanticReason.CONTENT_CATEGORY_NOT_AUTHORIZED.value,
                     request_id=frozen.lease.operation_id,
                 )
+            captured_content = ()
+            captured_content_scope = None
+            captured_content_gaps = ()
+            captured_local_fence_generation: str | None = None
+            captured_local_fence_profiles: tuple[str, ...] = ()
+            captured_local_fence_required = False
+            captured_observation_workspace: str | None = None
+            if (
+                runtime is not None
+                and "targeted_excerpts" in review_selection.sections
+                and review_selection.max_excerpts > 0
+            ):
+                captured_observation_workspace = _observation_workspace_for_runtime(runtime)
+                if captured_observation_workspace is None:
+                    captured_content_gaps = ("content_capture_unavailable",)
+                else:
+                    try:
+                        captured_resolution = await resolve_captured_semantic_content(
+                            runtime=runtime,
+                            frozen=FrozenCase(frozen.case, current_lease[0]),
+                            workspace_commitment=captured_observation_workspace,
+                            local_observation=local_observation,
+                            max_parts=min(
+                                MAX_CAPTURED_SEMANTIC_CONTENT_PARTS,
+                                max(16, review_selection.max_excerpts * 16),
+                            ),
+                            max_total_bytes=MAX_CAPTURED_SEMANTIC_INPUT_BYTES,
+                        )
+                        captured_content = captured_resolution.content
+                        captured_content_scope = captured_resolution.scope
+                        captured_content_gaps = captured_resolution.gaps
+                        captured_local_fence_generation = captured_resolution.local_fence_generation
+                        captured_local_fence_profiles = captured_resolution.local_fence_profiles
+                        captured_local_fence_required = captured_resolution.local_fence_required
+                    except Exception as exc:
+                        # Content is an additive evidence arm. A malformed or unavailable
+                        # retained object must leave the deterministic case usable while
+                        # carrying an explicit bounded coverage gap into the packet.
+                        record_unexpected_exception_without_raising(
+                            exc,
+                            component="semantic_composition",
+                            operation="semantic_content_resolution_failed",
+                            request_id=frozen.lease.operation_id,
+                        )
+                        captured_content_gaps = ("content_capture_unavailable",)
+                        captured_local_fence_required = False
             semantic_case = build_semantic_case(
                 case_id=recovered_case_id or ids.new(IdKind.OUTBOUND_CASE),
                 frozen_case=frozen.case,
@@ -2618,43 +4154,33 @@ def _privacy_gated_semantic_evaluator(
                 policy_id=policy_id,
                 policy_version=policy_version,
                 lineage_evaluation=lineage_evaluation,
+                captured_content=captured_content,
+                captured_content_scope=captured_content_scope,
+                captured_content_gaps=captured_content_gaps,
             )
-            if runtime is not None and resolve_native_content is not None:
-                # The first pure pass identifies selected captured records whose bytes are
-                # missing. Resolve only those records, then freeze their bytes into the case.
-                selected_refs = frozenset(
-                    item.subject_ref
-                    for item in semantic_case.packet.omissions
-                    if item.reason == "not_recorded"
+            if captured_local_fence_required and captured_content_scope is not None:
+                # A resolver may authenticate a group that the active excerpt selection then
+                # omits. Keep the final disclosure fence only when retained bytes actually became
+                # a case item; structural review can continue with an honest omission gap.
+                captured_refs = frozenset(
+                    ref for ref, _phase in captured_content_scope.phase_bindings
                 )
-                resolved = await resolve_native_content(
-                    frozen,
-                    runtime,
-                    review_selection,
-                    selected_refs,
+                captured_local_fence_required = any(
+                    item.section == "excerpt" and item.source_ref in captured_refs
+                    for item in semantic_case.items
                 )
-                if resolved.items:
-                    semantic_case = build_semantic_case(
-                        case_id=semantic_case.case_id,
-                        frozen_case=frozen.case,
-                        dependency_digest=frozen.lease.dependency_digest,
-                        findings=typed_findings,
-                        review_context_profile=review_profile,
-                        review_selection=review_selection,
-                        policy_id=policy_id,
-                        policy_version=policy_version,
-                        lineage_evaluation=lineage_evaluation,
-                        resolved_content=resolved,
-                    )
             # The builder folds the gap into the packet coverage the reviewer sees; the check
             # result is a separate coverage fold, so carry the fact rather than re-deriving it.
+            reference_scope_reduced = semantic_case.omitted_reference_count > 0
             content_gaps = tuple(
                 sorted(
-                    {
-                        gap
-                        for gap in semantic_case.packet.coverage.known_gaps
-                        if gap
-                        in {"captured_object_unavailable", "content_unselected", "content_redacted"}
+                    set(semantic_case.packet.coverage.known_gaps)
+                    & {
+                        "captured_object_unavailable",
+                        "content_capture_unavailable",
+                        "content_unselected",
+                        "content_redacted",
+                        "truncated_payload",
                     }
                 )
             )
@@ -2708,6 +4234,7 @@ def _privacy_gated_semantic_evaluator(
                 return replace(
                     _map_egress_to_final(result, ids),
                     case_content_over_item_limit=over_item_limit,
+                    case_reference_scope_reduced=reference_scope_reduced,
                     case_content_gaps=content_gaps,
                 )
 
@@ -2726,15 +4253,16 @@ def _privacy_gated_semantic_evaluator(
                 record_bounded_event_without_raising(
                     component="semantic_composition",
                     operation="semantic_not_dispatched_case_envelope_unbounded",
-                    reason=SemanticReason.COORDINATOR_FAILURE.value,
+                    reason=SemanticReason.CASE_CAPACITY_EXCEEDED.value,
                     request_id=frozen.lease.operation_id,
                 )
                 return FinalSemanticEvaluation(
                     SemanticStatus.FAILED,
-                    SemanticReason.COORDINATOR_FAILURE,
+                    SemanticReason.CASE_CAPACITY_EXCEEDED,
                     operation_lease=current_lease[0],
                     withheld_review_categories=withheld,
                     case_content_over_item_limit=over_item_limit,
+                    case_reference_scope_reduced=reference_scope_reduced,
                     case_content_gaps=content_gaps,
                 )
 
@@ -2757,59 +4285,155 @@ def _privacy_gated_semantic_evaluator(
             def _dispatch_for(
                 binding: ProviderBinding,
             ) -> Callable[[object, Deadline], Awaitable[FinalSemanticEvaluation]]:
+                async def _captured_content_fence_current() -> bool:
+                    if not captured_local_fence_required:
+                        return True
+                    if (
+                        captured_local_fence_generation is None
+                        or captured_observation_workspace is None
+                        or local_observation is None
+                    ):
+                        return False
+                    if (
+                        _observation_workspace_for_runtime(runtime)
+                        != captured_observation_workspace
+                    ):
+                        return False
+                    checker = getattr(
+                        local_observation,
+                        "content_capture_authority_is_current",
+                        None,
+                    )
+                    if not callable(checker):
+                        return False
+                    try:
+                        return (
+                            checker(
+                                captured_observation_workspace,
+                                captured_local_fence_generation,
+                                captured_local_fence_profiles,
+                            )
+                            is True
+                        )
+                    except Exception:
+                        return False
+
+                async def _evaluate_with_fence(
+                    candidate: CandidateContext,
+                    attempt_deadline: Deadline,
+                ) -> object:
+                    # Keep a runtime compatibility seam for small composition fakes used by
+                    # non-dispatch tests while retaining the concrete coordinator's final gate.
+                    if type(privacy) is PrivacyCoordinator:
+                        return await privacy.evaluate_semantic(
+                            candidate,
+                            attempt_deadline,
+                            dispatch_guard=_captured_content_fence_current,
+                        )
+                    # Small composition fakes used by non-dispatch tests predate
+                    # the optional final-boundary guard; the concrete production
+                    # coordinator above owns that boundary.
+                    return await privacy.evaluate_semantic(candidate, attempt_deadline)
+
+                async def _resume_with_fence(
+                    request_id: str,
+                    case_digest: str,
+                    attempt_deadline: Deadline,
+                ) -> object:
+                    if type(privacy) is PrivacyCoordinator:
+                        return await privacy.resume(
+                            request_id,
+                            case_digest,
+                            attempt_deadline,
+                            dispatch_guard=_captured_content_fence_current,
+                        )
+                    return await privacy.resume(request_id, case_digest, attempt_deadline)
+
                 async def _dispatch(
                     handle: object, attempt_deadline: Deadline
                 ) -> FinalSemanticEvaluation:
                     from yoetz.ports.ledger import SemanticAttemptHandle as _Handle
 
                     assert type(handle) is _Handle
-                    # Reclaim preserves the physical request identity. Reconcile its durable
-                    # admission before allowing this same attempt to reach the gateway again.
-                    candidate = semantic_case_to_candidate_context(
-                        semantic_case,
-                        request_id=handle.provider_request_id,
-                        scope=scope,
-                        provider_binding=binding,
-                    )
-                    wait = await runtime.ledger.load_disclosure_wait(
-                        handle.writer_id, handle.operation_id
-                    )
-                    if type(privacy) is PrivacyCoordinator:
-                        recovered = await privacy.recover_started_attempt(
-                            handle.provider_request_id,
-                            semantic_case.case_digest,
-                            attempt_deadline,
-                        )
-                        if recovered is not None:
-                            return _map_egress_to_final(
-                                recovered,
-                                ids,
-                                attempt_id=handle.attempt_id,
-                                operation_request_id=frozen.lease.operation_id,
+                    diagnostic_token = semantic_check_request.set(frozen.lease.operation_id)
+                    stage = "privacy_admission"
+                    try:
+                        # The local observation store is the authority for retained
+                        # content. Its generation must still be current after all
+                        # object resolution and before candidate bytes can enter the
+                        # privacy coordinator's evaluate/resume path.
+                        if not await _captured_content_fence_current():
+                            return FinalSemanticEvaluation(
+                                SemanticStatus.BLOCKED_BY_POLICY,
+                                SemanticReason.SCOPE_NOT_AUTHORIZED,
                             )
-                    if (
-                        wait is not None
-                        and wait.job_id == handle.job_id
-                        and wait.attempt_id == handle.attempt_id
-                        and wait.state == "awaiting"
-                    ):
-                        # Exact replay after a trusted local decision resumes the
-                        # already-prepared proposal. Starting the semantic pipeline again would
-                        # mint a replacement proposal and could never observe the decision
-                        # bound to this attempt.
-                        result = await privacy.resume(
-                            handle.provider_request_id,
-                            semantic_case.case_digest,
-                            attempt_deadline,
+                        # A newly claimed attempt gets a fresh request identity. A reclaimed started
+                        # attempt deliberately keeps its original identity so the privacy audit can
+                        # prove whether it was pre-admission or already consumed before replay.
+                        candidate = semantic_case_to_candidate_context(
+                            semantic_case,
+                            request_id=handle.provider_request_id,
+                            scope=scope,
+                            provider_binding=binding,
                         )
-                    else:
-                        result = await privacy.evaluate_semantic(candidate, attempt_deadline)
-                    return _map_egress_to_final(
-                        result,
-                        ids,
-                        attempt_id=handle.attempt_id,
-                        operation_request_id=frozen.lease.operation_id,
-                    )
+                        wait = await runtime.ledger.load_disclosure_wait(
+                            handle.writer_id, handle.operation_id
+                        )
+                        if not await _captured_content_fence_current():
+                            return FinalSemanticEvaluation(
+                                SemanticStatus.BLOCKED_BY_POLICY,
+                                SemanticReason.SCOPE_NOT_AUTHORIZED,
+                            )
+                        stage = "privacy_dispatch_entered"
+                        if type(privacy) is PrivacyCoordinator:
+                            recovered = await privacy.recover_started_attempt(
+                                handle.provider_request_id,
+                                semantic_case.case_digest,
+                                attempt_deadline,
+                                dispatch_guard=_captured_content_fence_current,
+                            )
+                            if recovered is not None:
+                                stage = "response_mapping"
+                                return _map_egress_to_final(
+                                    recovered,
+                                    ids,
+                                    attempt_id=handle.attempt_id,
+                                    operation_request_id=frozen.lease.operation_id,
+                                )
+                        if (
+                            wait is not None
+                            and wait.job_id == handle.job_id
+                            and wait.attempt_id == handle.attempt_id
+                            and wait.state == "awaiting"
+                        ):
+                            # Exact replay after a trusted local decision resumes the
+                            # already-prepared proposal. Starting the semantic pipeline again would
+                            # mint a replacement proposal and could never observe the decision
+                            # bound to this attempt.
+                            result = await _resume_with_fence(
+                                handle.provider_request_id,
+                                semantic_case.case_digest,
+                                attempt_deadline,
+                            )
+                        else:
+                            result = await _evaluate_with_fence(candidate, attempt_deadline)
+                        stage = "response_mapping"
+                        return _map_egress_to_final(
+                            result,
+                            ids,
+                            attempt_id=handle.attempt_id,
+                            operation_request_id=frozen.lease.operation_id,
+                        )
+                    except BaseException as exc:
+                        record_unexpected_exception_without_raising(
+                            exc,
+                            component="semantic_composition",
+                            operation=f"semantic_attempt_{stage}_failed",
+                            request_id=frozen.lease.operation_id,
+                        )
+                        raise
+                    finally:
+                        semantic_check_request.reset(diagnostic_token)
 
                 return _dispatch
 
@@ -2904,6 +4528,7 @@ def _privacy_gated_semantic_evaluator(
                         operation_lease=current_lease[0],
                         withheld_review_categories=withheld,
                         case_content_over_item_limit=over_item_limit,
+                        case_reference_scope_reduced=reference_scope_reduced,
                         case_content_gaps=content_gaps,
                     )
                 return FinalSemanticEvaluation(
@@ -2915,6 +4540,7 @@ def _privacy_gated_semantic_evaluator(
                     operation_lease=current_lease[0],
                     withheld_review_categories=withheld,
                     case_content_over_item_limit=over_item_limit,
+                    case_reference_scope_reduced=reference_scope_reduced,
                     case_content_gaps=content_gaps,
                     continuation=continuation,
                 )
@@ -2959,6 +4585,7 @@ def _privacy_gated_semantic_evaluator(
                 operation_lease=current_lease[0],
                 withheld_review_categories=withheld,
                 case_content_over_item_limit=over_item_limit,
+                case_reference_scope_reduced=reference_scope_reduced,
                 case_content_gaps=content_gaps,
             )
 
@@ -3062,6 +4689,8 @@ async def provide_service_ready_context(
     clock: ClockPort,
     secret_memory: object,
     diagnostics: DiagnosticsPort | None = None,
+    observation_gate: asyncio.Lock | None = None,
+    startup_bundle_upgrade: _StartupBundleUpgrade | None = None,
 ) -> ServiceReadyContext:
     """Compose one generation-bound ready application context."""
 
@@ -3081,6 +4710,25 @@ async def provide_service_ready_context(
         clock=clock,
         ids=ids,
     )
+    # The storage-owned startup phase is deliberately after catalog migration and before any
+    # lineage/runtime clients are composed.  It may inspect and upgrade existing task bundles,
+    # but ordinary lazy runtime opening remains fail-closed for a stale schema.  A failed phase
+    # closes the catalog immediately so a retry cannot race a half-composed generation.
+    if startup_bundle_upgrade is not None:
+        try:
+            await startup_bundle_upgrade(
+                catalog=catalog,
+                bundle_root=paths.bundle,
+                installation_id=installation_id,
+                service_generation=service_generation,
+                vault_generation=vault_generation,
+                clock=clock,
+                ids=ids,
+                diagnostics=diagnostics,
+            )
+        except BaseException:
+            _close_db(cast(apsw.Connection | None, getattr(catalog, "_db", None)))
+            raise
     # Lineage shares the catalog connection with start/status.  The adapter only validates the
     # numbered catalog migration; all lineage tables are installed by that migration before this
     # composition point.  The handle MAC is installation-owned and never falls back to a fixed
@@ -3275,7 +4923,6 @@ async def provide_service_ready_context(
     # Repository authority is session-specific, so ready-time composition cannot activate a
     # provider binding or claim semantic readiness. Exact configured-credential presence is a
     # separate structural vault fact: it neither decrypts the record nor grants dispatch authority.
-    provider_binding: ProviderBinding | None = None
     provider_credential_connected = await configured_provider_credential_present()
     fallback_credential_connected = await configured_fallback_credential_present()
     semantic_ready = False
@@ -3387,52 +5034,46 @@ async def provide_service_ready_context(
             installation_id,
         )
 
-    async def _resolve_native_content(
-        frozen: FrozenCase,
-        task_runtime: TaskRuntime,
-        selection: ReviewSelectionPolicy,
-        selected_refs: frozenset[str],
-    ) -> SemanticContentResolution:
-        # Resolve the locator through current catalog ownership. Local capture consent is
-        # independent from the outbound policy applied after case construction.
-        if not any(
-            str(ref) in selected_refs
-            and record.payload is not None
-            and record.payload.captured_object_id is not None
-            for ref, record in frozen.case.projection.evidence.items()
-        ):
-            return SemanticContentResolution(
-                f"{frozen.case.frontier.sequence}:{frozen.case.frontier.head_digest}",
-                {},
-            )
-        try:
-            workspace = await _local_workspace_commitment_for_source(task_runtime.task_id)
-        except PublicOperationError:
-            workspace = None
-        consent = None if workspace is None else local_observation.consent_for(workspace)
-        authorized = bool(config.observation.enabled and consent is not None and consent.active)
-        resolved = await resolve_semantic_content(
-            frozen_case=frozen.case,
-            runtime=task_runtime,
-            workspace=workspace or "hmac-sha256:" + "0" * 64,
-            authorized=authorized,
-            authorized_since=None if consent is None else consent.granted_at,
-            review_selection=selection,
-            selected_refs=selected_refs,
-        )
-        latest = None if workspace is None else local_observation.consent_for(workspace)
-        if latest != consent:
-            return await resolve_semantic_content(
-                frozen_case=frozen.case,
-                runtime=task_runtime,
-                workspace=workspace or "hmac-sha256:" + "0" * 64,
-                authorized=False,
-                review_selection=selection,
-                selected_refs=selected_refs,
-            )
-        return resolved
-
     versions = _receipt_versions(manifest)
+    local_observation = LocalObservationStore(_state=paths.state)
+    # Publish the loaded config gate before semantic composition can resolve
+    # retained bytes. The owner-private store is also the authoritative consent
+    # fence while task-bundle propagation is still catching up.
+    local_observation.set_runtime_enabled(config.observation.enabled)
+    require_capture_bootstrap = getattr(
+        local_observation, "set_capture_reservation_bootstrap_required", None
+    )
+    if callable(require_capture_bootstrap):
+        require_capture_bootstrap(True)
+
+    async def bootstrap_capture_reservations(
+        workspace: str,
+        current_runtime: TaskRuntime,
+        current_store: TaskObservationPort,
+    ) -> bool:
+        return await _bootstrap_capture_reservations(
+            workspace,
+            current_runtime,
+            current_store,
+            catalog=catalog,
+            runtime=runtime,
+            local_observation=local_observation,
+            clock=clock,
+            generation_is_current=lambda: generation_is_current(
+                service_generation, vault_generation
+            ),
+        )
+
+    async def reconcile_observation_capture(runtime: TaskRuntime) -> None:
+        store = runtime.observation
+        if store is None:
+            return
+        await _reconcile_observation_capture(
+            runtime,
+            local_observation,
+            clock,
+        )
+
     if not semantic_configured:
         semantic_evaluator = _semantic_not_configured
     elif not provider_endpoint_bound:
@@ -3455,116 +5096,116 @@ async def provide_service_ready_context(
             fallback_max_retries=2 if fallback_config is None else int(fallback_config.max_retries),
             configured_primary=candidate_binding,
             lineage_source_gate=lineage_semantic_gate,
-            resolve_native_content=_resolve_native_content,
+            local_observation=local_observation,
         )
 
-    async def _semantic_review(
-        candidates: tuple[ObservationAdviceCandidate, ...],
-        basis: str,
-        gaps: tuple[str, ...],
-        yoetz_session_id: str | None,
-    ) -> ObservationAdviceSemanticAddon | None:
-        # Privacy-gated observation semantic path: authorize/dispatch through the coordinator.
-        # Provider failure or no-discrepancy leaves deterministic advice intact (no upgrade).
-        del gaps
-        if not semantic_ready or provider_binding is None or yoetz_session_id is None:
-            return None
-        packet = minimized_semantic_evidence_packet(
-            candidates,
-            basis,
-            coverage_gaps=(),
-            finding_summaries=tuple(str(item.rule_code) for item in candidates),
+    async def _dispatch_observation_advice_semantic(
+        attempt: ObservationAdviceSemanticAttempt,
+    ) -> ObservationAdviceSemanticOutcome:
+        """Privacy-gated provider attempt for one durable advice row, off the hook path (#619).
+
+        Repository authority and the provider binding are resolved here, at dispatch time,
+        never from the READY snapshot. The stored packet already carries the exact scoped
+        observation gaps; nothing is rebuilt from live state. Every non-success leaves a closed
+        failure reason and no finding, so the advice can only ever claim what a validated
+        provider answer supports.
+        """
+
+        route = await catalog.resolve_route(attempt.yoetz_session_id)
+        if (
+            route is None
+            or route.state is not TaskRouteState.ACTIVE
+            or route.repository_privacy_commitment is None
+        ):
+            return ObservationAdviceSemanticOutcome(
+                status="unavailable", failure_reason="authorization_missing"
+            )
+        repository_scope = AuthorizationScope(
+            AuthorizationScopeKind.TASK,
+            installation_id,
+            route.repository_privacy_commitment,
+            route.task_id,
         )
-        try:
-            payload = canonical_encode(cast(CanonicalJsonValue, dict(packet)))
-            subject = (
-                basis
-                if basis.startswith("sha256:")
-                else canonical_digest(cast(CanonicalJsonValue, {"basis": basis}))
+        if not await cast(PrivacyCoordinator, privacy).activate_repository(repository_scope):
+            return ObservationAdviceSemanticOutcome(
+                status="unavailable", failure_reason="authorization_missing"
             )
-            route = await catalog.resolve_route(yoetz_session_id)
-            if (
-                route is None
-                or route.state is not TaskRouteState.ACTIVE
-                or route.repository_privacy_commitment is None
-            ):
-                return None
-            repository_scope = AuthorizationScope(
-                AuthorizationScopeKind.TASK,
-                installation_id,
-                route.repository_privacy_commitment,
-                route.task_id,
+        binding = await resolve_provider_binding()
+        if binding is None:
+            return ObservationAdviceSemanticOutcome(
+                status="unavailable", failure_reason="provider_unavailable"
             )
-            if not await cast(PrivacyCoordinator, privacy).activate_repository(repository_scope):
-                return None
-            candidate = CandidateContext(
-                request_id=ids.new(IdKind.REQUEST),
-                channel=EgressChannel.LLM_INFERENCE,
-                local_sink=None,
-                purpose="semantic-review",
-                scope=repository_scope,
-                subject_digest=subject,
-                provider_binding=provider_binding,
-                items=(
-                    CandidateContextItem(
-                        "observation-advice-packet",
-                        DataCategory.BOUNDED_STRUCTURAL_METADATA,
-                        repository_scope,
-                        "/observation-advice",
-                        payload,
-                    ),
+        candidate = CandidateContext(
+            request_id=ids.new(IdKind.REQUEST),
+            channel=EgressChannel.LLM_INFERENCE,
+            local_sink=None,
+            purpose="semantic-review",
+            scope=repository_scope,
+            subject_digest=attempt.subject_digest,
+            provider_binding=binding,
+            items=(
+                CandidateContextItem(
+                    "observation-advice-packet",
+                    DataCategory.BOUNDED_STRUCTURAL_METADATA,
+                    repository_scope,
+                    "/observation-advice",
+                    attempt.packet_json,
                 ),
-            )
-            deadline = Deadline(clock.now_utc(), clock.monotonic_seconds() + 60.0)
-            result = await cast(PrivacyCoordinator, privacy).evaluate_semantic(candidate, deadline)
-        except Exception:
-            return None
+            ),
+        )
+        deadline = Deadline(clock.now_utc(), clock.monotonic_seconds() + 60.0)
+        result = await cast(PrivacyCoordinator, privacy).evaluate_semantic(candidate, deadline)
         if type(result) is not SemanticEgressSuccess:
-            return None
+            return ObservationAdviceSemanticOutcome(
+                status="failed",
+                failure_reason="provider_failed",
+                provider_identity=binding.provider_id,
+            )
+        receipt = result.privacy_receipt_id or result.authorization_id
         judgment = result.result.judgment
         if judgment.conclusion != "challenges_returned" or not judgment.challenges:
             # Honest attempt receipt without inventing additive findings.
-            return ObservationAdviceSemanticAddon(
-                finding_ids=(),
-                evidence_digest=basis,
-                next_action=None,
-                summaries=(),
-                details=(),
-                provider_identity=provider_binding.provider_id,
-                attempt_receipt=result.privacy_receipt_id or result.authorization_id,
-                failure_reason=None,
+            return ObservationAdviceSemanticOutcome(
+                status="succeeded",
+                attempt_receipt=receipt,
+                provider_identity=binding.provider_id,
+                evidence_digest=attempt.subject_digest,
             )
-        # Additive note only when the provider returned post-validated challenges.
         detail = f"challenges:{len(judgment.challenges)}"
         digest = canonical_digest(
             cast(
                 CanonicalJsonValue,
                 {
-                    "basis": basis,
+                    "basis": attempt.basis_digest,
                     "authorization_id": result.authorization_id,
                     "challenges": len(judgment.challenges),
                 },
             )
         )
         finding = stable_advice_finding_id("semantic_additive_review", detail, digest)
-        return ObservationAdviceSemanticAddon(
+        return ObservationAdviceSemanticOutcome(
+            status="succeeded",
+            attempt_receipt=receipt,
+            provider_identity=binding.provider_id,
             finding_ids=(finding,),
             evidence_digest=digest,
-            next_action=None,
             summaries=("Privacy-gated semantic observation review",),
             details=(
                 "Additive semantic note recorded after authorized provider attempt; "
                 "deterministic findings unchanged.",
             ),
-            provider_identity=provider_binding.provider_id,
-            attempt_receipt=result.privacy_receipt_id or result.authorization_id,
-            failure_reason=None,
         )
+
+    advice_semantic_supervisor = ObservationAdviceSemanticSupervisor(
+        service_generation=service_generation
+    )
+    advice_semantic_scheduler = ObservationAdviceSemanticScheduler(
+        now=lambda: timestamp_from_datetime(clock.now_utc()).wire
+    )
 
     verification_supervisor = ObservationVerificationSupervisor(
         service_generation=service_generation
     )
-    local_observation = LocalObservationStore(_state=paths.state)
 
     async def _project_object_store(
         task_id: str, route_generation: int
@@ -3962,6 +5603,14 @@ async def provide_service_ready_context(
         project_catalog,
         ids=ids,
         clock=clock,
+        operation_journal=SqliteProjectOperationJournal(
+            cast(apsw.Connection, getattr(catalog, "_db")),
+            installation_id=installation_id,
+        ),
+        operation_digest=lambda identity: lookup.mac(
+            PROJECT_OPERATION_MAC_DOMAIN,
+            canonical_encode(identity),
+        ),
         text_store=cast(ProjectTextStore, project_text_store),
         workspace_consent=_workspace_consent,
         workspace_consent_for_source=_workspace_consent_for_source,
@@ -4067,18 +5716,24 @@ async def provide_service_ready_context(
         consent_invalidation_applier=project_application.apply_source_workspace_consent_invalidation,
         advice_context_builder=ObservationAdviceContextBuilder(
             composition=observation_composition_fact,
-            semantic_review=_semantic_review if semantic_configured else None,
+            semantic_scheduler=advice_semantic_scheduler if semantic_configured else None,
         ),
         verification_supervisor=verification_supervisor,
+        advice_semantic_supervisor=advice_semantic_supervisor,
+        advice_semantic_dispatch=_dispatch_observation_advice_semantic,
         observation_enabled=config.observation.enabled,
         lineage_coordinator=lineage_manifest_coordinator,
         host_lineage_registry=host_lineage_registry,
+        capture_budget_bootstrap=bootstrap_capture_reservations,
     )
     observation_sweeper = ObservationOutboxSweeper(
         local_observation,
         observation_coordinator,
         budget_seconds=DEFAULT_OBSERVATION_SWEEP_BUDGET_SECONDS,
+        ingest_gate=observation_gate,
+        capture_recovery=observation_coordinator.recover_capture_inventory,
     )
+    legacy_spool_forwarder = _LegacyHookSpoolForwarder(paths.state)
 
     async def sweep_lineage_manifests() -> tuple[object, ...]:
         """Refresh recorded manifests after public task activity.
@@ -4125,25 +5780,16 @@ async def provide_service_ready_context(
         the ordinary service-owned outbox sweep forwards it.
         """
 
-        spool = HookSpool(_state=paths.state)
-        from yoetz.cli.observe_hooks import handle_observe
-
-        for workspace_commitment in spool.pending_workspaces():
-            with spool.claim(workspace_commitment) as records:
-                for record in records:
-                    handle_observe(
-                        event_name=record.event_name,
-                        stdin_bytes=canonical_encode(cast(DomainJsonValue, record.payload)),
-                        stdout=io.BytesIO(),
-                        _state=paths.state,
-                        skip_service=True,
-                        _workspace_commitment=workspace_commitment,
-                    )
+        # The forwarding worker owns the spool claim and its executor.  Keeping it outside the
+        # event loop preserves the mainline cancellation boundary; lineage refresh then runs after
+        # ordinary observation ingestion so the same maintenance pass sees the newest task state.
+        await legacy_spool_forwarder.replay()
         summary = await observation_sweeper.sweep()
         await sweep_lineage_manifests()
         return summary
 
     def close_observation_maintenance() -> None:
+        legacy_spool_forwarder.close()
         observation_sweeper.close()
         observation_coordinator.close()
 
@@ -4204,14 +5850,22 @@ async def provide_service_ready_context(
         support_handlers=support_handlers,
         verification_supervisor=verification_supervisor,
         rediscover_pending_verification=observation_coordinator.rediscover_pending_verification,
+        advice_semantic_supervisor=advice_semantic_supervisor,
+        rediscover_pending_advice_semantic=(
+            observation_coordinator.rediscover_pending_advice_semantic
+        ),
         connected_provider_ids=connected_provider_ids,
         provider_credential_connected=provider_credential_connected,
         fallback_credential_connected=fallback_credential_connected,
         semantic_ready=semantic_ready,
-        observation_sweep=sweep_observation,
+        observation_sweep=_ReadyObservationSweep(
+            sweep_observation,
+            row_gate_bound=observation_gate is not None,
+        ),
         coordination_sweep=sweep_coordination,
         observation_sweep_close=close_observation_maintenance,
         ready_recommendation_refresh=refresh_ready_recommendations,
+        reconcile_observation_capture=reconcile_observation_capture,
         lineage=lineage,
         project_application=project_application,
         host_lineage_registry=host_lineage_registry,
@@ -4227,7 +5881,18 @@ def build_ready_application_factory(
     clock: ClockPort,
     secret_memory: object,
     diagnostics: DiagnosticsPort | None = None,
+    observation_gate: asyncio.Lock | None = None,
+    startup_bundle_upgrade: _StartupBundleUpgrade | None = None,
 ) -> ReadyApplicationFactory:
+    upgrade = startup_bundle_upgrade
+    if upgrade is None:
+        upgrade = _build_default_startup_bundle_upgrade(
+            lifecycle=lifecycle,
+            vault=vault,
+            config=config,
+            paths=paths,
+            secret_memory=secret_memory,
+        )
     # Publish the loaded config gate before unlock/READY construction begins;
     # hooks then stop capture during a disabled service generation as well as
     # after it reaches READY.
@@ -4243,5 +5908,7 @@ def build_ready_application_factory(
             clock=clock,
             secret_memory=secret_memory,
             diagnostics=diagnostics,
+            observation_gate=observation_gate,
+            startup_bundle_upgrade=upgrade,
         )
     )

@@ -81,7 +81,7 @@ def _external_runtime() -> ExternalRuntimeProfileConfig:
         executable_path="/Applications/Codex.app/Contents/Resources/codex",
         executable_sha256=_DIGEST,
         runtime_version="0.150.1",
-        source_identity="openai-codex-darwin-arm64-0.150.1",
+        source_identity="openai-codex-npm-darwin-arm64-0.150.1",
         app_server_schema_sha256=_DIGEST,
         capability_cell_sha256=_DIGEST,
         isolated_config_sha256=_DIGEST,
@@ -159,7 +159,7 @@ def test_defaults_are_frozen_and_all_disclosure_is_denied() -> None:
     assert config.schema_version == "1"
     assert config.profile == "strict-local"
     assert config.storage == StorageConfig(data_dir=None, durability="full")
-    assert config.verification == VerificationConfig(semantic="optional", max_findings=3)
+    assert config.verification == VerificationConfig(semantic="required", max_findings=10)
     assert config.observation == ObservationConfig(enabled=True)
     assert config.lineage == LineageSettings()
     assert config.logging == LoggingConfig(level="info", payloads=False)

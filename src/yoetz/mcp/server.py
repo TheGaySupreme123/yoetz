@@ -6,12 +6,15 @@ import asyncio
 import contextlib
 import os
 import re
+import stat
+import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final, Literal, cast
+from typing import Final, Literal, Protocol, cast
+from urllib.parse import unquote_to_bytes, urlsplit
 
 import anyio
 from mcp import types
@@ -22,7 +25,16 @@ from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
 from pydantic import AnyUrl, BaseModel, ValidationError
 
 from yoetz import __version__
+from yoetz.adapters.integrations.cursor_project_mcp import (
+    CursorProjectMcpError,
+    CursorProjectMcpRegistrationSnapshot,
+    inspect_project_mcp_registration,
+)
 from yoetz.adapters.mcp_stdio import bounded_stdio_server
+from yoetz.adapters.workspace_binding import (
+    MAX_WORKSPACE_LOCATOR_BYTES,
+    canonical_workspace_locator,
+)
 from yoetz.config.load import load_config
 from yoetz.config.models import LoggingConfig
 from yoetz.mcp.descriptors import (
@@ -51,6 +63,10 @@ from yoetz.mcp.resources import (
 from yoetz.mcp.resources import (
     read_resource as read_guidance_resource,
 )
+from yoetz.mcp.semantic_destination import (
+    SemanticDestinationDisclosure,
+    read_semantic_destination_disclosure,
+)
 from yoetz.mcp.summaries import render_safe_compact_summary
 from yoetz.observability.logging import (
     LogMode,
@@ -58,7 +74,13 @@ from yoetz.observability.logging import (
     record_public_error_without_raising,
     record_unexpected_exception_without_raising,
 )
-from yoetz.ports.control import ControlClientKind, ControlError, ServiceState, WorkspaceLocator
+from yoetz.ports.control import (
+    ControlClientKind,
+    ControlError,
+    McpHostProfile,
+    ServiceState,
+    WorkspaceLocator,
+)
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.consent import CONSENT_PENDING_TTL_SECONDS
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
@@ -78,6 +100,11 @@ from yoetz.protocol.models import (
     StatusRequest,
     StatusResult,
     public_model_to_wire,
+)
+from yoetz.protocol.recovery import (
+    WRITE_OPERATIONS,
+    continuation_for_reason,
+    timeout_operation_kind,
 )
 from yoetz.service.client import (
     ServiceClient,
@@ -114,6 +141,10 @@ __all__ = [
 _SERVER_NAME: Final = "yoetz"
 _WORKFLOW_RPC_DEADLINE_MS: Final = 30_000
 _SEMANTIC_CHECK_RPC_DEADLINE_MS: Final = 300_000
+_CURSOR_ROOTS_REQUEST_TIMEOUT_SECONDS: Final = 5.0
+_MAX_CURSOR_ROOTS: Final = 32
+_MAX_CURSOR_ROOT_URI_BYTES: Final = MAX_WORKSPACE_LOCATOR_BYTES * 2
+_INVALID_URI_ESCAPE: Final = re.compile(r"%(?![0-9A-Fa-f]{2})", re.ASCII)
 _REGISTERED_TOOL_NAMES: Final = frozenset(
     {"start", "publish_work", "check", "respond", "status", "receipt", "read_guidance"}
 )
@@ -187,7 +218,7 @@ _PUBLISH_RECOVERY_UNCHECKED_CAVEAT: Final = (
     "request_id itself if it already names a committed operation."
 )
 _PUBLISH_RECOVERY_UNAVAILABLE_REASON: Final = "operation_recovery_unavailable"
-_WRITE_OPERATIONS: Final = frozenset({"start", "publish_work", "check", "respond", "receipt"})
+_WRITE_OPERATIONS: Final = WRITE_OPERATIONS
 _REQUEST_TEMPLATES_GUIDANCE_URI: Final = "yoetz://guidance/request-templates.md"
 _GUIDANCE_BY_OPERATION: Final = MappingProxyType(
     {
@@ -199,6 +230,11 @@ _GUIDANCE_BY_OPERATION: Final = MappingProxyType(
         "receipt": _REQUEST_TEMPLATES_GUIDANCE_URI,
     }
 )
+
+# The host profile is part of the serving command, rather than inferred from the MCP client.
+# ``generic`` is deliberately unknown; only an explicit ``codex`` profile may be compared with
+# the Codex applied-route record. Native Claude and Cursor carriers identify themselves explicitly
+# so that record cannot be applied to another host.
 
 
 def _authoring_hint_for(operation: str, locations: Sequence[Mapping[str, str]]) -> str:
@@ -253,6 +289,18 @@ class _ClientSlot:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     client: ServiceClient | None = None
     availability: _AvailabilityLatch | None = None
+    # Cursor's native MCP process is often launched from the host home directory. Its ordinary
+    # process cwd therefore cannot be a repository authority. A Cursor slot starts unresolved and
+    # is bound once from the host's MCP roots/list response; generic slots retain the build-time
+    # cwd in BridgeRuntime.
+    workspace_locator: WorkspaceLocator | None = None
+    workspace_root_identity: tuple[int, int] | None = None
+    cursor_registration_snapshot: CursorProjectMcpRegistrationSnapshot | None = None
+    cursor_registration_invalid: bool = False
+    workspace_binding_state: Literal["unresolved", "bound", "failed"] = "unresolved"
+    workspace_binding_source: Literal["injected", "mcp_roots"] = "mcp_roots"
+    workspace_binding_correlation_id: str | None = None
+    workspace_binding_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # Concurrent first arrivals share one on-demand probe: the owner sets attempting, waiters
     # park on attempt_finished, then re-check the completed latch (issue #476).
     attempting: bool = False
@@ -267,28 +315,115 @@ class BridgeRuntime:
     descriptors: tuple[ToolDescriptor, ...]
     resources: tuple[GuidanceResource, ...]
     instructions: str
-    host_profile: Literal["generic", "cursor"] = "generic"
-    workspace_locator: WorkspaceLocator = field(
+    host_profile: McpHostProfile = "generic"
+    workspace_locator: WorkspaceLocator | None = field(
         default_factory=lambda: WorkspaceLocator(os.fspath(Path.cwd().resolve(strict=True))),
         repr=False,
         compare=False,
     )
     _slot: _ClientSlot = field(default_factory=_ClientSlot, repr=False, compare=False)
+    # A Cursor project registration may pass its expanded ``${workspaceFolder}`` selector.  It
+    # only disambiguates roots returned by that same MCP client; the selector is never an
+    # authority by itself and never participates in generic/Codex/Claude routes.
+    cursor_project_root: str | None = field(default=None, repr=False, compare=False)
+    # Keep the opened Cursor folder separate from the canonical repository selector: its
+    # ``.cursor/mcp.json`` is the registration being fenced, while roots/list supplies the
+    # canonical service authority.
+    cursor_project_directory: str | None = field(default=None, repr=False, compare=False)
+    cursor_launcher: tuple[str, ...] | None = field(default=None, repr=False, compare=False)
+    cursor_isolation_root: str | None = field(default=None, repr=False, compare=False)
+
+
+def _valid_runtime_launcher(value: object) -> bool:
+    if type(value) is not tuple or not value:
+        return False
+    parts = cast(tuple[object, ...], value)
+    for part in parts:
+        if type(part) is not str or not part:
+            return False
+        try:
+            if len(part.encode("utf-8")) > MAX_WORKSPACE_LOCATOR_BYTES:
+                return False
+        except UnicodeEncodeError:
+            return False
+        if any(ord(character) < 32 or ord(character) == 127 for character in part):
+            return False
+    first = parts[0]
+    assert isinstance(first, str)
+    return Path(first).is_absolute()
+
+
+def _runtime_launcher_from_argv() -> tuple[str, ...] | None:
+    """Recover the exact launcher prefix from the process that is serving MCP."""
+
+    argv = tuple(sys.argv)
+    serve_index = next(
+        (
+            index
+            for index, token in enumerate(argv[:-1])
+            if token == "mcp" and argv[index + 1] == "serve"
+        ),
+        None,
+    )
+    if serve_index is None or not argv[:serve_index]:
+        return None
+    prefix = argv[:serve_index]
+    try:
+        package_main = (Path(__file__).resolve().parents[1] / "__main__.py").resolve(strict=True)
+        first = Path(prefix[0]).resolve(strict=True)
+    except OSError:
+        return None
+    if first == package_main:
+        try:
+            executable = str(Path(sys.executable).resolve(strict=True))
+        except OSError:
+            return None
+        prefix = (executable, "-m", "yoetz", *prefix[1:])
+    else:
+        prefix = (str(first), *prefix[1:])
+    return prefix if _valid_runtime_launcher(prefix) else None
 
 
 def build_bridge_runtime(
     route_profile: McpRouteProfile = "policy",
     *,
-    host_profile: Literal["generic", "cursor"] = "generic",
+    host_profile: McpHostProfile = "generic",
+    workspace_locator: WorkspaceLocator | None = None,
+    semantic_destination: SemanticDestinationDisclosure | None = None,
+    project_root: Path | None = None,
+    launcher: tuple[str, ...] | None = None,
+    isolation_root: str | None = None,
 ) -> BridgeRuntime:
-    """Verify every agent-readable byte and construct an unconnected bridge runtime."""
+    """Verify every agent-readable byte and construct an unconnected bridge runtime.
+
+    Generic bridges use their process cwd as the ordinary trusted locator. Cursor bridges defer
+    binding to the MCP session's client-provided roots/list response because a native Cursor helper
+    may start from the user's home directory. ``workspace_locator`` is an internal injection point
+    for an already trusted host binding and for transport tests; it is never read from a public
+    workflow request.
+
+    On the policy route the initialize instructions name the configured semantic review
+    destination (issue #479). The bridge reads its configuration once here, at startup, through
+    the same tolerant loader the logging sink uses; an unreadable configuration renders as an
+    unknown destination rather than blocking serving. ``semantic_destination`` is an internal
+    injection point for tests; the strict route never reads configuration and ignores it.
+    """
 
     if route_profile not in TOOL_DESCRIPTORS:
         raise ValueError("mcp_route_profile_invalid")
-    if host_profile not in {"generic", "cursor"}:
+    if host_profile not in {"generic", "codex", "claude", "cursor"}:
         raise ValueError("mcp_host_profile_invalid")
+    if semantic_destination is not None and (
+        type(semantic_destination) is not SemanticDestinationDisclosure
+    ):
+        raise TypeError("semantic_destination_wrong_type")
     resources = list_guidance_resources()
-    instructions = server_instructions(route_profile)
+    if route_profile == "policy" and semantic_destination is None:
+        semantic_destination = read_semantic_destination_disclosure()
+    instructions = server_instructions(
+        route_profile,
+        semantic_destination=semantic_destination if route_profile == "policy" else None,
+    )
     if not instructions:
         raise RuntimeError("mcp_instructions_empty")
     # Accessing every schema verifies its checked-in public identity before serving.
@@ -297,7 +432,47 @@ def build_bridge_runtime(
         descriptor.input_schema
         descriptor.output_schema
     build_last_resort_internal_error_result()
-    workspace_locator = WorkspaceLocator(os.fspath(Path.cwd().resolve(strict=True)))
+    if workspace_locator is not None and type(workspace_locator) is not WorkspaceLocator:
+        raise TypeError("workspace_locator_invalid")
+    if project_root is not None and host_profile != "cursor":
+        raise ValueError("mcp_project_root_host_invalid")
+    cursor_project_root: str | None = None
+    cursor_project_directory: str | None = None
+    cursor_launcher: tuple[str, ...] | None = None
+    cursor_isolation_root: str | None = None
+    if project_root is not None:
+        if type(project_root) is not type(Path()):
+            raise TypeError("mcp_project_root_invalid")
+        text = os.fspath(project_root)
+        try:
+            encoded = text.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("mcp_project_root_invalid") from None
+        if (
+            not project_root.is_absolute()
+            or ".." in project_root.parts
+            or not encoded
+            or len(encoded) > MAX_WORKSPACE_LOCATOR_BYTES
+            or any(ord(character) < 32 or ord(character) == 127 for character in text)
+        ):
+            raise ValueError("mcp_project_root_invalid")
+        cursor_project_root = canonical_workspace_locator(text)
+        if cursor_project_root is None:
+            raise ValueError("mcp_project_root_invalid")
+        if not _valid_runtime_launcher(launcher):
+            raise ValueError("mcp_project_launcher_invalid")
+        if isolation_root is not None and type(isolation_root) is not str:
+            raise TypeError("mcp_project_isolation_root_invalid")
+        cursor_project_directory = text
+        cursor_launcher = launcher
+        cursor_isolation_root = isolation_root
+    if host_profile != "cursor" and workspace_locator is None:
+        workspace_locator = WorkspaceLocator(os.fspath(Path.cwd().resolve(strict=True)))
+    slot = _ClientSlot()
+    if host_profile == "cursor" and workspace_locator is not None:
+        slot.workspace_locator = workspace_locator
+        slot.workspace_binding_state = "bound"
+        slot.workspace_binding_source = "injected"
     return BridgeRuntime(
         route_profile,
         descriptors,
@@ -305,10 +480,190 @@ def build_bridge_runtime(
         instructions,
         host_profile,
         workspace_locator,
+        slot,
+        cursor_project_root,
+        cursor_project_directory,
+        cursor_launcher,
+        cursor_isolation_root,
     )
 
 
 BRIDGE_RUNTIME: Final = build_bridge_runtime()
+
+
+class _RootsSession(Protocol):
+    """The MCP session capability needed to ask a host for its project roots."""
+
+    async def list_roots(self) -> types.ListRootsResult: ...
+
+
+class _RawListRootsResult(BaseModel):
+    """Raw roots/list envelope used for Cursor's non-conforming POSIX root representation."""
+
+    # MCP 1.28.1 models ``Root.uri`` as ``FileUrl`` and rejects Cursor's raw ``/absolute/path``
+    # before the bridge can apply its narrow host-specific compatibility rule.  Keep this model
+    # intentionally shallow; root shape and URI safety are checked below without retaining raw
+    # host content.
+    roots: object
+
+
+class _RawRootsSession(Protocol):
+    async def send_request(
+        self, request: object, result_type: type[_RawListRootsResult]
+    ) -> _RawListRootsResult: ...
+
+
+async def _cursor_list_roots(session: _RootsSession) -> object:
+    """Request Cursor roots without letting the SDK's ``FileUrl`` validator discard raw paths."""
+
+    sender = getattr(session, "send_request", None)
+    if callable(sender):
+        raw_session = cast(_RawRootsSession, session)
+        return await raw_session.send_request(
+            types.ServerRequest(types.ListRootsRequest()), _RawListRootsResult
+        )
+    # Small transport fakes and older adapters expose only the typed helper.  They remain valid
+    # test inputs; production ServerSession always takes the raw path above.
+    return await session.list_roots()
+
+
+class _CursorWorkspaceBindingError(Exception):
+    """The native Cursor bridge has no trusted project locator for this MCP session."""
+
+
+def _cursor_root_uri(root: object) -> str | None:
+    if isinstance(root, types.Root):
+        return str(root.uri)
+    if isinstance(root, Mapping):
+        uri = cast(Mapping[object, object], root).get("uri")
+        return uri if type(uri) is str else None
+    return None
+
+
+def _cursor_root_path(root: object) -> str | None:
+    """Decode one safe Cursor root, including its observed raw POSIX compatibility form."""
+
+    uri = _cursor_root_uri(root)
+    if uri is None:
+        return None
+    try:
+        if len(uri.encode("utf-8")) > _MAX_CURSOR_ROOT_URI_BYTES:
+            return None
+    except UnicodeEncodeError:
+        return None
+
+    # Cursor 3.19 sends ``workspaceFolder.uri.toString()`` as a bare POSIX path.  This branch is
+    # deliberately host-local and strict: a single-root absolute path with no URI metadata is
+    # accepted as path text; authority-bearing, relative, query-bearing, or fragment-bearing
+    # values continue through the rejecting URI branch below.
+    if uri.startswith("/") and not uri.startswith("//"):
+        try:
+            path_bytes = uri.encode("utf-8")
+        except UnicodeEncodeError:
+            return None
+        if len(path_bytes) > MAX_WORKSPACE_LOCATOR_BYTES or "?" in uri or "#" in uri:
+            return None
+        if any(ord(character) < 32 or ord(character) == 127 for character in uri):
+            return None
+        return uri
+    try:
+        parsed = urlsplit(uri)
+    except TypeError, ValueError:
+        return None
+    if (
+        parsed.scheme != "file"
+        or parsed.netloc not in {"", "localhost"}
+        or parsed.query
+        or parsed.fragment
+        or not parsed.path.startswith("/")
+        or _INVALID_URI_ESCAPE.search(parsed.path) is not None
+    ):
+        return None
+    try:
+        path = unquote_to_bytes(parsed.path).decode("utf-8", errors="strict")
+    except UnicodeDecodeError, ValueError:
+        return None
+    try:
+        path_bytes = path.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    if (
+        not path
+        or len(path_bytes) > MAX_WORKSPACE_LOCATOR_BYTES
+        or any(ord(character) < 32 or ord(character) == 127 for character in path)
+    ):
+        return None
+    return path
+
+
+def _cursor_roots_value(result: object) -> object | None:
+    if isinstance(result, types.ListRootsResult):
+        return result.roots
+    if isinstance(result, _RawListRootsResult):
+        return result.roots
+    if isinstance(result, Mapping):
+        return cast(Mapping[object, object], result).get("roots")
+    return None
+
+
+def _cursor_workspace_binding(
+    result: object, selector: str | None = None
+) -> tuple[WorkspaceLocator, str] | None:
+    """Convert a host roots/list result to one canonical repository locator.
+
+    The roots capability is a host-session input, not a workflow field. Every root must be a
+    local, safe directory. Without a project selector, all roots must resolve to one canonical
+    repository. With a selector, it may disambiguate a multi-root response only when that
+    selector's canonical identity is present in the validated roots; it cannot create authority.
+    """
+
+    roots = _cursor_roots_value(result)
+    if type(roots) is not list:
+        return None
+    root_items = cast(list[object], roots)
+    if not root_items or len(root_items) > _MAX_CURSOR_ROOTS:
+        return None
+    canonical: list[str] = []
+    for root in root_items:
+        path = _cursor_root_path(root)
+        if path is None:
+            return None
+        resolved = canonical_workspace_locator(path)
+        if resolved is None:
+            return None
+        canonical.append(resolved)
+    fingerprints = tuple(sorted(set(canonical), key=str.encode))
+    selected = fingerprints[0] if len(fingerprints) == 1 else None
+    if selector is not None:
+        if selector not in fingerprints:
+            return None
+        selected = selector
+    elif selected is None:
+        return None
+    try:
+        assert selected is not None
+        return WorkspaceLocator(selected), selected
+    except ValueError:
+        return None
+
+
+def _cursor_workspace_locator(  # pyright: ignore[reportUnusedFunction]
+    result: object, selector: str | None = None
+) -> WorkspaceLocator | None:
+    binding = _cursor_workspace_binding(result, selector)
+    return None if binding is None else binding[0]
+
+
+def _cursor_workspace_identity(path: str) -> tuple[int, int] | None:
+    """Return the selected directory identity without following a replacement symlink."""
+
+    try:
+        facts = os.lstat(path)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(facts.st_mode):
+        return None
+    return facts.st_dev, facts.st_ino
 
 
 async def _close_client(client: ServiceClient) -> None:
@@ -342,6 +697,9 @@ async def ensure_service_client(
     """
 
     slot = runtime._slot  # pyright: ignore[reportPrivateUsage]
+    workspace_locator = _workspace_locator_for_runtime(runtime)
+    if workspace_locator is None:
+        raise _CursorWorkspaceBindingError()
     keep_gate = False
     try:
         while True:
@@ -370,7 +728,7 @@ async def ensure_service_client(
                     try:
                         connected_attempt = await connect_service_on_demand(
                             ControlClientKind.MCP_BRIDGE,
-                            workspace_locator=runtime.workspace_locator,
+                            workspace_locator=workspace_locator,
                         )
                         await connected_attempt.connect()
                     except BaseException as exc:
@@ -410,7 +768,7 @@ async def close_bridge_runtime(runtime: BridgeRuntime = BRIDGE_RUNTIME) -> None:
 def _result_text(
     wire: Mapping[str, object],
     *,
-    host_profile: Literal["generic", "cursor"] = "generic",
+    host_profile: McpHostProfile = "generic",
 ) -> str:
     """Project one result onto the model-visible text channel for the selected host.
 
@@ -422,7 +780,7 @@ def _result_text(
 
     if host_profile == "cursor":
         return canonical_encode(cast(JsonValue, dict(wire))).decode("utf-8")
-    if host_profile != "generic":
+    if host_profile not in {"generic", "codex", "claude"}:
         raise ValueError("mcp_host_profile_invalid")
     return render_safe_compact_summary(wire)
 
@@ -430,7 +788,7 @@ def _result_text(
 def result_from_public_model(
     result: object,
     *,
-    host_profile: Literal["generic", "cursor"] = "generic",
+    host_profile: McpHostProfile = "generic",
 ) -> types.CallToolResult:
     """Validate and project one public result to structured plus host-compatible text."""
 
@@ -447,7 +805,7 @@ def result_from_public_model(
 def _result_from_wire(
     wire: Mapping[str, object],
     *,
-    host_profile: Literal["generic", "cursor"] = "generic",
+    host_profile: McpHostProfile = "generic",
 ) -> types.CallToolResult:
     structured = dict(wire)
     return types.CallToolResult(
@@ -486,7 +844,7 @@ def structured_error_result(
     correlation_id: str | None = None,
     operation: str | None = None,
     diagnostic_reason: str | None = None,
-    host_profile: Literal["generic", "cursor"] = "generic",
+    host_profile: McpHostProfile = "generic",
 ) -> types.CallToolResult:
     """Build a bounded structured tool error with a prevalidated nested fallback.
 
@@ -544,6 +902,265 @@ def structured_error_result(
             )
 
 
+def _cursor_workspace_error(
+    runtime: BridgeRuntime,
+    request_id: str | None,
+    operation: str,
+    *,
+    binding_changed: bool = False,
+    registration_invalid: bool = False,
+) -> types.CallToolResult:
+    """Return one bounded, repeatable error for an unbound native Cursor session."""
+
+    slot = runtime._slot  # pyright: ignore[reportPrivateUsage]
+    if binding_changed:
+        message = (
+            "Cursor's registered project or selected repository changed during this MCP "
+            "session. Reconnect the MCP server with that project open, then retry in a fresh "
+            "conversation. Hook workspace data and CLI CWD cannot substitute for roots/list."
+        )
+    elif registration_invalid:
+        message = (
+            "Cursor's project MCP registration is missing or does not match the exact Yoetz "
+            "launcher, route, project selector, or isolated root. Reconnect the MCP server "
+            "with that project open, then retry in a fresh conversation."
+        )
+    elif runtime.cursor_project_root is not None:
+        message = (
+            "Cursor did not provide one safe local project root matching the registered project "
+            "selector through MCP roots/list. Reconnect the MCP server with that project open, "
+            "then retry in a fresh conversation. Hook workspace data and CLI CWD cannot "
+            "substitute for roots/list."
+        )
+    else:
+        message = (
+            "Cursor did not provide one safe local project root through MCP roots/list. "
+            "If a plugin-managed server has no roots, use yoetz integrate cursor project-mcp "
+            "to register one project .cursor/mcp.json entry with an external-registration "
+            "plugin and no duplicate Yoetz MCP sources. Reconnect the MCP server with that "
+            "project open, then retry in a fresh conversation. Hook workspace data and CLI "
+            "CWD cannot substitute for roots/list."
+        )
+    result = structured_error_result(
+        PublicErrorCode.SESSION_CONFLICT,
+        message,
+        request_id=request_id,
+        correlation_id=slot.workspace_binding_correlation_id,
+        operation=operation,
+        diagnostic_reason="repository_identity_required",
+        safe_details={
+            "host_profile": "cursor",
+            "reason_code": "repository_identity_required",
+        },
+        host_profile=runtime.host_profile,
+    )
+    # A failed roots/list exchange is session-scoped. Reusing its correlation id keeps repeated
+    # delegated calls from minting one diagnostic per tool while preserving the same public fact.
+    if slot.workspace_binding_correlation_id is None:
+        wire = _wire_error(result)
+        if wire is not None and type(wire.get("correlation_id")) is str:
+            slot.workspace_binding_correlation_id = cast(str, wire["correlation_id"])
+    return result
+
+
+async def _ensure_cursor_workspace_binding(
+    runtime: BridgeRuntime,
+    session: _RootsSession | None,
+    request_id: str | None,
+    operation: str,
+) -> types.CallToolResult | None:
+    """Bind and revalidate a Cursor bridge against the host's MCP roots/list response.
+
+    Native Cursor helpers can launch from a user home directory, so process cwd is not a valid
+    repository selector for this host profile. The binding is fetched only from the active MCP
+    session and cached for that bridge process; no workflow request field participates.
+    """
+
+    if runtime.host_profile != "cursor":
+        return None
+    slot = runtime._slot  # pyright: ignore[reportPrivateUsage]
+    retire_client = False
+    binding_error: types.CallToolResult | None = None
+    async with slot.workspace_binding_lock:
+        if (
+            slot.workspace_binding_state == "bound"
+            and slot.workspace_binding_source == "injected"
+            and runtime.cursor_project_directory is None
+        ):
+            return None
+        if slot.workspace_binding_state == "failed":
+            return _cursor_workspace_error(
+                runtime,
+                request_id,
+                operation,
+                registration_invalid=slot.cursor_registration_invalid,
+            )
+        was_bound = slot.workspace_binding_state == "bound"
+        registration: CursorProjectMcpRegistrationSnapshot | None = None
+        registration_invalid = False
+        if runtime.cursor_project_directory is not None:
+            if runtime.cursor_launcher is None:
+                registration_invalid = True
+            else:
+                try:
+                    registration = inspect_project_mcp_registration(
+                        Path(runtime.cursor_project_directory),
+                        launcher=runtime.cursor_launcher,
+                        route_profile=runtime.route_profile,
+                        isolation_root=runtime.cursor_isolation_root,
+                    )
+                except CursorProjectMcpError, OSError, TypeError, ValueError:
+                    registration_invalid = True
+            if registration_invalid:
+                slot.workspace_binding_state = "failed"
+                slot.workspace_locator = None
+                slot.workspace_root_identity = None
+                slot.cursor_registration_snapshot = None
+                slot.cursor_registration_invalid = True
+                binding_error = _cursor_workspace_error(
+                    runtime,
+                    request_id,
+                    operation,
+                    binding_changed=was_bound,
+                    registration_invalid=True,
+                )
+                retire_client = True
+            elif was_bound and slot.cursor_registration_snapshot != registration:
+                slot.workspace_binding_state = "failed"
+                slot.workspace_locator = None
+                slot.workspace_root_identity = None
+                slot.cursor_registration_snapshot = None
+                slot.cursor_registration_invalid = False
+                slot.workspace_binding_correlation_id = None
+                binding_error = _cursor_workspace_error(
+                    runtime,
+                    request_id,
+                    operation,
+                    binding_changed=True,
+                )
+                retire_client = True
+        if binding_error is None and session is None:
+            slot.workspace_binding_state = "failed"
+            slot.workspace_locator = None
+            slot.workspace_root_identity = None
+            slot.cursor_registration_snapshot = None
+            slot.cursor_registration_invalid = False
+            binding_error = _cursor_workspace_error(runtime, request_id, operation)
+            retire_client = True
+        elif binding_error is None:
+            try:
+                async with asyncio.timeout(_CURSOR_ROOTS_REQUEST_TIMEOUT_SECONDS):
+                    assert session is not None
+                    roots = await _cursor_list_roots(session)
+            except Exception:
+                slot.workspace_binding_state = "failed"
+                slot.workspace_locator = None
+                slot.workspace_root_identity = None
+                slot.cursor_registration_snapshot = None
+                slot.cursor_registration_invalid = False
+                binding_error = _cursor_workspace_error(runtime, request_id, operation)
+                retire_client = True
+            else:
+                binding = _cursor_workspace_binding(roots, runtime.cursor_project_root)
+                locator = None if binding is None else binding[0]
+                selected_path = None if binding is None else binding[1]
+                selected_identity = (
+                    None if selected_path is None else _cursor_workspace_identity(selected_path)
+                )
+                if (
+                    locator is None
+                    or selected_identity is None
+                    or (was_bound and slot.workspace_locator != locator)
+                    or (was_bound and slot.workspace_root_identity != selected_identity)
+                ):
+                    # Cursor 3.19 advertises roots.listChanged=false, so a notification cannot be
+                    # relied on to retire a process after the user switches projects. Revalidate
+                    # before every workflow call and retire the old client on any change.
+                    slot.workspace_binding_state = "failed"
+                    slot.workspace_locator = None
+                    slot.workspace_root_identity = None
+                    slot.cursor_registration_snapshot = None
+                    slot.cursor_registration_invalid = False
+                    slot.workspace_binding_correlation_id = None
+                    binding_error = _cursor_workspace_error(
+                        runtime,
+                        request_id,
+                        operation,
+                        binding_changed=was_bound,
+                    )
+                    retire_client = True
+                else:
+                    latest_registration = registration
+                    latest_registration_invalid = False
+                    if runtime.cursor_project_directory is not None:
+                        if runtime.cursor_launcher is None:
+                            latest_registration_invalid = True
+                        else:
+                            try:
+                                latest_registration = inspect_project_mcp_registration(
+                                    Path(runtime.cursor_project_directory),
+                                    launcher=runtime.cursor_launcher,
+                                    route_profile=runtime.route_profile,
+                                    isolation_root=runtime.cursor_isolation_root,
+                                )
+                            except CursorProjectMcpError, OSError, TypeError, ValueError:
+                                latest_registration_invalid = True
+                        if latest_registration_invalid or latest_registration != registration:
+                            slot.workspace_binding_state = "failed"
+                            slot.workspace_locator = None
+                            slot.workspace_root_identity = None
+                            slot.cursor_registration_snapshot = None
+                            slot.cursor_registration_invalid = latest_registration_invalid
+                            slot.workspace_binding_correlation_id = None
+                            binding_error = _cursor_workspace_error(
+                                runtime,
+                                request_id,
+                                operation,
+                                binding_changed=was_bound,
+                                registration_invalid=latest_registration_invalid or not was_bound,
+                            )
+                            retire_client = True
+                    if binding_error is None:
+                        slot.workspace_locator = locator
+                        slot.workspace_root_identity = selected_identity
+                        slot.cursor_registration_snapshot = latest_registration
+                        slot.cursor_registration_invalid = False
+                        slot.workspace_binding_state = "bound"
+                        slot.workspace_binding_source = "mcp_roots"
+    if retire_client:
+        await close_bridge_runtime(runtime)
+    if binding_error is not None:
+        return binding_error
+    return None
+
+
+async def _invalidate_cursor_workspace_binding(runtime: BridgeRuntime) -> None:
+    """Retire this bridge when the host says its project roots changed.
+
+    Rebinding an existing MCP process would let one service-client slot cross repository
+    authorities. The safe lifecycle is to discard the old client and require the host to create a
+    fresh bridge session, which asks roots/list again.
+    """
+
+    if runtime.host_profile != "cursor":
+        return
+    slot = runtime._slot  # pyright: ignore[reportPrivateUsage]
+    async with slot.workspace_binding_lock:
+        slot.workspace_locator = None
+        slot.workspace_root_identity = None
+        slot.cursor_registration_snapshot = None
+        slot.cursor_registration_invalid = False
+        slot.workspace_binding_state = "failed"
+        slot.workspace_binding_correlation_id = None
+    await close_bridge_runtime(runtime)
+
+
+def _workspace_locator_for_runtime(runtime: BridgeRuntime) -> WorkspaceLocator | None:
+    if runtime.host_profile == "cursor":
+        return runtime._slot.workspace_locator  # pyright: ignore[reportPrivateUsage]
+    return runtime.workspace_locator
+
+
 def _control_public_error_result(
     error: ControlError,
     request_id: str | None,
@@ -552,7 +1169,7 @@ def _control_public_error_result(
     code: PublicErrorCode,
     message: str,
     retryable: bool,
-    host_profile: Literal["generic", "cursor"],
+    host_profile: McpHostProfile,
     safe_details: Mapping[str, object] | None = None,
     diagnostic_reason: str | None = None,
 ) -> types.CallToolResult:
@@ -602,10 +1219,10 @@ async def _vault_initialization_continuation(
         "prepare_command": _VAULT_INITIALIZE_PREPARE_COMMAND,
         "review_command": _CONSENT_REVIEW_COMMAND,
     }
-    # Cursor is never an agent-chat attestation client, and the bridge knows that binding
-    # positively. The generic profile serves both the allowlisted first-party client and hosts
-    # that are not; the message states the allowlist condition and the host runbooks own the
-    # split, exactly as they do for the consent catalog's own authorize_command.
+    # Host identity never grants agent-chat attestation. Cursor is never an agent-chat
+    # attestation client, and the bridge knows that binding positively. Other profiles may carry
+    # the reviewed command, but the elevated authorize path still requires its independent
+    # allowlisted client-kind and current-chat facts.
     if runtime.host_profile != "cursor":
         details["authorize_command"] = _CONSENT_AUTHORIZE_COMMAND
     if request_id is not None:
@@ -640,7 +1257,7 @@ def _control_error_result(
     request_id: str | None,
     operation: str,
     *,
-    host_profile: Literal["generic", "cursor"] = "generic",
+    host_profile: McpHostProfile = "generic",
     vault_initialization_details: Mapping[str, object] | None = None,
 ) -> types.CallToolResult:
     # Prefer the service-minted diagnostic id when present so the agent-facing public error
@@ -769,7 +1386,18 @@ def _control_error_result(
             safe_details={"reason_code": "privacy_projection_unavailable"},
         )
     if error.reason == "request_timeout":
-        if operation in _WRITE_OPERATIONS:
+        operation_kind = timeout_operation_kind(operation, write_operations=_WRITE_OPERATIONS)
+        if operation_kind == "start":
+            # A lost start returns neither session nor writer id, so the operation view the
+            # generic write recovery names cannot be queried. The shipped guidance excepts this
+            # case explicitly: replay the exact start once under the same request_id.
+            message = (
+                "The local start timed out and may still have committed. Replay the exact same "
+                "start body once with the same request_id; the idempotent start path returns the "
+                "stored result or a typed boundary. Do not fabricate session or writer ids for a "
+                "status query."
+            )
+        elif operation_kind == "write":
             message = (
                 "The local operation timed out and may still have committed. Retry with the same "
                 "request_id to recover the stored outcome; for an existing Yoetz session, status "
@@ -780,6 +1408,13 @@ def _control_error_result(
                 "The local status read timed out and requested no write. Repeat the read with a "
                 "new request_id."
             )
+        # The read-versus-write distinction above was previously legible only in the free-form
+        # message, which the native text channel drops by design; a typed continuation carries it
+        # to the model that has to act on it (issue #669).
+        timeout_details: dict[str, object] = {"reason_code": "request_timeout"}
+        continuation = continuation_for_reason("request_timeout", operation_kind=operation_kind)
+        if continuation is not None:
+            timeout_details["continuation"] = continuation
         return _control_public_error_result(
             error,
             request_id,
@@ -788,7 +1423,7 @@ def _control_error_result(
             message=message,
             retryable=True,
             host_profile=host_profile,
-            safe_details={"reason_code": "request_timeout"},
+            safe_details=timeout_details,
         )
     if error.reason in {"service_incompatible", "protocol_mismatch"}:
         # The one per-user endpoint is owned by a service of another Yoetz installation (or
@@ -901,7 +1536,7 @@ def _control_error_result(
             host_profile=host_profile,
             safe_details={"reason_code": "endpoint_unsafe"},
         )
-    if error.reason == "frame_invalid":
+    if error.reason in {"frame_invalid", "invalid_request"}:
         return _control_public_error_result(
             error,
             request_id,
@@ -910,7 +1545,7 @@ def _control_error_result(
             message="The local control request was invalid.",
             retryable=False,
             host_profile=host_profile,
-            safe_details={"reason_code": "frame_invalid"},
+            safe_details={"reason_code": error.reason},
         )
     if error.reason == "frame_too_large":
         return _control_public_error_result(
@@ -1091,9 +1726,12 @@ async def _clear_availability(runtime: BridgeRuntime) -> None:
 async def _quiet_probe(runtime: BridgeRuntime) -> ServiceClient | None:
     """Handshake with a service that is already listening; never spawn or supersede one."""
 
+    workspace_locator = _workspace_locator_for_runtime(runtime)
+    if workspace_locator is None:
+        return None
     try:
         client = await connect_service(
-            ControlClientKind.MCP_BRIDGE, workspace_locator=runtime.workspace_locator
+            ControlClientKind.MCP_BRIDGE, workspace_locator=workspace_locator
         )
     except Exception:
         return None
@@ -1277,6 +1915,8 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
             request_id,
             retain_availability_failure_for_latch=True,
         )
+    except _CursorWorkspaceBindingError:
+        return _cursor_workspace_error(runtime, request_id, operation)
     except PublicOperationError as exc:
         # Defense in depth: the ordinary client normally returns ok:false bodies, but if a
         # PublicOperationError escapes the service boundary, keep the exact public code.
@@ -1458,7 +2098,7 @@ def _publish_validation_recovery_unavailable_result(
     request_id: str | None,
     locations: Sequence[Mapping[str, str]] = (),
     *,
-    host_profile: Literal["generic", "cursor"] = "generic",
+    host_profile: McpHostProfile = "generic",
 ) -> types.CallToolResult:
     """Field-pointed INVALID_REQUEST primary, unreachable-oracle caveat alongside."""
 
@@ -1541,6 +2181,8 @@ async def _publish_recovery_from_envelope(
             lambda service, request: service.status(request, deadline_ms=_WORKFLOW_RPC_DEADLINE_MS),
             recovery_request_id,
         )
+    except _CursorWorkspaceBindingError:
+        return _PublishRecoveryOutcome(_PublishRecoveryKind.UNAVAILABLE)
     except PublicOperationError as exc:
         # A nested public failure (session conflict, projection, etc.) does not prove the
         # operation is absent or found. Do not promote it over the outer authoring diagnostic,
@@ -1704,6 +2346,7 @@ async def dispatch_check(
             request,
             deadline_ms=_SEMANTIC_CHECK_RPC_DEADLINE_MS,
             route_profile=runtime.route_profile,
+            host_profile=runtime.host_profile,
         ),
         runtime,
         "check",
@@ -1856,6 +2499,8 @@ async def call_tool(
 async def _handle_call_tool_request(
     req: types.CallToolRequest,
     runtime: BridgeRuntime = BRIDGE_RUNTIME,
+    *,
+    session: _RootsSession | None = None,
 ) -> types.ServerResult:
     """Own CallToolRequest so unknown names never reach the SDK's name-echoing cache path."""
 
@@ -1866,6 +2511,15 @@ async def _handle_call_tool_request(
             types.ErrorData(code=types.INVALID_PARAMS, message=sanitize_unknown_tool_name(name))
         )
     arguments = dict(req.params.arguments or {})
+    if name != "read_guidance":
+        binding_error = await _ensure_cursor_workspace_binding(
+            runtime,
+            session,
+            safe_request_id_from(arguments),
+            name,
+        )
+        if binding_error is not None:
+            return types.ServerResult(binding_error)
     result = await call_tool(name, arguments, runtime)
     return types.ServerResult(result)
 
@@ -1912,7 +2566,14 @@ def _build_server(runtime: BridgeRuntime) -> Server[object]:
         return await list_tools(runtime)
 
     async def runtime_call_tool(req: types.CallToolRequest) -> types.ServerResult:
-        return await _handle_call_tool_request(req, runtime)
+        return await _handle_call_tool_request(
+            req,
+            runtime,
+            session=cast(_RootsSession, active.request_context.session),
+        )
+
+    async def runtime_roots_changed(_notify: types.RootsListChangedNotification) -> None:
+        await _invalidate_cursor_workspace_binding(runtime)
 
     async def runtime_list_resources() -> list[types.Resource]:
         return await list_resources(runtime)
@@ -1921,6 +2582,7 @@ def _build_server(runtime: BridgeRuntime) -> Server[object]:
     # Register a Yoetz-owned CallToolRequest handler instead of Server.call_tool so an unregistered
     # name becomes a sanitized JSON-RPC error and never reaches the SDK path that logs the raw name.
     active.request_handlers[types.CallToolRequest] = runtime_call_tool
+    active.notification_handlers[types.RootsListChangedNotification] = runtime_roots_changed
     active.list_resources()(runtime_list_resources)
     active.read_resource()(read_resource)
     return active
@@ -1969,7 +2631,12 @@ def _bridge_logging_config() -> LoggingConfig:
         return LoggingConfig()
 
 
-def record_startup_route_drift(serving_profile: str, *, _state: Path | None = None) -> None:
+def record_startup_route_drift(
+    serving_profile: str,
+    *,
+    host_profile: McpHostProfile = "generic",
+    _state: Path | None = None,
+) -> None:
     """Record `registration_drift` when this bridge's route disagrees with the applied one.
 
     Issue #537. This is the sole emitter of the diagnostic: the bridge is the one process
@@ -1980,6 +2647,10 @@ def record_startup_route_drift(serving_profile: str, *, _state: Path | None = No
     never raises, never blocks serving, never records content.
     """
 
+    # The applied-route record belongs to the Codex registration adapter. A generic, Claude, or
+    # Cursor bridge cannot establish that it is the process described by that record.
+    if host_profile != "codex":
+        return
     try:
         from yoetz.application.applied_mcp_route import read_applied_route
         from yoetz.cli.hook_diagnostics import record_hook_diagnostic
@@ -2004,22 +2675,34 @@ def record_startup_route_drift(serving_profile: str, *, _state: Path | None = No
 def main(
     *,
     semantic: Literal["on", "off"] = "on",
-    host: Literal["generic", "cursor"] = "generic",
+    host: McpHostProfile = "generic",
+    project_root: Path | None = None,
 ) -> None:
     """Run the MCP bridge on stdio using the SDK-supported latest protocol contract."""
 
     if semantic not in {"on", "off"}:
         raise ValueError("mcp_semantic_profile_invalid")
-    if host not in {"generic", "cursor"}:
+    if host not in {"generic", "codex", "claude", "cursor"}:
         raise ValueError("mcp_host_profile_invalid")
     if types.LATEST_PROTOCOL_VERSION not in SUPPORTED_PROTOCOL_VERSIONS:
         raise RuntimeError("mcp_sdk_protocol_registry_invalid")
     configure_logging(_bridge_logging_config(), LogMode.MCP_STDIO)
+    launcher = (
+        _runtime_launcher_from_argv() if host == "cursor" and project_root is not None else None
+    )
+    registration_isolation_root = (
+        os.environ.get("YOETZ_ISOLATED_ROOT")
+        if host == "cursor" and project_root is not None
+        else None
+    )
     runtime = build_bridge_runtime(
         "strict" if semantic == "off" else "policy",
         host_profile=host,
+        project_root=project_root,
+        launcher=launcher,
+        isolation_root=registration_isolation_root,
     )
-    record_startup_route_drift(runtime.route_profile)
+    record_startup_route_drift(runtime.route_profile, host_profile=runtime.host_profile)
     anyio.run(
         run_stdio,
         runtime,

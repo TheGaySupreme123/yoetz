@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import platform
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -12,6 +11,8 @@ from enum import StrEnum
 from typing import Final, Literal, cast
 
 from yoetz.domain.events import (
+    FINDING_EVENT_SCHEMA_VERSION,
+    SEMANTIC_EVENT_SCHEMA_VERSION,
     AcceptedEvent,
     ActionRecordedPayload,
     AssignmentRecordedPayload,
@@ -53,10 +54,12 @@ from yoetz.domain.events import (
 )
 from yoetz.domain.findings import (
     RankedFindings,
+    RuntimeTokenUsage,
     SemanticProvenance,
     rank_key,
     semantic_provenance_to_json,
 )
+from yoetz.domain.receipts import CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP
 from yoetz.domain.values import (
     Actor,
     ActorType,
@@ -76,6 +79,7 @@ from yoetz.domain.values import (
     timestamp_from_datetime,
     writer_id,
 )
+from yoetz.kernel.command_attempts import command_attempts
 from yoetz.kernel.deterministic_checks import (
     CaseAvailabilityFacts,
     DeterministicCase,
@@ -84,7 +88,11 @@ from yoetz.kernel.deterministic_checks import (
     deterministic_case_from_json,
     deterministic_case_to_json,
 )
-from yoetz.kernel.finding_resolution import finding_is_resolved
+from yoetz.kernel.finding_resolution import (
+    append_resolution_explanation,
+    finding_is_resolved,
+    finding_resolution_explanation,
+)
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import (
     PROJECTION_VERSION,
@@ -95,10 +103,16 @@ from yoetz.kernel.projections import (
 )
 from yoetz.kernel.receipt_capacity import (
     ReceiptCoverageCapacityExceeded,
+    _validate_receipt_coverage_capacity_validated,  # pyright: ignore[reportPrivateUsage]
     receipt_blocking_finding_count,
-    validate_receipt_coverage_capacity,
 )
-from yoetz.kernel.reducers import invalidates_recorded_check, replay
+from yoetz.kernel.reducers import (
+    invalidates_recorded_check,
+    is_material_event_family,
+    replay,
+    replay_extension_with_index,
+    replay_with_index,
+)
 from yoetz.observability.logging import record_unexpected_exception_without_raising
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
@@ -158,6 +172,7 @@ from yoetz.protocol.canonical import (
 from yoetz.protocol.coverage import (
     AuthorshipAssurance,
     Coverage,
+    LedgerFreshness,
     PublicationChannel,
     coverage_for_channel,
     coverage_to_json,
@@ -184,6 +199,7 @@ from yoetz.protocol.models import (
     StatusStructuralSubjectStateModel,
     StatusVersionSliceModel,
 )
+from yoetz.version import build_status_version_slice_facts
 
 __all__ = ["MemoryLedgerAdapter", "MemoryLedgerState", "compact_status_coverage"]
 
@@ -297,7 +313,7 @@ async def _run_blocking_joined[ResultT](call: Callable[[], ResultT]) -> ResultT:
                     record_unexpected_exception_without_raising(
                         worker_error,
                         component="adapters.memory.ledger",
-                        operation="query_projection_worker_failed",
+                        operation="append_validation_worker_failed",
                     )
         raise
 
@@ -317,6 +333,7 @@ class _AttemptState:
     result_object_ref: ObjectRef | None = None
     terminal_code: SemanticReason | None = None
     started_at: datetime | None = None
+    token_usage: RuntimeTokenUsage | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -903,7 +920,27 @@ def compact_status_coverage(
         for record in records
     ):
         return baseline
-    return weakest(baseline, check_record.payload.coverage)
+    coverage = weakest(baseline, check_record.payload.coverage)
+    if any(
+        is_material_event_family(record.schema.name)
+        and record.ledger.ingestion_sequence > check_record.ledger.ingestion_sequence
+        for record in records
+    ):
+        # The same attributable suffix that the receipt builder discloses still leaves the check
+        # useful, but only as of its tested subject frontier. Keep the current observation
+        # records visible in status and add the bounded qualification instead of manufacturing
+        # ``check_not_applicable`` or stale-after-material-change.
+        gaps = tuple(
+            sorted(
+                set(coverage.known_gaps) | {CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP},
+                key=str.encode,
+            )
+        )
+        freshness = coverage.ledger_freshness
+        if freshness is LedgerFreshness.CURRENT:
+            freshness = LedgerFreshness.PARTIAL
+        coverage = replace(coverage, ledger_freshness=freshness, known_gaps=gaps)
+    return coverage
 
 
 def _obligation_item(
@@ -1040,6 +1077,8 @@ def _projection_items(
                 record,
                 tuple(sorted(actors.get(obligation, ()), key=str.encode)),
                 attempted_items,
+            ).model_copy(
+                update={"command_attempts": command_attempts(projection, records, obligation)}
             )
             for obligation, record in sorted(
                 projection.obligations.items(), key=lambda item: item[0].encode()
@@ -1120,7 +1159,10 @@ def _projection_items(
                     origin=finding.origin.value,
                     priority=finding.priority,
                     summary=finding.summary,
-                    detail=finding.detail,
+                    detail=append_resolution_explanation(
+                        finding.detail,
+                        finding_resolution_explanation(projection, finding.finding_id, records),
+                    ),
                     subject_refs=finding.subject_refs,
                     policy_id=cast(
                         Literal["research-evidence", "work-integrity"], finding.policy_id
@@ -1184,7 +1226,10 @@ def _projection_items(
                 kind=finding.kind.value,
                 priority=finding.priority,
                 summary=finding.summary,
-                detail=finding.detail,
+                detail=append_resolution_explanation(
+                    finding.detail,
+                    finding_resolution_explanation(projection, finding.finding_id, records),
+                ),
             )
             for finding in sorted(
                 (
@@ -1219,6 +1264,12 @@ def _projection_items(
         # `current`, so reporting the projection scalar raw lets the headline read cleaner than
         # the coverage it summarizes. Report the weaker of the two (issue #307).
         item_freshness = min(projection.freshness, item_coverage.ledger_freshness)
+        item_gaps = tuple(
+            sorted(
+                set(_status_gap_codes(projection.coverage_gaps)) | set(item_coverage.known_gaps),
+                key=str.encode,
+            )
+        )
         return (
             StatusCompactItemModel(
                 task_id=task,
@@ -1238,23 +1289,26 @@ def _projection_items(
                 unanswered_findings=unanswered_findings[:10],
                 freshness=item_freshness.value,
                 coverage=CoverageModel.model_validate(coverage_to_json(item_coverage)),
-                gaps=_status_gap_codes(projection.coverage_gaps),
+                gaps=item_gaps,
             ),
         )
     if view is ProjectionView.VERSIONS:
+        facts = build_status_version_slice_facts()
         return (
-            StatusVersionSliceModel(
-                protocol_version="0.1",
-                engine_version="0.1.0",
-                projection_version="0.1.0",
-                object_format="yoetz-object/1",
-                storage_schema="1",
-                python_version=platform.python_version(),
-                apsw_version="3.51.0.0",
-                sqlite_version="3.51.0",
-                sqlite_source_id="runtime-verified-by-connection-gate",
-                policy_packs=("research-evidence/0.1.0", "work-integrity/0.1.0"),
-                provider_profiles=(),
+            StatusVersionSliceModel.model_validate(
+                {
+                    "protocol_version": facts.protocol_version,
+                    "engine_version": facts.engine_version,
+                    "projection_version": facts.projection_version,
+                    "object_format": facts.object_format,
+                    "storage_schema": facts.storage_schema,
+                    "python_version": facts.python_version,
+                    "apsw_version": facts.apsw_version,
+                    "sqlite_version": facts.sqlite_version,
+                    "sqlite_source_id": facts.sqlite_source_id,
+                    "policy_packs": list(facts.policy_packs),
+                    "provider_profiles": list(facts.provider_profiles),
+                }
             ),
         )
     raise _error(PublicErrorCode.INVALID_REQUEST)
@@ -1604,9 +1658,22 @@ class MemoryLedgerAdapter:
                 previous_ledger = record.entry_digest
                 previous_writer = record.entry_digest
                 prior_batch.add(record.event_id)
-            proposed = snapshot_records + tuple(new_records)
+            appended_records = tuple(new_records)
+            proposed = snapshot_records + appended_records
+            prior_projection = self._state.projection
             try:
-                projection = replay(proposed)
+                if observation_authored and appended_records:
+                    projection, replay_index = await _run_blocking_joined(
+                        lambda: replay_extension_with_index(
+                            prior_projection,
+                            snapshot_records,
+                            appended_records,
+                        )
+                    )
+                else:
+                    projection, replay_index = await _run_blocking_joined(
+                        lambda: replay_with_index(proposed)
+                    )
             except NoObligationsReasonMismatch as exc:
                 draft_index: int | None = None
                 if exc.event_id is not None:
@@ -1640,7 +1707,13 @@ class MemoryLedgerAdapter:
             except ValueError as exc:
                 raise _error(PublicErrorCode.EVENT_INVALID) from exc
             try:
-                validate_receipt_coverage_capacity(projection, proposed)
+                await _run_blocking_joined(
+                    lambda: _validate_receipt_coverage_capacity_validated(
+                        projection,
+                        proposed,
+                        replay_index=replay_index,
+                    )
+                )
             except ReceiptCoverageCapacityExceeded as exc:
                 raise _error(
                     PublicErrorCode.LIMIT_EXCEEDED,
@@ -1669,6 +1742,10 @@ class MemoryLedgerAdapter:
                 **{
                     entry.payload_object.object_id: entry.payload_object
                     for entry in command.entries
+                },
+                **{
+                    artifact_ref.object_id: artifact_ref
+                    for artifact_ref in command.artifact_object_refs
                 },
                 **(
                     {}
@@ -1999,7 +2076,21 @@ class MemoryLedgerAdapter:
             elif type(last) is StatusResultItemModel:
                 next_position = IdProjectionPosition(last.result_id)
         status_gaps = _status_gap_codes(effective_projection.coverage_gaps)
-        coverage = replace(prefix[-1].coverage, known_gaps=status_gaps)
+        if view is ProjectionView.COMPACT:
+            # Compact status exposes the same applicable-check fold as the item and as the
+            # receipt. In particular, an observation-only suffix keeps the check attributable
+            # while qualifying it at its earlier tested frontier; do not let the page-level
+            # coverage silently drop that qualification.
+            compact_coverage = compact_status_coverage(prefix, effective_projection)
+            status_gaps = tuple(
+                sorted(
+                    set(status_gaps) | set(compact_coverage.known_gaps),
+                    key=str.encode,
+                )
+            )
+            coverage = replace(compact_coverage, known_gaps=status_gaps)
+        else:
+            coverage = replace(prefix[-1].coverage, known_gaps=status_gaps)
         page = ProjectionPage(
             query.view,
             selected,
@@ -2479,6 +2570,7 @@ class MemoryLedgerAdapter:
         outcome: AttemptOutcome,
         result_object_ref: ObjectRef | None = None,
         terminal_code: SemanticReason | None = None,
+        token_usage: RuntimeTokenUsage | None = None,
     ) -> None:
         async with self._lock:
             attempt = self._state.attempts.get(handle.attempt_id)
@@ -2487,11 +2579,16 @@ class MemoryLedgerAdapter:
             job = self._state.jobs[handle.job_id]
             if outcome is AttemptOutcome.SELECTED:
                 raise _error(PublicErrorCode.INVALID_REQUEST)
+            if token_usage is not None and type(token_usage) is not RuntimeTokenUsage:
+                raise _error(PublicErrorCode.INVALID_REQUEST)
             if outcome is AttemptOutcome.RESPONSE_DURABLE:
                 if result_object_ref is None or terminal_code is not None:
                     raise _error(PublicErrorCode.INVALID_REQUEST)
                 self._state.attempts[handle.attempt_id] = replace(
-                    attempt, state="response_durable", result_object_ref=result_object_ref
+                    attempt,
+                    state="response_durable",
+                    result_object_ref=result_object_ref,
+                    token_usage=token_usage,
                 )
                 return
             if terminal_code is None or (
@@ -2503,6 +2600,7 @@ class MemoryLedgerAdapter:
                 state=outcome.value,
                 result_object_ref=result_object_ref,
                 terminal_code=terminal_code,
+                token_usage=token_usage,
             )
             if outcome is AttemptOutcome.FAILED:
                 self._state.jobs[handle.job_id] = replace(
@@ -2642,6 +2740,7 @@ class MemoryLedgerAdapter:
                     attempt.terminal_code,
                     attempt.result_object_ref,
                     attempt.started_at,
+                    attempt.token_usage,
                 )
                 for attempt in self._state.attempts.values()
                 if attempt.handle.job_id == job_id
@@ -2908,7 +3007,9 @@ class MemoryLedgerAdapter:
             payload_ref = await self._objects.finalize(staged)
             schema = EventSchema(
                 "finding_recorded" if type(payload) is FindingRecordedPayload else "check_recorded",
-                "1.1.0",
+                FINDING_EVENT_SCHEMA_VERSION
+                if type(payload) is FindingRecordedPayload
+                else SEMANTIC_EVENT_SCHEMA_VERSION,
             )
             entries.append(
                 AppendEntry(

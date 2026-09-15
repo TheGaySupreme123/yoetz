@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from yoetz.cli.app import app
@@ -189,3 +190,99 @@ def test_a_strict_re_render_preview_discloses_the_host_admission_it_would_revoke
     )
     assert policy.exit_code == 0, policy.output
     assert json.loads(policy.stdout)["admission_cleanup"] is None
+
+
+def test_claude_cli_preview_and_status_report_host_version_provenance(tmp_path: Path) -> None:
+    runner = CliRunner()
+    status = runner.invoke(app, _args(tmp_path, "status"))
+    assert status.exit_code == 0, status.output
+    assert json.loads(status.stdout)["host_version_provenance"] == "tested"
+    preview = runner.invoke(
+        app,
+        _args(
+            tmp_path,
+            "preview",
+            "--action",
+            "install",
+            "--request-id",
+            "req_10000000-0000-4000-8000-000000000041",
+        ),
+    )
+    assert preview.exit_code == 0, preview.output
+    assert json.loads(preview.stdout)["host"]["version_provenance"] == "tested"
+
+
+@pytest.mark.parametrize(
+    ("platform", "expected"),
+    [("darwin", ["macos"]), ("linux", ["linux"]), ("win32", [])],
+)
+def test_default_presence_cell_follows_the_platform_and_fails_closed_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str, expected: list[str]
+) -> None:
+    from types import SimpleNamespace
+
+    from yoetz.adapters.integrations import artifact_presence
+    from yoetz.adapters.integrations.artifact_presence import describe_artifact_presence
+    from yoetz.adapters.integrations.linux_artifact_presence import LinuxArtifactUserPresence
+    from yoetz.adapters.integrations.macos_artifact_presence import MacOSArtifactUserPresence
+    from yoetz.adapters.integrations.portable_plugin import prepare_portable_artifact_review
+    from yoetz.cli.claude_code_integration import run_claude_code_plugin_command
+    from yoetz.ports.plugin_artifacts import ArtifactAuthority
+
+    runner = CliRunner()
+    state = tmp_path / "private-state"
+    monkeypatch.setattr(artifact_presence, "sys", SimpleNamespace(platform=platform))
+
+    preview = runner.invoke(
+        app,
+        _args(
+            tmp_path,
+            "preview",
+            "--action",
+            "install",
+            "--request-id",
+            "req_10000000-0000-4000-8000-000000000041",
+        ),
+    )
+    assert preview.exit_code == 0, preview.output
+    body = json.loads(preview.stdout)
+    assert body["authorization"]["human_presence"] == describe_artifact_presence(platform)
+    assert body["authorization"]["human_presence"]["supported"] is bool(expected)
+    prepare_portable_artifact_review(body["preview_digest"], _state=state)
+
+    called: list[str] = []
+
+    def macos(_self: object, _authority: ArtifactAuthority) -> None:
+        called.append("macos")
+        raise RuntimeError("human_authority_unavailable")
+
+    def linux(_self: object, _authority: ArtifactAuthority) -> None:
+        called.append("linux")
+        raise RuntimeError("human_authority_unavailable")
+
+    monkeypatch.setattr(MacOSArtifactUserPresence, "verify_artifact_review", macos)
+    monkeypatch.setattr(LinuxArtifactUserPresence, "verify_artifact_review", linux)
+
+    config = tmp_path / "claude-testing"
+    exit_code = run_claude_code_plugin_command(
+        "install",
+        harness="claude",
+        claude_path=_fake_claude(tmp_path),
+        claude_config_root=config,
+        cache_root=config / "plugins" / "cache",
+        marketplace_root=tmp_path / "marketplace",
+        project_root=tmp_path / "project",
+        format_name="native",
+        ownership_name="plugin-managed",
+        route_profile="strict",
+        requested_action=None,
+        request_value=body["request_id"],
+        preview_digest=body["preview_digest"],
+        accept=True,
+        json_output=True,
+        _state=state,
+        _presence=None,
+    )
+    assert exit_code == 1
+    assert called == expected
+    assert not (tmp_path / "marketplace").exists()

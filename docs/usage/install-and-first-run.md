@@ -1,16 +1,31 @@
 # Install and first run
 
-> Local Cursor support is configured explicitly, not by ambient discovery. Use
+> Three harnesses have first-party integrations: Codex, Claude Code, and Cursor. The first-run
+> wizard detects and connects Codex. Claude Code and Cursor are configured explicitly, never by
+> ambient discovery: `yoetz integrate claude plugin preview` for Claude Code (then `install`,
+> `update`, `enable`, `disable`, `remove`, or `export` for a development plugin directory) and
 > `yoetz integrate cursor plugin preview` with an exact isolated Cursor configuration root and
-> project; see [the Cursor integration runbook](../runbooks/cursor-integration.md). Cursor Cloud is
-> not supported.
+> project; see [the Claude Code integration runbook](../runbooks/claude-code-integration.md) and
+> [the Cursor integration runbook](../runbooks/cursor-integration.md). For both, the integration
+> ships but its support evidence is release-bound: each covers one exact local CLI cell, and no
+> cell is claimed beyond what its runbook records. Claude Desktop, remote, and web sessions are
+> untested, not claimed either way; Cursor Cloud is not supported. Any other agent can use Yoetz
+> over MCP with no integration at all.
 
 ## Install
 
-The supported install path is Python via [`uv`](https://docs.astral.sh/uv/):
+For guided setup, click **Set up with your agent** on [yoetz.dev](https://yoetz.dev).
+The popup confirms the instruction was copied. Paste it into your agent’s chat, then send it
+to start setup.
+The **Install with PyPI** and **Install with npm** buttons show the copied command in the popup:
+paste it into your terminal, then press Enter.
+After the PyPI installation finishes, run `yoetz` in your terminal to start setup.
+The npm command, `npx yoetz`, starts setup directly.
+
+Install the latest published version through Python via [`uv`](https://docs.astral.sh/uv/):
 
 ```text
-uv tool install --managed-python --python 3.14.6 "yoetz==0.1.0"
+uv tool install --managed-python --python 3.14.6 yoetz
 yoetz
 ```
 
@@ -29,6 +44,80 @@ Compatibility extras (the standard install already contains these exact dependen
 | `semantic-openai` | Existing install-command alias for the HTTP client and OpenAI SDK |
 | `portable-recovery` | Existing install-command alias for Argon2 recovery/passphrase support |
 
+## Linux
+
+Yoetz runs on macOS and Linux. The certified cells are macOS 11 or later on Apple silicon and
+glibc 2.28 or later Linux on x86-64. The package also installs on other Linux architectures, such
+as aarch64 (Raspberry Pi, Graviton, Asahi, or WSL on a Windows-on-ARM laptop); those installs are
+untested, not presumed compatible: `yoetz version --json` lists `platform_cell_untested` under
+`limitations`, `yoetz setup status --json` reports the cell, and `/doctor` shows the platform line
+as *not proven*. Nothing is refused there, and nothing is claimed either.
+
+Three things on Linux differ from macOS, and each is reported once, up front, by `/doctor` and
+`yoetz setup status --json` rather than discovered later:
+
+- **Approved checks that deny network need bubblewrap.** Install it before trusting a check
+  policy (Debian and Ubuntu: `sudo apt install bubblewrap`; Fedora: `sudo dnf install
+  bubblewrap`). Without a usable `bwrap`, every network-denied check is rejected as
+  `sandbox_unavailable`. Ubuntu 24.04 and later restrict unprivileged user namespaces through
+  AppArmor: use the distribution package, which ships the profile that permits `bwrap`; if a
+  hand-built copy still fails, `/doctor` says `bwrap_unusable` and names the sysctl to relax.
+  `yoetz observe checks status --json` reports the same `sandbox` answer per workspace.
+- **System secure storage needs a running Secret Service.** The "system keyring" choice at setup
+  means macOS Keychain on macOS and, on Linux, a Freedesktop Secret Service on your session bus
+  (GNOME Keyring, or KWallet through its Secret Service bridge). Headless sessions, servers, and
+  WSL usually have none. Setup then disables that option, states the reason, and offers a Yoetz
+  passphrase, which is the supported route there.
+- **State stays on a local disk.** A state directory on a network or cross-machine filesystem
+  is refused with `path_on_network_filesystem`; the message names the safe location.
+
+## Windows
+
+Yoetz runs on macOS and Linux. On Windows it runs inside WSL 2 (Windows Subsystem for Linux),
+Microsoft's supported way to run Linux programs on Windows. A native Windows install succeeds, but
+every command except `yoetz version`, `--version`, and `--help` then refuses with
+`unsupported_platform` and points here.
+
+1. Open **PowerShell as administrator** and run `wsl --install`. Restart Windows when asked.
+2. Open **Ubuntu** from the Start menu. The first launch asks you to choose a Linux username and
+   password.
+3. Inside that Ubuntu window, install `uv`, then Yoetz:
+
+   ```text
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   source "$HOME/.local/bin/env"
+   uv tool install --managed-python --python 3.14.6 yoetz
+   yoetz
+   ```
+
+Everything else on this page happens inside that Ubuntu window, including `yoetz service run` and
+the steps that need your own terminal. Installing the Cursor or Claude Code plugin is one of
+those steps: on Linux and inside WSL 2 it asks for your Linux account password in that terminal
+(the one you chose at first launch) before it changes anything, where macOS shows its own
+authentication dialog instead. A coding agent driving the install from the Windows side
+can run each command with `wsl -e bash -lc "..."`. Connecting a Windows-native Codex, Claude Code,
+or Cursor to a Yoetz inside WSL is untested and not claimed: connect from the same WSL
+environment, or keep Yoetz local-only through the CLI.
+
+Inside WSL, the [Linux](#linux) notes above apply, with these specifics:
+
+- **Keep Yoetz on the Linux filesystem.** Install and run it from your WSL home. Windows drives
+  under `/mnt/c` and the other drive letters reach Linux through a transport (`9p`, `drvfs`, or
+  `virtiofs`) whose locking and durability Yoetz has not certified, so a state directory there — including one
+  named by `YOETZ_ISOLATED_ROOT` — is refused with `path_on_network_filesystem`. Your projects
+  can live on a Windows drive; Yoetz's own state cannot.
+- **Choose a Yoetz passphrase.** A default WSL session has no Secret Service, so system secure
+  storage is unavailable and setup says why.
+- **Install bubblewrap** (`sudo apt install bubblewrap`) before trusting a check policy whose
+  checks deny network.
+- **Windows-on-ARM laptops** run an aarch64 Ubuntu, which is an untested platform cell (see
+  [Linux](#linux)); Yoetz installs and says so.
+- **Claude Code and Cursor plugins** need a supported approval mechanism. Inspect the plugin
+  preview: Linux-capable builds name PAM through the trusted terminal and ask for your Linux
+  account password there. Builds without Linux approval support refuse
+  `human_authority_unavailable`. Linux and WSL native host coverage remains unproven; both hosts
+  can use Yoetz over MCP with a `yoetz mcp serve` entry in their own configuration.
+
 ## First run
 
 The first bare `yoetz` on an interactive terminal opens the full-screen interface in first-run
@@ -38,7 +127,9 @@ pipes, redirected streams — prints help instead, exactly as before.
 
 Setup is a linear path inside the interface, each finished step collapsing into a short line:
 
-1. **Detection.** Supported harnesses (Codex in v0.1), your project and its canonical Git common
+1. **Detection.** Codex installations (the wizard detects Codex only; Claude Code and Cursor are
+   connected afterwards through `yoetz integrate claude ...` and `yoetz integrate cursor ...`, see
+   the note at the top of this page), your project and its canonical Git common
    root (or resolved non-Git directory), whether system secure storage is available, and whether
    Yoetz is connected yet.
 2. **Which installation**, when several Codex binaries are found on your `PATH`, in the standard
@@ -53,7 +144,9 @@ Setup is a linear path inside the interface, each finished step collapsing into 
    bound to the exact preview and policy digests that were displayed: if either has moved, the
    apply refuses as stale rather than proceeding.
 5. **Installation activity**, with each step reported only once its postcondition was checked.
-6. **Secure storage** — the system keyring, or a Yoetz passphrase. A passphrase is entered on the
+6. **Secure storage** — the system keyring (macOS Keychain, or a running Secret Service on
+   Linux; see [Linux](#linux)), or a Yoetz passphrase. When the keyring is unusable the option is
+   disabled with the reason stated. A passphrase is entered on the
    trusted terminal: input is masked with `*`, must be 16–1024 UTF-8 bytes with no control
    characters, and the helper re-prompts after invalid or mismatched input. Later changes use
    `yoetz service rotate-passphrase` (or **Change the passphrase** under `/service`).
@@ -158,9 +251,16 @@ yoetz provider credential set      # provision the API credential through the te
 `yoetz service run` runs in the foreground on purpose when invoked directly — you choose the
 supervisor (launchd, systemd, a terminal). Interactive setup may use the bounded on-demand launcher.
 Related: `yoetz service status`, `lock`, `unlock`, `initialize-passphrase`,
-`rotate-passphrase`, `idle-relock`, `stop`. Passphrase setup and rotation mask input with `*` and
-re-prompt invalid or mismatched values; they never accept a secret through a flag, pipe, or the
-full-screen window.
+`rotate-passphrase`, `idle-relock`, `stop`; `restart` stops the running service — even one from
+another installation — and starts this one; `isolation` reports the resolved identity roots and
+isolation mode as digests, without connecting to a service; `diagnostics --correlation-id
+<err_...>` resolves one durable owner-only diagnostic record by the correlation id printed with a
+public error. Two sub-trees sit beneath it: `yoetz service auto-unlock status|enable|repair`
+inspects or repairs restart-safe passphrase unlock after proving the current vault passphrase, and
+`yoetz service recovery status|provision|rotate|revoke|export|import|restore` provisions and uses
+installation-vault recovery without exposing secrets to agents. Passphrase setup and rotation mask
+input with `*` and re-prompt invalid or mismatched values; they never accept a secret through a
+flag, pipe, or the full-screen window.
 
 ## What a fresh installation does not do
 
@@ -171,6 +271,28 @@ run the deterministic packs only and say so in their coverage vector.
 
 That state is fully useful: the ledger, deterministic checks, findings, and receipts all work. You
 opt into external review deliberately, or never.
+
+## More than one Yoetz on one machine
+
+Your everyday installation is the **permanent** instance: it uses the platform's own application
+directories and nothing else touches them. To try a change, reproduce a defect, or run a test
+against a real installed Yoetz without disturbing that installation, create a separate instance
+with its own root, service, and vault:
+
+```text
+yoetz instance create --root ~/.yz-try/state --lifecycle disposable --expires-in 8 --bind-runtime
+yoetz instance status --json
+yoetz instance dispose --root ~/.yz-try/state
+```
+
+`--bind-runtime` pins the Yoetz you ran to that root, so it keeps using its own state even when a
+program starts it without the `YOETZ_ISOLATED_ROOT` variable; a different root in the variable is
+refused rather than obeyed. `status` never prints paths, only digests, and reports whether the
+instance is `permanent`, `persistent`, `disposable`, or an older unlabeled isolated root, and
+whether it has expired. `dispose` removes only a root that carries such an instance record, stops
+only the service holding that root, and can be repeated safely; it will not remove your everyday
+installation. Contributors building instances from source use the procedure in the project's
+contributor documentation.
 
 ## After setup
 
@@ -189,3 +311,6 @@ From here:
 - [Privacy and semantic review](privacy-and-semantic-review.md) — before you enable any egress.
 - [`docs/runbooks/codex-integration.md`](../runbooks/codex-integration.md) — integration detail and
   the exact tested Codex version set.
+- [`docs/runbooks/claude-code-integration.md`](../runbooks/claude-code-integration.md) and
+  [`docs/runbooks/cursor-integration.md`](../runbooks/cursor-integration.md) — the exact Claude
+  Code and Cursor cells, their commands, and what each host's hooks do and do not observe.

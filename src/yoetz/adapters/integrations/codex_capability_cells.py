@@ -23,6 +23,7 @@ __all__ = [
     "CODEX_ROLLOUT_HISTORY_MODES",
     "CODEX_ROLLOUT_IMPORTER_PROFILE_ID",
     "CODEX_ROLLOUT_PARSER_PROOFS",
+    "CODEX_ROLLOUT_COMPATIBLE_EVIDENCE_CASE_IDS",
     "CODEX_ROLLOUT_STREAM_MAPPING_VERSION",
     "CODEX_ROLLOUT_SURFACE",
     "CODEX_ROLLOUT_UNSUPPORTED_EVIDENCE_CASE_IDS",
@@ -53,7 +54,7 @@ class CodexRolloutParserProof:
 # multi-version proofs. ``CODEX_ROLLOUT_PARSER_PROOFS`` is the authority.
 CODEX_ROLLOUT_CLI_VERSION: Final = "0.148.0"
 CODEX_ROLLOUT_IMPORTER_PROFILE_ID: Final = "codex-rollout-jsonl/0.148.0/v1"
-CODEX_ROLLOUT_STREAM_MAPPING_VERSION: Final = "codex-obs-stream/1.3.0"
+CODEX_ROLLOUT_STREAM_MAPPING_VERSION: Final = "codex-obs-stream/1.4.0"
 CODEX_ROLLOUT_SURFACE: Final = "session_stream_rollout"
 CODEX_ROLLOUT_HISTORY_MODES: Final = ("legacy", "paginated")
 CODEX_ROLLOUT_EVIDENCE_CASE_IDS: Final = ("IMP-006", "IMP-007", "IMP-008", "IMP-009")
@@ -71,8 +72,11 @@ CODEX_ROLLOUT_PARSER_PROOFS: Final = (
         fixture_history_modes=("paginated",),
     ),
 )
-# Fixture proving a release without an exact profile is refused, not aliased.
+# Fixture proving a structurally unsupported header (unknown ``history_mode``) is refused, and
+# fixture proving an unproven release is admitted under the structural compatibility profile
+# without inheriting a parser proof (issue #656).
 CODEX_ROLLOUT_UNSUPPORTED_EVIDENCE_CASE_IDS: Final = ("IMP-013",)
+CODEX_ROLLOUT_COMPATIBLE_EVIDENCE_CASE_IDS: Final = ("IMP-014",)
 
 
 def rollout_parser_proven_versions() -> tuple[str, ...]:

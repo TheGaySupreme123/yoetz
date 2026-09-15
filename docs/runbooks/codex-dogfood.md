@@ -28,7 +28,10 @@ the machine on its own, authenticate the report author, or upgrade a digest into
   candidate executable with the exact launch environment. Compare the two exact reports. Platform
   defaults are not a substitute because the normal target may relocate its config or storage.
 - Rollback of Yoetz state is deleting the isolation root: every artifact of the isolated runtime
-  lives beneath it. Stop only processes the runner started, then remove the root.
+  lives beneath it. Stop only processes the runner started, then remove the root. An instance
+  provisioned by `scripts/provision_test_instance.py` (ADR-028) is pinned to its root and disposed
+  with that script's `dispose`, which stops only the holder of that root's singleton; see
+  [`test-instances.md`](test-instances.md).
 - Two Codex homes have different lifetimes. The **host** Codex home (the one carrying the plugin,
   MCP activation, and hooks under test) is per run and lives beneath the run directory. The
   **evaluator** home bound by `yoetz provider codex-subscription setup --codex-home <dir>` holds

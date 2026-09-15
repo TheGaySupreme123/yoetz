@@ -378,6 +378,117 @@ async def test_prebirth_auto_grouping_preference_is_durable_without_project_birt
 
 
 @pytest.mark.anyio
+async def test_pending_operation_recovery_preserves_workspace_before_explicit_sibling() -> None:
+    """A pending pair can recover while a different pair creates one workspace sibling."""
+
+    harness = _Harness.create(850)
+    pending_request = await harness.command(851, mode=StartMode.CREATE_OR_ATTACH, refs="pending")
+    pending = await harness.catalog.reserve_or_resume(pending_request)
+    workspace = pending_request.identity_commitments.workspace_ref_commitment
+    assert workspace is not None
+
+    sibling_identity = StartIdentityInput(
+        "Repaired verification", "workspace-pending", "external-repaired"
+    )
+    sibling_commitments = await harness.catalog.commit_identity(sibling_identity)
+    sibling_digest = canonical_digest(
+        {
+            "external": sibling_commitments.external_ref_commitment,
+            "mode": StartMode.CREATE_OR_ATTACH.value,
+            "session_id": None,
+            "title": sibling_commitments.title_commitment,
+            "workspace": sibling_commitments.workspace_ref_commitment,
+        }
+    )
+    implicit_sibling = StartCommand(
+        _id(IdKind.REQUEST, 852),
+        sibling_digest,
+        StartMode.CREATE_OR_ATTACH,
+        sibling_identity,
+        sibling_commitments,
+        None,
+    )
+    sibling = await harness.catalog.reserve_or_resume(implicit_sibling)
+    assert sibling.outcome == "reserved"
+    assert sibling.route_action == "created"
+    assert sibling.task_id != pending.task_id
+    assert sibling.session_id != pending.session_id
+    assert sibling.writer_id != pending.writer_id
+    assert sibling.lifecycle_event_id != pending.lifecycle_event_id
+    assert await harness.catalog.list_workspace_task_ids(workspace) == tuple(
+        sorted((pending.task_id, sibling.task_id))
+    )
+    pending_route = await harness.catalog.resolve_route(pending.session_id)
+    sibling_route = await harness.catalog.resolve_route(sibling.session_id)
+    assert pending_route is not None and pending_route.task_id == pending.task_id
+    assert sibling_route is not None and sibling_route.task_id == sibling.task_id
+    assert pending_route.session_id == pending.session_id
+    assert sibling_route.session_id == sibling.session_id
+
+    # Recover the pending operation with its exact request identity before advancing the original
+    # task. The sibling remains a separate pending operation and route.
+    harness.clock.advance(61)
+    resumed = await harness.catalog.reserve_or_resume(pending_request)
+    assert resumed.outcome == "resumed"
+    assert resumed.task_id == pending.task_id
+    assert resumed.session_id == pending.session_id
+    assert resumed.writer_id == pending.writer_id
+    assert resumed.lifecycle_event_id == pending.lifecycle_event_id
+    assert resumed.route_generation == pending.route_generation
+    assert resumed.route_identity_digest == pending.route_identity_digest
+    await _complete(harness.catalog, resumed, 853)
+
+    # The automatic sibling already owns this exact pair. An explicit create must retain its
+    # collision guard and must not allocate a third task while the sibling operation is pending.
+    explicit_sibling = StartCommand(
+        _id(IdKind.REQUEST, 854),
+        canonical_digest(
+            {
+                "external": sibling_commitments.external_ref_commitment,
+                "mode": StartMode.CREATE.value,
+                "session_id": None,
+                "title": sibling_commitments.title_commitment,
+                "workspace": sibling_commitments.workspace_ref_commitment,
+            }
+        ),
+        StartMode.CREATE,
+        sibling_identity,
+        sibling_commitments,
+        None,
+    )
+    with pytest.raises(PublicOperationError) as conflict:
+        await harness.catalog.reserve_or_resume(explicit_sibling)
+    assert conflict.value.code is PublicErrorCode.SESSION_CONFLICT
+    assert conflict.value.safe_details == {"reason_code": "workspace_task_exists"}
+    assert await harness.catalog.list_workspace_task_ids(workspace) == tuple(
+        sorted((pending.task_id, sibling.task_id))
+    )
+
+    # Resume and complete the original automatic sibling by its exact request. The explicit create
+    # collision above must leave this operation untouched and must not create a fourth route.
+    sibling_resumed = await harness.catalog.reserve_or_resume(implicit_sibling)
+    assert sibling_resumed.outcome == "resumed"
+    assert sibling_resumed.task_id == sibling.task_id
+    assert sibling_resumed.session_id == sibling.session_id
+    assert sibling_resumed.writer_id == sibling.writer_id
+    assert sibling_resumed.lifecycle_event_id == sibling.lifecycle_event_id
+    await _complete(harness.catalog, sibling_resumed, 855)
+    assert await harness.catalog.list_workspace_task_ids(workspace) == tuple(
+        sorted((pending.task_id, sibling.task_id))
+    )
+
+    # Repeating the explicit create remains a collision after completion, with the same two routes
+    # and no operation record or task multiplication introduced by the refused request.
+    with pytest.raises(PublicOperationError) as completed_conflict:
+        await harness.catalog.reserve_or_resume(explicit_sibling)
+    assert completed_conflict.value.code is PublicErrorCode.SESSION_CONFLICT
+    assert completed_conflict.value.safe_details == {"reason_code": "workspace_task_exists"}
+    assert await harness.catalog.list_workspace_task_ids(workspace) == tuple(
+        sorted((pending.task_id, sibling.task_id))
+    )
+
+
+@pytest.mark.anyio
 async def test_expiry_and_stale_generation_reclaim() -> None:
     harness = _Harness.create(830)
     expired_request = await harness.command(831, refs="expired")

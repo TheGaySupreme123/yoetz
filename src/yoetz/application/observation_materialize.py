@@ -37,12 +37,16 @@ from yoetz.domain.events import (
 )
 from yoetz.domain.host_lineage import host_lineage_from_envelope
 from yoetz.domain.observation import (
+    ROUTINE_READ_SUMMARY_DETAIL_GAP,
     ObservationContentKind,
     ObservationContentManifest,
     ObservationEnvelope,
     ObservationGapCode,
     ObservationInspectionSnapshot,
     ObservationSource,
+    RoutineReadSummary,
+    observation_content_binding_matches,
+    routine_read_summary_from_envelope,
 )
 from yoetz.domain.values import (
     Actor,
@@ -68,6 +72,7 @@ from yoetz.protocol.coverage import (
     PublicationChannel,
     coverage_for_channel,
 )
+from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 
 __all__ = [
@@ -78,6 +83,7 @@ __all__ = [
     "SESSION_BOUND_MAPPING_VERSIONS",
     "MaterializedObservationBatch",
     "MaterializedObservationDraft",
+    "materialize_routine_read_summary",
     "STREAM_COMPLETED_EVENT_KINDS",
     "canonical_logical_identity",
     "materialize_observation_envelope",
@@ -90,11 +96,16 @@ __all__ = [
     "stream_event_is_completed_tool",
 ]
 
-MATERIALIZATION_MAPPING_VERSION: Final = "obs-ledger/1.5.0"
+# 1.6 scopes the canonical/action/result identities to the source lane and
+# source generation.  This prevents a reused host call id from aliasing a
+# different session while preserving Codex hook/stream equivalence inside one
+# generation.  The previous task-scoped mapping remains replayable below.
+MATERIALIZATION_MAPPING_VERSION: Final = "obs-ledger/1.6.0"
 MATERIALIZATION_LEGACY_MAPPING_VERSIONS: Final = (
     "obs-ledger/1.4.0",
     "obs-ledger/1.3.0",
     "obs-ledger/1.2.0",
+    "obs-ledger/1.5.0",
 )
 # Mapping versions whose operation digest was bound to the routed Yoetz session
 # and its observation writer. A workflow reattach in the same host session
@@ -102,7 +113,13 @@ MATERIALIZATION_LEGACY_MAPPING_VERSIONS: Final = (
 # session that committed them (#560). ``obs-ledger/1.5.0`` keys the digest on
 # the task, the canonical logical identity, and the role tuple only — exactly
 # the facts the stable event ids are derived from — and is resolved task-wide.
-SESSION_BOUND_MAPPING_VERSIONS: Final = frozenset(MATERIALIZATION_LEGACY_MAPPING_VERSIONS)
+SESSION_BOUND_MAPPING_VERSIONS: Final = frozenset(
+    {
+        "obs-ledger/1.4.0",
+        "obs-ledger/1.3.0",
+        "obs-ledger/1.2.0",
+    }
+)
 # One bounded coverage condition for "the host emitted a paired tool result with
 # no outcome semantics at all" (#350). It rides the entry coverage of the
 # affected action/result records, so any number of outcome-less observed calls
@@ -187,6 +204,7 @@ class MaterializedObservationBatch:
     channel: PublicationChannel
     gaps: tuple[str, ...]
     skip_reason: str | None = None
+    summary: RoutineReadSummary | None = None
 
 
 def stable_observation_id(
@@ -218,6 +236,14 @@ def _tool_name(payload: Mapping[str, JsonValue]) -> str | None:
 def _pairing_contract(
     envelope: ObservationEnvelope, payload: Mapping[str, JsonValue]
 ) -> tuple[str, str]:
+    """Resolve the installed host/profile pairing contract for an envelope.
+
+    The structural marker is emitted by the host adapter, while the exact
+    profile lookup remains the authority for historical envelopes that
+    predate the marker.  Generation identities are intentionally retained as
+    metadata only and never become tool-call identities.
+    """
+
     harness = (
         "claude"
         if envelope.source is ObservationSource.CLAUDE_HOOK
@@ -230,21 +256,19 @@ def _pairing_contract(
 
 
 def _correlation(
-    payload: Mapping[str, JsonValue],
-    correlation_kind: str | None = None,
-    pairing_mode: str | None = None,
+    payload: Mapping[str, JsonValue], *, correlation_kind: str | None = None
 ) -> str | None:
     # Codex spells the host tool-call id ``tool_use_id``; ingress normalizes it
     # to ``tool_call_id``, but read the host spelling first too so a payload
     # that reaches this seam un-normalized still correlates (#274).
-    if pairing_mode == "post_only" or correlation_kind == "none":
+    kind = correlation_kind
+    if kind is None:
+        raw_kind = payload.get("correlation_kind")
+        kind = raw_kind if type(raw_kind) is str else "tool_call_id"
+    if kind == "none":
         return None
-    kind = correlation_kind or (
-        payload.get("correlation_kind")
-        if type(payload.get("correlation_kind")) is str
-        else "tool_call_id"
-    )
-    for key in ("tool_use_id", "tool_call_id"):
+    direct_keys = ("tool_use_id", "tool_call_id")
+    for key in direct_keys:
         value = payload.get(key)
         if type(value) is str and value:
             return value
@@ -323,6 +347,28 @@ def _action_kind(tool: str | None) -> ActionKind:
     if lowered in _COMMAND_TOOLS or "shell" in lowered or "exec" in lowered:
         return ActionKind.COMMAND
     return ActionKind.OTHER
+
+
+def _materialization_call_source(
+    envelope: ObservationEnvelope, *, phase: str, correlation: str, family: str
+) -> str:
+    """Build a source identity that cannot cross session or generation lanes."""
+
+    return (
+        f"{phase}:{_logical_source_lane(envelope.source)}:"
+        f"{envelope.session_commitment}:{envelope.cursor.source_generation}:"
+        f"{correlation}:{family}"
+    )
+
+
+def _observation_host_label(source: ObservationSource) -> str:
+    """Name the host that supplied a native observation in user-facing text."""
+
+    if source is ObservationSource.CLAUDE_HOOK:
+        return "Claude Code hook"
+    if source is ObservationSource.CURSOR_HOOK:
+        return "Cursor hook"
+    return "Codex hook"
 
 
 def _coverage_for(
@@ -429,6 +475,14 @@ def _eligible_captured_content(
         if manifest.content_digest is None or manifest.content_bytes is None:
             gaps.add(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
             continue
+        if not observation_content_binding_matches(
+            envelope,
+            content_kind=manifest.content_kind,
+            correlation_identity=manifest.correlation_identity,
+            source_commitment=manifest.source_commitment,
+        ):
+            gaps.add(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
+            continue
         if manifest.redacted:
             gaps.add(ObservationGapCode.CONTENT_REDACTED.value)
         eligible.append(manifest)
@@ -444,6 +498,7 @@ def _captured_evidence_drafts(
     task_id: str,
     manifests: tuple[ObservationContentManifest, ...],
     parents: tuple[str, ...] = (),
+    mapping_version: str = MATERIALIZATION_MAPPING_VERSION,
 ) -> tuple[tuple[MaterializedObservationDraft, ...], tuple[str, ...]]:
     drafts: list[MaterializedObservationDraft] = []
     refs: list[str] = []
@@ -453,14 +508,14 @@ def _captured_evidence_drafts(
             kind=IdKind.EVIDENCE,
             task_id=task_id,
             source_identity=source,
-            mapping_version=MATERIALIZATION_MAPPING_VERSION,
+            mapping_version=mapping_version,
             role="captured_evidence",
         )
         event = stable_observation_id(
             kind=IdKind.EVENT,
             task_id=task_id,
             source_identity=source,
-            mapping_version=MATERIALIZATION_MAPPING_VERSION,
+            mapping_version=mapping_version,
             role="captured_evidence_event",
         )
         refs.append(evidence)
@@ -496,6 +551,86 @@ def _captured_evidence_drafts(
         )
     # Object order does not imply evidence-ID order; result references are a canonical set.
     return tuple(drafts), tuple(sorted(refs, key=str.encode))
+
+
+def materialize_routine_read_summary(
+    summary: RoutineReadSummary,
+    *,
+    task_id: str,
+    mapping_version: str = MATERIALIZATION_MAPPING_VERSION,
+) -> MaterializedObservationBatch:
+    """Materialize one bounded summary without inventing per-call evidence.
+
+    The local summary envelope remains the source of the exact member list.
+    The task ledger receives one metadata-only pointer whose description binds
+    only fixed structural counters and digests.  In particular, this function
+    never turns an aggregate into content coverage or a verification result.
+    """
+
+    baseline = coverage_for_channel(PublicationChannel.HOOK_OBSERVED)
+    try:
+        _validate_materialization_mapping_version(mapping_version)
+    except TypeError, ValueError:
+        return MaterializedObservationBatch(
+            (), baseline, PublicationChannel.HOOK_OBSERVED, (), "unsupported_mapping_version"
+        )
+    if type(summary) is not RoutineReadSummary:
+        return MaterializedObservationBatch(
+            (), baseline, PublicationChannel.HOOK_OBSERVED, (), "invalid_routine_read_summary"
+        )
+    gap = ROUTINE_READ_SUMMARY_DETAIL_GAP
+    summary_gaps = tuple(sorted({gap, *summary.coverage_gaps}, key=str.encode))
+    coverage = Coverage(
+        publication_channels=baseline.publication_channels,
+        authorship_assurance=baseline.authorship_assurance,
+        artifact_observation=baseline.artifact_observation,
+        evidence_immutability=baseline.evidence_immutability,
+        ledger_freshness=baseline.ledger_freshness,
+        check_types=baseline.check_types,
+        known_gaps=tuple(sorted({*baseline.known_gaps, *summary_gaps}, key=str.encode)),
+    )
+    source = f"routine-read-summary:{summary.summary_identity}"
+    evidence = stable_observation_id(
+        kind=IdKind.EVIDENCE,
+        task_id=task_id,
+        source_identity=source,
+        mapping_version=mapping_version,
+        role="routine_read_summary",
+    )
+    event = stable_observation_id(
+        kind=IdKind.EVENT,
+        task_id=task_id,
+        source_identity=source,
+        mapping_version=mapping_version,
+        role="routine_read_summary_event",
+    )
+    description = (
+        "Routine-read summary observed "
+        f"calls={summary.summary_count} inputs={summary.input_count} "
+        f"member_digest={summary.member_digest} content_scope={summary.content_scope}"
+    )
+    draft = _draft(
+        event=event,
+        schema_name="evidence_recorded",
+        occurred_at=summary.receipt_time,
+        payload=EvidenceRecordedPayload(
+            evidence_id(evidence),
+            EvidenceKind.OTHER,
+            EvidenceImmutability.METADATA_ONLY,
+            summary.receipt_time,
+            reference=f"routine_read_summary:{summary.summary_identity}",
+            description=description,
+        ),
+        role="routine_read_summary",
+    )
+    return MaterializedObservationBatch(
+        (draft,),
+        coverage,
+        PublicationChannel.HOOK_OBSERVED,
+        summary_gaps,
+        None,
+        summary,
+    )
 
 
 def materialize_observation_inspection_snapshot(
@@ -620,11 +755,28 @@ def materialize_observation_envelope(
     *,
     task_id: str,
     captured_content: tuple[ObservationContentManifest, ...] = (),
+    mapping_version: str = MATERIALIZATION_MAPPING_VERSION,
 ) -> MaterializedObservationBatch:
     """Map one envelope to zero or more ledger drafts.
 
+    ``mapping_version`` is the materialization schema, never the source cursor
+    version. New calls use the current ``obs-ledger/1.6.0`` default; a caller
+    replaying an already committed historical operation may explicitly select
+    one of the supported legacy versions.
+
     Returns ``skip_reason`` when the envelope should remain observation-store-only.
     """
+
+    try:
+        _validate_materialization_mapping_version(mapping_version)
+    except TypeError, ValueError:
+        return MaterializedObservationBatch(
+            (),
+            coverage_for_channel(PublicationChannel.HOOK_OBSERVED),
+            PublicationChannel.HOOK_OBSERVED,
+            (),
+            "unsupported_mapping_version",
+        )
 
     if type(envelope) is not ObservationEnvelope:
         return MaterializedObservationBatch(
@@ -635,25 +787,49 @@ def materialize_observation_envelope(
             "invalid_envelope",
         )
 
+    if envelope.event_kind == "RoutineReadSummary":
+        try:
+            summary = routine_read_summary_from_envelope(envelope)
+        except ProtocolValueError:
+            # Summary envelopes are local, bounded accounting records. A
+            # malformed one must stay out of the ledger rather than degrade to
+            # an opaque evidence record that hides the accounting failure.
+            return MaterializedObservationBatch(
+                (),
+                coverage_for_channel(PublicationChannel.HOOK_OBSERVED),
+                PublicationChannel.HOOK_OBSERVED,
+                (ObservationGapCode.ROUTINE_READ_SUMMARY_INVALID.value,),
+                "invalid_routine_read_summary",
+            )
+        return materialize_routine_read_summary(
+            summary, task_id=task_id, mapping_version=mapping_version
+        )
+
     structural = cast(Mapping[str, JsonValue], envelope.structural_payload)
     pairing_mode, correlation_kind = _pairing_contract(envelope, structural)
-    if (
-        pairing_mode == "post_only"
-        and ObservationGapCode.UNPAIRED_EVENT.value in envelope.gap_codes
-    ):
-        # A pre-#607 native post-only observation may carry the old false gap.
-        # Keep its immutable envelope history, but do not expose that stale
-        # pairing diagnosis to materialization or coverage.
-        envelope = replace(
-            envelope,
-            gap_codes=tuple(
-                gap for gap in envelope.gap_codes if gap != ObservationGapCode.UNPAIRED_EVENT.value
-            ),
-        )
-    captured, gaps = _eligible_captured_content(envelope, captured_content)
-    coverage = _coverage_for(envelope, gaps=gaps, content_captured=bool(captured))
+    # ``unpaired_event`` on an old Claude/Cursor envelope records the shared
+    # ingress defect, not a missing host event: those profiles never promised
+    # a pre hook.  Keep the original envelope and its gap history intact, but
+    # remove the false current limitation from this materialization attempt.
+    effective_gaps = tuple(
+        gap
+        for gap in envelope.gap_codes
+        if not (gap == ObservationGapCode.UNPAIRED_EVENT.value and pairing_mode == "post_only")
+    )
+    materialized_envelope = (
+        envelope
+        if effective_gaps == envelope.gap_codes
+        else replace(envelope, gap_codes=effective_gaps)
+    )
+    captured, gaps = _eligible_captured_content(materialized_envelope, captured_content)
+    coverage = _coverage_for(materialized_envelope, gaps=gaps, content_captured=bool(captured))
     channel = PublicationChannel.HOOK_OBSERVED
-    mapping = envelope.cursor.mapping_version or MATERIALIZATION_MAPPING_VERSION
+    # Cursor mappings describe the transport that delivered the envelope. They
+    # must never select ledger record identities: equivalent hook/stream input
+    # has one source-independent materialization mapping. Historical replay is
+    # explicit through the keyword above so a legacy committed graph can still
+    # be reconstructed without allowing a transport version to mint new IDs.
+    mapping = mapping_version
     kind = envelope.event_kind
     # Codex hook ``PostToolUse`` and a completed session-stream tool record
     # (rollout ``function_call_output``, historically exec ``item.completed``)
@@ -664,12 +840,12 @@ def materialize_observation_envelope(
     if (
         envelope.source is ObservationSource.CODEX_SESSION_STREAM
         and completed_stream
-        and _correlation(structural, correlation_kind, pairing_mode) is not None
+        and _correlation(structural, correlation_kind=correlation_kind) is not None
     ):
         kind = "PostToolUse"
     tool = _tool_name(structural)
-    correlation = _correlation(structural, correlation_kind, pairing_mode)
-    unpaired = ObservationGapCode.UNPAIRED_EVENT.value in gaps
+    correlation = _correlation(structural, correlation_kind=correlation_kind)
+    unpaired = ObservationGapCode.UNPAIRED_EVENT.value in gaps and pairing_mode == "paired"
     unsupported = (
         ObservationGapCode.UNSUPPORTED_EVENT.value in gaps
         or kind in {"unsupported_event", "observation_gap"}
@@ -684,31 +860,33 @@ def materialize_observation_envelope(
         return MaterializedObservationBatch((), coverage, channel, gaps, "lifecycle_only")
 
     drafts: list[MaterializedObservationDraft] = []
-    routine_read = structural.get("action") == "routine_read"
-
     if kind == "PreToolUse":
-        if routine_read and not captured:
-            # The full envelope remains in the observation store. Successful read-only calls are
-            # rate-limited at the task-ledger boundary rather than minting one pending action per
-            # file lookup; a failed PostToolUse still materializes below.
-            return MaterializedObservationBatch(
-                (), coverage, channel, gaps, "routine_read_deferred"
-            )
+        # A selected routine pre normally reaches the ledger only through its
+        # completed summary.  When the admission buffer has to flush an
+        # incomplete attempt (deadline, boundary, or session close), this
+        # envelope is delivered individually.  Preserve its native identity as
+        # a pending action so the missing post remains visible as an
+        # action-without-result condition; do not synthesize an outcome.
         if correlation is None:
             return MaterializedObservationBatch(
                 (), coverage, channel, gaps, "missing_tool_identity"
             )
+        action_source = (
+            f"pre-event:{_logical_source_lane(envelope.source)}:"
+            f"{envelope.session_commitment}:{envelope.cursor.source_generation}:"
+            f"{envelope.source_identity}"
+        )
         action = stable_observation_id(
             kind=IdKind.ACTION,
             task_id=task_id,
-            source_identity=envelope.source_identity,
+            source_identity=action_source,
             mapping_version=mapping,
             role="action",
         )
         event = stable_observation_id(
             kind=IdKind.EVENT,
             task_id=task_id,
-            source_identity=envelope.source_identity,
+            source_identity=action_source,
             mapping_version=mapping,
             role="action_event",
         )
@@ -739,24 +917,23 @@ def materialize_observation_envelope(
             task_id=task_id,
             manifests=captured,
             parents=(event,),
+            mapping_version=mapping,
         )
         drafts.extend(captured_drafts)
         return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
 
     if kind == "PostToolUse":
-        # A routine read is coalesced only after the host supplied an explicit
-        # successful outcome. An outcome-less result must retain its durable
-        # action/result identity and folded host_outcome_unavailable gap under
-        # ADR-022 decision 12; treating UNKNOWN as a successful read would
-        # discard that limitation before the materializer can record it.
-        if routine_read and not captured and _post_outcome(structural) is ResultOutcome.SUCCESS:
-            return MaterializedObservationBatch(
-                (), coverage, channel, gaps, "routine_read_coalesced"
-            )
-        if pairing_mode == "post_only" or unpaired or correlation is None:
+        # Successful routine reads are summarized before this boundary when
+        # the selection contract is valid.  Any individually admitted copy
+        # (legacy input, an unknown route/fence, a builder fallback, or a
+        # context boundary) must still materialize its own action/result.  The
+        # summary event has its separate branch above, so this cannot turn a
+        # real summary into per-call records.
+        if unpaired or correlation is None:
             # Standalone structural observation: evidence only; do not invent
-            # an action. A post-only profile has an intentional identity limit,
-            # so its result is evidence without an ``unpaired_event`` gap.
+            # an action.  A post-only profile has an intentional identity
+            # limit, so its generation-only result is evidence without the
+            # paired-profile ``unpaired_event`` gap.
             post_only = pairing_mode == "post_only"
             evidence_role = "post_only_result" if post_only else "unpaired_result"
             event_role = "post_only_result_event" if post_only else "unpaired_result_event"
@@ -775,18 +952,17 @@ def materialize_observation_envelope(
                 role=event_role,
             )
             exit_status = _exit_status(structural)
-            if pairing_mode == "post_only":
-                summary = (
-                    f"Post-only observed tool result exit={exit_status}"
-                    if exit_status is not None
-                    else "Post-only observed tool result"
+            summary = (
+                (
+                    f"Observed post-only tool result exit={exit_status}"
+                    if post_only
+                    else f"Unpaired observed tool result exit={exit_status}"
                 )
-            else:
-                summary = (
-                    f"Unpaired observed tool result exit={exit_status}"
-                    if exit_status is not None
-                    else "Unpaired observed tool result"
-                )
+                if exit_status is not None
+                else "Observed post-only tool result"
+                if post_only
+                else "Unpaired observed tool result"
+            )
             drafts.append(
                 _draft(
                     event=event,
@@ -807,45 +983,53 @@ def materialize_observation_envelope(
                 task_id=task_id,
                 manifests=captured,
                 parents=(event,),
+                mapping_version=mapping,
             )
             drafts.extend(captured_drafts)
             merged_gaps = (
                 gaps
-                if pairing_mode == "post_only"
+                if post_only
                 else tuple(sorted({*gaps, ObservationGapCode.UNPAIRED_EVENT.value}, key=str.encode))
             )
             return MaterializedObservationBatch(tuple(drafts), coverage, channel, merged_gaps, None)
 
         # Linked post: action (idempotent stable IDs from correlation) + result.
+        # Post-only profiles may use an actual tool-call id when supplied, but
+        # their action identity is explicitly separate from a paired pre.
         family = _action_kind(tool).value
-        action_source = f"pre:{correlation}:{family}"
+        action_phase = "post-only" if pairing_mode == "post_only" else "pre"
+        action_source = _materialization_call_source(
+            envelope, phase=action_phase, correlation=correlation, family=family
+        )
         action = stable_observation_id(
             kind=IdKind.ACTION,
             task_id=task_id,
             source_identity=action_source,
-            mapping_version=MATERIALIZATION_MAPPING_VERSION,
+            mapping_version=mapping,
             role="action",
         )
         action_event = stable_observation_id(
             kind=IdKind.EVENT,
             task_id=task_id,
             source_identity=action_source,
-            mapping_version=MATERIALIZATION_MAPPING_VERSION,
+            mapping_version=mapping,
             role="action_event",
         )
-        result_source = f"post:{correlation}:{family}"
+        result_source = _materialization_call_source(
+            envelope, phase="post", correlation=correlation, family=family
+        )
         result = stable_observation_id(
             kind=IdKind.RESULT,
             task_id=task_id,
             source_identity=result_source,
-            mapping_version=MATERIALIZATION_MAPPING_VERSION,
+            mapping_version=mapping,
             role="result",
         )
         result_event = stable_observation_id(
             kind=IdKind.EVENT,
             task_id=task_id,
             source_identity=result_source,
-            mapping_version=MATERIALIZATION_MAPPING_VERSION,
+            mapping_version=mapping,
             role="result_event",
         )
         action_kind = _action_kind(tool)
@@ -861,7 +1045,11 @@ def materialize_observation_envelope(
                 payload=ActionRecordedPayload(
                     action_id(action),
                     action_kind,
-                    f"Observed {action_kind.value} via Codex hook",
+                    (
+                        f"Observed {action_kind.value} via post-only hook"
+                        if pairing_mode == "post_only"
+                        else f"Observed {action_kind.value} via {_observation_host_label(envelope.source)}"
+                    ),
                     command=command,
                 ),
                 role="action",
@@ -872,6 +1060,7 @@ def materialize_observation_envelope(
             task_id=task_id,
             manifests=captured,
             parents=(action_event,),
+            mapping_version=mapping,
         )
         drafts.extend(captured_drafts)
         exit_status = _exit_status(structural)
@@ -945,16 +1134,20 @@ def materialize_observation_envelope(
             )
         )
         captured_drafts, _captured_refs = _captured_evidence_drafts(
-            envelope, task_id=task_id, manifests=captured, parents=(event,)
+            envelope,
+            task_id=task_id,
+            manifests=captured,
+            parents=(event,),
+            mapping_version=mapping,
         )
         drafts.extend(captured_drafts)
         return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
 
     if kind in _SUBAGENT_START or kind in _SUBAGENT_STOP:
-        # Assignment requires obligations; record evidence-only until the
-        # service lineage coordinator binds this host observation to a child.
-        # Keep a stable, path-free correlation reference so a late stop can
-        # reconcile with its start without minting a second annotation.
+        # Assignment requires obligations; record evidence-only until the service lineage
+        # coordinator binds this host observation to a child. Keep a stable, path-free
+        # correlation reference so a late stop can reconcile with its start without minting a
+        # second annotation.
         lineage = host_lineage_from_envelope(envelope)
         if lineage is None:
             return MaterializedObservationBatch(
@@ -976,10 +1169,6 @@ def materialize_observation_envelope(
             role="subagent_observation_event",
         )
         phase = lineage.phase
-        description = (
-            f"Observed host subagent {phase}; origin=host_observed; "
-            f"acceptance=pending; correlation={lineage.logical_identity}"
-        )
         drafts.append(
             _draft(
                 event=event,
@@ -991,13 +1180,20 @@ def materialize_observation_envelope(
                     EvidenceImmutability.METADATA_ONLY,
                     envelope.receipt_time,
                     reference=f"host-lineage:{lineage.logical_identity}",
-                    description=description,
+                    description=(
+                        f"Observed host subagent {phase}; origin=host_observed; "
+                        f"acceptance=pending; correlation={lineage.logical_identity}"
+                    ),
                 ),
                 role="subagent",
             )
         )
         captured_drafts, _captured_refs = _captured_evidence_drafts(
-            envelope, task_id=task_id, manifests=captured, parents=(event,)
+            envelope,
+            task_id=task_id,
+            manifests=captured,
+            parents=(event,),
+            mapping_version=mapping,
         )
         drafts.extend(captured_drafts)
         return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
@@ -1035,7 +1231,11 @@ def materialize_observation_envelope(
             )
         )
         captured_drafts, _captured_refs = _captured_evidence_drafts(
-            envelope, task_id=task_id, manifests=captured, parents=(event,)
+            envelope,
+            task_id=task_id,
+            manifests=captured,
+            parents=(event,),
+            mapping_version=mapping,
         )
         drafts.extend(captured_drafts)
         return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
@@ -1071,7 +1271,11 @@ def materialize_observation_envelope(
             )
         )
         captured_drafts, _captured_refs = _captured_evidence_drafts(
-            envelope, task_id=task_id, manifests=captured, parents=(event,)
+            envelope,
+            task_id=task_id,
+            manifests=captured,
+            parents=(event,),
+            mapping_version=mapping,
         )
         drafts.extend(captured_drafts)
         return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
@@ -1107,7 +1311,11 @@ def materialize_observation_envelope(
         )
     )
     captured_drafts, _captured_refs = _captured_evidence_drafts(
-        envelope, task_id=task_id, manifests=captured, parents=(event,)
+        envelope,
+        task_id=task_id,
+        manifests=captured,
+        parents=(event,),
+        mapping_version=mapping,
     )
     drafts.extend(captured_drafts)
     return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
@@ -1133,8 +1341,8 @@ def materialize_observation_outcome_correction(
     """
 
     structural = cast(Mapping[str, JsonValue], envelope.structural_payload)
-    pairing_mode, correlation_kind = _pairing_contract(envelope, structural)
-    correlation = _correlation(structural, correlation_kind, pairing_mode)
+    _pairing_mode, correlation_kind = _pairing_contract(envelope, structural)
+    correlation = _correlation(structural, correlation_kind=correlation_kind)
     tool = _tool_name(structural)
     coverage = _coverage_for(envelope)
     channel = PublicationChannel.HOOK_OBSERVED
@@ -1151,7 +1359,9 @@ def materialize_observation_outcome_correction(
         return MaterializedObservationBatch((), coverage, channel, gaps, "outcome_unknown")
 
     family = _action_kind(tool).value
-    action_source = f"pre:{correlation}:{family}"
+    action_source = _materialization_call_source(
+        envelope, phase="pre", correlation=correlation, family=family
+    )
     if target_action_id is not None:
         action = action_id(target_action_id)
         action_parents = (
@@ -1180,7 +1390,9 @@ def materialize_observation_outcome_correction(
         )
     exit_status = _exit_status(structural)
     correction_source = (
-        f"outcome-correction:{correlation}:{family}:{outcome.value}:"
+        f"outcome-correction:{_logical_source_lane(envelope.source)}:"
+        f"{envelope.session_commitment}:{envelope.cursor.source_generation}:"
+        f"{correlation}:{family}:{outcome.value}:"
         f"{exit_status if exit_status is not None else 'none'}"
     )
     correction_role = (
@@ -1237,45 +1449,85 @@ def materialize_observation_outcome_correction(
     return MaterializedObservationBatch((draft,), coverage, channel, gaps, None)
 
 
-def canonical_logical_identity(envelope: ObservationEnvelope) -> str:
-    """Return the canonical logical-observation identity for one envelope.
+def _logical_source_lane(source: ObservationSource) -> str:
+    """Collapse only Codex hook/stream copies into one source lane."""
 
-    Hook ``PostToolUse`` and stream completed-tool copies of the same host
-    call collapse to one identity (session + host call/correlation id + tool
-    family), so cross-source duplicates materialize a single ledger action or
-    result. Consecutive identical commands with *different* host ids stay
-    distinct. Events without a host call id (lifecycle, unsupported, or gap
-    envelopes) fall back to a source-specific opaque identity so unrelated
-    look-alikes never collide.
-    """
+    if source in {ObservationSource.CODEX_HOOK, ObservationSource.CODEX_SESSION_STREAM}:
+        return "codex"
+    return source.value
 
-    if type(envelope) is not ObservationEnvelope:
-        return _logical_identity_digest(("opaque", "invalid"))
+
+def _legacy_logical_identity(envelope: ObservationEnvelope) -> str:
+    """Reproduce the pre-1.6 identity for committed-operation recovery."""
+
     structural = cast(Mapping[str, JsonValue], envelope.structural_payload)
-    lineage = host_lineage_from_envelope(envelope)
-    if lineage is not None:
-        # Hook and session-stream copies of one host subagent signal share a
-        # source-stable logical identity. Keep the phase in the key so start
-        # and stop each retain a durable observation while replaying the same
-        # phase is idempotent. The service registry reconciles the stronger
-        # host correlation fields separately.
-        return _logical_identity_digest(("subagent", lineage.logical_identity, lineage.phase))
-    pairing_mode, correlation_kind = _pairing_contract(envelope, structural)
-    host_call = _correlation(structural, correlation_kind, pairing_mode)
+    # Explicit legacy replay keeps the old payload interpretation.  This is
+    # only used to locate already-committed pre-1.6 rows; current materialized
+    # identities still derive from the reviewed source/profile contract, so a
+    # historical Cursor generation id cannot become a new tool identity.
+    host_call = _correlation(structural)
     if host_call is None:
         return _logical_identity_digest(("opaque", envelope.source.value, envelope.source_identity))
     family = _action_kind(_tool_name(structural)).value
     return _logical_identity_digest(("action", envelope.session_commitment, host_call, family))
 
 
-def observation_content_identity(envelope: ObservationEnvelope) -> str:
+def canonical_logical_identity(
+    envelope: ObservationEnvelope, *, mapping_version: str | None = None
+) -> str:
+    """Return the canonical logical-observation identity for one envelope.
+
+    Hook ``PostToolUse`` and stream completed-tool copies of the same Codex
+    call collapse to one identity (source lane + session + generation + host
+    call/correlation id + tool family), so cross-source duplicates materialize
+    a single ledger action or result. Claude and Cursor remain separate lanes.
+    Consecutive identical commands with different host ids, sessions, or
+    generations stay distinct. Events without a host call id (lifecycle,
+    unsupported, or gap envelopes) fall back to a source-specific opaque
+    identity so unrelated look-alikes never collide.
+
+    ``mapping_version`` is accepted for replay of pre-1.6 operations, whose
+    committed identities intentionally omitted the lane and generation.
+    """
+
+    if type(envelope) is not ObservationEnvelope:
+        return _logical_identity_digest(("opaque", "invalid"))
+    if mapping_version in set(MATERIALIZATION_LEGACY_MAPPING_VERSIONS):
+        return _legacy_logical_identity(envelope)
+    lineage = host_lineage_from_envelope(envelope)
+    if lineage is not None:
+        # Hook and session-stream copies of one host subagent signal share a source-stable
+        # identity. Keep the phase in the key so start and stop remain distinct.
+        return _logical_identity_digest(("subagent", lineage.logical_identity, lineage.phase))
+    structural = cast(Mapping[str, JsonValue], envelope.structural_payload)
+    _pairing_mode, correlation_kind = _pairing_contract(envelope, structural)
+    host_call = _correlation(structural, correlation_kind=correlation_kind)
+    if host_call is None:
+        return _logical_identity_digest(("opaque", envelope.source.value, envelope.source_identity))
+    family = _action_kind(_tool_name(structural)).value
+    return _logical_identity_digest(
+        (
+            "action",
+            _logical_source_lane(envelope.source),
+            envelope.session_commitment,
+            str(envelope.cursor.source_generation),
+            host_call,
+            family,
+        )
+    )
+
+
+def observation_content_identity(
+    envelope: ObservationEnvelope, *, mapping_version: str | None = None
+) -> str:
     """Return the phase-scoped identity used to recover captured manifests.
 
     Ledger action/result identity intentionally collapses hook/stream copies and
     several phases of one host call. Captured content follows only the first
     half of that rule: equivalent same-phase copies share recovery, while
     Pre/Post/unpaired siblings remain isolated so they cannot change one
-    another's materialized role sets.
+    another's materialized role sets.  ``mapping_version`` selects the
+    historical identity when replaying a pre-1.6 manifest key.
     """
 
     if type(envelope) is not ObservationEnvelope:
@@ -1286,24 +1538,22 @@ def observation_content_identity(envelope: ObservationEnvelope) -> str:
     if (
         envelope.source is ObservationSource.CODEX_SESSION_STREAM
         and stream_event_is_completed_tool(kind, structural)
-        and _correlation(structural, correlation_kind, pairing_mode) is not None
+        and _correlation(structural, correlation_kind=correlation_kind) is not None
     ):
         kind = "PostToolUse"
     phase = (
         f"{kind}:unpaired"
         if (
             kind == "PostToolUse"
-            and ObservationGapCode.UNPAIRED_EVENT.value in envelope.gap_codes
             and pairing_mode == "paired"
+            and ObservationGapCode.UNPAIRED_EVENT.value in envelope.gap_codes
         )
-        else f"{kind}:post_only"
-        if kind == "PostToolUse" and pairing_mode == "post_only"
         else kind
     )
     return _logical_identity_digest(
         (
             "content",
-            canonical_logical_identity(envelope),
+            canonical_logical_identity(envelope, mapping_version=mapping_version),
             phase,
         )
     )
@@ -1328,11 +1578,12 @@ def observation_claim_identity(
     """
 
     _validate_materialization_mapping_version(mapping_version)
+    logical_identity = canonical_logical_identity(envelope, mapping_version=mapping_version)
     return _logical_identity_digest(
         (
             "claim",
             mapping_version,
-            canonical_logical_identity(envelope),
+            logical_identity,
             *draft_roles,
         )
     )
@@ -1365,9 +1616,10 @@ def observation_operation_digest(
     identity so matching hook/stream copies produce one ledger operation.
 
     Under the current mapping the digest is task-scoped: the stable event ids it
-    commits depend on the task and the source identity only, so the operation
-    that owns them must be findable from any later Yoetz session of the same
-    task (a workflow reattach rotates the session and writer, #560). The legacy
+    commits depend on the task and the source identity (which includes the
+    source lane, host session, and generation), so the operation that owns them
+    must be findable from any later Yoetz session of the same task (a workflow
+    reattach rotates the routed session and writer, #560). The legacy
     session-bound versions still require ``session_id`` and ``writer_id`` so a
     pre-upgrade committed operation keeps its exact replay identity.
     """

@@ -186,6 +186,10 @@ class DeclaredCoordinationInput:
     source_has_attributable_paths: bool = True
     obligation_ids: tuple[str, ...] = ()
     coordination_declarations: tuple[CoordinationObligationDeclaredPayload, ...] = ()
+    # Internal provenance only.  It is deliberately absent from ``as_wire``: route identity is
+    # used to derive a successor detection id, while the released coordination input schema stays
+    # byte-compatible.
+    route_identity_digest: str | None = None
 
     def __post_init__(self) -> None:
         _task(self.task_id)
@@ -196,6 +200,11 @@ class DeclaredCoordinationInput:
         _commitment(self.repository_commitment)
         _commitment(self.workspace_commitment)
         _positive(self.route_generation)
+        if self.route_identity_digest is not None:
+            try:
+                validate_sha256_digest(self.route_identity_digest)
+            except (TypeError, ValueError) as exc:
+                raise CoordinationError(CoordinationErrorCode.INVALID) from exc
         if type(self.resources) is not tuple or len(self.resources) > 256:
             raise CoordinationError(CoordinationErrorCode.INVALID)
         # Validate each declaration and reject duplicate/sorted ambiguity at the boundary.  The
@@ -537,6 +546,8 @@ class RoutedCoordinationContextWriter:
             source_workspace_commitment=recipient.workspace_commitment,
             project=recipient.project_id,
             expected_generation=detection.membership_generation,
+            expected_route_generation=recipient.route_generation,
+            expected_repository_commitment=recipient.repository_commitment,
             cross_repository=recipient.repository_commitment != source.repository_commitment,
         )
         await self.projects.admit(
@@ -544,6 +555,8 @@ class RoutedCoordinationContextWriter:
             source_workspace_commitment=source.workspace_commitment,
             project=source.project_id,
             expected_generation=detection.membership_generation,
+            expected_route_generation=source.route_generation,
+            expected_repository_commitment=source.repository_commitment,
             cross_repository=recipient.repository_commitment != source.repository_commitment,
         )
         route = await self.projects.catalog.task_route(recipient.task_id)
@@ -1366,6 +1379,7 @@ class LedgerCoordinationInputProvider:
             or route.task_id != task
             or route.state is not TaskRouteState.ACTIVE
             or route.route_generation != provenance.route_generation
+            or route.route_identity_digest != provenance.route_identity_digest
         ):
             return None
         if project_value is None:
@@ -1395,7 +1409,9 @@ class LedgerCoordinationInputProvider:
             selected_declarations = tuple(
                 item
                 for item in declarations
-                if item.project_id == project_value and item.recipient_task_id == task
+                if item.project_id == project_value
+                and item.recipient_task_id == task
+                and item.obligation_id in derived_obligations
             )
         else:
             selected_resources = tuple(
@@ -1424,6 +1440,7 @@ class LedgerCoordinationInputProvider:
             attributable,
             selected_obligations,
             selected_declarations,
+            provenance.route_identity_digest,
         )
 
     async def for_task(
@@ -1877,6 +1894,9 @@ class CoordinationDetector:
                 source_workspace_commitment=left.workspace_commitment,
                 project=left.project_id,
                 expected_generation=generation,
+                expected_route_generation=left.route_generation,
+                expected_route_identity_digest=left.route_identity_digest,
+                expected_repository_commitment=left.repository_commitment,
                 cross_repository=True,
             )
             right_admission = await self.projects.admit(
@@ -1884,6 +1904,9 @@ class CoordinationDetector:
                 source_workspace_commitment=right.workspace_commitment,
                 project=right.project_id,
                 expected_generation=generation,
+                expected_route_generation=right.route_generation,
+                expected_route_identity_digest=right.route_identity_digest,
+                expected_repository_commitment=right.repository_commitment,
                 cross_repository=True,
             )
             return left_admission, right_admission
@@ -1893,12 +1916,18 @@ class CoordinationDetector:
                 source_workspace_commitment=left.workspace_commitment,
                 project=left.project_id,
                 expected_generation=generation,
+                expected_route_generation=left.route_generation,
+                expected_route_identity_digest=left.route_identity_digest,
+                expected_repository_commitment=left.repository_commitment,
             ),
             await self.projects.admit(
                 source_task_id=right.task_id,
                 source_workspace_commitment=right.workspace_commitment,
                 project=right.project_id,
                 expected_generation=generation,
+                expected_route_generation=right.route_generation,
+                expected_route_identity_digest=right.route_identity_digest,
+                expected_repository_commitment=right.repository_commitment,
             ),
         )
 
@@ -1913,6 +1942,15 @@ class CoordinationDetector:
         right_current = await self.projects.current_route_generation(right.task_id)
         if left.route_generation != left_current or right.route_generation != right_current:
             raise CoordinationError(CoordinationErrorCode.GENERATION_MISMATCH)
+        for declared in (left, right):
+            if declared.route_identity_digest is None:
+                continue
+            provenance = await self.projects.catalog.task_source_provenance(declared.task_id)
+            if (
+                provenance is None
+                or provenance.route_identity_digest != declared.route_identity_digest
+            ):
+                raise CoordinationError(CoordinationErrorCode.GENERATION_MISMATCH)
 
     async def detect(
         self,
@@ -1966,13 +2004,71 @@ class CoordinationDetector:
         if overlap_kind is None:
             return ()
         ordered_left, ordered_right = sorted((left.task_id, right.task_id), key=str.encode)
+        ordered_left_input = left if left.task_id == ordered_left else right
+        ordered_right_input = right if right.task_id == ordered_right else left
+        route_identity_digests = (
+            ordered_left_input.route_identity_digest,
+            ordered_right_input.route_identity_digest,
+        )
+        include_route_identity = all(value is not None for value in route_identity_digests)
         detection_id = coordination_detection_identity(
             project_id_value=left.project_id,
             membership_generation=generation,
             left_task_id=ordered_left,
             right_task_id=ordered_right,
             resource_identities=resource_ids,
+            left_route_generation=ordered_left_input.route_generation,
+            right_route_generation=ordered_right_input.route_generation,
+            left_route_identity_digest=(
+                route_identity_digests[0] if include_route_identity else None
+            ),
+            right_route_identity_digest=(
+                route_identity_digests[1] if include_route_identity else None
+            ),
         )
+        # Detections written by the pre-route-bound implementation remain durable and must be
+        # retried in place while their participant snapshots still match.  A rotated route has a
+        # different route-bound id and therefore gets a successor row instead of colliding with
+        # the immutable old participant rows.
+        legacy_detection_id = coordination_detection_identity(
+            project_id_value=left.project_id,
+            membership_generation=generation,
+            left_task_id=ordered_left,
+            right_task_id=ordered_right,
+            resource_identities=resource_ids,
+        )
+        participants = cast(
+            tuple[CoordinationParticipant, CoordinationParticipant],
+            tuple(
+                sorted(
+                    (
+                        CoordinationParticipant(
+                            left.task_id,
+                            left.project_id,
+                            left.repository_commitment,
+                            left.workspace_commitment,
+                            left.route_generation,
+                            left.source_has_attributable_paths,
+                        ),
+                        CoordinationParticipant(
+                            right.task_id,
+                            right.project_id,
+                            right.repository_commitment,
+                            right.workspace_commitment,
+                            right.route_generation,
+                            right.source_has_attributable_paths,
+                        ),
+                    ),
+                    key=lambda item: item.task_id.encode("ascii"),
+                )
+            ),
+        )
+        if detection_id != legacy_detection_id:
+            legacy = await self.store.get_detection(legacy_detection_id)
+            if legacy is not None:
+                prior_participants = await self.store.participants(legacy_detection_id)
+                if prior_participants == participants:
+                    detection_id = legacy_detection_id
         declared_ids: dict[str, str] = {}
         if type(coordination_declarations) not in {tuple, list}:
             raise CoordinationError(CoordinationErrorCode.INVALID)
@@ -2047,24 +2143,6 @@ class CoordinationDetector:
             if merged != stored_detection:
                 stored_detection = await self.store.replace_detection(merged)
             detection = stored_detection
-        participants = (
-            CoordinationParticipant(
-                left.task_id,
-                left.project_id,
-                left.repository_commitment,
-                left.workspace_commitment,
-                left.route_generation,
-                left.source_has_attributable_paths,
-            ),
-            CoordinationParticipant(
-                right.task_id,
-                right.project_id,
-                right.repository_commitment,
-                right.workspace_commitment,
-                right.route_generation,
-                right.source_has_attributable_paths,
-            ),
-        )
         await self.store.put_participants(detection_id, participants)
         self._participants[detection_id] = participants
         for task in sorted(declared_tasks, key=str.encode):
@@ -2094,6 +2172,8 @@ class CoordinationDetector:
                     source_workspace_commitment=target.workspace_commitment,
                     project=target.project_id,
                     expected_generation=detection.membership_generation,
+                    expected_route_generation=target.route_generation,
+                    expected_repository_commitment=target.repository_commitment,
                     cross_repository=target.repository_commitment
                     != counterpart.repository_commitment,
                 )
@@ -2173,6 +2253,8 @@ class CoordinationDetector:
                         source_workspace_commitment=target.workspace_commitment,
                         project=target.project_id,
                         expected_generation=detection.membership_generation,
+                        expected_route_generation=target.route_generation,
+                        expected_repository_commitment=target.repository_commitment,
                         cross_repository=target.repository_commitment
                         != counterpart.repository_commitment,
                     )
@@ -2181,6 +2263,8 @@ class CoordinationDetector:
                         source_workspace_commitment=counterpart.workspace_commitment,
                         project=counterpart.project_id,
                         expected_generation=detection.membership_generation,
+                        expected_route_generation=counterpart.route_generation,
+                        expected_repository_commitment=counterpart.repository_commitment,
                         cross_repository=target.repository_commitment
                         != counterpart.repository_commitment,
                     )

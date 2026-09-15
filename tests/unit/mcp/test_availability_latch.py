@@ -20,7 +20,7 @@ import pytest
 from pydantic import BaseModel
 
 import yoetz.mcp.server as bridge
-from yoetz.ports.control import ControlError
+from yoetz.ports.control import ControlError, WorkspaceLocator
 from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.models import (
     PublicRequestModel,
@@ -199,7 +199,9 @@ async def test_parent_terminal_start_is_inherited_by_three_delegates_without_any
 ) -> None:
     harness = _Harness(monkeypatch, tmp_path)
     harness.on_demand_failure = ControlError("service_incompatible", retryable=True)
-    runtime = bridge.build_bridge_runtime(host_profile="cursor")
+    runtime = bridge.build_bridge_runtime(
+        host_profile="cursor", workspace_locator=WorkspaceLocator(str(tmp_path))
+    )
 
     parent = _error(await bridge.dispatch_start(_start(_PARENT), runtime))
     assert parent["code"] == "SERVICE_UNAVAILABLE"

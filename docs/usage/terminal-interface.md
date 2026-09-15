@@ -84,9 +84,11 @@ line above the active one:
    planned file count.
 5. **Installation activity**, step by step. A step is only reported as done once its postcondition
    was checked.
-6. **Secure storage** — system keyring, or a Yoetz passphrase entered on the trusted terminal
-   (masked, re-prompted, 16–1024 UTF-8 bytes). Change it later with `/service` or
-   `yoetz service rotate-passphrase`.
+6. **Secure storage** — system keyring (macOS Keychain, or a running Secret Service on Linux),
+   or a Yoetz passphrase entered on the trusted terminal (masked, re-prompted, 16–1024 UTF-8
+   bytes). When the keyring is unusable — no store loaded, or a backend Yoetz does not approve for
+   the vault — the option is disabled with that reason and the passphrase is offered. Change it
+   later with `/service` or `yoetz service rotate-passphrase`.
 7. **Review mode** — Local only, or Add semantic review.
 8. **Semantic setup, when selected** — an explicit choice between OpenAI API / compatible API and
    Codex with ChatGPT subscription, followed by the matching secure API-key or Codex-owned login
@@ -132,10 +134,28 @@ Guidance installed                  Provider binding saved
 Structural hooks installed          Credential stored
 Project consent active              Provider connection tested
 Approved-check policy trusted       Deeper-review evaluator composed
-                                    Machine privacy ceiling permits review
-                                    Exact repository grant active
+                                    Privacy permits external review
                                     Deeper review ready
+                                    Codex agent route permits deeper review
+                                    Host auto-review admits the semantic check
 ```
+
+The last four are deliberately separate lines, because each can be true while the others are not:
+
+- **Privacy permits external review** — the effective privacy policy for this repository allows
+  external LLM inference. Unknown when the policy could not be read; its detail line carries the
+  policy summary.
+- **Deeper review ready** — the installation reports `semantic_ready`: semantic review enabled, a
+  bound provider with a stored credential, a policy that permits inference, and an exact grant for
+  this repository. Configured, not proven working. Otherwise the detail says external review is
+  off.
+- **Codex agent route permits deeper review** — whether the registered Codex MCP route can dispatch
+  semantic review. A route registered as `strict` is verified installation-side and still shows
+  here as not permitting review, with the command that changes it; unknown when the registration
+  could not be read.
+- **Host auto-review admits the semantic check** — whether at least one host's automatic reviewer
+  has been admitted for this repository; the detail names each host as present or absent, and a
+  stale admission that outlives its grant or route is called out for revocation.
 
 "Connected" is never a substitute for any of these. If the privacy policy could not be read,
 `/status` says so rather than claiming nothing is leaving your computer.
@@ -177,8 +197,9 @@ confirmation.
 
 ### `/provider`
 
-Choose a preset — OpenAI, Fireworks AI, Anthropic, Google Gemini, OpenRouter, Vercel AI Gateway,
-or a custom OpenAI-compatible HTTPS endpoint — or choose **Codex with ChatGPT subscription**.
+Choose a preset — OpenAI, Fireworks AI, Anthropic, Google Gemini, OpenRouter, Grok (xAI), Vercel
+AI Gateway, or a custom OpenAI-compatible HTTPS endpoint — or choose **Codex with ChatGPT
+subscription**.
 The same command also offers Codex subscription **status**, **disconnect**, **rollback**, and
 **switch account**. Yoetz shows the endpoint/runtime and privacy posture before asking for an API
 key or opening Codex login, and states plainly that storing a binding does not switch external
@@ -234,9 +255,12 @@ terminal handoff as first-time setup: input is masked with `*`, the helper state
 UTF-8 byte contract, and it re-prompts after invalid or mismatched input. The shell equivalent is
 `yoetz service rotate-passphrase`.
 
-`/doctor` runs bounded read-only checks across runtime, package version, discovery, registration,
-managed files, hooks, consent, policy digest, service reachability, vault, provider, and privacy,
-then suggests safe next steps. When policy permits package update checks and a newer release is
+`/doctor` runs bounded read-only checks across runtime, package version, the platform cell
+(certified, or untested such as Linux aarch64), the approved-check sandbox (Seatbelt on macOS,
+bubblewrap on Linux, with the install step named when it is missing or blocked), system secure
+storage (with the reason when it is unusable), discovery, registration, managed files, hooks,
+consent, policy digest, service reachability, vault, provider, and privacy, then suggests safe
+next steps. When policy permits package update checks and a newer release is
 known, the package line is optional with remediation `uv tool upgrade yoetz`; when the check is
 allowed but fails, the line is unproven with "could not check for updates." **It never changes
 anything.**

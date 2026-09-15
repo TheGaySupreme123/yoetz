@@ -91,7 +91,9 @@ def _tool_install(
 ) -> tuple[Path, dict[str, str]]:
     tool_dir = root / "tool"
     bin_dir = root / "bin"
-    spec = "yoetz" + (f"[{','.join(extras)}]" if extras else "") + "==0.1.0"
+    wheels = sorted(dist_dir.glob("*.whl"))
+    assert len(wheels) == 1
+    spec = str(wheels[0]) + (f"[{','.join(extras)}]" if extras else "")
     env = {
         **os.environ,
         "HOME": str(home),
@@ -216,7 +218,7 @@ def test_version_json_reports_a_clean_installed_manifest(
     assert result.returncode == 0
     manifest = json.loads(result.stdout)
     assert manifest["package_name"] == "yoetz"
-    assert manifest["package_version"] == "0.1.0"
+    assert manifest["package_version"] == built_dist.wheel.name.split("-")[1]
     assert manifest["apsw_version"]["status"] == "present"
     assert manifest["sqlite_version"]["status"] == "present"
     marker = str(_REPO_ROOT).encode("utf-8")

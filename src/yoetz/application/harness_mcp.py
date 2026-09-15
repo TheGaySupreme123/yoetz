@@ -323,7 +323,7 @@ class HarnessMcpService:
             profile = preview.route_profile
             if profile != "policy" and profile != "strict":
                 return
-            serve_command = MCP_STRICT_SERVE_COMMAND if profile == "strict" else MCP_SERVE_COMMAND
+            serve_command = preview.serve_command
             record_applied_route(
                 profile,
                 list(serve_command),
@@ -376,7 +376,9 @@ class HarnessMcpService:
             if profile != "policy" and profile != "strict":
                 _clear_stale()
                 return
-            serve_command = MCP_STRICT_SERVE_COMMAND if profile == "strict" else MCP_SERVE_COMMAND
+            serve_command = observation.serve_command or (
+                MCP_STRICT_SERVE_COMMAND if profile == "strict" else MCP_SERVE_COMMAND
+            )
             try:
                 record_applied_route(
                     profile,

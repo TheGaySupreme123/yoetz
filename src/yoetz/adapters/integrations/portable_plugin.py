@@ -75,6 +75,10 @@ AGENT_PLUGIN_ROOT: Final = ".agents/plugins/yoetz"
 _PLUGIN_SCHEMA_PATH: Final = "support/agent-plugins/1.0.0/plugin.schema.json"
 _MCP_SCHEMA_PATH: Final = "support/agent-plugins/1.0.0/mcp.schema.json"
 _SKILL_PATH: Final = "skills/portable/yoetz/SKILL.md"
+_SKILL_PATH_BY_HOST: Final[Mapping[str, str]] = {
+    "portable": _SKILL_PATH,
+    "cursor": "skills/cursor/yoetz/SKILL.md",
+}
 _GUIDANCE_NAMES: Final = (
     "agent-instructions.md",
     "coverage-and-receipts.md",
@@ -557,7 +561,10 @@ def build_portable_plugin_plan(
     resource_source: PortableResourceSource | None = None,
     mcp_ownership: McpOwnership = McpOwnership.EXTERNAL_REGISTRATION,
     mcp_route_profile: Literal["strict", "policy"] | None = None,
+    skill_host: Literal["portable", "cursor"] = "portable",
 ) -> RenderedPortablePlugin:
+    if type(skill_host) is not str or skill_host not in _SKILL_PATH_BY_HOST:
+        raise _error(PluginArtifactReason.SOURCE_INVALID)
     if type(mcp_ownership) is not McpOwnership or (
         mcp_ownership is McpOwnership.PLUGIN_MANAGED
     ) != (mcp_route_profile in {"strict", "policy"}):
@@ -567,7 +574,8 @@ def build_portable_plugin_plan(
     mcp_schema = _read_verified_source(source, _MCP_SCHEMA_PATH)
     if _sha(schema) != _PLUGIN_SCHEMA_SHA or _sha(mcp_schema) != _MCP_SCHEMA_SHA:
         raise _error(PluginArtifactReason.SOURCE_INVALID)
-    skill = _read_verified_source(source, _SKILL_PATH)
+    skill_path = _SKILL_PATH_BY_HOST[skill_host]
+    skill = _read_verified_source(source, skill_path)
     validate_portable_skill(skill)
     members: dict[str, bytes] = {
         "plugin.json": _plugin_json(),
@@ -613,7 +621,7 @@ def build_portable_plugin_plan(
                 {
                     _MCP_SCHEMA_PATH,
                     _PLUGIN_SCHEMA_PATH,
-                    _SKILL_PATH,
+                    skill_path,
                     *(f"guidance/{name}" for name in _GUIDANCE_NAMES),
                 },
                 key=str.encode,

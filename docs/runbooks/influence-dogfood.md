@@ -5,15 +5,20 @@ merely whether Yoetz was healthy, authorable, or able to emit feedback. Its purp
 questions to be answered **separately**, so a zero-influence run with a healthy service and an honest
 receipt is never summarized as “Yoetz improved the agent.”
 
-It exists because of the 2026-08-03 postmortem
-([`docs/postmortems/2026-08-03-codex-testing-yoetz-schema-feedback-influence.md`](../postmortems/2026-08-03-codex-testing-yoetz-schema-feedback-influence.md)),
-which recorded operational health and receipt honesty while demonstrating little attributable work
+It exists because of the 2026-08-03 codex-testing postmortem (a private drafting input under the
+gitignored `docs/postmortems/`, not shipped; this runbook is self-contained without it), which
+recorded operational health and receipt honesty while demonstrating little attributable work
 revision. The postmortem's P1.6–P1.8 remediation items (policy-enabled qualitative route, seeded
 defect, intervention timing) are the experiment contract this runbook operationalizes.
 
 Semantic eligibility and the provenance gate stay in the
 [semantic dogfood runbook](semantic-dogfood.md) (#132). This runbook **consumes** that profile and
 gate; it does not redefine them.
+
+For the 0.2 multi-round workflow and recovery follow-up, use
+[native guidance-use acceptance](native-guidance-acceptance.md). It adds fresh/stale-memory variants,
+feedback scope, evidence reuse, repair qualification, safe recovery, and final-receipt agreement to
+each named host cell while keeping package delivery separate from actual guidance use.
 
 **Issue:** [#133](https://github.com/TheGaySupreme123/yoetz/issues/133).  
 **Design gate:** docs/test-only evaluation protocol — no public runtime behavior change.  
@@ -306,6 +311,6 @@ if prose claims improvement.
 - [Codex integration runbook](codex-integration.md) — skill install, MCP registration, route profile.
 - [Privacy and semantic review](../usage/privacy-and-semantic-review.md) — durable policy that
   authorizes disclosure.
-- Postmortem
-  [`2026-08-03-codex-testing-yoetz-schema-feedback-influence.md`](../postmortems/2026-08-03-codex-testing-yoetz-schema-feedback-influence.md)
-  — root evidence and P1.6–P1.8.
+- The 2026-08-03 codex-testing postmortem — root evidence and the P1.6–P1.8 remediation items —
+  is a private drafting input under the gitignored `docs/postmortems/` and is not shipped; the
+  experiment contract above restates everything this runbook needs from it.

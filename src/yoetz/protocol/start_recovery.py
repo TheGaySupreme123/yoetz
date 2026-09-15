@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import cast
 
 from yoetz.protocol.errors import PublicErrorCode
+from yoetz.protocol.recovery import continuation_for_reason, directive_for
 
 
 def start_recovery_guidance(code: object, retryable: object, safe_details: object) -> str:
@@ -16,20 +17,13 @@ def start_recovery_guidance(code: object, retryable: object, safe_details: objec
     reason = cast(Mapping[str, object], safe_details).get("reason_code")
     if type(reason) is not str:
         return ""
-    if code == PublicErrorCode.BUNDLE_BUSY and reason in {
+    yielded = code == PublicErrorCode.BUNDLE_BUSY and reason in {
         "start_runtime_rebind_retry_ready",
         "start_catalog_retry_ready",
         "start_busy_retry_ready",
-    }:
-        return (
-            " The start reservation is retained and its lease was released. Replay the exact "
-            "start body and request_id once; no session or writer IDs are needed. If contention "
-            "persists, retain that request and report the unresolved start."
-        )
-    if code == PublicErrorCode.OPERATION_PENDING and reason == "start_lease_pending":
-        return (
-            " Start still has a live lease. Wait up to 60 seconds, then replay the exact start "
-            "body and request_id once. Do not invent session or writer IDs. If still pending, "
-            "retain the request and report the unresolved start."
-        )
-    return ""
+    }
+    pending = code == PublicErrorCode.OPERATION_PENDING and reason == "start_lease_pending"
+    if not (yielded or pending):
+        return ""
+    directive = directive_for(continuation_for_reason(reason))
+    return "" if directive is None else " " + directive.directive

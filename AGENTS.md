@@ -13,7 +13,9 @@ For public behavior, resolve in this order:
 3. the code and the tests that lock it.
 
 For exact wire shape and byte identity, [`schemas/`](schemas/) and [`fixtures/`](fixtures/) win over
-prose. Start at [`docs/architecture.md`](docs/architecture.md) to find the owning module.
+prose. When the owning module is unclear, use [`docs/architecture.md`](docs/architecture.md).
+Read the relevant authority when a change touches its contract; small edits do not require a full
+architecture or documentation tour.
 
 Do not invent behavior that contradicts those authorities. When behavior changes, update the ADR or
 affected `docs/` page in the same change.
@@ -35,7 +37,17 @@ ripple below. Full map: [`docs/architecture.md`](docs/architecture.md); shared v
 1. Search issues/PRs for duplicates.
 2. Open an issue before coding; link it from the PR.
 3. For design-gated areas (protocol, privacy/egress, storage/durability, release/packaging, ADR or
-   `OPEN_QUESTIONS` flips), wait for maintainer acknowledgement on the issue before opening a PR.
+   `OPEN_QUESTIONS` flips), record maintainer acknowledgement on the issue before opening a PR.
+   An explicit maintainer request for that scoped work counts; record it without asking again.
+   This does not grant runtime, credential, disclosure, or destructive-action authority.
+
+## Complete authorized work
+
+Within the requested scope, complete implementation, relevant documentation, and focused
+verification. Fix regressions caused by the change and rerun affected checks without asking again.
+Stop for a specific unmet authority requirement or a material scope decision. Report completed
+work and any unmet acceptance criterion separately; do not stop merely at a first implementation.
+Keep the PR, live-state, and exact consent boundaries below.
 
 ## Ways to hurt yourself
 
@@ -47,6 +59,16 @@ ripple below. Full map: [`docs/architecture.md`](docs/architecture.md); shared v
    copy); the copy must sit in a symlink-free, mode-0700 directory — not `/tmp`, which macOS
    resolves through a symlink and the runtime refuses as `path_contains_symlink`. Copy in, never
    symlink, never copy back. Copying vault material needs maintainer sign-off first.
+   For anything that needs an installed launcher, a running service, a host registration, or an
+   upgrade path, provision an independent test instance instead
+   (`scripts/provision_test_instance.py`, [`docs/runbooks/test-instances.md`](docs/runbooks/test-instances.md),
+   ADR-028): it builds a wheel from the exact revision, installs it into its own runtime, and pins
+   that runtime to its own root, service, and vault, so a dropped `YOETZ_ISOLATED_ROOT`, a hook,
+   or a `PATH` that lists the test runtime first can no longer reach the live singleton. Setting
+   `YOETZ_ISOLATED_ROOT` alone (ADR-026) still isolates an explicitly exported process tree but
+   not a bare launcher; a bare `yoetz` resolved through `PATH` in a host registration is how the
+   live service got superseded by a test build (issue #604). Register hosts with absolute
+   launcher paths.
 2. **Never kill the service by pattern.** `pkill -f yoetz`, `pgrep | kill`, or killing a PID matched
    on a path also hits the user's real service and the hook/bridge processes, whose argv carries
    this checkout's path. Stop only a PID you spawned, or use the sanctioned path: `yoetz service
@@ -62,13 +84,15 @@ ripple below. Full map: [`docs/architecture.md`](docs/architecture.md); shared v
    (`AF_UNIX path too long`).
 4. **Edit sources, not mirrors.** `guidance/`, `schemas/`, `migrations/`, `support/`, and
    `skills/codex/` at the repo root are the sources; `src/yoetz/resources/` and the committed
-   `.agents/` trees are generated. `scripts/sync_resource_ripple.py` converges the package mirror
-   but does not re-render `.agents/`; `tests/packaging/test_committed_*_tree.py` gates both.
+   `.agents/` trees are generated. `scripts/sync_resource_ripple.py --write` converges the package
+   mirror plus `.agents/plugins/yoetz` and `.agents/skills/yoetz`; `--check` and the committed-tree
+   packaging tests gate all three. Repository generation never targets an installed host home.
 
 ## Hit every surface
 
 The most common defect here is a change that works on the path you tested and is missing everywhere
-else. Before calling work done, walk this list and say which entries applied:
+else. Apply the relevant entries when a change affects behavior or delivery. Report material
+coverage decisions and gaps; do not recite unrelated entries for every task:
 
 - **Hosts.** Codex, Claude Code, and Cursor each have an integration adapter under
   `src/yoetz/adapters/integrations/`. Host-shaped features need a decision per host, even if the
@@ -95,15 +119,25 @@ uv sync
 uv run pytest <path-to-touched-tests>
 ```
 
-Use Ruff and the pinned npm Pyright (`npx --no-install pyright`) from repository metadata. Prefer the
+For Python changes, use Ruff and the pinned npm Pyright (`npx --no-install pyright`) from
+repository metadata. For prose-only changes, verify relevant facts and links plus `git diff --check`;
+shipped guidance still needs its resource and integration packaging checks. Run `uv sync` when the
+environment needs setup or dependency synchronization, not before every edit. Prefer the
 smallest relevant test slice: the touched module family under `tests/unit/`, plus
 `tests/conformance/` when a runtime or storage boundary moves. Do not run the full suite unless
 asked; CI owns it.
 
 - New tests wait on receipts, diagnostics, and worker drains, never on sleeps. A test that needs a
-  timeout to pass is wrong.
+  sleep to infer success is wrong; bounded waits may fail on a deadline while observing real state.
 - `tests/packaging/` spawns real CLIs and shares install roots under `~/.yz-*`; never run it
-  concurrently with another pytest run, and re-run a failure solo before believing it.
+  concurrently with another pytest run, and re-run a failure solo before believing it. That
+  restriction is unchanged by ADR-028: instance pinning makes the *instances* independent, not
+  the shared `~/.yz-*` base those tests still create and delete.
+- Run any test that spawns a real service (`tests/subprocess/`, `tests/packaging/`) with
+  `YOETZ_ISOLATED_ROOT` unset in the invoking shell (`env -u YOETZ_ISOLATED_ROOT uv run pytest
+  …`) unless the test itself owns that root: an inherited root makes the spawned children
+  resolve someone else's instance. Pinned test-instance launchers are immune; the checkout's
+  `.venv` is unpinned by design.
 - The `endpoint_unsafe` family (`tests/integration/service/test_local_control_channel.py` and
   friends) is environment-dependent, not a standing baseline: re-run from a short checkout path
   before blaming a change.
@@ -120,7 +154,8 @@ uv run python scripts/sync_resource_ripple.py --check
 
 - Never open a PR unless the maintainer explicitly asks for one.
 - Conventional-commit titles in plain language: `fix(receipts): sectional markdown/text receipts`.
-- One concern per PR. If the description says "also", split it.
+- One concern per PR. Split unrelated behavior changes; keep supporting docs, tests, and generated
+  artifacts with the change they support.
 - Body: the problem in a sentence or two, how you fixed it, the verification commands you ran, and
   the model and harness that did the work. Use the repository template.
 - When babysitting a PR: poll checks and comments newer than the last push, verify each bot

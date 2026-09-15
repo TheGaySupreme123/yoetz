@@ -38,6 +38,11 @@ from yoetz.mcp.resources import (
     list_resources,
     read_resource,
 )
+from yoetz.mcp.semantic_destination import (
+    DISCLOSURE_PREFIX,
+    MAX_DISCLOSURE_ENCODED_BYTES,
+    SemanticDestinationDisclosure,
+)
 from yoetz.mcp.summaries import render_safe_compact_summary
 from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.errors import SAFE_DETAIL_KEYS, PublicErrorCode
@@ -48,7 +53,11 @@ from yoetz.protocol.models import (
     StartRequest,
     StatusRequest,
 )
-from yoetz.protocol.schemas import validate_schema_instance
+from yoetz.protocol.schemas import (
+    load_schema_catalog,
+    request_result_schema_versions,
+    validate_schema_instance,
+)
 
 _EXPECTED_TOOL_NAMES = (
     "start",
@@ -124,9 +133,13 @@ def test_public_error_and_validation_summaries_are_sanitized() -> None:
     )
     multi_location_error = cast(dict[str, object], multi_location_result["error"])
     assert multi_location_error["safe_details"] == {
+        "continuation": "input_correction_new_identity",
         "fields": ["/request_id", "/client"],
         "reasons": ["missing", "extra_forbidden"],
     }
+    multi_location_summary = render_safe_compact_summary(multi_location_result)
+    assert "Rejected: missing at /request_id; extra_forbidden at /client." in multi_location_summary
+    assert "Continuation: input_correction_new_identity." in multi_location_summary
 
     class _Request(BaseModel):
         model_config = ConfigDict(extra="forbid")
@@ -265,7 +278,11 @@ def test_unknown_nested_payload_key_keeps_the_extra_forbidden_reason() -> None:
         safe_details=locations,
     )
     details = cast(dict[str, object], cast(dict[str, object], wire["error"])["safe_details"])
-    assert details == {"fields": ["/event_drafts/0/payload"], "reasons": ["extra_forbidden"]}
+    assert details == {
+        "continuation": "input_correction_new_identity",
+        "fields": ["/event_drafts/0/payload"],
+        "reasons": ["extra_forbidden"],
+    }
 
 
 def test_unknown_tool_message_is_sanitized() -> None:
@@ -280,8 +297,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:a2d74a0e9f1604c60dc707996e0035711df07e8c27d448a7f911cc59f15fafb5",
-        "strict": "sha256:0c52e7d6c2c53c6b49d2bcf78eaecd1ee36bfc4f8e2fbd6e6786ed1efee703e9",
+        "policy": "sha256:8304e83f7dc7aa9e3c94aa3b5d817e2f0dde83d00f3c8779e4908f66c4e94beb",
+        "strict": "sha256:f18b8232073f7528ebc37a65e2f404fa40dc71f0cc6427c360aaa41779960d39",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -290,22 +307,28 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
         assert "yoetz://guidance/" in descriptor_for(name).description
     # The check descriptor carries the full mode decision rule, including semantic_required.
     check_description = descriptor_for("check").description
-    assert "semantic_if_configured for most material implementation" in check_description
-    assert "semantic_required when the claim depends on qualitative correctness" in (
+    assert "semantic_if_configured only when review is known to be optional" in check_description
+    assert "semantic_required when the user, effective policy or acceptance requires it" in (
         check_description
     )
-    assert "Omitting mode resolves through the configured verification policy" in check_description
+    assert "Omit mode to preserve the configured default" in check_description
     respond_description = descriptor_for("respond").description
     assert "result frontier of the check that returned it" in respond_description
     assert "not its subject_frontier" in respond_description
+    for local_description in (descriptor_for("publish_work").description, respond_description):
+        assert "local Yoetz ledger" in local_description
+        assert "does not publish to GitHub" in local_description
+        assert "run a semantic evaluation" in local_description
     assert descriptor_for("start").description.startswith(
-        "Call for material multi-step, delegated, resumable, or verification-heavy work"
+        "First read yoetz://guidance/workflow.md."
     )
     # The two argument conventions a first-time caller cannot infer from prose alone. Both cost a
     # rejected start call in the 2026-07-30 dogfood before the descriptor named them.
     start_description = descriptor_for("start").description
     assert "fresh req_ prefixed random UUID" in start_description
     assert "workspace_ref and external_ref are admitted only as a pair" in start_description
+    assert "A new session's first workflow operation is this call" in start_description
+    assert "for intro and guidance" in start_description
     assert (
         "unique and already in ascending ASCII order" in descriptor_for("publish_work").description
     )
@@ -320,9 +343,13 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     publish_descriptor = descriptor_for("publish_work")
     assert publish_descriptor.input_schema_ref.endswith("publish-work-request-1.2.0.schema.json")
     assert publish_descriptor.output_schema_ref.endswith("publish-work-result-1.0.0.schema.json")
+    check_descriptor = descriptor_for("check")
+    assert check_descriptor.output_schema_ref.endswith("check-result-1.3.0.schema.json")
     status_descriptor = descriptor_for("status")
     assert status_descriptor.input_schema_ref.endswith("status-request-1.2.0.schema.json")
-    assert status_descriptor.output_schema_ref.endswith("status-result-1.3.0.schema.json")
+    assert status_descriptor.output_schema_ref.endswith("status-result-1.4.0.schema.json")
+    receipt_descriptor = descriptor_for("receipt")
+    assert receipt_descriptor.output_schema_ref.endswith("receipt-result-1.3.0.schema.json")
     for descriptors in TOOL_DESCRIPTORS.values():
         assert {item.name for item in descriptors if item.annotations.read_only} == {
             "status",
@@ -377,10 +404,361 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     strict_instructions = server_instructions("strict")
     assert "Route profile: strict." in strict_instructions
     assert "This route will not request external semantic review" in strict_instructions
+    # #479: the bridge appends the startup-read semantic destination disclosure to the policy
+    # tail only; the strict tail is byte-identical with or without one, and the packaged text
+    # never carries the passage on its own.
+    disclosure = SemanticDestinationDisclosure("unknown", DISCLOSURE_PREFIX + "unknown.")
+    assert server_instructions("policy", semantic_destination=disclosure) == (
+        f"{base_instructions.rstrip()}\n\nRoute profile: policy. "
+        "External semantic review follows the configured policy. "
+        f"{disclosure.sentence}\n"
+    )
+    assert server_instructions("strict", semantic_destination=disclosure) == strict_instructions
+    assert DISCLOSURE_PREFIX not in server_instructions()
+    assert DISCLOSURE_PREFIX not in strict_instructions
 
     with pytest.raises(KeyError, match="unregistered_tool_descriptor") as captured:
         descriptor_for("secret-tool")
     assert "secret-tool" not in str(captured.value)
+
+
+def test_advertised_schema_versions_match_catalog_current_versions() -> None:
+    """Every tools/list schema reference must point at the catalog's current result contract."""
+
+    catalog = load_schema_catalog()
+    current_versions = request_result_schema_versions(catalog)
+    for profile in TOOL_DESCRIPTORS:
+        for descriptor in TOOL_DESCRIPTORS[profile]:
+            for kind, reference in (
+                ("request", descriptor.input_schema_ref),
+                ("result", descriptor.output_schema_ref),
+            ):
+                schema_name = f"{descriptor.name.replace('_', '-')}-{kind}"
+                expected_version = current_versions[schema_name]
+                assert reference.endswith(f"{schema_name}-{expected_version}.schema.json"), (
+                    f"{profile}/{descriptor.name} advertises a stale {kind} schema"
+                )
+
+
+_SUBSCRIPTION_DIGEST = "sha256:" + "a" * 64
+_SUBSCRIPTION_COMMITMENT = "hmac-sha256:" + "b" * 64
+
+
+def _subscription_id(prefix: str, ordinal: int) -> str:
+    return f"{prefix}00000000-0000-4000-8000-{ordinal:012d}"
+
+
+def _subscription_coverage() -> dict[str, Any]:
+    return {
+        "publication_channels": ["cooperative_mcp"],
+        "authorship_assurance": "service_authenticated",
+        "artifact_observation": "published_only",
+        "evidence_immutability": "metadata_only",
+        "ledger_freshness": "current",
+        "check_types": ["deterministic", "semantic_model_derived"],
+        "known_gaps": [],
+    }
+
+
+def _subscription_privacy_projection() -> dict[str, Any]:
+    return {
+        "sink": "agent_context",
+        "local_disclosure_receipt_id": _subscription_id("egr_", 2),
+        "policy_id": _subscription_id("pvy_", 3),
+        "policy_version": "1",
+        "policy_digest": _SUBSCRIPTION_DIGEST,
+        "included_categories": [],
+        "blocked_categories": [],
+        "omitted_pointers": [],
+        "projection_commitment": _SUBSCRIPTION_COMMITMENT,
+    }
+
+
+def _subscription_provenance() -> dict[str, Any]:
+    return {
+        "provider": "openai-codex",
+        "endpoint_profile_id": "codex-chatgpt-subscription",
+        "endpoint_profile_version": "1.0.0",
+        "model": "gpt-5.6-luna",
+        "sdk_version": "codex-app-server-0.150.1",
+        "prompt_digest": _SUBSCRIPTION_DIGEST,
+        "schema_digest": _SUBSCRIPTION_DIGEST,
+        "policy_digest": _SUBSCRIPTION_DIGEST,
+        "privacy_policy_digest": _SUBSCRIPTION_DIGEST,
+        "sampling_params": {"max_output_tokens": "2048"},
+        "latency_ms": "321",
+        "semantic_attempt_id": _subscription_id("att_", 1),
+        "dispatch_kind": "external_runtime_oauth",
+        "privacy_receipt_id": _subscription_id("egr_", 2),
+        "token_usage": {
+            "input_tokens": "103",
+            "output_tokens": "19",
+            "total_tokens": "122",
+        },
+        "status": "succeeded",
+        "reason": "semantic_completed",
+        "egress_authorization_id": _subscription_id("aut_", 3),
+        "request_commitment": _SUBSCRIPTION_COMMITMENT,
+        "runtime_evidence": {
+            "app_server_schema_sha256": _SUBSCRIPTION_DIGEST,
+            "capability_cell_sha256": _SUBSCRIPTION_DIGEST,
+            "capability_evidence_expires_at": "2026-11-30T00:00:00Z",
+            "capability_profile": "codex-evaluator/0.150.1/v1",
+            "case_disclosed": True,
+            "credential_authority": "external_runtime_oauth",
+            "disclosed_case_sha256": _SUBSCRIPTION_DIGEST,
+            "executable_sha256": _SUBSCRIPTION_DIGEST,
+            "instruction_sha256": _SUBSCRIPTION_DIGEST,
+            "isolated_config_sha256": _SUBSCRIPTION_DIGEST,
+            "launcher_sha256": _SUBSCRIPTION_DIGEST,
+            "output_schema_sha256": _SUBSCRIPTION_DIGEST,
+            "process_cleanup": "terminated",
+            "reasoning_effort": "high",
+            "runtime_source_identity": "openai-codex-npm-darwin-arm64-0.150.1",
+            "runtime_version": "0.150.1",
+            "selection_sha256": _SUBSCRIPTION_DIGEST,
+            "turn_acknowledged": True,
+            "upstream_body_observability": "unavailable",
+            "auth_mode": "chatgpt",
+            "plan_type": "prolite",
+            "thread_id": "thread-1",
+            "turn_id": "turn-1",
+            "final_output_sha256": _SUBSCRIPTION_DIGEST,
+            "token_usage": {
+                "cached_input_tokens": "101",
+                "cache_write_input_tokens": "17",
+                "input_tokens": "103",
+                "output_tokens": "19",
+                "reasoning_output_tokens": "11",
+                "total_tokens": "122",
+            },
+        },
+    }
+
+
+def _subscription_finding() -> dict[str, Any]:
+    return {
+        "finding_id": _subscription_id("fnd_", 8),
+        "kind": "material_limitation_omitted",
+        "origin": "semantic_model_derived",
+        "priority": 1,
+        "summary": "The synthetic semantic finding remains advisory.",
+        "detail": "The synthetic semantic finding remains advisory.",
+        "subject_refs": [_subscription_id("clm_", 9)],
+        "policy_id": "research-evidence",
+        "policy_version": "0.1.0",
+        "subject_frontier": {"sequence": "1", "head_digest": _SUBSCRIPTION_DIGEST},
+        "coverage": _subscription_coverage(),
+        "provenance": _subscription_provenance(),
+    }
+
+
+def _subscription_check_result() -> dict[str, Any]:
+    frontier = {"sequence": "1", "head_digest": _SUBSCRIPTION_DIGEST}
+    return {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": _subscription_id("req_", 7),
+        "ok": True,
+        "state": "complete",
+        "task_id": _subscription_id("tsk_", 4),
+        "session_id": _subscription_id("ses_", 5),
+        "writer_id": _subscription_id("wri_", 6),
+        "subject_frontier": frontier,
+        "result_frontier": frontier,
+        "verdict": "action_required",
+        "findings": [_subscription_finding()],
+        "suppressed_count": "0",
+        "policy_executions": [
+            {
+                "policy_id": "work-integrity",
+                "policy_version": "0.1.0",
+                "outcome": "run",
+                "reason": "completed",
+            }
+        ],
+        "semantic_status": "succeeded",
+        "semantic_reason": "semantic_completed",
+        "semantic_provenance": _subscription_provenance(),
+        "coverage": _subscription_coverage(),
+        "versions": {
+            "protocol_version": "0.1",
+            "engine_version": "0.1.0",
+            "projection_version": "0.1.0",
+            "policy_packs": ["work-integrity/0.1.0"],
+        },
+        "privacy_projection": _subscription_privacy_projection(),
+    }
+
+
+def _subscription_status_result() -> dict[str, Any]:
+    frontier = {"sequence": "1", "head_digest": _SUBSCRIPTION_DIGEST}
+    finding = _subscription_finding()
+    finding.update(
+        {
+            "disposition": "none",
+            "resolved": False,
+            "response_event_id": None,
+            "reason": None,
+            "waiver_scope": None,
+            "waiver_expiry": None,
+        }
+    )
+    return {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": _subscription_id("req_", 10),
+        "ok": True,
+        "task_id": _subscription_id("tsk_", 4),
+        "session_id": _subscription_id("ses_", 5),
+        "writer_id": _subscription_id("wri_", 6),
+        "view": "findings",
+        "requested_frontier": frontier,
+        "head_frontier": frontier,
+        "subject_frontier": frontier,
+        "result_frontier": frontier,
+        "projection_lag": "0",
+        "projection_version": "0.1.0",
+        "rebuild_state": "current",
+        "page": {"items": [finding], "next_cursor": None},
+        "coverage": _subscription_coverage(),
+        "gaps": [],
+        "import_status": {
+            "pending_count": "0",
+            "terminal_count": "0",
+            "phase": None,
+            "report_evidence_id": None,
+            "source_identity_digest": None,
+        },
+        "closure_readiness": {
+            "declared_obligation_count": "0",
+            "no_obligations_reason": None,
+            "open_obligation_count": "0",
+            "unanswered_finding_count": "1",
+            "receipt_blocking_finding_count": "1",
+            "blocking_conditions": ["findings_unanswered"],
+        },
+        "privacy_projection": _subscription_privacy_projection(),
+    }
+
+
+def _subscription_receipt_result() -> dict[str, Any]:
+    frontier = {"sequence": "1", "head_digest": _SUBSCRIPTION_DIGEST}
+    finding = _subscription_finding()
+    document: dict[str, Any] = {
+        "schema_version": "1.0.0",
+        "receipt_id": _subscription_id("rcp_", 11),
+        "task_id": _subscription_id("tsk_", 4),
+        "session_id": _subscription_id("ses_", 5),
+        "generated_at": "2026-09-05T00:00:00.000Z",
+        "subject_frontier": frontier,
+        "conclusion": "unresolved_findings_remain",
+        "suppressed_finding_count": 0,
+        "versions": {
+            "package_name": "yoetz",
+            "package_version": "0.1.0",
+            "protocol_version": "0.1",
+            "engine_version": "0.1.0",
+            "projection_version": "yoetz/0.1.0",
+            "object_format_version": "yoetz-object/1",
+            "catalog_schema_version": "6",
+            "bundle_schema_version": "9",
+            "policy_versions": [
+                {"policy_id": "research-evidence", "policy_version": "0.1.0"},
+                {"policy_id": "work-integrity", "policy_version": "0.1.0"},
+            ],
+            "schema_versions": [
+                {"schema_id": "findings/finding", "schema_version": "1.3.0"},
+                {"schema_id": "receipts/receipt-document", "schema_version": "1.3.0"},
+            ],
+            "resource_manifest_digest": _SUBSCRIPTION_DIGEST,
+        },
+        "coverage": _subscription_coverage(),
+        "findings": [finding],
+        "obligations": [],
+        "responses": [],
+        "claim_refs": [_subscription_id("clm_", 9)],
+        "evidence_refs": [],
+        "gaps": [],
+        "redactions": [],
+        "children": {"children": []},
+        "sections": [
+            {"key": "summary", "title": "Summary", "body": "Synthetic receipt.", "items": []},
+            {
+                "key": "outstanding_work",
+                "title": "Outstanding work",
+                "body": "The synthetic finding remains open.",
+                "items": [],
+            },
+            {
+                "key": "findings_and_dispositions",
+                "title": "Findings",
+                "body": "One synthetic finding remains.",
+                "items": [_subscription_id("fnd_", 8)],
+            },
+            {
+                "key": "evidence_and_claim_basis",
+                "title": "Evidence basis",
+                "body": "The synthetic receipt carries bounded provenance.",
+                "items": [],
+            },
+            {
+                "key": "limitations_and_coverage",
+                "title": "Limitations",
+                "body": "The result is advisory.",
+                "items": [],
+            },
+            {
+                "key": "version_and_policy_identity",
+                "title": "Versions and policy",
+                "body": "Synthetic contract fixture.",
+                "items": [],
+            },
+        ],
+        "semantic_provenance": _subscription_provenance(),
+    }
+    return {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": _subscription_id("req_", 12),
+        "ok": True,
+        "receipt_id": document["receipt_id"],
+        "task_id": document["task_id"],
+        "session_id": document["session_id"],
+        "subject_frontier": document["subject_frontier"],
+        "result_frontier": {"sequence": "2", "head_digest": _SUBSCRIPTION_DIGEST},
+        "receipt_object_id": _subscription_id("obj_", 13),
+        "receipt_digest": _SUBSCRIPTION_DIGEST,
+        "conclusion": document["conclusion"],
+        "redaction_profile": "full_local",
+        "format": "json",
+        "include": "full",
+        "document": document,
+        "human_text": None,
+        "coverage": document["coverage"],
+        "suppressed_finding_count": document["suppressed_finding_count"],
+        "versions": document["versions"],
+        "privacy_projection": _subscription_privacy_projection(),
+    }
+
+
+@pytest.mark.parametrize("profile", ("policy", "strict"))
+def test_advertised_outputs_accept_subscription_runtime_provenance(
+    profile: McpRouteProfile,
+) -> None:
+    """Current MCP result declarations must carry the OAuth runtime provenance contract."""
+
+    outputs = {
+        "check": _subscription_check_result(),
+        "status": _subscription_status_result(),
+        "receipt": _subscription_receipt_result(),
+    }
+    for tool_name, output in outputs.items():
+        validator = cast(
+            Any, Draft202012Validator(cast(Any, descriptor_for(tool_name, profile).output_schema))
+        )
+        errors = sorted(validator.iter_errors(output), key=lambda error: list(error.path))
+        assert not errors, f"{profile}/{tool_name}: {errors[0].json_path}: {errors[0].message}"
 
 
 def test_respond_agent_surface_names_every_admitted_disposition() -> None:
@@ -466,9 +844,26 @@ def test_advertised_surface_honors_instructions_and_aggregate_budgets() -> None:
     advertised tool, so an unbounded edit here is multiplied, not merely added."""
 
     profiles: tuple[McpRouteProfile, ...] = ("policy", "strict")
+    # #479: the policy route appends a runtime-composed destination disclosure of at most
+    # MAX_DISCLOSURE_ENCODED_BYTES. The packaged text is held to the original bound on its own,
+    # and the longest admissible disclosure is charged against the widened bound.
+    longest = SemanticDestinationDisclosure(
+        "external",
+        DISCLOSURE_PREFIX + "x" * (MAX_DISCLOSURE_ENCODED_BYTES - len(DISCLOSURE_PREFIX)),
+    )
+    assert len(longest.sentence.encode("utf-8")) == MAX_DISCLOSURE_ENCODED_BYTES
     for profile in profiles:
         metrics = advertised_surface_metrics(profile)
         assert metrics["tool_count"] == len(_EXPECTED_TOOL_NAMES)
+        assert (
+            metrics["instructions_encoded_bytes"]
+            <= (SERVER_INSTRUCTIONS_BUDGET["packaged_max_encoded_bytes"])
+        ), f"{profile} packaged initialize instructions exceed their reviewed budget"
+        assert (
+            metrics["replicated_encoded_bytes"]
+            <= (ADVERTISED_SURFACE_BUDGET["packaged_max_encoded_bytes"])
+        ), f"{profile} packaged advertised surface exceeds its reviewed budget"
+        metrics = advertised_surface_metrics(profile, semantic_destination=longest)
         assert (
             metrics["instructions_encoded_bytes"] <= SERVER_INSTRUCTIONS_BUDGET["max_encoded_bytes"]
         ), f"{profile} initialize instructions exceed their reviewed budget"

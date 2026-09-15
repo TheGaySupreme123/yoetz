@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import cast
@@ -9,6 +12,7 @@ from typing import cast
 import pytest
 
 from builders.ledger_adapters import FixedClock, FixedIds, MemoryObjects
+from yoetz.adapters.memory.project_operations import InMemoryProjectOperationJournal
 from yoetz.application.coordination import (
     CoordinationDetector,
     CoordinationParticipant,
@@ -44,15 +48,31 @@ from yoetz.domain.coordination import (
 )
 from yoetz.domain.events import CoordinationObligationDeclaredPayload
 from yoetz.domain.privacy import DataCategory, DataClass, LocalDisclosureSink
-from yoetz.domain.values import JsonObject, event_id, obligation_id, task_id
+from yoetz.domain.values import JsonObject, JsonValue, event_id, obligation_id, task_id
 from yoetz.ports.objects import ObjectKind
-from yoetz.ports.start_catalog import SessionState, TaskSourceProvenance
-from yoetz.protocol.canonical import canonical_digest
+from yoetz.ports.start_catalog import (
+    SessionState,
+    TaskRoute,
+    TaskRouteState,
+    TaskSourceProvenance,
+)
+from yoetz.protocol.canonical import canonical_digest, canonical_encode
 from yoetz.protocol.ids import IdKind, new_id
 
 
 def _commitment(seed: str) -> str:
     return "hmac-sha256:" + seed * 64
+
+
+def _operation_digest(value: JsonValue) -> str:
+    return (
+        "hmac-sha256:"
+        + hmac.new(
+            b"project-operation-test-key",
+            canonical_encode(value),
+            hashlib.sha256,
+        ).hexdigest()
+    )
 
 
 @dataclass
@@ -67,10 +87,11 @@ class _TextStore:
         *,
         owner_task_id: str,
         route_generation: int,
+        reserved_object_id: str | None = None,
     ) -> ProjectTextRef:
         del field
         return ProjectTextRef(
-            self.ids.new(IdKind.OBJECT),
+            reserved_object_id or self.ids.new(IdKind.OBJECT),
             canonical_digest({"project_id": project_id, "text": plaintext}),
             len(plaintext.encode()),
             owner_task_id,
@@ -566,7 +587,7 @@ async def test_configured_source_policy_denial_blocks_coordination_admission() -
             source_workspace_commitment=workspace,
             project=project.project_id,
         )
-    assert error.value.code is CoordinationErrorCode.CONSENT_REQUIRED
+    assert error.value.code is CoordinationErrorCode.SOURCE_POLICY_DENIED
 
     configured_categories.add(DataCategory.FINDING_SUMMARY)
     admission = await app.admit(
@@ -641,6 +662,25 @@ async def test_coordination_resource_detail_requires_both_source_owner_policies(
     )
     store = InMemoryCoordinationStore()
     await store.put_detection(detection)
+    await store.put_participants(
+        detection_id,
+        (
+            CoordinationParticipant(
+                left_task,
+                project.project_id,
+                repository,
+                workspace_left,
+                1,
+            ),
+            CoordinationParticipant(
+                right_task,
+                project.project_id,
+                repository,
+                workspace_right,
+                1,
+            ),
+        ),
+    )
     app.detection_store = store
 
     class _DetailReader:
@@ -721,6 +761,25 @@ async def test_coordination_resource_detail_requires_both_source_owner_policies(
         detail_ref=detail_ref,
     )
     await store.put_detection(case_insensitive_detection)
+    await store.put_participants(
+        case_insensitive_detection_id,
+        (
+            CoordinationParticipant(
+                left_task,
+                project.project_id,
+                repository,
+                workspace_left,
+                1,
+            ),
+            CoordinationParticipant(
+                right_task,
+                project.project_id,
+                repository,
+                workspace_right,
+                1,
+            ),
+        ),
+    )
 
     class _CaseInsensitiveDetailReader:
         async def read_details(self, reference: ProjectTextRef) -> JsonObject:
@@ -836,6 +895,25 @@ async def test_repository_membership_expands_to_admitted_tasks_and_commitment_re
         task_two,
     )
     await detector_store.put_detection(detection)
+    await detector_store.put_participants(
+        detection_id,
+        (
+            CoordinationParticipant(
+                task_one,
+                project.project_id,
+                repository,
+                workspace_one,
+                1,
+            ),
+            CoordinationParticipant(
+                task_two,
+                project.project_id,
+                repository,
+                workspace_two,
+                1,
+            ),
+        ),
+    )
     visible = await app_with_detections.project_detections_for(
         project.project_id,
         visible_task_ids=(task_one, task_two),
@@ -925,15 +1003,216 @@ async def test_detector_has_one_identity_and_two_idempotent_deliveries() -> None
         1,
         ("src/a.py",),
     )
+    legacy_detection_id = coordination_detection_identity(
+        project_id_value=project.project_id,
+        membership_generation=current.membership_generation,
+        left_task_id=min(task_one, task_two),
+        right_task_id=max(task_one, task_two),
+        resource_identities=(
+            canonical_resource_identity("src/a.py", repository_commitment=repository),
+        ),
+    )
+    legacy_detection = CoordinationDetection(
+        legacy_detection_id,
+        project.project_id,
+        current.membership_generation,
+        min(task_one, task_two),
+        max(task_one, task_two),
+        OverlapKind.INTEGRATION,
+        (canonical_resource_identity("src/a.py", repository_commitment=repository),),
+        max(task_one, task_two),
+    )
+    await store.put_detection(legacy_detection)
+    await store.put_participants(
+        legacy_detection_id,
+        (
+            CoordinationParticipant(
+                task_one,
+                project.project_id,
+                repository,
+                workspace_one,
+                1,
+            ),
+            CoordinationParticipant(
+                task_two,
+                project.project_id,
+                repository,
+                workspace_two,
+                1,
+            ),
+        ),
+    )
     deliveries = await detector.detect(left, right)
     assert len(deliveries) == 2
     assert len(store.delivery_rows) == 2
     detection = await store.get_detection(deliveries[0].detection_id)
     assert detection is not None and detection.advice_only and not detection.obligation_declared
+    assert detection.detection_id == legacy_detection_id
+    assert len(await store.list_detections(project.project_id)) == 1
     assert await store.obligation(detection.detection_id, task_one) is None
     assert await store.obligation(detection.detection_id, task_two) is None
     await detector.redeliver(deliveries[0].detection_id)
     assert len(store.delivery_rows) == 2
+
+
+@pytest.mark.anyio
+async def test_route_rotation_creates_a_successor_detection_identity() -> None:
+    ids = FixedIds()
+    task_one = new_id(IdKind.TASK)
+    task_two = new_id(IdKind.TASK)
+    repository = _commitment("4")
+    workspace_one = _commitment("5")
+    workspace_two = _commitment("6")
+    resource_identity = canonical_resource_identity("src/a.py", repository_commitment=repository)
+    route_one = "sha256:" + "a" * 64
+    route_two = "sha256:" + "b" * 64
+    forward_identity = coordination_detection_identity(
+        project_id_value="prj_00000000-0000-4000-8000-000000000001",
+        membership_generation=1,
+        left_task_id=task_one,
+        right_task_id=task_two,
+        resource_identities=(resource_identity,),
+        left_route_generation=1,
+        right_route_generation=2,
+        left_route_identity_digest=route_one,
+        right_route_identity_digest=route_two,
+    )
+    reverse_identity = coordination_detection_identity(
+        project_id_value="prj_00000000-0000-4000-8000-000000000001",
+        membership_generation=1,
+        left_task_id=task_two,
+        right_task_id=task_one,
+        resource_identities=(resource_identity,),
+        left_route_generation=2,
+        right_route_generation=1,
+        left_route_identity_digest=route_two,
+        right_route_identity_digest=route_one,
+    )
+    assert forward_identity == reverse_identity
+
+    class _RotatingCatalog(_Catalog):
+        route_generations: dict[str, int]
+
+        async def task_route_generation(self, task_id: str) -> int:
+            return self.route_generations.get(task_id, 1)
+
+    catalog = _RotatingCatalog(
+        {
+            task_one: _provenance(task_one, workspace_one, repository),
+            task_two: _provenance(task_two, workspace_two, repository),
+        }
+    )
+    catalog.route_generations = {task_one: 1, task_two: 1}
+    app = ProjectApplication(
+        catalog,
+        ids=ids,
+        text_store=_TextStore(ids),
+        workspace_consent=lambda _workspace: True,
+        grant_authorizer=_GrantApproval(),
+        coordination_source_authorizer=_allow_coordination_source,
+    )
+    project = await app.create(
+        title="Rotating overlap",
+        owner_task_id=task_one,
+        owner_route_generation=1,
+    )
+    await app.grant(ProjectGrantCommand(project.project_id, 1))
+    await app.link(
+        project_id=project.project_id,
+        member_kind=MemberKind.TASK,
+        member_commitment_or_id=task_one,
+        source_workspace_commitment=workspace_one,
+    )
+    current = await catalog.project_state(project.project_id)
+    assert current is not None
+    await app.grant(ProjectGrantCommand(project.project_id, current.membership_generation))
+    await app.link(
+        project_id=project.project_id,
+        member_kind=MemberKind.TASK,
+        member_commitment_or_id=task_two,
+        source_workspace_commitment=workspace_two,
+    )
+    current = await catalog.project_state(project.project_id)
+    assert current is not None
+    await app.grant(ProjectGrantCommand(project.project_id, current.membership_generation))
+
+    store = InMemoryCoordinationStore()
+    detector = CoordinationDetector(app, store)
+    first_left = catalog.provenance[task_one]
+    first_right = catalog.provenance[task_two]
+    left = DeclaredCoordinationInput(
+        task_one,
+        project.project_id,
+        repository,
+        workspace_one,
+        1,
+        ("src/a.py",),
+        route_identity_digest=first_left.route_identity_digest,
+    )
+    right = DeclaredCoordinationInput(
+        task_two,
+        project.project_id,
+        repository,
+        workspace_two,
+        1,
+        ("src/a.py",),
+        route_identity_digest=first_right.route_identity_digest,
+    )
+    first = await detector.detect(left, right)
+    assert len(first) == 2
+    first_detection_id = first[0].detection_id
+
+    catalog.route_generations = {task_one: 2, task_two: 2}
+    catalog.provenance[task_one] = TaskSourceProvenance(
+        task_one,
+        workspace_one,
+        first_left.external_ref_commitment,
+        repository,
+        2,
+        "sha256:" + "c" * 64,
+    )
+    catalog.provenance[task_two] = TaskSourceProvenance(
+        task_two,
+        workspace_two,
+        first_right.external_ref_commitment,
+        repository,
+        2,
+        "sha256:" + "d" * 64,
+    )
+    assert await detector.redeliver(first_detection_id) == ()
+    stale = await store.get_detection(first_detection_id)
+    assert stale is not None and stale.generation_valid is False
+    second = await detector.detect(
+        DeclaredCoordinationInput(
+            task_one,
+            project.project_id,
+            repository,
+            workspace_one,
+            2,
+            ("src/a.py",),
+            route_identity_digest=catalog.provenance[task_one].route_identity_digest,
+        ),
+        DeclaredCoordinationInput(
+            task_two,
+            project.project_id,
+            repository,
+            workspace_two,
+            2,
+            ("src/a.py",),
+            route_identity_digest=catalog.provenance[task_two].route_identity_digest,
+        ),
+    )
+    assert len(second) == 2
+    assert second[0].detection_id != first_detection_id
+    assert len(await store.list_detections(project.project_id)) == 2
+    assert len(store.delivery_rows) == 4
+    app.detection_store = store
+    visible = await app.project_detections_for(
+        project.project_id,
+        visible_task_ids=(task_one, task_two),
+        expected_generation=current.membership_generation,
+    )
+    assert tuple(item.detection_id for item in visible) == (second[0].detection_id,)
 
 
 @pytest.mark.anyio
@@ -1175,6 +1454,8 @@ async def test_declared_pair_appends_context_before_each_terminal_delivery_and_s
         left_task_id=min(task_one, task_two),
         right_task_id=max(task_one, task_two),
         resource_identities=(resource_identity,),
+        left_route_generation=1,
+        right_route_generation=1,
     )
     advice = await detector.detect(
         left,
@@ -1197,7 +1478,8 @@ async def test_declared_pair_appends_context_before_each_terminal_delivery_and_s
         ),
     )
     assert len(advice) == 2
-    assert context_calls == [(task_one, 0), (task_two, 1)]
+    ordered_tasks = sorted((task_one, task_two), key=str.encode)
+    assert context_calls == [(ordered_tasks[0], 0), (ordered_tasks[1], 1)]
     assert len(store.delivery_rows) == 2
     assert advice[0].detection_id == detection_id
     first_state = await store.obligation(detection_id, task_one)
@@ -1262,6 +1544,92 @@ async def test_detector_rejects_stale_task_route_declarations() -> None:
 
 
 @pytest.mark.anyio
+async def test_input_provider_drops_declarations_for_closed_obligations() -> None:
+    task = new_id(IdKind.TASK)
+    repository = _commitment("1")
+    workspace = _commitment("2")
+    provenance = TaskSourceProvenance(
+        task,
+        workspace,
+        _commitment("e"),
+        repository,
+        1,
+        canonical_digest(
+            {
+                "task_id": task,
+                "bundle_relpath": f"tasks/{task}",
+                "route_generation": 1,
+            }
+        ),
+    )
+    session = new_id(IdKind.SESSION)
+
+    class _RoutedCatalog(_Catalog):
+        async def task_route_generation(self, task_id: str) -> int:
+            assert task_id == task
+            return provenance.route_generation
+
+        async def task_route(self, task_id: str) -> TaskRoute | None:
+            if task_id != task:
+                return None
+            return TaskRoute(
+                task_id,
+                session,
+                f"tasks/{task_id}",
+                provenance.route_generation,
+                TaskRouteState.ACTIVE,
+                provenance.route_identity_digest,
+                repository,
+            )
+
+    catalog = _RoutedCatalog({task: provenance})
+    app = ProjectApplication(catalog, ids=FixedIds())
+    project = await catalog.ensure_repository_project(repository)
+    stale_obligation = new_id(IdKind.OBLIGATION)
+    open_obligation = new_id(IdKind.OBLIGATION)
+    detection_id = new_id(IdKind.EVENT)
+    stale = CoordinationObligationDeclaredPayload(
+        event_id(detection_id),
+        project.project_id,
+        project.membership_generation,
+        task_id(task),
+        obligation_id(stale_obligation),
+    )
+    current = CoordinationObligationDeclaredPayload(
+        event_id(detection_id),
+        project.project_id,
+        project.membership_generation,
+        task_id(task),
+        obligation_id(open_obligation),
+    )
+
+    class _NoopRuntime:
+        async def route(self, _command: object) -> object:
+            raise AssertionError("material is supplied by the test")
+
+        async def release(self, _runtime: object) -> None:
+            return None
+
+    provider = LedgerCoordinationInputProvider(app, _NoopRuntime())  # type: ignore[arg-type]
+
+    async def material(
+        _route: TaskRoute,
+    ) -> tuple[
+        set[str],
+        list[Mapping[str, JsonValue]],
+        set[str],
+        tuple[CoordinationObligationDeclaredPayload, ...],
+    ]:
+        return set(), [], {open_obligation}, (stale, current)
+
+    setattr(provider, "_load_ledger_material", material)
+    result = await provider.input_for(task, project.project_id)
+    assert result is not None
+    assert result.obligation_ids == (open_obligation,)
+    assert result.coordination_declarations == (current,)
+
+
+@pytest.mark.anyio
 async def test_project_and_coordination_text_use_encrypted_owned_objects() -> None:
     ids = FixedIds()
     objects = MemoryObjects(ids)
@@ -1311,3 +1679,116 @@ async def test_project_and_coordination_text_use_encrypted_owned_objects() -> No
     )
     assert await routed.read(routed_ref) == "routed description"
     assert routed_calls == [(owner, 4), (owner, 4)]
+
+
+@pytest.mark.anyio
+async def test_journal_replays_create_without_second_encrypted_text_write() -> None:
+    ids = FixedIds()
+    owner = new_id(IdKind.TASK)
+    workspace = _commitment("7")
+    repository = _commitment("8")
+    catalog = _Catalog({owner: _provenance(owner, workspace, repository)})
+    text_store = _TextStore(ids)
+    journal = InMemoryProjectOperationJournal()
+    app = ProjectApplication(
+        catalog,
+        ids=ids,
+        text_store=text_store,
+        workspace_consent=lambda _workspace: True,
+        text_disclosure_authorizer=_allow_text_disclosure,
+        coordination_source_authorizer=_allow_coordination_source,
+        operation_journal=journal,
+        operation_digest=_operation_digest,
+    )
+    request = new_id(IdKind.REQUEST)
+
+    first = await app.create(title="journaled", owner_task_id=owner, request_id=request)
+    second = await app.create(title="journaled", owner_task_id=owner, request_id=request)
+
+    assert second == first
+    record = journal.records[request]
+    assert record.completed
+    assert record.result_canonical is not None
+    assert b"journaled" not in record.result_canonical
+    assert first.title_ref is not None
+    assert record.reserved_title_object_id == first.title_ref.object_id
+
+
+@pytest.mark.anyio
+async def test_journal_reused_request_id_with_changed_content_conflicts() -> None:
+    ids = FixedIds()
+    owner = new_id(IdKind.TASK)
+    workspace = _commitment("9")
+    repository = _commitment("a")
+    catalog = _Catalog({owner: _provenance(owner, workspace, repository)})
+    app = ProjectApplication(
+        catalog,
+        ids=ids,
+        text_store=_TextStore(ids),
+        workspace_consent=lambda _workspace: True,
+        text_disclosure_authorizer=_allow_text_disclosure,
+        coordination_source_authorizer=_allow_coordination_source,
+        operation_journal=InMemoryProjectOperationJournal(),
+        operation_digest=_operation_digest,
+    )
+    request = new_id(IdKind.REQUEST)
+    await app.create(title="first", owner_task_id=owner, request_id=request)
+
+    with pytest.raises(ProjectCommandError) as error:
+        await app.create(title="changed", owner_task_id=owner, request_id=request)
+    assert error.value.code is CoordinationErrorCode.SELECTOR_CONFLICT
+
+
+@pytest.mark.anyio
+async def test_journal_retries_unlink_after_catalog_effect_before_response_completion() -> None:
+    class _CompleteFailsOnce(InMemoryProjectOperationJournal):
+        failed = False
+
+        async def complete(self, request_id: str, request_digest: str, result_canonical: bytes):
+            if not self.failed:
+                self.failed = True
+                raise RuntimeError("simulated_lost_response")
+            return await super().complete(request_id, request_digest, result_canonical)
+
+    ids = FixedIds()
+    owner = new_id(IdKind.TASK)
+    workspace = _commitment("b")
+    repository = _commitment("c")
+    catalog = _Catalog({owner: _provenance(owner, workspace, repository)})
+    journal = _CompleteFailsOnce()
+    app = ProjectApplication(
+        catalog,
+        ids=ids,
+        text_store=_TextStore(ids),
+        workspace_consent=lambda _workspace: True,
+        grant_authorizer=_GrantApproval(),
+        text_disclosure_authorizer=_allow_text_disclosure,
+        coordination_source_authorizer=_allow_coordination_source,
+        operation_journal=journal,
+        operation_digest=_operation_digest,
+    )
+    project = await app.create(title="unlink", owner_task_id=owner)
+    await app.grant(ProjectGrantCommand(project.project_id, 1))
+    await app.link(
+        project_id=project.project_id,
+        member_kind=MemberKind.TASK,
+        member_commitment_or_id=owner,
+        source_workspace_commitment=workspace,
+    )
+    request = new_id(IdKind.REQUEST)
+
+    with pytest.raises(RuntimeError, match="simulated_lost_response"):
+        await app.unlink(
+            project_id=project.project_id,
+            member_kind=MemberKind.TASK,
+            member_commitment_or_id=owner,
+            request_id=request,
+        )
+    replay = await app.unlink(
+        project_id=project.project_id,
+        member_kind=MemberKind.TASK,
+        member_commitment_or_id=owner,
+        request_id=request,
+    )
+    assert replay.unbound_at is not None
+    assert journal.records[request].completed

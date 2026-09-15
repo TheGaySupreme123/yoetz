@@ -4,9 +4,9 @@ This runbook governs sessions that use Yoetz on Yoetz and then report a finding 
 purpose is to fix, **before** the first task action, which claim the run is allowed to make — so a
 result is never read as evidence for a question the run's configuration made unanswerable.
 
-It exists because of the 2026-08-03 postmortem
-([`docs/postmortems/2026-08-03-codex-testing-yoetz-schema-feedback-influence.md`](../postmortems/2026-08-03-codex-testing-yoetz-schema-feedback-influence.md)),
-which scored "did semantic feedback help?" against a session whose MCP route was `strict`. Yoetz
+It exists because of the 2026-08-03 codex-testing postmortem (a private drafting input under the
+gitignored `docs/postmortems/`, not shipped; this runbook is self-contained without it), which
+scored "did semantic feedback help?" against a session whose MCP route was `strict`. Yoetz
 behaved correctly and reported honestly — `semantic_status=blocked_by_policy`,
 `semantic_reason=route_semantic_ceiling`, `semantic_provenance: null`, zero egress. The run simply
 could never have measured semantic usefulness. Nothing in the tooling said so in advance.
@@ -101,16 +101,18 @@ A second, independent drift signal compares the live registration against the la
 install rather than current configuration (issue #537). `yoetz provider status --json`
 `mcp_route` carries `applied_profile` (the route the installer last applied, from the
 state-root record) and `drift_since_install` (true when the live observed registration
-disagrees with it). Record both at preflight alongside the table above. A ceiling check
-served while the applied record says `policy` additionally carries the
-`optional_semantic_review_registration_drift` coverage gap next to the ceiling gap, and its
-receipt names the recovery: re-run `mcp preview` / `mcp install --route-profile policy` and
-start a fresh Codex process. The MCP bridge emits a closed `registration_drift` hook
-diagnostic under the `mcp_serve` event when the route it starts on disagrees with the applied
-record, so read `hook_diagnostics.reasons` there too — a drift that appears mid-session
-invalidates the profile the run declared in §1. The hook events themselves emit nothing here:
-they have no serving route to compare, and probing the host from a hook costs more than the
-hook budget allows.
+disagrees with it). Record both at preflight alongside the table above. A ceiling check served
+while the Codex applied record says `policy` additionally carries the
+`optional_semantic_review_registration_drift` coverage gap only when the serving command declares
+`--host codex`. Its receipt names the recovery: re-run `mcp preview` / `mcp install --route-profile
+policy` and start a fresh Codex process. Generic, Claude, and Cursor serving identities cannot be
+attributed to the Codex applied-route record, so their strict ceiling remains the terminal result
+without this drift gap. The MCP bridge emits a closed `registration_drift` hook diagnostic under
+the `mcp_serve` event only for explicit Codex identity when the route it starts on disagrees with
+the applied record, so read `hook_diagnostics.reasons` there too — a drift that appears mid-session
+invalidates the profile the run declared in §1. The hook events themselves emit nothing here: they
+have no serving route to compare, and probing the host from a hook costs more than the hook budget
+allows.
 
 `mcp_route.observed: false` is disqualifying for **both** profiles. An unread route is not a policy
 route, and it is not a strict route either — it is no route at all until it is read.

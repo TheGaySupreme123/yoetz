@@ -48,6 +48,7 @@ from yoetz.cli.render import (
     render_human_error,
     render_human_receipt,
     render_human_status,
+    render_local_recovery_lines,
 )
 from yoetz.domain.values import JsonObject
 from yoetz.ports.control import (
@@ -136,6 +137,9 @@ integrate_skill_app = typer.Typer(help="Manage the Yoetz harness skill.", no_arg
 integrate_mcp_app = typer.Typer(
     help="Manage the Yoetz MCP server registration.", no_args_is_help=True
 )
+integrate_project_mcp_app = typer.Typer(
+    help="Manage Cursor's project-scoped Yoetz MCP registration.", no_args_is_help=True
+)
 integrate_plugin_app = typer.Typer(
     help=(
         "Manage an explicit host plugin artifact. Claude Code supports the full lifecycle plus "
@@ -153,6 +157,13 @@ integrate_admission_app = typer.Typer(
 )
 setup_app = typer.Typer(help="Guided first-run harness and provider setup.", no_args_is_help=True)
 service_app = typer.Typer(help="Manage the foreground local service.", no_args_is_help=True)
+instance_app = typer.Typer(
+    help=(
+        "Create, inspect, and dispose independent Yoetz instances (persistent development "
+        "instances and disposable test snapshots with their own root, service, and vault)."
+    ),
+    no_args_is_help=True,
+)
 auto_unlock_app = typer.Typer(
     help="Inspect or repair restart-safe passphrase unlock.", no_args_is_help=True
 )
@@ -210,10 +221,12 @@ app.add_typer(state_app, name="state")
 app.add_typer(integrate_app, name="integrate")
 integrate_app.add_typer(integrate_skill_app, name="skill")
 integrate_app.add_typer(integrate_mcp_app, name="mcp")
+integrate_app.add_typer(integrate_project_mcp_app, name="project-mcp")
 integrate_app.add_typer(integrate_plugin_app, name="plugin")
 integrate_app.add_typer(integrate_admission_app, name="admission")
 app.add_typer(setup_app, name="setup")
 app.add_typer(service_app, name="service")
+app.add_typer(instance_app, name="instance")
 service_app.add_typer(auto_unlock_app, name="auto-unlock")
 service_app.add_typer(recovery_app, name="recovery")
 app.add_typer(provider_app, name="provider")
@@ -267,6 +280,9 @@ def recommend_list_cmd(
 @recommend_app.command("accept")
 def recommend_accept_cmd(
     recommendation_id: Annotated[str, typer.Argument(help="Exact recommendation id.")],
+    release_version: Annotated[
+        str | None, typer.Option("--release-version", help="Exact advertised package release.")
+    ] = None,
     codex_path: Annotated[
         Path | None,
         typer.Option(
@@ -283,6 +299,7 @@ def recommend_accept_cmd(
 
     _recommend_operation("recommend_accept")(
         recommendation_id,
+        release_version=release_version,
         codex_path=codex_path,
         codex_home=codex_home,
     )
@@ -291,6 +308,9 @@ def recommend_accept_cmd(
 @recommend_app.command("decline")
 def recommend_decline_cmd(
     recommendation_id: Annotated[str, typer.Argument(help="Exact recommendation id.")],
+    release_version: Annotated[
+        str | None, typer.Option("--release-version", help="Exact advertised package release.")
+    ] = None,
     codex_path: Annotated[
         Path | None,
         typer.Option(
@@ -309,8 +329,104 @@ def recommend_decline_cmd(
 
     _recommend_operation("recommend_decline")(
         recommendation_id,
+        release_version=release_version,
         codex_path=codex_path,
         codex_home=codex_home,
+    )
+
+
+@app.command("upgrade")
+def upgrade_cmd(
+    host: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--host", help="Existing host: codex, claude, cursor; repeat for multiple hosts."
+        ),
+    ] = None,
+    accept: Annotated[
+        bool,
+        typer.Option(
+            "--accept", help="Run only the fixed uv package upgrade; other stages stay explicit."
+        ),
+    ] = False,
+    writers_stopped: Annotated[
+        bool,
+        typer.Option(
+            "--writers-stopped",
+            help="Confirm old hosts/hooks and service have been quiesced before package replacement.",
+        ),
+    ] = False,
+    project_root: Annotated[
+        str | None,
+        typer.Option("--project-root", help="Exact existing project-root; never inferred."),
+    ] = None,
+    codex_path: Annotated[
+        str | None, typer.Option("--codex-path", help="Exact existing codex-path; never inferred.")
+    ] = None,
+    codex_home: Annotated[
+        str | None, typer.Option("--codex-home", help="Exact existing codex-home; never inferred.")
+    ] = None,
+    claude_path: Annotated[
+        str | None,
+        typer.Option("--claude-path", help="Exact existing claude-path; never inferred."),
+    ] = None,
+    claude_config_root: Annotated[
+        str | None,
+        typer.Option(
+            "--claude-config-root", help="Exact existing claude-config-root; never inferred."
+        ),
+    ] = None,
+    cache_root: Annotated[
+        str | None, typer.Option("--cache-root", help="Exact existing cache-root; never inferred.")
+    ] = None,
+    marketplace_root: Annotated[
+        str | None,
+        typer.Option("--marketplace-root", help="Exact existing marketplace-root; never inferred."),
+    ] = None,
+    cursor_config_root: Annotated[
+        str | None,
+        typer.Option(
+            "--cursor-config-root", help="Exact existing cursor-config-root; never inferred."
+        ),
+    ] = None,
+    mcp_ownership: Annotated[
+        str | None,
+        typer.Option("--mcp-ownership", help="Exact existing mcp-ownership; never inferred."),
+    ] = None,
+    route_profile: Annotated[
+        str | None,
+        typer.Option("--route-profile", help="Exact existing route-profile; never inferred."),
+    ] = None,
+    observation_profile: Annotated[
+        str | None,
+        typer.Option(
+            "--observation-profile", help="Exact existing observation-profile; never inferred."
+        ),
+    ] = None,
+) -> None:
+    """Plan a complete upgrade while preserving settings; optionally replace this uv tool."""
+    module = importlib.import_module("yoetz.cli.upgrade")
+    operation = cast(Callable[..., int], module.run_upgrade)
+    options = {
+        "project-root": project_root,
+        "codex-path": codex_path,
+        "codex-home": codex_home,
+        "claude-path": claude_path,
+        "claude-config-root": claude_config_root,
+        "cache-root": cache_root,
+        "marketplace-root": marketplace_root,
+        "cursor-config-root": cursor_config_root,
+        "mcp-ownership": mcp_ownership,
+        "route-profile": route_profile,
+        "observation-profile": observation_profile,
+    }
+    _finish(
+        operation(
+            hosts=host,
+            options={key: value for key, value in options.items() if value is not None},
+            accept=accept,
+            writers_stopped=writers_stopped,
+        )
     )
 
 
@@ -443,11 +559,16 @@ def _machine_scope_request_or_none() -> JsonObject | None:
 
 
 def _bounded_failure_line(reason: str, *, prefix: str | None = None) -> str:
-    """Render one bounded token with its remediation; the token itself stays first."""
+    """Render one bounded token with its remediation; the token itself stays first.
+
+    When the reason has a registered recovery directive (ADR-030), the directive lines follow on
+    their own lines, so a lifecycle refusal the MCP bridge would explain is explained here too.
+    """
 
     head = reason if prefix is None else f"{prefix}: {reason}"
     remediation = remediation_message(reason)
-    return head if remediation is None else f"{head}: {remediation}"
+    line = head if remediation is None else f"{head}: {remediation}"
+    return "\n".join([line, *render_local_recovery_lines(reason)])
 
 
 def _codex_subscription_cli_failure(error: BaseException) -> None:
@@ -498,9 +619,16 @@ def _singleton_holder_pid() -> int | None:
         return None
 
 
+def _annotate_first_line(text: str, suffix: str) -> str:
+    """Append a bounded annotation to the token line, ahead of any directive lines beneath it."""
+
+    head, separator, rest = text.partition("\n")
+    return f"{head}{suffix}{separator}{rest}"
+
+
 def _with_holder_pid(line: str) -> str:
     holder = _singleton_holder_pid()
-    return line if holder is None else f"{line} (holder pid {holder})"
+    return line if holder is None else _annotate_first_line(line, f" (holder pid {holder})")
 
 
 def _lifecycle_exit_code(error: BaseException) -> int | None:
@@ -530,19 +658,24 @@ def _lifecycle_failure(error: LifecycleError) -> int:
     return exit_code_for(code)
 
 
-def _control_failure(error: ControlError, *, json_output: bool = False) -> int:
+def _control_failure(
+    error: ControlError, *, json_output: bool = False, operation: str | None = None
+) -> int:
     return _shared_control_failure(
         error,
         json_output=json_output,
+        operation=operation,
         stderr_writer=_stderr,
         stdout_writer=_stdout_json,
     )
 
 
-def control_failure(error: ControlError, *, json_output: bool = False) -> int:
+def control_failure(
+    error: ControlError, *, json_output: bool = False, operation: str | None = None
+) -> int:
     """Render a control-channel failure using the shared CLI taxonomy."""
 
-    return _control_failure(error, json_output=json_output)
+    return _control_failure(error, json_output=json_output, operation=operation)
 
 
 type WorkflowRequest = (
@@ -596,7 +729,7 @@ async def _call_workflow(
     except OSError, ProtocolValueError, ValidationError, ValueError:
         return _usage_failure()
     except ControlError as error:
-        return _control_failure(error)
+        return _control_failure(error, operation=method)
 
 
 def _finish(code: int) -> None:
@@ -692,13 +825,24 @@ def hooks_cursor_observe(
             ),
         ),
     ] = None,
+    observation_profile: Annotated[
+        str | None,
+        typer.Option(
+            "--observation-profile",
+            help="Exact profile emitted by the rendered native Cursor artifact.",
+        ),
+    ] = None,
 ) -> None:
     """Privacy-minimized, fail-open observation ingress for local Cursor hooks."""
 
     try:
         module = importlib.import_module("yoetz.cli.observe_hooks")
         handler = cast(Callable[..., int], getattr(module, "handle_cursor_observe"))
-        handler(event_name=event, workspace=workspace)
+        handler(
+            event_name=event,
+            workspace=workspace,
+            observation_profile=observation_profile,
+        )
     except BaseException:
         try:
             _stdout_json({})
@@ -719,13 +863,24 @@ def hooks_claude_observe(
             ),
         ),
     ] = None,
+    observation_profile: Annotated[
+        str | None,
+        typer.Option(
+            "--observation-profile",
+            help="Exact profile emitted by the rendered native Claude artifact.",
+        ),
+    ] = None,
 ) -> None:
     """Privacy-minimized, fail-open observation ingress for Claude Code hooks."""
 
     try:
         module = importlib.import_module("yoetz.cli.observe_hooks")
         handler = cast(Callable[..., int], getattr(module, "handle_claude_observe"))
-        handler(event_name=event, workspace=workspace)
+        handler(
+            event_name=event,
+            workspace=workspace,
+            observation_profile=observation_profile,
+        )
     except BaseException:
         try:
             _stdout_json({})
@@ -830,6 +985,252 @@ def observe_grant_cmd(
     """One-time observation consent; stores a private workspace commitment only."""
 
     _finish(_observe_operation("grant_observation")(workspace=workspace))
+
+
+@observe_app.command("content-enable")
+def observe_content_enable_cmd(
+    workspace: Annotated[str, typer.Option("--workspace", help="Workspace path to consent.")],
+    profile: Annotated[
+        str,
+        typer.Option(
+            "--profile",
+            help=(
+                "Versioned native-host content profile; use the exact profile emitted by the "
+                "host integration renderer."
+            ),
+        ),
+    ],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Enable one versioned native-host content capture arm."""
+
+    _finish(
+        _observe_operation("enable_observation_content")(
+            workspace=workspace, profile=profile, json_output=json_output
+        )
+    )
+
+
+@observe_app.command("content-disable")
+def observe_content_disable_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+    profile: Annotated[
+        str | None,
+        typer.Option("--profile", help="Disable one profile; omit to disable all profiles."),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Disable one native-host content arm or all native-host content capture."""
+
+    _finish(
+        _observe_operation("disable_observation_content")(
+            workspace=workspace, profile=profile, json_output=json_output
+        )
+    )
+
+
+@observe_app.command("content-status")
+def observe_content_status_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Show exact native-host content arms and their active state."""
+
+    _finish(
+        _observe_operation("observation_content_status")(
+            workspace=workspace, json_output=json_output
+        )
+    )
+
+
+@observe_app.command("selection-status")
+def observe_selection_status_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+    session_id: Annotated[
+        str | None,
+        typer.Option(
+            "--session-id",
+            help="Optional current host session token; status stores only its commitment.",
+        ),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Show selected/effective observation detail and capacity."""
+
+    _finish(
+        _observe_operation("observation_selection_status")(
+            workspace=workspace,
+            session_id=session_id,
+            json_output=json_output,
+        )
+    )
+
+
+@observe_app.command("selection-preview")
+def observe_selection_preview_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+    detail: Annotated[
+        str,
+        typer.Option("--detail", help="focused or detailed"),
+    ],
+    capacity: Annotated[
+        str,
+        typer.Option("--capacity", help="standard, larger, or largest (512/2048/8192)"),
+    ],
+    session_id: Annotated[str | None, typer.Option("--session-id")] = None,
+    persist: Annotated[
+        bool,
+        typer.Option(
+            "--persist",
+            help="Preview an explicit workspace default instead of a session override.",
+        ),
+    ] = False,
+    expires_at: Annotated[
+        str | None,
+        typer.Option("--expires-at", help="RFC3339 UTC expiry (optional)."),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Preview a detail/capacity choice before owner apply."""
+
+    _finish(
+        _observe_operation("observation_selection_preview")(
+            workspace=workspace,
+            detail=detail,
+            capacity=capacity,
+            session_id=session_id,
+            persist=persist,
+            expires_at=expires_at,
+            json_output=json_output,
+        )
+    )
+
+
+@observe_app.command("selection-apply")
+def observe_selection_apply_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+    detail: Annotated[str, typer.Option("--detail", help="focused or detailed")],
+    capacity: Annotated[
+        str,
+        typer.Option("--capacity", help="standard, larger, or largest (512/2048/8192)"),
+    ],
+    session_id: Annotated[str | None, typer.Option("--session-id")] = None,
+    persist: Annotated[
+        bool,
+        typer.Option(
+            "--persist",
+            help="Persist for the workspace; without it the setting is session-scoped.",
+        ),
+    ] = False,
+    expires_at: Annotated[
+        str | None,
+        typer.Option("--expires-at", help="RFC3339 UTC expiry (optional)."),
+    ] = None,
+    accept: Annotated[
+        bool,
+        typer.Option(
+            "--accept",
+            help="Accept the exact selection preview shown by --preview-digest.",
+        ),
+    ] = False,
+    preview_digest: Annotated[
+        str | None,
+        typer.Option("--preview-digest", help="Exact digest returned by selection-preview."),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Apply an exact owner-selected detail/capacity preview."""
+
+    _finish(
+        _observe_operation("set_observation_selection")(
+            workspace=workspace,
+            detail=detail,
+            capacity=capacity,
+            session_id=session_id,
+            persist=persist,
+            expires_at=expires_at,
+            accept=accept,
+            preview_digest=preview_digest,
+            json_output=json_output,
+        )
+    )
+
+
+@observe_app.command("selection-revoke")
+def observe_selection_revoke_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+    session_id: Annotated[str | None, typer.Option("--session-id")] = None,
+    persist: Annotated[
+        bool,
+        typer.Option("--persist", help="Revoke the persisted workspace default."),
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Revoke a session/workspace selection and restore the safe fallback."""
+
+    _finish(
+        _observe_operation("revoke_observation_selection")(
+            workspace=workspace,
+            session_id=session_id,
+            persist=persist,
+            json_output=json_output,
+        )
+    )
+
+
+@observe_app.command("protect-read")
+def observe_protect_read_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+    session_id: Annotated[str, typer.Option("--session-id")],
+    reference: Annotated[
+        str,
+        typer.Option(
+            "--reference",
+            help="Existing obligation, claim, finding, or verification reference.",
+        ),
+    ],
+    count: Annotated[int, typer.Option("--count", min=1, max=32)] = 1,
+    expires_at: Annotated[
+        str | None,
+        typer.Option("--expires-at", help="RFC3339 UTC expiry (optional)."),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Protect the next bounded session reads within existing authority."""
+
+    _finish(
+        _observe_operation("protect_observation_read")(
+            workspace=workspace,
+            session_id=session_id,
+            reference=reference,
+            count=count,
+            expires_at=expires_at,
+            json_output=json_output,
+        )
+    )
+
+
+@observe_app.command("promote")
+def observe_promote_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+    source_identity: Annotated[
+        str,
+        typer.Option(
+            "--source-identity",
+            help="Exact retained observation source identity to promote.",
+        ),
+    ],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Promote a still-retained observation identity without new capture."""
+
+    _finish(
+        _observe_operation("promote_observation")(
+            workspace=workspace,
+            source_identity=source_identity,
+            json_output=json_output,
+        )
+    )
 
 
 @observe_app.command("pause")
@@ -955,6 +1356,54 @@ app.command("check")(_workflow_command("check", CheckRequest))
 app.command("respond")(_workflow_command("respond", RespondRequest))
 app.command("status")(_workflow_command("status", StatusRequest))
 app.command("receipt")(_workflow_command("receipt", ReceiptRequest))
+
+
+@app.command("closure-prepare")
+def closure_prepare_command(
+    session_id: Annotated[str, typer.Option("--session-id")],
+    writer_id: Annotated[str, typer.Option("--writer-id")],
+    input_path: _INPUT = None,
+) -> None:
+    """Read closure inventory or prepare one explicitly selected phase; never publish."""
+
+    from yoetz.cli.closure import PREPARATION_REMEDIATIONS, Selection, prepare_closure
+
+    async def prepare() -> None:
+        selection = (
+            Selection()
+            if input_path is None
+            else cast(Selection, _request_model(Selection, input_path, None))
+        )
+        client = await build_service_client()
+        try:
+            result = await prepare_closure(client.status, session_id, writer_id, selection)
+        finally:
+            await client.close()
+        _stdout_json(result)
+
+    try:
+        run_async(prepare)
+    except OSError, ProtocolValueError, ValidationError:
+        _finish(_usage_failure())
+    except ValueError as error:
+        reason = str(error)
+        remediation = PREPARATION_REMEDIATIONS.get(reason)
+        if remediation is None:
+            _finish(_usage_failure())
+        else:
+            _stderr(f"{reason}: {remediation}")
+            _finish(2)
+    except ControlError as error:
+        _finish(_control_failure(error))
+
+
+@app.command("closure-schema")
+def closure_schema_command() -> None:
+    """Print the closed selection-input schema for closure-prepare."""
+
+    from yoetz.cli.closure import Selection
+
+    _stdout_json(cast(JsonValue, Selection.model_json_schema()))
 
 
 @cache
@@ -1218,12 +1667,18 @@ def service_run() -> None:
         raise typer.Exit(exit_code_for(PublicErrorCode.SERVICE_UNAVAILABLE)) from None
 
     # Free at this point: the daemon import above already composed the lifecycle module.
+    from yoetz.config.installation import InstanceIdentityError
+    from yoetz.config.paths import PathSafetyError
     from yoetz.service.lifecycle import LifecycleError
 
     try:
         daemon_main()
     except LifecycleError as error:
         _finish(_lifecycle_failure(error))
+    except (InstanceIdentityError, PathSafetyError) as error:
+        # An instance whose identity, pin, root, or lifetime cannot be trusted is refused before
+        # the singleton is taken (issue #604); name the condition, never a traceback.
+        _finish(_instance_failure(error))
 
 
 @service_app.command("isolation")
@@ -1236,6 +1691,7 @@ def service_isolation(json_output: _JSON = False) -> None:
     """
 
     from yoetz.cli.isolation_status import isolation_report
+    from yoetz.config.installation import InstanceIdentityError
     from yoetz.config.models import ConfigError
     from yoetz.config.paths import PathSafetyError
 
@@ -1247,20 +1703,172 @@ def service_isolation(json_output: _JSON = False) -> None:
     except ConfigError as error:
         _stderr(f"isolation_unprovable: {error.reason_code}")
         _finish(2)
+    except InstanceIdentityError as error:
+        _stderr(f"isolation_unprovable: {error.reason}")
+        _finish(2)
     else:
         _human_or_json(cast(JsonValue, dict(report)), json_output=json_output)
         _finish(0)
 
 
+def _instance_failure(error: BaseException) -> int:
+    """Report a bounded instance-identity or isolation-root refusal (issue #604)."""
+
+    from yoetz.cli.exits import INSTANCE_PUBLIC_CODES
+    from yoetz.cli.instance import instance_failure_line
+    from yoetz.config.installation import InstanceIdentityError
+    from yoetz.config.paths import PathSafetyError
+
+    if isinstance(error, InstanceIdentityError):
+        reason = error.reason
+    elif isinstance(error, PathSafetyError):
+        reason = error.reason_code
+    else:
+        _stderr("internal_error: the command could not be completed")
+        return exit_code_for(PublicErrorCode.INTERNAL_ERROR)
+    _stderr(instance_failure_line(error))
+    return exit_code_for(INSTANCE_PUBLIC_CODES.get(reason, PublicErrorCode.STORAGE_UNSAFE))
+
+
+def _run_instance_operation(operation: Callable[[], object], *, json_output: bool) -> None:
+    from yoetz.config.installation import InstanceIdentityError
+    from yoetz.config.paths import PathSafetyError
+
+    try:
+        result = operation()
+    except (InstanceIdentityError, PathSafetyError) as error:
+        _finish(_instance_failure(error))
+    else:
+        _human_or_json(cast(JsonValue, result), json_output=json_output)
+        _finish(0)
+
+
+_INSTANCE_ROOT_OPTION = Annotated[
+    Path,
+    typer.Option(
+        "--root",
+        help="Absolute isolated root the instance owns (created by 'create', removed by 'dispose').",
+    ),
+]
+
+
+@instance_app.command("create")
+def instance_create(
+    root: _INSTANCE_ROOT_OPTION,
+    lifecycle: Annotated[
+        Literal["persistent", "disposable"],
+        typer.Option(
+            "--lifecycle",
+            help="persistent: a kept development instance; disposable: a bounded test snapshot.",
+        ),
+    ],
+    source_ref: Annotated[
+        str | None,
+        typer.Option(
+            "--source-ref", help="Exact 40/64-hex source revision the runtime was built from."
+        ),
+    ] = None,
+    source_state: Annotated[
+        Literal["clean", "modified", "unknown"],
+        typer.Option("--source-state", help="Whether that revision's tree was clean when built."),
+    ] = "unknown",
+    package_digest: Annotated[
+        str | None,
+        typer.Option("--package-digest", help="sha256:<hex> of the installed wheel, when known."),
+    ] = None,
+    expires_in: Annotated[
+        float | None,
+        typer.Option("--expires-in", help="Hours until a disposable instance stops serving."),
+    ] = None,
+    expires_at: Annotated[
+        str | None,
+        typer.Option("--expires-at", help="RFC 3339 UTC millisecond time the instance expires."),
+    ] = None,
+    bind_runtime: Annotated[
+        bool,
+        typer.Option(
+            "--bind-runtime",
+            help=(
+                "Pin this runtime (its virtual environment) to the root so it resolves the root "
+                "even without YOETZ_ISOLATED_ROOT."
+            ),
+        ),
+    ] = False,
+    json_output: _JSON = False,
+) -> None:
+    """Create an isolated instance root with a sealed identity; connection-free."""
+
+    from datetime import UTC, datetime
+
+    from yoetz.cli.instance import create_instance, parse_expiry
+
+    def operation() -> object:
+        now = datetime.now(UTC)
+        return create_instance(
+            root=root,
+            lifecycle=lifecycle,
+            now=now,
+            expires_at=parse_expiry(now=now, expires_in_hours=expires_in, expires_at=expires_at),
+            source_ref=source_ref,
+            source_state=source_state,
+            package_digest=package_digest,
+            bind_runtime=bind_runtime,
+        )
+
+    _run_instance_operation(operation, json_output=json_output)
+
+
+@instance_app.command("status")
+def instance_status_command(json_output: _JSON = False) -> None:
+    """Report this runtime's instance (mode, binding, lifecycle, provenance); digest-only."""
+
+    from yoetz.cli.instance import instance_status
+
+    _run_instance_operation(instance_status, json_output=json_output)
+
+
+@instance_app.command("dispose")
+def instance_dispose(
+    root: _INSTANCE_ROOT_OPTION,
+    retain_logs: Annotated[
+        Path | None,
+        typer.Option(
+            "--retain-logs",
+            help="Directory that receives a copy of the instance's log files before removal.",
+        ),
+    ] = None,
+    no_stop: Annotated[
+        bool,
+        typer.Option(
+            "--no-stop",
+            help="Refuse instead of stopping a service that still holds the root's singleton.",
+        ),
+    ] = False,
+    json_output: _JSON = False,
+) -> None:
+    """Remove one persistent or disposable instance root; repeated calls are a no-op."""
+
+    from yoetz.cli.instance import dispose_instance
+
+    _run_instance_operation(
+        lambda: dispose_instance(root=root, retain_logs=retain_logs, stop_service=not no_stop),
+        json_output=json_output,
+    )
+
+
 @service_app.command("diagnostics")
 def service_diagnostics(
     correlation_id: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--correlation-id",
             help="Exact err_… correlation id from a public error or reduced accept envelope.",
         ),
-    ],
+    ] = None,
+    request_id: Annotated[
+        str | None,
+        typer.Option("--request-id", help="Exact check request ID for joined failure stages."),
+    ] = None,
     json_output: _JSON = False,
 ) -> None:
     """Resolve one durable owner-only diagnostic record by correlation id."""
@@ -1269,12 +1877,14 @@ def service_diagnostics(
         from yoetz.observability.diagnostics import lookup_diagnostic_records
         from yoetz.protocol.ids import IdKind, validate_id
 
-        validate_id(IdKind.CORRELATION, correlation_id)
-        records = lookup_diagnostic_records(correlation_id)
+        if correlation_id is not None:
+            validate_id(IdKind.CORRELATION, correlation_id)
+        records = lookup_diagnostic_records(correlation_id, request_id=request_id)
         output = cast(
             JsonValue,
             {
                 "correlation_id": correlation_id,
+                **({"request_id": request_id} if request_id is not None else {}),
                 "count": len(records),
                 "records": [dict(item) for item in records],
             },
@@ -1295,18 +1905,28 @@ def mcp_serve(
         ),
     ] = "on",
     host: Annotated[
-        Literal["generic", "cursor"],
+        Literal["generic", "codex", "claude", "cursor"],
         typer.Option(
             "--host",
-            help="MCP result presentation profile for the exact local host.",
+            help="MCP serving identity for the exact local host; generic leaves host unknown.",
         ),
     ] = "generic",
+    project_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--project-root",
+            help=(
+                "Cursor only: expanded project selector from the host's ${workspaceFolder}; "
+                "it must also be present in MCP roots/list."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Run the MCP stdio bridge."""
 
     module = importlib.import_module("yoetz.mcp.server")
     mcp_main = cast(Callable[..., None], getattr(module, "main"))
-    mcp_main(semantic=semantic, host=host)
+    mcp_main(semantic=semantic, host=host, project_root=project_root)
 
 
 @state_app.command("capture")
@@ -1472,6 +2092,52 @@ for _mcp_action in ("preview", "preview-remove", "install", "status", "remove"):
     integrate_mcp_app.command(_mcp_action)(_integration_mcp_command(_mcp_action))
 
 
+def _cursor_project_mcp_command(action: str) -> Callable[..., None]:
+    def command(
+        context: typer.Context,
+        project_root: Annotated[
+            Path,
+            typer.Option(
+                "--project-root", help="Exact trusted project containing .cursor/mcp.json."
+            ),
+        ],
+        cursor_config_root: Annotated[
+            Path,
+            typer.Option("--cursor-config-root", help="Exact Cursor user configuration root."),
+        ],
+        route_profile: _ROUTE_PROFILE = None,
+        accept: _ACCEPT = False,
+        preview_digest: Annotated[
+            str | None,
+            typer.Option("--preview-digest", help="Exact reviewed project MCP preview digest."),
+        ] = None,
+        json_output: _JSON = False,
+    ) -> None:
+        harness = cast(str, context.find_root().find_object(str) or context.obj)
+        module = importlib.import_module("yoetz.cli.cursor_project_mcp")
+        operation = cast(Callable[..., int], getattr(module, "run_cursor_project_mcp_command"))
+        _finish(
+            operation(
+                action,
+                harness,
+                project_root=project_root,
+                cursor_config_root=cursor_config_root,
+                route_profile=_validated_route_profile(route_profile),
+                accept=accept,
+                preview_digest=preview_digest,
+                json_output=json_output,
+            )
+        )
+
+    return command
+
+
+for _project_mcp_action in ("preview", "preview-remove", "install", "status", "remove"):
+    integrate_project_mcp_app.command(_project_mcp_action)(
+        _cursor_project_mcp_command(_project_mcp_action)
+    )
+
+
 # The per-host plugin command surface (issue #465). Codex activation is the
 # digest-bound setup/recommendation ceremony (ADR-012), so its standalone
 # lifecycle is removal-shaped; Cursor has no update/enable/disable states; the
@@ -1583,6 +2249,13 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
             typer.Option("--project-root", help="Exact trusted project for MCP source checks."),
         ] = None,
         format_name: Annotated[str, typer.Option("--format", help="portable or native")] = "native",
+        observation_profile: Annotated[
+            str,
+            typer.Option(
+                "--observation-profile",
+                help="structural or ordinary native hooks; content capture requires separate consent.",
+            ),
+        ] = "structural",
         ownership_name: Annotated[
             str,
             typer.Option("--mcp-ownership", help="external-registration or plugin-managed"),
@@ -1628,6 +2301,10 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
         if harness in _PLUGIN_HOSTS and harness not in _PLUGIN_COMMAND_HOSTS[command_name]:
             _refuse_unsupported_plugin_command(harness, command_name)
             return
+        if observation_profile not in {"structural", "ordinary"}:
+            raise typer.BadParameter("--observation-profile must be structural or ordinary")
+        if observation_profile == "ordinary" and (harness == "codex" or format_name != "native"):
+            raise typer.BadParameter("ordinary observation requires native Claude or Cursor")
         if harness == "codex":
             module = importlib.import_module("yoetz.cli.codex_plugin")
             operation = cast(Callable[..., int], getattr(module, "run_codex_plugin_command"))
@@ -1657,6 +2334,7 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
                 "cursor_config_root": cursor_config_root,
                 "project_root": project_root,
                 "format_name": format_name,
+                "observation_profile": observation_profile,
                 "ownership_name": ownership_name,
                 "route_profile": route_profile,
                 "requested_action": requested_action,
@@ -1676,6 +2354,7 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
                     ownership_name=ownership_name,
                     route_profile=route_profile,
                     development_enabled=development_enabled,
+                    observation_profile=observation_profile,
                     json_output=json_output,
                 )
             )
@@ -1705,6 +2384,7 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
                 "marketplace_root": marketplace_root,
                 "project_root": project_root,
                 "format_name": format_name,
+                "observation_profile": observation_profile,
                 "ownership_name": ownership_name,
                 "route_profile": route_profile,
                 "requested_action": requested_action,
@@ -2634,7 +3314,16 @@ def provider_codex_subscription_setup(
             help="Selected Codex CLI/native executable; its exact native binary is digest-bound.",
         ),
     ],
-    model: Annotated[str, typer.Option("--model", help="Exact Codex model id.")] = "gpt-5.6-sol",
+    model: Annotated[
+        str | None,
+        typer.Option(
+            "--model",
+            help=(
+                "Exact Codex model id. Defaults to gpt-5.6-luna for a new binding and "
+                "preserves an existing binding's model when omitted."
+            ),
+        ),
+    ] = None,
     reasoning_effort: Annotated[
         str, typer.Option("--reasoning-effort", help="Exact reasoning effort.")
     ] = "high",
@@ -2673,25 +3362,34 @@ def provider_codex_subscription_setup(
 ) -> None:
     """Prove an existing Codex login (or obtain one) via app-server, then bind the exact runtime."""
 
+    import platform
+
+    from yoetz.adapters.providers.codex_app_server import codex_evaluator_cell_for_platform
     from yoetz.cli.codex_subscription import (
-        CODEX_EVALUATOR_CAPABILITY_CELL_SHA256,
-        CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT,
         codex_subscription_setup,
         default_codex_home,
+        default_codex_subscription_model,
         resolve_supported_codex_executable,
     )
 
     try:
         native, digest, source = resolve_supported_codex_executable(executable)
+        cell = codex_evaluator_cell_for_platform(
+            "linux" if sys.platform.startswith("linux") else sys.platform,
+            platform.machine(),
+        )
+        if source != cell.source_identity or digest != cell.executable_sha256:
+            raise ValueError("codex_runtime_capability_unsupported")
         destination = default_codex_home() if codex_home is None else codex_home
+        selected_model = default_codex_subscription_model() if model is None else model
         typer.echo("Codex with ChatGPT subscription")
         typer.echo(f"  runtime: {native}")
         typer.echo(f"  executable_sha256: {digest}")
         typer.echo(f"  source: {source}")
-        typer.echo(f"  capability cell: {CODEX_EVALUATOR_CAPABILITY_CELL_SHA256}")
-        typer.echo(f"  cell evidence expires: {CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT}")
+        typer.echo(f"  capability cell: {cell.capability_cell_sha256}")
+        typer.echo(f"  cell evidence expires: {cell.capability_evidence_expires_at}")
         typer.echo(f"  dedicated CODEX_HOME: {destination}")
-        typer.echo(f"  model/reasoning: {model} / {reasoning_effort}")
+        typer.echo(f"  model/reasoning: {selected_model} / {reasoning_effort}")
         typer.echo("  destination: OpenAI through Codex-managed ChatGPT authentication")
         typer.echo("  data-use posture: unknown; your ChatGPT plan and terms apply")
         typer.echo("  Yoetz sends only a privacy-approved case; Codex owns the upstream body.")
@@ -2718,7 +3416,7 @@ def provider_codex_subscription_setup(
                 lambda: codex_subscription_setup(
                     executable=executable,
                     codex_home=destination,
-                    model=model,
+                    model=selected_model,
                     reasoning_effort=reasoning_effort,
                     login_mode="device_code" if device_code else "browser",
                     open_browser=open_browser,

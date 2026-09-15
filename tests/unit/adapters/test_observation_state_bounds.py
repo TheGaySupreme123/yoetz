@@ -26,7 +26,7 @@ from yoetz.domain.observation import (
     ObservationStatusQuery,
 )
 from yoetz.domain.values import JsonObject, Timestamp
-from yoetz.protocol.errors import ProtocolValueError
+from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 
 _DROPPED_GAP = "_local_stream_partial_dropped"
 _MAX_PARTIAL = local_mod._MAX_STREAM_PARTIAL_BYTES  # pyright: ignore[reportPrivateUsage]
@@ -38,6 +38,7 @@ def _envelope(
     identity: str,
     ordinal: int = 1,
     source: ObservationSource = ObservationSource.CODEX_HOOK,
+    gap_codes: tuple[str, ...] = (),
 ) -> ObservationEnvelope:
     return ObservationEnvelope(
         session_commitment=session,
@@ -48,7 +49,7 @@ def _envelope(
         receipt_time=Timestamp("2026-01-01T00:00:00.000Z"),
         structural_payload=JsonObject({"tool_name": "shell", "tool_call_id": f"c{ordinal}"}),
         content_object_refs=(),
-        gap_codes=(),
+        gap_codes=gap_codes,
     )
 
 
@@ -424,6 +425,39 @@ def test_renewed_shedding_reopens_the_truncation_gap(
     assert truncated in store.status(ObservationStatusQuery(workspace)).gaps
 
 
+def test_pairing_history_does_not_reconcile_after_envelope_eviction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retained post-only suffix cannot prove an evicted true orphan healed."""
+
+    store, workspace, session = _consented_store(tmp_path)
+    store.ingest(
+        _envelope(
+            session=session,
+            identity="hook:legacy-codex-orphan",
+            ordinal=1,
+            gap_codes=(ObservationGapCode.UNPAIRED_EVENT.value,),
+        )
+    )
+    # Simulate the bounded suffix retaining only a later legacy Claude false
+    # positive.  The missing Codex row must keep the active diagnostic honest.
+    monkeypatch.setattr(local_mod, "_MAX_ENVELOPES", 1)
+    store.ingest(
+        _envelope(
+            session=session,
+            identity="hook:legacy-claude-post-only",
+            ordinal=2,
+            source=ObservationSource.CLAUDE_HOOK,
+            gap_codes=(ObservationGapCode.UNPAIRED_EVENT.value,),
+        )
+    )
+
+    assert (
+        ObservationGapCode.UNPAIRED_EVENT.value
+        in store.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+
 def test_store_stage_timings_attribute_hydrate_encode_write(tmp_path: Path) -> None:
     """The store accounts its hydrate/encode/write cost for hook timing rows (#290)."""
 
@@ -621,10 +655,41 @@ def test_pruned_binding_resumes_with_generation_continuity(tmp_path: Path) -> No
     store.note_session_end(workspace, commitment)
     assert store.prune_codex_session_bindings(workspace, ("sess-resumed",)) == ("sess-resumed",)
     assert store.codex_session_ended(workspace, "sess-resumed") is False
-
     assert store.bind_codex_session(workspace, "sess-resumed") == commitment
     # Bound again but not yet restarted: still the ended generation, exactly as
     # before pruning, until SessionStart advances it under the lifecycle lock.
     assert store.codex_session_ended(workspace, "sess-resumed") is True
     assert store.begin_session_generation(workspace, commitment) == 2
     assert store.codex_session_ended(workspace, "sess-resumed") is False
+
+
+def test_codex_binding_capacity_fails_closed_and_reclaims_only_terminal_lanes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raw child bindings stay bounded without dropping active accepted lanes."""
+
+    monkeypatch.setattr(local_mod, "_MAX_CODEX_SESSION_BINDINGS", 2)
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    first = store.bind_codex_session(workspace, "sess-binding-first")
+    store.bind_codex_session(workspace, "sess-binding-second")
+
+    with pytest.raises(PublicOperationError) as raised:
+        store.bind_codex_session(workspace, "sess-binding-third")
+    assert raised.value.code is PublicErrorCode.LIMIT_EXCEEDED
+    assert raised.value.retryable is True
+    assert store.codex_sessions_for_workspace(workspace) == (
+        "sess-binding-first",
+        "sess-binding-second",
+    )
+
+    # A durable terminal mark is enough to make one lane reclaimable. The
+    # binding itself is pruned atomically with the subsequent new bind; an
+    # active lane is never selected by the capacity guard.
+    store.note_session_end(workspace, first)
+    assert store.bind_codex_session(workspace, "sess-binding-third")
+    assert store.codex_sessions_for_workspace(workspace) == (
+        "sess-binding-second",
+        "sess-binding-third",
+    )

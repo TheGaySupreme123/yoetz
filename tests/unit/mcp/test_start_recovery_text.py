@@ -10,6 +10,7 @@ from mcp import types
 from yoetz.cli.render import render_human_error
 from yoetz.mcp.server import result_from_public_model
 from yoetz.mcp.summaries import summary_for_public_error
+from yoetz.protocol.errors import attach_reason_continuation
 from yoetz.protocol.models import StartResultModel
 from yoetz.protocol.start_recovery import start_recovery_guidance
 
@@ -36,7 +37,7 @@ def test_first_start_recovery_survives_all_text_surfaces(
                 "message": "PRIVATE-MESSAGE-NOT-FOR-MCP-SUMMARY",
                 "retryable": True,
                 "correlation_id": "err_edd47974-68b1-4c5b-88e7-f063054f7760",
-                "safe_details": {"reason_code": reason},
+                "safe_details": dict(attach_reason_continuation({"reason_code": reason})),
             },
         }
     )

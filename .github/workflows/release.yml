@@ -159,11 +159,25 @@ jobs:
           set -euo pipefail
           prev_tag=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -v "^${{ steps.version.outputs.tag }}$" | head -n1 || true)
           if [ -n "$prev_tag" ]; then
-            removed=$(git diff --diff-filter=DMR --name-only "refs/tags/${prev_tag}" -- migrations schemas fixtures/canonical || true)
+            removed=$(git diff --diff-filter=DMR --name-only "refs/tags/${prev_tag}" -- migrations schemas fixtures/canonical \
+                ':(exclude)schemas/manifest.json' || true)
             if [ -n "$removed" ]; then
               echo "::error::non-append-only change against ${prev_tag}: $removed"
               exit 1
             fi
+          fi
+          if [ -n "$prev_tag" ]; then
+            PREVIOUS_RELEASE="$prev_tag" uv run --locked python - <<'PYTHON'
+          import json, os, pathlib, subprocess
+          old = json.loads(subprocess.check_output([
+              "git", "show", f"refs/tags/{os.environ['PREVIOUS_RELEASE']}:schemas/manifest.json"
+          ]))
+          new = json.loads(pathlib.Path("schemas/manifest.json").read_bytes())
+          current = {member["path"]: member for member in new["members"]}
+          for member in old["members"]:
+              if current.get(member["path"]) != member:
+                  raise SystemExit("released schema manifest entry changed: " + member["path"])
+          PYTHON
           fi
 
       - name: Verify changelog/security/license/contributor metadata is complete
@@ -473,6 +487,9 @@ jobs:
         run: |
           "${{ runner.temp }}/verify-venv/bin/yoetz" version --json
           uv sync --locked --group dev
+          # Production vault tests must not use pytest's shared /tmp base or a repository path.
+          # Resolve runner temp first so macOS aliases cannot enter the private state path.
+          release_test_root="$(.venv/bin/python -c 'import os; from pathlib import Path; print((Path(os.environ["RUNNER_TEMP"]) / "yoetz-integration").resolve())')"
           uv run --locked pytest tests/packaging \
             --deselect tests/packaging/test_offline_reinstall.py::test_corrupted_wheel_fails_exact_hash_verification_before_any_install \
             --deselect tests/packaging/test_offline_reinstall.py::test_correct_hash_matching_the_real_wheel_installs_cleanly \
@@ -507,14 +524,15 @@ jobs:
             tests/packaging/test_offline_reinstall.py::test_corrupted_wheel_fails_exact_hash_verification_before_any_install \
             tests/packaging/test_offline_reinstall.py::test_correct_hash_matching_the_real_wheel_installs_cleanly \
             -q --timeout=900
-          YOETZ_DENY_NETWORK=1 \
+          YZCI_DENY_NETWORK=1 \
           YOETZ_CANDIDATE_PYTHON="${{ runner.temp }}/verify-venv/bin/python" \
             uv run --locked pytest tests/subprocess \
             -m "not fault and not soak and not live" -q --timeout=900
           # Linux approved-command execution remains a documented fail-closed alpha limitation.
-          YOETZ_DENY_NETWORK=1 \
+          YZCI_DENY_NETWORK=1 \
           YOETZ_CANDIDATE_PYTHON="${{ runner.temp }}/verify-venv/bin/python" \
             uv run --locked pytest tests/integration \
+            --basetemp "$release_test_root" \
             --deselect tests/integration/observation/test_acceptance_scenarios.py::test_approved_check_stale_when_digest_changes \
             --deselect tests/integration/observation/test_production_composition.py::test_approved_true_check_succeeds_in_sandbox \
             -m "not fault and not soak and not live" -q --timeout=900
@@ -593,6 +611,9 @@ jobs:
         run: |
           "${{ runner.temp }}/verify-venv/bin/yoetz" version --json
           uv sync --locked --group dev
+          # Production vault tests must not use pytest's shared /tmp base or a repository path.
+          # Resolve runner temp first so macOS aliases cannot enter the private state path.
+          release_test_root="$(.venv/bin/python -c 'import os; from pathlib import Path; print((Path(os.environ["RUNNER_TEMP"]) / "yoetz-integration").resolve())')"
           uv run --locked pytest tests/packaging \
             --deselect tests/packaging/test_offline_reinstall.py::test_corrupted_wheel_fails_exact_hash_verification_before_any_install \
             --deselect tests/packaging/test_offline_reinstall.py::test_correct_hash_matching_the_real_wheel_installs_cleanly \
@@ -627,13 +648,14 @@ jobs:
             tests/packaging/test_offline_reinstall.py::test_corrupted_wheel_fails_exact_hash_verification_before_any_install \
             tests/packaging/test_offline_reinstall.py::test_correct_hash_matching_the_real_wheel_installs_cleanly \
             -q --timeout=900
-          YOETZ_DENY_NETWORK=1 \
+          YZCI_DENY_NETWORK=1 \
           YOETZ_CANDIDATE_PYTHON="${{ runner.temp }}/verify-venv/bin/python" \
             uv run --locked pytest tests/subprocess \
             -m "not fault and not soak and not live" -q --timeout=900
-          YOETZ_DENY_NETWORK=1 \
+          YZCI_DENY_NETWORK=1 \
           YOETZ_CANDIDATE_PYTHON="${{ runner.temp }}/verify-venv/bin/python" \
             uv run --locked pytest tests/integration \
+            --basetemp "$release_test_root" \
             -m "not fault and not soak and not live" -q --timeout=900
 
       - name: Clean install/upgrade/rollback/uninstall/data-retention/offline reinstall, backup/restore, key backend states

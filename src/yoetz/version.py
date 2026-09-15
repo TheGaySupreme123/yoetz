@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import platform
+import re
 import sys
 import sysconfig
 from collections.abc import Mapping
@@ -36,17 +37,24 @@ __all__ = [
     "ENGINE_VERSION",
     "OBJECT_FORMAT_VERSION",
     "PRIVACY_CLASSIFIER_RULESET_VERSION",
+    "PLATFORM_CELL_UNTESTED",
     "PRIVACY_POLICY_SCHEMA_VERSION",
     "PROJECTION_VERSION",
     "PROTOCOL_VERSION",
+    "PlatformCell",
     "REVIEWED_RESOURCE_COUNT",
     "RESEARCH_EVIDENCE_POLICY_VERSION",
     "ResourceIdentity",
     "ResourceIntegrityError",
     "SQLITE_APPLICATION_ID",
+    "STATUS_VERSION_STORAGE_SCHEMA",
+    "StatusVersionSliceFacts",
+    "UNAVAILABLE_RUNTIME_FACT",
     "VersionManifest",
     "WORK_INTEGRITY_POLICY_VERSION",
+    "build_status_version_slice_facts",
     "build_version_manifest",
+    "platform_cell",
     "read_verified_resource",
     "verify_resource_manifest",
     "version_manifest_json",
@@ -63,8 +71,27 @@ WORK_INTEGRITY_POLICY_VERSION: Final = "work-integrity/0.1.0"
 RESEARCH_EVIDENCE_POLICY_VERSION: Final = "research-evidence/0.1.0"
 COORDINATION_POLICY_VERSION: Final = "coordination/0.1.0"
 OBJECT_FORMAT_VERSION: Final = "yoetz-object/1"
-CATALOG_SCHEMA_VERSION: Final = "4"
-BUNDLE_SCHEMA_VERSION: Final = "10"
+# Static identity on the status versions slice. Distinct from catalog/bundle schema counters
+# and from live SQLite user_version. Not a probed runtime fact.
+STATUS_VERSION_STORAGE_SCHEMA: Final = "1"
+UNAVAILABLE_RUNTIME_FACT: Final = "unavailable"
+# ADR-007's advertised platform matrix, as (platform.system(), platform.machine()) pairs. Any
+# other cell the package happens to install on — Linux aarch64 (WSL 2 on Windows-on-ARM,
+# Graviton, Raspberry Pi, Asahi), macOS x86-64, musl — is untested, not presumed compatible, and
+# says so through the ``platform_cell_untested`` limitation (issue #724).
+_CERTIFIED_PLATFORM_CELLS: Final[Mapping[tuple[str, str], str]] = MappingProxyType(
+    {
+        ("Darwin", "arm64"): "macosx_11_0_arm64",
+        ("Linux", "x86_64"): "manylinux_2_28_x86_64",
+        ("Linux", "amd64"): "manylinux_2_28_x86_64",
+    }
+)
+PLATFORM_CELL_UNTESTED: Final = "platform_cell_untested"
+_VERSION_WIRE_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+/-]{0,63}$")
+_PROFILE_ID_WIRE_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,127}$")
+_ASCII_PRINTABLE_PATTERN: Final = re.compile(r"^[ -~]+$")
+CATALOG_SCHEMA_VERSION: Final = "5"
+BUNDLE_SCHEMA_VERSION: Final = "13"
 SQLITE_APPLICATION_ID: Final = "0x594F4554"
 
 _MANIFEST_SCHEMA: Final = "yoetz.resource-manifest/1"
@@ -75,7 +102,7 @@ _RESOURCE_LIMIT: Final = 4_194_304
 # One independently reviewed cardinality tripwire guards the generated resource manifest. All
 # per-kind counts are derived from the manifest entries so adding a resource has exactly one
 # hand-authored count to review and the owning resource-ripple command can regenerate the rest.
-REVIEWED_RESOURCE_COUNT: Final = 216
+REVIEWED_RESOURCE_COUNT: Final = 246
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -93,15 +120,15 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("catalog", "7.0.0"),
     ("chat-user-attestation", "1.0.0"),
     ("check-request", "1.1.0"),
-    ("check-result", "1.2.0"),
+    ("check-result", "1.3.0"),
     ("client-info", "1.0.0"),
-    ("control-hello", "2.5.0"),
-    ("control-hello-result", "2.5.0"),
-    ("control-request", "2.5.0"),
-    ("control-result", "2.5.0"),
+    ("control-hello", "2.7.0"),
+    ("control-hello-result", "2.7.0"),
+    ("control-request", "2.7.0"),
+    ("control-result", "2.7.0"),
     ("coverage", "1.0.0"),
     ("egress-receipt", "1.0.0"),
-    ("finding", "1.2.0"),
+    ("finding", "1.3.0"),
     ("frontier", "1.0.0"),
     ("lineage-acceptance", "1.0.0"),
     ("lineage-origin", "1.0.0"),
@@ -116,14 +143,15 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("publish-work-result", "1.0.0"),
     ("read-guidance-request", "1.0.0"),
     ("read-guidance-result", "1.0.0"),
-    ("receipt-document", "1.2.0"),
+    ("receipt-document", "1.3.0"),
     ("receipt-request", "1.0.0"),
-    ("receipt-result", "1.2.0"),
+    ("receipt-result", "1.3.0"),
     ("respond-request", "1.0.0"),
     ("respond-result", "1.0.0"),
     ("review-result", "7.0.0"),
-    ("runtime-attempt-evidence", "1.0.0"),
-    ("semantic-provenance", "1.1.0"),
+    ("routine-read-summary", "1.0.0"),
+    ("runtime-attempt-evidence", "1.1.0"),
+    ("semantic-provenance", "1.2.0"),
     ("service-status", "1.0.0"),
     ("session-health", "1.0.0"),
     ("setup-wizard-contract", "1.0.0"),
@@ -131,7 +159,7 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("start-result", "1.1.0"),
     ("status", "7.0.0"),
     ("status-request", "1.2.0"),
-    ("status-result", "1.3.0"),
+    ("status-result", "1.4.0"),
     ("subject-state-ref", "1.0.0"),
     ("work-state", "1.0.0"),
 )
@@ -265,6 +293,78 @@ class VersionManifest:
     build_identity: str
     support_status: str
     limitations: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformCell:
+    """The host's (OS, architecture) cell against ADR-007's advertised matrix."""
+
+    os_name: str
+    machine: str
+    certified: bool
+    cell: str | None
+
+    def as_json(self) -> dict[str, JsonValue]:
+        certified_cells: list[JsonValue] = [
+            cell for cell in sorted(set(_CERTIFIED_PLATFORM_CELLS.values()))
+        ]
+        return {
+            "cell": self.cell,
+            "certified": self.certified,
+            "certified_cells": certified_cells,
+            "machine": self.machine,
+            "os_name": self.os_name,
+        }
+
+
+def platform_cell(
+    *,
+    os_name: str | None = None,
+    machine: str | None = None,
+    libc: tuple[str, str] | None = None,
+) -> PlatformCell:
+    """Classify this host (or the given one) as a certified or an untested platform cell."""
+
+    resolved_os = (platform.system() or sys.platform) if os_name is None else os_name
+    resolved_machine = (platform.machine() or "unknown") if machine is None else machine
+    cell = _CERTIFIED_PLATFORM_CELLS.get((resolved_os, resolved_machine))
+    if cell is not None and resolved_os == "Linux":
+        libc_name, libc_version = platform.libc_ver() if libc is None else libc
+        match = re.fullmatch(r"([0-9]+)\.([0-9]+)(?:\.[0-9]+)*", libc_version)
+        if (
+            libc_name != "glibc"
+            or match is None
+            or tuple(int(part) for part in match.group(1, 2)) < (2, 28)
+        ):
+            cell = None
+    return PlatformCell(
+        os_name=resolved_os,
+        machine=resolved_machine,
+        certified=cell is not None,
+        cell=cell,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class StatusVersionSliceFacts:
+    """Live and static facts for MCP/CLI ``status view=versions``.
+
+    Runtime-probed values come from the same producer as ``version --json``.
+    Contract identities are package constants. ``provider_profiles`` is the
+    packaged support-catalog inventory, not live semantic-evaluator presence.
+    """
+
+    protocol_version: str
+    engine_version: str
+    projection_version: str
+    object_format: str
+    storage_schema: str
+    python_version: str
+    apsw_version: str
+    sqlite_version: str
+    sqlite_source_id: str
+    policy_packs: tuple[str, ...]
+    provider_profiles: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -545,6 +645,49 @@ def _component(*, value: str | None, field: str) -> Component:
     return MappingProxyType({"status": "present", field: value})
 
 
+def _wire_version(value: str) -> str:
+    if type(value) is not str or _VERSION_WIRE_PATTERN.fullmatch(value) is None:
+        return UNAVAILABLE_RUNTIME_FACT
+    return value
+
+
+def _wire_component(
+    component: Component,
+    *,
+    field: str,
+    max_length: int,
+    ascii_printable: bool = False,
+) -> str:
+    if component.get("status") != "present":
+        return UNAVAILABLE_RUNTIME_FACT
+    value = component.get(field)
+    if type(value) is not str or not value or len(value) > max_length:
+        return UNAVAILABLE_RUNTIME_FACT
+    if ascii_printable:
+        if _ASCII_PRINTABLE_PATTERN.fullmatch(value) is None:
+            return UNAVAILABLE_RUNTIME_FACT
+        return value
+    return _wire_version(value)
+
+
+def _support_provider_profile_ids(raw: JsonValue) -> tuple[str, ...]:
+    if type(raw) is not list:
+        raise ResourceIntegrityError("support_shape_invalid")
+    profiles: list[str] = []
+    for item in raw:
+        if (
+            type(item) is not str
+            or len(item) > 128
+            or _PROFILE_ID_WIRE_PATTERN.fullmatch(item) is None
+        ):
+            raise ResourceIntegrityError("support_shape_invalid")
+        profiles.append(item)
+    ordered = tuple(sorted(set(profiles), key=str.encode))
+    if len(ordered) > 16:
+        raise ResourceIntegrityError("support_shape_invalid")
+    return ordered
+
+
 def _distribution_version(name: str) -> str | None:
     try:
         return importlib.metadata.version(name)
@@ -620,8 +763,10 @@ def build_version_manifest(*, include_optional_probes: bool = False) -> VersionM
     limitations = tuple(cast(list[str], support["limitations"]))
     if mcp_version is not None and not cast(list[JsonValue], support["mcp_cells"]):
         limitations = tuple(sorted({*limitations, "mcp_capability_unverified"}, key=str.encode))
+    if not platform_cell().certified:
+        limitations = tuple(sorted({*limitations, PLATFORM_CELL_UNTESTED}, key=str.encode))
     return VersionManifest(
-        schema_version="2.2.0",
+        schema_version="2.3.0",
         package_name="yoetz",
         package_version=_distribution_version("yoetz") or "0.1.0",
         protocol_version=PROTOCOL_VERSION,
@@ -635,8 +780,10 @@ def build_version_manifest(*, include_optional_probes: bool = False) -> VersionM
         event_schema_versions=tuple(
             (
                 name,
-                "1.2.0"
-                if name in {"evidence_recorded", "finding_recorded", "session_opened"}
+                "1.3.0"
+                if name == "finding_recorded"
+                else "1.2.0"
+                if name in {"evidence_recorded", "session_opened", "check_recorded"}
                 else "1.1.0"
                 if name
                 in {
@@ -681,6 +828,35 @@ def build_version_manifest(*, include_optional_probes: bool = False) -> VersionM
         build_identity="development-unavailable",
         support_status="development_unverified",
         limitations=limitations,
+    )
+
+
+def build_status_version_slice_facts(
+    *, manifest: VersionManifest | None = None
+) -> StatusVersionSliceFacts:
+    """Project ``version --json`` runtime facts onto the status versions slice."""
+
+    resolved = build_version_manifest() if manifest is None else manifest
+    if type(resolved) is not VersionManifest:
+        raise TypeError("manifest_must_be_version_manifest")
+    support = _load_support(_load_resource_manifest())
+    return StatusVersionSliceFacts(
+        protocol_version=PROTOCOL_VERSION,
+        engine_version=ENGINE_VERSION,
+        projection_version=PROJECTION_VERSION,
+        object_format=OBJECT_FORMAT_VERSION,
+        storage_schema=STATUS_VERSION_STORAGE_SCHEMA,
+        python_version=_wire_version(resolved.python_version),
+        apsw_version=_wire_component(resolved.apsw_version, field="version", max_length=64),
+        sqlite_version=_wire_component(resolved.sqlite_version, field="version", max_length=64),
+        sqlite_source_id=_wire_component(
+            resolved.sqlite_source_id,
+            field="source_id",
+            max_length=160,
+            ascii_printable=True,
+        ),
+        policy_packs=(RESEARCH_EVIDENCE_POLICY_VERSION, WORK_INTEGRITY_POLICY_VERSION),
+        provider_profiles=_support_provider_profile_ids(support["provider_profiles"]),
     )
 
 

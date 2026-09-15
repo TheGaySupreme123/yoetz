@@ -596,7 +596,10 @@ async def test_busy_after_each_start_milestone_yields_for_immediate_exact_replay
     monkeypatch.setattr(runtime, "verify_start", busy_once)
     with pytest.raises(PublicOperationError) as busy:
         await execute_start(app, request)
-    assert busy.value.safe_details == {"reason_code": "start_busy_retry_ready"}
+    assert busy.value.safe_details == {
+        "reason_code": "start_busy_retry_ready",
+        "continuation": "start_busy_retry_ready",
+    }
     original = runtime.provisions[0]
     recovered = await execute_start(app, request)
     assert recovered.task_id == original.task_id
@@ -629,7 +632,10 @@ async def test_cancelled_provision_keeps_live_lease_until_expiry(
         await attempt
     with pytest.raises(PublicOperationError) as pending:
         await execute_start(app, request)
-    assert pending.value.safe_details == {"reason_code": "start_lease_pending"}
+    assert pending.value.safe_details == {
+        "reason_code": "start_lease_pending",
+        "continuation": "start_lease_wait",
+    }
     clock.advance(61)
     release.set()
     recovered = await execute_start(app, request)

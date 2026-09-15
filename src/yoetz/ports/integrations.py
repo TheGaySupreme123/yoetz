@@ -42,6 +42,12 @@ type Compatibility = Literal["supported", "unsupported", "untested"]
 HookPairingMode = Literal["paired", "post_only"]
 HookCorrelationKind = Literal["tool_call_id", "generation_id", "none"]
 
+# Pairing is a host/profile fact, rather than a property of the shared hook
+# transport. Keep the exact reviewed profile cells here so hook ingress can
+# apply the contract without importing a renderer (and its filesystem/process
+# dependencies). An omitted profile is the compatibility path for an already
+# installed legacy Claude/Cursor carrier. A nonempty unknown profile is a
+# future claim, so it stays paired until that exact cell is reviewed.
 _DEFAULT_HOOK_PAIRING: Final[tuple[HookPairingMode, HookCorrelationKind]] = (
     "paired",
     "tool_call_id",
@@ -58,10 +64,10 @@ _HOOK_PAIRING_BY_PROFILE: Final[
     Mapping[tuple[str, str], tuple[HookPairingMode, HookCorrelationKind]]
 ] = MappingProxyType(
     {
-        ("claude", "claude-code-cli-local-project-2.1.241"): (
-            "post_only",
-            "tool_call_id",
-        ),
+        (
+            "claude",
+            "claude-code-cli-local-project-2.1.241",
+        ): ("post_only", "tool_call_id"),
         ("cursor", "cursor-ide-3.17.8"): ("post_only", "generation_id"),
     }
 )
@@ -70,11 +76,12 @@ _HOOK_PAIRING_BY_PROFILE: Final[
 def observation_pairing_contract(
     harness_id: str, capability_profile_id: str | None
 ) -> tuple[HookPairingMode, HookCorrelationKind]:
-    """Return the reviewed pairing contract for a host/profile cell.
+    """Return the reviewed pairing contract for one host/profile cell.
 
-    Native Claude and Cursor hooks are currently post-only.  A future paired
-    carrier must register an exact profile here instead of inheriting a
-    generic marker from the incoming payload.
+    The mapping is intentionally exact. A missing Claude/Cursor profile uses
+    the installed legacy post-only contract without claiming a supported
+    host/version cell. A nonempty unknown profile stays on the conservative
+    paired contract until its exact hook shape is reviewed.
     """
 
     if type(harness_id) is not str:
@@ -83,6 +90,7 @@ def observation_pairing_contract(
         exact = _HOOK_PAIRING_BY_PROFILE.get((harness_id, capability_profile_id))
         if exact is not None:
             return exact
+        return _DEFAULT_HOOK_PAIRING
     return _LEGACY_HOST_PAIRING.get(harness_id, _DEFAULT_HOOK_PAIRING)
 
 
@@ -355,17 +363,13 @@ class HarnessHookProfile:
             "observation_events",
             _sorted_unique_strings(self.observation_events, maximum=64, token=True),
         )
-        if type(self.pairing_mode) is not str or self.pairing_mode not in {
-            "paired",
-            "post_only",
-        }:
+        if self.pairing_mode not in {"paired", "post_only"}:
             raise _port_error("integration_hook_invalid")
-        if type(self.correlation_kind) is not str or self.correlation_kind not in {
-            "tool_call_id",
-            "generation_id",
-            "none",
-        }:
+        if self.correlation_kind not in {"tool_call_id", "generation_id", "none"}:
             raise _port_error("integration_hook_invalid")
+        # A generation identifies a host turn/conversation, never a tool call.
+        # Pairing a pre/post action on it would manufacture identity and can
+        # merge unrelated tools from one generation.
         if self.pairing_mode == "paired" and self.correlation_kind != "tool_call_id":
             raise _port_error("integration_hook_invalid")
 

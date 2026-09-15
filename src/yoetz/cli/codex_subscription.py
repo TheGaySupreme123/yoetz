@@ -16,16 +16,13 @@ from typing import Final, Literal, cast
 import typer
 
 from yoetz.adapters.providers.codex_app_server import (
-    CODEX_APP_SERVER_SCHEMA_SHA256,
-    CODEX_EVALUATOR_CAPABILITY_CELL_SHA256,
-    CODEX_EVALUATOR_CAPABILITY_PROFILE,
-    CODEX_EVALUATOR_CONFIG_SHA256,
-    CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT,
     CODEX_EVALUATOR_RUNTIME_VERSION,
     CodexAppServerProfile,
+    CodexEvaluatorCell,
     CodexLoginChallenge,
     CodexRuntimeStatus,
     codex_account_status,
+    codex_evaluator_cell_for_platform,
     codex_login,
     codex_logout,
     prepare_codex_home,
@@ -50,22 +47,16 @@ __all__ = [
     "codex_subscription_setup",
     "codex_subscription_status",
     "default_codex_home",
+    "default_codex_subscription_model",
     "prompt_codex_subscription_setup",
     "resolve_supported_codex_executable",
     "subscription_failure_reason",
 ]
 
-_DARWIN_ARM64_EXECUTABLE_SHA256: Final = (
-    "sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b"
-)
-_DARWIN_ARM64_SOURCE_IDENTITY: Final = "openai-codex-npm-darwin-arm64-0.150.1"
 _CODEX_PACKAGE_NAME: Final = "@openai/codex"
-_CODEX_NATIVE_PACKAGE_DIRECTORY: Final = "codex-darwin-arm64"
-_CODEX_NATIVE_PACKAGE_VERSION: Final = f"{CODEX_EVALUATOR_RUNTIME_VERSION}-darwin-arm64"
-_CODEX_NATIVE_PACKAGE_SPEC: Final = f"npm:{_CODEX_PACKAGE_NAME}@{_CODEX_NATIVE_PACKAGE_VERSION}"
-_CODEX_NATIVE_EXECUTABLE_RELATIVE: Final = Path("vendor/aarch64-apple-darwin/bin/codex")
 _CODEX_PACKAGE_JSON_MAX_BYTES: Final = 64 * 1024
 _SUPPORTED_REASONING: Final = frozenset({"low", "medium", "high", "xhigh", "max", "ultra"})
+_DEFAULT_CODEX_SUBSCRIPTION_MODEL: Final = "gpt-5.6-luna"
 _CLOSED_FAILURE_TOKEN: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 
 
@@ -165,7 +156,9 @@ def _package_json(package_root: Path) -> Mapping[str, JsonValue]:
     return cast(Mapping[str, JsonValue], document)
 
 
-def _validate_codex_wrapper_manifest(document: Mapping[str, JsonValue]) -> None:
+def _validate_codex_wrapper_manifest(
+    document: Mapping[str, JsonValue], cell: CodexEvaluatorCell
+) -> None:
     """Validate the exact wrapper metadata for the closed evaluator cell."""
 
     if document.get("name") != _CODEX_PACKAGE_NAME:
@@ -178,20 +171,23 @@ def _validate_codex_wrapper_manifest(document: Mapping[str, JsonValue]) -> None:
     optional_dependencies = document.get("optionalDependencies")
     if (
         not isinstance(optional_dependencies, Mapping)
-        or optional_dependencies.get(f"@openai/{_CODEX_NATIVE_PACKAGE_DIRECTORY}")
-        != _CODEX_NATIVE_PACKAGE_SPEC
+        or optional_dependencies.get(f"@openai/{cell.native_package_directory}")
+        != cell.native_package_spec
     ):
         raise ValueError("codex_runtime_capability_unsupported")
 
 
-def _validate_codex_native_manifest(document: Mapping[str, JsonValue]) -> None:
-    """Validate the exact native package identity and macOS arm64 selectors."""
+def _validate_codex_native_manifest(
+    document: Mapping[str, JsonValue], cell: CodexEvaluatorCell
+) -> None:
+    """Validate the exact native package identity and platform selectors."""
 
     if document.get("name") != _CODEX_PACKAGE_NAME:
         raise ValueError("codex_runtime_capability_unsupported")
-    if document.get("version") != _CODEX_NATIVE_PACKAGE_VERSION:
+    if document.get("version") != cell.native_package_version:
         raise ValueError("codex_runtime_capability_unsupported")
-    if document.get("os") != ["darwin"] or document.get("cpu") != ["arm64"]:
+    expected_cpu = "arm64" if cell.platform_architecture == "arm64" else "x64"
+    if document.get("os") != [cell.platform_os] or document.get("cpu") != [expected_cpu]:
         raise ValueError("codex_runtime_capability_unsupported")
 
 
@@ -219,7 +215,7 @@ def _reject_symlinked_package_root(path: Path) -> None:
         raise ValueError("codex_runtime_unavailable") from error
 
 
-def _resolve_codex_package_layout(selected: Path) -> Path:
+def _resolve_codex_package_layout(selected: Path, cell: CodexEvaluatorCell | None = None) -> Path:
     """Resolve a selected wrapper to its exact nested or npm-prefix native executable.
 
     The only allowed package roots are the optional dependency nested below the selected wrapper
@@ -228,15 +224,16 @@ def _resolve_codex_package_layout(selected: Path) -> Path:
     """
 
     wrapper = _runtime_path(selected.expanduser(), missing_token="codex_runtime_not_found")
+    selected_cell = cell or codex_evaluator_cell_for_platform(sys.platform, platform.machine())
     if wrapper.name != "codex.js" or wrapper.parent.name != "bin":
         return wrapper
     package_root = wrapper.parent.parent
     if package_root == Path(package_root.anchor):
         raise ValueError("codex_runtime_capability_unsupported")
-    _validate_codex_wrapper_manifest(_package_json(package_root))
+    _validate_codex_wrapper_manifest(_package_json(package_root), selected_cell)
 
-    nested = package_root / "node_modules" / "@openai" / _CODEX_NATIVE_PACKAGE_DIRECTORY
-    hoisted = package_root.parent / _CODEX_NATIVE_PACKAGE_DIRECTORY
+    nested = package_root / "node_modules" / "@openai" / selected_cell.native_package_directory
+    hoisted = package_root.parent / selected_cell.native_package_directory
     if _package_candidate_present(nested):
         _reject_symlinked_package_root(nested)
         expected_parent = nested.parent
@@ -255,9 +252,9 @@ def _resolve_codex_package_layout(selected: Path) -> Path:
         or not native_root.is_dir()
     ):
         raise ValueError("codex_runtime_capability_unsupported")
-    _validate_codex_native_manifest(_package_json(native_root))
+    _validate_codex_native_manifest(_package_json(native_root), selected_cell)
     native = _runtime_path(
-        native_root / _CODEX_NATIVE_EXECUTABLE_RELATIVE,
+        native_root / selected_cell.native_executable_relative,
         missing_token="codex_runtime_not_found",
     )
     try:
@@ -270,21 +267,16 @@ def _resolve_codex_package_layout(selected: Path) -> Path:
 def resolve_supported_codex_executable(selected: Path) -> tuple[Path, str, str]:
     """Resolve only the selected npm distribution to its exact native executable."""
 
+    cell = codex_evaluator_cell_for_platform(sys.platform, platform.machine())
     resolved = _runtime_path(selected.expanduser(), missing_token="codex_runtime_not_found")
     if resolved.name == "codex.js" and resolved.parent.name == "bin":
-        if sys.platform != "darwin" or platform.machine() != "arm64":
-            raise ValueError("codex_runtime_platform_unsupported")
-        resolved = _resolve_codex_package_layout(resolved)
+        resolved = _resolve_codex_package_layout(resolved, cell)
     if not resolved.is_file() or not os.access(resolved, os.X_OK):
         raise ValueError("codex_runtime_executable_invalid")
     digest = _sha256_file(resolved)
-    if (
-        sys.platform != "darwin"
-        or platform.machine() != "arm64"
-        or digest != _DARWIN_ARM64_EXECUTABLE_SHA256
-    ):
+    if digest != cell.executable_sha256:
         raise ValueError("codex_runtime_capability_unsupported")
-    return resolved, digest, _DARWIN_ARM64_SOURCE_IDENTITY
+    return resolved, digest, cell.source_identity
 
 
 def default_codex_home() -> Path:
@@ -300,6 +292,9 @@ def codex_subscription_preview(
     """Resolve and validate the exact nonsecret cell without creating a home or logging in."""
 
     native, digest, source_identity = resolve_supported_codex_executable(executable)
+    cell = codex_evaluator_cell_for_platform(sys.platform, platform.machine())
+    if source_identity != cell.source_identity or digest != cell.executable_sha256:
+        raise ValueError("codex_runtime_capability_unsupported")
     if not codex_home.is_absolute():
         raise ValueError("codex_home_invalid")
     if not model or reasoning_effort not in _SUPPORTED_REASONING:
@@ -311,11 +306,11 @@ def codex_subscription_preview(
         "runtime_source_identity": source_identity,
         "executable_path": str(native),
         "executable_sha256": digest,
-        "app_server_schema_sha256": CODEX_APP_SERVER_SCHEMA_SHA256,
-        "capability_cell_sha256": CODEX_EVALUATOR_CAPABILITY_CELL_SHA256,
-        "capability_profile": CODEX_EVALUATOR_CAPABILITY_PROFILE,
-        "capability_evidence_expires_at": CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT,
-        "isolated_config_sha256": CODEX_EVALUATOR_CONFIG_SHA256,
+        "app_server_schema_sha256": cell.app_server_schema_sha256,
+        "capability_cell_sha256": cell.capability_cell_sha256,
+        "capability_profile": cell.capability_profile,
+        "capability_evidence_expires_at": cell.capability_evidence_expires_at,
+        "isolated_config_sha256": cell.isolated_config_sha256,
         "codex_home": str(codex_home),
         "model": model,
         "reasoning_effort": reasoning_effort,
@@ -339,6 +334,15 @@ def _base_config(path: Path | None) -> YoetzConfig:
 
     target = _target_config_path(path)
     return _bounded_config_operation(lambda: load_config({}, {}, target))
+
+
+def default_codex_subscription_model(path: Path | None = None) -> str:
+    """Return the new-binding recommendation or preserve an existing binding's model."""
+
+    config = _base_config(path)
+    if config.external_runtime is not None:
+        return config.external_runtime.model
+    return _DEFAULT_CODEX_SUBSCRIPTION_MODEL
 
 
 def _config_snapshot(path: Path) -> tuple[YoetzConfig, bytes | None]:
@@ -370,11 +374,13 @@ def _binding(
         executable_sha256=cast(str, preview["executable_sha256"]),
         runtime_version=CODEX_EVALUATOR_RUNTIME_VERSION,
         source_identity=cast(str, preview["runtime_source_identity"]),
-        app_server_schema_sha256=CODEX_APP_SERVER_SCHEMA_SHA256,
-        capability_cell_sha256=CODEX_EVALUATOR_CAPABILITY_CELL_SHA256,
-        isolated_config_sha256=CODEX_EVALUATOR_CONFIG_SHA256,
-        capability_profile=CODEX_EVALUATOR_CAPABILITY_PROFILE,
-        capability_evidence_expires_at=CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT,
+        app_server_schema_sha256=cast(str, preview["app_server_schema_sha256"]),
+        capability_cell_sha256=cast(str, preview["capability_cell_sha256"]),
+        isolated_config_sha256=cast(str, preview["isolated_config_sha256"]),
+        capability_profile=cast(str, preview["capability_profile"]),
+        capability_evidence_expires_at=cast(
+            Literal["2026-11-30T00:00:00Z"], preview["capability_evidence_expires_at"]
+        ),
         codex_home=str(codex_home),
         model=model,
         reasoning_effort=reasoning_effort,
@@ -530,7 +536,7 @@ async def prompt_codex_subscription_setup() -> dict[str, JsonValue]:
     codex_home = Path(
         typer.prompt("Dedicated evaluator CODEX_HOME", default=str(default_codex_home()))
     ).expanduser()
-    model = typer.prompt("Exact model", default="gpt-5.6-sol").strip()
+    model = typer.prompt("Exact model", default=default_codex_subscription_model()).strip()
     reasoning_effort = typer.prompt("Reasoning effort", default="high").strip()
     login_choice = typer.prompt("Login method (browser/device_code)", default="browser").strip()
     if login_choice not in {"browser", "device_code"}:

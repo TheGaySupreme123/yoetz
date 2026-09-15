@@ -6,7 +6,7 @@ import asyncio
 import io
 import os
 import subprocess
-from collections.abc import Buffer
+from collections.abc import Buffer, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -41,7 +41,10 @@ from yoetz.ports.ledger import CheckCommitResult
 from yoetz.protocol.canonical import canonical_encode
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import CheckRequest, StartRequest, StatusRequest
-from yoetz.service.client import _connected_client  # pyright: ignore[reportPrivateUsage]
+from yoetz.service.client import (
+    _connected_client,  # pyright: ignore[reportPrivateUsage]
+    prepare_project_request,
+)
 from yoetz.service.control_protocol import client_handshake
 from yoetz.service.daemon import ServiceComposition, ServiceDaemon
 from yoetz.service.elevated_bootstrap import (
@@ -167,6 +170,12 @@ def _frontier(value: object) -> dict[str, object]:
     if not callable(as_wire):
         raise AssertionError("frontier_not_serializable")
     return dict(cast(dict[str, object], as_wire()))
+
+
+def _project_request(values: Mapping[str, object], *, request_id: str | None = None) -> JsonObject:
+    """Build one project body with a retained identity for exact retries."""
+
+    return prepare_project_request(JsonObject(values), request_id=request_id).body
 
 
 async def _check_current(
@@ -373,7 +382,7 @@ async def test_project_lifecycle_uses_real_ready_client_and_exact_grant_retries(
             assert checked.root.versions.policy_packs == ("coordination/0.1.0",)
 
             created = await client.project(
-                JsonObject(
+                _project_request(
                     {
                         "schema_version": "1.0.0",
                         "operation": "create",
@@ -386,33 +395,22 @@ async def test_project_lifecycle_uses_real_ready_client_and_exact_grant_retries(
             project_id = created["project_id"]
             assert isinstance(project_id, str)
 
-            with pytest.raises(Exception):
-                await client.project(
-                    JsonObject(
-                        {
-                            "schema_version": "1.0.0",
-                            "operation": "grant",
-                            "project_id": project_id,
-                            "membership_generation": 1,
-                        }
-                    )
-                )
-            audit = await _approve_pending(service.root / "state")
-            granted = await client.project(
-                JsonObject(
-                    {
-                        "schema_version": "1.0.0",
-                        "operation": "grant",
-                        "project_id": project_id,
-                        "membership_generation": 1,
-                        "audit_record_id": audit,
-                    }
-                )
+            first_grant = _project_request(
+                {
+                    "schema_version": "1.0.0",
+                    "operation": "grant",
+                    "project_id": project_id,
+                    "membership_generation": 1,
+                }
             )
+            with pytest.raises(Exception):
+                await client.project(first_grant)
+            await _approve_pending(service.root / "state")
+            granted = await client.project(first_grant)
             assert granted["state"] == "active"
             first_provenance = await service.app.start_catalog.task_source_provenance(first.task_id)
             assert first_provenance is not None
-            link_body = JsonObject(
+            link_body = _project_request(
                 {
                     "schema_version": "1.0.0",
                     "operation": "link",
@@ -425,28 +423,18 @@ async def test_project_lifecycle_uses_real_ready_client_and_exact_grant_retries(
             linked = await client.project(link_body)
             assert linked["member_commitment_or_id"] == first.task_id
 
-            with pytest.raises(Exception):
-                await client.project(
-                    JsonObject(
-                        {
-                            "schema_version": "1.0.0",
-                            "operation": "grant",
-                            "project_id": project_id,
-                            "membership_generation": 2,
-                        }
-                    )
-                )
-            audit = await _approve_pending(service.root / "state")
-            grant_body = JsonObject(
+            second_grant = _project_request(
                 {
                     "schema_version": "1.0.0",
                     "operation": "grant",
                     "project_id": project_id,
                     "membership_generation": 2,
-                    "audit_record_id": audit,
                 }
             )
-            granted = await client.project(grant_body)
+            with pytest.raises(Exception):
+                await client.project(second_grant)
+            await _approve_pending(service.root / "state")
+            granted = await client.project(second_grant)
             assert granted["state"] == "active"
 
             status_body: dict[str, object] = {
@@ -475,7 +463,7 @@ async def test_project_lifecycle_uses_real_ready_client_and_exact_grant_retries(
             assert page["project_id"] == project_id
 
             amended = await client.project(
-                JsonObject(
+                _project_request(
                     {
                         "schema_version": "1.0.0",
                         "operation": "amend",
@@ -491,7 +479,7 @@ async def test_project_lifecycle_uses_real_ready_client_and_exact_grant_retries(
                 second.task_id
             )
             assert second_provenance is not None
-            second_link = JsonObject(
+            second_link = _project_request(
                 {
                     "schema_version": "1.0.0",
                     "operation": "link",
@@ -504,29 +492,18 @@ async def test_project_lifecycle_uses_real_ready_client_and_exact_grant_retries(
             linked_second = await client.project(second_link)
             assert linked_second["member_commitment_or_id"] == second.task_id
 
-            with pytest.raises(Exception):
-                await client.project(
-                    JsonObject(
-                        {
-                            "schema_version": "1.0.0",
-                            "operation": "grant",
-                            "project_id": project_id,
-                            "membership_generation": 3,
-                        }
-                    )
-                )
-            audit = await _approve_pending(service.root / "state")
-            granted = await client.project(
-                JsonObject(
-                    {
-                        "schema_version": "1.0.0",
-                        "operation": "grant",
-                        "project_id": project_id,
-                        "membership_generation": 3,
-                        "audit_record_id": audit,
-                    }
-                )
+            third_grant = _project_request(
+                {
+                    "schema_version": "1.0.0",
+                    "operation": "grant",
+                    "project_id": project_id,
+                    "membership_generation": 3,
+                }
             )
+            with pytest.raises(Exception):
+                await client.project(third_grant)
+            await _approve_pending(service.root / "state")
+            granted = await client.project(third_grant)
             assert granted["state"] == "active"
 
             project_application = service.app.project_application
@@ -633,7 +610,7 @@ async def test_project_lifecycle_uses_real_ready_client_and_exact_grant_retries(
             }
 
             unlinked = await client.project(
-                JsonObject(
+                _project_request(
                     {
                         "schema_version": "1.0.0",
                         "operation": "unlink",
@@ -646,31 +623,20 @@ async def test_project_lifecycle_uses_real_ready_client_and_exact_grant_retries(
             )
             assert unlinked["member_commitment_or_id"] == second.task_id
 
-            with pytest.raises(Exception):
-                await client.project(
-                    JsonObject(
-                        {
-                            "schema_version": "1.0.0",
-                            "operation": "grant",
-                            "project_id": project_id,
-                            "membership_generation": 4,
-                        }
-                    )
-                )
-            audit = await _approve_pending(service.root / "state")
-            granted = await client.project(
-                JsonObject(
-                    {
-                        "schema_version": "1.0.0",
-                        "operation": "grant",
-                        "project_id": project_id,
-                        "membership_generation": 4,
-                        "audit_record_id": audit,
-                    }
-                )
+            fourth_grant = _project_request(
+                {
+                    "schema_version": "1.0.0",
+                    "operation": "grant",
+                    "project_id": project_id,
+                    "membership_generation": 4,
+                }
             )
+            with pytest.raises(Exception):
+                await client.project(fourth_grant)
+            await _approve_pending(service.root / "state")
+            granted = await client.project(fourth_grant)
             assert granted["state"] == "active"
-            revoke_body = JsonObject(
+            revoke_body = _project_request(
                 {
                     "schema_version": "1.0.0",
                     "operation": "revoke",
@@ -690,7 +656,7 @@ async def test_project_lifecycle_uses_real_ready_client_and_exact_grant_retries(
             assert checked_after_revoke.advisory_notes == independent_notes
 
             opt_out = await client.project(
-                JsonObject(
+                _project_request(
                     {
                         "schema_version": "1.0.0",
                         "operation": "opt_out",
@@ -700,7 +666,7 @@ async def test_project_lifecycle_uses_real_ready_client_and_exact_grant_retries(
             )
             assert opt_out["auto_grouping"] is False
             opt_in = await client.project(
-                JsonObject(
+                _project_request(
                     {
                         "schema_version": "1.0.0",
                         "operation": "opt_in",
@@ -711,7 +677,7 @@ async def test_project_lifecycle_uses_real_ready_client_and_exact_grant_retries(
             assert opt_in["auto_grouping"] is True
 
             dissolved = await client.project(
-                JsonObject(
+                _project_request(
                     {
                         "schema_version": "1.0.0",
                         "operation": "dissolve",
@@ -854,6 +820,12 @@ async def test_ready_service_client_admits_claude_and_cursor_observation_wire(
             )
         )
         await daemon.start()
+        # This test drives the two newly queued rows through the authenticated client itself.
+        # The daemon's independent READY maintenance loop may otherwise ingest one between the
+        # hook and this client's call, turning a deterministic wire assertion into a timing-based
+        # ACCEPTED versus DUPLICATE race.  Maintenance delivery has its own lifecycle coverage;
+        # keep this client-boundary case focused on the exact request/result pair.
+        await daemon._cancel_ready_maintenance()  # pyright: ignore[reportPrivateUsage]
         client_stream, server_stream = _pair()
         server_task = asyncio.create_task(daemon._serve_control_connection(server_stream))  # pyright: ignore[reportPrivateUsage]
         client = None
@@ -923,7 +895,7 @@ async def test_ready_service_client_admits_claude_and_cursor_observation_wire(
             assert claude_envelope.structural_payload["correlation_kind"] == "tool_call_id"
             assert cursor_envelope.structural_payload["pairing_mode"] == "post_only"
             assert cursor_envelope.structural_payload["correlation_kind"] == "generation_id"
-            assert cursor_envelope.structural_payload["generation_id"] == "cursor-generation-1"
+            assert cursor_envelope.structural_payload["correlation_id"] == "cursor-generation-1"
 
             for row in rows:
                 raw = await client.observation_ingest(

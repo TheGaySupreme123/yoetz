@@ -173,3 +173,105 @@ async def test_store_provider_credential_supplies_the_scoped_reauthentication_se
     assert credential is None
     assert reauthentication is not None
     assert bytes(cast(bytearray, reauthentication)) == b"scoped-reauth"
+
+
+def test_every_reviewed_provider_preset_gets_a_friendly_picker_label(tmp_path: Path) -> None:
+    """A preset missing from the label map either vanishes from ``/provider`` or
+    shows its raw provider id; both regress silently, so the map is locked to
+    the preset registry rather than to a hand-maintained list."""
+
+    from yoetz.config.write import PROVIDER_PRESETS
+
+    options = {option.choice: option for option in YoetzRuntime(cwd=tmp_path).provider_options()}
+
+    missing = sorted(set(PROVIDER_PRESETS) - set(options))
+    assert missing == [], f"presets without a picker entry: {missing}"
+    for choice, preset in PROVIDER_PRESETS.items():
+        option = options[choice]
+        assert option.provider_id == preset.provider_id
+        assert option.label.strip(), f"empty label for preset {choice}"
+        assert option.label != preset.provider_id, (
+            f"preset {choice} falls through to its raw provider id {preset.provider_id!r}"
+        )
+        assert option.label != choice, f"preset {choice} falls through to its choice key"
+    assert options["grok"].label == "Grok (xAI)"
+
+
+# ---------------------------------------------------------------------------
+# Host facts are named once in /doctor and detection (issues #720, #721, #724)
+# ---------------------------------------------------------------------------
+
+
+def test_secure_storage_probe_names_the_reason_from_the_vault_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yoetz.adapters.keys import os_keyring
+    from yoetz.tui import runtime as runtime_module
+
+    monkeypatch.setattr(
+        os_keyring,
+        "describe_vault_keyring_backend",
+        lambda: os_keyring.KeyringBackendReport(
+            "keyring.backends.null.Keyring", False, "backend_not_approved", "macOS Keychain"
+        ),
+    )
+
+    available, reason = runtime_module._secure_storage_probe()  # pyright: ignore[reportPrivateUsage]
+
+    assert available is False
+    assert "keyring.backends.null.Keyring" in reason
+    assert reason.endswith("Yoetz needs macOS Keychain")
+
+
+def test_host_entries_report_platform_sandbox_and_storage_without_mutating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.version as version_module
+    from yoetz.adapters import check_sandbox
+    from yoetz.adapters.keys import os_keyring
+    from yoetz.ports.check_sandbox import CheckSandboxAvailability, CheckSandboxStatus
+    from yoetz.tui import runtime as runtime_module
+    from yoetz.tui.models import LayerState
+
+    monkeypatch.setattr(version_module.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(version_module.platform, "machine", lambda: "aarch64")
+    monkeypatch.setattr(
+        check_sandbox,
+        "default_check_sandbox",
+        lambda: check_sandbox.LinuxCheckSandbox(bwrap="/nonexistent/bwrap", _probe=lambda _argv: 1),
+    )
+    monkeypatch.setattr(
+        os_keyring,
+        "describe_vault_keyring_backend",
+        lambda: os_keyring.KeyringBackendReport("", False, "keyring_unavailable", "a store"),
+    )
+
+    entries = runtime_module._host_entries()  # pyright: ignore[reportPrivateUsage]
+
+    by_key = {entry.key: entry for entry in entries}
+    assert list(by_key) == ["platform_cell", "check_sandbox", "secure_storage"]
+    assert by_key["platform_cell"].state is LayerState.UNPROVEN
+    assert "aarch64" in by_key["platform_cell"].detail
+    assert "macOS arm64 and Linux x86-64" in by_key["platform_cell"].remediation
+    assert by_key["check_sandbox"].state is LayerState.NOT_CONFIGURED
+    assert by_key["check_sandbox"].detail.startswith("bwrap_missing")
+    assert "apt install bubblewrap" in by_key["check_sandbox"].remediation
+    assert by_key["secure_storage"].state is LayerState.NOT_CONFIGURED
+    assert by_key["secure_storage"].detail == "no credential store is loaded; Yoetz needs a store"
+    assert "passphrase" in by_key["secure_storage"].remediation
+
+    ready = CheckSandboxAvailability(CheckSandboxStatus.READY, "seatbelt", "ready", "")
+    monkeypatch.setattr(check_sandbox, "probe_check_sandbox", lambda: ready)
+    monkeypatch.setattr(version_module.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(version_module.platform, "libc_ver", lambda: ("glibc", "2.28"))
+    monkeypatch.setattr(
+        os_keyring,
+        "describe_vault_keyring_backend",
+        lambda: os_keyring.KeyringBackendReport("x", True, "approved", "a store"),
+    )
+
+    verified = {entry.key: entry for entry in runtime_module._host_entries()}  # pyright: ignore[reportPrivateUsage]
+    assert all(entry.state is LayerState.VERIFIED for entry in verified.values())
+    assert verified["platform_cell"].detail == "Linux x86_64 (manylinux_2_28_x86_64)"
+    assert verified["check_sandbox"].detail == "seatbelt"
+    assert all(entry.remediation == "" for entry in verified.values())

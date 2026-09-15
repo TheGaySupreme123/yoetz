@@ -19,11 +19,14 @@ import sys
 from pathlib import Path
 from typing import Literal, TypedDict
 
+from yoetz.config.installation import ReportedLifecycle, read_instance_identity
 from yoetz.config.load import parse_minimal_safe_config
 from yoetz.config.paths import (
+    IsolationBinding,
     bundle_root,
     config_file_path,
     isolated_root,
+    isolation_binding,
     runtime_dir,
     state_dir,
 )
@@ -41,6 +44,8 @@ class ResolvedIdentity(TypedDict):
 
 class IsolationReport(TypedDict):
     mode: Literal["isolated", "ambient"]
+    binding: IsolationBinding
+    lifecycle: ReportedLifecycle
     identity: ResolvedIdentity
 
 
@@ -71,15 +76,25 @@ def _effective_storage_dir() -> Path:
 def isolation_report() -> IsolationReport:
     """Resolve only this exact environment's identity roots.
 
-    Raises ``PathSafetyError`` when ``YOETZ_ISOLATED_ROOT`` is set but unusable and
-    ``ConfigError`` when the selected configuration cannot be minimally parsed; both mean the
-    isolation state is unprovable and the caller must fail closed. A dogfood preflight compares
-    this report with a second report captured from the exact normal target; platform defaults are
-    not a substitute because that target may use relocated config or storage.
+    Raises ``PathSafetyError`` when ``YOETZ_ISOLATED_ROOT`` or the runtime pin is set but
+    unusable (or the two conflict), ``InstanceIdentityError`` when the root's instance marker is
+    malformed, and ``ConfigError`` when the selected configuration cannot be minimally parsed;
+    all mean the isolation state is unprovable and the caller must fail closed. A dogfood
+    preflight compares this report with a second report captured from the exact normal target;
+    platform defaults are not a substitute because that target may use relocated config or
+    storage.
     """
 
     root = isolated_root()
     mode: Literal["isolated", "ambient"] = "ambient" if root is None else "isolated"
+    binding = isolation_binding()
+    # The everyday install is the permanent instance and carries no marker; an isolated root
+    # without a marker is a legacy ADR-026 root and stays isolated, just unlabeled (issue #604).
+    # A malformed marker propagates as ``InstanceIdentityError``: unprovable, never ambient.
+    lifecycle: ReportedLifecycle = "permanent"
+    if root is not None:
+        marker = read_instance_identity(state_dir())
+        lifecycle = "unlabeled" if marker is None else marker.lifecycle
     identity = ResolvedIdentity(
         state_digest=_identity_digest(state_dir()),
         endpoint_digest=_identity_digest(runtime_dir()),
@@ -90,4 +105,4 @@ def isolation_report() -> IsolationReport:
         # identical (or the reverse when wrappers share one interpreter).
         executable_digest=_identity_digest(Path(sys.argv[0])),
     )
-    return IsolationReport(mode=mode, identity=identity)
+    return IsolationReport(mode=mode, binding=binding, lifecycle=lifecycle, identity=identity)

@@ -1700,8 +1700,10 @@ def _exact_match(left: str, right: str) -> bool:
     return hmac.compare_digest(left, right)
 
 
-def claim_pending_for_review(*, _state: Path | None = None) -> PendingElevatedConsent:
-    """Atomically consume one pending request for a verified-console review."""
+def claim_pending_for_review(
+    *, for_console: bool = False, _state: Path | None = None
+) -> PendingElevatedConsent:
+    """Atomically claim a request, refusing unsupported console authority before mutation."""
 
     with _PendingStateLock(_state):
         pending = _load_pending_unlocked(_state=_state)
@@ -1709,6 +1711,8 @@ def claim_pending_for_review(*, _state: Path | None = None) -> PendingElevatedCo
             raise ElevatedBootstrapError("pending_absent")
         if not operation_spec(pending.operation).implemented:
             raise ElevatedBootstrapError("operation_not_implemented")
+        if for_console and pending.operation == "project_coordination_grant":
+            raise ElevatedBootstrapError("project_coordination_grant_requires_chat_authority")
         source = pending_path(_state=_state)
         claim = review_path(_state=_state)
         try:

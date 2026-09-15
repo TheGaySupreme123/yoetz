@@ -254,13 +254,51 @@ launch a child. A neighboring version, changed binary/config, absent ChatGPT log
 exact model/reasoning cell, or unproved isolation fails before case disclosure. This cell has
 unknown data-use posture and receives no Assisted recommendation badge.
 
+The September 7, 2026 amendment for issue #584 pins `codex-evaluator/0.150.1/v2` to the same
+native binary, schema, configuration, and expiry. It accepts the pinned schema's sparse rate-limit
+bookkeeping independently of bucket name; malformed bookkeeping after acknowledgement records
+only a bounded nonterminal diagnostic. Native quota and 429 errors remain authoritative. Tool
+and unreviewed event failures stay terminal but are unavailable rather than invalid model answers.
+The runbook records the exact new cell digest and synthetic evidence boundary. Existing bindings
+require explicit setup to accept the new identity; no privacy authority migrates implicitly.
+
+### Linux x86_64 cell amendment (2026-09-13, issue #716)
+
+The same evaluator contract now has a separate Linux x86_64 implementation cell for Codex npm
+`0.150.1-linux-x64` (`@openai/codex-linux-x64`). Its native executable, source identity, package
+layout, platform, and capability-cell digest are distinct from the macOS arm64 cell; its
+app-server v2 schema, isolated configuration, model/reasoning contract, OAuth authority, and
+privacy/cleanup fences remain identical. An x86_64 WSL2 Linux userspace is eligible for the Linux
+cell, but WSL-specific smoke evidence is pending; this amendment creates no native Windows cell.
+The Linux cell remains an implementation candidate until its packaged Yoetz lifecycle and
+semantic-receipt evidence is complete. The empty `runtime-support.json` arrays therefore remain
+unchanged.
+
 The gateway issues a secret-free, dispatch-bound `ExternalRuntimeAuthority` instead of minting a
 vault handle. The runtime may receive only the already-approved canonical case through stdin. Its
 `RuntimeAttemptEvidence` commits to the disclosed case, instruction, output schema, launcher,
 configuration, executable, protocol, capability, model/reasoning selection, safe correlation,
 terminal output digest, and process cleanup. It explicitly records
 `upstream_body_observability=unavailable`; the disclosed-case commitment must never be described as
-the upstream OpenAI body.
+the upstream OpenAI body. Current runtime evidence may also record the Codex app-server's bounded
+cumulative token snapshot for that exact thread and turn: input/output/total counters plus cached
+input and reasoning-output subsets, with cache-write input retained as a separate provider
+counter. Repeated cumulative updates replace one another; they are never summed, and missing,
+malformed, unrelated, or regressing updates remain
+unknown or become a bounded `token_usage_invalid` diagnostic. Account identifiers and raw provider
+notification bodies never enter provenance.
+
+For the same reason, each observed `RuntimeTokenUsage` sample is copied into the corresponding
+`semantic_attempts` ledger row as six bounded numeric counters before the attempt is closed. The
+nullable columns preserve older ledgers and keep cache-write and reasoning subsets separate; a
+partial or invariant-breaking sample fails closed. Internal attempt accounting for an operation
+that is still in flight can thus recover usage for selected, failed, and expired physical attempts
+across a service restart, while public provenance continues to describe only the provider result
+it actually represents and never invents provenance for a failed recovery. Usage for attempts of
+already-completed operations stays in the owner ledger rows and reaches no public surface. A
+failure while persisting a successful response is terminalized as a bounded
+`coordinator_failure` with the attempt's usage retained, rather than leaving the attempt
+`started`.
 
 Retries remain within the durable attempt budget. A pre-`turn/start`-acknowledgement transient may
 receive a fresh one-use authorization and exact retry. After acknowledgement, transport ambiguity
@@ -314,11 +352,21 @@ configuration; swapping the primary keeps both bindings and both approvals.
    configured pairing (`coordinator_failure` before dispatch or during a disclosure wait,
    an uncertain started attempt retains `outcome_unknown` durably and reports the provenance-free
    public gap `receipt_persistence_unknown`). The internal attempt projection
-   exposes the existing durable `started_at` timestamp; no storage migration is introduced. An expired
+   exposes the existing durable `started_at` timestamp; usage counters are an additive nullable
+   bundle migration (0013), so legacy rows remain readable. An expired
    resumed attempt without a disclosure wait preserves `outcome_unknown`; a known undispatched
    expiry records `provider_timeout`. If provider-result provenance is unavailable on recovery,
    the public result uses `receipt_persistence_unknown` while retaining the original durable reason.
    Retained provider-result objects are recovered when their status and reason match that row.
+   **Lease/recovery amendment, 2026-09-07 (#616, #620):** live semantic operation and job leases
+   use the authenticated execution snapshot's total expiry plus five seconds for local cleanup,
+   rather than a renewable heartbeat. The current two-endpoint maximum makes that live bound
+   at most 7205 seconds; a crash can consequently delay reclaim until that bound. Claim/reclaim
+   retains an existing `started` or `response_durable` attempt and its physical request identity.
+   A saved response is selected and recovered before any new attempt is considered. After the
+   execution bound, an already reclaimed ordinary operation lease may perform bounded local
+   terminal recovery; it cannot renew semantic execution or dispatch after the immutable provider
+   deadline. Provider deadlines and human approval expiry remain separate from lease ownership.
 4. **Every fallback attempt is a fresh physical attempt** under ADR-009: its own privacy
    evaluation against the exact fallback binding, authorization, dispatch identity, credential
    handle or `ExternalRuntimeAuthority`, and privacy receipt. Under `confirm_every_request` it
@@ -349,26 +397,34 @@ credential is absent is reported unavailable on its own row without fencing the 
 interoperability of a paired dispatch is claimed until authorized evidence records the exact
 request, response, route, and receipt for the endpoint that served.
 
-## 0.3 long-review execution and recovery (#746)
 
-The Codex subscription evaluator defaults to a 900-second total execution budget; an explicit
-`external_runtime.timeout_seconds` from 1 through 3600 is preserved. Other provider profiles keep
-their existing bounds. Primary and approved fallback endpoints retain separate frozen shares;
-the authenticated combined execution may span at most 7200 seconds. Retries never reset the clock
-or increase the configured retry count.
+## Amendment: bounded reference scope and exceptional exits (#675, #676)
 
-The operation lease and active semantic-job lease cover the authenticated frozen execution expiry
-plus five seconds of local cleanup. Reclaim preserves a started or response-durable attempt's
-identity. Exact durable admission lookup precedes any gateway call: consumed/completed or uncertain
-admission never licenses a fresh dispatch. A durable authenticated response can be selected on
-recovery; otherwise the result retains uncertainty. Missing or invalid case/audit objects fail
-closed. Expired disclosure waits alone do not prove that no disclosure occurred.
+The semantic packet selects a deterministic dependency closure from the frozen allowlist. Retained
+packet relations, canonical payload dependencies, recorded findings and source-event identities
+remain connected. Unrelated frontier IDs are counted as omitted, bound into the case digest, and
+reported through partial `semantic_reference_scope_reduced` coverage. The deterministic case is
+not reduced. The existing envelope byte limit and independent disclosure policy remain in force.
+Irreducible required structure fails before job/attempt creation with `case_capacity_exceeded` and
+`semantic_case_capacity_exceeded` coverage. Narrowing scope creates new work; it does not replay a
+terminal check or imply that the reduced packet reviewed the whole task.
 
-An admitted semantic check belongs to the service, not to one control connection's wait. A client
-wait timeout or disconnect leaves that check running under its original deadline and identity;
-an identical active retry reports `OPERATION_PENDING`, and terminal replay reads the ledger again.
-At most eight check handlers may be retained, including bounded admission waiters. Results are not
-cached across client contexts. Explicit control cancellation of an attached call cancels its check;
-service shutdown cancels and joins retained handlers before closing the application or vault.
-Maintenance and lifecycle exclusion remain in force. This does not introduce parallel semantic
-execution, new phase telemetry, or an automatic deadline-extension policy.
+Exceptional attempts retain a request-joined stage/category before cleanup. Dispatch entry is an
+uncertain execution boundary; null provenance and missing diagnostics are not non-dispatch proof.
+Provider-return, mapping and persistence faults remain distinct. Diagnostics cannot change retry
+eligibility, durable-response recovery, cancellation or lease fencing. See `docs/INTERFACES.md` for
+the public reason, coverage and owner diagnostic lookup contracts.
+
+
+### Long external Codex reviews (2026-09-16, #496 / #746)
+
+The external Codex evaluator defaults to 900 seconds and accepts explicit values from 1 to 3600
+seconds. Existing explicit shorter values are preserved. Other provider kinds keep their existing
+limits. The primary and optional fallback each retain their own frozen budget, with a combined
+execution bound of 7200 seconds and five seconds of lease cleanup. Recovery never resets that clock
+or mints a new provider request after authority was consumed.
+
+A client wait timeout or disconnect leaves an admitted semantic check running under service
+ownership. At most eight such checks can be retained; same-identity retries report pending, and a
+changed body conflicts. An explicit attached control cancellation or service shutdown cancels and
+joins the work. This does not introduce parallel semantic scheduling or phase-progress telemetry.

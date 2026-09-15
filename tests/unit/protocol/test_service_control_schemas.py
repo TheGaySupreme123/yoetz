@@ -12,8 +12,9 @@ from urllib.parse import urlparse
 import pytest
 
 from yoetz.domain.observation import _STRUCTURAL_KEYS  # pyright: ignore[reportPrivateUsage]
+from yoetz.domain.values import JsonObject
 from yoetz.ports.control import ControlCallRequest
-from yoetz.protocol.canonical import JsonValue, strict_json_parse
+from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.schemas import load_schema_catalog, validate_schema_instance
 from yoetz.service.control_protocol import (
@@ -30,6 +31,29 @@ _INSTANCE_ID = "svc_00000000-0000-4000-8000-000000000001"
 _RPC_ID = "rpc_00000000-0000-4000-8000-000000000002"
 _REQUEST_ID = "req_00000000-0000-4000-8000-000000000003"
 _DIGEST = "sha256:" + "0" * 64
+# Routine-read summaries use a separate observation envelope. These structural keys are therefore
+# intentionally absent from the ordinary native capture control envelope, even though the domain
+# observation validator admits them for that summary lane.
+_ROUTINE_SUMMARY_STRUCTURAL_KEYS = frozenset(
+    {
+        "summary_count",
+        "input_count",
+        "member_digest",
+        "fence",
+        "provenance",
+        "summary_schema",
+        "selection_policy_version",
+        "content_scope",
+        "coverage_gaps",
+        "subject_state_digest",
+        "members",
+        "selection_task_id",
+        "selection_session_id",
+        "selection_writer_id",
+        "selection_authority_generation",
+        "protection_reference",
+    }
+)
 _WORKFLOW_METHODS = (
     "check",
     "publish_work",
@@ -526,7 +550,7 @@ def test_v23_updates_only_the_status_operation_schema_refs() -> None:
         assert (_ROOT / filename).read_bytes() == _PACKAGE_ROOT.joinpath(filename).read_bytes()
 
 
-def test_v24_updates_only_publish_provenance_and_privacy_policy_contracts() -> None:
+def test_v24_updates_publish_provenance_privacy_and_ordinary_content_contracts() -> None:
     request_v23 = cast(
         dict[str, Any],
         strict_json_parse((_ROOT / "control-request-2.3.0.schema.json").read_bytes()),
@@ -550,6 +574,56 @@ def test_v24_updates_only_publish_provenance_and_privacy_policy_contracts() -> N
     new_result_id = result_v24.pop("$id")
     assert "publish-work-request-1.0.0.schema.json" in str(request_v23)
     assert "publish-work-request-1.1.0.schema.json" in str(request_v24)
+
+    structural_v23 = request_v23["$defs"]["observation_envelope"]["properties"][
+        "structural_payload"
+    ]["properties"]
+    structural_v24 = request_v24["$defs"]["observation_envelope"]["properties"][
+        "structural_payload"
+    ]["properties"]
+    pairing_fields = ("pairing_mode", "correlation_kind", "generation_id")
+    assert all(name not in structural_v23 for name in pairing_fields)
+    assert structural_v24["pairing_mode"] == {
+        "enum": ["paired", "post_only"],
+        "type": "string",
+    }
+    assert structural_v24["correlation_kind"] == {
+        "enum": ["tool_call_id", "generation_id", "none"],
+        "type": "string",
+    }
+    assert structural_v24["generation_id"]["pattern"] == ("^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$")
+    check_v24 = next(
+        branch
+        for branch in request_v24["oneOf"]
+        if branch.get("properties", {}).get("method", {}).get("const") == "check"
+    )
+    assert check_v24["properties"]["host_profile"] == {
+        "enum": ["generic", "codex", "claude", "cursor"],
+        "type": "string",
+    }
+
+    # Strip the current-schema additions before comparing the historical
+    # contract below. This keeps the existing byte-preservation assertion
+    # precise while making the v2.4-only expansion explicit above.
+    for name in pairing_fields:
+        del structural_v24[name]
+    del check_v24["properties"]["host_profile"]
+    request_v24_defs = cast(dict[str, dict[str, Any]], request_v24["$defs"])
+    request_v24_ingest = request_v24_defs["observation_ingest_body"]
+    content_profile = cast(
+        dict[str, Any],
+        cast(dict[str, Any], request_v24_ingest["properties"])["content_capture_profile"],
+    )
+    assert content_profile == {
+        "enum": [
+            "claude-code-ordinary-observation-v1",
+            "cursor-ordinary-observation-v1",
+        ],
+        "type": "string",
+    }
+    # This selector is the only ordinary-observation wire addition in 2.4;
+    # remove it before comparing the inherited 2.3 contract below.
+    del cast(dict[str, Any], request_v24_ingest["properties"])["content_capture_profile"]
 
     policy_ref = "https://schemas.yoetz.dev/0.1/privacy/privacy-policy-1.0.0.schema.json"
     policy_union = [
@@ -615,16 +689,15 @@ def test_v25_observation_wire_tracks_domain_structural_keys_without_rewriting_v2
     v25_properties = request_v25["$defs"]["observation_envelope"]["properties"][
         "structural_payload"
     ]["properties"]
-    current_only = {"pairing_mode", "correlation_kind", "generation_id"}
-
-    assert set(v25_properties) == set(_STRUCTURAL_KEYS)
-    assert set(v24_properties) == set(_STRUCTURAL_KEYS) - current_only
+    expected_observation_keys = set(_STRUCTURAL_KEYS) - _ROUTINE_SUMMARY_STRUCTURAL_KEYS
+    assert set(v25_properties) == expected_observation_keys
+    assert set(v24_properties) == expected_observation_keys
     assert v25_properties["pairing_mode"] == {
         "enum": ["paired", "post_only"],
         "type": "string",
     }
     assert v25_properties["correlation_kind"] == {
-        "enum": ["generation_id", "none", "tool_call_id"],
+        "enum": ["tool_call_id", "generation_id", "none"],
         "type": "string",
     }
     assert v25_properties["generation_id"] == {
@@ -671,7 +744,7 @@ def test_v25_observation_wire_tracks_domain_structural_keys_without_rewriting_v2
 def test_v25_control_client_round_trips_cli_shaped_native_observation_frames(
     source: str, codex_session_id: str, structural: dict[str, Any]
 ) -> None:
-    """Current control admission accepts native hook metadata; frozen 2.4 rejects it."""
+    """The control admission preserves pairing metadata from the 2.4 wire onward."""
 
     frame = _current_cli_observation_frame(
         source=source,
@@ -684,12 +757,48 @@ def test_v25_control_client_round_trips_cli_shaped_native_observation_frames(
     assert isinstance(parsed, ControlCallRequest)
     assert parsed.method.value == "observation_ingest"
 
+    validate_schema_instance("control-request", "2.4.0", cast(JsonValue, frame))
     with pytest.raises(ProtocolValueError):
-        validate_schema_instance("control-request", "2.4.0", cast(JsonValue, frame))
+        validate_schema_instance("control-request", "2.3.0", cast(JsonValue, frame))
 
 
-def test_v25_control_check_uses_current_request_wire_and_coordination_pack() -> None:
-    """The current control envelope must carry the current check operation schema."""
+def test_v27_control_client_round_trips_selection_route_fields_without_rewriting_frozen_v26() -> (
+    None
+):
+    """Current native hook envelopes carry the selection route on the active 2.7 wire only."""
+
+    frame = _current_cli_observation_frame(
+        source="claude_hook",
+        codex_session_id="claude:session-1",
+        structural={
+            "action": "claude_mcp_success",
+            "capability_profile_id": "claude-code-cli-local-project-2.1.241",
+            "correlation_kind": "tool_call_id",
+            "hook_name": "PostToolUse",
+            "pairing_mode": "post_only",
+            "selection_authority_generation": "sha256:" + "2" * 64,
+            "selection_session_id": "ses_00000000-0000-4000-8000-000000000004",
+            "selection_task_id": "tsk_00000000-0000-4000-8000-000000000005",
+            "selection_writer_id": "wri_00000000-0000-4000-8000-000000000006",
+            "success": True,
+            "tool_call_id": "tool-1",
+        },
+    )
+
+    validate_schema_instance("control-request", "2.7.0", cast(JsonValue, frame))
+    parsed = parse_control_request(decode_control_frame(encode_control_frame(frame)))
+    assert isinstance(parsed, ControlCallRequest)
+    assert isinstance(parsed.body, JsonObject)
+    assert canonical_encode(parsed.body) == canonical_encode(frame["body"])
+
+    # The released 2.6 document remains byte-frozen and must not silently gain the
+    # current selection routing extension.
+    with pytest.raises(ProtocolValueError):
+        validate_schema_instance("control-request", "2.6.0", cast(JsonValue, frame))
+
+
+def test_v27_control_check_uses_current_request_wire_and_coordination_pack() -> None:
+    """The active control envelope carries the project-aware check operation schema."""
 
     def operation_refs(filename: str) -> set[str]:
         document = cast(dict[str, Any], strict_json_parse((_ROOT / filename).read_bytes()))
@@ -710,7 +819,7 @@ def test_v25_control_check_uses_current_request_wire_and_coordination_pack() -> 
         collect_refs(document)
         return references
 
-    assert operation_refs("control-request-2.5.0.schema.json") == {
+    assert operation_refs("control-request-2.7.0.schema.json") == {
         "check-request-1.1.0.schema.json",
         "publish-work-request-1.2.0.schema.json",
         "receipt-request-1.0.0.schema.json",
@@ -718,13 +827,13 @@ def test_v25_control_check_uses_current_request_wire_and_coordination_pack() -> 
         "start-request-1.1.0.schema.json",
         "status-request-1.2.0.schema.json",
     }
-    assert operation_refs("control-result-2.5.0.schema.json") == {
-        "check-result-1.2.0.schema.json",
+    assert operation_refs("control-result-2.7.0.schema.json") == {
+        "check-result-1.3.0.schema.json",
         "publish-work-result-1.0.0.schema.json",
-        "receipt-result-1.2.0.schema.json",
+        "receipt-result-1.3.0.schema.json",
         "respond-result-1.0.0.schema.json",
         "start-result-1.1.0.schema.json",
-        "status-result-1.3.0.schema.json",
+        "status-result-1.4.0.schema.json",
     }
 
     request: JsonValue = cast(
@@ -754,9 +863,31 @@ def test_v25_control_check_uses_current_request_wire_and_coordination_pack() -> 
             },
         },
     )
-    validate_schema_instance("control-request", "2.5.0", request)
+    validate_schema_instance("control-request", "2.7.0", request)
     with pytest.raises(ProtocolValueError):
         validate_schema_instance("control-request", "2.4.0", request)
+
+
+def test_v24_pairing_structural_fields_round_trip_and_are_rejected_by_v23() -> None:
+    """Pairing metadata is accepted on the active wire and closed in older versions."""
+
+    frame = _cursor_ingest_frame(
+        {
+            "capability_profile_id": "cursor-ide-3.17.8",
+            "correlation_kind": "generation_id",
+            "generation_id": "turn-607",
+            "pairing_mode": "post_only",
+        }
+    )
+    validate_schema_instance("control-request", "2.4.0", cast(JsonValue, frame))
+    with pytest.raises(ProtocolValueError):
+        validate_schema_instance("control-request", "2.3.0", cast(JsonValue, frame))
+
+    from yoetz.service.control_protocol import decode_control_frame, encode_control_frame
+
+    encoded = encode_control_frame(cast(JsonValue, frame))
+    decoded = decode_control_frame(encoded)
+    assert canonical_encode(decoded) == canonical_encode(frame)
 
 
 def test_control_request_and_result_unions_are_exact_and_disjoint() -> None:

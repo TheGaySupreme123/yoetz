@@ -264,13 +264,13 @@ async def _create_unreferenced_object(service: MultiAgentService, task: StartInt
         )
         staged = await runtime.objects.stage(ObjectSource(data=b"aged-gc-orphan"), metadata)
         reference = await runtime.objects.finalize(staged)
-        # GC's grace window uses filesystem mtime, not the encrypted metadata timestamp.
-        # Put this synthetic object's filesystem clock on the same injected timeline so
-        # the scenario remains deterministic when the wall clock advances beyond it.
+        # The production file-store sweep uses filesystem mtime as its retention clock.  Keep
+        # this orphan deterministically older than the 24-hour retention window using the same
+        # injected clock as the object metadata; waiting would make the lifecycle test flaky.
         store = cast(EncryptedFilesObjectStore, runtime.objects)
-        path = store._path_for(reference.object_id)  # pyright: ignore[reportPrivateUsage]
-        instant = service.clock.now_utc().timestamp()
-        os.utime(path, (instant, instant), follow_symlinks=False)
+        aged_at = service.clock.now_utc() - timedelta(days=2)
+        timestamp = aged_at.timestamp()
+        os.utime(store._path_for(reference.object_id), (timestamp, timestamp))  # pyright: ignore[reportPrivateUsage]
         return reference.object_id
     finally:
         await service.app.runtime.release(runtime)

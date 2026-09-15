@@ -1969,6 +1969,7 @@ class SqliteStartCatalog:
         *,
         title_ref: ProjectTextRef | None,
         description_ref: ProjectTextRef | None,
+        expected_current_refs: tuple[ProjectTextRef | None, ProjectTextRef | None] | None = None,
     ) -> ProjectDescriptor:
         self._require_lineage_schema()
         try:
@@ -1979,6 +1980,20 @@ class SqliteStartCatalog:
                 raise ValueError("project_description_ref_invalid")
             title_blob = _project_text_ref_blob(title_ref)
             description_blob = _project_text_ref_blob(description_ref)
+            if expected_current_refs is not None:
+                if (
+                    type(expected_current_refs) is not tuple
+                    or len(expected_current_refs) != 2
+                    or any(
+                        item is not None and type(item) is not ProjectTextRef
+                        for item in expected_current_refs
+                    )
+                ):
+                    raise ValueError("project_text_expected_refs_invalid")
+                expected_title_blob = _project_text_ref_blob(expected_current_refs[0])
+                expected_description_blob = _project_text_ref_blob(expected_current_refs[1])
+            else:
+                expected_title_blob = expected_description_blob = None
         except (TypeError, ValueError) as exc:
             raise _error(PublicErrorCode.INVALID_REQUEST) from exc
         with self._transaction():
@@ -1992,13 +2007,36 @@ class SqliteStartCatalog:
                     if not rows
                     else PublicErrorCode.STORAGE_CORRUPT
                 )
-            self._db.execute(
-                "UPDATE projects SET title_ref_canonical = ?, description_ref_canonical = ? "
-                "WHERE project_id = ?",
-                (title_blob, description_blob, project),
-            )
+            if expected_current_refs is None:
+                self._db.execute(
+                    "UPDATE projects SET title_ref_canonical = ?, description_ref_canonical = ? "
+                    "WHERE project_id = ?",
+                    (title_blob, description_blob, project),
+                )
+            else:
+                self._db.execute(
+                    "UPDATE projects SET title_ref_canonical = ?, description_ref_canonical = ? "
+                    "WHERE project_id = ? AND title_ref_canonical IS ? "
+                    "AND description_ref_canonical IS ?",
+                    (
+                        title_blob,
+                        description_blob,
+                        project,
+                        expected_title_blob,
+                        expected_description_blob,
+                    ),
+                )
             if self._db.changes() != 1:
-                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+                current_rows = self._rows(
+                    f"SELECT {_PROJECT_COLUMNS} FROM projects WHERE project_id = ? LIMIT 2",
+                    (project,),
+                )
+                if len(current_rows) != 1:
+                    raise _error(PublicErrorCode.STORAGE_CORRUPT)
+                current = _project_from_row(current_rows[0])
+                if current.title_ref == title_ref and current.description_ref == description_ref:
+                    return current
+                raise _error(PublicErrorCode.SESSION_CONFLICT)
             rows = self._rows(
                 f"SELECT {_PROJECT_COLUMNS} FROM projects WHERE project_id = ? LIMIT 2",
                 (project,),
@@ -2013,9 +2051,13 @@ class SqliteStartCatalog:
         *,
         title_ref: ProjectTextRef | None,
         description_ref: ProjectTextRef | None,
+        expected_current_refs: tuple[ProjectTextRef | None, ProjectTextRef | None] | None = None,
     ) -> ProjectDescriptor:
         return await self.record_project_text_refs(
-            project_id, title_ref=title_ref, description_ref=description_ref
+            project_id,
+            title_ref=title_ref,
+            description_ref=description_ref,
+            expected_current_refs=expected_current_refs,
         )
 
     async def unbind_project_membership(
@@ -2306,6 +2348,8 @@ class SqliteStartCatalog:
                 return self._resume_existing(existing, request, now, now_wire, owner_generation)
 
             route = self._resolve_requested_route(request)
+            if route is not None and route.state is TaskRouteState.QUARANTINED:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
             if request.mode is StartMode.CREATE and route is not None:
                 raise _error(
                     PublicErrorCode.SESSION_CONFLICT,

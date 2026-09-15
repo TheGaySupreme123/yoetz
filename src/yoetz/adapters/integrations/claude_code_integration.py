@@ -27,6 +27,10 @@ from typing import Final, Literal, Protocol, cast
 from yoetz import __version__
 from yoetz.adapters.integrations.launcher import resolve_yoetz_launcher, valid_launcher
 from yoetz.adapters.integrations.portable_plugin import PackagedPortableResources
+from yoetz.domain.observation_profiles import (
+    CLAUDE_CODE_ORDINARY_HOOK_MAPPING_VERSION,
+    CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+)
 from yoetz.domain.values import JsonObject, RequestId
 from yoetz.domain.values import request_id as validate_request_id
 from yoetz.ports.integrations import (
@@ -40,6 +44,7 @@ from yoetz.ports.plugin_artifacts import (
     ManagedPluginFile,
     McpOwnership,
     McpOwnershipState,
+    PluginArtifactError,
     PluginArtifactReason,
     PluginArtifactState,
     PluginFormatProfile,
@@ -62,6 +67,9 @@ __all__ = [
     "CLAUDE_CODE_HOOK_EVENTS",
     "CLAUDE_CODE_MINIMUM_VERSION",
     "CLAUDE_CODE_NATIVE_PROFILE_ID",
+    "CLAUDE_CODE_ORDINARY_HOOK_MAPPING_VERSION",
+    "CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID",
+    "CLAUDE_CODE_ORDINARY_HOOK_EVENTS",
     "ClaudeCodeCapabilityIdentity",
     "ClaudeCodeCommandPort",
     "ClaudeCodeCommandResult",
@@ -81,15 +89,19 @@ __all__ = [
     "export_claude_code_plugin",
     "observe_claude_code_mcp",
     "observe_claude_code_session_init",
+    "claude_code_version_provenance",
     "preview_claude_code_plugin",
     "render_claude_code_plugin",
     "status_claude_code_plugin",
 ]
 
-# Hooks/plugin surfaces this integration relies on exist from 2.1.233, but
-# admission is gated on the exactly proven versions in
-# CLAUDE_CODE_HARNESS_PROFILE.supported_versions, never on this floor alone.
+# Hooks/plugin surfaces this integration relies on exist from 2.1.233. Plugin
+# preview/apply admits any parseable version at or above this floor (issue #656);
+# the exactly proven versions in CLAUDE_CODE_HARNESS_PROFILE.supported_versions
+# are certification provenance (``tested``), never the admission gate. A version
+# at or above the floor that was not proven is admitted as ``untested``.
 CLAUDE_CODE_MINIMUM_VERSION: Final = "2.1.233"
+type ClaudeCodeVersionProvenance = Literal["tested", "untested"]
 CLAUDE_CODE_NATIVE_PROFILE_ID: Final = "claude-code-cli-local-project-2.1.241"
 CLAUDE_CODE_HOOK_MAPPING_VERSION: Final = "claude-code-hooks-2.1.241-v1"
 CLAUDE_CODE_HOOK_EVENTS: Final = (
@@ -101,6 +113,17 @@ CLAUDE_CODE_HOOK_EVENTS: Final = (
     "Stop",
     "SubagentStart",
     "SubagentStop",
+)
+CLAUDE_CODE_ORDINARY_HOOK_EVENTS: Final = (
+    "PermissionDenied",
+    "PermissionRequest",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "PreToolUse",
+    "SessionEnd",
+    "SessionStart",
+    "Stop",
+    "StopFailure",
 )
 _CLAUDE_HOOK_PROFILE: Final = HarnessHookProfile(
     trigger_event="SessionStart",
@@ -134,7 +157,7 @@ _MARKER_SCHEMA: Final = "yoetz.claude-code-marketplace-install/2"
 _LEGACY_MARKER_SCHEMAS: Final = frozenset({"yoetz.claude-code-marketplace-install/1"})
 _EXPORT_MARKER_NAME: Final = ".yoetz-claude-plugin-export.json"
 _EXPORT_MARKER_SCHEMA: Final = "yoetz.claude-code-plugin-export/1"
-_RENDERER_VERSION: Final = "claude-code-plugin/0.3.0"
+_RENDERER_VERSION: Final = "claude-code-plugin/0.4.0"
 _STAGE_PREFIX: Final = ".yoetz-claude-marketplace-stage-"
 _ROLLBACK_NAME: Final = ".yoetz-claude-marketplace-rollback"
 _MAX_FILE_BYTES: Final = 262_144
@@ -152,6 +175,7 @@ _GUIDANCE_NAMES: Final = (
     "request-templates.md",
     "workflow.md",
 )
+_SKILL_PATH: Final = "skills/claude-code/yoetz/SKILL.md"
 _YOETZ_SCOPED_TOOL_MATCHER: Final = (
     "^mcp__plugin_yoetz_yoetz__(" + "|".join(YOETZ_WORKFLOW_TOOL_NAMES) + ")$"
 )
@@ -342,12 +366,17 @@ class ClaudeCodePluginStatus:
     mcp_observation: ClaudeCodeMcpObservation
     proof: tuple[PluginProofStatus, ...]
     notes: tuple[str, ...]
+    # Whether the target host version is an exactly proven cell (``tested``) or a compatible
+    # release admitted on the floor alone (``untested``); ``None`` when below the floor (#656).
+    version_provenance: ClaudeCodeVersionProvenance | None = None
 
     def __post_init__(self) -> None:
         if (
             type(self.state) is not PluginArtifactState
             or type(self.operation_state) is not PluginOperationState
         ):
+            raise ValueError("claude_code_status_invalid")
+        if self.version_provenance not in {None, "tested", "untested"}:
             raise ValueError("claude_code_status_invalid")
         for value in (self.artifact_digest, self.marketplace_digest, self.host_state_digest):
             _validate_digest(value)
@@ -392,6 +421,9 @@ class ClaudeCodePluginPreview:
     mcp_ownership_state: McpOwnershipState
     mcp_route_profile: Literal["strict", "policy"] | None
     warnings: tuple[str, ...]
+    # Admission provenance of the previewed host version (#656). A preview never exists for a
+    # version below the floor, so this is never ``None`` on a constructed preview.
+    version_provenance: ClaudeCodeVersionProvenance = "untested"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "request_id", validate_request_id(self.request_id))
@@ -399,6 +431,8 @@ class ClaudeCodePluginPreview:
             type(self.action) is not ClaudeCodePluginAction
             or type(self.state_before) is not PluginArtifactState
         ):
+            raise ValueError("claude_code_preview_invalid")
+        if self.version_provenance not in {"tested", "untested"}:
             raise ValueError("claude_code_preview_invalid")
         for value in (
             self.target_identity,
@@ -582,6 +616,26 @@ def _version_tuple(value: object) -> tuple[int, int, int]:
     return int(major), int(minor), int(patch)
 
 
+def claude_code_version_provenance(version: str) -> ClaudeCodeVersionProvenance | None:
+    """Classify a host version for plugin admission (issue #656).
+
+    ``tested`` names an exactly proven cell in ``CLAUDE_CODE_HARNESS_PROFILE.supported_versions``;
+    ``untested`` is a parseable version at or above ``CLAUDE_CODE_MINIMUM_VERSION`` whose native
+    contract was never proven — admitted because the surfaces it relies on exist, but never
+    promoted to a proven cell; ``None`` is below the floor or unparseable and is refused.
+    """
+
+    try:
+        parsed = _version_tuple(version)
+    except ValueError:
+        return None
+    if parsed < _version_tuple(CLAUDE_CODE_MINIMUM_VERSION):
+        return None
+    if version in CLAUDE_CODE_HARNESS_PROFILE.supported_versions:
+        return "tested"
+    return "untested"
+
+
 def _digest_file(path: Path) -> str:
     if path.is_symlink():
         path = path.resolve(strict=True)
@@ -639,7 +693,7 @@ def _inventory(members: Mapping[str, bytes]) -> tuple[ManagedPluginFile, ...]:
 
 
 def _mcp_json(route_profile: Literal["strict", "policy"], yoetz_launcher: tuple[str, ...]) -> bytes:
-    args = [*yoetz_launcher[1:], "mcp", "serve"]
+    args = [*yoetz_launcher[1:], "mcp", "serve", "--host", "claude"]
     if route_profile == "strict":
         args.extend(("--semantic", "off"))
     return canonical_encode(
@@ -654,12 +708,41 @@ def _mcp_json(route_profile: Literal["strict", "policy"], yoetz_launcher: tuple[
     )
 
 
-def _hooks_json(yoetz_launcher: tuple[str, ...]) -> bytes:
+def _hooks_json(
+    yoetz_launcher: tuple[str, ...], *, observation_profile: Literal["structural", "ordinary"]
+) -> bytes:
     launcher = " ".join(shlex.quote(part) for part in yoetz_launcher)
     command = f'{launcher} hooks claude-observe --workspace "${{CLAUDE_PROJECT_DIR}}"'
 
     def hook(event: str) -> dict[str, JsonValue]:
-        return {"command": f"{command} --event {event}", "timeout": 3, "type": "command"}
+        # The hook entrypoint has a small import path, but a fresh process can
+        # still spend time on local state hydration and one bounded service
+        # drain. Keep ordinary events above that base budget while giving
+        # lifecycle attach/advice events enough room for their documented
+        # service work. SessionEnd is intentionally local-first and remains
+        # within Claude's three-second teardown window (#616).
+        timeout = 3 if event == "SessionEnd" else 10 if event in {"SessionStart", "Stop"} else 5
+        return {"command": f"{command} --event {event}", "timeout": timeout, "type": "command"}
+
+    if observation_profile == "ordinary":
+        command = (
+            f"{command} --observation-profile "
+            f"{shlex.quote(CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID)}"
+        )
+        hooks: dict[str, JsonValue] = {
+            "PermissionDenied": [{"hooks": [hook("PermissionDenied")]}],
+            "PermissionRequest": [{"hooks": [hook("PermissionRequest")]}],
+            "PreToolUse": [{"hooks": [hook("PreToolUse")], "matcher": ".*"}],
+            "PostToolUse": [{"hooks": [hook("PostToolUse")], "matcher": ".*"}],
+            "PostToolUseFailure": [{"hooks": [hook("PostToolUseFailure")], "matcher": ".*"}],
+            "SessionEnd": [{"hooks": [hook("SessionEnd")]}],
+            "SessionStart": [
+                {"hooks": [hook("SessionStart")], "matcher": "startup|resume|clear|compact|fork"}
+            ],
+            "Stop": [{"hooks": [hook("Stop")]}],
+            "StopFailure": [{"hooks": [hook("StopFailure")]}],
+        }
+        return canonical_encode(cast(JsonValue, {"hooks": hooks}))
 
     hooks: dict[str, JsonValue] = {
         # Fires when auto mode (or a rule or another hook) denies the call, after the denial;
@@ -694,6 +777,7 @@ def render_claude_code_plugin(
     version: str = __version__,
     yoetz_launcher: Path | str | Sequence[str] | None = None,
     development_enabled: bool = False,
+    observation_profile: Literal["structural", "ordinary"] = "structural",
 ) -> ClaudeCodePluginArtifact:
     """Render Claude-native bytes from canonical packaged guidance.
 
@@ -708,6 +792,8 @@ def render_claude_code_plugin(
         raise ValueError("claude_code_mcp_ownership_invalid")
     if type(development_enabled) is not bool:
         raise ValueError("claude_code_artifact_invalid")
+    if observation_profile not in {"structural", "ordinary"}:
+        raise ValueError("claude_code_observation_profile_invalid")
     resolved_launcher = resolve_yoetz_launcher(yoetz_launcher)
     if (mcp_ownership is McpOwnership.PLUGIN_MANAGED) != (route_profile in {"strict", "policy"}):
         raise ValueError(
@@ -729,8 +815,8 @@ def render_claude_code_plugin(
     }
     members: dict[str, bytes] = {
         ".claude-plugin/plugin.json": canonical_encode(manifest),
-        "hooks/hooks.json": _hooks_json(resolved_launcher),
-        "skills/yoetz/SKILL.md": resources.read_bytes("skills/portable/yoetz/SKILL.md"),
+        "hooks/hooks.json": _hooks_json(resolved_launcher, observation_profile=observation_profile),
+        "skills/yoetz/SKILL.md": resources.read_bytes(_SKILL_PATH),
     }
     for name in _GUIDANCE_NAMES:
         members[f"skills/yoetz/references/{name}"] = resources.read_bytes(f"guidance/{name}")
@@ -744,7 +830,11 @@ def render_claude_code_plugin(
         format_profile=PluginFormatProfile.CLAUDE_CODE_PLUGIN_NATIVE,
         mcp_ownership=mcp_ownership,
         mcp_route_profile=route_profile,
-        host_extension_profile=CLAUDE_CODE_NATIVE_PROFILE_ID,
+        host_extension_profile=(
+            CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+            if observation_profile == "ordinary"
+            else CLAUDE_CODE_NATIVE_PROFILE_ID
+        ),
         specification_version="1.0.0",
         renderer_version=_RENDERER_VERSION,
         source_refs=tuple(
@@ -755,7 +845,7 @@ def render_claude_code_plugin(
                     "guidance/publication-policy.md",
                     "guidance/request-templates.md",
                     "guidance/workflow.md",
-                    "skills/portable/yoetz/SKILL.md",
+                    _SKILL_PATH,
                 },
                 key=str.encode,
             )
@@ -888,12 +978,22 @@ def _source_members(artifact: ClaudeCodePluginArtifact) -> dict[str, bytes]:
     return members
 
 
+def _hook_mapping_version_for_artifact(artifact: ClaudeCodePluginArtifact) -> str:
+    """Return the mapping bound into this artifact's rendered hook command."""
+
+    return (
+        CLAUDE_CODE_ORDINARY_HOOK_MAPPING_VERSION
+        if artifact.plan.host_extension_profile == CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+        else CLAUDE_CODE_HOOK_MAPPING_VERSION
+    )
+
+
 def _marker(artifact: ClaudeCodePluginArtifact) -> bytes:
     source = _source_members(artifact)
     body: dict[str, JsonValue] = {
         "artifact_digest": artifact.artifact_digest,
         "format_profile": artifact.plan.format_profile.value,
-        "hook_mapping_version": CLAUDE_CODE_HOOK_MAPPING_VERSION,
+        "hook_mapping_version": _hook_mapping_version_for_artifact(artifact),
         "managed_files": [
             {"relative_path": path, "sha256": _sha(data), "size": len(data)}
             for path, data in sorted(source.items(), key=lambda item: item[0].encode("ascii"))
@@ -1097,7 +1197,9 @@ def _route_profile(
 
     An exact route launches either a bare ``yoetz`` console script (external registrations
     the owner wrote by hand) or this artifact's exact bound launcher (plugin-owned entries and
-    launcher-bound external registrations), followed by the exact ``mcp serve`` arguments.
+    launcher-bound external registrations), followed by the exact Claude ``mcp serve`` arguments.
+    The pre-host-identity bare forms remain readable for an upgrade/remove transition but are
+    never emitted by the renderer.
     """
 
     if entry is None or set(entry) != {"args", "command", "type"}:
@@ -1118,9 +1220,15 @@ def _route_profile(
     if args[: len(prefix)] != prefix:
         return None
     rest = args[len(prefix) :]
-    if rest == ("mcp", "serve"):
+    if rest in {
+        ("mcp", "serve", "--host", "claude"),
+        ("mcp", "serve"),
+    }:
         return "policy"
-    if rest == ("mcp", "serve", "--semantic", "off"):
+    if rest in {
+        ("mcp", "serve", "--host", "claude", "--semantic", "off"),
+        ("mcp", "serve", "--semantic", "off"),
+    }:
         return "strict"
     return None
 
@@ -1471,6 +1579,7 @@ def status_claude_code_plugin(
             session=session_observation,
         ),
         notes,
+        claude_code_version_provenance(target.identity.version),
     )
 
 
@@ -1574,13 +1683,17 @@ def preview_claude_code_plugin(
         # The development carrier exists only for ``claude --plugin-dir`` runs; it never
         # enters the marketplace lane or consumes review authority.
         raise _error(PluginArtifactReason.SOURCE_INVALID, {"development_carrier": True})
-    if target.identity.version not in CLAUDE_CODE_HARNESS_PROFILE.supported_versions:
-        # Only versions whose native contract was actually proven are admitted.
-        # A neighboring version must stay explicitly untested rather than run
-        # under (and emit evidence for) the 2.1.241 profile it never earned.
+    version_provenance = claude_code_version_provenance(target.identity.version)
+    if version_provenance is None:
+        # Below the compatibility floor the plugin/hook surfaces do not exist.
+        # At or above it a version is admitted; whether it is an exactly proven
+        # cell is reported as provenance, never inferred from proximity (#656).
         raise _error(
             PluginArtifactReason.FORMAT_UNSUPPORTED,
-            {"version_untested": target.identity.version},
+            {
+                "version_unsupported": target.identity.version,
+                "minimum_version": CLAUDE_CODE_MINIMUM_VERSION,
+            },
         )
     target_identity = _validate_target(target)
     status = status_claude_code_plugin(
@@ -1684,6 +1797,7 @@ def preview_claude_code_plugin(
         status.mcp_observation.ownership_state,
         artifact.plan.mcp_route_profile,
         warnings,
+        version_provenance,
     )
 
 
@@ -1784,7 +1898,7 @@ def _export_marker(artifact: ClaudeCodePluginArtifact) -> bytes:
         "artifact_digest": artifact.artifact_digest,
         "development": artifact.development,
         "format_profile": artifact.plan.format_profile.value,
-        "hook_mapping_version": CLAUDE_CODE_HOOK_MAPPING_VERSION,
+        "hook_mapping_version": _hook_mapping_version_for_artifact(artifact),
         "managed_files": [
             {"relative_path": path, "sha256": _sha(data), "size": len(data)}
             for path, data in sorted(
@@ -1852,10 +1966,17 @@ def _consume_authority(
     if authority is None or authority.target_digest != preview_digest:
         raise _error(PluginArtifactReason.AUTHORITY_REQUIRED)
     port = _DenyStandaloneClaudeReview() if review is None else review
-    if authority.channel == "setup_composition":
-        port.consume_setup_authority(authority, preview_digest)
-    else:
-        port.consume_artifact_review(authority, preview_digest)
+    try:
+        if authority.channel == "setup_composition":
+            port.consume_setup_authority(authority, preview_digest)
+        else:
+            port.consume_artifact_review(authority, preview_digest)
+    except PluginArtifactError as exc:
+        # The shared elevated-bootstrap review port raises the neutral artifact error. Keep one
+        # error type on the Claude Code surface without inventing a reason the port did not
+        # choose, so a cancelled or unavailable presence prompt is reported, not raised through
+        # the CLI as a traceback.
+        raise _error(exc.reason) from exc
 
 
 def _run_mutation(

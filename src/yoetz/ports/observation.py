@@ -7,6 +7,8 @@ from typing import Protocol
 from yoetz.domain.observation import (
     AdviceItem,
     AdviceSnapshot,
+    ObservationCaptureBacklog,
+    ObservationCaptureTicket,
     ObservationContentChunk,
     ObservationContentKind,
     ObservationContentManifest,
@@ -33,8 +35,10 @@ __all__ = [
     "AdviceItem",
     "AdviceSnapshot",
     "ObservationControlCommand",
+    "ObservationCaptureBacklog",
     "ObservationContentChunk",
     "ObservationContentManifest",
+    "ObservationCaptureTicket",
     "ObservationContentKind",
     "ObservationCursor",
     "ObservationEnvelope",
@@ -42,6 +46,7 @@ __all__ = [
     "ObservationIngestDisposition",
     "ObservationIngestResult",
     "ObservationInspectionSnapshot",
+    "ObservationLogicalIdentityClaim",
     "ObservationLifecycle",
     "ObservationPort",
     "ObservationRevokeCommand",
@@ -52,6 +57,8 @@ __all__ = [
     "observation_earns_hook_observed",
     "workspace_commitment_from_path",
 ]
+
+type ObservationLogicalIdentityClaim = tuple[str, str, str]
 
 
 class ObservationPort(Protocol):
@@ -75,7 +82,21 @@ class TaskObservationPort(Protocol):
     read back coverage, and record advice snapshots for one mapped task bundle.
     """
 
-    def grant_consent(self, workspace_commitment: str, granted_at: Timestamp) -> None: ...
+    def grant_consent(
+        self,
+        workspace_commitment: str,
+        granted_at: Timestamp,
+        *,
+        content_capture_profiles: tuple[str, ...] = (),
+    ) -> None: ...
+
+    def content_capture_profiles(self, workspace_commitment: str) -> tuple[str, ...]: ...
+
+    def enable_content_capture(self, workspace_commitment: str, profile: str) -> None: ...
+
+    def disable_content_capture(
+        self, workspace_commitment: str, profile: str | None = None
+    ) -> None: ...
 
     def bind_session(self, workspace_commitment: str, session_commitment: str) -> None: ...
 
@@ -191,6 +212,24 @@ class TaskObservationPort(Protocol):
 
     def load_content_manifest(self, object_id: str) -> ObservationContentManifest | None: ...
 
+    def capture_backlog(self, workspace: str) -> ObservationCaptureBacklog: ...
+
+    def record_capture_ticket(self, ticket: ObservationCaptureTicket) -> None: ...
+
+    def finalize_capture_ticket(
+        self,
+        staging_ticket: ObservationCaptureTicket,
+        complete_ticket: ObservationCaptureTicket,
+    ) -> None: ...
+
+    def load_capture_ticket(
+        self, *, workspace: str, logical_identity: str
+    ) -> ObservationCaptureTicket | None: ...
+
+    def delete_capture_ticket(self, ticket: ObservationCaptureTicket) -> None: ...
+
+    def tombstone_capture_ticket(self, ticket: ObservationCaptureTicket) -> None: ...
+
     def bind_workspace_locator(
         self,
         *,
@@ -218,6 +257,8 @@ class TaskObservationPort(Protocol):
 
     def verification_repository(self) -> object: ...
 
+    def advice_semantic_repository(self) -> object: ...
+
     def record_logical_identity_claim(
         self,
         *,
@@ -229,3 +270,7 @@ class TaskObservationPort(Protocol):
         mapping_version: str,
         materialized_at: Timestamp,
     ) -> None: ...
+
+    def load_logical_identity_claim(
+        self, *, workspace: str, logical_identity: str
+    ) -> ObservationLogicalIdentityClaim | None: ...

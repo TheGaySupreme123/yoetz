@@ -14,6 +14,7 @@ import contextlib
 import importlib.util
 import io
 import os
+import shlex
 import sys
 import tempfile
 from collections.abc import Awaitable, Callable, Mapping
@@ -40,12 +41,12 @@ from yoetz.adapters.integrations.codex_skill import (
     inspect_destination,
     load_packaged_skill_source,
 )
+from yoetz.adapters.workspace_binding import canonical_workspace_locator
 from yoetz.application.applied_mcp_route import clear_applied_route, read_applied_route
 from yoetz.application.codex_plugin import CodexPluginService
 from yoetz.application.harness_mcp import HarnessMcpService, McpRegistrationConfirmation
 from yoetz.application.observation_check_policy import load_observation_check_policy
 from yoetz.cli.agent_start import AGENT_START_HANDOFF
-from yoetz.cli.workspace_binding import canonical_workspace_locator
 from yoetz.config.load import load_config
 from yoetz.config.models import ConfigError
 from yoetz.config.paths import PathSafetyError, setup_marker_path
@@ -748,7 +749,7 @@ def _emit_registration_preview(
     typer.echo("  3. Register the Yoetz MCP server with Codex")
     typer.echo("  MCP server name: yoetz")
     serve_command = getattr(mcp_preview, "serve_command", ())
-    typer.echo(f"  Command: {' '.join(serve_command)}")
+    typer.echo(f"  Command: {shlex.join(serve_command)}")
     isolated_root = getattr(mcp_preview, "isolated_root", None)
     typer.echo(
         "  MCP isolation root: " + (str(isolated_root) if isolated_root is not None else "ambient")
@@ -838,7 +839,7 @@ def _emit_unregistration_preview(mcp_preview: object) -> None:
     typer.echo(f"  Action: {getattr(mcp_preview, 'action').value}")
     typer.echo(f"  State before: {getattr(mcp_preview, 'state_before').value}")
     serve_command = getattr(mcp_preview, "serve_command", ())
-    typer.echo(f"  Command: {' '.join(serve_command)}")
+    typer.echo(f"  Command: {shlex.join(serve_command)}")
     isolated_root = getattr(mcp_preview, "isolated_root", None)
     typer.echo(
         "  MCP isolation root: " + (str(isolated_root) if isolated_root is not None else "ambient")
@@ -1697,6 +1698,22 @@ def write_setup_marker(outcome: str) -> bool:
     return _write_setup_marker(outcome)
 
 
+def _credential_store_unavailable_line() -> str:
+    """Name why the platform credential store cannot hold the vault root (issue #721)."""
+
+    from yoetz.adapters.keys.os_keyring import describe_vault_keyring_backend
+
+    report = describe_vault_keyring_backend()
+    if report.reason == "backend_not_approved":
+        why = f"the loaded backend is not approved for the vault ({report.backend_id})"
+    else:
+        why = "no credential store is loaded"
+    return (
+        f"Platform credential store unavailable: {why}; Yoetz needs {report.requirement}. "
+        "Choose a vault passphrase instead."
+    )
+
+
 async def _service_reachability(*, start_if_absent: bool = False) -> dict[str, JsonValue]:
     from yoetz.cli.app import build_service_client
     from yoetz.ports.control import ControlClientKind, ControlError
@@ -1910,10 +1927,12 @@ async def _interactive_provider_setup(
                             typer.echo(f"  Credential store service: {entry_service}", err=True)
                             typer.echo(f"  Account: {entry_account}", err=True)
                             typer.echo(
-                                "Delete that entry (macOS: Keychain Access; Linux: "
-                                "'secret-tool clear service " + entry_service + "'), then "
-                                "rerun 'yoetz setup'. Keep it only if this install already has "
-                                "a vault, in which case setup did not need to initialize one.",
+                                "Delete that entry (macOS: Keychain Access; Linux: your keyring "
+                                "manager such as Seahorse or KWalletManager, or "
+                                "'secret-tool clear service " + entry_service + "' from the "
+                                "libsecret tools package), then rerun 'yoetz setup'. Keep it "
+                                "only if this install already has a vault, in which case setup "
+                                "did not need to initialize one.",
                                 err=True,
                             )
                         else:
@@ -1924,7 +1943,7 @@ async def _interactive_provider_setup(
                                 err=True,
                             )
                         return _provider_setup_result(service, provider_report)
-                    typer.echo("Platform credential store unavailable; choose a vault passphrase")
+                    typer.echo(_credential_store_unavailable_line())
                     typer.echo("Secure vault setup (hidden local-terminal input)")
                     await initialize_passphrase_vault()
             elif service.get("vault_mode") == "passphrase":
@@ -2876,11 +2895,29 @@ async def setup_status(*, json_output: bool) -> int:
         "discovered": rows,
         "integration": _integration_layers(),
         "marker_present": setup_marker_present(),
+        "platform": _platform_diagnostics(),
         "schema": _STATUS_SCHEMA,
         "service": await _service_reachability(),
     }
     _emit(report, json_output=json_output)
     return 0
+
+
+def _platform_diagnostics() -> dict[str, JsonValue]:
+    """Host facts named once: platform cell, check sandbox, credential store (#720, #721, #724).
+
+    Each answer is a fixed reason token plus fixed remediation text; none echoes a path.
+    """
+
+    from yoetz.adapters.check_sandbox import probe_check_sandbox
+    from yoetz.adapters.keys.os_keyring import describe_vault_keyring_backend
+    from yoetz.version import platform_cell
+
+    return {
+        "cell": cast(JsonValue, platform_cell().as_json()),
+        "check_sandbox": cast(JsonValue, probe_check_sandbox().as_json()),
+        "secure_storage": describe_vault_keyring_backend().as_json(),
+    }
 
 
 _MCP_EXIT_USAGE: Final = frozenset(

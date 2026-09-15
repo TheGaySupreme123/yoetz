@@ -20,12 +20,14 @@ golden vectors under [`fixtures/`](../fixtures/) win over any prose, including t
 ## Reference
 
 - [`docs/OPEN_QUESTIONS.md`](OPEN_QUESTIONS.md) — the decision ledger: every decision taken, each
-  release gate's dated v0.1.0 disposition, and what evidence a stronger claim would need.
+  release gate's dated disposition, including the current 0.2 release line, and what evidence a
+  stronger claim would need.
 - [`docs/protocol/`](protocol/) — the technical protocol: compatibility, data egress and privacy,
   local service security, the privacy setup wizard.
 - [`docs/runbooks/`](runbooks/) — operational procedures: backup/restore, key recovery, migration
-  rollback, quarantine recovery, Codex integration, portable plugin authoring/lifecycle, semantic
-  dogfood, exact-worktree Codex dogfood parity, and influence dogfood.
+  rollback, quarantine recovery, Codex integration, Claude Code integration, Cursor integration,
+  the Codex subscription semantic evaluator, portable plugin authoring/lifecycle, semantic dogfood,
+  exact-worktree Codex dogfood parity, influence dogfood, and Linux/WSL host facts.
 - [`docs/public-claims.json`](public-claims.json) — every public claim bound to its requirements,
   surfaces, tests, and honest release status. Enforced by `tests/conformance/claims/`.
 - [`docs/releases/`](releases/) — curated release notes, one file per tag; the release workflow

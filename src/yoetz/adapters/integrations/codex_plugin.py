@@ -168,7 +168,9 @@ def _hooks_json(*, codex_version: str | None = None) -> bytes:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": "yoetz hooks session-start",
+                            # `--workspace .` names the hook cwd explicitly; the host
+                            # payload's cwd still outranks it for the status probe (#659).
+                            "command": "yoetz hooks session-start --workspace .",
                             "timeout": 15,
                             "statusMessage": "Yoetz re-ground",
                         }

@@ -81,7 +81,7 @@ def test_history_wire_admits_every_registered_event_family(family: str) -> None:
 
 
 def test_packaged_history_schema_covers_registered_events() -> None:
-    value: JsonValue = schema_document_for("status-result", "1.3.0").json_schema["$defs"]
+    value: JsonValue = schema_document_for("status-result", "1.4.0").json_schema["$defs"]
     for key in ("history_item", "properties", "summary_code", "enum"):
         assert isinstance(value, Mapping)
         value = value[key]

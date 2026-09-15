@@ -31,7 +31,8 @@ def test_missing_installed_argon2_kdf_reports_a_bounded_startup_remedy(tmp_path:
         check=False,
     )
     assert build.returncode == 0, build.stderr.decode("utf-8", errors="replace")
-    assert any(dist.glob("*.whl")), "expected a real wheel artifact"
+    wheels = sorted(dist.glob("*.whl"))
+    assert len(wheels) == 1, "expected exactly one real wheel artifact"
     install = subprocess.run(
         [
             "uv",
@@ -41,7 +42,7 @@ def test_missing_installed_argon2_kdf_reports_a_bounded_startup_remedy(tmp_path:
             "3.14.6",
             "--find-links",
             str(dist),
-            "yoetz==0.1.0",
+            str(wheels[0]),
         ],
         capture_output=True,
         timeout=180,

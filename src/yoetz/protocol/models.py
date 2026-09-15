@@ -344,6 +344,7 @@ class SemanticReason(str, Enum):  # noqa: UP042 - exact public wire enum base
     LEASE_AUTHORITY_LOST = "lease_authority_lost"
     FRONTIER_CHANGED = "frontier_changed"
     DEPENDENCY_CHANGED = "dependency_changed"
+    CASE_CAPACITY_EXCEEDED = "case_capacity_exceeded"
     COORDINATOR_FAILURE = "coordinator_failure"
 
 
@@ -405,7 +406,9 @@ VALID_SEMANTIC_REASONS: Final[Mapping[SemanticStatus, frozenset[SemanticReason]]
             SemanticStatus.STALE: frozenset(
                 {SemanticReason.FRONTIER_CHANGED, SemanticReason.DEPENDENCY_CHANGED}
             ),
-            SemanticStatus.FAILED: frozenset({SemanticReason.COORDINATOR_FAILURE}),
+            SemanticStatus.FAILED: frozenset(
+                {SemanticReason.COORDINATOR_FAILURE, SemanticReason.CASE_CAPACITY_EXCEEDED}
+            ),
         }
     )
 )
@@ -481,7 +484,7 @@ def validate_semantic_provenance_binding(
     if provenance_present and (provenance_status is not status or provenance_reason is not reason):
         raise ProtocolValueError("invalid_semantic_provenance")
 
-    if status in _PREDISPATCH_SEMANTIC_STATUSES:
+    if status in _PREDISPATCH_SEMANTIC_STATUSES or reason is SemanticReason.CASE_CAPACITY_EXCEEDED:
         provenance_required = False
     elif status in _REQUIRED_SEMANTIC_PROVENANCE_STATUSES:
         provenance_required = True
@@ -2075,6 +2078,7 @@ _PUBLISH_SUMMARY_CATEGORY: Final[Mapping[tuple[str, str], DataCategory]] = Mappi
         ("finding_recorded", "1.0.0"): DataCategory.FINDING_SUMMARY,
         ("finding_recorded", "1.1.0"): DataCategory.FINDING_SUMMARY,
         ("finding_recorded", "1.2.0"): DataCategory.FINDING_SUMMARY,
+        ("finding_recorded", "1.3.0"): DataCategory.FINDING_SUMMARY,
     }
 )
 _PUBLISH_FIXED_SUMMARY: Final[Mapping[tuple[str, str], str]] = MappingProxyType(
@@ -2085,6 +2089,7 @@ _PUBLISH_FIXED_SUMMARY: Final[Mapping[tuple[str, str], str]] = MappingProxyType(
         ("redaction_recorded", "1.0.0"): "redaction_recorded",
         ("check_recorded", "1.0.0"): "check_recorded",
         ("check_recorded", "1.1.0"): "check_recorded",
+        ("check_recorded", "1.2.0"): "check_recorded",
         ("receipt_recorded", "1.0.0"): "receipt_recorded",
         ("coordination_context_recorded", "1.0.0"): "coordination_context_recorded",
         ("coordination_obligation_declared", "1.0.0"): "coordination_obligation_declared",
@@ -3264,6 +3269,19 @@ class StatusRequestedItemModel(_ClosedModel):
         return self
 
 
+class StatusCommandAttemptModel(_ClosedModel):
+    requested_item_index: Annotated[str, Field(pattern=r"^(?:[0-9]|[1-5][0-9]|6[0-3])$")]
+    relation: Literal["matching_observed_attempt", "asserted_observed_mismatch", "unknown"]
+    asserted_action_ids: tuple[ActionIdWire, ...]
+    observed_event_ids: tuple[EventIdWire, ...]
+
+    @model_validator(mode="after")
+    def _validate_refs(self) -> StatusCommandAttemptModel:
+        _require_unique(self.asserted_action_ids, limit=64)
+        _require_unique(self.observed_event_ids, limit=64)
+        return self
+
+
 class StatusObligationItemModel(_ClosedModel):
     optional_non_null_fields = frozenset({"acceptance_criteria"})
 
@@ -3277,6 +3295,7 @@ class StatusObligationItemModel(_ClosedModel):
     revision_event_id: EventIdWire | None
     requested_items: tuple[StatusRequestedItemModel, ...] = ()
     unattempted_items: tuple[StatusRequestedItemModel, ...] = ()
+    command_attempts: tuple[StatusCommandAttemptModel, ...] = ()
     acceptance_criteria: String1To8192 | OmittedContentModel | None = None
 
     @model_validator(mode="after")
@@ -3285,6 +3304,8 @@ class StatusObligationItemModel(_ClosedModel):
             _require_unique(values, limit=64)
         if len(self.requested_items) > 64 or len(self.unattempted_items) > 64:
             raise ValueError("obligation_requested_item_limit")
+        if len(self.command_attempts) > 64:
+            raise ValueError("obligation_command_attempt_limit")
         requested = tuple((item.item_kind, item.value) for item in self.requested_items)
         unattempted = tuple((item.item_kind, item.value) for item in self.unattempted_items)
         if any(item not in requested for item in unattempted):
@@ -4093,6 +4114,12 @@ _SEMANTIC_PROVENANCE_LEAVES: Final = (
     "runtime_evidence/turn_acknowledged",
     "runtime_evidence/turn_id",
     "runtime_evidence/upstream_body_observability",
+    "runtime_evidence/token_usage/cached_input_tokens",
+    "runtime_evidence/token_usage/cache_write_input_tokens",
+    "runtime_evidence/token_usage/input_tokens",
+    "runtime_evidence/token_usage/output_tokens",
+    "runtime_evidence/token_usage/reasoning_output_tokens",
+    "runtime_evidence/token_usage/total_tokens",
     "sampling_params/max_output_tokens",
     "sampling_params/seed",
     "sampling_params/temperature",
@@ -4564,6 +4591,10 @@ _STATUS_OBLIGATIONS_STRUCTURAL_POINTERS: Final = (
             "source_refs/*",
             "status",
             "unattempted_items/*/item_kind",
+            "command_attempts/*/requested_item_index",
+            "command_attempts/*/relation",
+            "command_attempts/*/asserted_action_ids/*",
+            "command_attempts/*/observed_event_ids/*",
         ),
     )
     + _prefix_leaf_patterns("/page/items/*/acceptance_criteria", _OMITTED_CONTENT_LEAVES)
@@ -4773,6 +4804,7 @@ _RECEIPT_STRUCTURAL_POINTERS: Final = (
         "/document/findings/*/provenance",
         _SEMANTIC_PROVENANCE_LEAVES,
     )
+    + _prefix_leaf_patterns("/document/semantic_provenance", _SEMANTIC_PROVENANCE_LEAVES)
     + _prefix_leaf_patterns(
         "/document/obligations/*",
         ("obligation_id", "source_refs/*", "status"),
@@ -5024,7 +5056,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 1053:
+    if len(result) != 1151:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

@@ -19,14 +19,19 @@ from builders.codex_rollout import (
 from fixture_loader import FixtureLoader, build_fixture_loader
 from yoetz.adapters.importers.codex_jsonl import profile_for_codex_version
 from yoetz.adapters.importers.codex_rollout_jsonl import (
+    CODEX_ROLLOUT_COMPATIBLE_PROFILE_ID,
+    COMPATIBLE_ROLLOUT_PROFILE,
     SUPPORTED_ROLLOUT_PROFILES,
+    admission_profile_for_rollout_version,
     parse_codex_rollout_jsonl,
     parse_codex_rollout_jsonl_from_offset,
     profile_for_rollout_id,
     profile_for_rollout_version,
+    rollout_admission_provenance,
 )
 from yoetz.adapters.integrations.codex_capability_cells import (
     CODEX_ROLLOUT_CLI_VERSION,
+    CODEX_ROLLOUT_COMPATIBLE_EVIDENCE_CASE_IDS,
     CODEX_ROLLOUT_EVIDENCE_CASE_IDS,
     CODEX_ROLLOUT_IMPORTER_PROFILE_ID,
     CODEX_ROLLOUT_PARSER_PROOFS,
@@ -191,6 +196,8 @@ def test_secret_assignment_in_valid_output_preserves_json_structure() -> None:
 
 
 def test_wrong_cli_version_is_unsupported_format() -> None:
+    """A caller pinned to one exact profile still refuses a header that selects another."""
+
     profile = profile_for_rollout_version("0.148.0")
     source = encode_lines(
         session_meta(cli_version="0.149.1"),
@@ -287,7 +294,9 @@ def test_rollout_fixture_cell_does_not_promote_harness_support() -> None:
     assert current_proof.evidence_case_ids == ("IMP-011", "IMP-012")
     assert rollout_parser_proof("0.149.1") is None
     assert rollout_parser_proof("0.152.1") is None
+    assert rollout_parser_proof("0.153.4") is None
     assert CODEX_ROLLOUT_UNSUPPORTED_EVIDENCE_CASE_IDS == ("IMP-013",)
+    assert CODEX_ROLLOUT_COMPATIBLE_EVIDENCE_CASE_IDS == ("IMP-014",)
 
 
 def test_parser_proofs_and_supported_profiles_name_the_same_exact_versions() -> None:
@@ -380,9 +389,13 @@ def test_0_150_1_truncated_fixture_holds_live_partial_tail() -> None:
 
 
 def test_unsupported_0_152_1_fixture_is_refused_not_aliased() -> None:
+    """IMP-013 now proves structural refusal: its header names an unknown history_mode, so no
+    profile (exact or compatible) admits it and the release label plays no part."""
+
     raw = _variant_bytes(_UNSUPPORTED_0152, "future")
     expected = _expected(_UNSUPPORTED_0152, "future")
-    for profile in (None, *SUPPORTED_ROLLOUT_PROFILES.values()):
+    assert b'"history_mode":"streamed"' in raw
+    for profile in (None, *SUPPORTED_ROLLOUT_PROFILES.values(), COMPATIBLE_ROLLOUT_PROFILE):
         parsed = parse_codex_rollout_jsonl(raw, profile, require_admission=True)
         assert parsed.profile is None
         assert parsed.records == ()
@@ -392,6 +405,10 @@ def test_unsupported_0_152_1_fixture_is_refused_not_aliased() -> None:
 
 
 def test_header_selects_exact_profile_without_inference() -> None:
+    """An exact release selects its certified profile; every other release selects the
+    structural compatibility profile with ``structural`` provenance, never a neighbour's exact
+    profile (issue #656)."""
+
     for version in ("0.148.0", "0.150.1"):
         parsed = parse_codex_rollout_jsonl(
             encode_lines(
@@ -402,8 +419,10 @@ def test_header_selects_exact_profile_without_inference() -> None:
             require_admission=True,
         )
         assert parsed.profile is SUPPORTED_ROLLOUT_PROFILES[version]
+        assert parsed.profile is not None
+        assert rollout_admission_provenance(parsed.profile) == "exact"
         assert parsed.stream_gaps == ()
-    for version in ("0.149.1", "0.150.0", "0.150.2", "0.152.1", "0.148"):
+    for version in ("0.149.1", "0.150.0", "0.150.2", "0.152.1", "0.153.4", "0.148", "99.0.0"):
         parsed = parse_codex_rollout_jsonl(
             encode_lines(
                 session_meta(cli_version=version), function_call(name="shell", call_id="x")
@@ -411,8 +430,151 @@ def test_header_selects_exact_profile_without_inference() -> None:
             None,
             require_admission=True,
         )
+        assert parsed.profile is COMPATIBLE_ROLLOUT_PROFILE
+        assert parsed.profile is not None
+        assert rollout_admission_provenance(parsed.profile) == "structural"
+        assert parsed.profile not in SUPPORTED_ROLLOUT_PROFILES.values()
+        assert parsed.stream_gaps == ()
+        assert all(status is ImportLineStatus.MAPPED for status in parsed.statuses)
+    assert admission_profile_for_rollout_version("0.150.1") == (
+        SUPPORTED_ROLLOUT_PROFILES["0.150.1"],
+        "exact",
+    )
+    assert admission_profile_for_rollout_version("0.153.4") == (
+        COMPATIBLE_ROLLOUT_PROFILE,
+        "structural",
+    )
+    with pytest.raises(ValueError, match="unsupported_codex_profile"):
+        admission_profile_for_rollout_version("0.153.4\u00e9")
+
+
+def test_compatible_profile_is_the_union_and_not_a_certified_version() -> None:
+    assert COMPATIBLE_ROLLOUT_PROFILE.cli_version == "compatible"
+    assert COMPATIBLE_ROLLOUT_PROFILE.profile_id == CODEX_ROLLOUT_COMPATIBLE_PROFILE_ID
+    assert profile_for_rollout_id(CODEX_ROLLOUT_COMPATIBLE_PROFILE_ID) is (
+        COMPATIBLE_ROLLOUT_PROFILE
+    )
+    with pytest.raises(ValueError, match="unsupported_codex_profile"):
+        profile_for_rollout_version("compatible")
+    union_wrappers = {
+        wrapper for p in SUPPORTED_ROLLOUT_PROFILES.values() for wrapper in p.wrapper_types
+    }
+    union_items = {item for p in SUPPORTED_ROLLOUT_PROFILES.values() for item in p.item_types}
+    assert set(COMPATIBLE_ROLLOUT_PROFILE.wrapper_types) == union_wrappers
+    assert set(COMPATIBLE_ROLLOUT_PROFILE.item_types) == union_items
+    # Certification surfaces never grow because the compatibility profile exists.
+    assert "compatible" not in SUPPORTED_ROLLOUT_PROFILES
+    assert rollout_parser_proof("compatible") is None
+    assert rollout_parser_proof("0.153.4") is None
+
+
+_COMPATIBLE_0153 = "imports/codex/rollout-compatible-0.153.4.case.json"
+
+
+@pytest.mark.parametrize(
+    "variant", ["relabeled", "additive", "unknown_event", "incompatible_known", "truncated"]
+)
+def test_compatible_0_153_4_fixture_matrix_matches_expectations(variant: str) -> None:
+    """Issue #656 differential matrix: the version label alone never disables the stream, unknown
+    or malformed lines stay bounded per-line gaps, and independent known lines keep mapping.
+    Constructed from the 0.150.1 grammar; no real 0.153.4 transcript was available."""
+
+    raw = _variant_bytes(_COMPATIBLE_0153, variant)
+    expected = _expected(_COMPATIBLE_0153, variant)
+
+    parsed = parse_codex_rollout_jsonl(raw, None, require_admission=True)
+
+    assert parsed.profile is COMPATIBLE_ROLLOUT_PROFILE
+    assert parsed.profile is not None
+    assert rollout_admission_provenance(parsed.profile) == expected["provenance"]
+    assert list(parsed.stream_gaps) == expected["stream_gaps"]
+    assert (
+        sum(status is ImportLineStatus.UNKNOWN for status in parsed.statuses)
+        == expected["unknown_count"]
+    )
+    assert (
+        sum(status is ImportLineStatus.UNSUPPORTED for status in parsed.statuses)
+        == expected["unsupported_count"]
+    )
+    reason_codes = sorted({code for code in parsed.reason_codes if code is not None})
+    assert reason_codes == expected.get("reason_codes", [])
+    meta = cast(dict[str, object], parsed.records[0].value["payload"])
+    assert meta["cli_version"] == "0.153.4"
+    assert parsed.statuses[0] is ImportLineStatus.MAPPED
+
+
+def test_relabeled_release_maps_every_line_the_exact_profile_maps() -> None:
+    """Changing only the header version keeps every event of the supported structure."""
+
+    exact = parse_codex_rollout_jsonl(
+        _variant_bytes(_PAGINATED_0150, "paginated"), None, require_admission=True
+    )
+    relabeled = parse_codex_rollout_jsonl(
+        _variant_bytes(_COMPATIBLE_0153, "relabeled"), None, require_admission=True
+    )
+    assert exact.profile is SUPPORTED_ROLLOUT_PROFILES["0.150.1"]
+    assert relabeled.profile is COMPATIBLE_ROLLOUT_PROFILE
+    assert relabeled.statuses == exact.statuses
+    assert [(r.wrapper_type, r.item_type) for r in relabeled.records] == [
+        (r.wrapper_type, r.item_type) for r in exact.records
+    ]
+
+
+def test_additive_fields_do_not_break_or_promote_compatible_lines() -> None:
+    parsed = parse_codex_rollout_jsonl(
+        _variant_bytes(_COMPATIBLE_0153, "additive"), None, require_admission=True
+    )
+    assert all(status is ImportLineStatus.MAPPED for status in parsed.statuses)
+    # The additive fields survive into parser records (the parser is structural, not a content
+    # filter); ``test_codex_session_stream`` proves they never reach an observation envelope.
+    assert any("x_future_wrapper_field" in record.value for record in parsed.records)
+
+
+def test_incompatible_known_wrapper_is_bounded_and_invents_no_outcome() -> None:
+    parsed = parse_codex_rollout_jsonl(
+        _variant_bytes(_COMPATIBLE_0153, "incompatible_known"), None, require_admission=True
+    )
+    assert parsed.statuses == (
+        ImportLineStatus.MAPPED,
+        ImportLineStatus.UNSUPPORTED,
+        ImportLineStatus.UNSUPPORTED,
+        ImportLineStatus.MAPPED,
+    )
+    assert parsed.reason_codes[1:3] == ("wrapper_shape_unsupported",) * 2
+    # No record is minted for the incompatible lines, so nothing downstream can pair or
+    # conclude from them; the later known call still maps on its own.
+    assert [record.line_ordinal for record in parsed.records] == [1, 4]
+    assert parsed.records[-1].item_type == "function_call"
+
+
+def test_structurally_refused_header_is_refused_under_every_profile() -> None:
+    """Refusal is structural: an unknown history_mode refuses regardless of version, and so does
+    a header naming an exact release when the caller pinned a different profile."""
+
+    for version in ("0.148.0", "0.150.1", "0.153.4"):
+        parsed = parse_codex_rollout_jsonl(
+            encode_lines(
+                session_meta(cli_version=version, history_mode="streamed"),
+                function_call(name="shell", call_id="x"),
+            ),
+            None,
+            require_admission=True,
+        )
         assert parsed.profile is None
         assert parsed.stream_gaps == ("unsupported_codex_profile",)
+    pinned = parse_codex_rollout_jsonl(
+        encode_lines(session_meta(cli_version="0.153.4"), function_call(name="shell", call_id="x")),
+        profile_for_rollout_version("0.150.1"),
+        require_admission=True,
+    )
+    assert pinned.profile is None
+    assert pinned.stream_gaps == ("unsupported_codex_profile",)
+    compatible_pinned = parse_codex_rollout_jsonl(
+        encode_lines(session_meta(cli_version="0.153.4"), function_call(name="shell", call_id="x")),
+        COMPATIBLE_ROLLOUT_PROFILE,
+        require_admission=True,
+    )
+    assert compatible_pinned.profile is COMPATIBLE_ROLLOUT_PROFILE
 
 
 def test_explicit_profile_refuses_the_other_supported_release() -> None:

@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from yoetz.application.coordination import CoordinationParticipant
 from yoetz.application.egress import PrivacyCoordinator
 from yoetz.application.lineage import LineageCoordinator, LineageSnapshot, LineageStatus
+from yoetz.application.observation_advice_semantic import ObservationAdviceSemanticSupervisor
 from yoetz.application.observation_verification import ObservationVerificationSupervisor
 from yoetz.application.projects import ProjectApplication
 from yoetz.application.start import recover_delegation
@@ -33,6 +34,7 @@ from yoetz.domain.events import (
     ChildDependenciesRecordedPayload,
     ChildRejectedPayload,
     ChildWrittenOffPayload,
+    CoordinationContextRecordedPayload,
     CoordinationDispositionRecordedPayload,
     CoordinationObligationDeclaredPayload,
     DelegationCancelledPayload,
@@ -76,6 +78,7 @@ from yoetz.ports.control import (
     ControlClientKind,
     ControlError,
     ControlMethod,
+    McpHostProfile,
     ProjectionRenderMode,
     RepositoryPrivacyContext,
 )
@@ -798,9 +801,20 @@ class Application:
     ready_recommendation_refresh: Callable[[], Awaitable[object]] | None = field(
         default=None, repr=False, compare=False
     )
+    # Off-hook observation-advice semantic attempts (#619); stopped with the verification
+    # supervisor so no provider attempt outlives this generation's privacy coordinator.
+    advice_semantic_supervisor: ObservationAdviceSemanticSupervisor | None = field(
+        default=None, repr=False, compare=False
+    )
     # The sweeper owns a worker pool of its own; this generation's close is the only place that
     # can release it, so it travels with the sweep it belongs to.
     observation_sweep_close: Callable[[], None] | None = field(
+        default=None, repr=False, compare=False
+    )
+    # One task-local admission hook runs after a new CHECK hits a retryable capture barrier and
+    # before its single freeze retry. It may retire unfinished native-content handoffs whose local
+    # authority has changed; it never touches captured history or the ledger projection.
+    reconcile_observation_capture: Callable[[TaskRuntime], Awaitable[None]] | None = field(
         default=None, repr=False, compare=False
     )
     enforce_repository_identity: bool = True
@@ -844,6 +858,10 @@ class Application:
             raise TypeError("ready_recommendation_refresh_invalid")
         if self.observation_sweep_close is not None and not callable(self.observation_sweep_close):
             raise TypeError("observation_sweep_close_invalid")
+        if self.reconcile_observation_capture is not None and not callable(
+            self.reconcile_observation_capture
+        ):
+            raise TypeError("reconcile_observation_capture_invalid")
         if type(self.enforce_repository_identity) is not bool:
             raise TypeError("repository_identity_enforcement_invalid")
         # Readiness may never outrun the resolved binding. A connected provider that is not the
@@ -1566,9 +1584,22 @@ class Application:
             # repository than the route" without disclosing either commitment
             # (issue #578): a hook status probe sent without a workspace was
             # otherwise indistinguishable from a replaced session.
+            if repository_privacy_context is None:
+                message = (
+                    "The request has no repository context. Run from the original workspace "
+                    "directory or reconnect the host to that workspace before retrying."
+                )
+            else:
+                message = (
+                    "The request's repository context does not match the task attachment "
+                    f"(current identity kind: {repository_privacy_context.identity_kind}). "
+                    "Run from the original workspace directory or reconnect the host to that "
+                    "workspace before retrying. If the original directory is unavailable, "
+                    "this operation cannot be inspected through the task workflow."
+                )
             raise PublicOperationError(
                 PublicErrorCode.SESSION_CONFLICT,
-                "The requested task attachment conflicts.",
+                message,
                 False,
                 safe_details={
                     "reason_code": (
@@ -1761,6 +1792,8 @@ class Application:
             )
             try:
                 found: set[str] = set()
+                context_digest: str | None = None
+                context_sequence = 0
                 async for record in task_runtime.ledger.load_events(task_runtime.session_id):
                     if type(record) is not AcceptedEvent or record.payload is None:
                         continue
@@ -1768,6 +1801,24 @@ class Application:
                         found.add(str(record.payload.evidence_id))
                     elif isinstance(record.payload, ResultRecordedPayload):
                         found.add(str(record.payload.result_id))
+                    elif isinstance(record.payload, CoordinationContextRecordedPayload):
+                        context = record.payload
+                        if (
+                            context.detection_id == payload.detection_id
+                            and context.project_id == payload.project_id
+                            and context.membership_generation == payload.membership_generation
+                            and context.recipient_task_id == payload.recipient_task_id
+                            and record.ledger.ingestion_sequence > context_sequence
+                        ):
+                            context_digest = context.context_digest
+                            context_sequence = record.ledger.ingestion_sequence
+                if payload.context_digest is not None and payload.context_digest != context_digest:
+                    raise PublicOperationError(
+                        PublicErrorCode.INVALID_REQUEST,
+                        "The coordination disposition is invalid.",
+                        False,
+                        safe_details={"reason_code": "coordination_detection_mismatch"},
+                    )
                 if any(str(ref) not in found for ref in payload.evidence_refs):
                     raise PublicOperationError(
                         PublicErrorCode.INVALID_REQUEST,
@@ -2137,6 +2188,7 @@ class Application:
         request: CheckRequest,
         *,
         route_profile: Literal["policy", "strict"] = "policy",
+        host_profile: McpHostProfile = "generic",
         repository_privacy_context: RepositoryPrivacyContext | None = None,
     ) -> CheckCommitResult | CheckAwaitingHuman:
         from yoetz.application.check import execute_check
@@ -2152,6 +2204,7 @@ class Application:
             self,  # pyright: ignore[reportArgumentType]
             request,
             route_profile=route_profile,
+            host_profile=host_profile,
         )
 
     async def respond(
@@ -2719,6 +2772,12 @@ class Application:
             if failure is None:
                 failure = exc
         try:
+            if self.advice_semantic_supervisor is not None:
+                await self.advice_semantic_supervisor.stop()
+        except BaseException as exc:
+            if failure is None:
+                failure = exc
+        try:
             await self.privacy.close()
         except BaseException as exc:
             if failure is None:
@@ -2764,6 +2823,8 @@ class ServiceReadyContext:
     )
     verification_supervisor: ObservationVerificationSupervisor | None = None
     rediscover_pending_verification: Callable[[], Awaitable[None]] | None = None
+    advice_semantic_supervisor: ObservationAdviceSemanticSupervisor | None = None
+    rediscover_pending_advice_semantic: Callable[[], Awaitable[None]] | None = None
     connected_provider_ids: tuple[str, ...] = ()
     provider_credential_connected: bool = False
     # Structural presence of the declared fallback endpoint's credential (#582); never readiness.
@@ -2784,6 +2845,9 @@ class ServiceReadyContext:
     lineage: LineageCoordinator | None = field(default=None, repr=False, compare=False)
     project_application: ProjectApplication | None = field(default=None, repr=False, compare=False)
     host_lineage_registry: HostLineageRegistryPort | None = field(
+        default=None, repr=False, compare=False
+    )
+    reconcile_observation_capture: Callable[[TaskRuntime], Awaitable[None]] | None = field(
         default=None, repr=False, compare=False
     )
 
@@ -2813,6 +2877,10 @@ class ServiceReadyContext:
             raise TypeError("ready_recommendation_refresh_invalid")
         if self.observation_sweep_close is not None and not callable(self.observation_sweep_close):
             raise TypeError("observation_sweep_close_invalid")
+        if self.reconcile_observation_capture is not None and not callable(
+            self.reconcile_observation_capture
+        ):
+            raise TypeError("reconcile_observation_capture_invalid")
         # Readiness may never outrun the resolved binding. A connected provider that is not the
         # configured one leaves dispatch on the credential-unavailable path, so a readiness flag
         # set without it would report ready while every check reports unavailable.
@@ -2875,15 +2943,21 @@ class ReadyApplicationFactory:
                 coordination_sweep=context.coordination_sweep,
                 ready_recommendation_refresh=context.ready_recommendation_refresh,
                 observation_sweep_close=context.observation_sweep_close,
+                reconcile_observation_capture=context.reconcile_observation_capture,
                 enforce_repository_identity=True,
                 lineage=context.lineage,
                 project_application=context.project_application,
                 host_lineage_registry=context.host_lineage_registry,
+                advice_semantic_supervisor=context.advice_semantic_supervisor,
             )
             if context.verification_supervisor is not None:
                 await context.verification_supervisor.start()
             if context.rediscover_pending_verification is not None:
                 await context.rediscover_pending_verification()
+            if context.advice_semantic_supervisor is not None:
+                await context.advice_semantic_supervisor.start()
+            if context.rediscover_pending_advice_semantic is not None:
+                await context.rediscover_pending_advice_semantic()
             return application
         except BaseException:
             await _close_ready_context(context)
@@ -2902,6 +2976,12 @@ async def _close_ready_context(context: object) -> None:
     try:
         if context.verification_supervisor is not None:
             await context.verification_supervisor.stop()
+    except BaseException as exc:
+        if failure is None:
+            failure = exc
+    try:
+        if context.advice_semantic_supervisor is not None:
+            await context.advice_semantic_supervisor.stop()
     except BaseException as exc:
         if failure is None:
             failure = exc

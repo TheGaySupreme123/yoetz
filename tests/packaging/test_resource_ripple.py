@@ -14,13 +14,15 @@ from typing import Any, Final, cast
 
 import pytest
 
-from yoetz.protocol.canonical import JsonValue, canonical_encode
+from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _RIPPLE_SCRIPT = _REPO_ROOT / "scripts" / "sync_resource_ripple.py"
 
 # Every tree the inventory reads from or writes into, so a copied checkout can run the real ripple.
 _CHECKOUT_TREES: Final = (
+    ".agents/plugins/yoetz",
+    ".agents/skills/yoetz",
     "fixtures/agent-plugins",
     "fixtures/canonical",
     "fixtures/replay",
@@ -43,9 +45,12 @@ def _write(root: Path, relative_path: str, content: str) -> None:
 def _copy_checkout(destination: Path) -> None:
     """Copy the working-tree source and generated trees the ripple reads and writes."""
 
+    destination.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(_REPO_ROOT / "pyproject.toml", destination / "pyproject.toml")
     ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
     for relative in _CHECKOUT_TREES:
         shutil.copytree(_REPO_ROOT / relative, destination / relative, ignore=ignore)
+    shutil.copy2(_REPO_ROOT / "fixtures/manifest.json", destination / "fixtures/manifest.json")
 
 
 def _synthetic_checkout(root: Path, *, inventory_count: int, reviewed_count: int) -> None:
@@ -63,7 +68,7 @@ def _synthetic_checkout(root: Path, *, inventory_count: int, reviewed_count: int
         "def version_manifest_json(manifest, *, include_resources=False):\n"
         "    return b'{}'\n",
     )
-    _write(root, "schemas/version/version-manifest-2.2.0.schema.json", '{"type":"object"}')
+    _write(root, "schemas/version/version-manifest-2.3.0.schema.json", '{"type":"object"}')
     _write(
         root,
         "scripts/verify_resource_manifest.py",
@@ -86,7 +91,11 @@ def _synthetic_checkout(root: Path, *, inventory_count: int, reviewed_count: int
         "    raise SystemExit(1)\n",
     )
     _write(root, "scripts/sync_service_status_schema.py", "")
+    _write(root, "scripts/sync_semantic_capacity_schemas.py", "")
     _write(root, "scripts/sync_repository_authority_schemas.py", "")
+    _write(root, "scripts/sync_committed_agent_trees.py", "")
+    _write(root, "scripts/sync_mcp_descriptor_digests.py", "")
+    _write(root, "scripts/generate_project_policy_fixture.py", "")
     _write(root, "schemas/state.txt", "stale\n")
     _write(root, "src/yoetz/resources/manifest.json", "{}\n")
     _write(root, "skills/codex/yoetz/manifest.json", "{}\n")
@@ -149,7 +158,7 @@ def test_real_checkout_passes_the_single_ci_entrypoint() -> None:
 
 
 @pytest.mark.slow
-def test_shared_stale_schema_member_identity_cannot_pass_the_ripple(tmp_path: Path) -> None:
+def test_shared_invalid_schema_member_identity_cannot_pass_the_ripple(tmp_path: Path) -> None:
     """Source/mirror parity cannot conceal an invalid hand-maintained schema inventory."""
 
     checkout = tmp_path / "checkout"
@@ -157,9 +166,11 @@ def test_shared_stale_schema_member_identity_cannot_pass_the_ripple(tmp_path: Pa
     manifest_path = checkout / "schemas/manifest.json"
     manifest = json.loads(manifest_path.read_bytes())
     member = next(
-        item for item in manifest["members"] if item["path"] == "consent/status-7.0.0.schema.json"
+        item for item in manifest["members"] if item["path"] == "consent/status-6.0.0.schema.json"
     )
-    member["byte_length"] += 1
+    # The owning ripple refreshes digest/size bindings from source bytes. Media type remains
+    # part of the hand-maintained identity and cannot be repaired by refreshing those bindings.
+    member["media_type"] = "text/plain"
     manifest_path.write_bytes(canonical_encode(manifest))
 
     # The command owns all mirror and runtime digest changes, so the final failure can only be
@@ -314,6 +325,8 @@ def test_write_converges_a_reviewed_source_byte_change_in_a_real_checkout(tmp_pa
     _copy_checkout(checkout)
     guidance = checkout / "guidance/workflow.md"
     guidance.write_bytes(guidance.read_bytes() + b"\n<!-- ripple probe -->\n")
+    marker = checkout / ".agents/skills/yoetz/.yoetz-install.json"
+    previous_marker = marker.read_bytes()
 
     written = _run("--write", "--repo-root", str(checkout))
     assert written.returncode == 0, written.stderr + written.stdout
@@ -324,9 +337,124 @@ def test_write_converges_a_reviewed_source_byte_change_in_a_real_checkout(tmp_pa
     support = json.loads((checkout / "support/runtime-support.json").read_bytes())
     package_manifest = json.loads((checkout / "src/yoetz/resources/manifest.json").read_bytes())
     assert support["resource_set_digest"] == package_manifest["resource_set_digest"]
+    for relative in (
+        ".agents/plugins/yoetz/skills/yoetz/references/workflow.md",
+        ".agents/skills/yoetz/references/workflow.md",
+    ):
+        assert (checkout / relative).read_bytes() == guidance.read_bytes()
+    assert marker.read_bytes() != previous_marker
 
     checked = _run("--check", "--repo-root", str(checkout))
     assert checked.returncode == 0, checked.stderr + checked.stdout
+
+    before_second_write = {
+        path.relative_to(checkout).as_posix(): path.read_bytes()
+        for root in (".agents", "src/yoetz/resources", "schemas", "skills", "support")
+        for path in (checkout / root).rglob("*")
+        if path.is_file()
+    }
+    repeated = _run("--write", "--repo-root", str(checkout))
+    assert repeated.returncode == 0, repeated.stderr + repeated.stdout
+    assert before_second_write == {
+        path.relative_to(checkout).as_posix(): path.read_bytes()
+        for root in (".agents", "src/yoetz/resources", "schemas", "skills", "support")
+        for path in (checkout / root).rglob("*")
+        if path.is_file()
+    }
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [".agents/plugins/yoetz/skills/yoetz/SKILL.md", ".agents/skills/yoetz/.yoetz-install.json"],
+)
+def test_agent_only_drift_is_checked_and_repaired_by_the_owning_command(
+    tmp_path: Path, relative: str
+) -> None:
+    checkout = tmp_path / "checkout"
+    _copy_checkout(checkout)
+    target = checkout / relative
+    original = target.read_bytes()
+    target.write_bytes(b"stale generated bytes\n")
+
+    checked = _run("--check", "--repo-root", str(checkout))
+    assert checked.returncode == 1
+    assert "agent_tree_drift" in checked.stderr
+    assert "canonical owners: guidance/, skills/codex/yoetz/" in checked.stderr
+    assert "uv run python scripts/sync_resource_ripple.py --write" in checked.stderr
+    assert target.read_bytes() == b"stale generated bytes\n"
+
+    written = _run("--write", "--repo-root", str(checkout))
+    assert written.returncode == 0, written.stderr + written.stdout
+    assert target.read_bytes() == original
+
+
+def test_linked_agent_parent_fails_before_resource_writes(tmp_path: Path) -> None:
+    checkout = tmp_path / "checkout"
+    _copy_checkout(checkout)
+    outside = tmp_path / "foreign-install"
+    shutil.move(checkout / ".agents/skills", outside)
+    (checkout / ".agents/skills").symlink_to(outside, target_is_directory=True)
+    marker = (outside / "yoetz/.yoetz-install.json").read_bytes()
+    packaged = checkout / "src/yoetz/resources/guidance/workflow.md"
+    original = packaged.read_bytes()
+    (checkout / "guidance/workflow.md").write_bytes(original + b"\n<!-- change -->\n")
+
+    written = _run("--write", "--repo-root", str(checkout))
+    assert written.returncode == 1
+    assert "unsafe_agent_tree" in written.stderr
+    assert packaged.read_bytes() == original
+    assert (outside / "yoetz/.yoetz-install.json").read_bytes() == marker
+
+
+@pytest.mark.parametrize("tree", [".agents/skills/yoetz", ".agents/plugins/yoetz"])
+def test_foreign_agent_file_fails_before_resource_writes(tmp_path: Path, tree: str) -> None:
+    checkout = tmp_path / "checkout"
+    _copy_checkout(checkout)
+    foreign = checkout / tree / "foreign.txt"
+    foreign.write_bytes(b"keep this file\n")
+    guidance = checkout / "guidance/workflow.md"
+    guidance.write_bytes(guidance.read_bytes() + b"\n<!-- pending source change -->\n")
+    before = {
+        path.relative_to(checkout): path.read_bytes()
+        for root in (".agents", "src/yoetz/resources", "schemas", "skills", "support")
+        for path in (checkout / root).rglob("*")
+        if path.is_file()
+    }
+    written = _run("--write", "--repo-root", str(checkout))
+    assert written.returncode == 1
+    assert "foreign_agent_files" in written.stderr
+    assert foreign.read_bytes() == b"keep this file\n"
+    assert before == {
+        path.relative_to(checkout): path.read_bytes()
+        for root in (".agents", "src/yoetz/resources", "schemas", "skills", "support")
+        for path in (checkout / root).rglob("*")
+        if path.is_file()
+    }
+
+
+def test_obsolete_generated_member_requires_its_old_marker_binding(tmp_path: Path) -> None:
+    checkout = tmp_path / "checkout"
+    _copy_checkout(checkout)
+    root = checkout / ".agents/skills/yoetz"
+    relative = "references/obsolete.md"
+    data = b"obsolete generated reference\n"
+    (root / relative).write_bytes(data)
+    marker_path = root / ".yoetz-install.json"
+    marker = json.loads(marker_path.read_bytes())
+    marker.pop("marker_digest")
+    marker["managed_files"].append(
+        {
+            "relative_path": relative,
+            "size": len(data),
+            "sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
+        }
+    )
+    marker["marker_digest"] = canonical_digest(cast(JsonValue, marker))
+    marker_path.write_bytes(canonical_encode(cast(JsonValue, marker)) + b"\n")
+
+    written = _run("--write", "--repo-root", str(checkout))
+    assert written.returncode == 0, written.stderr + written.stdout
+    assert not (root / relative).exists()
 
 
 @pytest.mark.slow
@@ -337,9 +465,9 @@ def test_write_regenerates_current_builder_owned_schema_without_changing_frozen_
 
     checkout = tmp_path / "checkout"
     _copy_checkout(checkout)
-    frozen_path = checkout / "schemas/operations/status-result-1.2.0.schema.json"
+    frozen_path = checkout / "schemas/operations/status-result-1.3.0.schema.json"
     frozen = frozen_path.read_bytes()
-    current_path = checkout / "schemas/operations/status-result-1.3.0.schema.json"
+    current_path = checkout / "schemas/operations/status-result-1.4.0.schema.json"
     expected = current_path.read_bytes()
     current = json.loads(expected)
     current["$defs"]["history_item"]["properties"]["summary_code"]["enum"].remove("child_accepted")
@@ -351,7 +479,7 @@ def test_write_regenerates_current_builder_owned_schema_without_changing_frozen_
     assert current_path.read_bytes() == expected
     assert frozen_path.read_bytes() == frozen
     assert (
-        checkout / "src/yoetz/resources/schemas/operations/status-result-1.3.0.schema.json"
+        checkout / "src/yoetz/resources/schemas/operations/status-result-1.4.0.schema.json"
     ).read_bytes() == expected
     checked = _run("--check", "--repo-root", str(checkout))
     assert checked.returncode == 0, checked.stderr + checked.stdout
@@ -363,7 +491,7 @@ def test_check_rejects_a_self_consistent_but_stale_cardinality_constant(tmp_path
 
     checkout = tmp_path / "checkout"
     _copy_checkout(checkout)
-    schema_path = checkout / "schemas/version/version-manifest-2.2.0.schema.json"
+    schema_path = checkout / "schemas/version/version-manifest-2.3.0.schema.json"
     document = cast(dict[str, Any], json.loads(schema_path.read_bytes()))
     counts = document["$defs"]["resource_counts"]["properties"]
     counts["migrations"]["const"] = str(int(counts["migrations"]["const"]) - 1)
@@ -397,3 +525,24 @@ def test_reviewed_count_mismatch_fails_before_any_generator_runs(tmp_path: Path)
     assert completed.returncode == 1
     assert "reviewed_resource_count_mismatch" in completed.stderr
     assert sentinel.read_text(encoding="utf-8") == "stale\n"
+
+
+@pytest.mark.slow
+def test_write_bootstraps_new_version_manifest_without_rewriting_released_schema(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "checkout"
+    _copy_checkout(checkout)
+    released = checkout / "schemas/version/version-manifest-2.2.0.schema.json"
+    original = released.read_bytes()
+    current = checkout / "schemas/version/version-manifest-2.3.0.schema.json"
+    expected = current.read_bytes()
+    current.unlink()
+
+    written = _run("--write", "--repo-root", str(checkout))
+
+    assert written.returncode == 0, written.stderr + written.stdout
+    assert released.read_bytes() == original
+    assert current.read_bytes() == expected
+    checked = _run("--check", "--repo-root", str(checkout))
+    assert checked.returncode == 0, checked.stderr + checked.stdout

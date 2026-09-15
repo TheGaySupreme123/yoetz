@@ -170,6 +170,7 @@ class CoordinationErrorCode(str, Enum):  # noqa: UP042 - mirrors the exact wire 
     MEMBER_NOT_FOUND = "project_member_not_found"
     SELECTOR_CONFLICT = "selector_conflict"
     CONSENT_REQUIRED = "coordination_consent_required"
+    SOURCE_POLICY_DENIED = "coordination_source_policy_denied"
     GRANT_REQUIRED = "coordination_grant_required"
     GRANT_REVOKED = "coordination_generation_revoked"
     GENERATION_MISMATCH = "coordination_generation_mismatch"
@@ -337,6 +338,7 @@ class ProjectTextStore(Protocol):
         *,
         owner_task_id: str,
         route_generation: int,
+        reserved_object_id: str | None = None,
     ) -> ProjectTextRef: ...
 
     async def read(self, reference: ProjectTextRef) -> str: ...
@@ -856,8 +858,19 @@ def coordination_detection_identity(
     left_task_id: str,
     right_task_id: str,
     resource_identities: Iterable[str],
+    left_route_generation: int | None = None,
+    right_route_generation: int | None = None,
+    left_route_identity_digest: str | None = None,
+    right_route_identity_digest: str | None = None,
 ) -> str:
-    """Return one stable identity per project generation/task pair/resource set."""
+    """Return one stable identity per project/task/resource and route snapshot.
+
+    The route fields are optional for compatibility with detections written before route-bound
+    identities existed.  Omitting all four fields therefore reproduces the historical identity
+    exactly; supplying a complete route snapshot creates a successor identity when either task's
+    route changes.  Existing opaque event ids and released wire schemas are never decoded or
+    rewritten here.
+    """
 
     project_id(project_id_value)
     generation = _positive(membership_generation)
@@ -871,15 +884,57 @@ def coordination_detection_identity(
     resources = _sorted_resources(tuple(resource_identities))
     if not resources:
         raise _invalid()
-    digest = canonical_digest(
-        {
+    route_fields = (
+        left_route_generation,
+        right_route_generation,
+        left_route_identity_digest,
+        right_route_identity_digest,
+    )
+    if any(value is not None for value in route_fields):
+        if left_route_generation is None or right_route_generation is None:
+            raise _invalid()
+        try:
+            left_generation = _positive(left_route_generation)
+            right_generation = _positive(right_route_generation)
+        except ValueError as exc:
+            raise _invalid() from exc
+        if (left_route_identity_digest is None) != (right_route_identity_digest is None):
+            raise _invalid()
+        ordered_routes = sorted(
+            (
+                (left_task_id, left_generation, left_route_identity_digest),
+                (right_task_id, right_generation, right_route_identity_digest),
+            ),
+            key=lambda item: item[0].encode("ascii"),
+        )
+        ordered_left_task, ordered_left_generation, ordered_left_digest = ordered_routes[0]
+        ordered_right_task, ordered_right_generation, ordered_right_digest = ordered_routes[1]
+        identity: dict[str, JsonValue] = {
+            "left_route_generation": str(ordered_left_generation),
+            "left_task_id": ordered_left_task,
+            "membership_generation": str(generation),
+            "project_id": project_id_value,
+            "resource_identities": resources,
+            "right_route_generation": str(ordered_right_generation),
+            "right_task_id": ordered_right_task,
+        }
+        if ordered_left_digest is not None and ordered_right_digest is not None:
+            try:
+                validate_sha256_digest(ordered_left_digest)
+                validate_sha256_digest(ordered_right_digest)
+            except (TypeError, ValueError) as exc:
+                raise _invalid() from exc
+            identity["left_route_identity_digest"] = ordered_left_digest
+            identity["right_route_identity_digest"] = ordered_right_digest
+    else:
+        identity = {
             "left_task_id": min(left_task_id, right_task_id),
             "membership_generation": str(generation),
             "project_id": project_id_value,
             "resource_identities": resources,
             "right_task_id": max(left_task_id, right_task_id),
         }
-    )
+    digest = canonical_digest(identity)
     # Status and delivery contracts identify detections as durable event ids.  Derive a UUIDv4
     # shaped id from the canonical identity digest rather than minting a random id; retries and
     # service restarts therefore converge on the same event without retaining raw resource text.

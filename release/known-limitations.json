@@ -11,7 +11,7 @@
     },
     {
       "code": "public_doctor_command_deferred",
-      "description": "Startup safety validation and 'yoetz version --json' are available; the public 'yoetz doctor' command is deferred to v0.2."
+      "description": "Startup safety validation, 'yoetz version --json', 'yoetz service diagnostics' (one durable owner-only diagnostic record by correlation id), and the terminal interface's read-only '/doctor' report are available; a standalone public 'yoetz doctor' CLI command and support-bundle schema remain deferred."
     },
     {
       "code": "linux_approved_command_sandbox_unavailable",
@@ -19,7 +19,7 @@
     },
     {
       "code": "open_questions_ledger_not_automatically_enforced",
-      "description": "The E-001 through E-016 and R-001/R-002 decision ledger remains an owner-reviewed release record; this evidence bundle does not claim that every ledger item is automatically represented or enforced."
+      "description": "The E-001 through E-017 decision ledger in docs/OPEN_QUESTIONS.md remains an owner-reviewed release record; this evidence bundle does not claim that every ledger item is automatically represented or enforced."
     }
   ]
 }

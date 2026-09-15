@@ -177,7 +177,13 @@ def render_detection(detection: Detection, width: int) -> tuple[str, ...]:
     if detection.secure_storage_available:
         lines.append(_bullet(Level.VERIFIED, "System secure storage"))
     else:
-        lines.append(_bullet(Level.OPTIONAL, "System secure storage is not available here"))
+        reason = detection.secure_storage_reason
+        lines.append(
+            _bullet(
+                Level.OPTIONAL,
+                "System secure storage is not available here" + (f" — {reason}" if reason else ""),
+            )
+        )
     if detection.already_connected:
         lines.append(_bullet(Level.VERIFIED, "Yoetz is connected to this project"))
     else:

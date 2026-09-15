@@ -15,12 +15,13 @@ import inspect
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 if TYPE_CHECKING:
     from yoetz.application.coordination import (
         CoordinationAdvice,
         CoordinationDetailReader,
+        CoordinationParticipant,
         CoordinationResourceProjection,
     )
     from yoetz.application.lineage import LineageProjectAdmission
@@ -48,11 +49,24 @@ from yoetz.domain.coordination import (
     relative_resource_identity,
 )
 from yoetz.domain.privacy import LocalDisclosureSink
-from yoetz.domain.values import JsonObject, JsonValue, validate_commitment, validate_sha256_digest
+from yoetz.domain.values import (
+    JsonObject,
+    JsonValue,
+    parse_rfc3339_millis,
+    validate_commitment,
+    validate_sha256_digest,
+)
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ids import IdPort
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource, ObjectStorePort
+from yoetz.ports.project_operations import (
+    ProjectOperationConflict,
+    ProjectOperationDigest,
+    ProjectOperationJournalPort,
+    ProjectOperationName,
+    ProjectOperationRecord,
+)
 from yoetz.ports.runtime import BundleRuntimePort, RouteAccess, RouteCommand, TaskRuntime
 from yoetz.ports.start_catalog import (
     SessionBinding,
@@ -62,6 +76,7 @@ from yoetz.ports.start_catalog import (
     TaskRouteState,
     TaskSourceProvenance,
 )
+from yoetz.protocol.canonical import canonical_encode, strict_json_parse
 from yoetz.protocol.ids import IdKind, validate_id
 
 __all__ = [
@@ -94,6 +109,7 @@ __all__ = [
     "build_project_support_handler",
     "build_project_support_handlers",
     "project_request_from_json",
+    "ProjectOperationJournalPort",
 ]
 
 
@@ -256,6 +272,178 @@ def _project_id_from_ids(ids: IdPort) -> str:
 
 def _audit_id(ids: IdPort) -> str:
     return ids.new(IdKind.EVENT)
+
+
+def _project_operation_identity(operation: ProjectOperationName, **values: object) -> JsonObject:
+    """Build the authenticated identity tree for one project mutation.
+
+    The tree is hashed before it reaches the journal.  It may contain title/description values in
+    process memory while the request is being authenticated, but the journal receives only the
+    resulting digest and never this tree.
+    """
+
+    result: dict[str, JsonValue] = {
+        "schema_version": "1.0.0",
+        "operation": operation,
+    }
+    for key, value in values.items():
+        if value is None:
+            result[key] = None
+        elif type(value) is bool or type(value) is int or type(value) is str:
+            result[key] = value
+        else:
+            raise ProjectCommandError(CoordinationErrorCode.INVALID)
+    return JsonObject(result)
+
+
+def _operation_response_mapping(value: bytes) -> Mapping[str, JsonValue]:
+    try:
+        parsed = strict_json_parse(value)
+        if not isinstance(parsed, Mapping) or canonical_encode(parsed) != value:
+            raise ValueError("project_operation_response_invalid")
+        return cast(Mapping[str, JsonValue], parsed)
+    except (TypeError, ValueError) as exc:
+        raise ProjectCommandError(CoordinationErrorCode.INVALID) from exc
+
+
+def _text_ref_from_wire(value: object) -> ProjectTextRef | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ProjectCommandError(CoordinationErrorCode.INVALID)
+    source = cast(Mapping[str, object], value)
+    required = {
+        "object_id",
+        "content_digest",
+        "plaintext_size",
+        "owner_task_id",
+        "route_generation",
+    }
+    if set(source) not in (required, required | {"envelope_digest"}):
+        raise ProjectCommandError(CoordinationErrorCode.INVALID)
+    generation = source.get("route_generation")
+    if type(generation) is not str:
+        raise ProjectCommandError(CoordinationErrorCode.INVALID)
+    try:
+        parsed_generation = int(generation, 10)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ProjectCommandError(CoordinationErrorCode.INVALID) from exc
+    if str(parsed_generation) != generation:
+        raise ProjectCommandError(CoordinationErrorCode.INVALID)
+    try:
+        return ProjectTextRef(
+            cast(str, source["object_id"]),
+            cast(str, source["content_digest"]),
+            cast(int, source["plaintext_size"]),
+            cast(str, source["owner_task_id"]),
+            parsed_generation,
+            cast(str | None, source.get("envelope_digest")),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ProjectCommandError(CoordinationErrorCode.INVALID) from exc
+
+
+def _descriptor_from_wire(value: bytes | Mapping[str, JsonValue]) -> ProjectDescriptor:
+    source: Mapping[str, JsonValue]
+    if isinstance(value, bytes):
+        source = _operation_response_mapping(value)
+    else:
+        source = value
+    try:
+        generation = source["membership_generation"]
+        if type(generation) is not str:
+            raise ValueError("project_generation_wire_invalid")
+        parsed_generation = int(generation, 10)
+        if str(parsed_generation) != generation:
+            raise ValueError("project_generation_wire_invalid")
+        dissolved = source.get("dissolved_at")
+        return ProjectDescriptor(
+            cast(str, source["project_id"]),
+            ProjectKind(cast(str, source["kind"])),
+            cast(str | None, source.get("repository_commitment")),
+            cast(bool, source["auto_grouping"]),
+            parsed_generation,
+            _text_ref_from_wire(source.get("title_ref")),
+            _text_ref_from_wire(source.get("description_ref")),
+            parse_rfc3339_millis(source["created_at"]),
+            None if dissolved is None else parse_rfc3339_millis(dissolved),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ProjectCommandError(CoordinationErrorCode.INVALID) from exc
+
+
+def _membership_from_wire(value: bytes | Mapping[str, JsonValue]) -> ProjectMembership:
+    source: Mapping[str, JsonValue]
+    if isinstance(value, bytes):
+        source = _operation_response_mapping(value)
+    else:
+        source = value
+    try:
+        generation = source["membership_generation"]
+        if type(generation) is not str:
+            raise ValueError("membership_generation_wire_invalid")
+        parsed_generation = int(generation, 10)
+        if str(parsed_generation) != generation:
+            raise ValueError("membership_generation_wire_invalid")
+        unbound = source.get("unbound_at")
+        return ProjectMembership(
+            cast(str, source["project_id"]),
+            parsed_generation,
+            MemberKind(cast(str, source["member_kind"])),
+            cast(str, source["member_commitment_or_id"]),
+            parse_rfc3339_millis(source["bound_at"]),
+            None if unbound is None else parse_rfc3339_millis(unbound),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ProjectCommandError(CoordinationErrorCode.INVALID) from exc
+
+
+def _grant_from_wire(value: bytes | Mapping[str, JsonValue]) -> CoordinationGrant:
+    source: Mapping[str, JsonValue]
+    if isinstance(value, bytes):
+        source = _operation_response_mapping(value)
+    else:
+        source = value
+    try:
+        generation = source["membership_generation"]
+        if type(generation) is not str:
+            raise ValueError("grant_generation_wire_invalid")
+        parsed_generation = int(generation, 10)
+        if str(parsed_generation) != generation:
+            raise ValueError("grant_generation_wire_invalid")
+        revoked = source.get("revoked_at")
+        return CoordinationGrant(
+            cast(str, source["project_id"]),
+            parsed_generation,
+            GrantState(cast(str, source["state"])),
+            cast(str, source["audit_record_id"]),
+            parse_rfc3339_millis(source["granted_at"]),
+            None if revoked is None else parse_rfc3339_millis(revoked),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ProjectCommandError(CoordinationErrorCode.INVALID) from exc
+
+
+def _auto_grouping_wire(
+    repository: str, enabled: bool, result: ProjectDescriptor | None
+) -> JsonObject:
+    if result is None:
+        return JsonObject(
+            {
+                "schema_version": "1.0.0",
+                "repository_commitment": repository,
+                "auto_grouping": enabled,
+                "project_id": None,
+            }
+        )
+    return result.as_wire()
+
+
+def _auto_grouping_from_wire(value: bytes) -> ProjectDescriptor | None:
+    source = _operation_response_mapping(value)
+    if source.get("project_id") is None:
+        return None
+    return _descriptor_from_wire(value)
 
 
 class ProjectCommandError(CoordinationError):
@@ -580,7 +768,12 @@ class ProjectCatalogPort(Protocol):
     ) -> ProjectMembership: ...
 
     async def unbind_project_membership(
-        self, project_id: str, membership_generation: int
+        self,
+        project_id: str,
+        membership_generation: int,
+        *,
+        member_kind: MemberKind | None = None,
+        member_commitment_or_id: str | None = None,
     ) -> ProjectMembership: ...
 
     async def coordination_grant(
@@ -610,6 +803,7 @@ class ProjectCatalogPort(Protocol):
         *,
         title_ref: ProjectTextRef | None,
         description_ref: ProjectTextRef | None,
+        expected_current_refs: tuple[ProjectTextRef | None, ProjectTextRef | None] | None = None,
     ) -> ProjectDescriptor: ...
 
     async def record_project_text_refs(
@@ -618,6 +812,7 @@ class ProjectCatalogPort(Protocol):
         *,
         title_ref: ProjectTextRef | None,
         description_ref: ProjectTextRef | None,
+        expected_current_refs: tuple[ProjectTextRef | None, ProjectTextRef | None] | None = None,
     ) -> ProjectDescriptor: ...
 
     async def dissolve_project(self, project_id: str) -> ProjectDescriptor: ...
@@ -870,7 +1065,12 @@ class InMemoryProjectCatalog:
         return membership
 
     async def unbind_project_membership(
-        self, project_id: str, membership_generation: int
+        self,
+        project_id: str,
+        membership_generation: int,
+        *,
+        member_kind: MemberKind | None = None,
+        member_commitment_or_id: str | None = None,
     ) -> ProjectMembership:
         record = self.projects.get(project_id)
         if record is None:
@@ -878,7 +1078,13 @@ class InMemoryProjectCatalog:
         candidates = [
             (index, item)
             for index, item in enumerate(record.memberships)
-            if item.active and item.membership_generation == membership_generation
+            if item.active
+            and item.membership_generation == membership_generation
+            and (member_kind is None or item.member_kind is member_kind)
+            and (
+                member_commitment_or_id is None
+                or item.member_commitment_or_id == member_commitment_or_id
+            )
         ]
         if len(candidates) != 1:
             raise ProjectCommandError(
@@ -998,11 +1204,19 @@ class InMemoryProjectCatalog:
         *,
         title_ref: ProjectTextRef | None,
         description_ref: ProjectTextRef | None,
+        expected_current_refs: tuple[ProjectTextRef | None, ProjectTextRef | None] | None = None,
     ) -> ProjectDescriptor:
         record = self.projects.get(project_id)
         if record is None:
             raise ProjectCommandError(CoordinationErrorCode.PROJECT_NOT_FOUND)
         prior = record.descriptor
+        if expected_current_refs is not None and (
+            type(expected_current_refs) is not tuple
+            or len(expected_current_refs) != 2
+            or prior.title_ref != expected_current_refs[0]
+            or prior.description_ref != expected_current_refs[1]
+        ):
+            raise ProjectCommandError(CoordinationErrorCode.SELECTOR_CONFLICT)
         record.descriptor = ProjectDescriptor(
             prior.project_id,
             prior.kind,
@@ -1022,9 +1236,13 @@ class InMemoryProjectCatalog:
         *,
         title_ref: ProjectTextRef | None,
         description_ref: ProjectTextRef | None,
+        expected_current_refs: tuple[ProjectTextRef | None, ProjectTextRef | None] | None = None,
     ) -> ProjectDescriptor:
         return await self.record_project_text_refs(
-            project_id, title_ref=title_ref, description_ref=description_ref
+            project_id,
+            title_ref=title_ref,
+            description_ref=description_ref,
+            expected_current_refs=expected_current_refs,
         )
 
     async def dissolve_project(self, project_id: str) -> ProjectDescriptor:
@@ -1103,6 +1321,7 @@ class EncryptedProjectTextStore:
         *,
         owner_task_id: str,
         route_generation: int,
+        reserved_object_id: str | None = None,
     ) -> ProjectTextRef:
         _project(project_id)
         if field not in {"title", "description"}:
@@ -1122,7 +1341,11 @@ class EncryptedProjectTextStore:
             owner_task_id,
             _now(self.clock),
         )
-        staged = await self.objects.stage(ObjectSource(data=data), metadata)
+        if reserved_object_id is not None:
+            _id(IdKind.OBJECT, reserved_object_id)
+        staged = await self.objects.stage(
+            ObjectSource(data=data), metadata, object_id=reserved_object_id
+        )
         try:
             reference = await self.objects.finalize(staged)
         except BaseException:
@@ -1210,6 +1433,7 @@ class RoutedEncryptedProjectTextStore:
         *,
         owner_task_id: str,
         route_generation: int,
+        reserved_object_id: str | None = None,
     ) -> ProjectTextRef:
         store, release = await self._store(owner_task_id, route_generation)
         try:
@@ -1219,6 +1443,7 @@ class RoutedEncryptedProjectTextStore:
                 plaintext,
                 owner_task_id=owner_task_id,
                 route_generation=route_generation,
+                reserved_object_id=reserved_object_id,
             )
         finally:
             await release()
@@ -1344,6 +1569,8 @@ class ProjectApplication:
         coordination_resource_disclosure_authorizer: CoordinationResourceDisclosureAuthorizer
         | None = None,
         coordination_source_authorizer: ProjectCoordinationSourceAuthorizer | None = None,
+        operation_journal: ProjectOperationJournalPort | None = None,
+        operation_digest: ProjectOperationDigest | None = None,
     ) -> None:
         # Keep composition failures at construction time.  The service has one catalog contract;
         # probing alternate method names would allow a partially upgraded adapter to look ready.
@@ -1382,6 +1609,204 @@ class ProjectApplication:
             coordination_resource_disclosure_authorizer
         )
         self.coordination_detail_reader: CoordinationDetailReader | None = None
+        self.operation_journal = operation_journal
+        self.operation_digest = operation_digest
+
+    def _project_operation_digest(self, identity: JsonValue) -> str:
+        """Return the installation-keyed commitment for one request identity.
+
+        Project titles and descriptions are part of the authenticated command, so hashing their
+        canonical bytes directly would leave a low-entropy dictionary oracle in the durable
+        journal.  READY binds this callback to an installation-owned MAC handle; unbound durable
+        composition fails closed instead of falling back to a public hash.
+        """
+
+        digestor = self.operation_digest
+        if digestor is None:
+            raise ProjectCommandError(CoordinationErrorCode.INVALID)
+        try:
+            return validate_commitment(digestor(identity))
+        except Exception as exc:
+            raise ProjectCommandError(CoordinationErrorCode.INVALID) from exc
+
+    async def _run_project_operation[T](
+        self,
+        *,
+        operation: ProjectOperationName,
+        request_id: str | None,
+        identity: JsonValue,
+        reserve: Mapping[str, object],
+        execute: Callable[[ProjectOperationRecord | None], Awaitable[T]],
+        encode: Callable[[T], JsonObject],
+        decode: Callable[[bytes], T],
+    ) -> T:
+        """Run one mutation through the durable request journal when requested.
+
+        Direct application callers from the pre-journal API may omit ``request_id`` and retain
+        their existing behavior.  Control requests always carry one once READY binds a journal;
+        this keeps the compatibility seam explicit instead of pretending an in-memory fallback
+        is durable.
+        """
+
+        if request_id is None:
+            return await execute(None)
+        request = _id(IdKind.REQUEST, request_id)
+        journal = self.operation_journal
+        if journal is None:
+            raise ProjectCommandError(CoordinationErrorCode.INVALID)
+        try:
+            digest = self._project_operation_digest(identity)
+            record = await journal.reserve(
+                request,
+                digest,
+                operation,
+                **cast(Any, dict(reserve)),
+            )
+            if record.completed:
+                if record.result_canonical is None:
+                    raise ProjectCommandError(CoordinationErrorCode.INVALID)
+                return decode(record.result_canonical)
+            result = await execute(record)
+            response = encode(result)
+            await journal.complete(request, digest, canonical_encode(response))
+            return result
+        except ProjectOperationConflict as exc:
+            raise ProjectCommandError(CoordinationErrorCode.SELECTOR_CONFLICT) from exc
+
+    async def _replay_completed_project_operation[T](
+        self,
+        *,
+        operation: ProjectOperationName,
+        request_id: str | None,
+        identity: JsonValue,
+        decode: Callable[[bytes], T],
+    ) -> T | None:
+        """Replay a completed request before checking mutable route state.
+
+        A completed request is already authenticated by its durable request digest and its
+        structural response is immutable.  Looking it up first lets a response-loss retry remain
+        valid after the source task has rotated its route generation; re-running the old command
+        through current-route admission would turn a committed request into a spurious stale
+        refusal.  Incomplete requests still go through ``_run_project_operation`` so recovery can
+        validate the current fence and finish the recorded effect.
+        """
+
+        if request_id is None:
+            return None
+        journal = self.operation_journal
+        if journal is None:
+            return None
+        request = _id(IdKind.REQUEST, request_id)
+        digest = self._project_operation_digest(identity)
+        try:
+            record = await journal.get(request, digest)
+        except ProjectOperationConflict as exc:
+            raise ProjectCommandError(CoordinationErrorCode.SELECTOR_CONFLICT) from exc
+        if record is None:
+            return None
+        if record.operation != operation:
+            raise ProjectCommandError(CoordinationErrorCode.SELECTOR_CONFLICT)
+        if not record.completed:
+            return None
+        if record.result_canonical is None:
+            raise ProjectCommandError(CoordinationErrorCode.INVALID)
+        return decode(record.result_canonical)
+
+    async def _advance_project_operation(
+        self,
+        record: ProjectOperationRecord,
+        *,
+        phase: Literal["text_ready", "effect_pending"],
+        title_ref: ProjectTextRef | None = None,
+        description_ref: ProjectTextRef | None = None,
+        project_id: str | None = None,
+        member_kind: MemberKind | None = None,
+        member_commitment_or_id: str | None = None,
+        effect_generation: int | None = None,
+        audit_record_id: str | None = None,
+    ) -> ProjectOperationRecord:
+        journal = self.operation_journal
+        if journal is None:
+            raise ProjectCommandError(CoordinationErrorCode.INVALID)
+        try:
+            return await journal.advance(
+                record.request_id,
+                record.request_digest,
+                phase=phase,
+                project_id=project_id,
+                member_kind=member_kind,
+                member_commitment_or_id=member_commitment_or_id,
+                effect_generation=effect_generation,
+                audit_record_id=audit_record_id,
+                title_ref=title_ref,
+                description_ref=description_ref,
+            )
+        except ProjectOperationConflict as exc:
+            raise ProjectCommandError(CoordinationErrorCode.SELECTOR_CONFLICT) from exc
+
+    @staticmethod
+    def _validate_recorded_text_route(
+        record: ProjectOperationRecord,
+        *,
+        owner_task_id: str,
+        route_generation: int,
+    ) -> None:
+        """Reject an incomplete retry whose staged text belongs to an old route.
+
+        Completed rows replay their immutable structural response before this check.  A
+        non-completed row must finish through the exact route generation that created its staged
+        object refs; otherwise retrying it could associate old ciphertext with a newly rotated
+        task route.
+        """
+
+        for reference in (record.title_ref, record.description_ref):
+            if reference is None:
+                continue
+            if (
+                reference.owner_task_id != owner_task_id
+                or reference.route_generation != route_generation
+            ):
+                raise ProjectCommandError(CoordinationErrorCode.GENERATION_MISMATCH)
+
+    @staticmethod
+    def _recorded_text_route(
+        record: ProjectOperationRecord,
+        *,
+        owner_task_id: str,
+    ) -> tuple[str, int]:
+        """Recover the reservation-time text route for an incomplete create/amend.
+
+        The route is captured before any object is finalized.  Rows written by an older journal
+        that predate this fence may still recover after text staging, where the exact refs carry
+        the same owner and generation; a row with no refs has no safe way to identify the route
+        that owns a possibly finalized reserved object and therefore fails closed.
+        """
+
+        recorded_task = record.owner_task_id
+        recorded_generation = record.owner_route_generation
+        if recorded_task is not None or recorded_generation is not None:
+            if (
+                recorded_task is None
+                or recorded_generation is None
+                or recorded_task != owner_task_id
+            ):
+                raise ProjectCommandError(CoordinationErrorCode.GENERATION_MISMATCH)
+            return recorded_task, recorded_generation
+        references = tuple(
+            reference
+            for reference in (record.title_ref, record.description_ref)
+            if reference is not None
+        )
+        if not references:
+            raise ProjectCommandError(CoordinationErrorCode.GENERATION_MISMATCH)
+        first = references[0]
+        if first.owner_task_id != owner_task_id or any(
+            reference.owner_task_id != first.owner_task_id
+            or reference.route_generation != first.route_generation
+            for reference in references[1:]
+        ):
+            raise ProjectCommandError(CoordinationErrorCode.GENERATION_MISMATCH)
+        return first.owner_task_id, first.route_generation
 
     async def _source_workspace_consent(self, task_id: str, workspace: str) -> bool:
         checker = self.workspace_consent_for_source
@@ -1577,18 +2002,32 @@ class ProjectApplication:
         *,
         owner_task_id: str,
         route_generation: int,
+        reserved_object_id: str | None = None,
     ) -> ProjectTextRef | None:
         if plaintext is None:
             return None
         if self.text_store is None:
             raise ProjectCommandError(CoordinationErrorCode.INVALID)
-        return await self.text_store.put(
-            project,
-            kind,
-            plaintext,
-            owner_task_id=owner_task_id,
-            route_generation=route_generation,
-        )
+        kwargs: dict[str, object] = {
+            "owner_task_id": owner_task_id,
+            "route_generation": route_generation,
+        }
+        if reserved_object_id is not None:
+            kwargs["reserved_object_id"] = reserved_object_id
+        try:
+            return await cast(Callable[..., Awaitable[ProjectTextRef]], self.text_store.put)(
+                project,
+                kind,
+                plaintext,
+                **kwargs,
+            )
+        except TypeError as exc:
+            # Small pre-journal test doubles may implement the old text-store signature.  They
+            # remain valid for unjournaled calls, while a durable operation must fail closed when
+            # its store cannot honor the reserved-object fence.
+            if reserved_object_id is None:
+                raise
+            raise ProjectCommandError(CoordinationErrorCode.INVALID) from exc
 
     async def _project_or_error(self, value: str) -> ProjectDescriptor:
         result = await self.catalog.project_state(value)
@@ -1607,6 +2046,7 @@ class ProjectApplication:
         auto_grouping: bool = False,
         owner_task_id: str | None = None,
         owner_route_generation: int | None = None,
+        request_id: str | None = None,
     ) -> ProjectDescriptor:
         if command is None:
             if title is None:
@@ -1621,6 +2061,22 @@ class ProjectApplication:
         if type(command) is not CreateProjectCommand:
             raise ProjectCommandError(CoordinationErrorCode.INVALID)
         assert command.owner_task_id is not None
+        owner_task = command.owner_task_id
+        replayed = await self._replay_completed_project_operation(
+            operation="create",
+            request_id=request_id,
+            identity=_project_operation_identity(
+                "create",
+                title=command.title,
+                description=command.description,
+                auto_grouping=command.auto_grouping,
+                owner_task_id=owner_task,
+                owner_route_generation=command.owner_route_generation,
+            ),
+            decode=_descriptor_from_wire,
+        )
+        if replayed is not None:
+            return replayed
         current_route_generation = await self.catalog.task_route_generation(command.owner_task_id)
         owner_route_generation = (
             current_route_generation
@@ -1632,49 +2088,129 @@ class ProjectApplication:
         # The initial general-project write is the sole pre-membership exception.  Resolve the
         # authenticated source now so an arbitrary task id cannot become the durable text owner;
         # membership and grant authority are established by the subsequent explicit link flow.
-        owner_provenance = await self._text_owner_source(
-            command.owner_task_id, owner_route_generation
+        await self._text_owner_source(owner_task, owner_route_generation)
+
+        reserved_project_id = _project_id_from_ids(self.ids) if request_id is not None else None
+        reserved_title_object_id = (
+            _id(IdKind.OBJECT, self.ids.new(IdKind.OBJECT)) if request_id is not None else None
         )
-        identifier = _project_id_from_ids(self.ids)
-        title_ref = await self._text_ref(
-            identifier,
-            "title",
-            command.title,
-            owner_task_id=command.owner_task_id,
-            route_generation=owner_route_generation,
+        reserved_description_object_id = (
+            _id(IdKind.OBJECT, self.ids.new(IdKind.OBJECT))
+            if request_id is not None and command.description is not None
+            else None
         )
-        description_ref = await self._text_ref(
-            identifier,
-            "description",
-            command.description,
-            owner_task_id=command.owner_task_id,
-            route_generation=owner_route_generation,
+
+        async def execute(record: ProjectOperationRecord | None) -> ProjectDescriptor:
+            identifier = (
+                _project_id_from_ids(self.ids) if record is None else record.reserved_project_id
+            )
+            if identifier is None:
+                raise ProjectCommandError(CoordinationErrorCode.INVALID)
+            effective_owner_task = owner_task
+            effective_route_generation = owner_route_generation
+            if record is not None:
+                effective_owner_task, effective_route_generation = self._recorded_text_route(
+                    record,
+                    owner_task_id=owner_task,
+                )
+                self._validate_recorded_text_route(
+                    record,
+                    owner_task_id=effective_owner_task,
+                    route_generation=effective_route_generation,
+                )
+                # A reserved row may have no refs even though its object was finalized before a
+                # crash.  Revalidate the reservation fence before reusing that object id.
+                await self._text_owner_source(effective_owner_task, effective_route_generation)
+            title_ref = None if record is None else record.title_ref
+            if title_ref is None:
+                title_ref = await self._text_ref(
+                    identifier,
+                    "title",
+                    command.title,
+                    owner_task_id=effective_owner_task,
+                    route_generation=effective_route_generation,
+                    reserved_object_id=(
+                        None if record is None else record.reserved_title_object_id
+                    ),
+                )
+            description_ref = None if record is None else record.description_ref
+            if command.description is not None and description_ref is None:
+                description_ref = await self._text_ref(
+                    identifier,
+                    "description",
+                    command.description,
+                    owner_task_id=effective_owner_task,
+                    route_generation=effective_route_generation,
+                    reserved_object_id=(
+                        None if record is None else record.reserved_description_object_id
+                    ),
+                )
+            if record is not None:
+                record = await self._advance_project_operation(
+                    record,
+                    phase="text_ready",
+                    title_ref=title_ref,
+                    description_ref=description_ref,
+                )
+                await self._text_owner_source(effective_owner_task, effective_route_generation)
+            created = await self.catalog.project_state(identifier)
+            if created is None:
+                created = await self.catalog.create_general_project(
+                    identifier, auto_grouping=command.auto_grouping
+                )
+            if type(created) is not ProjectDescriptor:
+                raise ProjectCommandError(CoordinationErrorCode.INVALID)
+            if created.kind is not ProjectKind.GENERAL or created.dissolved_at is not None:
+                raise ProjectCommandError(CoordinationErrorCode.SELECTOR_CONFLICT)
+            # Keep the explicit initial general-project exception visible at the project boundary.
+            await self._authorize_text_owner(
+                created,
+                owner_task_id=effective_owner_task,
+                route_generation=effective_route_generation,
+                initial_general_project=True,
+            )
+            if record is not None:
+                await self._advance_project_operation(record, phase="effect_pending")
+            if created.title_ref is not None or created.description_ref is not None:
+                if created.title_ref != title_ref or created.description_ref != description_ref:
+                    raise ProjectCommandError(CoordinationErrorCode.SELECTOR_CONFLICT)
+                return created
+            return await self.catalog.record_project_text_refs(
+                identifier,
+                title_ref=title_ref,
+                description_ref=description_ref,
+                expected_current_refs=((created.title_ref, created.description_ref)),
+            )
+
+        return await self._run_project_operation(
+            operation="create",
+            request_id=request_id,
+            identity=_project_operation_identity(
+                "create",
+                title=command.title,
+                description=command.description,
+                auto_grouping=command.auto_grouping,
+                owner_task_id=owner_task,
+                owner_route_generation=command.owner_route_generation,
+            ),
+            reserve={
+                "owner_task_id": owner_task,
+                "owner_route_generation": owner_route_generation,
+                "reserved_project_id": reserved_project_id,
+                "reserved_title_object_id": reserved_title_object_id,
+                "reserved_description_object_id": reserved_description_object_id,
+            },
+            execute=execute,
+            encode=lambda result: result.as_wire(),
+            decode=_descriptor_from_wire,
         )
-        created = await self.catalog.create_general_project(
-            identifier, auto_grouping=command.auto_grouping
-        )
-        if type(created) is not ProjectDescriptor:
-            raise ProjectCommandError(CoordinationErrorCode.INVALID)
-        # Keep the explicit initial-project exception visible at the project boundary.  The
-        # pre-create provenance check above prevents an arbitrary owner reference from reaching
-        # the object store; this second typed check records that membership/grant admission is
-        # intentionally deferred until the maintainer links the first member.
-        await self._authorize_text_owner(
-            created,
-            owner_task_id=owner_provenance.task_id,
-            route_generation=owner_route_generation,
-            initial_general_project=True,
-        )
-        # Text is stored as encrypted objects.  Persist only the object references through the
-        # catalog; accepting a successful create while dropping the references would make status
-        # unable to disclose the selected title under the existing policy.
-        created = await self.catalog.record_project_text_refs(
-            identifier, title_ref=title_ref, description_ref=description_ref
-        )
-        return created
 
     async def link(
-        self, command: LinkProjectCommand | None = None, **kwargs: object
+        self,
+        command: LinkProjectCommand | None = None,
+        *,
+        request_id: str | None = None,
+        **kwargs: object,
     ) -> ProjectMembership:
         if command is None:
             try:
@@ -1690,80 +2226,148 @@ class ProjectApplication:
                 raise ProjectCommandError(CoordinationErrorCode.INVALID) from exc
         if type(command) is not LinkProjectCommand:
             raise ProjectCommandError(CoordinationErrorCode.INVALID)
-        descriptor = await self._project_or_error(command.project_id)
-        if descriptor.dissolved_at is not None:
-            raise ProjectCommandError(CoordinationErrorCode.PROJECT_DISSOLVED)
-        if descriptor.kind is not ProjectKind.GENERAL:
-            raise ProjectCommandError(CoordinationErrorCode.INVALID)
-        if (
-            command.expected_generation is not None
-            and command.expected_generation != descriptor.membership_generation
-        ):
-            raise ProjectCommandError(CoordinationErrorCode.GENERATION_MISMATCH)
-        # A general project is a cross-source coordination surface even before its first member
-        # is attached.  The local-human grant is checked against the generation being mutated;
-        # record_project_membership then advances the generation and fences future deliveries.
-        await self.require_grant(descriptor.project_id, descriptor.membership_generation)
-        if command.member_kind is MemberKind.TASK:
-            project_ids = await self.catalog.list_task_project_ids(command.member_commitment_or_id)
-            for other_project_id in project_ids:
-                if other_project_id == descriptor.project_id:
-                    continue
-                other_project = await self.catalog.project_state(other_project_id)
-                # A task always retains its implicit repository project.  Q3 limits a task to one
-                # active *general* project; the repository grouping is not a competing general
-                # membership and must not block an explicit project link.
-                if (
-                    other_project is not None
-                    and other_project.kind is ProjectKind.GENERAL
-                    and other_project.dissolved_at is None
-                ):
-                    raise ProjectCommandError(CoordinationErrorCode.GENERAL_MEMBERSHIP_CONFLICT)
-        if command.member_kind is MemberKind.REPOSITORY:
-            target_repository = (
-                command.member_repository_commitment or command.member_commitment_or_id
-            )
-            current_members = await self.catalog.project_memberships(descriptor.project_id)
-            has_other_repository = any(
-                item.active
-                and item.member_kind is MemberKind.REPOSITORY
-                and item.member_commitment_or_id != target_repository
-                for item in current_members
-            )
-            if has_other_repository:
-                await self.require_grant(descriptor.project_id, descriptor.membership_generation)
-        if command.member_kind is MemberKind.TASK and command.source_workspace_commitment is None:
-            raise ProjectCommandError(CoordinationErrorCode.CONSENT_REQUIRED)
-        if command.member_kind is MemberKind.TASK:
-            assert command.source_workspace_commitment is not None
-            provenance = await self.catalog.task_source_provenance(command.member_commitment_or_id)
+
+        async def execute(record: ProjectOperationRecord | None) -> ProjectMembership:
+            # A response can be lost after the catalog transaction commits.  Resolve the exact
+            # active membership before re-running consent/grant checks; those checks may have
+            # changed while the caller was retrying, but the same request must replay its effect.
+            if record is not None and record.effect_generation is not None:
+                current_members = await self.catalog.project_memberships(command.project_id)
+                existing = [
+                    item
+                    for item in current_members
+                    if item.membership_generation == record.effect_generation
+                    and item.member_kind is command.member_kind
+                    and item.member_commitment_or_id == command.member_commitment_or_id
+                ]
+                if len(existing) == 1:
+                    return existing[0]
+            descriptor = await self._project_or_error(command.project_id)
+            if descriptor.dissolved_at is not None:
+                raise ProjectCommandError(CoordinationErrorCode.PROJECT_DISSOLVED)
+            if descriptor.kind is not ProjectKind.GENERAL:
+                raise ProjectCommandError(CoordinationErrorCode.INVALID)
             if (
-                provenance is None
-                or provenance.workspace_ref_commitment != command.source_workspace_commitment
+                command.expected_generation is not None
+                and command.expected_generation != descriptor.membership_generation
+            ):
+                raise ProjectCommandError(CoordinationErrorCode.GENERATION_MISMATCH)
+            # A general project is a cross-source coordination surface even before its first
+            # member is attached.  The local-human grant is checked against the generation being
+            # mutated; record_project_membership then advances the generation and fences future
+            # deliveries.
+            await self.require_grant(descriptor.project_id, descriptor.membership_generation)
+            if command.member_kind is MemberKind.TASK:
+                project_ids = await self.catalog.list_task_project_ids(
+                    command.member_commitment_or_id
+                )
+                for other_project_id in project_ids:
+                    if other_project_id == descriptor.project_id:
+                        continue
+                    other_project = await self.catalog.project_state(other_project_id)
+                    if (
+                        other_project is not None
+                        and other_project.kind is ProjectKind.GENERAL
+                        and other_project.dissolved_at is None
+                    ):
+                        raise ProjectCommandError(CoordinationErrorCode.GENERAL_MEMBERSHIP_CONFLICT)
+            if command.member_kind is MemberKind.REPOSITORY:
+                target_repository = (
+                    command.member_repository_commitment or command.member_commitment_or_id
+                )
+                current_members = await self.catalog.project_memberships(descriptor.project_id)
+                has_other_repository = any(
+                    item.active
+                    and item.member_kind is MemberKind.REPOSITORY
+                    and item.member_commitment_or_id != target_repository
+                    for item in current_members
+                )
+                if has_other_repository:
+                    await self.require_grant(
+                        descriptor.project_id, descriptor.membership_generation
+                    )
+            if (
+                command.member_kind is MemberKind.TASK
+                and command.source_workspace_commitment is None
             ):
                 raise ProjectCommandError(CoordinationErrorCode.CONSENT_REQUIRED)
-        if command.source_workspace_commitment is not None:
-            consent = await self._source_workspace_consent(
+            if command.member_kind is MemberKind.TASK:
+                assert command.source_workspace_commitment is not None
+                provenance = await self.catalog.task_source_provenance(
+                    command.member_commitment_or_id
+                )
+                if (
+                    provenance is None
+                    or provenance.workspace_ref_commitment != command.source_workspace_commitment
+                ):
+                    raise ProjectCommandError(CoordinationErrorCode.CONSENT_REQUIRED)
+            if command.source_workspace_commitment is not None:
+                consent = await self._source_workspace_consent(
+                    command.member_commitment_or_id,
+                    command.source_workspace_commitment,
+                )
+                if consent is not True:
+                    raise ProjectCommandError(CoordinationErrorCode.CONSENT_REQUIRED)
+            membership = ProjectMembership(
+                descriptor.project_id,
+                descriptor.membership_generation,
+                command.member_kind,
                 command.member_commitment_or_id,
-                command.source_workspace_commitment,
+                _now(self.clock),
             )
-            if consent is not True:
-                raise ProjectCommandError(CoordinationErrorCode.CONSENT_REQUIRED)
-        membership = ProjectMembership(
-            descriptor.project_id,
-            descriptor.membership_generation,
-            command.member_kind,
-            command.member_commitment_or_id,
-            _now(self.clock),
-        )
-        return await self.catalog.record_project_membership(
-            descriptor.project_id,
-            member_kind=membership.member_kind,
-            member_commitment_or_id=membership.member_commitment_or_id,
+            if record is not None:
+                await self._advance_project_operation(
+                    record,
+                    phase="effect_pending",
+                    # Membership rows use the next project generation.  Persist that expected
+                    # post-effect generation before the catalog write so a crash between the
+                    # catalog commit and the journal update can still identify the exact row.
+                    effect_generation=descriptor.membership_generation + 1,
+                )
+            membership = await self.catalog.record_project_membership(
+                descriptor.project_id,
+                member_kind=membership.member_kind,
+                member_commitment_or_id=membership.member_commitment_or_id,
+            )
+            if (
+                record is not None
+                and membership.membership_generation != descriptor.membership_generation + 1
+            ):
+                await self._advance_project_operation(
+                    record,
+                    phase="effect_pending",
+                    effect_generation=membership.membership_generation,
+                )
+            return membership
+
+        return await self._run_project_operation(
+            operation="link",
+            request_id=request_id,
+            identity=_project_operation_identity(
+                "link",
+                project_id=command.project_id,
+                member_kind=command.member_kind.value,
+                member_commitment_or_id=command.member_commitment_or_id,
+                source_workspace_commitment=command.source_workspace_commitment,
+                member_repository_commitment=command.member_repository_commitment,
+                expected_generation=command.expected_generation,
+            ),
+            reserve={
+                "project_id": command.project_id,
+                "member_kind": command.member_kind,
+                "member_commitment_or_id": command.member_commitment_or_id,
+            },
+            execute=execute,
+            encode=lambda result: result.as_wire(),
+            decode=_membership_from_wire,
         )
 
     async def unlink(
-        self, command: ProjectUnlinkCommand | None = None, **kwargs: object
+        self,
+        command: ProjectUnlinkCommand | None = None,
+        *,
+        request_id: str | None = None,
+        **kwargs: object,
     ) -> ProjectMembership:
         if command is None:
             try:
@@ -1777,32 +2381,84 @@ class ProjectApplication:
                 raise ProjectCommandError(CoordinationErrorCode.INVALID) from exc
         if type(command) is not ProjectUnlinkCommand:
             raise ProjectCommandError(CoordinationErrorCode.INVALID)
-        descriptor = await self._project_or_error(command.project_id)
-        if descriptor.dissolved_at is not None:
-            raise ProjectCommandError(CoordinationErrorCode.PROJECT_DISSOLVED)
-        if (
-            command.expected_generation is not None
-            and command.expected_generation != descriptor.membership_generation
-        ):
-            raise ProjectCommandError(CoordinationErrorCode.GENERATION_MISMATCH)
-        memberships = await self.catalog.project_memberships(command.project_id)
-        selected = [
-            item
-            for item in memberships
-            if item.active
-            and item.member_kind is command.member_kind
-            and item.member_commitment_or_id == command.member_commitment_or_id
-        ]
-        if len(selected) != 1:
-            raise ProjectCommandError(CoordinationErrorCode.MEMBER_NOT_FOUND)
-        # The catalog contract keys the append-only tombstone by the member's binding generation.
-        # The catalog atomically advances the project generation in the same transaction.
-        return await self.catalog.unbind_project_membership(
-            command.project_id, selected[0].membership_generation
+
+        async def execute(record: ProjectOperationRecord | None) -> ProjectMembership:
+            memberships = await self.catalog.project_memberships(command.project_id)
+            if record is not None and record.effect_generation is not None:
+                prior = [
+                    item
+                    for item in memberships
+                    if not item.active
+                    and item.membership_generation == record.effect_generation
+                    and item.member_kind is command.member_kind
+                    and item.member_commitment_or_id == command.member_commitment_or_id
+                ]
+                if len(prior) == 1:
+                    return prior[0]
+            descriptor = await self._project_or_error(command.project_id)
+            if descriptor.dissolved_at is not None:
+                raise ProjectCommandError(CoordinationErrorCode.PROJECT_DISSOLVED)
+            if (
+                command.expected_generation is not None
+                and command.expected_generation != descriptor.membership_generation
+            ):
+                raise ProjectCommandError(CoordinationErrorCode.GENERATION_MISMATCH)
+            selected = [
+                item
+                for item in memberships
+                if item.active
+                and item.member_kind is command.member_kind
+                and item.member_commitment_or_id == command.member_commitment_or_id
+            ]
+            if len(selected) != 1:
+                raise ProjectCommandError(CoordinationErrorCode.MEMBER_NOT_FOUND)
+            if record is not None:
+                await self._advance_project_operation(
+                    record,
+                    phase="effect_pending",
+                    effect_generation=selected[0].membership_generation,
+                )
+            # The selector is part of the same catalog transaction where supported.  It prevents
+            # a reused binding generation from unbinding a different member during recovery.
+            unbind = cast(
+                Callable[..., Awaitable[ProjectMembership]], self.catalog.unbind_project_membership
+            )
+            try:
+                return await unbind(
+                    command.project_id,
+                    selected[0].membership_generation,
+                    member_kind=command.member_kind,
+                    member_commitment_or_id=command.member_commitment_or_id,
+                )
+            except TypeError:
+                return await unbind(command.project_id, selected[0].membership_generation)
+
+        return await self._run_project_operation(
+            operation="unlink",
+            request_id=request_id,
+            identity=_project_operation_identity(
+                "unlink",
+                project_id=command.project_id,
+                member_kind=command.member_kind.value,
+                member_commitment_or_id=command.member_commitment_or_id,
+                expected_generation=command.expected_generation,
+            ),
+            reserve={
+                "project_id": command.project_id,
+                "member_kind": command.member_kind,
+                "member_commitment_or_id": command.member_commitment_or_id,
+            },
+            execute=execute,
+            encode=lambda result: result.as_wire(),
+            decode=_membership_from_wire,
         )
 
     async def amend(
-        self, command: ProjectAmendCommand | None = None, **kwargs: object
+        self,
+        command: ProjectAmendCommand | None = None,
+        *,
+        request_id: str | None = None,
+        **kwargs: object,
     ) -> ProjectDescriptor:
         if command is None:
             try:
@@ -1818,7 +2474,23 @@ class ProjectApplication:
         if type(command) is not ProjectAmendCommand:
             raise ProjectCommandError(CoordinationErrorCode.INVALID)
         assert command.owner_task_id is not None
-        current_route_generation = await self.catalog.task_route_generation(command.owner_task_id)
+        owner_task = command.owner_task_id
+        replayed = await self._replay_completed_project_operation(
+            operation="amend",
+            request_id=request_id,
+            identity=_project_operation_identity(
+                "amend",
+                project_id=command.project_id,
+                title=command.title,
+                description=command.description,
+                owner_task_id=owner_task,
+                owner_route_generation=command.owner_route_generation,
+            ),
+            decode=_descriptor_from_wire,
+        )
+        if replayed is not None:
+            return replayed
+        current_route_generation = await self.catalog.task_route_generation(owner_task)
         owner_route_generation = (
             current_route_generation
             if command.owner_route_generation is None
@@ -1826,36 +2498,155 @@ class ProjectApplication:
         )
         if current_route_generation != owner_route_generation:
             raise ProjectCommandError(CoordinationErrorCode.GENERATION_MISMATCH)
-        descriptor = await self._project_or_error(command.project_id)
-        await self._authorize_text_owner(
-            descriptor,
-            owner_task_id=command.owner_task_id,
-            route_generation=owner_route_generation,
+        baseline_descriptor = await self._project_or_error(command.project_id)
+        reserved_title_object_id = (
+            _id(IdKind.OBJECT, self.ids.new(IdKind.OBJECT))
+            if request_id is not None and command.title is not None
+            else None
         )
-        title_ref = descriptor.title_ref
-        description_ref = descriptor.description_ref
-        if command.title is not None:
-            title_ref = await self._text_ref(
-                command.project_id,
-                "title",
-                command.title,
-                owner_task_id=command.owner_task_id,
-                route_generation=owner_route_generation,
+        reserved_description_object_id = (
+            _id(IdKind.OBJECT, self.ids.new(IdKind.OBJECT))
+            if request_id is not None and command.description is not None
+            else None
+        )
+
+        async def execute(record: ProjectOperationRecord | None) -> ProjectDescriptor:
+            descriptor = await self._project_or_error(command.project_id)
+            effective_owner_task = owner_task
+            effective_route_generation = owner_route_generation
+            if record is not None:
+                effective_owner_task, effective_route_generation = self._recorded_text_route(
+                    record,
+                    owner_task_id=owner_task,
+                )
+                self._validate_recorded_text_route(
+                    record,
+                    owner_task_id=effective_owner_task,
+                    route_generation=effective_route_generation,
+                )
+            await self._authorize_text_owner(
+                descriptor,
+                owner_task_id=effective_owner_task,
+                route_generation=effective_route_generation,
             )
-        if command.description is not None:
-            description_ref = await self._text_ref(
-                command.project_id,
-                "description",
-                command.description,
-                owner_task_id=command.owner_task_id,
-                route_generation=owner_route_generation,
+            if record is not None:
+                changed_states: list[str] = []
+                if command.title is not None:
+                    if record.title_ref is not None and descriptor.title_ref == record.title_ref:
+                        changed_states.append("new")
+                    elif descriptor.title_ref == record.prior_title_ref:
+                        changed_states.append("prior")
+                    else:
+                        changed_states.append("conflict")
+                if command.description is not None:
+                    if (
+                        record.description_ref is not None
+                        and descriptor.description_ref == record.description_ref
+                    ):
+                        changed_states.append("new")
+                    elif descriptor.description_ref == record.prior_description_ref:
+                        changed_states.append("prior")
+                    else:
+                        changed_states.append("conflict")
+                if any(state == "conflict" for state in changed_states) or (
+                    any(state == "new" for state in changed_states)
+                    and not all(state == "new" for state in changed_states)
+                ):
+                    raise ProjectCommandError(CoordinationErrorCode.SELECTOR_CONFLICT)
+                if changed_states and all(state == "new" for state in changed_states):
+                    return descriptor
+            title_ref = (
+                descriptor.title_ref
+                if command.title is None
+                else (None if record is None or record.title_ref is None else record.title_ref)
             )
-        return await self.catalog.amend_project(
-            command.project_id, title_ref=title_ref, description_ref=description_ref
+            description_ref = (
+                descriptor.description_ref
+                if command.description is None
+                else (
+                    None
+                    if record is None or record.description_ref is None
+                    else record.description_ref
+                )
+            )
+            if command.title is not None and title_ref is None:
+                title_ref = await self._text_ref(
+                    command.project_id,
+                    "title",
+                    command.title,
+                    owner_task_id=effective_owner_task,
+                    route_generation=effective_route_generation,
+                    reserved_object_id=(
+                        None if record is None else record.reserved_title_object_id
+                    ),
+                )
+            if command.description is not None and description_ref is None:
+                description_ref = await self._text_ref(
+                    command.project_id,
+                    "description",
+                    command.description,
+                    owner_task_id=effective_owner_task,
+                    route_generation=effective_route_generation,
+                    reserved_object_id=(
+                        None if record is None else record.reserved_description_object_id
+                    ),
+                )
+            if record is not None:
+                await self._advance_project_operation(
+                    record,
+                    phase="text_ready",
+                    title_ref=title_ref if command.title is not None else None,
+                    description_ref=description_ref if command.description is not None else None,
+                )
+                await self._text_owner_source(effective_owner_task, effective_route_generation)
+                await self._advance_project_operation(record, phase="effect_pending")
+            # On recovery the catalog may already contain the exact references.  Returning it is
+            # safe only after checking both pointers; a different request must not be mistaken
+            # for this request's committed effect.
+            if descriptor.title_ref == title_ref and descriptor.description_ref == description_ref:
+                return descriptor
+            return await self.catalog.amend_project(
+                command.project_id,
+                title_ref=title_ref,
+                description_ref=description_ref,
+                expected_current_refs=(descriptor.title_ref, descriptor.description_ref),
+            )
+
+        return await self._run_project_operation(
+            operation="amend",
+            request_id=request_id,
+            identity=_project_operation_identity(
+                "amend",
+                project_id=command.project_id,
+                title=command.title,
+                description=command.description,
+                owner_task_id=owner_task,
+                owner_route_generation=command.owner_route_generation,
+            ),
+            reserve={
+                "project_id": command.project_id,
+                "owner_task_id": owner_task,
+                "owner_route_generation": owner_route_generation,
+                "reserved_title_object_id": reserved_title_object_id,
+                "reserved_description_object_id": reserved_description_object_id,
+                "prior_title_ref": (
+                    baseline_descriptor.title_ref if command.title is not None else None
+                ),
+                "prior_description_ref": (
+                    baseline_descriptor.description_ref if command.description is not None else None
+                ),
+            },
+            execute=execute,
+            encode=lambda result: result.as_wire(),
+            decode=_descriptor_from_wire,
         )
 
     async def dissolve(
-        self, command: ProjectDissolveCommand | None = None, **kwargs: object
+        self,
+        command: ProjectDissolveCommand | None = None,
+        *,
+        request_id: str | None = None,
+        **kwargs: object,
     ) -> ProjectDescriptor:
         if command is None:
             try:
@@ -1867,36 +2658,82 @@ class ProjectApplication:
                 raise ProjectCommandError(CoordinationErrorCode.INVALID) from exc
         if type(command) is not ProjectDissolveCommand:
             raise ProjectCommandError(CoordinationErrorCode.INVALID)
-        descriptor = await self._project_or_error(command.project_id)
-        if descriptor.kind is ProjectKind.REPOSITORY:
-            # Repository grouping persists once born. Its reversible control is opt-out/opt-in;
-            # dissolving it would leave a tombstone blocking later implicit project admission.
-            raise ProjectCommandError(CoordinationErrorCode.IMPLICIT_PROJECT_REQUIRES_OPT_OUT)
-        if descriptor.dissolved_at is not None:
-            return descriptor
-        if (
-            command.expected_generation is not None
-            and command.expected_generation != descriptor.membership_generation
-        ):
-            raise ProjectCommandError(CoordinationErrorCode.GENERATION_MISMATCH)
-        return await self.catalog.dissolve_project(command.project_id)
+
+        async def execute(record: ProjectOperationRecord | None) -> ProjectDescriptor:
+            descriptor = await self._project_or_error(command.project_id)
+            if descriptor.kind is ProjectKind.REPOSITORY:
+                # Repository grouping persists once born. Its reversible control is opt-out/opt-in;
+                # dissolving it would leave a tombstone blocking later implicit project admission.
+                raise ProjectCommandError(CoordinationErrorCode.IMPLICIT_PROJECT_REQUIRES_OPT_OUT)
+            if descriptor.dissolved_at is not None:
+                return descriptor
+            if (
+                command.expected_generation is not None
+                and command.expected_generation != descriptor.membership_generation
+            ):
+                raise ProjectCommandError(CoordinationErrorCode.GENERATION_MISMATCH)
+            if record is not None:
+                await self._advance_project_operation(
+                    record,
+                    phase="effect_pending",
+                    effect_generation=descriptor.membership_generation,
+                )
+            return await self.catalog.dissolve_project(command.project_id)
+
+        return await self._run_project_operation(
+            operation="dissolve",
+            request_id=request_id,
+            identity=_project_operation_identity(
+                "dissolve",
+                project_id=command.project_id,
+                expected_generation=command.expected_generation,
+            ),
+            reserve={"project_id": command.project_id},
+            execute=execute,
+            encode=lambda result: result.as_wire(),
+            decode=_descriptor_from_wire,
+        )
 
     async def set_auto_grouping(
-        self, repository_commitment: str, enabled: bool
+        self,
+        repository_commitment: str,
+        enabled: bool,
+        *,
+        request_id: str | None = None,
     ) -> ProjectDescriptor | None:
         repository = _commitment(repository_commitment)
         if type(enabled) is not bool:
             raise ProjectCommandError(CoordinationErrorCode.INVALID)
-        descriptor = await self.catalog.repository_state(repository)
-        if descriptor is not None and descriptor.kind is not ProjectKind.REPOSITORY:
-            raise ProjectCommandError(CoordinationErrorCode.INVALID)
-        # A pre-birth opt-out is durable repository preference state.  It must not materialize an
-        # implicit project merely to save ``auto_grouping=false``; the next birth reads this
-        # preference and persists it on the project row.
-        return await self.catalog.set_project_auto_grouping(repository, enabled=enabled)
+        operation: ProjectOperationName = "opt_in" if enabled else "opt_out"
+
+        async def execute(_record: ProjectOperationRecord | None) -> ProjectDescriptor | None:
+            descriptor = await self.catalog.repository_state(repository)
+            if descriptor is not None and descriptor.kind is not ProjectKind.REPOSITORY:
+                raise ProjectCommandError(CoordinationErrorCode.INVALID)
+            # A pre-birth opt-out does not materialize an implicit project merely to save the
+            # preference; the next birth reads this durable setting.
+            return await self.catalog.set_project_auto_grouping(repository, enabled=enabled)
+
+        return await self._run_project_operation(
+            operation=operation,
+            request_id=request_id,
+            identity=_project_operation_identity(
+                operation,
+                repository_commitment=repository,
+                enabled=enabled,
+            ),
+            reserve={},
+            execute=execute,
+            encode=lambda result: _auto_grouping_wire(repository, enabled, result),
+            decode=_auto_grouping_from_wire,
+        )
 
     async def opt_out(
-        self, command: ProjectOptCommand | str | None = None, **kwargs: object
+        self,
+        command: ProjectOptCommand | str | None = None,
+        *,
+        request_id: str | None = None,
+        **kwargs: object,
     ) -> ProjectDescriptor | None:
         if command is None:
             try:
@@ -1907,10 +2744,16 @@ class ProjectApplication:
             command = ProjectOptCommand(command)
         if type(command) is not ProjectOptCommand:
             raise ProjectCommandError(CoordinationErrorCode.INVALID)
-        return await self.set_auto_grouping(command.repository_commitment, False)
+        return await self.set_auto_grouping(
+            command.repository_commitment, False, request_id=request_id
+        )
 
     async def opt_in(
-        self, command: ProjectOptCommand | str | None = None, **kwargs: object
+        self,
+        command: ProjectOptCommand | str | None = None,
+        *,
+        request_id: str | None = None,
+        **kwargs: object,
     ) -> ProjectDescriptor | None:
         if command is None:
             try:
@@ -1921,10 +2764,16 @@ class ProjectApplication:
             command = ProjectOptCommand(command)
         if type(command) is not ProjectOptCommand:
             raise ProjectCommandError(CoordinationErrorCode.INVALID)
-        return await self.set_auto_grouping(command.repository_commitment, True)
+        return await self.set_auto_grouping(
+            command.repository_commitment, True, request_id=request_id
+        )
 
     async def grant(
-        self, command: ProjectGrantCommand | None = None, **kwargs: object
+        self,
+        command: ProjectGrantCommand | None = None,
+        *,
+        request_id: str | None = None,
+        **kwargs: object,
     ) -> CoordinationGrant:
         if command is None:
             try:
@@ -1937,65 +2786,97 @@ class ProjectApplication:
                 raise ProjectCommandError(CoordinationErrorCode.INVALID) from exc
         if type(command) is not ProjectGrantCommand:
             raise ProjectCommandError(CoordinationErrorCode.INVALID)
-        descriptor = await self._project_or_error(command.project_id)
-        if command.membership_generation != descriptor.membership_generation:
-            raise ProjectCommandError(CoordinationErrorCode.GENERATION_MISMATCH)
         audit_record_id = command.audit_record_id
         if audit_record_id is None:
-            # The production consent bridge persists the generated audit identity in its
-            # owner-only challenge.  Recover it before minting a new one so a retry after a lost
-            # grant-required response targets the same approved action.
+            descriptor_for_audit = await self._project_or_error(command.project_id)
             resolver = (
                 None
                 if self.grant_authorizer is None
                 else getattr(self.grant_authorizer, "recover_audit_record_id", None)
             )
+            recovered_audit = None
             if callable(resolver):
-                recovered = await cast(Callable[[str, int], Awaitable[object]], resolver)(
-                    descriptor.project_id, descriptor.membership_generation
+                candidate = await cast(Callable[[str, int], Awaitable[object]], resolver)(
+                    descriptor_for_audit.project_id, command.membership_generation
                 )
-                if type(recovered) is str and recovered:
-                    audit_record_id = recovered
-        if audit_record_id is None:
-            audit_record_id = _audit_id(self.ids)
-        # A successful grant is idempotent for the same live generation.  Check the durable
-        # catalog before consuming a one-use consent handoff so a retry after a response loss does
-        # not demand a second human approval.
-        existing = await self.catalog.coordination_grant(
-            descriptor.project_id, descriptor.membership_generation
-        )
-        if existing is not None:
-            if existing.active:
-                # A previous request may have committed the grant and lost its response before
-                # cleanup.  Reconcile the same handoff before returning the durable success.
-                await self._consume_grant_handoff(
-                    descriptor.project_id, descriptor.membership_generation, audit_record_id
+                if type(candidate) is str and candidate:
+                    recovered_audit = candidate
+            audit_record_id = recovered_audit or _audit_id(self.ids)
+
+        async def execute(record: ProjectOperationRecord | None) -> CoordinationGrant:
+            descriptor = await self._project_or_error(command.project_id)
+            if command.membership_generation != descriptor.membership_generation:
+                raise ProjectCommandError(CoordinationErrorCode.GENERATION_MISMATCH)
+            resolved_audit = audit_record_id
+            effective_audit = (
+                resolved_audit
+                if record is None or record.audit_record_id is None
+                else record.audit_record_id
+            )
+            assert effective_audit is not None
+            # A successful grant is idempotent for the same live generation. Check the durable
+            # catalog before consuming a one-use consent handoff so a response-loss retry does not
+            # demand a second approval.
+            existing = await self.catalog.coordination_grant(
+                descriptor.project_id, descriptor.membership_generation
+            )
+            if existing is not None:
+                if existing.active:
+                    await self._consume_grant_handoff(
+                        descriptor.project_id, descriptor.membership_generation, effective_audit
+                    )
+                    return existing
+                raise ProjectCommandError(CoordinationErrorCode.GRANT_REVOKED)
+            if not await self._authorize_grant(
+                descriptor.project_id,
+                descriptor.membership_generation,
+                "grant",
+                effective_audit,
+            ):
+                raise ProjectCommandError(CoordinationErrorCode.GRANT_REQUIRED)
+            if record is not None:
+                await self._advance_project_operation(
+                    record,
+                    phase="effect_pending",
+                    effect_generation=descriptor.membership_generation,
+                    audit_record_id=effective_audit,
                 )
-                return existing
-            raise ProjectCommandError(CoordinationErrorCode.GRANT_REVOKED)
-        if not await self._authorize_grant(
-            descriptor.project_id,
-            descriptor.membership_generation,
-            "grant",
-            audit_record_id,
-        ):
-            raise ProjectCommandError(CoordinationErrorCode.GRANT_REQUIRED)
-        grant = await self.catalog.record_coordination_grant(
-            descriptor.project_id,
-            descriptor.membership_generation,
-            grant_state=GrantState.ACTIVE,
-            audit_ref=audit_record_id,
+            grant = await self.catalog.record_coordination_grant(
+                descriptor.project_id,
+                descriptor.membership_generation,
+                grant_state=GrantState.ACTIVE,
+                audit_ref=effective_audit,
+            )
+            await self._consume_grant_handoff(
+                descriptor.project_id, descriptor.membership_generation, effective_audit
+            )
+            return grant
+
+        return await self._run_project_operation(
+            operation="grant",
+            request_id=request_id,
+            identity=_project_operation_identity(
+                "grant",
+                project_id=command.project_id,
+                membership_generation=command.membership_generation,
+                audit_record_id=command.audit_record_id,
+            ),
+            reserve={
+                "project_id": command.project_id,
+                "effect_generation": command.membership_generation,
+                "audit_record_id": audit_record_id,
+            },
+            execute=execute,
+            encode=lambda result: result.as_wire(),
+            decode=_grant_from_wire,
         )
-        # The production consent bridge consumes its owner-only handoff after the catalog write.
-        # This ordering leaves a recoverable artifact if the process crashes between the two
-        # durable stores; retries observe the active grant before asking for another approval.
-        await self._consume_grant_handoff(
-            descriptor.project_id, descriptor.membership_generation, audit_record_id
-        )
-        return grant
 
     async def revoke(
-        self, command: ProjectRevokeCommand | None = None, **kwargs: object
+        self,
+        command: ProjectRevokeCommand | None = None,
+        *,
+        request_id: str | None = None,
+        **kwargs: object,
     ) -> CoordinationGrant:
         if command is None:
             try:
@@ -2008,27 +2889,70 @@ class ProjectApplication:
                 raise ProjectCommandError(CoordinationErrorCode.INVALID) from exc
         if type(command) is not ProjectRevokeCommand:
             raise ProjectCommandError(CoordinationErrorCode.INVALID)
-        descriptor = await self._project_or_error(command.project_id)
-        if command.membership_generation != descriptor.membership_generation:
-            raise ProjectCommandError(CoordinationErrorCode.GENERATION_MISMATCH)
-        existing = await self.catalog.coordination_grant(
-            descriptor.project_id, descriptor.membership_generation
+
+        async def execute(record: ProjectOperationRecord | None) -> CoordinationGrant:
+            descriptor = await self._project_or_error(command.project_id)
+            existing = await self.catalog.coordination_grant(
+                command.project_id, command.membership_generation
+            )
+            # Reconcile a crash after the grant row changed but before the generation fence.  A
+            # completed revoke must remain replayable even though the project descriptor has
+            # already advanced beyond the request's original generation.
+            if record is not None and existing is not None and not existing.active:
+                if descriptor.membership_generation == command.membership_generation:
+                    await self.catalog.advance_project_generation(
+                        descriptor.project_id,
+                        reason="revoke",
+                        expected_generation=command.membership_generation,
+                    )
+                elif descriptor.membership_generation < command.membership_generation:
+                    raise ProjectCommandError(CoordinationErrorCode.GENERATION_MISMATCH)
+                return existing
+            if command.membership_generation != descriptor.membership_generation:
+                raise ProjectCommandError(CoordinationErrorCode.GENERATION_MISMATCH)
+            if existing is None or not existing.active:
+                raise ProjectCommandError(CoordinationErrorCode.GRANT_REQUIRED)
+            # A revoke tightens the existing grant in place. The catalog row is keyed by the
+            # original grant audit identity so a repeat cannot replace it while changing state.
+            audit_record_id = existing.audit_record_id
+            if record is not None:
+                await self._advance_project_operation(
+                    record,
+                    phase="effect_pending",
+                    effect_generation=descriptor.membership_generation,
+                    audit_record_id=audit_record_id,
+                )
+            grant = await self.catalog.record_coordination_grant(
+                descriptor.project_id,
+                descriptor.membership_generation,
+                grant_state=GrantState.REVOKED,
+                audit_ref=audit_record_id,
+            )
+            await self.catalog.advance_project_generation(
+                descriptor.project_id,
+                reason="revoke",
+                expected_generation=descriptor.membership_generation,
+            )
+            return grant
+
+        return await self._run_project_operation(
+            operation="revoke",
+            request_id=request_id,
+            identity=_project_operation_identity(
+                "revoke",
+                project_id=command.project_id,
+                membership_generation=command.membership_generation,
+                audit_record_id=command.audit_record_id,
+            ),
+            reserve={
+                "project_id": command.project_id,
+                "effect_generation": command.membership_generation,
+                "audit_record_id": command.audit_record_id,
+            },
+            execute=execute,
+            encode=lambda result: result.as_wire(),
+            decode=_grant_from_wire,
         )
-        if existing is None or not existing.active:
-            raise ProjectCommandError(CoordinationErrorCode.GRANT_REQUIRED)
-        # A revoke tightens the existing grant in place.  The catalog row is keyed by the
-        # original grant audit identity so a second request cannot replace that identity while
-        # changing state; the durable revoked_at/state transition is the revoke audit fact.  No
-        # approval ceremony is consulted for this tightening operation.
-        audit_record_id = existing.audit_record_id
-        grant = await self.catalog.record_coordination_grant(
-            descriptor.project_id,
-            descriptor.membership_generation,
-            grant_state=GrantState.REVOKED,
-            audit_ref=audit_record_id,
-        )
-        await self.catalog.advance_project_generation(descriptor.project_id, reason="revoke")
-        return grant
 
     async def require_grant(self, project: str, generation: int) -> CoordinationGrant:
         descriptor = await self._project_or_error(project)
@@ -2121,6 +3045,36 @@ class ProjectApplication:
 
         return await self.catalog.task_route_generation(_id(IdKind.TASK, task))
 
+    async def _coordination_participants_for(
+        self, detection_id: str
+    ) -> tuple[CoordinationParticipant, CoordinationParticipant] | None:
+        """Load the durable source snapshots that authenticate a detection projection."""
+
+        store = self.detection_store
+        loader = None if store is None else getattr(store, "participants", None)
+        if not callable(loader):
+            return None
+        try:
+            participants = await cast(Callable[[str], Awaitable[object | None]], loader)(
+                detection_id
+            )
+        except CoordinationError, ProjectCommandError:
+            return None
+        from yoetz.application.coordination import CoordinationParticipant
+
+        if type(participants) is not tuple:
+            return None
+        typed_participants = cast(
+            tuple[CoordinationParticipant, CoordinationParticipant], participants
+        )
+        if (
+            len(typed_participants) != 2
+            or any(type(item) is not CoordinationParticipant for item in typed_participants)
+            or typed_participants[0].task_id == typed_participants[1].task_id
+        ):
+            return None
+        return typed_participants
+
     async def project_detections_for(
         self,
         project: str,
@@ -2150,6 +3104,16 @@ class ProjectApplication:
                 or item.right_task_id not in visible
             ):
                 continue
+            participant_rows = await self._coordination_participants_for(item.detection_id)
+            if participant_rows is None:
+                continue
+            participant_by_task = {entry.task_id: entry for entry in participant_rows}
+            if set(participant_by_task) != {item.left_task_id, item.right_task_id} or any(
+                entry.project_id != project_id_value for entry in participant_rows
+            ):
+                continue
+            left_snapshot = participant_by_task[item.left_task_id]
+            right_snapshot = participant_by_task[item.right_task_id]
             left = await self.catalog.task_source_provenance(item.left_task_id)
             right = await self.catalog.task_source_provenance(item.right_task_id)
             if (
@@ -2157,6 +3121,10 @@ class ProjectApplication:
                 or right is None
                 or left.workspace_ref_commitment is None
                 or right.workspace_ref_commitment is None
+                or left.workspace_ref_commitment != left_snapshot.workspace_commitment
+                or right.workspace_ref_commitment != right_snapshot.workspace_commitment
+                or left.repository_privacy_commitment != left_snapshot.repository_commitment
+                or right.repository_privacy_commitment != right_snapshot.repository_commitment
             ):
                 continue
             cross_repository = (
@@ -2168,6 +3136,8 @@ class ProjectApplication:
                     source_workspace_commitment=left.workspace_ref_commitment,
                     project=project_id_value,
                     expected_generation=generation,
+                    expected_route_generation=left_snapshot.route_generation,
+                    expected_repository_commitment=left_snapshot.repository_commitment,
                     cross_repository=cross_repository,
                 )
                 await self.admit(
@@ -2175,6 +3145,8 @@ class ProjectApplication:
                     source_workspace_commitment=right.workspace_ref_commitment,
                     project=project_id_value,
                     expected_generation=generation,
+                    expected_route_generation=right_snapshot.route_generation,
+                    expected_repository_commitment=right_snapshot.repository_commitment,
                     cross_repository=cross_repository,
                 )
             except CoordinationError:
@@ -2184,6 +3156,14 @@ class ProjectApplication:
             admitted.append(item)
         current: list[CoordinationDetection] = []
         for item in admitted:
+            participant_rows = await self._coordination_participants_for(item.detection_id)
+            if participant_rows is None:
+                continue
+            participant_by_task = {entry.task_id: entry for entry in participant_rows}
+            if set(participant_by_task) != {item.left_task_id, item.right_task_id}:
+                continue
+            left_snapshot = participant_by_task[item.left_task_id]
+            right_snapshot = participant_by_task[item.right_task_id]
             left = await self.catalog.task_source_provenance(item.left_task_id)
             right = await self.catalog.task_source_provenance(item.right_task_id)
             cross_repository = bool(
@@ -2196,6 +3176,14 @@ class ProjectApplication:
                 project=project_id_value,
                 generation=generation,
                 cross_repository=cross_repository,
+                expected_route_generations={
+                    item.left_task_id: left_snapshot.route_generation,
+                    item.right_task_id: right_snapshot.route_generation,
+                },
+                expected_repository_commitments={
+                    item.left_task_id: left_snapshot.repository_commitment,
+                    item.right_task_id: right_snapshot.repository_commitment,
+                },
             ):
                 current.append(item)
         return tuple(sorted(current, key=lambda item: item.detection_id.encode()))
@@ -2228,12 +3216,15 @@ class ProjectApplication:
         requester_provenance = await self.catalog.task_source_provenance(requester)
         if requester_provenance is None or requester_provenance.workspace_ref_commitment is None:
             raise ProjectCommandError(CoordinationErrorCode.CONSENT_REQUIRED)
+        requester_route_generation = requester_provenance.route_generation
         try:
             await self.admit(
                 source_task_id=requester,
                 source_workspace_commitment=requester_provenance.workspace_ref_commitment,
                 project=project_id_value,
                 expected_generation=generation,
+                expected_route_generation=requester_route_generation,
+                expected_repository_commitment=requester_provenance.repository_privacy_commitment,
             )
         except ProjectCommandError as error:
             # Advice is a read of currently deliverable rows.  A withdrawn source consent or
@@ -2243,6 +3234,7 @@ class ProjectApplication:
                 CoordinationErrorCode.CONSENT_REQUIRED,
                 CoordinationErrorCode.GRANT_REQUIRED,
                 CoordinationErrorCode.GRANT_REVOKED,
+                CoordinationErrorCode.GENERATION_MISMATCH,
             }:
                 return ()
             raise
@@ -2264,6 +3256,17 @@ class ProjectApplication:
                 or not detection.generation_valid
             ):
                 continue
+            participant_rows = await self._coordination_participants_for(detection.detection_id)
+            if participant_rows is None:
+                continue
+            participant_by_task = {entry.task_id: entry for entry in participant_rows}
+            if set(participant_by_task) != {
+                detection.left_task_id,
+                detection.right_task_id,
+            } or any(entry.project_id != project_id_value for entry in participant_rows):
+                continue
+            left_snapshot = participant_by_task[detection.left_task_id]
+            right_snapshot = participant_by_task[detection.right_task_id]
             deliveries = await cast(Callable[[str], Awaitable[tuple[object, ...]]], deliveries_for)(
                 detection.detection_id
             )
@@ -2284,6 +3287,10 @@ class ProjectApplication:
                 or right is None
                 or left.workspace_ref_commitment is None
                 or right.workspace_ref_commitment is None
+                or left.workspace_ref_commitment != left_snapshot.workspace_commitment
+                or right.workspace_ref_commitment != right_snapshot.workspace_commitment
+                or left.repository_privacy_commitment != left_snapshot.repository_commitment
+                or right.repository_privacy_commitment != right_snapshot.repository_commitment
             ):
                 continue
             cross_repository = (
@@ -2295,6 +3302,8 @@ class ProjectApplication:
                     source_workspace_commitment=left.workspace_ref_commitment,
                     project=project_id_value,
                     expected_generation=generation,
+                    expected_route_generation=left_snapshot.route_generation,
+                    expected_repository_commitment=left_snapshot.repository_commitment,
                     cross_repository=cross_repository,
                 )
                 await self.admit(
@@ -2302,6 +3311,8 @@ class ProjectApplication:
                     source_workspace_commitment=right.workspace_ref_commitment,
                     project=project_id_value,
                     expected_generation=generation,
+                    expected_route_generation=right_snapshot.route_generation,
+                    expected_repository_commitment=right_snapshot.repository_commitment,
                     cross_repository=cross_repository,
                 )
                 left_advice = await cast(
@@ -2315,6 +3326,14 @@ class ProjectApplication:
                     project=project_id_value,
                     generation=generation,
                     cross_repository=cross_repository,
+                    expected_route_generations={
+                        detection.left_task_id: left_snapshot.route_generation,
+                        detection.right_task_id: right_snapshot.route_generation,
+                    },
+                    expected_repository_commitments={
+                        detection.left_task_id: left_snapshot.repository_commitment,
+                        detection.right_task_id: right_snapshot.repository_commitment,
+                    },
                 ):
                     continue
             except ProjectCommandError:
@@ -2336,6 +3355,8 @@ class ProjectApplication:
             requester,
             project=project_id_value,
             generation=generation,
+            expected_route_generation=requester_route_generation,
+            expected_repository_commitment=requester_provenance.repository_privacy_commitment,
         ):
             return ()
         if advice_rows and not await self._sources_current_at_generation(
@@ -2409,11 +3430,49 @@ class ProjectApplication:
             else detection.left_task_id
         )
         participants = (requester, counterpart)
+        participant_rows = await self._coordination_participants_for(detection.detection_id)
+        if participant_rows is None:
+            return CoordinationResourceProjection(
+                detection.detection_id,
+                project_id_value,
+                generation,
+                counterpart,
+                None,
+                False,
+            )
+        participant_by_task = {entry.task_id: entry for entry in participant_rows}
+        if set(participant_by_task) != set(participants) or any(
+            entry.project_id != project_id_value for entry in participant_rows
+        ):
+            return CoordinationResourceProjection(
+                detection.detection_id,
+                project_id_value,
+                generation,
+                counterpart,
+                None,
+                False,
+            )
         provenance_values: list[TaskSourceProvenance | None] = []
         for participant in participants:
             provenance_values.append(await self.catalog.task_source_provenance(participant))
         provenances = tuple(provenance_values)
         if any(item is None or item.workspace_ref_commitment is None for item in provenances):
+            return CoordinationResourceProjection(
+                detection.detection_id,
+                project_id_value,
+                generation,
+                counterpart,
+                None,
+                False,
+            )
+        if any(
+            provenance.repository_privacy_commitment
+            != participant_by_task[participant].repository_commitment
+            or provenance.workspace_ref_commitment
+            != participant_by_task[participant].workspace_commitment
+            for participant, provenance in zip(participants, provenances, strict=True)
+            if provenance is not None
+        ):
             return CoordinationResourceProjection(
                 detection.detection_id,
                 project_id_value,
@@ -2436,6 +3495,10 @@ class ProjectApplication:
                     source_workspace_commitment=cast(str, provenance.workspace_ref_commitment),
                     project=project_id_value,
                     expected_generation=generation,
+                    expected_route_generation=participant_by_task[participant].route_generation,
+                    expected_repository_commitment=participant_by_task[
+                        participant
+                    ].repository_commitment,
                     cross_repository=cross_repository,
                 )
             except ProjectCommandError:
@@ -2461,9 +3524,11 @@ class ProjectApplication:
             )
         owner_index = participants.index(owner)
         owner_provenance = typed_provenances[owner_index]
+        owner_snapshot = participant_by_task[owner]
         if (
             owner_provenance.workspace_ref_commitment is None
             or owner_provenance.route_generation != reference.route_generation
+            or owner_snapshot.route_generation != reference.route_generation
             or await self.catalog.task_route_generation(owner) != reference.route_generation
         ):
             return CoordinationResourceProjection(
@@ -2630,6 +3695,10 @@ class ProjectApplication:
                     source_workspace_commitment=cast(str, provenance.workspace_ref_commitment),
                     project=project_id_value,
                     expected_generation=generation,
+                    expected_route_generation=participant_by_task[participant].route_generation,
+                    expected_repository_commitment=participant_by_task[
+                        participant
+                    ].repository_commitment,
                     cross_repository=cross_repository,
                 )
             except ProjectCommandError:
@@ -2703,12 +3772,15 @@ class ProjectApplication:
         requester_provenance = await self.catalog.task_source_provenance(requester)
         if requester_provenance is None or requester_provenance.workspace_ref_commitment is None:
             raise ProjectCommandError(CoordinationErrorCode.CONSENT_REQUIRED)
+        requester_route_generation = requester_provenance.route_generation
         try:
             await self.admit(
                 source_task_id=requester,
                 source_workspace_commitment=requester_provenance.workspace_ref_commitment,
                 project=project_id_value,
                 expected_generation=generation,
+                expected_route_generation=requester_route_generation,
+                expected_repository_commitment=requester_provenance.repository_privacy_commitment,
             )
         except ProjectCommandError:
             return ()
@@ -2720,6 +3792,12 @@ class ProjectApplication:
             project_id_value, generation
         )
         visible: list[CoordinationCoverage] = []
+        expected_route_generations = {requester: requester_route_generation}
+        expected_repository_commitments: dict[str, str] = {}
+        if requester_provenance.repository_privacy_commitment is not None:
+            expected_repository_commitments[requester] = (
+                requester_provenance.repository_privacy_commitment
+            )
         for row in rows:
             if (
                 type(row) is not _CoordinationCoverage
@@ -2736,20 +3814,31 @@ class ProjectApplication:
                     source_workspace_commitment=provenance.workspace_ref_commitment,
                     project=project_id_value,
                     expected_generation=generation,
+                    expected_route_generation=provenance.route_generation,
+                    expected_repository_commitment=provenance.repository_privacy_commitment,
                 )
             except ProjectCommandError:
                 continue
             visible.append(row)
+            expected_route_generations[row.task_id] = provenance.route_generation
+            if provenance.repository_privacy_commitment is not None:
+                expected_repository_commitments[row.task_id] = (
+                    provenance.repository_privacy_commitment
+                )
         if not await self._source_current_at_generation(
             requester,
             project=project_id_value,
             generation=generation,
+            expected_route_generation=requester_route_generation,
+            expected_repository_commitment=requester_provenance.repository_privacy_commitment,
         ):
             return ()
         if not await self._sources_current_at_generation(
             (requester, *(row.task_id for row in visible)),
             project=project_id_value,
             generation=generation,
+            expected_route_generations=expected_route_generations,
+            expected_repository_commitments=expected_repository_commitments,
         ):
             return ()
         latest = await self._project_or_error(project_id_value)
@@ -2921,10 +4010,27 @@ class ProjectApplication:
         source_workspace_commitment: str,
         project: str,
         expected_generation: int | None = None,
+        expected_route_generation: int | None = None,
+        expected_route_identity_digest: str | None = None,
+        expected_repository_commitment: str | None = None,
         cross_repository: bool = False,
     ) -> CoordinationAdmission:
         task = _id(IdKind.TASK, source_task_id)
         workspace = _commitment(source_workspace_commitment)
+        if expected_route_generation is not None and (
+            type(expected_route_generation) is not int or expected_route_generation < 1
+        ):
+            raise ProjectCommandError(CoordinationErrorCode.INVALID)
+        if expected_route_identity_digest is not None:
+            try:
+                validate_sha256_digest(expected_route_identity_digest)
+            except (TypeError, ValueError) as exc:
+                raise ProjectCommandError(CoordinationErrorCode.INVALID) from exc
+        expected_repository = (
+            None
+            if expected_repository_commitment is None
+            else _commitment(expected_repository_commitment)
+        )
         descriptor = await self._project_or_error(project)
         if descriptor.dissolved_at is not None:
             raise ProjectCommandError(CoordinationErrorCode.PROJECT_DISSOLVED)
@@ -2940,11 +4046,33 @@ class ProjectApplication:
             # A caller-provided workspace commitment is only a selector.  It becomes authority
             # for this task after the catalog proves that it is the task's current provenance.
             raise ProjectCommandError(CoordinationErrorCode.CONSENT_REQUIRED)
+        # A queued coordination item carries the source snapshot captured at detection time.
+        # Rechecking both catalog route generation and provenance keeps a route rotation from
+        # reusing a stale participant row, even when project membership has not advanced.
+        if expected_route_generation is not None:
+            if provenance.route_generation != expected_route_generation:
+                raise ProjectCommandError(CoordinationErrorCode.GENERATION_MISMATCH)
+            current_route_generation = await self.catalog.task_route_generation(task)
+            if (
+                type(current_route_generation) is not int
+                or current_route_generation != expected_route_generation
+            ):
+                raise ProjectCommandError(CoordinationErrorCode.GENERATION_MISMATCH)
+        if (
+            expected_route_identity_digest is not None
+            and provenance.route_identity_digest != expected_route_identity_digest
+        ):
+            raise ProjectCommandError(CoordinationErrorCode.GENERATION_MISMATCH)
+        if (
+            expected_repository is not None
+            and provenance.repository_privacy_commitment != expected_repository
+        ):
+            raise ProjectCommandError(CoordinationErrorCode.GENERATION_MISMATCH)
         own_consent = await self._source_workspace_consent(task, workspace)
         if own_consent is not True:
             raise ProjectCommandError(CoordinationErrorCode.CONSENT_REQUIRED)
         if not await self._coordination_source_allowed(task, workspace, descriptor.project_id):
-            raise ProjectCommandError(CoordinationErrorCode.CONSENT_REQUIRED)
+            raise ProjectCommandError(CoordinationErrorCode.SOURCE_POLICY_DENIED)
         direct_memberships = await self.catalog.list_task_project_ids(task)
         member = project in direct_memberships
         if not member:
@@ -2999,6 +4127,9 @@ class ProjectApplication:
         project: str,
         generation: int,
         cross_repository: bool = False,
+        expected_route_generation: int | None = None,
+        expected_route_identity_digest: str | None = None,
+        expected_repository_commitment: str | None = None,
     ) -> bool:
         """Re-admit one source immediately before publishing its derived identity.
 
@@ -3018,6 +4149,9 @@ class ProjectApplication:
                 source_workspace_commitment=provenance.workspace_ref_commitment,
                 project=project,
                 expected_generation=generation,
+                expected_route_generation=expected_route_generation,
+                expected_route_identity_digest=expected_route_identity_digest,
+                expected_repository_commitment=expected_repository_commitment,
                 cross_repository=cross_repository,
             )
         except ProjectCommandError:
@@ -3031,6 +4165,8 @@ class ProjectApplication:
         project: str,
         generation: int,
         cross_repository: bool = False,
+        expected_route_generations: Mapping[str, int] | None = None,
+        expected_repository_commitments: Mapping[str, str] | None = None,
     ) -> bool:
         """Fence every source in a multi-task projection at one exact generation."""
 
@@ -3043,6 +4179,16 @@ class ProjectApplication:
                 project=project,
                 generation=generation,
                 cross_repository=cross_repository,
+                expected_route_generation=(
+                    None
+                    if expected_route_generations is None
+                    else expected_route_generations.get(task_id)
+                ),
+                expected_repository_commitment=(
+                    None
+                    if expected_repository_commitments is None
+                    else expected_repository_commitments.get(task_id)
+                ),
             ):
                 return False
         latest = await self._project_or_error(project)
@@ -3111,6 +4257,8 @@ class ProjectApplication:
                     source_workspace_commitment=provenance.workspace_ref_commitment,
                     project=descriptor.project_id,
                     expected_generation=expected_generation,
+                    expected_route_generation=provenance.route_generation,
+                    expected_repository_commitment=provenance.repository_privacy_commitment,
                 )
             except ProjectCommandError:
                 continue
@@ -3138,6 +4286,8 @@ class ProjectApplication:
                 task_id,
                 project=descriptor.project_id,
                 generation=expected_generation,
+                expected_route_generation=provenance.route_generation,
+                expected_repository_commitment=provenance.repository_privacy_commitment,
             ):
                 continue
             views.append(
@@ -3221,6 +4371,8 @@ class ProjectApplication:
             source_workspace_commitment=requester_provenance.workspace_ref_commitment,
             project=project_id_value,
             expected_generation=expected_generation,
+            expected_route_generation=requester_provenance.route_generation,
+            expected_repository_commitment=requester_provenance.repository_privacy_commitment,
         )
         if selected != requester:
             selected_provenance = await self.catalog.task_source_provenance(selected)
@@ -3231,6 +4383,8 @@ class ProjectApplication:
                 source_workspace_commitment=selected_provenance.workspace_ref_commitment,
                 project=project_id_value,
                 expected_generation=admission.membership_generation,
+                expected_route_generation=selected_provenance.route_generation,
+                expected_repository_commitment=selected_provenance.repository_privacy_commitment,
             )
         descriptor = await self._project_or_error(project_id_value)
         memberships = await self.catalog.project_memberships(project_id_value)
@@ -3297,6 +4451,16 @@ class ProjectApplication:
             visible_task_ids,
             project=project_id_value,
             generation=admission.membership_generation,
+            expected_route_generations={
+                requester: requester_provenance.route_generation,
+            },
+            expected_repository_commitments=(
+                {
+                    requester: requester_provenance.repository_privacy_commitment,
+                }
+                if requester_provenance.repository_privacy_commitment is not None
+                else {}
+            ),
         ):
             raise ProjectCommandError(CoordinationErrorCode.GRANT_REVOKED)
         return ProjectStatus(
@@ -3360,6 +4524,8 @@ class ProjectApplication:
             source_workspace_commitment=requester_provenance.workspace_ref_commitment,
             project=project_id_value,
             expected_generation=generation,
+            expected_route_generation=requester_provenance.route_generation,
+            expected_repository_commitment=requester_provenance.repository_privacy_commitment,
         )
         memberships = await self.catalog.project_memberships(project_id_value)
         views = await self._authorized_member_views(
@@ -3371,6 +4537,8 @@ class ProjectApplication:
             requester,
             project=project_id_value,
             generation=admission.membership_generation,
+            expected_route_generation=requester_provenance.route_generation,
+            expected_repository_commitment=requester_provenance.repository_privacy_commitment,
         ):
             return ()
         candidates = {
@@ -3385,6 +4553,16 @@ class ProjectApplication:
             (requester, *candidates),
             project=project_id_value,
             generation=admission.membership_generation,
+            expected_route_generations={
+                requester: requester_provenance.route_generation,
+            },
+            expected_repository_commitments=(
+                {
+                    requester: requester_provenance.repository_privacy_commitment,
+                }
+                if requester_provenance.repository_privacy_commitment is not None
+                else {}
+            ),
         ):
             return ()
         latest = await self._project_or_error(project_id_value)
@@ -3420,6 +4598,7 @@ def project_request_from_json(value: object) -> JsonObject:
     # structural request helper and never echoes them into a response or error.
     result: dict[str, JsonValue] = {"schema_version": "1.0.0", "operation": operation}
     for key in (
+        "request_id",
         "project_id",
         "member_kind",
         "member_commitment_or_id",
@@ -3433,6 +4612,8 @@ def project_request_from_json(value: object) -> JsonObject:
         if item is not None:
             if type(item) is not str:
                 raise ProjectCommandError(CoordinationErrorCode.INVALID)
+            if key == "request_id":
+                item = _id(IdKind.REQUEST, item)
             result[key] = item
     for key in ("auto_grouping",):
         item = source.get(key)
@@ -3479,13 +4660,24 @@ def build_project_support_handler(
     does not probe the enum or silently expose additional methods.
     """
 
-    async def invoke(request: object) -> JsonObject:
+    async def invoke(request: object, **_context: object) -> JsonObject:
         try:
             if not isinstance(request, Mapping):
                 raise ProjectCommandError(CoordinationErrorCode.INVALID)
             body = cast(Mapping[str, object], request)
             parsed = project_request_from_json(body)
             operation = cast(str, parsed["operation"])
+            durable_journal = getattr(application, "operation_journal", None)
+            request_id_value = body.get("request_id")
+            if durable_journal is not None:
+                if request_id_value is None:
+                    raise ProjectCommandError(CoordinationErrorCode.INVALID)
+                request_id = _id(IdKind.REQUEST, request_id_value)
+            else:
+                request_id = None
+            operation_kwargs: dict[str, Any] = (
+                {} if request_id is None else {"request_id": request_id}
+            )
             if operation == "create":
                 title = _bounded_text(body.get("title"), required=True)
                 description = _bounded_text(body.get("description"), required=False)
@@ -3495,6 +4687,7 @@ def build_project_support_handler(
                     auto_grouping=body.get("auto_grouping", False) is True,
                     owner_task_id=cast(str | None, body.get("owner_task_id")),
                     owner_route_generation=cast(int | None, body.get("owner_route_generation")),
+                    **operation_kwargs,
                 )
                 return result.as_wire()
             if operation == "link":
@@ -3509,6 +4702,7 @@ def build_project_support_handler(
                         str | None, body.get("member_repository_commitment")
                     ),
                     expected_generation=cast(int | None, body.get("expected_generation")),
+                    **operation_kwargs,
                 )
                 return result.as_wire()
             if operation == "unlink":
@@ -3517,6 +4711,7 @@ def build_project_support_handler(
                     member_kind=_member_kind(body.get("member_kind")),
                     member_commitment_or_id=cast(str, body.get("member_commitment_or_id")),
                     expected_generation=cast(int | None, body.get("expected_generation")),
+                    **operation_kwargs,
                 )
                 return result.as_wire()
             if operation == "amend":
@@ -3526,17 +4721,21 @@ def build_project_support_handler(
                     description=cast(str | None, body.get("description")),
                     owner_task_id=cast(str | None, body.get("owner_task_id")),
                     owner_route_generation=cast(int | None, body.get("owner_route_generation")),
+                    **operation_kwargs,
                 )
                 return result.as_wire()
             if operation == "dissolve":
                 result = await application.dissolve(
                     project_id=cast(str, body.get("project_id")),
                     expected_generation=cast(int | None, body.get("expected_generation")),
+                    **operation_kwargs,
                 )
                 return result.as_wire()
             if operation in {"opt_out", "opt_in"}:
                 result = await application.set_auto_grouping(
-                    cast(str, body.get("repository_commitment")), operation == "opt_in"
+                    cast(str, body.get("repository_commitment")),
+                    operation == "opt_in",
+                    **operation_kwargs,
                 )
                 if result is None:
                     return JsonObject(
@@ -3553,6 +4752,7 @@ def build_project_support_handler(
                     project_id=cast(str, body.get("project_id")),
                     membership_generation=cast(int, body.get("membership_generation")),
                     audit_record_id=cast(str | None, body.get("audit_record_id")),
+                    **operation_kwargs,
                 )
                 return result.as_wire()
             if operation == "revoke":
@@ -3560,6 +4760,7 @@ def build_project_support_handler(
                     project_id=cast(str, body.get("project_id")),
                     membership_generation=cast(int, body.get("membership_generation")),
                     audit_record_id=cast(str | None, body.get("audit_record_id")),
+                    **operation_kwargs,
                 )
                 return result.as_wire()
             # Project status is deliberately not a second control result shape.  Callers must use

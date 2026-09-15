@@ -254,7 +254,13 @@ class ObjectRootSnapshot:
 class ObjectStorePort(Protocol):
     async def commitment_for(self, data: bytes, kind: ObjectKind) -> str: ...
 
-    async def stage(self, source: ObjectSource, metadata: ObjectMetadata) -> StagedObject: ...
+    async def stage(
+        self,
+        source: ObjectSource,
+        metadata: ObjectMetadata,
+        *,
+        object_id: str | None = None,
+    ) -> StagedObject: ...
 
     async def finalize(self, staged: StagedObject) -> ObjectRef: ...
 

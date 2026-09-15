@@ -220,3 +220,182 @@ def test_service_status_fast_path_bounds_rendering_failure_without_retry(
     )
     assert calls == 1
     assert capsys.readouterr().err == "internal_error: the command could not be completed\n"
+
+
+def test_claude_observe_fast_path_forwards_profile_and_entry_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_handler(**kwargs: object) -> int:
+        captured.update(kwargs)
+        return 7
+
+    monkeypatch.setattr(entry, "_ENTRY_MONOTONIC", 12.5)
+    monkeypatch.setattr(observe_hooks, "handle_claude_observe", fake_handler)
+
+    assert (
+        entry._claude_observe_fast_path(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            [
+                "--workspace",
+                "/project",
+                "--event",
+                "PostToolUse",
+                "--observation-profile",
+                "claude-code-ordinary-observation-v1",
+            ]
+        )
+        == 7
+    )
+    assert captured == {
+        "event_name": "PostToolUse",
+        "workspace": "/project",
+        "observation_profile": "claude-code-ordinary-observation-v1",
+        "_entry_monotonic": 12.5,
+    }
+
+
+def test_cursor_observe_fast_path_forwards_profile_and_entry_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_handler(**kwargs: object) -> int:
+        captured.update(kwargs)
+        return 3
+
+    monkeypatch.setattr(entry, "_ENTRY_MONOTONIC", 8.25)
+    monkeypatch.setattr(observe_hooks, "handle_cursor_observe", fake_handler)
+
+    assert (
+        entry._cursor_observe_fast_path(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            [
+                "--event",
+                "postToolUse",
+                "--workspace",
+                ".",
+                "--observation-profile",
+                "cursor-ordinary-observation-v1",
+            ]
+        )
+        == 3
+    )
+    assert captured == {
+        "event_name": "postToolUse",
+        "workspace": ".",
+        "observation_profile": "cursor-ordinary-observation-v1",
+        "_entry_monotonic": 8.25,
+    }
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--event", "PostToolUse", "--event", "Stop"],
+        ["--event", "PostToolUse", "--unknown", "value"],
+        ["--event"],
+        ["--help"],
+    ],
+)
+def test_claude_fast_path_falls_through_for_non_exact_arguments(arguments: list[str]) -> None:
+    assert (
+        entry._claude_observe_fast_path(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            arguments
+        )
+        is None
+    )
+
+
+def test_main_dispatches_claude_before_loading_full_cli(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["yoetz", "hooks", "claude-observe", "--event", "Stop"])
+
+    def fast_path(_arguments: list[str]) -> int:
+        return 9
+
+    monkeypatch.setattr(entry, "_claude_observe_fast_path", fast_path)
+
+    with pytest.raises(SystemExit) as caught:
+        entry.main()
+
+    assert caught.value.code == 9
+
+
+def test_native_windows_refuses_stateful_commands_with_a_bounded_line(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code = entry._unsupported_platform_exit(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        ["setup", "status", "--json"], os_name="nt"
+    )
+
+    assert code == 20
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("unsupported_platform: ")
+    assert "WSL 2" in captured.err
+    assert "install-and-first-run.md#windows" in captured.err
+    assert "internal_error" not in captured.err
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["version"],
+        ["version", "--json"],
+        ["--version"],
+        ["--help"],
+        ["setup", "--help"],
+        ["-h"],
+    ],
+)
+def test_native_windows_still_answers_version_and_help(
+    arguments: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert (
+        entry._unsupported_platform_exit(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            arguments, os_name="nt"
+        )
+        is None
+    )
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("arguments", [[], ["setup", "status"], ["service", "run"]])
+def test_posix_never_hits_the_platform_refusal(
+    arguments: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert (
+        entry._unsupported_platform_exit(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            arguments, os_name="posix"
+        )
+        is None
+    )
+    assert capsys.readouterr().err == ""
+
+
+def test_main_refuses_before_loading_the_full_cli_on_native_windows(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["yoetz", "privacy", "show"])
+    monkeypatch.setattr(entry.os, "name", "nt")
+
+    def never() -> None:
+        raise AssertionError("full CLI must not load on native Windows")
+
+    monkeypatch.setattr(entry, "_run_full_cli", never)
+
+    with pytest.raises(SystemExit) as caught:
+        entry.main()
+
+    assert caught.value.code == 20
+    assert capsys.readouterr().err.startswith("unsupported_platform: ")
+
+
+def test_main_falls_through_to_the_full_cli_on_posix(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["yoetz", "privacy", "show"])
+    monkeypatch.setattr(entry.os, "name", "posix")
+    calls: list[str] = []
+    monkeypatch.setattr(entry, "_run_full_cli", lambda: calls.append("cli"))
+
+    entry.main()
+
+    assert calls == ["cli"]

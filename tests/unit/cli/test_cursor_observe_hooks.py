@@ -21,6 +21,7 @@ from yoetz.application.recommendations import (
 )
 from yoetz.cli import observe_hooks
 from yoetz.domain.observation import ObservationSource
+from yoetz.domain.observation_profiles import CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
 from yoetz.kernel.policies.observation_advice import ObservationCompositionFact
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from yoetz.protocol.ids import IdKind, new_id
@@ -96,6 +97,7 @@ def test_cursor_hook_ingress_drops_every_content_and_identity_denylist_field(
             event_name="afterMCPExecution",
             stdin_bytes=canonical_encode(payload),
             workspace=str(tmp_path),
+            _state=tmp_path,
         )
         == 0
     )
@@ -123,6 +125,179 @@ def test_cursor_hook_ingress_drops_every_content_and_identity_denylist_field(
         "edits",
     }
     assert forbidden.isdisjoint(sanitized)
+
+
+@pytest.mark.parametrize(
+    ("event_name", "extra", "expected_duration"),
+    [
+        (
+            "afterMCPExecution",
+            {"duration": 428.607, "model": "grok-4.6"},
+            428,
+        ),
+        (
+            "afterFileEdit",
+            {"model": "grok-4.6"},
+            None,
+        ),
+    ],
+)
+def test_cursor_raw_vendor_fields_reach_structural_observation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    event_name: str,
+    extra: dict[str, object],
+    expected_duration: int | None,
+) -> None:
+    monkeypatch.delenv("CURSOR_PROJECT_DIR", raising=False)
+    captured: dict[str, object] = {}
+
+    def fake_handle_observe(**kwargs: object) -> int:
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(observe_hooks, "handle_observe", fake_handle_observe)
+    payload: dict[str, object] = {
+        "conversation_id": "cursor-raw-vendor-fields",
+        "cursor_version": "3.17.8",
+        "generation_id": "generation-1",
+        "hook_event_name": event_name,
+        "tool_name": "status",
+        "tool_input": {"private": 1.5},
+        "result_json": "private result",
+        **extra,
+    }
+
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name=event_name,
+            stdin_bytes=json.dumps(payload, separators=(",", ":")).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+        )
+        == 0
+    )
+
+    sanitized = strict_json_parse(cast(bytes, captured["stdin_bytes"]))
+    assert isinstance(sanitized, Mapping)
+    assert sanitized["model_id"] == "grok-4.6"
+    if expected_duration is None:
+        assert "duration_ms" not in sanitized
+    else:
+        assert sanitized["duration_ms"] == expected_duration
+    assert sanitized["tool_name"] == "status"
+    assert "tool_input" not in sanitized
+    assert "result_json" not in sanitized
+
+
+def test_cursor_model_id_takes_precedence_over_vendor_model_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_handle_observe(**kwargs: object) -> int:
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(observe_hooks, "handle_observe", fake_handle_observe)
+    payload = json.dumps(
+        {
+            "conversation_id": "cursor-model-precedence",
+            "hook_event_name": "stop",
+            "model": "cursor-grok-4.6-medium-fast",
+            "model_id": "grok-4.6",
+        },
+        separators=(",", ":"),
+    ).encode()
+
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name="stop",
+            stdin_bytes=payload,
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+        )
+        == 0
+    )
+
+    sanitized = strict_json_parse(cast(bytes, captured["stdin_bytes"]))
+    assert isinstance(sanitized, Mapping)
+    assert sanitized["model_id"] == "grok-4.6"
+
+
+def test_cursor_raw_fractional_duration_is_stored_structurally(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CURSOR_PROJECT_DIR", raising=False)
+    store, commitment = _consented_store(tmp_path)
+    canaries = {
+        "tool_input": {"prompt": "PROMPT_CANARY", "ratio": 1.5},
+        "result_json": "RESULT_CANARY",
+        "transcript_path": "/private/TRANSCRIPT_CANARY",
+    }
+    payload = {
+        "conversation_id": "cursor-stored-fraction",
+        "hook_event_name": "afterMCPExecution",
+        "model": "grok-4.6",
+        "duration": 428.607,
+        "tool_name": "status",
+        **canaries,
+    }
+
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name="afterMCPExecution",
+            stdin_bytes=json.dumps(payload, separators=(",", ":")).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+
+    envelopes = store.list_envelopes(commitment)
+    assert len(envelopes) == 1
+    structural = envelopes[0].structural_payload
+    assert structural["duration_ms"] == 428
+    assert structural["model_id"] == "grok-4.6"
+    assert structural["tool_name"] == "status"
+    stored = b"".join(
+        path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    )
+    for canary in ("PROMPT_CANARY", "RESULT_CANARY", "TRANSCRIPT_CANARY"):
+        assert canary.encode() not in stored
+
+
+def test_cursor_invalid_vendor_payload_records_bounded_diagnostic(
+    tmp_path: Path,
+) -> None:
+    stdout = io.BytesIO()
+
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name="afterMCPExecution",
+            stdin_bytes=b'{"conversation_id":"cursor-invalid","duration":-1.0}',
+            stdout=stdout,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+        )
+        == 0
+    )
+
+    assert stdout.getvalue() == b"{}\n"
+    diagnostic = tmp_path / "observation/hook-diagnostics.jsonl"
+    row = json.loads(diagnostic.read_text(encoding="utf-8"))
+    assert row == {
+        "event": "PostToolUse",
+        "reason": "cursor_payload_invalid",
+        "ts": row["ts"],
+    }
+    assert "cursor-invalid" not in diagnostic.read_text(encoding="utf-8")
 
 
 def test_cursor_file_edit_uses_keyed_path_commitment_and_drops_outcomes(
@@ -161,11 +336,12 @@ def test_cursor_file_edit_uses_keyed_path_commitment_and_drops_outcomes(
     assert path not in canonical_encode(cast(JsonValue, sanitized)).decode("utf-8")
     assert "result_status" not in sanitized
     assert "success" not in sanitized
-    assert sanitized["capability_profile_id"] == "untested"
+    assert "capability_profile_id" not in sanitized
 
 
 def test_cursor_session_prefix_reserves_space_inside_token_bound(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     captured: list[Mapping[str, JsonValue]] = []
 
@@ -188,6 +364,7 @@ def test_cursor_session_prefix_reserves_space_inside_token_bound(
                 stdin_bytes=canonical_encode(payload),
                 stdout=io.BytesIO(),
                 workspace=".",
+                _state=tmp_path,
             )
             == 0
         )
@@ -305,8 +482,13 @@ def test_cursor_real_ingress_uses_bounded_profile_and_privacy_canaries(
         == 0
     )
     emitted = json.loads(stdout.getvalue())
-    assert emitted == {}
-    assert stdout.getvalue() == b"{}\n"
+    assert set(emitted) == {"additional_context"}
+    assert "no ledger task is mapped yet" in emitted["additional_context"]
+    context = emitted["additional_context"]
+    assert "After guidance reads, tool/schema discovery" in context
+    assert "call start to attach a task before substantive material work" in context
+    assert "same-request recovery first" in context
+    assert "ask the user for intro and guidance" in context
 
     envelopes = store.list_envelopes(commitment)
     assert len(envelopes) == 1
@@ -539,6 +721,143 @@ def test_cursor_advice_delivery_stays_pending_until_session_start(
     )
 
 
+@pytest.mark.parametrize(
+    ("event_name", "event_fields", "delivers_advice"),
+    [
+        (
+            "postToolUse",
+            {
+                "tool_name": "Shell",
+                # Cursor's command result carries only the nonzero exit code;
+                # the host does not send a separate success/result_status flag.
+                "tool_output": '{"exitCode":7}',
+            },
+            True,
+        ),
+        (
+            "postToolUse",
+            {"tool_name": "Read", "tool_output": "{}"},
+            True,
+        ),
+        (
+            "postToolUseFailure",
+            {
+                "tool_name": "Shell",
+                "error_message": "command failed",
+                "failure_type": "error",
+            },
+            False,
+        ),
+        (
+            "afterMCPExecution",
+            {"tool_name": "MCP:fixture_echo", "result_json": "fixture result"},
+            False,
+        ),
+        (
+            "postToolUse",
+            {"tool_name": "yoetz:publish_work", "tool_output": "{}"},
+            False,
+        ),
+        (
+            "postToolUse",
+            {"tool_name": "plugin-yoetz-yoetz:publish_work", "tool_output": "{}"},
+            False,
+        ),
+    ],
+)
+def test_cursor_ordinary_advice_delivery_matches_native_output_channels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    event_name: str,
+    event_fields: dict[str, JsonValue],
+    delivers_advice: bool,
+) -> None:
+    """Only ordinary postToolUse can consume advice on Cursor's native channel."""
+
+    monkeypatch.delenv("CURSOR_PROJECT_DIR", raising=False)
+    store, commitment = _consented_store(tmp_path)
+    lease_calls: list[str] = []
+    original_lease = LocalObservationStore.advice_delivery_lease
+
+    def tracked_lease(self: LocalObservationStore, workspace: str) -> object:
+        lease_calls.append(workspace)
+        return original_lease(self, workspace)
+
+    monkeypatch.setattr(LocalObservationStore, "advice_delivery_lease", tracked_lease)
+    session = "cursor-ordinary-advice"
+    session_commitment = store.session_commitment(f"cursor:{session}")
+
+    # Seed a real task-scoped, transient failed-command finding. The loop
+    # guard leaves it pending, while the later native hook is the event under
+    # test. Standing provider configuration advice is intentionally excluded
+    # from PostToolUse cadence.
+    seed_out = io.BytesIO()
+    assert (
+        observe_hooks.handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=canonical_encode(
+                {
+                    "session_id": f"cursor:{session}",
+                    "hook_event_name": "PostToolUse",
+                    "capability_profile_id": CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+                    "tool_call_id": "seed-failed-command",
+                    "tool_name": "shell",
+                    "exit_status": 7,
+                    "stop_hook_active": True,
+                }
+            ),
+            stdout=seed_out,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+            source=ObservationSource.CURSOR_HOOK,
+            _output_event_name="postToolUse",
+            _content_capture_profile=CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+        )
+        == 0
+    )
+    assert seed_out.getvalue() == b"{}\n"
+    assert store.peek_advice_for_delivery(commitment, session_commitment=session_commitment)
+    assert lease_calls == []
+
+    output = io.BytesIO()
+    payload: dict[str, JsonValue] = {
+        "conversation_id": session,
+        "hook_event_name": event_name,
+        "cursor_version": "3.17.8",
+        **event_fields,
+    }
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name=event_name,
+            stdin_bytes=canonical_encode(payload),
+            stdout=output,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+            observation_profile=CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+        )
+        == 0
+    )
+
+    emitted = json.loads(output.getvalue())
+    if delivers_advice:
+        assert emitted == {"additional_context": emitted["additional_context"]}
+        assert "resolve_failed_command" in emitted["additional_context"]
+        assert lease_calls == [commitment]
+        assert (
+            store.peek_advice_for_delivery(
+                commitment,
+                session_commitment=session_commitment,
+            )
+            is None
+        )
+    else:
+        assert emitted == {}
+        assert lease_calls == []
+        assert store.peek_advice_for_delivery(commitment, session_commitment=session_commitment)
+
+
 def test_cursor_workspace_diagnostics_distinguish_unconsented_and_unresolvable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -681,3 +1000,25 @@ def test_cursor_mcp_executions_of_yoetz_tools_follow_the_self_observation_policy
     ]
     assert all(row.envelope.structural_payload["action"] == "cursor_mcp" for row in rows)
     assert len(store.list_envelopes(commitment)) == 5
+
+
+def test_cursor_version_mapping_distinguishes_ide_cli_unknown_and_omitted() -> None:
+    """Issue #656: Cursor keeps its exact table. The IDE cell is proven; the Agent CLI build and
+    any unknown version are ``untested`` on the conservative paired contract; an omitted version
+    takes the legacy post-only carrier. Compatible events ingest in every branch (see the
+    parametrized ingress test above); none is promoted to the proven profile."""
+
+    from yoetz.ports.integrations import observation_pairing_contract
+
+    mapper = observe_hooks._cursor_capability_profile_id  # pyright: ignore[reportPrivateUsage]
+    assert mapper("3.17.8") == "cursor-ide-3.17.8"
+    assert observation_pairing_contract("cursor", "cursor-ide-3.17.8") == (
+        "post_only",
+        "generation_id",
+    )
+    for version in ("2026.07.09-a3815c0", "3.17.9", "3.18.0", "1.0.24"):
+        assert mapper(version) == "untested", version
+        assert observation_pairing_contract("cursor", "untested") == ("paired", "tool_call_id")
+    assert mapper(None) is None
+    assert mapper("") is None
+    assert observation_pairing_contract("cursor", None) == ("post_only", "generation_id")

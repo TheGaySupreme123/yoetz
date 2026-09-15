@@ -2,8 +2,8 @@
 
 Resource inventory changes cross four generated layers: the package resource manifest, the
 version-manifest schema, the schema inventory/runtime-support digests, and the packaged copies of
-those files. This command owns that order and repeats it to a byte-identical fixed point instead
-of requiring maintainers to remember a multi-pass sequence.
+those files, followed by the committed Codex plugin and skill trees. This command owns that order
+and repeats it to a byte-identical fixed point instead of requiring a multi-pass manual sequence.
 """
 
 from __future__ import annotations
@@ -21,8 +21,13 @@ _SCRIPT_ROOT = Path(__file__).resolve().parent
 _DEFAULT_REPO_ROOT = _SCRIPT_ROOT.parent
 
 _MAX_PASSES: Final = 5
-_VERSION_MANIFEST_SCHEMA: Final = "version/version-manifest-2.2.0.schema.json"
-_OWNED_ROOTS: Final = ("schemas", "src/yoetz/resources")
+_VERSION_MANIFEST_SCHEMA: Final = "version/version-manifest-2.3.0.schema.json"
+_OWNED_ROOTS: Final = (
+    "schemas",
+    "src/yoetz/resources",
+    ".agents/plugins/yoetz",
+    ".agents/skills/yoetz",
+)
 _OWNED_FILES: Final = (
     "skills/codex/yoetz/manifest.json",
     "support/runtime-support.json",
@@ -40,7 +45,7 @@ from yoetz.version import build_version_manifest, version_manifest_json
 # catalog loader used by every public request before claiming the package is usable.
 load_schema_catalog()
 schema = json.loads(
-    pathlib.Path("schemas/version/version-manifest-2.2.0.schema.json").read_bytes()
+    pathlib.Path("schemas/version/version-manifest-2.3.0.schema.json").read_bytes()
 )
 document = json.loads(version_manifest_json(build_version_manifest(), include_resources=True))
 Draft202012Validator(schema).validate(document)
@@ -120,7 +125,7 @@ def _preflight(repo_root: Path) -> bool:
         print("sync_resource_ripple: FAIL (preflight_output_invalid)", file=sys.stderr)
         return False
     if actual_count == reviewed_count:
-        return True
+        return _run(repo_root, "sync_committed_agent_trees.py", "--preflight")
     print(
         "sync_resource_ripple: FAIL (reviewed_resource_count_mismatch)\n"
         f"  inventory entries: {actual_count}\n"
@@ -159,14 +164,23 @@ def _installed_manifest_agrees_with_schema(repo_root: Path) -> bool:
 
 def _check(repo_root: Path) -> bool:
     return (
-        _run(repo_root, "generate_schemas.py", "--check")
+        _run(repo_root, "generate_project_policy_fixture.py", "--check")
+        and _run(repo_root, "generate_schemas.py", "--check")
         and _run(repo_root, "verify_resource_manifest.py", "--check")
         and _installed_manifest_agrees_with_schema(repo_root)
+        and _run(repo_root, "sync_committed_agent_trees.py", "--check")
+        and _run(repo_root, "sync_mcp_descriptor_digests.py", "--check")
     )
 
 
 def _write_pass(repo_root: Path) -> bool:
+    if not (repo_root / "schemas" / _VERSION_MANIFEST_SCHEMA).exists():
+        if not _run(
+            repo_root, "generate_schemas.py", "--write", "--only", _VERSION_MANIFEST_SCHEMA
+        ):
+            return False
     steps = (
+        ("generate_project_policy_fixture.py", "--write"),
         (
             "generate_schemas.py",
             "--write",
@@ -175,8 +189,13 @@ def _write_pass(repo_root: Path) -> bool:
             "privacy/privacy-policy-1.0.0.schema.json",
             "--only",
             "privacy/privacy-policy-1.1.0.schema.json",
+            "--only",
+            "operations/status-result-1.1.0.schema.json",
+            "--only",
+            "operations/status-result-1.2.0.schema.json",
         ),
         ("sync_repository_authority_schemas.py", "--write"),
+        ("sync_semantic_capacity_schemas.py",),
         # Mirror the reviewed sources into the package tree and recompute the resource-set digest.
         ("verify_resource_manifest.py", "--sync"),
         # Rebind the runtime-support digests to that resource-set digest. This must precede the
@@ -196,6 +215,7 @@ def _write_pass(repo_root: Path) -> bool:
         # Mirror the regenerated schema bytes and schema inventory. The resource-set digest moves
         # when they change, which the next pass rebinds into runtime-support.
         ("verify_resource_manifest.py", "--sync"),
+        ("sync_mcp_descriptor_digests.py", "--write"),
     )
     for script_name, *arguments in steps:
         if not _run(repo_root, script_name, *arguments):
@@ -210,6 +230,12 @@ def _write_to_fixed_point(repo_root: Path) -> bool:
         if not _write_pass(repo_root):
             return False
         current = _owned_digest(repo_root)
+        if current == previous:
+            # Render only after package digests converge: the skill ownership marker binds
+            # the complete installed resource set. Include its bytes in the same fixed point.
+            if not _run(repo_root, "sync_committed_agent_trees.py", "--write"):
+                return False
+            current = _owned_digest(repo_root)
         if current == previous:
             if not _check(repo_root):
                 print("sync_resource_ripple: FAIL (post_convergence_check)", file=sys.stderr)
@@ -227,7 +253,7 @@ def _write_to_fixed_point(repo_root: Path) -> bool:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sync_resource_ripple.py",
-        description="Converge or verify generated schemas and packaged resource artifacts.",
+        description="Converge or verify generated schemas, packaged resources, and agent trees.",
     )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true", help="Read-only fixed-point verification.")

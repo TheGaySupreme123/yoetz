@@ -8,6 +8,7 @@ from typing import cast
 import pytest
 from typer.testing import CliRunner
 
+from yoetz.adapters.integrations.artifact_presence import describe_artifact_presence
 from yoetz.adapters.integrations.portable_plugin import prepare_portable_artifact_review
 from yoetz.cli.app import app
 from yoetz.cli.cursor_integration import run_cursor_plugin_command
@@ -75,7 +76,14 @@ def _args(config: Path, project: Path, command: str, *extra: str) -> list[str]:
     ]
 
 
-def test_cursor_plugin_cli_binds_preview_install_status_and_remove(tmp_path: Path) -> None:
+def test_cursor_plugin_cli_binds_preview_install_status_and_remove(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # This scripted CLI lifecycle represents a legacy ambient install. Mock
+    # only the adapter lookup; the process still runs with its isolated root.
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.isolated_root", lambda: None
+    )
     runner = CliRunner()
     config = tmp_path / "cursor-testing-home" / ".cursor"
     project = tmp_path / "project"
@@ -102,6 +110,7 @@ def test_cursor_plugin_cli_binds_preview_install_status_and_remove(tmp_path: Pat
             "--target-digest",
             preview["preview_digest"],
         ],
+        "human_presence": describe_artifact_presence(),
         "requires_os_authenticated_prompt": True,
     }
 
@@ -126,6 +135,7 @@ def test_cursor_plugin_cli_binds_preview_install_status_and_remove(tmp_path: Pat
     assert status.exit_code == 0, status.output
     status_body = json.loads(status.stdout)
     assert status_body["state"] == "native_managed"
+    assert status_body["isolation_binding"] == "ambient"
     assert status_body["mcp"]["ownership_state"] == "plugin"
     # Issue #468: the CLI status exposes the bound launcher, its MCP binding, and the identity
     # probed from that exact executable (this venv's own console script here).
@@ -215,6 +225,27 @@ def test_cursor_plugin_cli_binds_preview_install_status_and_remove(tmp_path: Pat
         == 1
     )
     assert len(presence.seen) == 3
+
+
+def test_cursor_plugin_cli_preview_surfaces_isolated_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "isolated-root"
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.isolated_root", lambda: root
+    )
+    runner = CliRunner()
+    preview_result = runner.invoke(
+        app,
+        _args(
+            tmp_path / "cursor-config",
+            tmp_path / "project",
+            "preview",
+        ),
+    )
+    assert preview_result.exit_code == 0, preview_result.output
+    preview = json.loads(preview_result.stdout)
+    assert preview["isolation_root"] == str(root)
 
 
 def test_cursor_plugin_cli_rejects_unknown_action_with_bounded_reason(tmp_path: Path) -> None:
@@ -398,3 +429,58 @@ def test_a_strict_preview_discloses_the_project_host_admission_it_would_revoke(
     policy = runner.invoke(app, policy_args)
     assert policy.exit_code == 0, policy.output
     assert json.loads(policy.stdout)["admission_cleanup"] is None
+
+
+@pytest.mark.parametrize(
+    ("platform", "expected"),
+    [("darwin", ["macos"]), ("linux", ["linux"]), ("win32", [])],
+)
+def test_default_presence_cell_follows_the_platform_and_fails_closed_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str, expected: list[str]
+) -> None:
+    from types import SimpleNamespace
+
+    from yoetz.adapters.integrations import artifact_presence
+    from yoetz.adapters.integrations.artifact_presence import describe_artifact_presence
+    from yoetz.adapters.integrations.linux_artifact_presence import LinuxArtifactUserPresence
+    from yoetz.adapters.integrations.macos_artifact_presence import MacOSArtifactUserPresence
+
+    config = tmp_path / "cursor-testing-home" / ".cursor"
+    project = tmp_path / "project"
+    project.mkdir()
+    state = tmp_path / "private-state"
+    runner = CliRunner()
+    monkeypatch.setattr(artifact_presence, "sys", SimpleNamespace(platform=platform))
+
+    preview = json.loads(runner.invoke(app, _args(config, project, "preview")).stdout)
+    assert preview["authorization"]["human_presence"] == describe_artifact_presence(platform)
+    assert preview["authorization"]["human_presence"]["supported"] is bool(expected)
+    prepare_portable_artifact_review(preview["preview_digest"], _state=state)
+
+    called: list[str] = []
+
+    def macos(_self: object, _authority: ArtifactAuthority) -> None:
+        called.append("macos")
+        raise RuntimeError("human_authority_unavailable")
+
+    def linux(_self: object, _authority: ArtifactAuthority) -> None:
+        called.append("linux")
+        raise RuntimeError("human_authority_unavailable")
+
+    monkeypatch.setattr(MacOSArtifactUserPresence, "verify_artifact_review", macos)
+    monkeypatch.setattr(LinuxArtifactUserPresence, "verify_artifact_review", linux)
+
+    assert (
+        _mutate(
+            "install",
+            config,
+            project,
+            request_value=preview["request_id"],
+            preview_digest=preview["preview_digest"],
+            state=state,
+            presence=None,
+        )
+        == 1
+    )
+    assert called == expected
+    assert not (config / "plugins" / "local" / "yoetz").exists()

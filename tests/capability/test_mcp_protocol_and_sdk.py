@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
-import os
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -19,6 +18,7 @@ from typing import cast
 import pytest
 from mcp import types
 from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
+from tests.capability.child_environment import child_environment
 from tests.capability.evidence import (
     CapabilityCase,
     EvidenceOutcome,
@@ -29,8 +29,8 @@ from tests.capability.evidence import (
 )
 
 from yoetz.adapters.mcp_stdio import MAX_JSON_FRAME_BYTES
-from yoetz.mcp.descriptors import TOOL_DESCRIPTORS
-from yoetz.mcp.server import BRIDGE_RUNTIME
+from yoetz.mcp.descriptors import TOOL_DESCRIPTORS, server_instructions
+from yoetz.mcp.semantic_destination import disclose_semantic_destination
 from yoetz.protocol.canonical import canonical_digest
 
 _TEST_REVISION = bytes_digest(Path(__file__).read_bytes())
@@ -74,14 +74,16 @@ _CASE_DENIED_V2 = CapabilityCase(
 )
 
 
-def _run_raw(*frames: Mapping[str, object]) -> tuple[list[dict[str, object]], bytes]:
+def _run_raw(
+    tmp_path: Path, *frames: Mapping[str, object]
+) -> tuple[list[dict[str, object]], bytes]:
     child = "from yoetz.mcp.server import main; main()"
     process = subprocess.Popen(
         [sys.executable, "-I", "-c", child],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env={**os.environ, "PYTHONPATH": "src"},
+        env={**child_environment(tmp_path), "PYTHONPATH": "src"},
     )
     assert process.stdin is not None
     assert process.stdout is not None
@@ -115,7 +117,7 @@ def _initialize(protocol_version: object, request_id: int = 1) -> dict[str, obje
     }
 
 
-def _stdio_malformed_null_id() -> list[dict[str, object]]:
+def _stdio_malformed_null_id(tmp_path: Path) -> list[dict[str, object]]:
     child = r"""
 import anyio
 import sys
@@ -135,7 +137,7 @@ anyio.run(main)
         input=data,
         capture_output=True,
         check=False,
-        env={**os.environ, "PYTHONPATH": "src"},
+        env={**child_environment(tmp_path), "PYTHONPATH": "src"},
         timeout=5,
     )
     assert result.returncode == 0
@@ -152,6 +154,7 @@ def test_pinned_sdk_protocol_negotiation_and_validation_authority(tmp_path: Path
     assert _PROTOCOL in SUPPORTED_PROTOCOL_VERSIONS
 
     frames, stderr = _run_raw(
+        tmp_path,
         _initialize(_PROTOCOL),
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
@@ -159,17 +162,19 @@ def test_pinned_sdk_protocol_negotiation_and_validation_authority(tmp_path: Path
     by_id = {frame.get("id"): frame for frame in frames}
     initialize = cast(dict[str, object], by_id[1]["result"])
     assert initialize["protocolVersion"] == _PROTOCOL
-    assert initialize["instructions"] == BRIDGE_RUNTIME.instructions
+    assert initialize["instructions"] == server_instructions(
+        semantic_destination=disclose_semantic_destination(None)
+    )
     tools = cast(list[dict[str, object]], cast(dict[str, object], by_id[2]["result"])["tools"])
     assert [tool["name"] for tool in tools] == [item.name for item in TOOL_DESCRIPTORS["policy"]]
     assert len(tools) == 7
 
-    fallback, _ = _run_raw(_initialize("1900-01-01"))
+    fallback, _ = _run_raw(tmp_path, _initialize("1900-01-01"))
     fallback_result = cast(dict[str, object], fallback[0]["result"])
     assert "error" not in fallback[0]
     assert fallback_result["protocolVersion"] == types.LATEST_PROTOCOL_VERSION
 
-    null_rows = _stdio_malformed_null_id()
+    null_rows = _stdio_malformed_null_id(tmp_path)
     assert null_rows[0]["id"] is None
     assert null_rows[0]["error"]["code"] == -32700  # type: ignore[index]
     assert MAX_JSON_FRAME_BYTES == 1_048_576

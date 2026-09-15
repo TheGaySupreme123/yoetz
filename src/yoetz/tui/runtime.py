@@ -18,6 +18,7 @@ by the owning service and merely transcribed here.
 
 from __future__ import annotations
 
+import shlex
 import sys
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager
@@ -103,19 +104,6 @@ def _host_admission_detail(provider: ProviderPosture) -> str:
     return summary
 
 
-def _serve_command_display(route_profile: Literal["policy", "strict"]) -> str:
-    """Render the exact argv this route registers, for the screen that asks for approval.
-
-    A fixed string here would show ``yoetz mcp serve`` while registering the strict command,
-    which is the one line on that screen the human is being asked to approve.
-    """
-
-    # Local import: the ports module stays off the TUI's startup path.
-    from yoetz.ports.harness_mcp import MCP_SERVE_COMMAND, MCP_STRICT_SERVE_COMMAND
-
-    return " ".join(MCP_STRICT_SERVE_COMMAND if route_profile == "strict" else MCP_SERVE_COMMAND)
-
-
 def _mapping(value: object) -> Mapping[str, object]:
     """Narrow an untyped service payload to a string-keyed mapping, or nothing.
 
@@ -165,6 +153,7 @@ def project_detection(
     *,
     harnesses: Sequence[HarnessOption] = (),
     secure_storage_available: bool = False,
+    secure_storage_reason: str = "",
     already_connected: bool = False,
 ) -> Detection:
     """Describe the project the user is standing in, without changing anything."""
@@ -179,6 +168,7 @@ def project_detection(
         launched_from_subdirectory=root is not None and root != resolved,
         harnesses=tuple(harnesses),
         secure_storage_available=secure_storage_available,
+        secure_storage_reason=secure_storage_reason if not secure_storage_available else "",
         already_connected=already_connected,
         cwd=str(resolved),
     )
@@ -192,7 +182,9 @@ def _harness_option(binary: object, *, index: int, total: int) -> HarnessOption:
     version_text = version if isinstance(version, str) else None
     lowered = path.lower()
     # A bundled application install and a PATH shim are the same binary contract
-    # but very different things to a person choosing between them.
+    # but very different things to a person choosing between them. The tokens are
+    # macOS and Windows on purpose: OpenAI publishes no Linux Codex App, so a Linux
+    # path is a command-line installation by definition, not a missing case (#722).
     is_app = any(token in lowered for token in (".app/", "/applications/", "program files"))
     label = f"Codex Desktop {version_text}" if is_app else f"Codex CLI {version_text or ''}".strip()
     if version_text is None and is_app:
@@ -210,18 +202,89 @@ def _harness_option(binary: object, *, index: int, total: int) -> HarnessOption:
     )
 
 
-def _secure_storage_available() -> bool:
-    """Probe whether an OS credential store is usable, never storing anything."""
+def _secure_storage_probe() -> tuple[bool, str]:
+    """Probe whether the OS credential store can hold the vault root, never storing anything.
+
+    Uses the vault-root allowlist itself, so the interface never offers a store that
+    initialization would then refuse, and names the reason when it is unusable (#721).
+    """
 
     try:
-        import keyring
-        from keyring.backends.fail import Keyring as FailKeyring
+        from yoetz.adapters.keys.os_keyring import describe_vault_keyring_backend
+
+        report = describe_vault_keyring_backend()
     except Exception:
-        return False
-    try:
-        return not isinstance(keyring.get_keyring(), FailKeyring)
-    except Exception:
-        return False
+        return False, "no credential store could be loaded"
+    if report.approved:
+        return True, ""
+    if report.reason == "keyring_unavailable":
+        return False, f"no credential store is loaded; Yoetz needs {report.requirement}"
+    return (
+        False,
+        f"the loaded credential store is not approved for the vault ({report.backend_id}); "
+        f"Yoetz needs {report.requirement}",
+    )
+
+
+def _host_entries() -> tuple[DoctorEntry, ...]:
+    """Host facts that decide what this installation can do, named once (#720, #721, #724)."""
+
+    from yoetz.adapters.check_sandbox import probe_check_sandbox
+    from yoetz.version import platform_cell
+
+    cell = platform_cell()
+    if cell.certified:
+        platform_entry = DoctorEntry(
+            "platform_cell",
+            "Platform",
+            LayerState.VERIFIED,
+            detail=f"{cell.os_name} {cell.machine} ({cell.cell})",
+        )
+    else:
+        platform_entry = DoctorEntry(
+            "platform_cell",
+            "Platform",
+            LayerState.UNPROVEN,
+            detail=f"{cell.os_name} {cell.machine} is an untested platform cell",
+            remediation=(
+                "Yoetz is certified on macOS arm64 and Linux x86-64 (glibc 2.28+); it installed here "
+                "but nothing has been proven on this cell, so expect no support claim"
+            ),
+        )
+    sandbox = probe_check_sandbox()
+    if sandbox.status.value == "ready":
+        sandbox_entry = DoctorEntry(
+            "check_sandbox",
+            "Approved-check sandbox",
+            LayerState.VERIFIED,
+            detail=sandbox.mechanism,
+        )
+    else:
+        sandbox_entry = DoctorEntry(
+            "check_sandbox",
+            "Approved-check sandbox",
+            LayerState.NOT_CONFIGURED,
+            detail=f"{sandbox.reason}; network-denied checks are rejected until this is fixed",
+            remediation=sandbox.remediation,
+        )
+    available, reason = _secure_storage_probe()
+    if available:
+        storage_entry = DoctorEntry(
+            "secure_storage", "System secure storage", LayerState.VERIFIED, detail="available"
+        )
+    else:
+        storage_entry = DoctorEntry(
+            "secure_storage",
+            "System secure storage",
+            LayerState.NOT_CONFIGURED,
+            detail=reason,
+            remediation=(
+                "use a Yoetz passphrase instead (run /service, or "
+                "'yoetz service initialize-passphrase'); nothing to do if this installation "
+                "already unlocks with one"
+            ),
+        )
+    return (platform_entry, sandbox_entry, storage_entry)
 
 
 # ---------------------------------------------------------------------------
@@ -286,10 +349,12 @@ class YoetzRuntime:
                     break
             except RuntimeError_:
                 continue
+        secure_storage_available, secure_storage_reason = _secure_storage_probe()
         return project_detection(
             self._cwd,
             harnesses=harnesses,
-            secure_storage_available=_secure_storage_available(),
+            secure_storage_available=secure_storage_available,
+            secure_storage_reason=secure_storage_reason,
             already_connected=connected,
         )
 
@@ -454,7 +519,7 @@ class YoetzRuntime:
             reported_version=option.reported_version,
             project_root=str(root),
             route_profile=route,
-            mcp_command=_serve_command_display(route),
+            mcp_command=shlex.join(mcp_preview.serve_command),
             mcp_server_name=_MCP_SERVER_NAME,
             policy_digest=digest if isinstance(digest, str) else None,
             planned_check_ids=tuple(str(item) for item in checks)
@@ -601,6 +666,29 @@ class YoetzRuntime:
         root = _git_root(self._cwd)
         return root if root is not None else self._cwd
 
+    async def observation_selection_status(self) -> Mapping[str, object]:
+        """Read owner-selected observation settings without touching the service.
+
+        The projection contains commitments, bounded counters, and selected /
+        effective modes only.  It never reads content or privacy policy.  A
+        richer store projection is preferred when the running package exposes
+        it; the CLI-shaped fallback keeps older services readable during an
+        upgrade.
+        """
+
+        from yoetz.adapters.integrations.observation_local import LocalObservationStore
+        from yoetz.cli.observe import selection_status_payload
+
+        try:
+            store = LocalObservationStore()
+            commitment = store.workspace_commitment(str(self.project_root()))
+            raw = selection_status_payload(store, commitment)
+            return cast(Mapping[str, object], raw)
+        except (OSError, ValueError, RuntimeError) as error:
+            raise RuntimeError_(
+                "observation_status_unavailable", "observation status is unavailable"
+            ) from error
+
     # -- service --------------------------------------------------------
 
     @asynccontextmanager
@@ -722,6 +810,7 @@ class YoetzRuntime:
             "anthropic": "Anthropic",
             "google_gemini": "Google Gemini",
             "openrouter": "OpenRouter",
+            "grok": "Grok (xAI)",
             "vercel_ai_gateway": "Vercel AI Gateway",
         }
         options = [
@@ -760,7 +849,7 @@ class YoetzRuntime:
                 provider_id="openai-codex",
                 host="openai.com",
                 base_path_prefix=" through Codex-managed login",
-                default_model="gpt-5.6-sol",
+                default_model="gpt-5.6-luna",
                 api_style="Codex app-server v2 (stdio)",
                 endpoint_profile_id="codex-chatgpt-subscription",
                 endpoint_profile_version="1.0.0",
@@ -772,11 +861,14 @@ class YoetzRuntime:
         """Return discovered nonsecret defaults; setup still digest-validates the exact binary."""
 
         from yoetz.adapters.integrations.codex_discovery import discover_codex_binaries
-        from yoetz.cli.codex_subscription import default_codex_home
+        from yoetz.cli.codex_subscription import (
+            default_codex_home,
+            default_codex_subscription_model,
+        )
 
         binaries = discover_codex_binaries()
         executable = "" if not binaries else binaries[0].executable_path
-        return executable, str(default_codex_home()), "gpt-5.6-sol", "high"
+        return executable, str(default_codex_home()), default_codex_subscription_model(), "high"
 
     def preview_codex_subscription(
         self, executable: str, codex_home: str, model: str, reasoning_effort: str
@@ -1580,6 +1672,7 @@ class YoetzRuntime:
                 remediation=package_remediation,
             )
         )
+        entries.extend(_host_entries())
         snapshot = await self.status_snapshot()
         remediation = {
             "harness_detected": "install Codex, or use Yoetz locally with /check",

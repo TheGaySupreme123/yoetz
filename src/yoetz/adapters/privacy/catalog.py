@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from dataclasses import fields, is_dataclass, replace
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Final, Literal, cast
+from typing import Final, Literal, TypedDict, cast
 
 import apsw
 
@@ -30,6 +30,7 @@ from yoetz.domain.privacy import (
     HumanPrivacyDecision,
     LocalDisclosureReceipt,
     LocalDisclosureSink,
+    NonLlmDestination,
     PreDispatchAuditDecision,
     PrivacyAuditSubject,
     PrivacyOutcome,
@@ -41,6 +42,7 @@ from yoetz.domain.privacy import (
     ReceiptPolicyBinding,
     ReceiptSecretScan,
     ReceiptTransformations,
+    RequestCommitment,
     ReviewContextProfile,
     ReviewSelectionPolicy,
 )
@@ -61,6 +63,7 @@ from yoetz.ports.privacy import (
     EffectivePrivacyPolicy,
     HumanPolicyDecision,
     LocalDisclosureReceiptView,
+    NetworkEgressReceiptView,
     PendingDisclosureEntry,
     PendingDisclosurePage,
     PolicyCommitResult,
@@ -194,41 +197,62 @@ def _string_values(items: tuple[str, ...]) -> list[JsonValue]:
     return encoded
 
 
-def _local_receipt_from_bytes(data: bytes) -> LocalDisclosureReceipt:
-    source = _mapping(strict_json_parse(data))
-    scope = _mapping(source["scope"])
+class _ReceiptCommon(TypedDict):
+    schema_version: Literal["1.0.0"]
+    receipt_id: str
+    request_id: str
+    privacy_proposal_id: str
+    outcome: PrivacyOutcome
+    finished_at: datetime
+    scope: AuthorizationScope
+    purpose: str
+    policy: ReceiptPolicyBinding
+    consent_source: ConsentSource
+    approved_categories: tuple[DataCategory, ...]
+    blocked_categories: tuple[DataCategory, ...]
+    counts: ReceiptCounts
+    transformations: ReceiptTransformations
+    secret_scan: ReceiptSecretScan
+    safe_failure_reason: PrivacyReason | None
+    audit_store_version: Literal[1]
+
+
+def _optional_integer(value: JsonValue) -> int | None:
+    return None if value is None else _integer(value)
+
+
+def _receipt_common_from_json(source: dict[str, JsonValue]) -> _ReceiptCommon:
+    """Decode the fields every stored receipt shares, exactly as ``_json`` wrote them."""
+
     policy = _mapping(source["policy"])
     counts = _mapping(source["counts"])
     transforms = _mapping(source["transformations"])
     scan = _mapping(source["secret_scan"])
-    return LocalDisclosureReceipt(
-        "1.0.0",
-        cast(str, source["receipt_id"]),
-        cast(str, source["request_id"]),
-        cast(str, source["privacy_proposal_id"]),
-        LocalDisclosureSink(cast(str, source["sink"])),
-        PrivacyOutcome(cast(str, source["outcome"])),
-        parse_rfc3339_millis(source["finished_at"]),
-        AuthorizationScope(
-            kind=__import__(
-                "yoetz.domain.privacy", fromlist=["AuthorizationScopeKind"]
-            ).AuthorizationScopeKind(cast(str, scope["kind"])),
-            installation_id=cast(str, scope["installation_id"]),
-            workspace_ref_commitment=cast(str | None, scope.get("workspace_ref_commitment")),
-            task_id=cast(str | None, scope.get("task_id")),
-            request_id=cast(str | None, scope.get("request_id")),
-        ),
-        cast(str, source["purpose"]),
-        ReceiptPolicyBinding(
+    if source["schema_version"] != "1.0.0" or source["audit_store_version"] != 1:
+        raise ValueError("privacy_audit_row_corrupt")
+    return {
+        "schema_version": "1.0.0",
+        "receipt_id": cast(str, source["receipt_id"]),
+        "request_id": cast(str, source["request_id"]),
+        "privacy_proposal_id": cast(str, source["privacy_proposal_id"]),
+        "outcome": PrivacyOutcome(cast(str, source["outcome"])),
+        "finished_at": parse_rfc3339_millis(source["finished_at"]),
+        "scope": _scope_from_json(source["scope"]),
+        "purpose": cast(str, source["purpose"]),
+        "policy": ReceiptPolicyBinding(
             cast(str, policy["policy_id"]),
             _integer(policy["version"]),
             cast(str, policy["policy_digest"]),
             cast(str, policy["authorization_scope_digest"]),
         ),
-        ConsentSource(cast(str, source["consent_source"])),
-        tuple(DataCategory(value) for value in _strings(source["approved_categories"])),
-        tuple(DataCategory(value) for value in _strings(source["blocked_categories"])),
-        ReceiptCounts(
+        "consent_source": ConsentSource(cast(str, source["consent_source"])),
+        "approved_categories": tuple(
+            DataCategory(value) for value in _strings(source["approved_categories"])
+        ),
+        "blocked_categories": tuple(
+            DataCategory(value) for value in _strings(source["blocked_categories"])
+        ),
+        "counts": ReceiptCounts(
             _integer(counts["candidate_items"]),
             _integer(counts["included_items"]),
             _integer(counts["removed_items"]),
@@ -236,25 +260,94 @@ def _local_receipt_from_bytes(data: bytes) -> LocalDisclosureReceipt:
             _integer(counts["blocked_items"]),
             _integer(counts["candidate_bytes"]),
             _integer(counts["final_bytes"]),
-            cast(int | None, counts["estimated_input_tokens"]),
-            cast(int | None, counts["request_body_bytes"]),
+            _optional_integer(counts.get("estimated_input_tokens")),
+            _optional_integer(counts.get("request_body_bytes")),
         ),
-        ReceiptTransformations(
+        "transformations": ReceiptTransformations(
             _integer(transforms["minimized_items"]),
             _integer(transforms["redacted_spans"]),
             _integer(transforms["blocked_items"]),
         ),
-        ReceiptSecretScan(
+        "secret_scan": ReceiptSecretScan(
             cast(str, scan["registry_version"]),
             cast(str, scan["scanner_profile_digest"]),
             _integer(scan["match_count"]),
             cast(bool, scan["passed"]),
         ),
-        None
-        if source["safe_failure_reason"] is None
-        else PrivacyReason(cast(str, source["safe_failure_reason"])),
-        1,
+        "safe_failure_reason": (
+            None
+            if source.get("safe_failure_reason") is None
+            else PrivacyReason(cast(str, source["safe_failure_reason"]))
+        ),
+        "audit_store_version": 1,
+    }
+
+
+def _local_receipt_from_bytes(data: bytes) -> LocalDisclosureReceipt:
+    source = _mapping(strict_json_parse(data))
+    return LocalDisclosureReceipt(
+        **_receipt_common_from_json(source),
+        sink=LocalDisclosureSink(cast(str, source["sink"])),
     )
+
+
+def _destination_from_json(value: JsonValue) -> ProviderBinding | NonLlmDestination:
+    source = _mapping(value)
+    if "provider_id" in source:
+        binding = _binding_from_json(source)
+        if binding is None:
+            raise ValueError("privacy_audit_row_corrupt")
+        return binding
+    return NonLlmDestination(
+        EgressChannel(cast(str, source["kind"])),
+        cast(str, source["profile_id"]),
+        cast(str, source["profile_version"]),
+    )
+
+
+def _network_receipt_from_bytes(data: bytes) -> EgressReceipt:
+    """Decode one stored network egress receipt.
+
+    ``complete_decision`` and ``complete_egress`` store the receipt as the canonical JSON of the
+    ``EgressReceipt`` dataclass, so every optional dispatch field is present as ``null`` when the
+    attempt never left the machine; ``get`` tolerates absence too so a row written by either
+    shape reads the same.
+    """
+
+    source = _mapping(strict_json_parse(data))
+    commitment = source.get("request_commitment")
+    request_commitment = None
+    if commitment is not None:
+        commitment_source = _mapping(commitment)
+        request_commitment = RequestCommitment(
+            cast(
+                Literal["hmac-sha256/yoetz-privacy-egress-request-v1"],
+                commitment_source["algorithm"],
+            ),
+            cast(str, commitment_source["commitment"]),
+        )
+    started = source.get("dispatch_started_at")
+    return EgressReceipt(
+        **_receipt_common_from_json(source),
+        channel=EgressChannel(cast(str, source["channel"])),
+        destination=_destination_from_json(source["destination"]),
+        authorization_id=cast(str | None, source.get("authorization_id")),
+        dispatch_id=cast(str | None, source.get("dispatch_id")),
+        dispatch_started_at=None if started is None else parse_rfc3339_millis(started),
+        request_commitment=request_commitment,
+    )
+
+
+def _receipt_view_from_row(destination_kind: object, canonical: object) -> PrivacyReceiptView:
+    """Project one audit row's stored receipt as the view its destination kind names."""
+
+    if type(canonical) is not bytes:
+        raise ValueError("privacy_audit_row_corrupt")
+    if destination_kind == "local":
+        return LocalDisclosureReceiptView("local_disclosure", _local_receipt_from_bytes(canonical))
+    if destination_kind == "network":
+        return NetworkEgressReceiptView("network_egress", _network_receipt_from_bytes(canonical))
+    raise ValueError("privacy_audit_row_corrupt")
 
 
 def _scope_from_json(value: JsonValue) -> AuthorizationScope:
@@ -1954,6 +2047,10 @@ class CatalogPrivacyAudit:
                     _mac(self._key, _LOOKUP_DOMAIN, structural_bytes), lookup_identity
                 ):
                     raise ValueError("privacy_audit_attempt_corrupt")
+                prepared_case_digest = structural.get("prepared_case_digest")
+                if type(prepared_case_digest) is not str:
+                    raise ValueError("privacy_audit_attempt_corrupt")
+                validate_sha256_digest(prepared_case_digest)
             except (TypeError, ValueError) as exc:
                 raise ValueError("privacy_audit_attempt_corrupt") from exc
             if structural.get("prepared_case_digest") != case_digest:
@@ -2282,11 +2379,7 @@ class CatalogPrivacyAudit:
         ).fetchone()
         if row is None:
             return None
-        if row[0] != "local":
-            raise ValueError("network_receipt_codec_deferred_to_b8")
-        return LocalDisclosureReceiptView(
-            "local_disclosure", _local_receipt_from_bytes(cast(bytes, row[1]))
-        )
+        return _receipt_view_from_row(row[0], row[1])
 
     async def list_pending_disclosures(
         self, audience: PrivacyReceiptAudience
@@ -2408,15 +2501,7 @@ class CatalogPrivacyAudit:
             parameters,
         ).fetchall()
         selected = rows[: query.limit]
-        receipts: list[PrivacyReceiptView] = []
-        for kind, canonical, _, _ in selected:
-            if kind != "local":
-                continue
-            receipts.append(
-                LocalDisclosureReceiptView(
-                    "local_disclosure", _local_receipt_from_bytes(cast(bytes, canonical))
-                )
-            )
+        receipts = [_receipt_view_from_row(kind, canonical) for kind, canonical, _, _ in selected]
         next_cursor = None
         if len(rows) > query.limit and selected:
             last = selected[-1]

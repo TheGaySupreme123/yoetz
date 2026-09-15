@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import io
+from pathlib import Path
+
+import pytest
 
 from yoetz.cli.hook_io import (
     claude_context_output,
     context_output,
     cursor_context_output,
+    read_cursor_hook_payload,
     stdout_json,
 )
+from yoetz.protocol.canonical import strict_json_parse
+from yoetz.protocol.errors import ProtocolValueError
 
 
 def test_session_start_and_post_tool_use_emit_additional_context() -> None:
@@ -45,6 +51,12 @@ def test_cursor_session_start_emits_cursor_native_additional_context() -> None:
     }
 
 
+def test_cursor_post_tool_use_emits_cursor_native_additional_context() -> None:
+    assert cursor_context_output("postToolUse", "  bounded advice  ") == {
+        "additional_context": "bounded advice"
+    }
+
+
 def test_cursor_stop_does_not_auto_submit_a_followup_message() -> None:
     assert cursor_context_output("stop", "submit this as a new user message") == {}
 
@@ -56,13 +68,26 @@ def test_cursor_stop_followup_is_explicitly_opt_in() -> None:
 
 
 def test_cursor_outputless_and_unknown_events_emit_empty_object() -> None:
-    for event in ("afterFileEdit", "afterMCPExecution", "sessionEnd", "unknown"):
+    for event in (
+        "postToolUseFailure",
+        "afterFileEdit",
+        "afterMCPExecution",
+        "sessionEnd",
+        "unknown",
+    ):
         assert cursor_context_output(event, "advice that has no output channel") == {}
 
 
 def test_cursor_context_is_bounded_by_the_codex_context_limit() -> None:
     advice = "x" * 2_001
     assert cursor_context_output("sessionStart", advice) == {"additional_context": "x" * 2_000}
+    assert cursor_context_output("postToolUse", advice) == {"additional_context": "x" * 2_000}
+
+
+def test_cursor_post_tool_use_stdout_is_canonical_and_bounded() -> None:
+    stream = io.BytesIO()
+    assert stdout_json(cursor_context_output("postToolUse", "  bounded advice  "), stream)
+    assert stream.getvalue() == b'{"additional_context":"bounded advice"}\n'
 
 
 def test_codex_context_output_keeps_canonical_stdout_bytes() -> None:
@@ -115,3 +140,79 @@ def test_claude_context_is_bounded_by_the_shared_context_limit() -> None:
     assert claude_context_output("Stop", "x" * 2_001) == {
         "hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": "x" * 2_000}
     }
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "cursor"))
+def test_truncated_bootstrap_keeps_the_current_procedure_route(host: str) -> None:
+    """Exercise delivered hook payloads; full source presence misses the truncation bug."""
+    root = Path(__file__).resolve().parents[3]
+    instructions = (root / "guidance/agent-instructions.md").read_text(encoding="utf-8")
+    if host == "cursor":
+        rendered = cursor_context_output("sessionStart", instructions)
+        delivered = rendered["additional_context"]
+    else:
+        render = claude_context_output if host == "claude" else context_output
+        rendered = render("SessionStart", instructions)
+        specific = rendered["hookSpecificOutput"]
+        assert isinstance(specific, dict)
+        delivered = specific["additionalContext"]
+    assert isinstance(delivered, str)
+    assert len(delivered) <= 2_000
+    assert len(delivered) < len(instructions)
+    assert "yoetz://guidance/workflow.md" in delivered
+    assert "current" in delivered.lower()
+    assert "memory" in delivered.lower()
+
+
+def test_intake_cue_keeps_a_complete_workflow_uri_before_the_byte_limit() -> None:
+    from yoetz.cli.hooks import intake_cue_text
+
+    root = Path(__file__).resolve().parents[3]
+    cue = intake_cue_text(resource_root=root)
+    assert len(cue.encode("utf-8")) <= 512
+    assert "yoetz://guidance/workflow.md" in cue
+    assert "start" in cue
+    assert "material" in cue
+
+
+@pytest.mark.parametrize(
+    ("literal", "expected"),
+    [("428.607", 428), ("428.5", 428), ("428.499", 428), ("0.0", 0), ("1e3", 1_000)],
+)
+def test_cursor_hook_payload_truncates_fractional_duration_to_canonical_integer(
+    literal: str, expected: int
+) -> None:
+    payload = ('{"duration":' + literal + ',"hook_event_name":"afterMCPExecution"}').encode()
+
+    parsed = read_cursor_hook_payload(payload)
+
+    assert parsed["duration"] == expected
+    # The canonical parser remains float-free for every non-Cursor wire surface.
+    with pytest.raises(ProtocolValueError, match="float_forbidden"):
+        strict_json_parse(payload)
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        (b'{"duration":-1.0}', "invalid_duration"),
+        (b'{"duration":NaN}', "float_forbidden"),
+        (b'{"duration":1.2,"duration":2.3}', "duplicate_object_key"),
+        (b'{"duration":9007199254740992}', "integer_out_of_safe_range"),
+        (b'{"duration":9007199254740991.4}', "integer_out_of_safe_range"),
+        (b'{"value":"\\u0000"}', "nul_byte_forbidden"),
+    ],
+)
+def test_cursor_hook_payload_preserves_bounded_wire_rejections(payload: bytes, reason: str) -> None:
+    with pytest.raises(ProtocolValueError, match=reason):
+        read_cursor_hook_payload(payload)
+
+
+def test_cursor_hook_payload_discards_nested_vendor_floats() -> None:
+    parsed = read_cursor_hook_payload(
+        b'{"model_params":[{"id":"temperature","value":0.2}],'
+        b'"tool_input":{"ratio":1.5},"hook_event_name":"afterMCPExecution"}'
+    )
+
+    assert parsed["model_params"] == [{"id": "temperature", "value": None}]
+    assert parsed["tool_input"] == {"ratio": None}

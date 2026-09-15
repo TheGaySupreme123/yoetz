@@ -18,7 +18,7 @@ from typing import cast
 import pytest
 
 import yoetz.mcp.server as bridge
-from yoetz.ports.control import ControlError, ServiceState, ServiceStatus
+from yoetz.ports.control import ControlError, ServiceState, ServiceStatus, WorkspaceLocator
 from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.models import StartRequest, StartResult
 
@@ -169,7 +169,9 @@ async def test_cursor_profile_receives_only_the_trusted_local_continuation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _wire(monkeypatch, tmp_path, [_LockedClient(retryable=False), _ProbeClient(_uninitialized())])
-    runtime = bridge.build_bridge_runtime(host_profile="cursor")
+    runtime = bridge.build_bridge_runtime(
+        host_profile="cursor", workspace_locator=WorkspaceLocator(str(tmp_path))
+    )
 
     error = _error(await bridge.dispatch_start(_start_body(), runtime))
 

@@ -94,7 +94,12 @@ from yoetz.protocol.coverage import (
     coverage_from_json,
     coverage_to_json,
 )
-from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
+from yoetz.protocol.errors import (
+    ADMITTED_CLAIM_REVISION_INVARIANTS,
+    ProtocolValueError,
+    PublicErrorCode,
+    PublicOperationError,
+)
 from yoetz.protocol.models import (
     CheckPolicyExecutionModel,
     CheckScopeModel,
@@ -226,7 +231,9 @@ EVIDENCE_SCHEMA_VERSIONS: Final = (
     EVIDENCE_SCHEMA_VERSION,
 )
 CLAIM_SCHEMA_VERSION: Final = "1.1.0"
-SEMANTIC_EVENT_SCHEMA_VERSION: Final = "1.1.0"
+SEMANTIC_EVENT_SCHEMA_VERSION: Final = "1.2.0"
+SEMANTIC_EVENT_SCHEMA_VERSIONS: Final = ("1.1.0", SEMANTIC_EVENT_SCHEMA_VERSION)
+FINDING_EVENT_SCHEMA_VERSION: Final = "1.3.0"
 COORDINATION_EVENT_SCHEMA_VERSION: Final = "1.0.0"
 SESSION_EVENT_SCHEMA_VERSION: Final = "1.1.0"
 # Lineage fields are additive to the original event families.  The old session-opened schema
@@ -767,7 +774,13 @@ def _locator_key_kind(schema: EventSchema) -> str:
         or (schema.name == "evidence_recorded" and schema.version in EVIDENCE_SCHEMA_VERSIONS)
         or (
             schema.name in {"check_recorded", "finding_recorded"}
-            and schema.version in {SEMANTIC_EVENT_SCHEMA_VERSION, "1.2.0"}
+            and (
+                schema.version in SEMANTIC_EVENT_SCHEMA_VERSIONS
+                or (
+                    schema.name == "finding_recorded"
+                    and schema.version == FINDING_EVENT_SCHEMA_VERSION
+                )
+            )
         )
     )
     if schema.version != SCHEMA_VERSION and not additive:
@@ -1495,20 +1508,10 @@ _CLAIM_REVISION_FIELDS: Final = frozenset(
         "supersedes_claim_refs",
     }
 )
-_CLAIM_REVISION_INVARIANTS: Final = frozenset(
-    {
-        "claim_id_must_be_fresh",
-        "claim_kind_must_match",
-        "limitation_refs_complete",
-        "limitation_refs_must_be_relevant_non_success_results",
-        "replacement_must_change_effective_claim",
-        "replacement_must_not_dispute",
-        "scope_overlap_required",
-        "supporting_refs_must_exclude_limitations",
-        "superseded_claim_must_be_effective",
-        "superseded_claim_must_exist",
-    }
-)
+# The invariant names are the public wire vocabulary as well as a domain rule, so they are
+# allowlisted in the protocol dependency root and reused here rather than restated. A second copy
+# is how the MCP projector and this module drifted apart before ADR-030.
+_CLAIM_REVISION_INVARIANTS: Final = ADMITTED_CLAIM_REVISION_INVARIANTS
 
 
 @dataclass(frozen=True, slots=True)
@@ -1566,7 +1569,13 @@ def public_error_for_claim_revision_mismatch(
 
     if type(mismatch) is not ClaimRevisionMismatch:
         raise TypeError("claim_revision_mismatch_wrong_type")
-    details: dict[str, str] = {"reason_code": mismatch.reason_code}
+    # ``invariant`` rides as a typed detail (ADR-030). It was previously legible only inside the
+    # message below, which the MCP text projector does not copy, so that projector had to recover
+    # it by matching this whole sentence with a regex.
+    details: dict[str, str] = {
+        "invariant": mismatch.invariant,
+        "reason_code": mismatch.reason_code,
+    }
     if type(event_index) is int and 0 <= event_index < _MAX_EVENTS_PER_BATCH_FOR_POINTER:
         details["field"] = f"/event_drafts/{event_index}/payload/{mismatch.field}"
     return PublicOperationError(
@@ -2345,12 +2354,18 @@ PAYLOAD_TYPES: Final[Mapping[EventSchema, type[EventPayload]]] = MappingProxyTyp
         EventSchema("claim_recorded", CLAIM_SCHEMA_VERSION): ClaimRecordedPayloadV1_1,
         EventSchema("plan_revised", SCHEMA_VERSION): PlanRevisedPayload,
         EventSchema("finding_recorded", SCHEMA_VERSION): Finding,
-        EventSchema("finding_recorded", SEMANTIC_EVENT_SCHEMA_VERSION): Finding,
-        EventSchema("finding_recorded", "1.2.0"): Finding,
+        EventSchema("finding_recorded", FINDING_EVENT_SCHEMA_VERSION): Finding,
+        **{
+            EventSchema("finding_recorded", version): Finding
+            for version in SEMANTIC_EVENT_SCHEMA_VERSIONS
+        },
         EventSchema("response_recorded", SCHEMA_VERSION): ResponseRecordedPayload,
         EventSchema("redaction_recorded", SCHEMA_VERSION): RedactionRecordedPayload,
         EventSchema("check_recorded", SCHEMA_VERSION): CheckRecordedPayload,
-        EventSchema("check_recorded", SEMANTIC_EVENT_SCHEMA_VERSION): CheckRecordedPayload,
+        **{
+            EventSchema("check_recorded", version): CheckRecordedPayload
+            for version in SEMANTIC_EVENT_SCHEMA_VERSIONS
+        },
         EventSchema("receipt_recorded", SCHEMA_VERSION): ReceiptRecordedPayload,
         EventSchema("delegation_declared", LINEAGE_EVENT_SCHEMA_VERSION): DelegationDeclaredPayload,
         EventSchema(

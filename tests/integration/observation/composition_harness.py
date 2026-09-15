@@ -34,6 +34,7 @@ from yoetz.adapters.integrations.codex_lifecycle import (
 )
 from yoetz.adapters.integrations.codex_plugin import render_plugin_tree
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
+from yoetz.adapters.sqlite import connection as connection_module
 from yoetz.adapters.sqlite.migrations import initialize_bundle
 from yoetz.adapters.sqlite.observation import SqliteObservationStore
 from yoetz.application.observation_advice import (
@@ -316,6 +317,7 @@ class ContractObservationPipeline:
         bundle_path = install.state / "task-bundle.sqlite3"
         db = apsw.Connection(str(bundle_path))
         initialize_bundle(db, {"task_id": "task_obs_comp", "owner_generation": "1"})
+        db.set_authorizer(connection_module._writer_authorizer)  # pyright: ignore[reportPrivateUsage]
         sqlite = SqliteObservationStore(db)
         sqlite.grant_consent(workspace, _TIME)
         return cls(
@@ -336,6 +338,7 @@ class ContractObservationPipeline:
         with contextlib.suppress(Exception):
             self.db.close(force=True)
         db = apsw.Connection(str(self.bundle_path))
+        db.set_authorizer(connection_module._writer_authorizer)  # pyright: ignore[reportPrivateUsage]
         sqlite = SqliteObservationStore(db)
         sqlite.grant_consent(self.workspace, _TIME)
         for session in self.bound_sessions:

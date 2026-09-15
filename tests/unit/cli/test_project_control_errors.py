@@ -58,3 +58,13 @@ def test_every_project_reason_maps_to_invalid_request_json(
     assert payload["public_code"] == "INVALID_REQUEST"
     assert payload["reason"] == reason
     assert payload["retryable"] is False
+
+
+def test_source_policy_refusal_does_not_recommend_workspace_consent(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert control_failure(ControlError("coordination_source_policy_denied")) == 2
+    error = capsys.readouterr().err
+    assert "coordination disclosure policy" in error
+    assert "workspace consent alone does not authorize this flow" in error
+    assert "obtain current source-workspace consent" not in error

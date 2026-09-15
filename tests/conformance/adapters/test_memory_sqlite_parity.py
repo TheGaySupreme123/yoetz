@@ -184,6 +184,8 @@ async def _commit_one_check(
     command: AppendCommand,
     objects: MemoryObjects,
     subject_frontier: Frontier,
+    semantic_status: SemanticStatus,
+    semantic_reason: SemanticReason,
 ) -> CheckCommitResult:
     check_request = uuid_id("req", 70_002)
     frozen = await ledger.freeze_case(
@@ -216,8 +218,8 @@ async def _commit_one_check(
         FrozenCase(frozen.case, lease),
         ranked,
         (CheckPolicyExecution("work-integrity", "0.1.0", "run", "completed"),),
-        SemanticStatus.NOT_REQUESTED,
-        SemanticReason.DETERMINISTIC_MODE,
+        semantic_status,
+        semantic_reason,
         None,
         check_request,
     )
@@ -282,7 +284,16 @@ async def test_sqlite_reopen_replays_reused_finding_payloads(tmp_path: Path) -> 
 
 
 @pytest.mark.anyio
-async def test_public_artifacts_match_across_backends(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("semantic_status", "semantic_reason"),
+    [
+        (SemanticStatus.NOT_REQUESTED, SemanticReason.DETERMINISTIC_MODE),
+        (SemanticStatus.FAILED, SemanticReason.CASE_CAPACITY_EXCEEDED),
+    ],
+)
+async def test_public_artifacts_match_across_backends(
+    tmp_path: Path, semantic_status: SemanticStatus, semantic_reason: SemanticReason
+) -> None:
     records = replay_records("all-event-families")
     command, memory_objects = command_from_records(records)
     sqlite_command, sqlite_objects = command_from_records(records)
@@ -306,12 +317,24 @@ async def test_public_artifacts_match_across_backends(tmp_path: Path) -> None:
     )
 
     check_memory = await _commit_one_check(
-        memory, command, memory_objects, memory_append.result_frontier
+        memory,
+        command,
+        memory_objects,
+        memory_append.result_frontier,
+        semantic_status,
+        semantic_reason,
     )
     check_sqlite = await _commit_one_check(
-        sqlite, sqlite_command, sqlite_objects, sqlite_append.result_frontier
+        sqlite,
+        sqlite_command,
+        sqlite_objects,
+        sqlite_append.result_frontier,
+        semantic_status,
+        semantic_reason,
     )
     assert check_sqlite == check_memory
+    assert check_sqlite.semantic_reason is semantic_reason
+    assert check_sqlite.semantic_provenance is None
     assert check_sqlite.result_frontier.sequence == check_sqlite.subject_frontier.sequence + 2
     after = tuple([row async for row in sqlite.load_events(command.session_id)])
     assert tuple(row.schema.name for row in after[-2:]) == (

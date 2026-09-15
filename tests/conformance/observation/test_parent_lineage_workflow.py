@@ -13,6 +13,7 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -229,6 +230,85 @@ async def _drain_lineage(service: MultiAgentService) -> None:
     sweep = service.app.observation_sweep
     if sweep is not None:
         await sweep()
+
+
+async def test_compact_readiness_exposes_unswept_children_and_failed_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _workspace(tmp_path / "workspace")
+    async with multi_agent_service(tmp_path / "state") as service:
+        parent = await service.app.start(
+            StartRequest.model_validate(
+                {
+                    **_identity(),
+                    "mode": "create",
+                    "task_title": "Readiness parent",
+                    "workspace_ref": str(workspace),
+                    "external_ref": "readiness-parent",
+                    "requested_view": "compact",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        await _publish(
+            service,
+            parent,
+            (
+                _event(
+                    "plan_published",
+                    {
+                        "plan_version": 1,
+                        "summary": "Readiness regression",
+                        "obligation_refs": [],
+                        "no_obligations_reason": "no_material_change",
+                    },
+                ),
+            ),
+        )
+
+        async def compact():
+            return await service.app.status(
+                StatusRequest.model_validate(
+                    {
+                        **_identity(),
+                        "session_id": parent.session_id,
+                        "writer_id": parent.writer_id,
+                        "view": "compact",
+                        "limit": "1",
+                    }
+                ),
+                repository_privacy_context=_REPOSITORY,
+            )
+
+        before = await compact()
+        assert before.closure_readiness.blocking_conditions == ()
+        child = await _delegated_child(service, parent, "Unswept accepted child")
+        unswept = await compact()
+        assert "lineage_manifest_not_recorded" in unswept.gaps
+        assert "coverage_gaps_declared" in unswept.closure_readiness.blocking_conditions
+        # Reading readiness neither appends a manifest nor changes the parent frontier.
+        repeated = await compact()
+        assert repeated.head_frontier == unswept.head_frontier
+        assert repeated.gaps == unswept.gaps
+        await _drain_lineage(service)
+        swept = await compact()
+        assert "lineage_manifest_not_recorded" not in swept.gaps
+        assert "coverage_gaps_declared" in swept.closure_readiness.blocking_conditions
+
+        with monkeypatch.context() as patcher:
+            patcher.setattr(
+                type(service.app.start_catalog),
+                "list_child_task_ids",
+                AsyncMock(side_effect=RuntimeError("synthetic inventory failure")),
+            )
+            unavailable = await compact()
+        assert "lineage_readiness_unavailable" in unavailable.gaps
+        assert "coverage_gaps_declared" in unavailable.closure_readiness.blocking_conditions
+        assert unavailable.head_frontier == swept.head_frontier
+        await _close_work(service, child)
+        changed = await compact()
+        assert "lineage_manifest_state_changed" in changed.gaps
+        assert "coverage_gaps_declared" in changed.closure_readiness.blocking_conditions
 
 
 async def test_parent_receipt_rolls_up_mixed_real_child_states_and_one_hop_grandchild(

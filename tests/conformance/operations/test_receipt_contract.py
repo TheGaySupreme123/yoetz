@@ -254,10 +254,10 @@ def _versions() -> ReceiptVersionSlice:
             PolicyVersionEntry("research-evidence", "0.1.0"),
             PolicyVersionEntry("work-integrity", "0.1.0"),
         ),
-        # The current application writer emits the additive 1.2.0 artifact, whose inner
+        # The current application writer emits the additive 1.3.0 artifact, whose inner
         # ``schema_version`` remains 1.0.0.  Golden documents above still exercise legacy
         # 1.0/1.1 artifact decoding separately.
-        schema_versions=(SchemaVersionEntry("receipts/receipt-document", "1.2.0"),),
+        schema_versions=(SchemaVersionEntry("receipts/receipt-document", "1.3.0"),),
         resource_manifest_digest=_DIGEST,
     )
 

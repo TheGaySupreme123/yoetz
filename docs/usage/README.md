@@ -4,7 +4,9 @@ Task-oriented guides. For the system's shape see [`docs/architecture.md`](../arc
 the decisions behind it see [`docs/adr/`](../adr/).
 
 - [Install and first run](install-and-first-run.md) — install, first run, starting the service,
-  what a fresh installation will and will not do.
+  what a fresh installation will and will not do. Codex is connected by the first-run wizard;
+  Claude Code and Cursor have first-party integrations configured through `yoetz integrate
+  claude ...` and `yoetz integrate cursor ...`, each bounded to the exact cell its runbook records.
 - [Agent start](agent-start.md) — the same installation addressed to a coding agent: what it runs
   itself, what it asks the user, and where it hands over the terminal.
 - [The terminal interface](terminal-interface.md) — the full-screen interface, its status
@@ -13,6 +15,8 @@ the decisions behind it see [`docs/adr/`](../adr/).
   `receipt`, end to end.
 - [Working with several agents](multi-agent-work.md) — child tasks, dependency receipts, projects,
   and consented coordination.
+- [Observation selection](observation-selection.md) — Focused and Detailed retention, independent
+  capacity profiles, evidence protection, promotion, and bounded content limits.
 - [Importing bounded Codex JSONL](importing-codex-jsonl.md) — stage, review, authorize, and resume
   one exact local `codex exec --json` import.
 - [Privacy and semantic review](privacy-and-semantic-review.md) — the zero-egress default, the
@@ -21,6 +25,8 @@ the decisions behind it see [`docs/adr/`](../adr/).
   cannot request external semantic review.
 - [Providers and credentials](providers.md) — reviewed presets, owner-declared endpoints, and the
   credential ceremony.
+- [Upgrade Yoetz](upgrading.md) — update the package while preserving existing tasks, settings,
+  permissions, host integrations, and compatible bundle data.
 - [Receipts and coverage](receipts-and-coverage.md) — how to read a receipt and why the wording is
   deliberately narrow.
 

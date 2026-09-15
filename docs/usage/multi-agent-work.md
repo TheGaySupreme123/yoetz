@@ -30,6 +30,13 @@ Use `status` with `view=lineage`, or `/lineage` in the terminal interface, to se
 their origin and acceptance, work state, session health, and completion gaps. A child also sees its
 parent reference. Deeper relationships are recorded, while each view shows one level.
 
+Compact status also reports accepted-child completion gaps. A child missing from the last recorded
+snapshot, changed child state, or an unavailable dependency read blocks readiness even if the
+parent's own obligations are resolved. Use the lineage view for the child details; let reconciliation
+record current facts before checking again. Reading status does not refresh a snapshot, and a parent
+receipt describes its recorded evidence rather than certifying that the current child inventory is
+complete. Pending child annotations alone do not block readiness.
+
 Work and contact are different facts. Work stays open until an explicit closure or a recorded
 cancellation, abandonment, or write-off. A missing host end event eventually means contact was
 lost. It does not establish permanent activity or immediately mean the work was abandoned.
@@ -66,16 +73,26 @@ General projects have `create`, `link`, `unlink`, `amend`, and `dissolve` comman
 `opt-out` and `opt-in` control automatic grouping. Dissolving a project or opting out preserves
 accepted delegations, obligations, and existing receipts.
 
-Coordination requires each source workspace's consent. Consent for one worktree does not cover
-another. General or cross-repository coordination also requires approval for the exact membership
-generation. Unlinking, dissolving, opting out, or revoking consent invalidates older queued
-deliveries immediately. Membership does not permit combining repositories' content in an external
-semantic review.
+Coordination requires workspace-level observation consent from each source workspace. Consent for
+one worktree does not cover another. General or cross-repository coordination also requires approval
+for the exact membership generation. Unlinking, dissolving, opting out, or revoking consent
+invalidates older queued deliveries immediately. Membership does not permit combining repositories'
+content in an external semantic review.
 
-Consent revocation advances the active project generation for every affected task route before
-queued delivery can proceed. If the service is interrupted during that fence, re-consent remains
-blocked until the recorded revocation is recovered; a later grant cannot make an older detection
-eligible again.
+`coordination_consent_required` means the source workspace lacks the required observation consent.
+`coordination_source_policy_denied` means its disclosure policy refused coordination (or could not
+be evaluated); granting workspace consent alone does not resolve that refusal.
+
+Project-generation approval currently uses the exact prepared `yoetz consent authorize` handoff,
+relayed only after the human sees the warning and explicitly approves that target in the current
+chat. Console `yoetz consent review` has no production user-presence adapter and fails closed. Even
+with verified console presence, this project operation remains unsupported on that channel and
+leaves the pending request untouched; it never silently broadens the accepted approval authority.
+
+Consent revocation advances the active workspace observation generation and each affected project
+membership generation before queued delivery can proceed. If the service is interrupted during that
+fence, re-consent remains blocked until the recorded revocation is recovered; a later grant cannot
+make an older detection eligible again.
 
 Overlap detection uses declared resource scopes and structured requested items. The same relative
 path in two worktrees of one repository is an integration overlap; the same spelling in unrelated

@@ -14,7 +14,7 @@ transcript, or one successful `check`, is never grounds for a blanket compatibil
 | Local-control hello/setup/proposal versions, including repository-locator and authority-digest support | `version --json`, `schemas/service/`, `schemas/privacy/` |
 | Each durable event schema name and version (sixteen families, each `1.0.0`) | `schemas/events/`, `version --json` |
 | Canonical encoding / digest domain version | `docs/adr/ADR-002-canonical-protocol.md`, `fixtures/canonical/` |
-| Storage schema and its ordered migration set | `version --json` (catalog 3, bundle 2), `migrations/` |
+| Storage schema and its ordered migration set | `version --json` (catalog 5, bundle 13), `migrations/` |
 | Object envelope / encryption / key / recovery artifact formats | `version --json` (object format `yoetz-object/1`) |
 | Projection engine/generation and deterministic policy/config digest | `version --json` (projection `yoetz/0.1.0`) |
 | Receipt schema and render version | `schemas/receipts/receipt-document-1.0.0.schema.json` |
@@ -81,8 +81,8 @@ registry, schema, reducer, unknown-gap handling, fixture, skill, and documentati
 ships as a silent addition.
 
 Consent publishes `catalog`, `pending-agent`, `prepare-result`, `review-result`, and `status` as one
-versioned family. Frozen v2-v5 files remain byte-identical and packaged; current runtime projections
-emit v6. V6 adds the exact repository privacy before/after preview and admits
+versioned family. Frozen v2-v6 files remain byte-identical and packaged; current runtime projections
+emit v7. V6 added the exact repository privacy before/after preview and admitted
 `expanded_review`, so older readers never reinterpret that wider enum or silently omit the decision
 surface. The durable owner-only pending record similarly moves from v3 to v4 and invalidates a
 short-lived older pending action rather than upgrading its authority target. The
@@ -90,6 +90,9 @@ short-lived older pending action rather than upgrading its authority target. The
 A pre-upgrade private review marker is not an unclaimed pending action: it may still have a live
 owner, so the new runtime preserves it and blocks replacement instead of deleting it during
 upgrade. This is the existing interrupted-review fail-closed boundary, not successful recovery.
+V7 adds the exact project coordination grant binding. Its project and membership generation are
+part of the reviewed authorization target; decoding an older consent result does not grant that
+new capability or change an existing workspace's observation or disclosure permissions.
 
 The declared-completion-scope change is an explicit pre-release 0.1 correction under that optional
 field rule. `plan_published` and `plan_revised` remain event schema `1.0.0`, and status remains
@@ -126,7 +129,14 @@ wording; it is never treated as equivalent to current, fully observed data.
 
 Storage migrates forward only, through a contiguous, immutable, numbered migration set, under an
 exclusive generation and a verified backup taken first. Migration never rewrites canonical event
-bytes. There is no automatic downgrade or reverse SQL. "Rollback" means restoring a verified
+bytes. There is no automatic downgrade or reverse SQL. For the supported package transition, a
+fresh service runs `BundleUpgradeCoordinator.run_before_ready` before publishing READY. It uses
+the existing catalog `maintenance_operations` row (`kind = 'migration'`,
+`requested_target_version = '13'`) to resume the same `package_upgrade_migration` operation,
+creates the machine-bound backup, and applies bundle migration `0013` from schema 12 to 13. A
+target that is already current is verified as a no-op; an unsupported, ambiguous, or post-commit
+uncertain result keeps READY blocked and requires the explicit recovery procedure. Package
+replacement alone is not data-upgrade completion. "Rollback" means restoring a verified
 pre-migration backup into a new quarantined target, replaying it, and then performing an atomic
 catalog switch — see [`../runbooks/migration-rollback.md`](../runbooks/migration-rollback.md).
 
@@ -160,7 +170,10 @@ tested profile; unknown lines are quarantined as an explicit import gap, never s
 
 Provider compatibility (for example the OpenAI Responses adapter) names an exact
 adapter/SDK/endpoint/model profile and is optional and advisory; the strict-local base support
-Yoetz ships with is independent of any provider profile. Platform support is stated as an exact
+Yoetz ships with is independent of any provider profile. New `codex-chatgpt-subscription@1`
+setups recommend `gpt-5.6-luna` with independent default reasoning `high`; that recommendation
+is not a live packaged Luna cell and does not rewrite historical Sol exact-cell evidence or
+existing bindings. Platform support is stated as an exact
 artifact/runtime/SQLite/filesystem/key-backend cell (for example "macOS 11.0+ arm64, APSW
 `3.53.3.1`, SQLite source ID `2026-06-26 ...`"), never a generic "Python" or "macOS/Linux" claim.
 
@@ -193,12 +206,20 @@ default, discovery/component inventory, hook declaration, fresh-session plugin/s
 registration, and connected plugin-owned strict MCP. A correlated model call was blocked by absent
 authentication in the isolated Claude config; only SessionStart/SessionEnd hook delivery was seen,
 and the separately installed older Yoetz lacked the new hook command. Model use, accepted
-observation, semantic dispatch, privacy receipt, and workflow receipt therefore remain unobserved.
+observation, semantic dispatch, privacy receipt, and workflow receipt therefore remain unobserved
+for that `2.1.241` cell. A later live capture (2026-09-04) on Claude Code `2.1.251` observed
+`PostToolUse` delivery for a scoped MCP tool with `tool_response` as one bare JSON string of the
+structured result; the binder admits that shape and a fixture pins it
+(`docs/runbooks/claude-code-integration.md`). That capture is an observed payload shape only: it
+populates no capability-profile entry, does not move the cell above, and `2.1.251` is not a tested
+version.
 Claude Desktop local/SSH, Desktop remote, web/cloud, synced plugins, managed/user/local scopes,
 Agent SDK, and noninteractive/headless behavior are separate unpopulated cells. Claude Code is not
 claimed to consume Agent Plugins 1.0.0.
 
-Local-control schema `2.4.0` is the current append-only service-control wire. Peers must
+Local-control schema `2.7.0` is the current append-only service-control wire. It retains the
+`2.6.0` method bodies and adds the project support method. Retained schema bytes establish
+historical decoding support, not interoperability between running package generations. Peers must
 match the schema-manifest digest; no source is inferred across versions. Because every resource
 change moves that digest, an upgraded installation cannot talk to the previous installation's
 still-running service, and an older CLI cannot talk to a newer still-running service: a
@@ -211,6 +232,9 @@ older-service direction and saw an opaque `INTERNAL_ERROR`; that is now a bounde
 `SERVICE_UNAVAILABLE` naming the repair. The 2026-08-28 dogfood hit the older-CLI / newer-service
 direction as an opaque `invalid_request` with no correlation id; the service now answers the
 hello-result so current CLIs name `service_incompatible` with holder identity and a diagnostic id.
+An older CLI whose closed method enum cannot decode the new project method can instead report
+`frame_invalid`. Use the updated launcher and restart existing host bridges as part of the package
+update; a frozen older wire is not widened to authorize newer methods.
 
 ## Change and deprecation process
 

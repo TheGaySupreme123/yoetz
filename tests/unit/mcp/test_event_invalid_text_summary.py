@@ -11,8 +11,10 @@ from __future__ import annotations
 import json
 from typing import Any, cast
 
+import pytest
 from mcp import types
 
+from yoetz.domain.events import ClaimRevisionMismatch, public_error_for_claim_revision_mismatch
 from yoetz.mcp.server import result_from_public_model
 from yoetz.mcp.summaries import render_safe_compact_summary
 from yoetz.protocol.canonical import JsonValue, canonical_encode
@@ -48,6 +50,25 @@ def _failure(
     )
 
 
+def _claim_revision_failure(
+    *,
+    invariant: str = "limitation_refs_complete",
+    field: str = "limitation_refs",
+    event_index: int = 7,
+) -> PublishWorkResultModel:
+    error = public_error_for_claim_revision_mismatch(
+        ClaimRevisionMismatch(field, invariant), event_index=event_index
+    ).bind_correlation_id(_CORRELATION)
+    return PublishWorkResultModel.model_validate(
+        {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "ok": False,
+            "error": error.as_public_dict(),
+        }
+    )
+
+
 def test_generic_text_summary_names_reason_code_and_field() -> None:
     """Claude Code's isError path is the bounded summary; it must name the kernel rule."""
 
@@ -58,6 +79,88 @@ def test_generic_text_summary_names_reason_code_and_field() -> None:
     assert len(summary.encode("ascii")) <= 512
     # Caller/message prose never rides the text channel.
     assert "already in ascending ASCII" not in summary
+
+
+def test_claim_revision_text_names_the_closed_invariant_and_correction() -> None:
+    wire = _claim_revision_failure().model_dump(mode="json", by_alias=True)
+    summary = render_safe_compact_summary(wire)
+
+    assert "Reason: claim_revision_mismatch at /event_drafts/7/payload/limitation_refs." in summary
+    assert "Invariant: limitation_refs_complete." in summary
+    assert "include every relevant partial or failed result in limitation_refs" in summary
+    assert "The event batch is invalid" not in summary
+    assert len(summary.encode("ascii")) <= 512
+
+
+def test_claim_revision_text_is_independent_of_the_error_message() -> None:
+    """ADR-030: the invariant is a typed safe detail, so message wording cannot change it.
+
+    This test previously asserted the opposite -- that a tampered message must suppress the
+    Invariant clause -- because the projector recovered the invariant by matching the whole
+    message with a regex, and message integrity was therefore load-bearing. Now the invariant
+    travels as an allowlisted detail, so a reworded, tampered, or truncated message costs the
+    agent nothing. Caller prose still never reaches the channel.
+    """
+
+    wire = _claim_revision_failure().model_dump(mode="json", by_alias=True)
+    error = cast(dict[str, object], wire["error"])
+    error["message"] = "secret caller prose"
+    summary = render_safe_compact_summary(wire)
+    assert "Invariant: limitation_refs_complete." in summary
+    assert "secret caller prose" not in summary
+    assert "Reason: claim_revision_mismatch at /event_drafts/7/payload/limitation_refs." in summary
+
+
+def test_claim_revision_text_drops_an_unregistered_invariant() -> None:
+    """The closed vocabulary is the fence now that the message shape is not."""
+
+    wire = _claim_revision_failure().model_dump(mode="json", by_alias=True)
+    error = cast(dict[str, object], wire["error"])
+    details = cast(dict[str, object], error["safe_details"])
+    details["invariant"] = "invariant_that_was_never_registered"
+    summary = render_safe_compact_summary(wire)
+    assert "Invariant:" not in summary
+    assert "invariant_that_was_never_registered" not in summary
+    assert "Reason: claim_revision_mismatch at /event_drafts/7/payload/limitation_refs." in summary
+
+
+def test_claim_revision_text_without_an_invariant_keeps_the_reason_clause() -> None:
+    wire = _claim_revision_failure().model_dump(mode="json", by_alias=True)
+    error = cast(dict[str, object], wire["error"])
+    details = cast(dict[str, object], error["safe_details"])
+    del details["invariant"]
+    summary = render_safe_compact_summary(wire)
+    assert "Invariant:" not in summary
+    assert "Reason: claim_revision_mismatch at /event_drafts/7/payload/limitation_refs." in summary
+
+
+@pytest.mark.parametrize(
+    ("field", "invariant"),
+    (
+        ("claim_id", "claim_id_must_be_fresh"),
+        ("claim_kind", "claim_kind_must_match"),
+        ("limitation_refs", "limitation_refs_complete"),
+        ("limitation_refs", "limitation_refs_must_be_relevant_non_success_results"),
+        ("supporting_refs", "supporting_refs_must_exclude_limitations"),
+        ("disputes_refs", "replacement_must_not_dispute"),
+        ("obligation_refs", "scope_overlap_required"),
+        ("supersedes_claim_refs", "replacement_must_change_effective_claim"),
+        ("supersedes_claim_refs", "superseded_claim_must_be_effective"),
+        ("supersedes_claim_refs", "superseded_claim_must_exist"),
+    ),
+)
+def test_claim_revision_registered_pairs_survive_max_pointer_budget(
+    field: str, invariant: str
+) -> None:
+    wire = _claim_revision_failure(field=field, invariant=invariant, event_index=99).model_dump(
+        mode="json", by_alias=True
+    )
+    summary = render_safe_compact_summary(wire)
+
+    assert f"Reason: claim_revision_mismatch at /event_drafts/99/payload/{field}." in summary
+    assert f"Invariant: {invariant}." in summary
+    assert "Correction:" in summary
+    assert len(summary.encode("ascii")) <= 512
 
 
 def _text(result: types.CallToolResult) -> str:

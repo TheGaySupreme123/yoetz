@@ -27,6 +27,15 @@ manifests, the packaging/capability suites, and the release workflows under `.gi
    advertised only after the complete Windows service transport, peer identity, storage, keyring,
    secret-memory, native-prompt, recovery, clean-install, and cross-platform drill gates pass. A
    portable console unit test is not that proof. No musl, Windows arm64, or macOS x86-64 claims.
+   Amendment (2026-09-13, issue #724): the pinned APSW lock also resolves
+   `manylinux_2_28_aarch64` wheels, so the package installs on Linux aarch64 (WSL 2 on
+   Windows-on-ARM, Graviton, Raspberry Pi, Asahi) without any gate. Such a host is an
+   **untested platform cell**, not a supported one: `version --json` adds
+   `platform_cell_untested` to `limitations`, `setup status` reports `platform.cell`, and the
+   interface's `/doctor` shows the platform line as not proven. The install is neither refused
+   nor claimed. Certifying that cell requires a real `ubuntu-24.04-arm` release runner and
+   release evidence, at which point the certified-cell table in `yoetz.version` and this list
+   change together.
    Primary install:
    `uv tool install --managed-python --python 3.14.6 "yoetz==0.1.0"`.
 6. **Keys, semantic readiness, and compatibility extras:** the certified standard install includes
@@ -73,10 +82,37 @@ manifests, the packaging/capability suites, and the release workflows under `.gi
 11. **Public schema hosting without runtime coupling:** the checked-in `schemas/` tree is mounted
     byte-for-byte at `https://schemas.yoetz.dev/0.1/`; each `$id` is the direct URL formed by
     appending its exact relative file path. Released versioned schema paths are immutable. The
-    manifest advances atomically with digest/ETag binding. PR/release gates resolve all refs from
+    manifest advances atomically with digest/ETag binding. The release comparison permits new
+    manifest members while requiring every previous member to remain identical; released schema,
+    migration, and canonical-vector files remain byte-immutable (release #702). PR/release gates resolve all refs from
     the local manifest with network denied, and installed Yoetz always uses packaged mirrors;
     hosted availability is independently verified release evidence, never an operational
     dependency.
+
+## Amendment — package update and compatible data upgrade (2026-09-12)
+
+Package replacement and data migration are separate lifecycle stages. The supported `uv tool`
+carrier executes only `uv tool upgrade yoetz` from `yoetz upgrade --accept --writers-stopped`; the
+command refuses source checkouts, pinned test instances, and isolated runtimes. Other carriers
+follow their own package procedure. A successful carrier command is therefore not a host,
+service, or data-upgrade result.
+
+After old hosts, hooks, and the service have been quiesced, the fresh service generation runs the
+storage-owned `BundleUpgradeCoordinator.run_before_ready` phase after catalog migration and before
+publishing READY. It uses the existing catalog `maintenance_operations` row (`kind = 'migration'`,
+`requested_target_version = '13'`) to resume one `package_upgrade_migration` operation, creates a
+verified machine-bound backup before applying bundle migration `0013` from schema 12 to 13, and
+reopens the bundle through the normal writer before projection replay verification. Existing task
+bundles, settings, permissions, host routes/integrations, consent, event history, objects, and
+frontiers are carried forward. A response loss or service restart reuses the recorded operation
+and backup identity; an unsupported or ambiguous path fails closed and keeps the installation out
+of READY until the documented recovery procedure succeeds.
+
+Host refresh, plugin activation, reload, and fresh-session checks remain separate proof facets. An
+upgrade does not select new hosts, roots, ownership, observation profiles, privacy recipes,
+providers, or Expanded review. Release acceptance still requires artifact-bound package evidence,
+the controlled startup migration result where applicable, and independent per-host activation and
+runtime evidence.
 
 ## Implementation-lock identities
 

@@ -541,3 +541,44 @@ def test_snapshot_rejects_a_null_resolution_key() -> None:
     rows[fnd(1)]["resolved_by_check_event_id"] = None  # type: ignore[index]
     with pytest.raises(ValueError, match="invalid_projection_state"):
         projection_from_snapshot(snapshot)
+
+
+@pytest.mark.parametrize(
+    "gap", ["host_outcome_unavailable", "unpaired_event", "semantic_case_content_over_item_limit"]
+)
+def test_resolution_explains_only_disqualifying_semantic_gaps(gap: str) -> None:
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    finding = _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
+    check = _check(
+        semantic=_SEMANTIC_OK,
+        coverage=_coverage(
+            gaps=tuple(sorted((gap, "evidence_content_digest_only"))), semantic=True
+        ),
+    )
+    assert resolution_blockers(finding, 4, check, frozenset()) == ("coverage:" + gap,)
+    assert not _resolves(finding, check)
+    tolerated = _check(
+        semantic=_SEMANTIC_OK,
+        coverage=_coverage(gaps=("evidence_content_digest_only",), semantic=True),
+    )
+    assert resolution_blockers(finding, 4, tolerated, frozenset()) == ()
+    assert _resolves(finding, tolerated)
+
+
+def test_resolution_explanation_preserves_scope_policy_suppression_and_refire() -> None:
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    finding = _finding()
+    check = _check(
+        suppressed=1,
+        policies=(_RESEARCH,),
+        scope=CheckScopeModel(claim_ids=(clm(99),), obligation_ids=()),
+    )
+    reasons = resolution_blockers(finding, 4, check, frozenset({issue_key(finding)}))
+    assert reasons == (
+        "issue_returned_again",
+        "findings_suppressed",
+        "matching_policy_not_completed",
+        "subject_outside_checked_scope",
+    )

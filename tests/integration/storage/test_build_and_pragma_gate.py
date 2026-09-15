@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import stat
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -14,8 +15,18 @@ from yoetz.adapters.sqlite.connection import (
     REQUIRED_SQLITE_SOURCE_ID,
     REQUIRED_SQLITE_VERSION,
     StorageUnsafeError,
+    open_read_only,
     verify_sqlite_build,
 )
+from yoetz.adapters.sqlite.migrations import BUNDLE_MIGRATIONS, initialize_bundle
+from yoetz.adapters.sqlite.observation import SqliteObservationStore
+from yoetz.domain.observation import (
+    ObservationCursor,
+    ObservationEnvelope,
+    ObservationIngestDisposition,
+    ObservationSource,
+)
+from yoetz.domain.values import JsonObject, Timestamp
 
 
 class _SupportPolicyFactory(Protocol):
@@ -198,6 +209,74 @@ def test_pragma_state_matches_contract(
         database.close()
 
 
+@pytest.mark.parametrize(
+    ("source", "profiles"),
+    [
+        (ObservationSource.CODEX_HOOK, ()),
+        (ObservationSource.CLAUDE_HOOK, ("claude-code-ordinary-observation-v1",)),
+        (ObservationSource.CURSOR_HOOK, ("cursor-ordinary-observation-v1",)),
+    ],
+)
+def test_observation_ingest_uses_production_writer_and_read_only_guards(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source: ObservationSource,
+    profiles: tuple[str, ...],
+) -> None:
+    """#616: fresh guarded bundles accept all hosts and reopen their consent."""
+
+    path = tmp_path / "observation.sqlite3"
+    _review_private_test_path(monkeypatch, tmp_path, path)
+    _install_exact_test_policy()
+    workspace = "hmac-sha256:" + "1" * 64
+    session = "hmac-sha256:" + "2" * 64
+    timestamp = Timestamp("2026-09-06T00:00:00.000Z")
+    envelope = ObservationEnvelope(
+        session_commitment=session,
+        event_kind="PostToolUse",
+        source_identity="hook:production-writer",
+        source=source,
+        cursor=ObservationCursor(1, 1, 1, "hmac-sha256:" + "3" * 64, "obs-guard/1"),
+        receipt_time=timestamp,
+        structural_payload=JsonObject({"tool_name": "shell", "exit_status": 0}),
+        content_object_refs=(),
+        gap_codes=(),
+    )
+    database = _open_unfenced_writer(path)
+    try:
+        initialize_bundle(database, {"task_id": "task_obs", "protocol_version": "0.1"})
+        store = SqliteObservationStore(database)
+        store.grant_consent(workspace, timestamp, content_capture_profiles=profiles)
+        store.bind_session(workspace, session)
+        assert (
+            asyncio.run(store.ingest(envelope)).disposition is ObservationIngestDisposition.ACCEPTED
+        )
+        assert (
+            asyncio.run(store.ingest(envelope)).disposition
+            is ObservationIngestDisposition.DUPLICATE
+        )
+        assert len(store.list_envelopes(workspace)) == 1
+        for statement in (
+            "PRAGMA table_info(bundle_meta)",
+            "PRAGMA table_info",
+            "PRAGMA writable_schema=ON",
+        ):
+            with pytest.raises(apsw.AuthError):
+                database.execute(statement).fetchall()
+    finally:
+        database.close()
+
+    inspection = open_read_only(path)
+    try:
+        assert SqliteObservationStore(inspection).content_capture_profiles(workspace) == profiles
+        with pytest.raises(apsw.AuthError):
+            inspection.execute("PRAGMA table_info(bundle_meta)").fetchall()
+        with pytest.raises(apsw.AuthError):
+            inspection.execute("DELETE FROM observation_consent")
+    finally:
+        inspection.close()
+
+
 def test_read_only_inspection_does_not_promote_write_safety(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -221,3 +300,51 @@ def test_read_only_inspection_does_not_promote_write_safety(
         _open_unfenced_writer(database_path)
     assert captured.value.reason_code == "compile_options_mismatch"
     assert observed_paths == [tmp_path, database_path, tmp_path, database_path]
+
+
+def test_read_only_legacy_bundle_allows_structural_consent_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-0010 bundles keep structural consent readable through the guarded RO path."""
+
+    database_path = tmp_path / "legacy-observation.sqlite3"
+    _review_private_test_path(monkeypatch, tmp_path, database_path)
+    _install_exact_test_policy()
+
+    database = _open_unfenced_writer(database_path)
+    try:
+        # Build a real supported older bundle instead of inventing a native-profile schema.
+        with database:
+            for migration in BUNDLE_MIGRATIONS[:9]:
+                database.execute(migration.ddl.decode("utf-8"))
+            database.executemany(
+                "INSERT INTO bundle_meta(key, value) VALUES (?, ?)",
+                (
+                    ("import_schema_version", "1"),
+                    ("protocol_version", "0.1"),
+                    ("storage_schema_version", "9"),
+                    ("task_id", "task_legacy"),
+                    ("owner_generation", "1"),
+                    ("owner_nonce", "nonce_value_123456"),
+                ),
+            )
+            database.execute(
+                "INSERT INTO observation_consent(workspace_commitment, granted_at, revoked_at, paused) "
+                "VALUES (?, ?, NULL, 0)",
+                ("hmac-sha256:" + "a" * 64, "2026-09-06T00:00:00.000Z"),
+            )
+        assert database.pragma("user_version") == 9
+    finally:
+        database.close(force=True)
+
+    inspection = open_read_only(database_path)
+    try:
+        workspace = "hmac-sha256:" + "a" * 64
+        assert SqliteObservationStore(inspection).content_capture_profiles(workspace) == ()
+        with pytest.raises(apsw.AuthError):
+            inspection.execute("PRAGMA table_info(bundle_meta)").fetchall()
+        with pytest.raises(apsw.AuthError):
+            inspection.execute("PRAGMA writable_schema=ON")
+    finally:
+        inspection.close(force=True)

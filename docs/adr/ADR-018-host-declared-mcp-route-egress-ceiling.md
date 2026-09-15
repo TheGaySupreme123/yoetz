@@ -23,19 +23,25 @@ semantic review would be dishonest.
 
 ## Decisions
 
-1. **The MCP process has one immutable route profile.** `yoetz mcp serve` starts the `policy`
-   profile. `yoetz mcp serve --semantic off` starts the `strict` profile. The flag is parsed before
-   the server accepts stdin and cannot be changed by an MCP request, an agent field, environment,
-   provider readiness, or a later privacy-policy change.
+1. **The MCP process has one immutable route profile and an independent serving identity.**
+   `yoetz mcp serve` starts the `policy` profile and `yoetz mcp serve --semantic off` starts the
+   `strict` profile. Native host carriers declare `--host codex`, `--host claude`, or
+   `--host cursor`; portable and legacy/manual carriers default to `--host generic`, which leaves
+   the host unproven. Both flags are parsed before the server accepts stdin and cannot be changed by
+   an MCP request, an agent field, environment, provider readiness, or a later privacy-policy
+   change. The host declaration identifies the serving carrier only; it grants neither host
+   admission nor agent-chat attestation.
 
 2. **Strict is a ceiling, not a privacy policy.** The durable policy continues to authorize or deny
    disclosure. The strict route adds a stronger process-local limit: `check` never requests the
    semantic runtime capability and never invokes a semantic evaluator. It does not disable
    deterministic checks, local service IPC, receipts, or the other five operations.
 
-3. **The public six-operation schemas stay host-neutral.** `route_profile` exists only in the
-   private local control envelope between the MCP bridge and the service, and only for `check` and
-   `status`. An agent-supplied field remains invalid under the frozen public request schema.
+3. **The public six-operation schemas stay host-neutral.** `route_profile` and the serving
+   `host_profile` exist only in the private local control envelope between the MCP bridge and the
+   service; the host profile is carried only for `check`, while route profile remains available for
+   `check` and `status`. Agent-supplied fields remain invalid under the frozen public request
+   schema.
 
 4. **A requested review fails honestly under strict.** A semantic request returns
    `semantic_status=blocked_by_policy` and
@@ -51,13 +57,16 @@ semantic review would be dishonest.
 
 6. **Initialize and versions status disclose the active profile.** Initialize instructions name
    `policy` or `strict` and state the corresponding bounded promise. MCP-originated
-   `status(view=versions)` includes the same route profile.
+   `status(view=versions)` includes the same route profile. On the policy route the instructions
+   also name the configured semantic review destination and payload bound, read once at bridge
+   startup (destination-disclosure amendment below, issue #479).
 
 7. **Registration binds the exact command.** A host registration preview includes the exact argv,
    route profile, and digest. Zero-egress setup registers Codex with
-   `yoetz mcp serve --semantic off`; an installation whose configured posture permits semantic
-   review registers the policy command. A Yoetz-owned registration with the wrong profile requires
-   a fresh digest-bound re-registration. A foreign same-name entry is still preserved.
+   `yoetz mcp serve --host codex --semantic off`; an installation whose configured posture permits
+   semantic review registers `yoetz mcp serve --host codex`. A Yoetz-owned registration with the
+   wrong profile requires a fresh digest-bound re-registration. A foreign same-name entry is still
+   preserved.
 
 ## Consequences
 
@@ -98,7 +107,8 @@ digest-bound re-registration.
 
 **Issue #151 implementation detail.** The portable projection emits one closed stdio server named
 `yoetz`. Its executable token is exactly `yoetz`; policy args are exactly `mcp serve`, and strict
-args are exactly `mcp serve --semantic off`. It emits no `env`, headers, credential references, or
+args are exactly `mcp serve --semantic off`. Portable routes retain the generic unknown host
+identity and emit no `env`, headers, credential references, or
 shell command. The pinned Agent Plugins schema is validated offline. Invalid top-level MCP config
 disables only MCP; an invalid, unsupported, or failing entry skips only that server, so the
 independent Yoetz skill remains loadable. Preview binds the full `mcp.json` bytes through
@@ -135,7 +145,8 @@ no privacy, disclosure, credential, or human-review gate. Yoetz records a Claude
 `PermissionDenied` on a scoped `check` as a payload-free `host_auto_review_denied` diagnostic;
 Codex and Cursor expose no typed denial and that gap is documented. Rejected: shipping a
 `PermissionRequest` / `beforeMCPExecution` hook that approves Yoetz's own tool (inverts the
-authority this ADR keeps with the host), widening admission to the other tools (they need none),
+authority this ADR keeps with the host), widening the egress admission entry to the other tools
+(their local or read-only effects do not invoke a provider, but a host may still review them),
 customizing a host's reviewer policy on the user's behalf, and relaying "the user authorized this"
 through the agent (the prompt-injection shape #187 forbids).
 
@@ -162,3 +173,51 @@ authority, privacy authorization, nor Codex child launch, and reports the existi
 `blocked_by_policy/route_semantic_ceiling` pair. A policy route merely permits the ordinary privacy
 decision path; it does not imply ChatGPT login, model entitlement, repository approval, or a live
 semantic attempt.
+
+## Destination-disclosure amendment (2026-09-06, issue #479)
+
+The #467 amendment made the owner's host admission the lever that admits the policy-route
+`check`; it left the initialize `instructions` saying only that external semantic review
+"follows the configured policy". A reviewer that reads descriptions — Codex copies the
+instructions into every tool description — therefore scored the call from no named destination,
+and a repository without admission had nothing better to show it. Decision 6 is extended: on the
+policy route the bridge appends one bounded passage, rendered by `mcp/semantic_destination.py`
+from the configuration it reads once at startup, that names the destination the route would
+dispatch to and the payload bound.
+
+What the passage may contain is closed. The endpoint profile id and provider id are echoed only
+when they are bundled catalog tokens (`BUNDLED_ENDPOINT_HOSTS`, `DISCLOSABLE_PROVIDER_IDS`); the
+host is the catalog's host for that endpoint profile, which a unit test locks to the adapter that
+dials it, or — for the owner-declared Responses profile — the hostname and port that already
+passed the HTTPS-origin validator, never the origin string itself. The Codex subscription runtime
+is named as a runtime class under its own ChatGPT login, and the passage states that Yoetz does not
+name that runtime's upstream host. A provider id outside the allowlist renders as *unlisted*; an
+endpoint profile outside the catalog renders as an *unknown* host; absent, unreadable, or invalid
+configuration renders as *unknown*, never as a guess; `verification.semantic = "disabled"`, a
+strict-local or test-fake profile, and a local-model-only binding render as *none* with the
+reason. A `[semantic_fallback]` pairing discloses the fallback endpoint beside the primary, because
+a reviewer told that only the primary can receive data would be misled. No secret, filesystem path,
+URL, query string, model name, repository handle, or free-form configuration prose can reach the
+text; the value is typed (`SemanticDestinationDisclosure`) so no caller can pass a string.
+
+Staleness is handled by disclosure, not detection. The bridge process has one immutable route
+(decision 1) and reads configuration once, so the passage is stamped "read once at bridge
+startup" and a later route change is reflected only when the host restarts the bridge. The live
+authority for what a given check did remains that check's recorded `semantic_status`, provider
+attempt, and receipt. Strict instructions are byte-identical to before this amendment whatever the
+configuration says, and annotations are unchanged (decision 5 stands).
+
+The passage is disclosure, not authority. It does not admit the call — Codex's guardian policy
+still requires trusted user content, Cursor's classifier inputs are undocumented, and Claude Code
+auto mode separates permissions from classifier context — and it does not widen privacy policy,
+prove a dispatch, or replace the privacy ceremony that authorized the destination. Because the
+packaged `agent-instructions.md` already sat within a few hundred bytes of the #300 instructions
+budget, `SERVER_INSTRUCTIONS_BUDGET` and `ADVERTISED_SURFACE_BUDGET` now carry two numbers each:
+the unchanged bound on the packaged text, and that bound plus the disclosure ceiling
+(`MAX_DISCLOSURE_ENCODED_BYTES`, charged once per advertised tool in the aggregate), which the
+longest admissible passage is tested against.
+
+The startup disclosure is a configuration snapshot, not a guarantee about the live service.
+Absent or invalid configuration remains unknown; a policy-route check may still reach an
+external reviewer whose destination the bridge could not determine. Even a valid snapshot
+with no external binding can differ from the independently running service configuration.

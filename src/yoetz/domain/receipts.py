@@ -14,9 +14,12 @@ from yoetz.domain.findings import (
     FindingKind,
     FindingOrigin,
     ResponseDisposition,
+    SemanticProvenance,
     WaiverScope,
     finding_from_json,
     finding_to_json,
+    semantic_provenance_from_json,
+    semantic_provenance_to_json,
 )
 from yoetz.domain.values import (
     ClaimId,
@@ -160,6 +163,8 @@ def semantic_coverage_gap_code(status: SemanticStatus, reason: SemanticReason) -
     """
 
     validate_semantic_outcome(status, reason)
+    if reason is SemanticReason.CASE_CAPACITY_EXCEEDED:
+        return "semantic_case_capacity_exceeded"
     if status is SemanticStatus.SUCCEEDED:
         return None
     if status is SemanticStatus.NOT_REQUESTED:
@@ -734,6 +739,7 @@ class ReceiptDocument:
     redactions: tuple[ReceiptRedaction, ...]
     sections: tuple[ReceiptSection, ...]
     children: ReceiptChildren = field(default_factory=ReceiptChildren)
+    semantic_provenance: SemanticProvenance | None = None
 
     def __post_init__(self) -> None:
         invalid = "invalid_receipt_document"
@@ -752,6 +758,11 @@ class ReceiptDocument:
         ):
             raise ProtocolValueError(invalid)
         if type(self.versions) is not ReceiptVersionSlice or type(self.coverage) is not Coverage:
+            raise ProtocolValueError(invalid)
+        if (
+            self.semantic_provenance is not None
+            and type(self.semantic_provenance) is not SemanticProvenance
+        ):
             raise ProtocolValueError(invalid)
         findings = _validate_tuple(self.findings, 0, 100, invalid)
         if any(type(value) is not Finding for value in findings):
@@ -782,7 +793,7 @@ class ReceiptDocument:
         if type(self.children) is not ReceiptChildren:
             raise ProtocolValueError(invalid)
         receipt_schema_version = _receipt_document_artifact_version(self.versions)
-        if self.children.children and receipt_schema_version != "1.2.0":
+        if self.children.children and receipt_schema_version != "1.3.0":
             raise ProtocolValueError("receipt_children_schema_version")
         section_keys = tuple(cast(ReceiptSection, section).key for section in sections)
         if section_keys not in _VALID_SECTION_KEY_SEQUENCES:
@@ -1106,9 +1117,9 @@ def receipt_document_from_json(value: object) -> ReceiptDocument:
     raw_schema_version = _field(cast(Mapping[object, object], value), "schema_version", invalid)
     if raw_schema_version != "1.0.0":
         raise ProtocolValueError(invalid)
-    # The artifact version is selected by the version slice.  Its 1.2.0 successor adds the
+    # The artifact version is selected by the version slice.  Its 1.3.0 successor adds the
     # required ``children`` member while retaining the document's historical inner version.
-    source = _closed_object(value, keys, frozenset({"children"}), invalid)
+    source = _closed_object(value, keys, frozenset({"children", "semantic_provenance"}), invalid)
     raw_suppressed = _field(source, "suppressed_finding_count", invalid)
     if type(raw_suppressed) is not int:
         raise ProtocolValueError("invalid_receipt_document")
@@ -1140,10 +1151,15 @@ def receipt_document_from_json(value: object) -> ReceiptDocument:
     versions = _version_slice_from_json(_field(source, "versions", invalid))
     artifact_version = _receipt_document_artifact_version(versions)
     has_children = "children" in source
-    if has_children and artifact_version != "1.2.0":
+    if has_children and artifact_version != "1.3.0":
         raise ProtocolValueError("invalid_receipt_document")
-    if not has_children and artifact_version == "1.2.0":
+    if not has_children and artifact_version == "1.3.0":
         raise ProtocolValueError("invalid_receipt_document")
+    semantic_provenance_value = (
+        semantic_provenance_from_json(freeze_json(_field(source, "semantic_provenance", invalid)))
+        if "semantic_provenance" in source
+        else None
+    )
     document = ReceiptDocument(
         receipt_id=receipt_id(_field(source, "receipt_id", invalid)),
         task_id=task_id(_field(source, "task_id", invalid)),
@@ -1166,6 +1182,7 @@ def receipt_document_from_json(value: object) -> ReceiptDocument:
         gaps=gaps,
         redactions=redactions,
         sections=sections,
+        semantic_provenance=semantic_provenance_value,
         children=(
             _children_from_json(_field(source, "children", invalid))
             if has_children
@@ -1314,8 +1331,10 @@ def receipt_document_to_json(document: ReceiptDocument) -> dict[str, object]:
         "redactions": [_redaction_to_json(value) for value in document.redactions],
         "sections": [_section_to_json(value) for value in document.sections],
     }
-    if _receipt_document_artifact_version(document.versions) == "1.2.0":
+    if _receipt_document_artifact_version(document.versions) == "1.3.0":
         result["children"] = _children_to_json(document.children)
+    if document.semantic_provenance is not None:
+        result["semantic_provenance"] = semantic_provenance_to_json(document.semantic_provenance)
     return result
 
 
@@ -1398,7 +1417,7 @@ def render_receipt_human(document: ReceiptDocument, *, markdown: bool) -> str:
         if section.coverage_note is not None:
             section_parts.append(section.coverage_note)
         parts.append("\n".join(section_parts))
-    if _receipt_document_artifact_version(document.versions) == "1.2.0":
+    if _receipt_document_artifact_version(document.versions) == "1.3.0":
         heading = "## Children" if markdown else "Children"
         child_parts = [heading]
         if not document.children.children:

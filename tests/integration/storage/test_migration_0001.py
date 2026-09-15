@@ -10,7 +10,9 @@ from yoetz.adapters.sqlite.connection import (  # pyright: ignore[reportPrivateU
 )
 from yoetz.adapters.sqlite.migrations import (
     BUNDLE_MIGRATIONS,
+    CATALOG_MIGRATIONS,
     _set_event_summary_rebuild_mode,  # pyright: ignore[reportPrivateUsage]
+    current_schema_version,
     initialize_bundle,
     initialize_catalog,
     run_migrations,
@@ -21,11 +23,8 @@ ROOT = Path(__file__).parents[3]
 
 def test_root_and_installed_migration_resources_are_byte_identical() -> None:
     for family, versions in (
-        ("catalog", ("0001", "0002", "0003", "0004")),
-        (
-            "bundle",
-            ("0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0010"),
-        ),
+        ("catalog", tuple(item.version for item in CATALOG_MIGRATIONS)),
+        ("bundle", tuple(item.version for item in BUNDLE_MIGRATIONS)),
     ):
         for version in versions:
             root = ROOT / "migrations" / family / f"{version}.sql"
@@ -43,13 +42,14 @@ def test_fresh_migrations_install_identified_foreign_key_clean_schemas() -> None
     initialize_bundle(bundle, {"task_id": "task_test", "owner_generation": "generation_test"})
 
     assert catalog.execute("PRAGMA application_id").fetchone() == (0x594F4554,)
-    assert catalog.execute("PRAGMA user_version").fetchone() == (4,)
+    assert catalog.execute("PRAGMA user_version").fetchone() == (5,)
     assert catalog.execute("PRAGMA foreign_keys").fetchone() == (1,)
     assert catalog.execute("PRAGMA trusted_schema").fetchone() == (0,)
     assert catalog.execute("PRAGMA foreign_key_check").fetchone() is None
 
     assert bundle.execute("PRAGMA application_id").fetchone() == (0x594F4554,)
-    assert bundle.execute("PRAGMA user_version").fetchone() == (10,)
+    current = current_schema_version(BUNDLE_MIGRATIONS)
+    assert bundle.execute("PRAGMA user_version").fetchone() == (current,)
     assert bundle.execute("PRAGMA foreign_keys").fetchone() == (1,)
     assert bundle.execute("PRAGMA trusted_schema").fetchone() == (0,)
     assert bundle.execute("PRAGMA foreign_key_check").fetchone() is None
@@ -59,7 +59,7 @@ def test_fresh_migrations_install_identified_foreign_key_clean_schemas() -> None
     ).fetchone() == ("1",)
     assert bundle.execute(
         "SELECT value FROM bundle_meta WHERE key = 'storage_schema_version'"
-    ).fetchone() == ("10",)
+    ).fetchone() == (str(current),)
     assert bundle.execute(
         "SELECT 1 FROM sqlite_schema WHERE name = 'observation_consent'"
     ).fetchone() == (1,)
@@ -74,9 +74,16 @@ def test_fresh_bundle_migration_window_restores_strict_writer_authorizer() -> No
         {"task_id": "task_test", "owner_generation": "generation_test", "protocol_version": "0.1"},
     )
 
-    assert bundle.execute("PRAGMA user_version").fetchone() == (10,)
+    assert bundle.execute("PRAGMA user_version").fetchone() == (
+        current_schema_version(BUNDLE_MIGRATIONS),
+    )
     assert bundle.execute("PRAGMA foreign_keys").fetchone() == (1,)
     assert bundle.authorizer is _writer_authorizer
+    assert bundle.execute("PRAGMA table_info(observation_consent)").fetchall()
+    with pytest.raises(apsw.AuthError):
+        bundle.execute("PRAGMA legacy_alter_table = ON")
+    with pytest.raises(apsw.AuthError):
+        bundle.execute("PRAGMA foreign_keys = OFF")
 
 
 def test_event_summary_rebuild_rejects_active_transaction_without_changing_pragmas() -> None:
@@ -117,31 +124,28 @@ def test_bundle_run_migrations_applies_pending_versions_from_schema_version_one(
 
     report = run_migrations(bundle, BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
     assert report.from_version == 1
-    assert report.to_version == 10
-    assert report.applied_versions == (
-        "0002",
-        "0003",
-        "0004",
-        "0005",
-        "0006",
-        "0007",
-        "0008",
-        "0009",
-        "0010",
+    assert report.to_version == current_schema_version(BUNDLE_MIGRATIONS)
+    assert report.applied_versions == tuple(item.version for item in BUNDLE_MIGRATIONS[1:])
+    assert bundle.execute("PRAGMA user_version").fetchone() == (
+        current_schema_version(BUNDLE_MIGRATIONS),
     )
-    assert bundle.execute("PRAGMA user_version").fetchone() == (10,)
     assert bundle.execute(
         "SELECT value FROM bundle_meta WHERE key = 'storage_schema_version'"
-    ).fetchone() == ("10",)
+    ).fetchone() == (str(current_schema_version(BUNDLE_MIGRATIONS)),)
     assert bundle.execute(
         "SELECT 1 FROM sqlite_schema WHERE name = 'observation_consent'"
     ).fetchone() == (1,)
 
 
-def test_bundle_migration_0010_preserves_event_history_and_admits_current_families() -> None:
+def test_bundle_migration_0014_preserves_event_history_and_admits_current_families() -> None:
     bundle = apsw.Connection(":memory:")
     bundle.execute("PRAGMA foreign_keys = ON")
     bundle.execute("PRAGMA trusted_schema = OFF")
+    event_rebuild_version = current_schema_version(BUNDLE_MIGRATIONS)
+    event_rebuild_index = next(
+        index for index, migration in enumerate(BUNDLE_MIGRATIONS) if migration.version == "0014"
+    )
+    main_frontier = event_rebuild_version - 1
     with bundle:
         for migration in BUNDLE_MIGRATIONS[:9]:
             bundle.execute(migration.ddl.decode("utf-8"))
@@ -152,6 +156,14 @@ def test_bundle_migration_0010_preserves_event_history_and_admits_current_famili
             "('storage_schema_version', '9'), "
             "('protocol_version', '0.1'), "
             "('import_schema_version', '1')"
+        )
+        # The released 0.2 migrations occupy 0010-0013. Apply them before
+        # exercising the 0.3 events-table rebuild at 0014.
+        for migration in BUNDLE_MIGRATIONS[9:event_rebuild_index]:
+            bundle.execute(migration.ddl.decode("utf-8"))
+        bundle.execute(
+            "UPDATE bundle_meta SET value=? WHERE key='storage_schema_version'",
+            (str(main_frontier),),
         )
         bundle.execute("INSERT INTO counters(name, next_value) VALUES ('ingestion_sequence', 2)")
         bundle.execute(
@@ -198,10 +210,10 @@ def test_bundle_migration_0010_preserves_event_history_and_admits_current_famili
 
     report = run_migrations(bundle, BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
 
-    assert report.from_version == 9
-    assert report.to_version == 10
-    assert report.applied_versions == ("0010",)
-    assert bundle.execute("PRAGMA user_version").fetchone() == (10,)
+    assert report.from_version == main_frontier
+    assert report.to_version == event_rebuild_version
+    assert report.applied_versions == ("0014",)
+    assert bundle.execute("PRAGMA user_version").fetchone() == (event_rebuild_version,)
     assert bundle.execute("PRAGMA foreign_keys").fetchone() == (1,)
     assert bundle.execute("PRAGMA legacy_alter_table").fetchone() == (0,)
     assert bundle.execute("PRAGMA foreign_key_check").fetchone() is None
@@ -215,7 +227,7 @@ def test_bundle_migration_0010_preserves_event_history_and_admits_current_famili
             "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
             (child,),
         ).fetchone()
-        assert child_sql is not None and "events_v10" not in child_sql[0]
+        assert child_sql is not None and f"events_v{event_rebuild_version}" not in child_sql[0]
     assert (
         bundle.execute(
             "SELECT canonical_entry, summary_code FROM events WHERE event_id = 'event-1'"

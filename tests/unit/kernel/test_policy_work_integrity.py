@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from builders.policy_cases import (
     BASE_COVERAGE,
     FRONTIER,
@@ -342,6 +344,75 @@ def test_action_without_result_requires_later_disjoint_work() -> None:
     assert FindingKind.ACTION_WITHOUT_RESULT in _kinds(trigger)
     latest_only = make_case(actions={act(1): record(unresolved, 1)})
     assert FindingKind.ACTION_WITHOUT_RESULT not in _kinds(latest_only)
+
+
+@pytest.mark.parametrize(
+    ("left_obligations", "left_items", "right_obligations", "right_items", "expected"),
+    [
+        ((1,), ("shared",), (2,), ("shared",), True),
+        ((1,), ("left",), (1,), ("right",), False),
+        ((1, 2), (), (2, 3), (), False),
+        ((1, 2), (), (3, 4), (), True),
+        ((), ("a", "b"), (), ("b", "c"), False),
+        ((), ("a",), (), ("c",), True),
+        ((1,), ("same",), (), ("same",), False),
+        ((), ("same",), (1,), ("other",), False),
+        ((), (), (), ("known",), False),
+        ((), ("known",), (), (), False),
+        ((), (), (), (), False),
+    ],
+)
+def test_action_subject_precedence_and_unknown_subjects(
+    left_obligations: tuple[int, ...],
+    left_items: tuple[str, ...],
+    right_obligations: tuple[int, ...],
+    right_items: tuple[str, ...],
+    expected: bool,
+) -> None:
+    left = replace(
+        _action(1, 1),
+        obligation_refs=tuple(obl(number) for number in left_obligations),
+        attempted_items=left_items,
+    )
+    right = replace(
+        _action(2, 2),
+        obligation_refs=tuple(obl(number) for number in right_obligations),
+        attempted_items=right_items,
+    )
+    case = make_case(actions={act(1): record(left, 1), act(2): record(right, 2)})
+
+    assert (FindingKind.ACTION_WITHOUT_RESULT in _kinds(case)) is expected
+
+
+def test_unresolved_action_basis_preserves_frontier_and_reference_order() -> None:
+    case = make_case(
+        actions={
+            act(5): replace(record(_action(5, 3), 5), source_frontier=3),
+            act(3): replace(record(_action(3, 2), 3), source_frontier=2),
+            act(4): replace(record(_action(4, 4), 4), source_frontier=2),
+            act(2): replace(record(_action(2, 2), 2), source_frontier=1),
+            act(1): record(_action(1, 1), 1),
+            act(6): replace(record(_action(6, 2), 6), source_frontier=4),
+            act(7): replace(record(_action(7, 7), 7), payload=None, redacted=True),
+        },
+        results={res(1): record(_result(1, 6, ResultOutcome.SUCCESS), 8)},
+    )
+    result = run_deterministic_policies(case, WORK_INTEGRITY_POLICY_PACK)
+    facts = tuple(
+        fact.subject_refs
+        for assessment in result.assessments
+        if assessment.candidate.kind is FindingKind.ACTION_WITHOUT_RESULT
+        for fact in assessment.basis.observed_facts
+        if fact.fact_code == "subsequent_unrelated_work_present"
+    )
+
+    assert facts == (
+        (act(1), act(3), act(4), act(5), act(6)),
+        (act(2), act(4), act(5)),
+        (act(3), act(5)),
+        (act(4), act(5), act(6)),
+        (act(5), act(6)),
+    )
 
 
 def test_stale_evidence_requires_comparable_different_tree_state() -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -20,7 +21,12 @@ from yoetz.adapters.memory.privacy import (
     MemoryPrivacyCatalogState,
     MemoryPrivacyPolicyStore,
 )
-from yoetz.adapters.privacy.catalog import CatalogPrivacyAudit, CatalogPrivacyPolicyStore
+from yoetz.adapters.privacy.catalog import (  # pyright: ignore[reportPrivateUsage]
+    _LOOKUP_DOMAIN,  # pyright: ignore[reportPrivateUsage]
+    CatalogPrivacyAudit,
+    CatalogPrivacyPolicyStore,
+    _mac,  # pyright: ignore[reportPrivateUsage]
+)
 from yoetz.adapters.privacy.local_enforcer import LocalPrivacyEnforcer
 from yoetz.application.egress import (
     PrivacyCoordinator,
@@ -36,6 +42,7 @@ from yoetz.domain.privacy import (
     DataClass,
     EgressAuthorization,
     EgressChannel,
+    EgressReceipt,
     LocalDisclosureApproved,
     LocalDisclosureReceipt,
     LocalDisclosureSink,
@@ -48,6 +55,7 @@ from yoetz.domain.privacy import (
     ReceiptPolicyBinding,
     ReceiptSecretScan,
     ReceiptTransformations,
+    RequestCommitment,
     ReviewContextProfile,
     ReviewSelectionPolicy,
 )
@@ -65,11 +73,14 @@ from yoetz.ports.privacy import (
     ConsumedAuthorization,
     DisclosureProposalRequest,
     HumanPolicyDecision,
+    LocalDisclosureReceiptView,
     MinimizedDisclosure,
+    NetworkEgressReceiptView,
     OutboundGatewayPort,
     PolicyOverlay,
     PolicyTransitionMember,
     PolicyTransitionProposal,
+    PrivacyAuditPort,
     PrivacyAuditState,
     PrivacyClassifierPort,
     PrivacyPolicyStorePort,
@@ -953,6 +964,94 @@ def test_catalog_disclosure_attempt_rejects_tampered_lookup_identity() -> None:
     asyncio.run(run())
 
 
+@pytest.fixture(params=("memory", "catalog"))
+def disclosure_audit(request: pytest.FixtureRequest) -> PrivacyAuditPort:
+    if request.param == "memory":
+        return MemoryPrivacyAudit(
+            MemoryPrivacyCatalogState(routes={_TASK: _ROUTE_DIGEST}),
+            cast(ObjectStorePort, _StoredObjects()),
+            _Key(),
+            _Clock(),
+        )  # type: ignore[arg-type]
+    db = _database()
+    _insert_task_route(db)
+    return CatalogPrivacyAudit(db, _StoredObjects(), _Key(), _Clock())  # type: ignore[arg-type]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("request_id", "digest", "error"),
+    (
+        (None, _DIGEST, TypeError),
+        (_REQUEST, None, TypeError),
+        (True, _DIGEST, TypeError),
+        (_REQUEST, b"digest", TypeError),
+        ("req_invalid", _DIGEST, ValueError),
+        (_REQUEST.upper(), _DIGEST, ValueError),
+        (_REQUEST, "sha256:bad", ValueError),
+        (_REQUEST, "sha256:" + "A" * 64, ValueError),
+    ),
+)
+async def test_disclosure_lookup_input_contract_matches_across_adapters(
+    disclosure_audit: PrivacyAuditPort,
+    request_id: object,
+    digest: object,
+    error: type[Exception],
+) -> None:
+    with pytest.raises(error, match="privacy_disclosure_attempt_lookup_invalid"):
+        await disclosure_audit.load_disclosure_attempt(cast(str, request_id), cast(str, digest))
+
+
+@pytest.mark.anyio
+async def test_disclosure_lookup_distinguishes_absence_match_and_mismatch(
+    disclosure_audit: PrivacyAuditPort,
+) -> None:
+    assert await disclosure_audit.load_disclosure_attempt(_REQUEST, _DIGEST) is None
+    prepared = await disclosure_audit.prepare_disclosure_proposal(_external_disclosure_request())
+    state = await disclosure_audit.load_disclosure_attempt(_REQUEST, _DIGEST)
+    assert state is not None and state.reservation == prepared.reservation
+    assert await disclosure_audit.load_disclosure_attempt(_REQUEST_2, _DIGEST) is None
+    with pytest.raises(ValueError, match="privacy_audit_attempt_case_mismatch"):
+        await disclosure_audit.load_disclosure_attempt(_REQUEST, "sha256:" + "4" * 64)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mutation", ("absent", "null", "number", "malformed"))
+async def test_authenticated_disclosure_sidecar_requires_a_valid_case_digest(mutation: str) -> None:
+    db = _database()
+    _insert_task_route(db)
+    audit = CatalogPrivacyAudit(db, _StoredObjects(), _Key(), _Clock())  # type: ignore[arg-type]
+    await audit.prepare_disclosure_proposal(_external_disclosure_request())
+    row = db.execute("SELECT subject_structural_canonical FROM privacy_audit_records").fetchone()
+    assert row is not None and isinstance(row[0], bytes)
+    structural = json.loads(row[0])
+    if mutation == "absent":
+        del structural["prepared_case_digest"]
+    else:
+        structural["prepared_case_digest"] = {"null": None, "number": 3, "malformed": "bad"}[
+            mutation
+        ]
+    raw = canonical_encode(structural)
+    # Authenticate the synthetic malformed sidecar, so the test reaches structural
+    # validation rather than passing merely because its MAC is invalid.
+    identity = _mac(_Key(), _LOOKUP_DOMAIN, raw)
+    db.execute(
+        "UPDATE privacy_audit_records SET subject_structural_canonical = ?, subject_lookup_identity = ?",
+        (raw, identity),
+    )
+    with pytest.raises(ValueError, match="privacy_audit_attempt_corrupt"):
+        await audit.load_disclosure_attempt(_REQUEST, _DIGEST)
+
+
+@pytest.mark.anyio
+async def test_disclosure_lookup_storage_failure_is_not_absence() -> None:
+    db = _database()
+    audit = CatalogPrivacyAudit(db, _StoredObjects(), _Key(), _Clock())  # type: ignore[arg-type]
+    db.close()
+    with pytest.raises(apsw.ConnectionClosedError):
+        await audit.load_disclosure_attempt(_REQUEST, _DIGEST)
+
+
 def test_catalog_disclosure_attempt_rejects_multiple_rows_for_request() -> None:
     db = _database()
     _insert_task_route(db)
@@ -1034,3 +1133,121 @@ def test_catalog_consumed_disclosure_attempt_is_durable_and_one_use() -> None:
     assert recovered.request_id == _REQUEST
     assert recovered.privacy_proposal_id == _PROPOSAL
     assert asyncio.run(audit.load(_REQUEST, _DIGEST)) is None
+
+
+def _network_receipt(authorization: EgressAuthorization) -> EgressReceipt:
+    """The receipt a completed subscription review records through the gateway."""
+
+    return EgressReceipt(
+        "1.0.0",
+        _RECEIPT,
+        authorization_request_id(authorization),
+        authorization.privacy_proposal_id,
+        EgressChannel.LLM_INFERENCE,
+        PrivacyOutcome.COMPLETED,
+        _NOW,
+        authorization.scope,
+        authorization.purpose,
+        authorization.provider_binding,
+        ReceiptPolicyBinding(_POLICY, authorization.policy_version, _DIGEST, _DIGEST),
+        authorization.consent_source,
+        (DataCategory.BOUNDED_STRUCTURAL_METADATA,),
+        (),
+        ReceiptCounts(1, 1, 0, 1, 0, 32, 32, 8, 96),
+        ReceiptTransformations(0, 0, 0),
+        ReceiptSecretScan("scanner-v1", _DIGEST, 0, True),
+        None,
+        1,
+        authorization_id=authorization.authorization_id,
+        dispatch_id=_DISPATCH,
+        dispatch_started_at=_NOW - timedelta(seconds=5),
+        request_commitment=RequestCommitment(
+            "hmac-sha256/yoetz-privacy-egress-request-v1", _WORKSPACE
+        ),
+    )
+
+
+def authorization_request_id(authorization: EgressAuthorization) -> str:
+    del authorization
+    return _REQUEST
+
+
+def test_completed_network_egress_receipt_is_retrievable_and_listable() -> None:
+    """A stored network receipt reads back whole; it used to raise a deferred-codec error.
+
+    Issue #730: the only receipts a real semantic review records are network egress receipts,
+    and ``get_receipt`` refused every one of them while ``list_receipts`` silently dropped them.
+    """
+
+    db = _database()
+    _insert_task_route(db)
+    audit = CatalogPrivacyAudit(db, _StoredObjects(), _Key(), _Clock())  # type: ignore[arg-type]
+
+    async def run() -> tuple[
+        EgressReceipt, PrivacyReceiptView | None, PrivacyReceiptPage, PrivacyReceiptPage
+    ]:
+        prepared = await audit.prepare_disclosure_proposal(_external_disclosure_request())
+        authorization = await audit.authorize(
+            prepared.proposal.privacy_proposal_id,
+            prepared.proposal.prepared_case_digest,
+            _NOW,
+        )
+        await audit.consume(authorization.authorization_id, _DISPATCH, _NOW)
+        receipt = _network_receipt(authorization)
+        await audit.complete_egress(_DISPATCH, receipt)
+        fetched = await audit.get_receipt(_RECEIPT, PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL)
+        by_provider = await audit.list_receipts(
+            PrivacyReceiptQuery(
+                channel=EgressChannel.LLM_INFERENCE,
+                provider_id="provider-test",
+                endpoint_profile_id="endpoint-test",
+                outcome=PrivacyOutcome.COMPLETED,
+            ),
+            PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL,
+        )
+        other_provider = await audit.list_receipts(
+            PrivacyReceiptQuery(provider_id="someone-else"),
+            PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL,
+        )
+        return receipt, fetched, by_provider, other_provider
+
+    receipt, fetched, by_provider, other_provider = asyncio.run(run())
+
+    assert fetched == NetworkEgressReceiptView("network_egress", receipt)
+    assert by_provider.receipts == (fetched,)
+    assert other_provider.receipts == ()
+
+
+def test_stored_receipts_of_both_kinds_list_together_newest_first() -> None:
+    db = _database()
+    _insert_task_route(db)
+    audit = CatalogPrivacyAudit(db, _StoredObjects(), _Key(), _Clock())  # type: ignore[arg-type]
+    local = replace(
+        _receipt(),
+        privacy_proposal_id=_PROPOSAL_2,
+        request_id=_REQUEST_2,
+        receipt_id=_RECEIPT_2,
+        finished_at=_NOW - timedelta(minutes=1),
+    )
+
+    async def run() -> PrivacyReceiptPage:
+        prepared = await audit.prepare_disclosure_proposal(_external_disclosure_request())
+        authorization = await audit.authorize(
+            prepared.proposal.privacy_proposal_id,
+            prepared.proposal.prepared_case_digest,
+            _NOW,
+        )
+        await audit.consume(authorization.authorization_id, _DISPATCH, _NOW)
+        await audit.complete_egress(_DISPATCH, _network_receipt(authorization))
+        await audit.complete_agent_projection(_projection_request(_PROPOSAL_2, _REQUEST_2), local)
+        return await audit.list_receipts(
+            PrivacyReceiptQuery(), PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL
+        )
+
+    page = asyncio.run(run())
+
+    assert [type(view) for view in page.receipts] == [
+        NetworkEgressReceiptView,
+        LocalDisclosureReceiptView,
+    ]
+    assert [view.receipt.receipt_id for view in page.receipts] == [_RECEIPT, _RECEIPT_2]

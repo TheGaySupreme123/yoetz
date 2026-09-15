@@ -6,6 +6,10 @@ import sys
 from pathlib import Path
 from typing import Final, Literal, cast
 
+from yoetz.adapters.integrations.artifact_presence import (
+    describe_artifact_presence,
+    select_artifact_user_presence,
+)
 from yoetz.adapters.integrations.cursor_integration import (
     CursorIntegrationError,
     CursorPluginArtifact,
@@ -18,12 +22,12 @@ from yoetz.adapters.integrations.cursor_integration import (
     status_cursor_plugin,
 )
 from yoetz.adapters.integrations.launcher import invoking_launcher
-from yoetz.adapters.integrations.macos_artifact_presence import MacOSArtifactUserPresence
 from yoetz.adapters.integrations.portable_plugin import (
     ArtifactUserPresencePort,
     ElevatedPortableArtifactReview,
 )
 from yoetz.cli.host_admission import admission_cleanup_preview, reverse_sweep
+from yoetz.config.paths import PathSafetyError
 from yoetz.domain.values import RequestId, request_id
 from yoetz.ports.plugin_artifacts import (
     ArtifactAuthority,
@@ -82,7 +86,11 @@ def _emit(value: dict[str, object], *, json_output: bool) -> None:
 
 
 def plugin_artifact(
-    format_name: str, ownership_name: str, route_name: str | None
+    format_name: str,
+    ownership_name: str,
+    route_name: str | None,
+    *,
+    observation_profile: str = "structural",
 ) -> CursorPluginArtifact:
     formats = {
         "native": PluginFormatProfile.CURSOR_PLUGIN_NATIVE,
@@ -110,11 +118,19 @@ def plugin_artifact(
             if ownership is McpOwnership.PLUGIN_MANAGED
             else "cursor_mcp_route_forbidden"
         )
+    if observation_profile not in {"structural", "ordinary"}:
+        raise ValueError("cursor_observation_profile_invalid")
+    if (
+        observation_profile == "ordinary"
+        and format_profile is not PluginFormatProfile.CURSOR_PLUGIN_NATIVE
+    ):
+        raise ValueError("cursor_observation_profile_unsupported")
     return render_cursor_plugin(
         format_profile,
         mcp_ownership=ownership,
         route_profile=route,
         yoetz_launcher=_invoking_launcher(),
+        observation_profile=cast(Literal["structural", "ordinary"], observation_profile),
     )
 
 
@@ -133,6 +149,7 @@ def _status_body(status: CursorPluginStatus) -> dict[str, object]:
         "artifact_digest": status.artifact_digest,
         "format_profile": None if status.format_profile is None else status.format_profile.value,
         "installed_digest": status.installed_digest,
+        "isolation_binding": status.isolation_binding,
         "launcher": {
             "artifact": (
                 None
@@ -197,6 +214,7 @@ def run_cursor_plugin_command(
     preview_digest: str | None,
     accept: bool,
     json_output: bool,
+    observation_profile: str = "structural",
     _state: Path | None = None,
     _presence: ArtifactUserPresencePort | None = None,
 ) -> int:
@@ -212,12 +230,26 @@ def run_cursor_plugin_command(
         sys.stderr.write("cursor_plugin_command_invalid\n")
         return 2
     try:
-        artifact = plugin_artifact(format_name, ownership_name, route_profile)
+        artifact = plugin_artifact(
+            format_name, ownership_name, route_profile, observation_profile=observation_profile
+        )
         target = CursorPluginTarget(str(cursor_config_root.expanduser().absolute()))
         project = None if project_root is None else project_root.expanduser().absolute()
         status = status_cursor_plugin(target, artifact, project_root=project)
         if command == "status":
-            _emit(_status_body(status), json_output=json_output)
+            _emit(
+                {
+                    **_status_body(status),
+                    "requested_observation_profile": artifact.plan.host_extension_profile,
+                    "installed_observation_profile": (
+                        artifact.plan.host_extension_profile
+                        if status.marker_valid
+                        and status.installed_digest == artifact.artifact_digest
+                        else None
+                    ),
+                },
+                json_output=json_output,
+            )
             return 0
 
         request = _request(request_value)
@@ -257,6 +289,7 @@ def run_cursor_plugin_command(
                         else None
                     ),
                     "artifact_digest": preview.artifact_digest,
+                    "observation_profile": artifact.plan.host_extension_profile,
                     "authorization": {
                         "operation": "plugin_artifact_apply",
                         "prepare_command": [
@@ -267,12 +300,14 @@ def run_cursor_plugin_command(
                             "--target-digest",
                             preview.preview_digest,
                         ],
+                        "human_presence": describe_artifact_presence(),
                         "requires_os_authenticated_prompt": True,
                     },
                     "format_profile": preview.format_profile.value,
                     "mcp_ownership": preview.mcp_ownership.value,
                     "mcp_ownership_state": preview.mcp_ownership_state.value,
                     "mcp_route_profile": preview.mcp_route_profile,
+                    "isolation_root": preview.isolation_root,
                     "preview_digest": preview.preview_digest,
                     "request_id": preview.request_id,
                     "scope": "user",
@@ -289,7 +324,7 @@ def run_cursor_plugin_command(
         # itself consumes the ADR-016 ``review_only`` single-shot trusted review prepared for
         # this exact digest; the adapter refuses when that authority is absent or unproven.
         review: PluginMutationReviewPort = ElevatedPortableArtifactReview(
-            MacOSArtifactUserPresence() if _presence is None else _presence,
+            select_artifact_user_presence() if _presence is None else _presence,
             _state=_state,
         )
         authority = _artifact_authority(preview_digest, state=_state)
@@ -326,6 +361,7 @@ def run_cursor_plugin_command(
                     else None
                 ),
                 "artifact_digest": result.artifact_digest,
+                "requested_observation_profile": artifact.plan.host_extension_profile,
                 "changed_files": list(result.changed_files),
                 "format_profile": result.format_profile.value,
                 "installed_digest": result.installed_digest,
@@ -339,6 +375,9 @@ def run_cursor_plugin_command(
             json_output=json_output,
         )
         return 0
+    except PathSafetyError as error:
+        sys.stderr.write(f"cursor_isolation_root_invalid:{error.reason_code}\n")
+        return 1
     except (CursorIntegrationError, ValueError) as error:
         reason = error.reason.value if isinstance(error, CursorIntegrationError) else str(error)
         sys.stderr.write(f"{reason}\n")

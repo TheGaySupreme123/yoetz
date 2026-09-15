@@ -157,7 +157,7 @@ async def test_recovery_status_is_pathless_and_agent_safe(
     monkeypatch.setattr(cli, "_installation_recovery_store", lambda: _Store())
     monkeypatch.setattr(cli, "build_service_client", _unavailable)
     monkeypatch.setattr("yoetz.config.paths.bundle_root", _bundle_root)
-    # The strict loader rejects unknown YOETZ_* variables, and CI sets YOETZ_DENY_NETWORK=1.
+    # Keep inherited configuration out of this status-only test.
     # Status reporting is what is under test here, not configuration resolution.
     monkeypatch.setattr("yoetz.config.load.load_config", _stub_config)
 

@@ -48,6 +48,7 @@ from yoetz.domain.privacy import (
     ReceiptTransformations,
 )
 from yoetz.observability.logging import record_unexpected_exception_without_raising
+from yoetz.observability.semantic_context import semantic_check_request
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.privacy import (
@@ -300,6 +301,7 @@ class PrivacyCoordinator:
         "_policies",
         "_policy_app",
         "_service_generation",
+        "_semantic_dispatch_guard",
     )
 
     def __init__(
@@ -333,6 +335,7 @@ class PrivacyCoordinator:
         self._closed = False
         self._close_lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
+        self._semantic_dispatch_guard: Callable[[], Awaitable[bool] | bool] | None = None
 
     @property
     def policy_application(self) -> PrivacyPolicyApplication | None:
@@ -375,7 +378,11 @@ class PrivacyCoordinator:
             )
 
     async def evaluate_semantic(
-        self, candidate: CandidateContext, deadline: Deadline
+        self,
+        candidate: CandidateContext,
+        deadline: Deadline,
+        *,
+        dispatch_guard: Callable[[], Awaitable[bool] | bool] | None = None,
     ) -> SemanticEgressResult:
         if type(candidate) is not CandidateContext or type(deadline) is not Deadline:
             raise TypeError("semantic_egress_arguments_invalid")
@@ -386,10 +393,20 @@ class PrivacyCoordinator:
                     PrivacyOutcome.CHANNEL_UNAVAILABLE,
                     PrivacyReason.CHANNEL_UNAVAILABLE,
                 )
-            return await self._evaluate_semantic_admitted(candidate, deadline)
+            prior_guard = self._semantic_dispatch_guard
+            self._semantic_dispatch_guard = dispatch_guard
+            try:
+                return await self._evaluate_semantic_admitted(candidate, deadline)
+            finally:
+                self._semantic_dispatch_guard = prior_guard
 
     async def resume(
-        self, request_id: str, case_digest: str, deadline: Deadline
+        self,
+        request_id: str,
+        case_digest: str,
+        deadline: Deadline,
+        *,
+        dispatch_guard: Callable[[], Awaitable[bool] | bool] | None = None,
     ) -> SemanticEgressResult:
         if (
             type(request_id) is not str
@@ -404,13 +421,20 @@ class PrivacyCoordinator:
                     PrivacyOutcome.CHANNEL_UNAVAILABLE,
                     PrivacyReason.CHANNEL_UNAVAILABLE,
                 )
-            return await self._resume_admitted(request_id, case_digest, deadline)
+            prior_guard = self._semantic_dispatch_guard
+            self._semantic_dispatch_guard = dispatch_guard
+            try:
+                return await self._resume_admitted(request_id, case_digest, deadline)
+            finally:
+                self._semantic_dispatch_guard = prior_guard
 
     async def recover_started_attempt(
         self,
         request_id: str,
         case_digest: str,
         deadline: Deadline,
+        *,
+        dispatch_guard: Callable[[], Awaitable[bool] | bool] | None = None,
     ) -> SemanticEgressResult | None:
         """Recover a started physical attempt without minting another authorization.
 
@@ -433,26 +457,31 @@ class PrivacyCoordinator:
                     PrivacyOutcome.CHANNEL_UNAVAILABLE,
                     PrivacyReason.CHANNEL_UNAVAILABLE,
                 )
-            state = await self._load_disclosure_attempt(request_id, case_digest)
-            if state is None:
-                return None
-            if state.status in {
-                "receipt_pending",
-                "attempt_completed",
-                "local_disclosure_pending",
-                "local_disclosure_completed",
-            }:
-                return SemanticEgressAttemptUnknown(
+            prior_guard = self._semantic_dispatch_guard
+            self._semantic_dispatch_guard = dispatch_guard
+            try:
+                state = await self._load_disclosure_attempt(request_id, case_digest)
+                if state is None:
+                    return None
+                if state.status in {
+                    "receipt_pending",
+                    "attempt_completed",
+                    "local_disclosure_pending",
+                    "local_disclosure_completed",
+                }:
+                    return SemanticEgressAttemptUnknown(
+                        request_id,
+                        state.reservation.privacy_proposal_id,
+                        state.receipt_id,
+                    )
+                return await self._resume_admitted(
                     request_id,
-                    state.reservation.privacy_proposal_id,
-                    state.receipt_id,
+                    case_digest,
+                    deadline,
+                    loaded_state=state,
                 )
-            return await self._resume_admitted(
-                request_id,
-                case_digest,
-                deadline,
-                loaded_state=state,
-            )
+            finally:
+                self._semantic_dispatch_guard = prior_guard
 
     async def _load_disclosure_attempt(
         self, request_id: str, case_digest: str
@@ -465,6 +494,20 @@ class PrivacyCoordinator:
             )
             return await typed_loader(request_id, case_digest)
         raise ValueError("privacy_audit_attempt_lookup_unavailable")
+
+    async def _semantic_dispatch_is_current(self) -> bool:
+        """Recheck a caller-owned content fence at the gateway boundary."""
+
+        guard = self._semantic_dispatch_guard
+        if guard is None:
+            return True
+        try:
+            result = guard()
+            if isinstance(result, Awaitable):
+                result = await result
+            return result is True
+        except Exception:
+            return False
 
     async def prepare_local_disclosure(self, candidate: CandidateContext) -> LocalDisclosureResult:
         if type(candidate) is not CandidateContext or candidate.local_sink is None:
@@ -1245,11 +1288,28 @@ class PrivacyCoordinator:
         binding = candidate.provider_binding
         assert binding is not None
         now = self._clock.now_utc()
-        if proposal.expires_at <= now or deadline.expired(self._clock.monotonic_seconds()):
+        if proposal.expires_at <= now:
             return SemanticEgressBlocked(
                 candidate.request_id,
                 PrivacyOutcome.APPROVAL_EXPIRED,
                 PrivacyReason.AUTHORIZATION_EXPIRED,
+                privacy_proposal_id=proposal.privacy_proposal_id,
+            )
+        if deadline.expired(self._clock.monotonic_seconds()):
+            return SemanticEgressBlocked(
+                candidate.request_id,
+                PrivacyOutcome.TIMEOUT,
+                PrivacyReason.DEADLINE_EXPIRED,
+                privacy_proposal_id=proposal.privacy_proposal_id,
+            )
+        # A caller-owned retained-content fence may have changed while policy, audit, or
+        # human-approval work awaited. Check before minting any provider authorization, then
+        # check again immediately before the gateway call below to cover the remaining race.
+        if not await self._semantic_dispatch_is_current():
+            return SemanticEgressBlocked(
+                candidate.request_id,
+                PrivacyOutcome.BLOCKED_BY_POLICY,
+                PrivacyReason.SCOPE_MISMATCH,
                 privacy_proposal_id=proposal.privacy_proposal_id,
             )
 
@@ -1271,9 +1331,22 @@ class PrivacyCoordinator:
                 effective.effective_digest,
                 proposal.prepared_case_digest,
             )
+            if not await self._semantic_dispatch_is_current():
+                return SemanticEgressBlocked(
+                    candidate.request_id,
+                    PrivacyOutcome.BLOCKED_BY_POLICY,
+                    PrivacyReason.SCOPE_MISMATCH,
+                    privacy_proposal_id=proposal.privacy_proposal_id,
+                )
             try:
                 result = await self._gateway.dispatch_local_semantic(local_case, deadline)
-            except Exception:
+            except Exception as exc:
+                record_unexpected_exception_without_raising(
+                    exc,
+                    component="semantic_provider",
+                    operation="semantic_provider_invocation_failed",
+                    request_id=semantic_check_request.get() or candidate.request_id,
+                )
                 return SemanticEgressBlocked(
                     candidate.request_id,
                     PrivacyOutcome.TRANSPORT_FAILED,
@@ -1355,9 +1428,22 @@ class PrivacyCoordinator:
             effective.effective_digest,
             proposal.prepared_case_digest,
         )
+        if not await self._semantic_dispatch_is_current():
+            return SemanticEgressBlocked(
+                candidate.request_id,
+                PrivacyOutcome.BLOCKED_BY_POLICY,
+                PrivacyReason.SCOPE_MISMATCH,
+                privacy_proposal_id=proposal.privacy_proposal_id,
+            )
         try:
             result = await self._gateway.dispatch_external_semantic(case, authorization, deadline)
-        except Exception:
+        except Exception as exc:
+            record_unexpected_exception_without_raising(
+                exc,
+                component="semantic_provider",
+                operation="semantic_provider_invocation_failed",
+                request_id=semantic_check_request.get() or candidate.request_id,
+            )
             return SemanticEgressBlocked(
                 candidate.request_id,
                 PrivacyOutcome.TRANSPORT_FAILED,

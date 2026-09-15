@@ -50,7 +50,8 @@ def test_coordination_refusals_cannot_be_marked_retryable(code: CoordinationErro
         ControlError(code.value, retryable=True)
 
 
-@pytest.mark.parametrize("reason", ("invalid_request", "project-title-leak", ""))
+# ``invalid_request`` is a registered transport refusal, even on the project surface.
+@pytest.mark.parametrize("reason", ("invalid_project_request", "project-title-leak", ""))
 def test_control_error_rejects_non_vocabulary_project_reason(reason: str) -> None:
     with pytest.raises(TypeError, match="control_error_reason_invalid"):
         ControlError(reason)

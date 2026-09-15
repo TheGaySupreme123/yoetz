@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -20,6 +21,10 @@ from yoetz.adapters.providers.codex_app_server import (
     CODEX_EVALUATOR_CAPABILITY_PROFILE,
     CODEX_EVALUATOR_CONFIG_SHA256,
     CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT,
+    CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256,
+    CODEX_EVALUATOR_LINUX_X64_EXECUTABLE_SHA256,
+    CODEX_EVALUATOR_LINUX_X64_SOURCE_IDENTITY,
+    CODEX_EVALUATOR_RUNTIME_VERSION,
     CodexAppServerEvaluator,
     CodexAppServerExternalFactory,
     CodexAppServerProfile,
@@ -65,9 +70,9 @@ def _profile() -> CodexAppServerProfile:
         endpoint_profile_id="codex-chatgpt-subscription",
         endpoint_profile_version="1.0.0",
         executable_path=Path("/opt/codex/0.150.1/codex"),
-        executable_sha256="sha256:" + "a" * 64,
+        executable_sha256="sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b",
         runtime_version="0.150.1",
-        source_identity="openai-codex-darwin-arm64-0.150.1",
+        source_identity="openai-codex-npm-darwin-arm64-0.150.1",
         app_server_schema_sha256=CODEX_APP_SERVER_SCHEMA_SHA256,
         capability_cell_sha256=CODEX_EVALUATOR_CAPABILITY_CELL_SHA256,
         capability_profile=CODEX_EVALUATOR_CAPABILITY_PROFILE,
@@ -115,6 +120,96 @@ def test_committed_compatibility_cell_matches_runtime_constants() -> None:
     assert config.decode("utf-8") == module.CODEX_EVALUATOR_CONFIG
     assert cell["upstream_body_observability"] == "unavailable"
     assert cell["release_evidence"] == "pending"
+
+
+def test_committed_linux_compatibility_cell_matches_runtime_constants() -> None:
+    root = Path(__file__).resolve().parents[4]
+    cell = json.loads(
+        (root / "support/codex-evaluator/0.150.1/cell-linux-x64.json").read_text("utf-8")
+    )
+    identity_keys = (
+        "schema",
+        "runtime_version",
+        "distribution_kind",
+        "distribution",
+        "platform",
+        "protocol",
+        "executable_sha256",
+        "app_server_schema_sha256",
+        "isolated_config_sha256",
+        "capability_profile",
+        "credential_authority",
+        "upstream_body_observability",
+        "evidence_reviewed_at",
+        "evidence_expires_at",
+    )
+
+    assert cell["runtime_version"] == CODEX_EVALUATOR_RUNTIME_VERSION
+    assert cell["app_server_schema_sha256"] == CODEX_APP_SERVER_SCHEMA_SHA256
+    assert cell["capability_profile"] == CODEX_EVALUATOR_CAPABILITY_PROFILE
+    assert cell["capability_cell_sha256"] == CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256
+    assert cell["executable_sha256"] == CODEX_EVALUATOR_LINUX_X64_EXECUTABLE_SHA256
+    assert cell["isolated_config_sha256"] == CODEX_EVALUATOR_CONFIG_SHA256
+    assert canonical_digest({key: cell[key] for key in identity_keys}) == (
+        CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256
+    )
+    assert cell["platform"] == {"architecture": "x86_64", "os": "linux"}
+    assert cell["release_evidence"] == "pending"
+    runtime_cell = module.codex_evaluator_cell_for_platform("linux", "x86_64")
+    assert cell["native_package"] == f"@openai/{runtime_cell.native_package_directory}"
+    assert cell["native_executable_relative"] == (
+        runtime_cell.native_executable_relative.as_posix()
+    )
+
+
+def test_linux_cell_identity_binds_the_native_digest_and_package_alias() -> None:
+    cell = module.codex_evaluator_cell_for_platform("linux", "x86_64")
+    assert module.codex_evaluator_cell_for_platform("linux2", "amd64") is cell
+
+    assert cell.source_identity == CODEX_EVALUATOR_LINUX_X64_SOURCE_IDENTITY
+    assert cell.executable_sha256 == CODEX_EVALUATOR_LINUX_X64_EXECUTABLE_SHA256
+    assert cell.capability_cell_sha256 == CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256
+    assert cell.native_package_directory == "codex-linux-x64"
+    assert cell.native_package_spec == "npm:@openai/codex@0.150.1-linux-x64"
+    assert cell.native_executable_relative.as_posix() == (
+        "vendor/x86_64-unknown-linux-musl/bin/codex"
+    )
+
+
+def test_linux_cell_rejects_mac_digest_or_source_identity() -> None:
+    with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
+        module.codex_evaluator_cell_for_binding(
+            source_identity=CODEX_EVALUATOR_LINUX_X64_SOURCE_IDENTITY,
+            executable_sha256="sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b",
+            runtime_version="0.150.1",
+            app_server_schema_sha256=CODEX_APP_SERVER_SCHEMA_SHA256,
+            capability_cell_sha256=CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256,
+            capability_profile=CODEX_EVALUATOR_CAPABILITY_PROFILE,
+            capability_evidence_expires_at=CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT,
+            isolated_config_sha256=CODEX_EVALUATOR_CONFIG_SHA256,
+        )
+
+    with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
+        module.codex_evaluator_cell_for_binding(
+            source_identity="openai-codex-npm-darwin-arm64-0.150.1",
+            executable_sha256=CODEX_EVALUATOR_LINUX_X64_EXECUTABLE_SHA256,
+            runtime_version="0.150.1",
+            app_server_schema_sha256=CODEX_APP_SERVER_SCHEMA_SHA256,
+            capability_cell_sha256=CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256,
+            capability_profile=CODEX_EVALUATOR_CAPABILITY_PROFILE,
+            capability_evidence_expires_at=CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT,
+            isolated_config_sha256=CODEX_EVALUATOR_CONFIG_SHA256,
+        )
+
+
+def test_local_binding_rejects_a_mac_cell_on_linux_before_file_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(module.sys, "platform", "linux")
+    monkeypatch.setattr(module.platform, "machine", lambda: "x86_64")
+
+    with pytest.raises(ValueError, match="codex_runtime_platform_unsupported"):
+        _profile().verify_local_binding()
 
 
 def test_codex_output_schema_omits_only_provider_rejected_uniqueness_keyword() -> None:
@@ -193,6 +288,66 @@ def _attempt(
     )
 
 
+_THREAD_ID = "019a0000-0000-7000-8000-000000000001"
+_TURN_ID = "019a0000-0000-7000-8000-000000000002"
+
+
+def _token_usage_notice(
+    *,
+    thread_id: str = _THREAD_ID,
+    turn_id: str = _TURN_ID,
+    total_input: int = 100,
+    total_cached: int = 40,
+    total_cache_write: int = 0,
+    total_output: int = 30,
+    total_reasoning: int = 10,
+    last_input: int = 100,
+    last_cached: int = 40,
+    last_cache_write: int = 0,
+    last_output: int = 30,
+    last_reasoning: int = 10,
+) -> dict[str, object]:
+    def breakdown(
+        input_tokens: int,
+        cached_input_tokens: int,
+        cache_write_input_tokens: int,
+        output_tokens: int,
+        reasoning_output_tokens: int,
+    ) -> dict[str, int]:
+        return {
+            "inputTokens": input_tokens,
+            "cachedInputTokens": cached_input_tokens,
+            "cacheWriteInputTokens": cache_write_input_tokens,
+            "outputTokens": output_tokens,
+            "reasoningOutputTokens": reasoning_output_tokens,
+            "totalTokens": input_tokens + output_tokens,
+        }
+
+    return {
+        "method": "thread/tokenUsage/updated",
+        "params": {
+            "threadId": thread_id,
+            "turnId": turn_id,
+            "tokenUsage": {
+                "last": breakdown(
+                    last_input,
+                    last_cached,
+                    last_cache_write,
+                    last_output,
+                    last_reasoning,
+                ),
+                "total": breakdown(
+                    total_input,
+                    total_cached,
+                    total_cache_write,
+                    total_output,
+                    total_reasoning,
+                ),
+            },
+        },
+    }
+
+
 class _Runtime:
     def __init__(
         self,
@@ -204,7 +359,7 @@ class _Runtime:
     ) -> None:
         self.profile = profile
         self.workdir = Path("/private/empty-attempt")
-        self.pending_notifications: list[dict[str, object]] = []
+        self.pending_notifications: deque[dict[str, object]] = deque()
         self.model_available = model_available
         self.account = (
             {"type": "chatgpt", "email": "discard@example", "planType": "plus"}
@@ -320,7 +475,7 @@ class _LoginRuntime:
         self.login_notifications = list(login_notifications or [])
         self.cancel_error = cancel_error
         self.block_read = block_read
-        self.pending_notifications: list[dict[str, object]] = []
+        self.pending_notifications: deque[dict[str, object]] = deque()
         self.methods: list[str] = []
         self.timeouts: list[float] = []
         self.read_timeouts: list[float] = []
@@ -502,7 +657,7 @@ async def test_login_demultiplexes_exact_remote_control_notice_before_completion
     assert result.auth_mode == "chatgpt"
     assert result.model_available is True
     assert runtime.methods.count("account/login/cancel") == 0
-    assert runtime.pending_notifications == []
+    assert not runtime.pending_notifications
     assert "discard-installation-canary" not in repr(result)
     assert "discard-server-canary" not in repr(result)
 
@@ -536,6 +691,145 @@ _LOGIN_COMPLETED: dict[str, object] = {
     "method": "account/login/completed",
     "params": {"loginId": "login-1", "success": True},
 }
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        {},
+        {"limitId": "premium", "primary": None, "secondary": None},
+        {"limitId": None, "credits": None, "individualLimit": None},
+        {"limitId": "other-bucket", "primary": {"usedPercent": 100}},
+        {"secondary": {"usedPercent": 0, "resetsAt": None, "windowDurationMins": None}},
+        {"credits": {"hasCredits": True, "unlimited": False}},
+        {
+            "individualLimit": {
+                "limit": "10.0",
+                "remainingPercent": 0,
+                "resetsAt": 1,
+                "used": "10.0",
+            }
+        },
+    ],
+)
+async def test_sparse_rate_limit_snapshots_do_not_prevent_a_valid_answer(
+    monkeypatch: pytest.MonkeyPatch, snapshot: dict[str, object]
+) -> None:
+    runtime = _Runtime(_profile())
+    notice: dict[str, object] = {
+        "method": "account/rateLimits/updated",
+        "params": {"rateLimits": snapshot},
+    }
+    # Exercise the strict pre-disclosure validator too; post-ack fallback must not mask
+    # accidental rejection of a supported 0.150.1 sparse shape.
+    module._discard_rate_limits_notification(notice)  # pyright: ignore[reportPrivateUsage]
+    runtime.events.insert(0, notice)
+    result = await _evaluate(monkeypatch, runtime)
+    assert type(result) is SemanticResultSuccess
+    assert result.provenance.runtime_evidence is not None
+    assert result.provenance.runtime_evidence.failure_stage is None
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        {"limitId": "premium", "primary": None, "secondary": None},
+        {"limitId": 42, "limitName": "private-account-canary"},
+    ],
+)
+@pytest.mark.parametrize(
+    ("native_error", "failure_class"),
+    [
+        ("usageLimitExceeded", SemanticFailureClass.QUOTA_EXHAUSTED),
+        ({"httpConnectionFailed": {"httpStatusCode": 429}}, SemanticFailureClass.RATE_LIMITED),
+    ],
+)
+async def test_rate_limit_bookkeeping_cannot_mask_authoritative_quota_or_rate_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot: dict[str, object],
+    native_error: object,
+    failure_class: SemanticFailureClass,
+) -> None:
+    runtime = _Runtime(_profile())
+    runtime.events[:0] = [
+        {"method": "account/rateLimits/updated", "params": {"rateLimits": snapshot}},
+        {
+            "method": "error",
+            "params": {
+                "error": {"codexErrorInfo": native_error, "message": "private-account-canary"}
+            },
+        },
+    ]
+    result = await _evaluate(monkeypatch, runtime)
+    assert type(result) is SemanticResultUnavailable
+    assert result.provenance.failure_class is failure_class
+    assert result.provenance.runtime_evidence is not None
+    assert result.provenance.runtime_evidence.failure_stage == "turn_failed"
+    assert result.provenance.runtime_evidence.turn_acknowledged is True
+    assert result.provenance.runtime_evidence.process_cleanup == "terminated"
+    assert "private-account-canary" not in repr(result)
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        None,
+        [],
+        {"unexpected": "private-account-canary"},
+        {"limitId": 42},
+        {"limitName": "x" * 129},
+        {"planType": []},
+        {"spendControlReached": 1},
+        {"rateLimitReachedType": "unknown-canary"},
+        {"primary": {}},
+        {"primary": {"usedPercent": True}},
+        {"primary": {"usedPercent": 1.5}},
+        {"primary": {"usedPercent": 2**31}},
+        {"secondary": {"usedPercent": 1, "resetsAt": 2**63}},
+        {"secondary": {"usedPercent": 1, "windowDurationMins": "1"}},
+        {"credits": {"hasCredits": 1, "unlimited": False}},
+        {"credits": {"hasCredits": True, "unlimited": False, "balance": "x" * 65}},
+        {"individualLimit": {"limit": None, "remainingPercent": 1, "resetsAt": 1, "used": "1"}},
+    ],
+)
+async def test_malformed_rate_limit_snapshot_records_only_nonterminal_diagnostic(
+    monkeypatch: pytest.MonkeyPatch, snapshot: object
+) -> None:
+    notice: dict[str, object] = {
+        "method": "account/rateLimits/updated",
+        "params": {"rateLimits": snapshot},
+    }
+    with pytest.raises(ValueError, match="^codex_app_server_rate_limits_invalid$"):
+        module._discard_rate_limits_notification(notice)  # pyright: ignore[reportPrivateUsage]
+    runtime = _Runtime(_profile())
+    runtime.events.insert(0, notice)
+    result = await _evaluate(monkeypatch, runtime)
+    assert type(result) is SemanticResultSuccess
+    assert result.provenance.failure_class is None
+    assert result.provenance.runtime_evidence is not None
+    assert result.provenance.runtime_evidence.failure_stage == "rate_limits_invalid"
+    assert "canary" not in repr(result)
+
+
+@pytest.mark.parametrize(
+    "notice",
+    [
+        {"method": "unreviewed/method", "params": {}},
+        {"method": "account/rateLimits/updated", "id": 99, "params": {}},
+        {"method": "item/started", "params": {"item": {"type": "commandExecution"}}},
+    ],
+)
+async def test_post_ack_isolation_failures_remain_terminal_without_answer_blame(
+    monkeypatch: pytest.MonkeyPatch, notice: dict[str, object]
+) -> None:
+    runtime = _Runtime(_profile())
+    runtime.events.insert(0, notice)
+    result = await _evaluate(monkeypatch, runtime)
+    assert type(result) is SemanticResultUnavailable
+    assert result.provenance.failure_class is SemanticFailureClass.UNSUPPORTED_PROFILE
+    assert result.provenance.runtime_evidence is not None
+    assert result.provenance.runtime_evidence.final_output_sha256 is None
+    assert result.provenance.runtime_evidence.process_cleanup == "terminated"
 
 
 async def test_login_demultiplexes_every_reviewed_predisclosure_notice_in_the_stream(
@@ -594,7 +888,7 @@ async def test_login_tolerates_predisclosure_notices_around_the_account_projecti
         },
         {"method": "thread/name/updated", "params": {"threadId": "t", "threadName": "canary"}},
         {"method": "item/completed", "params": {"item": {"type": "commandExecution"}}},
-        {"method": "account/rateLimits/updated", "params": {"rateLimits": {"limitId": "x"}}},
+        {"method": "account/rateLimits/updated", "params": {"rateLimits": {"limitId": 42}}},
     ],
 )
 async def test_login_still_fails_closed_on_unallowlisted_or_malformed_notices(
@@ -907,7 +1201,7 @@ async def test_cleanup_reaps_child_after_process_group_signal_race(
         process=cast(asyncio.subprocess.Process, process),
         workdir=workdir,
         stderr_task=asyncio.create_task(stderr_drain()),
-        pending_notifications=[],
+        pending_notifications=deque(),
     )
     probes = 0
 
@@ -952,7 +1246,7 @@ async def test_cleanup_reports_failed_when_process_disappears_without_reap(
         process=cast(asyncio.subprocess.Process, FakeProcess()),
         workdir=workdir,
         stderr_task=asyncio.create_task(stderr_drain()),
-        pending_notifications=[],
+        pending_notifications=deque(),
     )
 
     def absent_group(_pid: int, _sig: int) -> None:
@@ -964,6 +1258,34 @@ async def test_cleanup_reports_failed_when_process_disappears_without_reap(
 
     assert result == "failed"
     assert not workdir.exists()
+
+
+@pytest.mark.parametrize("line", [b"private-transport-canary\n", b"[]\n"])
+async def test_malformed_jsonl_is_transport_failure_even_after_acknowledgement(
+    line: bytes,
+) -> None:
+    class FakeProcess:
+        stdout = asyncio.StreamReader()
+
+    async def stderr_drain() -> bool:
+        return False
+
+    process = FakeProcess()
+    process.stdout.feed_data(line)
+    runtime = module._CodexProcess(  # pyright: ignore[reportPrivateUsage]
+        profile=_profile(),
+        process=cast(asyncio.subprocess.Process, process),
+        workdir=Path("/unused-test-workdir"),
+        stderr_task=asyncio.create_task(stderr_drain()),
+        pending_notifications=deque(),
+    )
+    with pytest.raises(ValueError, match="^codex_app_server_message_invalid$") as error:
+        await runtime.read(1)
+    await runtime.stderr_task
+    assert module._classify_runtime_exception(  # pyright: ignore[reportPrivateUsage]
+        error.value, turn_acknowledged=True
+    ) == ("post_ack_unknown", SemanticFailureClass.TRANSPORT)
+    assert "canary" not in repr(error.value)
 
 
 async def test_success_records_weaker_runtime_boundary_without_identity_or_transcript(
@@ -985,6 +1307,164 @@ async def test_success_records_weaker_runtime_boundary_without_identity_or_trans
     assert evidence.final_output_sha256 is not None
     assert "discard@example" not in repr(result)
     assert "no_material_discrepancy" not in repr(evidence)
+
+
+async def test_token_usage_keeps_latest_cumulative_total_and_non_overlapping_subsets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(_profile())
+    runtime.events[0:0] = [
+        _token_usage_notice(total_input=100, total_cached=40, total_output=30),
+        _token_usage_notice(
+            total_input=160,
+            total_cached=80,
+            total_cache_write=5,
+            total_output=50,
+            total_reasoning=20,
+        ),
+    ]
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultSuccess
+    evidence = result.provenance.runtime_evidence
+    assert evidence is not None and evidence.token_usage is not None
+    assert evidence.token_usage.input_tokens == 160
+    assert evidence.token_usage.cached_input_tokens == 80
+    assert evidence.token_usage.cache_write_input_tokens == 5
+    assert evidence.token_usage.output_tokens == 50
+    assert evidence.token_usage.reasoning_output_tokens == 20
+    assert evidence.token_usage.total_tokens == 210
+    assert result.provenance.token_usage is not None
+    assert result.provenance.token_usage.input_tokens == 160
+    assert result.provenance.token_usage.output_tokens == 50
+    assert result.provenance.token_usage.total_tokens == 210
+
+
+async def test_token_usage_buffered_before_turn_ack_is_attributed_after_ack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(_profile())
+    original_request = runtime.request
+
+    async def request_with_buffered_usage(
+        request_id: int, method: str, params: object, timeout: float
+    ) -> dict[str, object]:
+        if method == "turn/start":
+            runtime.pending_notifications.append(_token_usage_notice(total_cache_write=7))
+        return await original_request(request_id, method, params, timeout)
+
+    monkeypatch.setattr(runtime, "request", request_with_buffered_usage)
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultSuccess
+    evidence = result.provenance.runtime_evidence
+    assert evidence is not None and evidence.token_usage is not None
+    assert evidence.token_usage.cache_write_input_tokens == 7
+
+
+async def test_cumulative_token_usage_regression_keeps_larger_snapshot_and_marks_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(_profile())
+    runtime.events[0:0] = [
+        _token_usage_notice(total_input=160, total_cached=80, total_output=50),
+        _token_usage_notice(total_input=120, total_cached=60, total_output=40),
+    ]
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultSuccess
+    evidence = result.provenance.runtime_evidence
+    assert evidence is not None and evidence.token_usage is not None
+    assert evidence.token_usage.total_tokens == 210
+    assert evidence.failure_stage == "token_usage_invalid"
+
+
+async def test_malformed_matching_token_usage_is_nonterminal_and_stays_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(_profile())
+    runtime.events.insert(
+        0,
+        {
+            "method": "thread/tokenUsage/updated",
+            "params": {
+                "threadId": _THREAD_ID,
+                "turnId": _TURN_ID,
+                "tokenUsage": {"last": {}, "total": {}},
+            },
+        },
+    )
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultSuccess
+    evidence = result.provenance.runtime_evidence
+    assert evidence is not None
+    assert evidence.token_usage is None
+    assert evidence.failure_stage == "token_usage_invalid"
+
+
+async def test_unrelated_token_usage_is_ignored_without_retaining_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(_profile())
+    runtime.events.insert(
+        0,
+        _token_usage_notice(thread_id="other-thread", turn_id="other-turn"),
+    )
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultSuccess
+    evidence = result.provenance.runtime_evidence
+    assert evidence is not None
+    assert evidence.token_usage is None
+    assert evidence.failure_stage is None
+
+
+async def test_token_usage_survives_terminal_turn_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(_profile())
+    runtime.events[0:0] = [
+        _token_usage_notice(total_input=120, total_cached=60, total_output=40),
+        {
+            "method": "error",
+            "params": {"error": {"codexErrorInfo": "usageLimitExceeded"}},
+        },
+    ]
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultUnavailable
+    evidence = result.provenance.runtime_evidence
+    assert evidence is not None and evidence.token_usage is not None
+    assert evidence.token_usage.total_tokens == 160
+    assert result.provenance.token_usage is not None
+    assert result.provenance.token_usage.total_tokens == 160
+
+
+def test_token_usage_parser_rejects_incoherent_counters() -> None:
+    notices = [_token_usage_notice(total_cached=101), _token_usage_notice(total_reasoning=31)]
+    incoherent_total = _token_usage_notice()
+    incoherent_params = cast(dict[str, object], incoherent_total["params"])
+    incoherent_usage = cast(dict[str, object], incoherent_params["tokenUsage"])
+    incoherent_total_breakdown = cast(dict[str, object], incoherent_usage["total"])
+    incoherent_total_breakdown["totalTokens"] = 1
+    notices.append(incoherent_total)
+    missing_cache_write = _token_usage_notice()
+    missing_params = cast(dict[str, object], missing_cache_write["params"])
+    missing_usage = cast(dict[str, object], missing_params["tokenUsage"])
+    del cast(dict[str, object], missing_usage["total"])["cacheWriteInputTokens"]
+    notices.append(missing_cache_write)
+
+    for notice in notices:
+        with pytest.raises(ValueError, match="^codex_app_server_token_usage_invalid$"):
+            module._runtime_token_usage_from_notification(  # pyright: ignore[reportPrivateUsage]
+                notice, thread_id=_THREAD_ID, turn_id=_TURN_ID
+            )
 
 
 async def test_missing_model_fails_before_case_disclosure(
@@ -1118,7 +1598,7 @@ async def test_tool_event_is_rejected_after_ack_with_honest_cleanup(
 
     result = await _evaluate(monkeypatch, runtime)
 
-    assert type(result) is SemanticResultInvalid
+    assert type(result) is SemanticResultUnavailable
     assert result.provenance.runtime_evidence is not None
     assert result.provenance.runtime_evidence.turn_acknowledged is True
     assert result.provenance.runtime_evidence.process_cleanup == "terminated"
@@ -1164,8 +1644,10 @@ async def test_exact_rate_limit_update_is_discarded_after_ack(
     assert "discard-balance-canary" not in repr(result)
 
 
+@pytest.mark.parametrize("malformed", [False, True])
 async def test_native_warning_after_ack_is_transport_unknown_without_message_retention(
     monkeypatch: pytest.MonkeyPatch,
+    malformed: bool,
 ) -> None:
     runtime = _Runtime(_profile())
     runtime.events[0] = {
@@ -1176,6 +1658,8 @@ async def test_native_warning_after_ack_is_transport_unknown_without_message_ret
         },
         "emittedAtMs": 1788101617712,
     }
+    if malformed:
+        runtime.events[0]["emittedAtMs"] = "malformed-warning-canary"
 
     result = await _evaluate(monkeypatch, runtime)
 
@@ -1183,7 +1667,22 @@ async def test_native_warning_after_ack_is_transport_unknown_without_message_ret
     assert result.provenance.failure_class is SemanticFailureClass.TRANSPORT
     assert result.provenance.runtime_evidence is not None
     assert result.provenance.runtime_evidence.turn_acknowledged is True
+    assert result.provenance.runtime_evidence.failure_stage == "runtime_warning"
     assert "discard-native-warning-canary" not in repr(result)
+    assert "malformed-warning-canary" not in repr(result)
+
+
+@pytest.mark.parametrize("turn_acknowledged", [False, True])
+def test_malformed_warning_classification_preserves_runtime_ambiguity(
+    turn_acknowledged: bool,
+) -> None:
+    assert module._classify_runtime_exception(  # pyright: ignore[reportPrivateUsage]
+        ValueError("codex_app_server_warning_invalid"),
+        turn_acknowledged=turn_acknowledged,
+    ) == (
+        "post_ack_unknown" if turn_acknowledged else "unavailable",
+        SemanticFailureClass.TRANSPORT,
+    )
 
 
 async def test_unexpected_native_failure_stays_runtime_bounded_before_disclosure(
@@ -1401,7 +1900,7 @@ async def test_unknown_message_phase_is_a_forbidden_event(
 
     result = await _evaluate(monkeypatch, runtime)
 
-    assert type(result) is SemanticResultInvalid
+    assert type(result) is SemanticResultUnavailable
     assert result.provenance.runtime_evidence is not None
     assert result.provenance.runtime_evidence.failure_stage == "event_forbidden"
 
@@ -1541,7 +2040,7 @@ async def test_delta_storm_is_bounded_by_the_event_limit_stage(
 
     result = await _evaluate(monkeypatch, runtime)
 
-    assert type(result) is SemanticResultInvalid
+    assert type(result) is SemanticResultUnavailable
     assert result.provenance.runtime_evidence is not None
     assert result.provenance.runtime_evidence.failure_stage == "event_limit"
 
@@ -1558,6 +2057,41 @@ async def test_large_streamed_judgment_fits_the_event_budget(
     assert type(result) is SemanticResultSuccess
 
 
+@pytest.mark.parametrize("buffered_count", [1, 4094, 4096])
+async def test_buffered_notifications_drain_before_live_events_with_the_same_limit(
+    monkeypatch: pytest.MonkeyPatch, buffered_count: int
+) -> None:
+    class BufferedRuntime(_Runtime):
+        reads = 0
+
+        async def request(
+            self, request_id: int, method: str, params: object, timeout: float
+        ) -> dict[str, object]:
+            result = await super().request(request_id, method, params, timeout)
+            if method == "turn/start":
+                self.pending_notifications.extend(
+                    {"method": "item/agentMessage/delta", "params": {"delta": "x"}}
+                    for _ in range(buffered_count)
+                )
+            return result
+
+        async def read(self, timeout: float) -> dict[str, object]:
+            self.reads += 1
+            return await super().read(timeout)
+
+    runtime = BufferedRuntime(_profile())
+    result = await _evaluate(monkeypatch, runtime)
+    if buffered_count == 4096:
+        assert type(result) is SemanticResultUnavailable
+        assert result.provenance.runtime_evidence is not None
+        assert result.provenance.runtime_evidence.failure_stage == "event_limit"
+        assert runtime.reads == 0
+    else:
+        assert type(result) is SemanticResultSuccess
+        assert runtime.reads == 2
+    assert not runtime.pending_notifications
+
+
 async def test_tool_event_and_unconfirmed_cleanup_name_their_stages(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1567,7 +2101,7 @@ async def test_tool_event_and_unconfirmed_cleanup_name_their_stages(
         "params": {"item": {"type": "commandExecution", "text": "never-retained"}},
     }
     tool = await _evaluate(monkeypatch, tool_runtime)
-    assert type(tool) is SemanticResultInvalid
+    assert type(tool) is SemanticResultUnavailable
     assert tool.provenance.runtime_evidence is not None
     assert tool.provenance.runtime_evidence.failure_stage == "tool_event_forbidden"
 

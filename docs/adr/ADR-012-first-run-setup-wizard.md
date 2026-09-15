@@ -102,8 +102,8 @@ exactly those contracts and connects the steps without weakening any existing tr
    absence only when that successful structural listing contains no `yoetz` name. A failed or
    malformed listing fails closed; a single matching entry is classified normally; duplicate
    matching names are ambiguous and fail closed. In ambient mode it runs the exact `codex mcp add
-   yoetz -- yoetz mcp serve` command; under ADR-026 isolation it runs `codex mcp add yoetz --env
-   YOETZ_ISOLATED_ROOT=<validated-root> -- yoetz mcp serve`. It does so only after that positive
+   yoetz -- yoetz mcp serve --host codex` command; under ADR-026 isolation it runs `codex mcp add yoetz --env
+   YOETZ_ISOLATED_ROOT=<validated-root> -- yoetz mcp serve --host codex`. It does so only after that positive
    absence observation; a foreign same-name entry is
    preserved and refused with `foreign_entry_present` — there is no force path. The structural
    JSON parser rejects duplicate keys, nonstandard constants, and truncated output. Codex exposes
@@ -472,3 +472,24 @@ preserve-and-review rule stands; a foreign entry is reported with a manual follo
 **A `YOETZ_SKIP_SETUP_WIZARD` environment opt-out.** Rejected: the non-TTY guard already covers
 automation, and the marker covers humans; an ambient env escape would make first-run silently
 skippable by inherited shell configuration.
+
+
+## Verification defaults amendment (issue #303)
+
+Maintainer decision: new configurations propose `verification.semantic = "required"` and
+`verification.max_findings = 10` (the existing upper bound). Required review preserves completed
+deterministic results; absent, denied, unavailable or invalid providers yield the existing terminal
+semantic status and incomplete coverage, never fabricated success. Explicit `deterministic_only`
+remains the bounded local option.
+
+Existing configuration files retain their explicit values. Missing verification leaves in an
+existing file resolve to the released `optional` / `3` defaults; loading and upgrades do not rewrite
+it. A deliberate migration previews and explicitly writes `required` / `10` using the existing
+configuration writer. Unrelated rewrites must materialize the effective old values. A missing
+configuration file uses the new defaults. Neither case grants disclosure authority.
+
+The existing reviewed-route `assisted_review` recommendation remains the privacy proposal. The
+exact repository-scoped categories, selection bounds, provider posture and retention are shown by
+the current trusted privacy ceremony; acceptance is still required. Unknown, stale or
+account-unqualified provider posture does not acquire a reviewed assurance. Existing durable policy
+bytes stay unchanged. Editing verification settings cannot enable egress or silently migrate policy.

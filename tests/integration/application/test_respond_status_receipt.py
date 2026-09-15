@@ -117,10 +117,12 @@ from yoetz.protocol.models import (
     RespondRequest,
     SemanticReason,
     SemanticStatus,
+    StartRequest,
     StatusCandidateFindingsPageModel,
     StatusCompactPageModel,
     StatusEvidencePageModel,
     StatusFindingsPageModel,
+    StatusObligationsPageModel,
     StatusOperationPageModel,
     StatusRequest,
 )
@@ -158,12 +160,14 @@ class _FailSecondPersistObjects(MemoryObjects):
     async def commitment_for(self, data: bytes, kind: ObjectKind) -> str:
         return await self._delegate.commitment_for(data, kind)
 
-    async def stage(self, source: ObjectSource, metadata: ObjectMetadata) -> StagedObject:
+    async def stage(
+        self, source: ObjectSource, metadata: ObjectMetadata, *, object_id: str | None = None
+    ) -> StagedObject:
         self.stage_calls += 1
         if self._fault_at == "stage" and self.stage_calls == 2 and not self._failed:
             self._failed = True
             raise OSError("simulated_second_stage_failure")
-        return await self._delegate.stage(source, metadata)
+        return await self._delegate.stage(source, metadata, object_id=object_id)
 
     async def finalize(self, staged: StagedObject) -> ObjectRef:
         self.finalize_calls += 1
@@ -214,10 +218,13 @@ class _WorkflowRuntime(MemoryStartRuntime):
         super().__init__(clock, ids)
         self.ledger_backend = ledger_backend
         self.sqlite_connections: list[apsw.Connection] = []
+        self.owner_tasks: dict[tuple[str, str], str] = {}
 
     async def provision_start(self, command: BundleProvisionCommand) -> TaskRuntime:
         if self.ledger_backend == "memory":
-            return await super().provision_start(command)
+            runtime = await super().provision_start(command)
+            self.owner_tasks[(command.session_id, command.writer_id)] = command.task_id
+            return runtime
         resources = self.resources.get(command.task_id)
         if resources is None:
             objects = MemoryObjects(self.ids)
@@ -243,6 +250,7 @@ class _WorkflowRuntime(MemoryStartRuntime):
             self.sqlite_connections.append(db)
         ledger, objects = resources
         self.owners[(command.session_id, command.writer_id)] = command.owner_generation
+        self.owner_tasks[(command.session_id, command.writer_id)] = command.task_id
         return TaskRuntime(
             command.task_id,
             command.session_id,
@@ -260,7 +268,9 @@ class _WorkflowRuntime(MemoryStartRuntime):
 
     async def route(self, command: RouteCommand) -> TaskRuntime:
         assert command.writer_id is not None
-        task_id, resources = next(iter(self.resources.items()))
+        task_id = self.owner_tasks.get((command.session_id, command.writer_id))
+        assert task_id is not None
+        resources = self.resources[task_id]
         ledger, objects = resources
         assert (command.session_id, command.writer_id) in self.owners
         return TaskRuntime(
@@ -1166,7 +1176,7 @@ async def test_receipt_build_context_is_complete() -> None:
     assert "only responses to the findings it returned were published after it" in limitations
     assert f"Its verdict is current as of subject frontier {tested}" in limitations
     assert f"not frontier {receipt.subject_frontier.sequence}" in limitations
-    assert "Re-run check at this frontier to close the gap." in limitations
+    assert "Re-run check to evaluate the later material" in limitations
 
     text_wire: dict[str, JsonValue] = {
         **receipt_wire,
@@ -1710,15 +1720,18 @@ async def test_check_respond_recheck_reaches_a_fixed_point() -> None:
     assert status.closure_readiness.blocking_conditions == (
         "receipt_findings_unresolved",
         "no_plan_published",
+        "coverage_gaps_declared",
     )
     assert item.freshness != "stale_after_material_change"
 
     # The MCP text fallback stands in for this exact result when a host drops structured content,
-    # so it must report the singleton's own counters and freshness, not the newest record
-    # envelope's coverage, which reads `current` at this same frontier.
+    # so it must report the singleton's own counters and freshness. Aggregate and item coverage
+    # both retain the deterministic-only limitation instead of claiming complete coverage.
     summary = summary_for_status(status.as_json())
     assert f"freshness: {item.freshness}" in summary
-    assert status.coverage.ledger_freshness.value != item.freshness
+    assert status.coverage.ledger_freshness.value == item.freshness
+    assert "semantic_review_not_requested" in status.coverage.known_gaps
+    assert "check_not_applicable" not in status.coverage.known_gaps
     assert "unanswered findings: 0" in summary
     assert f"receipt-blocking findings: {item.receipt_blocking_finding_count}" in summary
 
@@ -2069,6 +2082,240 @@ async def test_status_operation_after_reattach_recovers_prior_session_request() 
     assert binding is not None
     assert binding.session_id == attached.session_id
     assert binding.writer_id == attached.writer_id
+
+
+async def test_explicit_sibling_handoff_preserves_predecessor_state_and_fresh_scope() -> None:
+    """A bounded sibling keeps the predecessor receipt/findings/obligations as separate history."""
+
+    app, _runtime, _ = _build_app(seed_offset=15)
+    started, checked, predecessor_obligation = await _bootstrap_finding(app, seed=2300, refs=True)
+
+    predecessor_findings_status = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 2310)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "findings",
+                "limit": "10",
+                "at_frontier": str(checked.result_frontier.sequence),
+            }
+        )
+    )
+    predecessor_findings = cast(StatusFindingsPageModel, predecessor_findings_status.page)
+    predecessor_finding_ids = tuple(item.finding_id for item in predecessor_findings.items)
+    assert predecessor_finding_ids
+
+    predecessor_obligations_status = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 2311)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "obligations",
+                "limit": "10",
+                "at_frontier": str(checked.result_frontier.sequence),
+            }
+        )
+    )
+    predecessor_obligations = cast(StatusObligationsPageModel, predecessor_obligations_status.page)
+    assert tuple(item.obligation_id for item in predecessor_obligations.items) == (
+        predecessor_obligation,
+    )
+
+    predecessor_receipt = await app.receipt(
+        ReceiptRequest.model_validate(
+            _receipt_wire(
+                2312,
+                task_id=started.task_id,
+                session=started.session_id,
+                writer=started.writer_id,
+                frontier=checked.result_frontier,
+            )
+        )
+    )
+    assert predecessor_receipt.conclusion == "unresolved_findings_remain"
+
+    sibling_wire = start_request(2320, title="Bounded repaired verification", refs=True).model_dump(
+        mode="json", exclude_none=True
+    )
+    sibling_wire["mode"] = "create"
+    sibling_wire["external_ref"] = "issue-613-recovery-v1"
+    sibling = await app.start(StartRequest.model_validate(sibling_wire))
+    assert sibling.task_id != started.task_id
+    assert sibling.session_id != started.session_id
+    assert sibling.writer_id != started.writer_id
+
+    sibling_obligation = protocol_id("obl_", 2321)
+    sibling_evidence = protocol_id("evd_", 2322)
+    sibling_published = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 2323)),
+                "session_id": sibling.session_id,
+                "writer_id": sibling.writer_id,
+                "expected_frontier": _frontier(sibling.frontier),
+                "event_drafts": (
+                    {
+                        "event_id": protocol_id("evt_", 2324),
+                        "schema": {"name": "plan_published", "version": "1.0.0"},
+                        "occurred_at": "2026-07-19T12:00:02.000Z",
+                        "causal_parents": (),
+                        "payload": {
+                            "plan_version": 1,
+                            "summary": "Run the bounded repaired verification scope.",
+                            "obligation_refs": (sibling_obligation,),
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                    {
+                        "event_id": protocol_id("evt_", 2325),
+                        "schema": {"name": "obligation_published", "version": "1.0.0"},
+                        "occurred_at": "2026-07-19T12:00:03.000Z",
+                        "causal_parents": (),
+                        "payload": {
+                            "obligation_id": sibling_obligation,
+                            "description": "Complete the repaired verification scope.",
+                            "acceptance_criteria": "A new check covers the repaired scope.",
+                            "evidence_expectation": "A caller-published test result commitment.",
+                            "status": "open",
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                    {
+                        "event_id": protocol_id("evt_", 2326),
+                        "schema": {"name": "evidence_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-07-19T12:00:04.000Z",
+                        "causal_parents": (),
+                        "payload": {
+                            "evidence_id": sibling_evidence,
+                            "evidence_kind": "test_result",
+                            "strength": "content_digest",
+                            "content_digest": "sha256:" + "b" * 64,
+                            "observed_at": "2026-07-19T12:00:04.000Z",
+                            "description": "A caller-published repaired-scope test result commitment.",
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                ),
+            }
+        )
+    )
+    assert type(sibling_published) is PublishWorkInternalResult
+
+    sibling_checked = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 2327)),
+                "session_id": sibling.session_id,
+                "writer_id": sibling.writer_id,
+                "expected_frontier": _frontier(sibling_published.result_frontier),
+                "mode": "deterministic_only",
+                "max_findings": "3",
+            }
+        )
+    )
+    assert type(sibling_checked) is CheckCommitResult
+
+    sibling_evidence_status = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 2328)),
+                "session_id": sibling.session_id,
+                "writer_id": sibling.writer_id,
+                "view": "evidence",
+                "limit": "10",
+                "at_frontier": str(sibling_checked.result_frontier.sequence),
+            }
+        )
+    )
+    sibling_evidence_page = cast(StatusEvidencePageModel, sibling_evidence_status.page)
+    assert any(item.evidence_id == sibling_evidence for item in sibling_evidence_page.items)
+
+    sibling_receipt = await app.receipt(
+        ReceiptRequest.model_validate(
+            _receipt_wire(
+                2329,
+                task_id=sibling.task_id,
+                session=sibling.session_id,
+                writer=sibling.writer_id,
+                frontier=sibling_checked.result_frontier,
+            )
+        )
+    )
+    sibling_document = cast(Mapping[str, JsonValue], sibling_receipt.document)
+    sibling_document_bytes = canonical_encode(sibling_document)
+    assert sibling_obligation.encode() in sibling_document_bytes
+    assert predecessor_obligation.encode() not in sibling_document_bytes
+    assert predecessor_finding_ids[0].encode() not in sibling_document_bytes
+
+    # The predecessor was never mutated by the sibling's plan, evidence, check, or receipt.
+    predecessor_findings_after_status = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 2330)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "findings",
+                "limit": "10",
+            }
+        )
+    )
+    predecessor_findings_after = cast(
+        StatusFindingsPageModel, predecessor_findings_after_status.page
+    )
+    assert predecessor_findings_after_status.subject_frontier == predecessor_receipt.result_frontier
+    assert predecessor_findings_after_status.result_frontier == predecessor_receipt.result_frontier
+    assert tuple(
+        item.model_dump(mode="json") for item in predecessor_findings_after.items
+    ) == tuple(item.model_dump(mode="json") for item in predecessor_findings.items)
+
+    predecessor_obligations_after_status = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 2331)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "obligations",
+                "limit": "10",
+            }
+        )
+    )
+    predecessor_obligations_after = cast(
+        StatusObligationsPageModel, predecessor_obligations_after_status.page
+    )
+    assert (
+        predecessor_obligations_after_status.subject_frontier == predecessor_receipt.result_frontier
+    )
+    assert (
+        predecessor_obligations_after_status.result_frontier == predecessor_receipt.result_frontier
+    )
+    assert tuple(
+        item.model_dump(mode="json") for item in predecessor_obligations_after.items
+    ) == tuple(item.model_dump(mode="json") for item in predecessor_obligations.items)
+
+    # Re-read the original receipt through its idempotent request, without creating a new one.
+    predecessor_receipt_after = await app.receipt(
+        ReceiptRequest.model_validate(
+            _receipt_wire(
+                2312,
+                task_id=started.task_id,
+                session=started.session_id,
+                writer=started.writer_id,
+                frontier=checked.result_frontier,
+            )
+        )
+    )
+    assert predecessor_receipt_after.subject_frontier == predecessor_receipt.subject_frontier
+    assert predecessor_receipt_after.conclusion == predecessor_receipt.conclusion
+    assert predecessor_receipt_after.coverage == predecessor_receipt.coverage
+    assert predecessor_receipt_after.receipt_id == predecessor_receipt.receipt_id
+    assert predecessor_receipt_after.receipt_digest == predecessor_receipt.receipt_digest
+    predecessor_document = cast(Mapping[str, JsonValue], predecessor_receipt_after.document)
+    assert predecessor_obligation.encode() in canonical_encode(predecessor_document)
 
 
 async def _drain_observation_record(
@@ -2472,6 +2719,13 @@ async def test_finding_free_observation_work_keeps_check_applicable(
     compact = cast(StatusCompactPageModel, status.page)
     assert CheckType.DETERMINISTIC in compact.items[0].coverage.check_types
     assert compact.items[0].freshness != LedgerFreshness.STALE_AFTER_MATERIAL_CHANGE.value
+    # Status and the receipt must expose the same earlier-frontier qualification. The suffix is
+    # attributable observation work, so the check remains useful, but compact status must not
+    # silently report the current ledger as fully covered.
+    assert "check_current_as_of_earlier_frontier" in compact.items[0].coverage.known_gaps
+    assert "check_current_as_of_earlier_frontier" in compact.items[0].gaps
+    assert "check_current_as_of_earlier_frontier" in status.coverage.known_gaps
+    assert "coverage_gaps_declared" in status.closure_readiness.blocking_conditions
 
     receipt = await app.receipt(
         ReceiptRequest.model_validate(
@@ -2490,6 +2744,95 @@ async def test_finding_free_observation_work_keeps_check_applicable(
     assert "check_not_applicable" not in receipt.coverage.known_gaps
     assert "check_current_as_of_earlier_frontier" in receipt.coverage.known_gaps
     assert CheckType.DETERMINISTIC in receipt.coverage.check_types
+    # Issue #657: the suffix here is a check-answering response followed by finding-free host
+    # observations, so the explanation must disclose the mixture rather than claim responses only.
+    assert receipt.document is not None
+    limitations = _limitations_body(receipt.document)
+    assert "responses to the findings it returned and finding-free host observations" in (
+        limitations
+    )
+    assert "only responses to the findings it returned" not in limitations
+    assert f"not frontier {receipt.subject_frontier.sequence}" in limitations
+
+
+def _limitations_body(document: object) -> str:
+    sections = cast(
+        tuple[Mapping[str, JsonValue], ...],
+        cast(Mapping[str, JsonValue], document)["sections"],
+    )
+    return next(
+        cast(str, section["body"])
+        for section in sections
+        if cast(str, section["key"]) == "limitations_and_coverage"
+    )
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_observation_only_suffix_is_named_as_observations(
+    ledger_backend: Literal["memory", "sqlite"],
+) -> None:
+    """Issue #657: a check followed only by finding-free host observations stays attributable,
+    and the receipt must say observations were retained but not evaluated. It must not claim
+    that finding responses were published, and it must keep the tested boundary explicit."""
+
+    app, runtime, _ = _build_app(seed_offset=29, ledger_backend=ledger_backend)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=3800)
+    observed = await _drain_observation_work_sequence(
+        app,
+        runtime,
+        started,
+        seed=3820,
+        expected_frontier=checked.result_frontier.sequence,
+    )
+
+    receipt = await app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 3850)),
+                "task_id": started.task_id,
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(observed.result_frontier),
+                "format": "json",
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+    assert "check_not_applicable" not in receipt.coverage.known_gaps
+    assert "check_current_as_of_earlier_frontier" in receipt.coverage.known_gaps
+    assert CheckType.DETERMINISTIC in receipt.coverage.check_types
+    assert receipt.document is not None
+    limitations = _limitations_body(receipt.document)
+    tested = checked.subject_frontier.sequence
+    assert f"A check is recorded at subject frontier {tested} and still contributes here" in (
+        limitations
+    )
+    assert "finding-free host observations" in limitations
+    assert "not evaluated by that check" in limitations
+    assert "responses to the findings it returned" not in limitations
+    assert f"Its verdict is current as of subject frontier {tested}" in limitations
+    assert f"not frontier {receipt.subject_frontier.sequence}" in limitations
+    assert "Re-run check to evaluate the later material" in limitations
+
+    # The same sentence reaches every delivery rendering (markdown/text project the sections).
+    text_receipt = await app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 3851)),
+                "task_id": started.task_id,
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(receipt.result_frontier),
+                "format": "text",
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+    assert text_receipt.human_text is not None
+    assert "finding-free host observations" in text_receipt.human_text
+    assert "responses to the findings it returned" not in text_receipt.human_text
 
 
 @pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
@@ -2694,9 +3037,10 @@ async def test_receipt_prefix_replay_conflict_is_retryable_with_repair_facts() -
     assert caught.value.code is PublicErrorCode.FRONTIER_CONFLICT
     assert caught.value.retryable is True
     assert dict(caught.value.safe_details) == {
+        "continuation": "frontier_refresh_required",
+        "head_digest": head.head_digest,
         "reason_code": "frontier_changed",
         "sequence": int(head.sequence),
-        "head_digest": head.head_digest,
     }
 
     stale_digest_wire: dict[str, JsonValue] = {
