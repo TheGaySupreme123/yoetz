@@ -157,6 +157,7 @@ def test_each_migration_family_has_contiguous_versions(installed: _Installed) ->
         "0011",
         "0012",
         "0013",
+        "0014",
     ]
     assert payload["catalog_current"] == 5
     assert payload["bundle_current"] == 13
@@ -181,6 +182,7 @@ def test_migration_ddl_contains_only_reviewed_table_rebuilds(installed: _Install
                 "0011",
                 "0012",
                 "0013",
+        "0014",
             ),
         ),
     ):
@@ -206,10 +208,10 @@ def test_migration_ddl_contains_only_reviewed_table_rebuilds(installed: _Install
                     assert upper.count(drop) == 1
                     assert upper.index(copy) < upper.index(drop) < upper.index(rename)
                     upper = upper.replace(drop, "", 1)
-            if (family, version) == ("bundle", "0013"):
-                copy = "INSERT INTO EVENTS_V13_NEW ("
+            if (family, version) == ("bundle", "0014"):
+                copy = "INSERT INTO EVENTS_V14_NEW ("
                 drop = "DROP TABLE EVENTS;"
-                rename = "ALTER TABLE EVENTS_V13_NEW RENAME TO EVENTS;"
+                rename = "ALTER TABLE EVENTS_V14_NEW RENAME TO EVENTS;"
                 assert upper.count(drop) == 1
                 assert upper.index(copy) < upper.index(drop) < upper.index(rename)
                 upper = upper.replace(drop, "", 1)
@@ -265,7 +267,7 @@ def test_fresh_catalog_and_bundle_initialize_at_current_schema_version(
         "catalog_state": "current",
         "catalog_version": 5,
         "bundle_state": "current",
-        "bundle_version": 13,
+        "bundle_version": 14,
     }
 
 

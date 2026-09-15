@@ -174,6 +174,17 @@ def _version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
             "version_schema_template_invalid", entries=(entry.relative_path,)
         ) from exc
 
+    # Bootstrap a newly versioned inventory schema from the released predecessor. The
+    # owning ripple mirrors the enlarged inventory, then rebuilds this schema in the same
+    # pass and verifies a fixed point before reporting success.
+    destination = source.parents[1] / entry.relative_path
+    if entry.schema_version == "2.3.0" and not destination.exists():
+        document = _load_versioned_template(entry, "version/version-manifest-2.2.0.schema.json")
+        cast(dict[str, JsonValue], document["properties"])["schema_version"] = {
+            "const": entry.schema_version
+        }
+        return document
+
     manifest = build_version_manifest()
     version_pairs = dict(manifest.request_result_schema_versions)
     request_versions.clear()
@@ -1007,6 +1018,7 @@ def _runtime_attempt_evidence_schema(entry: _RegistryEntry) -> dict[str, JsonVal
                     __import__(
                         "yoetz.domain.findings", fromlist=["RUNTIME_FAILURE_STAGES"]
                     ).RUNTIME_FAILURE_STAGES
+                    - ({"token_usage_invalid"} if entry.schema_version == "1.0.0" else set())
                 ),
                 "type": "string",
             },
@@ -1045,6 +1057,42 @@ def _runtime_attempt_evidence_schema(entry: _RegistryEntry) -> dict[str, JsonVal
             },
         }
     )
+    if entry.schema_version == "1.1.0":
+        uint53_decimal = {
+            "maxLength": 16,
+            "pattern": (
+                "^(?:0|[1-9][0-9]{0,14}|(?:[1-8][0-9]{15}|900[0-6][0-9]{12}|"
+                "90070[0-9]{11}|90071[0-8][0-9]{10}|900719[0-8][0-9]{9}|"
+                "9007199[01][0-9]{8}|90071992[0-4][0-9]{7}|900719925[0-3][0-9]{6}|"
+                "9007199254[0-6][0-9]{5}|90071992547[0-3][0-9]{4}|"
+                "9007199254740[0-8][0-9]{2}|90071992547409[0-8][0-9]|"
+                "9007199254740990|9007199254740991))$"
+            ),
+            "type": "string",
+        }
+        properties["token_usage"] = {
+            "additionalProperties": False,
+            "properties": {
+                name: dict(uint53_decimal)
+                for name in (
+                    "cached_input_tokens",
+                    "cache_write_input_tokens",
+                    "input_tokens",
+                    "output_tokens",
+                    "reasoning_output_tokens",
+                    "total_tokens",
+                )
+            },
+            "required": [
+                "cached_input_tokens",
+                "cache_write_input_tokens",
+                "input_tokens",
+                "output_tokens",
+                "reasoning_output_tokens",
+                "total_tokens",
+            ],
+            "type": "object",
+        }
     return {
         "$id": SCHEMA_NAMESPACE + entry.relative_path,
         "$schema": _DRAFT_2020_12,
@@ -1189,6 +1237,17 @@ def _semantic_provenance_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonVal
     return document
 
 
+def _semantic_provenance_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Carry the additive runtime-attempt evidence extension into current provenance."""
+
+    document = _semantic_provenance_v1_1_schema(entry)
+    properties = cast(dict[str, JsonValue], document["properties"])
+    properties["runtime_evidence"] = {
+        "$ref": (f"{SCHEMA_NAMESPACE}findings/runtime-attempt-evidence-1.1.0.schema.json")
+    }
+    return document
+
+
 def _check_result_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     document = _load_versioned_template(
         entry,
@@ -1258,12 +1317,12 @@ def _simple_versioned_schema(
     return _load_versioned_template(entry, source, replacements=replacements)
 
 
-def _finding_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+def _finding_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Add the coordination finding and policy identity to the current finding reader."""
 
     document = _simple_versioned_schema(
         entry,
-        "findings/finding-1.1.0.schema.json",
+        "findings/finding-1.2.0.schema.json",
         {"semantic-provenance-1.1.0": "semantic-provenance-1.1.0"},
     )
     definitions = cast(dict[str, JsonValue], document["$defs"])
@@ -2036,12 +2095,12 @@ def _start_result_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     return document
 
 
-def _check_result_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+def _check_result_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Add the frozen child preview and advisory coordination branches to ``check``."""
 
     document = _load_versioned_template(
         entry,
-        "operations/check-result-1.1.0.schema.json",
+        "operations/check-result-1.2.0.schema.json",
     )
     definitions = cast(dict[str, JsonValue], document["$defs"])
     binding = cast(dict[str, JsonValue], definitions["semantic_binding"])
@@ -2277,12 +2336,12 @@ def _status_request_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     return document
 
 
-def _status_result_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+def _status_result_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Add lineage and project pages while preserving every earlier status view."""
 
     document = _load_versioned_template(
         entry,
-        "operations/status-result-1.2.0.schema.json",
+        "operations/status-result-1.3.0.schema.json",
     )
     definitions = cast(dict[str, JsonValue], document["$defs"])
     history_item = cast(dict[str, JsonValue], definitions["history_item"])
@@ -2696,12 +2755,12 @@ def _status_result_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     return document
 
 
-def _receipt_document_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+def _receipt_document_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Add the recorded child outcome section to the immutable receipt document."""
 
     document = _load_versioned_template(
         entry,
-        "receipts/receipt-document-1.1.0.schema.json",
+        "receipts/receipt-document-1.2.0.schema.json",
     )
     definitions = cast(dict[str, JsonValue], document["$defs"])
     definitions["child_finding"] = _lineage_child_finding_schema()
@@ -2759,7 +2818,7 @@ def _receipt_document_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]
     }
     properties = cast(dict[str, JsonValue], document["properties"])
     findings = cast(dict[str, JsonValue], properties["findings"])
-    findings["items"] = {"$ref": SCHEMA_NAMESPACE + "findings/finding-1.2.0.schema.json"}
+    findings["items"] = {"$ref": SCHEMA_NAMESPACE + "findings/finding-1.3.0.schema.json"}
     properties["children"] = {"$ref": "#/$defs/receipt_children"}
     required = cast(list[JsonValue], document["required"])
     if "children" not in required:
@@ -2769,11 +2828,11 @@ def _receipt_document_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]
     return document
 
 
-def _receipt_result_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+def _receipt_result_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     return _simple_versioned_schema(
         entry,
-        "operations/receipt-result-1.1.0.schema.json",
-        {"receipt-document-1.1.0": "receipt-document-1.2.0"},
+        "operations/receipt-result-1.2.0.schema.json",
+        {"receipt-document-1.2.0": "receipt-document-1.3.0"},
     )
 
 
@@ -2870,6 +2929,7 @@ def _event_draft_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
 
     add_branch("session_opened", "1.2.0")
     add_branch("finding_recorded", "1.2.0")
+    add_branch("finding_recorded", "1.3.0")
     for family in (
         "child_accepted",
         "child_dependencies_recorded",
@@ -2933,7 +2993,7 @@ def _opaque_unknown_event_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonVa
     values.append(
         {
             "additionalProperties": False,
-            "properties": {"name": {"const": "finding_recorded"}, "version": {"const": "1.2.0"}},
+            "properties": {"name": {"const": "finding_recorded"}, "version": {"const": "1.3.0"}},
             "required": ["name", "version"],
             "type": "object",
         }
@@ -3711,13 +3771,13 @@ def _control_v2_7_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         SCHEMA_NAMESPACE + "operations/check-request-1.0.0.schema.json": SCHEMA_NAMESPACE
         + "operations/check-request-1.1.0.schema.json",
         SCHEMA_NAMESPACE + "operations/check-result-1.1.0.schema.json": SCHEMA_NAMESPACE
-        + "operations/check-result-1.2.0.schema.json",
+        + "operations/check-result-1.3.0.schema.json",
         SCHEMA_NAMESPACE + "operations/status-request-1.1.0.schema.json": SCHEMA_NAMESPACE
         + "operations/status-request-1.2.0.schema.json",
         SCHEMA_NAMESPACE + "operations/status-result-1.2.0.schema.json": SCHEMA_NAMESPACE
-        + "operations/status-result-1.3.0.schema.json",
+        + "operations/status-result-1.4.0.schema.json",
         SCHEMA_NAMESPACE + "operations/receipt-result-1.1.0.schema.json": SCHEMA_NAMESPACE
-        + "operations/receipt-result-1.2.0.schema.json",
+        + "operations/receipt-result-1.3.0.schema.json",
     }
 
     def retarget(node: JsonValue) -> None:
@@ -4621,7 +4681,11 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "7.0.0",
         "request_result",
         "local-control",
-        None,
+        lambda: (
+            __import__(
+                "yoetz.protocol.consent", fromlist=["ConsentCatalogModel"]
+            ).ConsentCatalogModel
+        ),
     ),
     _RegistryEntry(
         "consent/chat-user-attestation-1.0.0.schema.json",
@@ -4685,7 +4749,11 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "7.0.0",
         "request_result",
         "local-control",
-        None,
+        lambda: (
+            __import__(
+                "yoetz.protocol.consent", fromlist=["AgentSafePendingModel"]
+            ).AgentSafePendingModel
+        ),
     ),
     _RegistryEntry(
         "consent/prepare-result-2.0.0.schema.json",
@@ -4737,7 +4805,11 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "7.0.0",
         "request_result",
         "local-control",
-        None,
+        lambda: (
+            __import__(
+                "yoetz.protocol.consent", fromlist=["ConsentPrepareResultModel"]
+            ).ConsentPrepareResultModel
+        ),
     ),
     _RegistryEntry(
         "consent/review-result-2.0.0.schema.json",
@@ -4789,7 +4861,11 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "7.0.0",
         "request_result",
         "local-control",
-        None,
+        lambda: (
+            __import__(
+                "yoetz.protocol.consent", fromlist=["ConsentReviewResultModel"]
+            ).ConsentReviewResultModel
+        ),
     ),
     _RegistryEntry(
         "consent/status-2.0.0.schema.json",
@@ -4839,7 +4915,9 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "7.0.0",
         "request_result",
         "local-control",
-        None,
+        lambda: (
+            __import__("yoetz.protocol.consent", fromlist=["ConsentStatusModel"]).ConsentStatusModel
+        ),
     ),
     _RegistryEntry(
         "events/accepted-event-1.0.0.schema.json",
@@ -4994,6 +5072,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "events/check-recorded-1.2.0.schema.json",
+        "check-recorded",
+        "1.2.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["CheckRecordedPayload"]
+            ).CheckRecordedPayload
+        ),
+    ),
+    _RegistryEntry(
         "events/claim-recorded-1.0.0.schema.json",
         "claim-recorded",
         "1.0.0",
@@ -5133,6 +5223,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "events/finding-recorded-1.2.0.schema.json",
         "finding-recorded",
         "1.2.0",
+        "event",
+        "event-payload",
+        None,
+    ),
+    _RegistryEntry(
+        "events/finding-recorded-1.3.0.schema.json",
+        "finding-recorded",
+        "1.3.0",
         "event",
         "event-payload",
         lambda: __import__("yoetz.domain.findings", fromlist=["Finding"]).Finding,
@@ -5369,6 +5467,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "1.2.0",
         "request_result",
         "finding",
+        None,
+    ),
+    _RegistryEntry(
+        "findings/finding-1.3.0.schema.json",
+        "finding",
+        "1.3.0",
+        "request_result",
+        "finding",
         lambda: __import__("yoetz.domain.findings", fromlist=["Finding"]).Finding,
     ),
     _RegistryEntry(
@@ -5392,9 +5498,31 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "findings/semantic-provenance-1.2.0.schema.json",
+        "semantic-provenance",
+        "1.2.0",
+        "request_result",
+        "semantic-provenance",
+        lambda: (
+            __import__("yoetz.domain.findings", fromlist=["SemanticProvenance"]).SemanticProvenance
+        ),
+    ),
+    _RegistryEntry(
         "findings/runtime-attempt-evidence-1.0.0.schema.json",
         "runtime-attempt-evidence",
         "1.0.0",
+        "request_result",
+        "semantic-provenance",
+        lambda: (
+            __import__(
+                "yoetz.domain.findings", fromlist=["RuntimeAttemptEvidence"]
+            ).RuntimeAttemptEvidence
+        ),
+    ),
+    _RegistryEntry(
+        "findings/runtime-attempt-evidence-1.1.0.schema.json",
+        "runtime-attempt-evidence",
+        "1.1.0",
         "request_result",
         "semantic-provenance",
         lambda: (
@@ -5455,6 +5583,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "operations/check-result-1.2.0.schema.json",
         "check-result",
         "1.2.0",
+        "request_result",
+        "MCP output",
+        None,
+    ),
+    _RegistryEntry(
+        "operations/check-result-1.3.0.schema.json",
+        "check-result",
+        "1.3.0",
         "request_result",
         "MCP output",
         lambda: __import__("yoetz.protocol.models", fromlist=["CheckResultModel"]).CheckResultModel,
@@ -5567,6 +5703,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "operations/receipt-result-1.2.0.schema.json",
         "receipt-result",
         "1.2.0",
+        "request_result",
+        "MCP output",
+        None,
+    ),
+    _RegistryEntry(
+        "operations/receipt-result-1.3.0.schema.json",
+        "receipt-result",
+        "1.3.0",
         "request_result",
         "MCP output",
         lambda: (
@@ -5697,6 +5841,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "1.3.0",
         "request_result",
         "MCP output",
+        None,
+    ),
+    _RegistryEntry(
+        "operations/status-result-1.4.0.schema.json",
+        "status-result",
+        "1.4.0",
+        "request_result",
+        "MCP output",
         lambda: (
             __import__("yoetz.protocol.models", fromlist=["StatusResultModel"]).StatusResultModel
         ),
@@ -5777,6 +5929,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "receipts/receipt-document-1.2.0.schema.json",
         "receipt-document",
         "1.2.0",
+        "request_result",
+        "receipt-document",
+        None,
+    ),
+    _RegistryEntry(
+        "receipts/receipt-document-1.3.0.schema.json",
+        "receipt-document",
+        "1.3.0",
         "request_result",
         "receipt-document",
         lambda: __import__("yoetz.domain.receipts", fromlist=["ReceiptDocument"]).ReceiptDocument,
@@ -6109,6 +6269,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "version-report",
         lambda: __import__("yoetz.version", fromlist=["VersionManifest"]).VersionManifest,
     ),
+    _RegistryEntry(
+        "version/version-manifest-2.3.0.schema.json",
+        "version-manifest",
+        "2.3.0",
+        "version_manifest",
+        "version-report",
+        lambda: __import__("yoetz.version", fromlist=["VersionManifest"]).VersionManifest,
+    ),
 )
 
 
@@ -6118,6 +6286,11 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
 # regenerating them would silently rewrite frozen history.
 _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
     {
+        "consent/status-7.0.0.schema.json",
+        "consent/review-result-7.0.0.schema.json",
+        "consent/prepare-result-7.0.0.schema.json",
+        "consent/pending-agent-7.0.0.schema.json",
+        "consent/catalog-7.0.0.schema.json",
         "common/lineage-acceptance-1.0.0.schema.json",
         "common/lineage-origin-1.0.0.schema.json",
         "common/session-health-1.0.0.schema.json",
@@ -6132,25 +6305,25 @@ _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
         "events/delegation-cancelled-1.0.0.schema.json",
         "events/delegation-declared-1.0.0.schema.json",
         "events/event-draft-1.2.0.schema.json",
-        "events/finding-recorded-1.2.0.schema.json",
+        "events/finding-recorded-1.3.0.schema.json",
         "events/opaque-unknown-event-draft-1.2.0.schema.json",
         "events/session-opened-1.2.0.schema.json",
         "events/work-abandoned-1.0.0.schema.json",
         "events/work-cancelled-1.0.0.schema.json",
         "events/work-closed-1.0.0.schema.json",
         "events/work-written-off-1.0.0.schema.json",
-        "operations/check-result-1.2.0.schema.json",
+        "operations/check-result-1.3.0.schema.json",
         "config/yoetz-config-1.3.0.schema.json",
         "operations/check-request-1.1.0.schema.json",
         "operations/publish-work-request-1.2.0.schema.json",
-        "operations/receipt-result-1.2.0.schema.json",
+        "operations/receipt-result-1.3.0.schema.json",
         "operations/start-request-1.1.0.schema.json",
         "operations/start-result-1.1.0.schema.json",
         "operations/status-request-1.2.0.schema.json",
-        "operations/status-result-1.3.0.schema.json",
+        "operations/status-result-1.4.0.schema.json",
         "observations/routine-read-summary-1.0.0.schema.json",
-        "receipts/receipt-document-1.2.0.schema.json",
-        "findings/finding-1.2.0.schema.json",
+        "receipts/receipt-document-1.3.0.schema.json",
+        "findings/finding-1.3.0.schema.json",
         "service/control-hello-2.7.0.schema.json",
         "service/control-hello-result-2.7.0.schema.json",
         "service/control-request-2.7.0.schema.json",
@@ -6365,6 +6538,7 @@ def build_schema_documents(
         }:
             normalized = _lineage_vocabulary_schema(entry)
         elif entry.relative_path in {
+            "consent/catalog-7.0.0.schema.json",
             "privacy/privacy-policy-1.0.0.schema.json",
             "config/yoetz-config-1.0.0.schema.json",
             "config/yoetz-config-1.1.0.schema.json",
@@ -6392,17 +6566,23 @@ def build_schema_documents(
             normalized = _event_draft_v1_2_schema(entry)
         elif entry.relative_path == "events/check-recorded-1.1.0.schema.json":
             normalized = _check_recorded_v1_1_schema(entry)
+        elif entry.relative_path == "events/check-recorded-1.2.0.schema.json":
+            normalized = _simple_versioned_schema(
+                entry,
+                "events/check-recorded-1.1.0.schema.json",
+                {"semantic-provenance-1.1.0": "semantic-provenance-1.2.0"},
+            )
         elif entry.relative_path == "events/finding-recorded-1.1.0.schema.json":
             normalized = _simple_versioned_schema(
                 entry,
                 "events/finding-recorded-1.0.0.schema.json",
                 {"finding-1.0.0": "finding-1.1.0"},
             )
-        elif entry.relative_path == "events/finding-recorded-1.2.0.schema.json":
+        elif entry.relative_path == "events/finding-recorded-1.3.0.schema.json":
             normalized = _simple_versioned_schema(
                 entry,
-                "events/finding-recorded-1.1.0.schema.json",
-                {"finding-1.1.0": "finding-1.2.0"},
+                "events/finding-recorded-1.2.0.schema.json",
+                {"finding-1.2.0": "finding-1.3.0"},
             )
         elif entry.relative_path in {
             "events/evidence-recorded-1.1.0.schema.json",
@@ -6453,30 +6633,34 @@ def build_schema_documents(
             normalized = _publish_work_request_v1_2_schema(entry)
         elif entry.relative_path == "findings/runtime-attempt-evidence-1.0.0.schema.json":
             normalized = _runtime_attempt_evidence_schema(entry)
+        elif entry.relative_path == "findings/runtime-attempt-evidence-1.1.0.schema.json":
+            normalized = _runtime_attempt_evidence_schema(entry)
         elif entry.relative_path == "findings/semantic-provenance-1.1.0.schema.json":
             normalized = _semantic_provenance_v1_1_schema(entry)
+        elif entry.relative_path == "findings/semantic-provenance-1.2.0.schema.json":
+            normalized = _semantic_provenance_v1_2_schema(entry)
         elif entry.relative_path == "findings/finding-1.1.0.schema.json":
             normalized = _simple_versioned_schema(
                 entry,
                 "findings/finding-1.0.0.schema.json",
                 {"semantic-provenance-1.0.0": "semantic-provenance-1.1.0"},
             )
-        elif entry.relative_path == "findings/finding-1.2.0.schema.json":
-            normalized = _finding_v1_2_schema(entry)
+        elif entry.relative_path == "findings/finding-1.3.0.schema.json":
+            normalized = _finding_v1_3_schema(entry)
         elif entry.relative_path == "operations/check-request-1.1.0.schema.json":
             normalized = _check_request_v1_1_schema(entry)
         elif entry.relative_path == "operations/check-result-1.1.0.schema.json":
             normalized = _check_result_v1_1_schema(entry)
-        elif entry.relative_path == "operations/check-result-1.2.0.schema.json":
-            normalized = _check_result_v1_2_schema(entry)
+        elif entry.relative_path == "operations/check-result-1.3.0.schema.json":
+            normalized = _check_result_v1_3_schema(entry)
         elif entry.relative_path == "operations/receipt-result-1.1.0.schema.json":
             normalized = _simple_versioned_schema(
                 entry,
                 "operations/receipt-result-1.0.0.schema.json",
                 {"receipt-document-1.0.0": "receipt-document-1.1.0"},
             )
-        elif entry.relative_path == "operations/receipt-result-1.2.0.schema.json":
-            normalized = _receipt_result_v1_2_schema(entry)
+        elif entry.relative_path == "operations/receipt-result-1.3.0.schema.json":
+            normalized = _receipt_result_v1_3_schema(entry)
         elif entry.relative_path == "operations/start-result-1.0.0.schema.json":
             normalized = _start_result_schema(entry)
         elif entry.relative_path == "operations/start-result-1.1.0.schema.json":
@@ -6509,8 +6693,8 @@ def build_schema_documents(
                 "operations/status-result-1.1.0.schema.json",
                 {"semantic-provenance-1.0.0": "semantic-provenance-1.1.0"},
             )
-        elif entry.relative_path == "operations/status-result-1.3.0.schema.json":
-            normalized = _status_result_v1_3_schema(entry)
+        elif entry.relative_path == "operations/status-result-1.4.0.schema.json":
+            normalized = _status_result_v1_4_schema(entry)
         elif entry.relative_path == "receipts/receipt-document-1.0.0.schema.json":
             normalized = _receipt_document_schema(entry)
         elif entry.relative_path == "receipts/receipt-document-1.1.0.schema.json":
@@ -6522,14 +6706,15 @@ def build_schema_documents(
                     "semantic-provenance-1.0.0": "semantic-provenance-1.1.0",
                 },
             )
-        elif entry.relative_path == "receipts/receipt-document-1.2.0.schema.json":
-            normalized = _receipt_document_v1_2_schema(entry)
+        elif entry.relative_path == "receipts/receipt-document-1.3.0.schema.json":
+            normalized = _receipt_document_v1_3_schema(entry)
         elif entry.relative_path in {
             "version/version-manifest-2.0.0.schema.json",
             "version/version-manifest-2.1.0.schema.json",
+            "version/version-manifest-2.2.0.schema.json",
         }:
             normalized = _frozen_version_manifest_schema(entry)
-        elif entry.relative_path == "version/version-manifest-2.2.0.schema.json":
+        elif entry.relative_path == "version/version-manifest-2.3.0.schema.json":
             normalized = _version_manifest_schema(entry)
         elif entry.relative_path == "privacy/privacy-policy-1.1.0.schema.json":
             normalized = _privacy_policy_v1_1_schema(entry)

@@ -85,6 +85,7 @@ from yoetz.application.unit_of_work import (
 )
 from yoetz.domain.events import (
     EVIDENCE_TYPED_SCHEMA_VERSION,
+    SEMANTIC_EVENT_SCHEMA_VERSION,
     ActionKind,
     ActionRecordedPayload,
     EventDraft,
@@ -5085,7 +5086,7 @@ class ObservationCoordinator:
                     item.coverage,
                     None,
                 )
-                schema = EventSchema("finding_recorded", "1.1.0")
+                schema = EventSchema("finding_recorded", SEMANTIC_EVENT_SCHEMA_VERSION)
                 draft = EventDraft(
                     event_id(
                         stable_observation_id(

@@ -76,9 +76,10 @@ __all__ = [
 ]
 
 BUNDLE_UPGRADE_SOURCE_VERSION: Final = 12
-BUNDLE_UPGRADE_TARGET_VERSION: Final = 13
+BUNDLE_UPGRADE_TARGET_VERSION: Final = 14
+BUNDLE_UPGRADE_SOURCE_VERSIONS: Final = (12, 13)
 _MAX_SAFE_INTEGER: Final = 2**53 - 1
-_REQUIRED_MIGRATION_IDS: Final[tuple[str, ...]] = ("0013",)
+_REQUIRED_MIGRATION_IDS: Final[tuple[str, ...]] = ("0013", "0014")
 _LEASE_SECONDS: Final = 60
 _MIGRATION_PHASE_ORDER: Final[tuple[str, ...]] = (
     "reserved",
@@ -234,10 +235,16 @@ class BackupEvidence:
     task_id: TaskId
     frontier: Frontier
     manifest_digest: str
+    source_version: int = BUNDLE_UPGRADE_SOURCE_VERSION
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "task_id", task_id(self.task_id))
         if type(self.frontier) is not Frontier:
+            raise ValueError("bundle_backup_evidence_invalid")
+        if (
+            type(self.source_version) is not int
+            or self.source_version not in BUNDLE_UPGRADE_SOURCE_VERSIONS
+        ):
             raise ValueError("bundle_backup_evidence_invalid")
         try:
             validate_sha256_digest(self.manifest_digest)
@@ -324,7 +331,7 @@ class BundleUpgradeEffects(Protocol):
 
         ``before`` is ``None`` when a process restarted after the bundle DDL committed but before
         its phase CAS.  The implementation must then read the original integrity facts from the
-        machine-bound backup identified by ``backup``; comparing the live v13 bundle to itself is
+        machine-bound backup identified by ``backup``; comparing the live v14 bundle to itself is
         not preservation evidence.
         """
         ...
@@ -355,7 +362,7 @@ def migration_plan_digest(target: BundleUpgradeTarget) -> str:
     )
     return canonical_digest(
         {
-            "from_version": str(BUNDLE_UPGRADE_SOURCE_VERSION),
+            "source_versions": tuple(str(version) for version in BUNDLE_UPGRADE_SOURCE_VERSIONS),
             "kind": "package_upgrade_migration",
             "migration_ids": _REQUIRED_MIGRATION_IDS,
             "migration_digests": migration_digests,
@@ -456,12 +463,28 @@ def _stream_table_digest(
 ) -> tuple[str, int]:
     """Digest one table using a bounded cursor and explicit ordering where it matters.
 
-    The only table rebuilt by 0013 (``events``) and the object inventory use their stable key
+    The only table rebuilt by 0014 (``events``) and the object inventory use their stable key
     ordering.  Other tables are unchanged by the migration and are scanned in SQLite's native
     b-tree order, so the digest does not retain their rows merely to sort them in Python.
     """
 
-    sql = f"SELECT * FROM {_safe_identifier(table)}"
+    projection = "*"
+    if table == "semantic_attempts":
+        columns = {row[1] for row in db.execute("PRAGMA table_info(semantic_attempts)")}
+        usage_columns = (
+            "usage_input_tokens",
+            "usage_cached_input_tokens",
+            "usage_cache_write_input_tokens",
+            "usage_output_tokens",
+            "usage_reasoning_output_tokens",
+            "usage_total_tokens",
+        )
+        present = tuple(column in columns for column in usage_columns)
+        if any(present) and not all(present):
+            raise BundleUpgradeError(BundleUpgradeReason.SCHEMA_METADATA_DISAGREES, False)
+        if not any(present):
+            projection += ", " + ", ".join("NULL" for _ in usage_columns)
+    sql = f"SELECT {projection} FROM {_safe_identifier(table)}"
     if order_by is not None:
         sql += f" ORDER BY {_safe_identifier(order_by)}"
     cursor = db.execute(sql)
@@ -984,7 +1007,8 @@ class SqliteBundleUpgradeJournal:
         if (
             str(result.request_id) != operation.request_id
             or result.task_id != operation.task_id
-            or result.from_version != str(BUNDLE_UPGRADE_SOURCE_VERSION)
+            or result.from_version
+            not in tuple(str(version) for version in BUNDLE_UPGRADE_SOURCE_VERSIONS)
             or result.to_version != str(BUNDLE_UPGRADE_TARGET_VERSION)
             or operation.backup_manifest_digest is None
             or result.backup_manifest_digest != operation.backup_manifest_digest
@@ -1245,7 +1269,7 @@ class BundleUpgradeCoordinator:
         try:
             db = open_read_only(target.bundle_path)
             identity = verify_schema_identity(db)
-            if identity.user_version in {10, BUNDLE_UPGRADE_SOURCE_VERSION}:
+            if identity.user_version in {10, *BUNDLE_UPGRADE_SOURCE_VERSIONS}:
                 try:
                     _validate_v10_bundle_layout(db, identity.user_version, (BUNDLE_MIGRATIONS[-1],))
                 except RuntimeError as exc:
@@ -1257,7 +1281,7 @@ class BundleUpgradeCoordinator:
                         ) from None
                     raise
             if identity.user_version not in {
-                BUNDLE_UPGRADE_SOURCE_VERSION,
+                *BUNDLE_UPGRADE_SOURCE_VERSIONS,
                 BUNDLE_UPGRADE_TARGET_VERSION,
             }:
                 raise BundleUpgradeError(
@@ -1295,9 +1319,14 @@ class BundleUpgradeCoordinator:
                 maintenance=None,
             )
             if (
-                report.from_version != BUNDLE_UPGRADE_SOURCE_VERSION
+                report.from_version not in BUNDLE_UPGRADE_SOURCE_VERSIONS
                 or report.to_version != BUNDLE_UPGRADE_TARGET_VERSION
-                or report.applied_versions != _REQUIRED_MIGRATION_IDS
+                or report.applied_versions
+                != tuple(
+                    m.version
+                    for m in BUNDLE_MIGRATIONS
+                    if report.from_version < int(m.version) <= BUNDLE_UPGRADE_TARGET_VERSION
+                )
             ):
                 raise BundleUpgradeError(
                     BundleUpgradeReason.MIGRATION_FAILED,
@@ -1421,7 +1450,7 @@ class BundleUpgradeCoordinator:
     ) -> MigrationResult:
         backup: BackupEvidence
         self._assert_holder()
-        if current_version == BUNDLE_UPGRADE_SOURCE_VERSION and operation.phase not in {
+        if current_version in BUNDLE_UPGRADE_SOURCE_VERSIONS and operation.phase not in {
             BundleUpgradePhase.RESERVED,
             BundleUpgradePhase.BACKUP_READY,
         }:
@@ -1458,6 +1487,10 @@ class BundleUpgradeCoordinator:
             type(backup) is not BackupEvidence
             or backup.task_id != target.task_id
             or backup.frontier != before.frontier
+            or (
+                current_version in BUNDLE_UPGRADE_SOURCE_VERSIONS
+                and backup.source_version != current_version
+            )
         ):
             error = BundleUpgradeError(
                 BundleUpgradeReason.BACKUP_FAILED,
@@ -1485,7 +1518,7 @@ class BundleUpgradeCoordinator:
             self._quarantine_deterministic_backup_failure(operation, error)
             raise error
 
-        if current_version == BUNDLE_UPGRADE_SOURCE_VERSION:
+        if current_version in BUNDLE_UPGRADE_SOURCE_VERSIONS:
             if operation.phase is not BundleUpgradePhase.BACKUP_READY:
                 error = BundleUpgradeError(BundleUpgradeReason.OPERATION_LOST, False)
                 self._quarantine_operation_contradiction(
@@ -1502,7 +1535,7 @@ class BundleUpgradeCoordinator:
                     version_after, _ = self._inspect(target)
                 except BundleUpgradeError:
                     version_after = -1
-                if version_after == BUNDLE_UPGRADE_SOURCE_VERSION:
+                if version_after == current_version:
                     raise
                 if version_after == BUNDLE_UPGRADE_TARGET_VERSION:
                     try:
@@ -1567,12 +1600,12 @@ class BundleUpgradeCoordinator:
                 raise BundleUpgradeError(
                     BundleUpgradeReason.VERIFICATION_FAILED, False, {"check": "schema"}
                 )
-            # A restart after DDL may observe v13 while the durable operation is still pending.
+            # A restart after DDL may observe v14 while the durable operation is still pending.
             # In that case the original v12 facts live in the machine-bound backup; passing the
-            # live v13 snapshot as ``before`` would compare the target to itself and falsely prove
+            # live v14 snapshot as ``before`` would compare the target to itself and falsely prove
             # preservation.  The effects backend must load and verify the original backup facts.
             preservation_before = (
-                before if current_version == BUNDLE_UPGRADE_SOURCE_VERSION else None
+                before if current_version in BUNDLE_UPGRADE_SOURCE_VERSIONS else None
             )
             if preservation_before is not None:
                 self._compare_preservation(preservation_before, after)
@@ -1608,7 +1641,7 @@ class BundleUpgradeCoordinator:
         result = MigrationResult(
             request_id=request_id(operation.request_id),
             task_id=target.task_id,
-            from_version=str(BUNDLE_UPGRADE_SOURCE_VERSION),
+            from_version=str(backup.source_version),
             to_version=str(BUNDLE_UPGRADE_TARGET_VERSION),
             backup_manifest_digest=backup.manifest_digest,
             frontier_before=before.frontier,
@@ -1625,7 +1658,7 @@ class BundleUpgradeCoordinator:
         self,
         targets: Sequence[BundleUpgradeTarget],
     ) -> BundleUpgradeReport:
-        """Migrate stale v12 targets during startup, before any READY work is admitted."""
+        """Migrate stale v12/v13 targets during startup, before any READY work is admitted."""
 
         if type(targets) not in (tuple, list):
             raise TypeError("bundle_upgrade_targets_invalid")
@@ -1662,7 +1695,7 @@ class BundleUpgradeCoordinator:
                     self._assert_holder()
                     operation = self._journal.reserve(
                         target,
-                        create_if_absent=current == BUNDLE_UPGRADE_SOURCE_VERSION,
+                        create_if_absent=current in BUNDLE_UPGRADE_SOURCE_VERSIONS,
                     )
                     self._assert_holder()
                     if operation is None:

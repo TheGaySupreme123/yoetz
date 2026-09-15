@@ -77,15 +77,18 @@ carrying them after the fix: a later clean check never erases what was caught.
 # One-off run (needs uv: https://docs.astral.sh/uv/)
 uvx yoetz
 
-# Install from PyPI — the canonical distribution
-uv tool install --managed-python --python 3.14.6 "yoetz==0.1.0"
+# Install the latest published version from PyPI — the canonical distribution
+uv tool install --managed-python --python 3.14.6 yoetz
 
 # Via npm — a dependency-free launcher for the exact same PyPI package (needs uv)
 npx yoetz
 ```
 
 The npm package bundles no Python and no Yoetz code and never installs `uv` itself; it only
-launches the exact matching Python distribution.
+launches the exact matching Python distribution. Yoetz runs on macOS and Linux (certified on
+macOS arm64 and Linux x86-64 (glibc 2.28+); other Linux architectures install and report themselves as untested —
+see [Linux](docs/usage/install-and-first-run.md#linux)); on Windows, install it inside WSL 2 — see
+[Windows](docs/usage/install-and-first-run.md#windows).
 
 > [!TIP]
 > **Let your agent set it up.** Paste this into your coding agent and it walks you through
@@ -97,8 +100,9 @@ launches the exact matching Python distribution.
 >
 > curl -fsSL https://raw.githubusercontent.com/TheGaySupreme123/yoetz/main/docs/usage/agent-start.md
 >
-> It tells you what to run yourself, what to ask me, and where to hand me the terminal. Setup's
-> questions are mine to answer in my own terminal, and show me any proposed change before it is
+> It tells you what to run yourself, what to ask me, and where to hand me the terminal. If your
+> sandbox blocks that fetch, ask me to approve it or to paste the guide. Setup's questions are
+> mine to answer, so ask me each one and wait, and show me any proposed change before it is
 > applied.
 > ```
 
@@ -217,9 +221,10 @@ does not claim" section, and the full changelog — and live versioned in
 
 ## Status
 
-It's an alpha: early, and it already does a lot. v0.1.0 is the first **public alpha**. Every
-public claim in [`docs/public-claims.json`](docs/public-claims.json) is bound to real checked-in
-evidence: a claim flagged `evidenced` has concrete test or fixture coverage, with its non-live
+Yoetz **0.2** is the current public-alpha release line. **0.2.1** fixes significant Linux and
+WSL compatibility bugs; see the [release notes](docs/releases/v0.2.1.md) for the fixes and
+remaining validation limits. Every public claim in
+[`docs/public-claims.json`](docs/public-claims.json) is bound to real checked-in evidence: a claim flagged `evidenced` has concrete test or fixture coverage, with its non-live
 suites exercised in per-PR CI; a claim whose own wording names still-missing capability or drill
 evidence stays `not_yet_evidenced` and is not asserted as release evidence. Every reviewed provider
 preset resolves to a real runtime

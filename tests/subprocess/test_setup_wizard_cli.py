@@ -1187,6 +1187,29 @@ def test_setup_status_is_read_only(wizard_env: dict[str, object]) -> None:
     assert report["discovered"][0]["registered_route_profile"] == "strict"
     assert report["marker_present"] is False
     assert report["service"]["reachable"] is False
+    # Host facts are named once here rather than per rejected check (issues #720, #721, #724).
+    platform_report = report["platform"]
+    assert set(platform_report) == {"cell", "check_sandbox", "secure_storage"}
+    assert set(platform_report["cell"]) == {
+        "cell",
+        "certified",
+        "certified_cells",
+        "machine",
+        "os_name",
+    }
+    assert platform_report["check_sandbox"]["status"] in {"ready", "unavailable"}
+    assert set(platform_report["check_sandbox"]) == {
+        "mechanism",
+        "reason",
+        "remediation",
+        "status",
+    }
+    assert set(platform_report["secure_storage"]) == {
+        "approved",
+        "backend_id",
+        "reason",
+        "requirement",
+    }
     assert report["integration"] == {
         "hooks": {
             "presence": "absent",

@@ -25,6 +25,7 @@ from yoetz.domain.findings import (
     Finding,
     FindingOrigin,
     ResponseDisposition,
+    SemanticProvenance,
     rank_key,
 )
 from yoetz.domain.receipts import (
@@ -1008,6 +1009,37 @@ def _semantic_endpoint_sentence(check: CheckRecordedPayload | None) -> str:
     )
 
 
+def _semantic_usage_sentence(provenance: SemanticProvenance | None) -> str:
+    """Render only bounded token counters retained by semantic provenance.
+
+    Receipt text is a public projection of the canonical document.  Keep this projection useful
+    for benchmark analysis while excluding provider response text, account identifiers, and any
+    other runtime content.  Codex runtime evidence has the detailed counters (cached input and
+    reasoning output are subsets of their parent totals); ordinary semantic providers retain the
+    aggregate input/output/total counters.
+    """
+
+    if provenance is None:
+        return ""
+    runtime = provenance.runtime_evidence
+    usage = None if runtime is None else runtime.token_usage
+    if usage is not None:
+        return (
+            " Semantic attempt usage: "
+            f"input={usage.input_tokens}, cached_input={usage.cached_input_tokens}, "
+            f"cache_write_input={usage.cache_write_input_tokens}, output={usage.output_tokens}, "
+            f"reasoning_output={usage.reasoning_output_tokens}, total={usage.total_tokens} tokens."
+        )
+    aggregate = provenance.token_usage
+    if aggregate is None:
+        return ""
+    return (
+        " Semantic attempt usage: "
+        f"input={aggregate.input_tokens}, output={aggregate.output_tokens}, "
+        f"total={aggregate.total_tokens} tokens."
+    )
+
+
 def _sections(
     *,
     include: ReceiptInclude,
@@ -1026,6 +1058,7 @@ def _sections(
     tested_subject_sequence: str | None = None,
     resolved_finding_ids: tuple[FindingId, ...] = (),
     semantic_endpoint_sentence: str = "",
+    semantic_usage_sentence: str = "",
     resolution_explanations: tuple[str, ...] = (),
     attempt_explanations: tuple[str, ...] = (),
     check_suffix: CheckSuffixClass | None = None,
@@ -1240,6 +1273,7 @@ def _sections(
     bodies[ReceiptSectionKey.VERSION_AND_POLICY_IDENTITY] = (
         f"Engine {versions.engine_version}; protocol {versions.protocol_version}; {policy_rows}."
         + semantic_endpoint_sentence
+        + semantic_usage_sentence
     )
     items[ReceiptSectionKey.VERSION_AND_POLICY_IDENTITY] = ()
 
@@ -1342,6 +1376,11 @@ def build_receipt(
         ),
         resolved_finding_ids=resolved_finding_ids,
         semantic_endpoint_sentence=_semantic_endpoint_sentence(context.applicable_check),
+        semantic_usage_sentence=_semantic_usage_sentence(
+            None
+            if context.applicable_check is None
+            else context.applicable_check.semantic_provenance
+        ),
         attempt_explanations=tuple(
             f"{obligation.obligation_id} command item {attempt.requested_item_index}: {attempt.relation}. "
             "This relation concerns the attempt only, not command success."
@@ -1387,4 +1426,9 @@ def build_receipt(
         redactions=redactions,
         sections=sections,
         children=children,
+        semantic_provenance=(
+            None
+            if context.applicable_check is None
+            else context.applicable_check.semantic_provenance
+        ),
     )

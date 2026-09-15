@@ -824,7 +824,8 @@ class YoetzTui(App[int]):
                         "Use system secure storage",
                         "Recommended. Unlocks automatically for the operating-system user.",
                         disabled=not detection.secure_storage_available,
-                        disabled_reason="not available on this machine",
+                        disabled_reason=detection.secure_storage_reason
+                        or "not available on this machine",
                     ),
                     Option(
                         StorageChoice.PASSPHRASE.value,

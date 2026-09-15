@@ -308,9 +308,9 @@ _STATUS_PAGE_DEF_BY_VIEW_FOR_TEST: tuple[tuple[str, str], ...] = (
     ("versions", "versions_page"),
 )
 _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
-    ("check", None): 212,
+    ("check", None): 224,
     ("publish_work", None): 57,
-    ("receipt", None): 198,
+    ("receipt", None): 272,
     ("respond", None): 53,
     ("start", None): 72,
     ("status", None): 47,
@@ -319,7 +319,7 @@ _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
     ("status", "candidate_findings"): 32,
     ("status", "compact"): 46,
     ("status", "evidence"): 18,
-    ("status", "findings"): 97,
+    ("status", "findings"): 103,
     ("status", "history"): 12,
     ("status", "lineage"): 16,
     ("status", "obligations"): 33,
@@ -358,7 +358,7 @@ _RESULT_SUPPORT_MODEL_SPECS: tuple[tuple[str, str, str], ...] = (
         "operations/publish-work-result-1.0.0.schema.json",
         "version_slice",
     ),
-    ("CheckSuccessModel", "operations/check-result-1.2.0.schema.json", "success"),
+    ("CheckSuccessModel", "operations/check-result-1.3.0.schema.json", "success"),
     (
         "CheckPolicyExecutionModel",
         "operations/check-result-1.0.0.schema.json",
@@ -386,7 +386,7 @@ _RESULT_SUPPORT_MODEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("StatusSuccessModel", "operations/status-result-1.1.0.schema.json", "success"),
     (
         "StatusAdviceItemModel",
-        "operations/status-result-1.3.0.schema.json",
+        "operations/status-result-1.4.0.schema.json",
         "advice_item",
     ),
     (
@@ -2047,7 +2047,7 @@ def test_current_receipt_document_accepts_coordination_overlap_finding() -> None
             "summary": "Two admitted tasks overlap on a shared resource.",
         }
     ]
-    validate_schema_instance("receipt-document", "1.2.0", document)
+    validate_schema_instance("receipt-document", "1.3.0", document)
 
 
 def test_public_status_finding_models_accept_coordination_overlap() -> None:
@@ -2306,6 +2306,27 @@ def test_result_field_classification_is_closed() -> None:
     )
     assert models.classify_result_leaf("receipt", receipt, "/human_text") == "public_structural"
 
+    receipt_with_provenance = _receipt_result_wire()
+    document = cast(dict[str, JsonValue], receipt_with_provenance["document"])
+    provenance = _semantic_provenance_for("succeeded", "semantic_completed")
+    provenance["token_usage"] = {
+        "input_tokens": "103",
+        "output_tokens": "19",
+        "total_tokens": "122",
+    }
+    document["semantic_provenance"] = provenance
+    receipt_with_provenance_wire = models.public_model_to_wire(
+        models.ReceiptResultModel.model_validate(receipt_with_provenance)
+    )
+    assert (
+        models.classify_result_leaf(
+            "receipt",
+            receipt_with_provenance_wire,
+            "/document/semantic_provenance/token_usage/total_tokens",
+        )
+        == "public_structural"
+    )
+
     markdown_receipt = _receipt_result_wire()
     markdown_receipt["format"] = "markdown"
     markdown_receipt["document"] = None
@@ -2368,7 +2389,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     rules = cast(tuple[Any, ...], getattr(models, "_RESULT_LEAF_RULES"))
 
     derived_patterns = _derived_result_success_patterns(catalog)
-    assert len(derived_patterns) == 1035
+    assert len(derived_patterns) == 1127
 
     derived_counts = {
         context: sum(1 for method, view, _ in derived_patterns if (method, view) == context)
@@ -2377,7 +2398,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert derived_counts == _EXPECTED_RESULT_PATTERN_COUNTS
 
     assert type(rules) is tuple
-    assert len(rules) == 1057
+    assert len(rules) == 1150
     assert rules == tuple(sorted(rules, key=_test_rule_sort_key))
 
     rule_keys = {
@@ -2386,7 +2407,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert len(rule_keys) == len(rules)
 
     registry_patterns = {(rule.method, rule.status_view, rule.segments) for rule in rules}
-    assert len(registry_patterns) == 1035
+    assert len(registry_patterns) == 1127
     assert registry_patterns == derived_patterns
 
     content_rules = _expected_nonpublish_content_rules(models)
@@ -2398,7 +2419,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
         for rule in rules
         if rule.method == "publish_work" and rule.segments == publish_summary_segments
     )
-    assert len(publish_summary_rules) == 23
+    assert len(publish_summary_rules) == 24
     assert all(rule.status_view is None for rule in publish_summary_rules)
 
     expected_publish = _expected_publish_summary_rules(models)
@@ -2863,6 +2884,7 @@ def _expected_publish_summary_rules(models: Any) -> dict[object, object]:
         ("assignment_recorded", "1.0.0"): "public_structural",
         ("check_recorded", "1.0.0"): "public_structural",
         ("check_recorded", "1.1.0"): "public_structural",
+        ("check_recorded", "1.2.0"): "public_structural",
         ("coordination_context_recorded", "1.0.0"): "public_structural",
         ("coordination_obligation_declared", "1.0.0"): "public_structural",
         ("coordination_disposition_recorded", "1.0.0"): "public_structural",
@@ -2872,6 +2894,7 @@ def _expected_publish_summary_rules(models: Any) -> dict[object, object]:
         ("finding_recorded", "1.0.0"): models.DataCategory.FINDING_SUMMARY,
         ("finding_recorded", "1.1.0"): models.DataCategory.FINDING_SUMMARY,
         ("finding_recorded", "1.2.0"): models.DataCategory.FINDING_SUMMARY,
+        ("finding_recorded", "1.3.0"): models.DataCategory.FINDING_SUMMARY,
         ("obligation_published", "1.0.0"): models.DataCategory.TASK_DESCRIPTION,
         ("plan_published", "1.0.0"): models.DataCategory.TASK_DESCRIPTION,
         ("plan_revised", "1.0.0"): models.DataCategory.TASK_DESCRIPTION,
@@ -2971,7 +2994,7 @@ def test_schema_catalog_reports_complete_registry() -> None:
     assert SCHEMA_NAMESPACE == "https://schemas.yoetz.dev/0.1/"
     assert SCHEMA_MANIFEST_SCHEMA == "yoetz.schema-manifest/1.0.0"
     assert SCHEMA_MANIFEST_VERSION == "1.0.0"
-    assert SCHEMA_MEMBER_COUNT == 177
+    assert SCHEMA_MEMBER_COUNT == 187
     assert len(catalog.documents) == SCHEMA_MEMBER_COUNT
 
     paths = tuple(document.relative_path for document in catalog.documents)
@@ -3055,7 +3078,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 5_327
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 5_831
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:
@@ -3075,13 +3098,14 @@ def test_schema_name_derivation_and_version_maps_are_exact() -> None:
         "1.3.0",
         "2.7.0",
         "7.0.0",
+        "1.4.0",
     }
     assert set(event_versions.values()) == {"1.0.0", "1.1.0", "1.2.0"}
     assert event_versions["action_recorded"] == "1.0.0"
     assert event_versions["evidence_recorded"] == "1.2.0"
-    assert event_versions["check_recorded"] == "1.1.0"
+    assert event_versions["check_recorded"] == "1.2.0"
     assert event_versions["claim_recorded"] == "1.1.0"
-    assert event_versions["finding_recorded"] == "1.2.0"
+    assert event_versions["finding_recorded"] == "1.3.0"
     assert event_versions["session_opened"] == "1.2.0"
     assert event_versions["session_resumed"] == "1.1.0"
     assert "accepted_event" not in event_versions
@@ -3290,6 +3314,29 @@ def test_schema_instance_validation_is_closed_and_bounded(
         _assert_reason(exc_info, "float_forbidden")
     finally:
         schemas_module._load_catalog_state.cache_clear()  # pyright: ignore[reportPrivateUsage]
+
+
+def test_current_receipt_document_schema_carries_optional_semantic_provenance() -> None:
+    schema_root = Path(__file__).parents[3] / "schemas"
+    old_schema = cast(
+        dict[str, Any],
+        strict_json_parse(
+            (schema_root / "receipts/receipt-document-1.1.0.schema.json").read_bytes()
+        ),
+    )
+    current_schema = cast(
+        dict[str, Any],
+        strict_json_parse(
+            (schema_root / "receipts/receipt-document-1.2.0.schema.json").read_bytes()
+        ),
+    )
+    old_properties = cast(dict[str, Any], old_schema["properties"])
+    current_properties = cast(dict[str, Any], current_schema["properties"])
+    assert "semantic_provenance" not in old_properties
+    assert current_properties["semantic_provenance"] == {
+        "$ref": "https://schemas.yoetz.dev/0.1/findings/semantic-provenance-1.2.0.schema.json"
+    }
+    assert "semantic_provenance" not in cast(list[str], current_schema["required"])
 
 
 def test_capacity_failure_forbids_attempt_provenance() -> None:

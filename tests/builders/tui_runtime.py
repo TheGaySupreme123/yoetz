@@ -174,6 +174,9 @@ class FakeRuntime:
             launched_from_subdirectory=False,
             harnesses=self.harnesses,
             secure_storage_available=self.secure_storage,
+            secure_storage_reason=(
+                "" if self.secure_storage else "no credential store is loaded; Yoetz needs a test"
+            ),
             already_connected=self.mcp == "yoetz_owned",
             cwd="/tmp/project",
         )

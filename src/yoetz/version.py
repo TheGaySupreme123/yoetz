@@ -37,9 +37,11 @@ __all__ = [
     "ENGINE_VERSION",
     "OBJECT_FORMAT_VERSION",
     "PRIVACY_CLASSIFIER_RULESET_VERSION",
+    "PLATFORM_CELL_UNTESTED",
     "PRIVACY_POLICY_SCHEMA_VERSION",
     "PROJECTION_VERSION",
     "PROTOCOL_VERSION",
+    "PlatformCell",
     "REVIEWED_RESOURCE_COUNT",
     "RESEARCH_EVIDENCE_POLICY_VERSION",
     "ResourceIdentity",
@@ -52,6 +54,7 @@ __all__ = [
     "WORK_INTEGRITY_POLICY_VERSION",
     "build_status_version_slice_facts",
     "build_version_manifest",
+    "platform_cell",
     "read_verified_resource",
     "verify_resource_manifest",
     "version_manifest_json",
@@ -72,6 +75,18 @@ OBJECT_FORMAT_VERSION: Final = "yoetz-object/1"
 # and from live SQLite user_version. Not a probed runtime fact.
 STATUS_VERSION_STORAGE_SCHEMA: Final = "1"
 UNAVAILABLE_RUNTIME_FACT: Final = "unavailable"
+# ADR-007's advertised platform matrix, as (platform.system(), platform.machine()) pairs. Any
+# other cell the package happens to install on — Linux aarch64 (WSL 2 on Windows-on-ARM,
+# Graviton, Raspberry Pi, Asahi), macOS x86-64, musl — is untested, not presumed compatible, and
+# says so through the ``platform_cell_untested`` limitation (issue #724).
+_CERTIFIED_PLATFORM_CELLS: Final[Mapping[tuple[str, str], str]] = MappingProxyType(
+    {
+        ("Darwin", "arm64"): "macosx_11_0_arm64",
+        ("Linux", "x86_64"): "manylinux_2_28_x86_64",
+        ("Linux", "amd64"): "manylinux_2_28_x86_64",
+    }
+)
+PLATFORM_CELL_UNTESTED: Final = "platform_cell_untested"
 _VERSION_WIRE_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+/-]{0,63}$")
 _PROFILE_ID_WIRE_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,127}$")
 _ASCII_PRINTABLE_PATTERN: Final = re.compile(r"^[ -~]+$")
@@ -87,7 +102,7 @@ _RESOURCE_LIMIT: Final = 4_194_304
 # One independently reviewed cardinality tripwire guards the generated resource manifest. All
 # per-kind counts are derived from the manifest entries so adding a resource has exactly one
 # hand-authored count to review and the owning resource-ripple command can regenerate the rest.
-REVIEWED_RESOURCE_COUNT: Final = 234
+REVIEWED_RESOURCE_COUNT: Final = 246
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -105,7 +120,7 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("catalog", "7.0.0"),
     ("chat-user-attestation", "1.0.0"),
     ("check-request", "1.1.0"),
-    ("check-result", "1.2.0"),
+    ("check-result", "1.3.0"),
     ("client-info", "1.0.0"),
     ("control-hello", "2.7.0"),
     ("control-hello-result", "2.7.0"),
@@ -113,7 +128,7 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("control-result", "2.7.0"),
     ("coverage", "1.0.0"),
     ("egress-receipt", "1.0.0"),
-    ("finding", "1.2.0"),
+    ("finding", "1.3.0"),
     ("frontier", "1.0.0"),
     ("lineage-acceptance", "1.0.0"),
     ("lineage-origin", "1.0.0"),
@@ -128,15 +143,15 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("publish-work-result", "1.0.0"),
     ("read-guidance-request", "1.0.0"),
     ("read-guidance-result", "1.0.0"),
-    ("receipt-document", "1.2.0"),
+    ("receipt-document", "1.3.0"),
     ("receipt-request", "1.0.0"),
-    ("receipt-result", "1.2.0"),
+    ("receipt-result", "1.3.0"),
     ("respond-request", "1.0.0"),
     ("respond-result", "1.0.0"),
     ("review-result", "7.0.0"),
     ("routine-read-summary", "1.0.0"),
-    ("runtime-attempt-evidence", "1.0.0"),
-    ("semantic-provenance", "1.1.0"),
+    ("runtime-attempt-evidence", "1.1.0"),
+    ("semantic-provenance", "1.2.0"),
     ("service-status", "1.0.0"),
     ("session-health", "1.0.0"),
     ("setup-wizard-contract", "1.0.0"),
@@ -144,7 +159,7 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("start-result", "1.1.0"),
     ("status", "7.0.0"),
     ("status-request", "1.2.0"),
-    ("status-result", "1.3.0"),
+    ("status-result", "1.4.0"),
     ("subject-state-ref", "1.0.0"),
     ("work-state", "1.0.0"),
 )
@@ -278,6 +293,56 @@ class VersionManifest:
     build_identity: str
     support_status: str
     limitations: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformCell:
+    """The host's (OS, architecture) cell against ADR-007's advertised matrix."""
+
+    os_name: str
+    machine: str
+    certified: bool
+    cell: str | None
+
+    def as_json(self) -> dict[str, JsonValue]:
+        certified_cells: list[JsonValue] = [
+            cell for cell in sorted(set(_CERTIFIED_PLATFORM_CELLS.values()))
+        ]
+        return {
+            "cell": self.cell,
+            "certified": self.certified,
+            "certified_cells": certified_cells,
+            "machine": self.machine,
+            "os_name": self.os_name,
+        }
+
+
+def platform_cell(
+    *,
+    os_name: str | None = None,
+    machine: str | None = None,
+    libc: tuple[str, str] | None = None,
+) -> PlatformCell:
+    """Classify this host (or the given one) as a certified or an untested platform cell."""
+
+    resolved_os = (platform.system() or sys.platform) if os_name is None else os_name
+    resolved_machine = (platform.machine() or "unknown") if machine is None else machine
+    cell = _CERTIFIED_PLATFORM_CELLS.get((resolved_os, resolved_machine))
+    if cell is not None and resolved_os == "Linux":
+        libc_name, libc_version = platform.libc_ver() if libc is None else libc
+        match = re.fullmatch(r"([0-9]+)\.([0-9]+)(?:\.[0-9]+)*", libc_version)
+        if (
+            libc_name != "glibc"
+            or match is None
+            or tuple(int(part) for part in match.group(1, 2)) < (2, 28)
+        ):
+            cell = None
+    return PlatformCell(
+        os_name=resolved_os,
+        machine=resolved_machine,
+        certified=cell is not None,
+        cell=cell,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -698,8 +763,10 @@ def build_version_manifest(*, include_optional_probes: bool = False) -> VersionM
     limitations = tuple(cast(list[str], support["limitations"]))
     if mcp_version is not None and not cast(list[JsonValue], support["mcp_cells"]):
         limitations = tuple(sorted({*limitations, "mcp_capability_unverified"}, key=str.encode))
+    if not platform_cell().certified:
+        limitations = tuple(sorted({*limitations, PLATFORM_CELL_UNTESTED}, key=str.encode))
     return VersionManifest(
-        schema_version="2.2.0",
+        schema_version="2.3.0",
         package_name="yoetz",
         package_version=_distribution_version("yoetz") or "0.1.0",
         protocol_version=PROTOCOL_VERSION,
@@ -713,8 +780,10 @@ def build_version_manifest(*, include_optional_probes: bool = False) -> VersionM
         event_schema_versions=tuple(
             (
                 name,
-                "1.2.0"
-                if name in {"evidence_recorded", "finding_recorded", "session_opened"}
+                "1.3.0"
+                if name == "finding_recorded"
+                else "1.2.0"
+                if name in {"evidence_recorded", "session_opened", "check_recorded"}
                 else "1.1.0"
                 if name
                 in {

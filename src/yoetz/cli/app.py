@@ -3344,9 +3344,10 @@ def provider_codex_subscription_setup(
 ) -> None:
     """Prove an existing Codex login (or obtain one) via app-server, then bind the exact runtime."""
 
+    import platform
+
+    from yoetz.adapters.providers.codex_app_server import codex_evaluator_cell_for_platform
     from yoetz.cli.codex_subscription import (
-        CODEX_EVALUATOR_CAPABILITY_CELL_SHA256,
-        CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT,
         codex_subscription_setup,
         default_codex_home,
         default_codex_subscription_model,
@@ -3355,14 +3356,20 @@ def provider_codex_subscription_setup(
 
     try:
         native, digest, source = resolve_supported_codex_executable(executable)
+        cell = codex_evaluator_cell_for_platform(
+            "linux" if sys.platform.startswith("linux") else sys.platform,
+            platform.machine(),
+        )
+        if source != cell.source_identity or digest != cell.executable_sha256:
+            raise ValueError("codex_runtime_capability_unsupported")
         destination = default_codex_home() if codex_home is None else codex_home
         selected_model = default_codex_subscription_model() if model is None else model
         typer.echo("Codex with ChatGPT subscription")
         typer.echo(f"  runtime: {native}")
         typer.echo(f"  executable_sha256: {digest}")
         typer.echo(f"  source: {source}")
-        typer.echo(f"  capability cell: {CODEX_EVALUATOR_CAPABILITY_CELL_SHA256}")
-        typer.echo(f"  cell evidence expires: {CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT}")
+        typer.echo(f"  capability cell: {cell.capability_cell_sha256}")
+        typer.echo(f"  cell evidence expires: {cell.capability_evidence_expires_at}")
         typer.echo(f"  dedicated CODEX_HOME: {destination}")
         typer.echo(f"  model/reasoning: {selected_model} / {reasoning_effort}")
         typer.echo("  destination: OpenAI through Codex-managed ChatGPT authentication")

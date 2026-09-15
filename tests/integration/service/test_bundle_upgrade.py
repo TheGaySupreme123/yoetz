@@ -261,7 +261,7 @@ async def test_v12_upgrade_is_backup_first_idempotent_and_fenced(
     assert holder_calls == [(_TASK_ID,)]
     inspection = apsw.Connection(str(bundle), flags=apsw.SQLITE_OPEN_READONLY)
     try:
-        assert inspection.execute("PRAGMA user_version").fetchone() == (13,)
+        assert inspection.execute("PRAGMA user_version").fetchone() == (14,)
     finally:
         inspection.close()
     assert catalog.execute(
@@ -287,7 +287,7 @@ async def test_current_bundle_selection_uses_tail_probe_without_full_hashing(
 ) -> None:
     monkeypatch.setattr(connection_module, "verify_private_local_bundle", _allow_isolated_path)
     bundle = tmp_path / "current.sqlite3"
-    _build_bundle(bundle, version=13)
+    _build_bundle(bundle, version=14)
     catalog = _catalog(bundle)
     target = _target(bundle)
 
@@ -309,7 +309,7 @@ async def test_fresh_bundle_generation_zero_is_accepted(
 ) -> None:
     monkeypatch.setattr(connection_module, "verify_private_local_bundle", _allow_isolated_path)
     bundle = tmp_path / "fresh.sqlite3"
-    _build_bundle(bundle, version=13, owner_generation="0")
+    _build_bundle(bundle, version=14, owner_generation="0")
     catalog = _catalog(bundle, generation=3)
     target = _target(bundle, catalog_owner_generation=3)
 
@@ -330,7 +330,7 @@ async def test_invalid_bundle_generations_fail_closed(
 ) -> None:
     monkeypatch.setattr(connection_module, "verify_private_local_bundle", _allow_isolated_path)
     bundle = tmp_path / f"invalid-generation-{owner_generation}.sqlite3"
-    _build_bundle(bundle, version=13, owner_generation=owner_generation)
+    _build_bundle(bundle, version=14, owner_generation=owner_generation)
     catalog = _catalog(bundle, generation=3)
     target = _target(bundle, catalog_owner_generation=3)
 
@@ -520,7 +520,7 @@ async def test_retryable_backup_failure_keeps_pending_operation_retryable(
             "operation_lost",
         ),
         (
-            13,
+            14,
             BundleUpgradePhase.RESERVED,
             BundleUpgradeReason.ROLLBACK_REQUIRED,
             "rollback_required",

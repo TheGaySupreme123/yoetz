@@ -15,6 +15,7 @@ from typing import Final, Literal, ParamSpec, Protocol, cast
 import typer
 
 from yoetz.adapters.approved_checks import ApprovedCheckRunner
+from yoetz.adapters.check_sandbox import probe_check_sandbox
 from yoetz.adapters.git_subject_state import GitSubjectStateAdapter, open_local_workspace
 from yoetz.adapters.integrations.codex_lifecycle import (
     load_mapping,
@@ -1780,6 +1781,8 @@ def observe_checks_status(
             "workspace_commitment": commitment,
             "policy_digest": policy.raw_digest,
             "state": "trusted" if trusted else "untrusted",
+            # Host-level answer, named once here rather than per rejected run (issue #720).
+            "sandbox": probe_check_sandbox().as_json(),
             "executable_checks": (
                 tuple(item.approval_id for item in policy.checks if not item.allow_network)
                 if trusted

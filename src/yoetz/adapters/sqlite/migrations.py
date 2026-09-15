@@ -89,6 +89,7 @@ BUNDLE_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration("0011", _load_resource("bundle", "0011")),
     Migration("0012", _load_resource("bundle", "0012")),
     Migration("0013", _load_resource("bundle", "0013")),
+    Migration("0014", _load_resource("bundle", "0014")),
 )
 
 
@@ -161,7 +162,7 @@ def _migration_authorization_window(db: apsw.Connection):
 def _requires_foreign_keys_disabled(pending: Sequence[Migration]) -> bool:
     """Return whether pending migrations include the isolated events-table rebuild."""
 
-    return any(item.version == "0013" for item in pending)
+    return any(item.version == "0014" for item in pending)
 
 
 def _validate_v10_bundle_layout(
@@ -175,11 +176,11 @@ def _validate_v10_bundle_layout(
     The short-lived 0.3 development v10 used the same user_version for its events CHECK
     rebuild and therefore lacks that consent column.  There is no safe way to infer whether
     that development schema has user data that can be replayed into the released frontier.
-    Only the released layout may continue through 0011-0013; every other combination fails
+    Only the released layout may continue through 0011-0014; every other combination fails
     closed before opening a migration transaction.
     """
 
-    if current not in {10, 11, 12} or not any(item.version == "0013" for item in pending):
+    if current not in {10, 11, 12, 13} or not any(item.version == "0014" for item in pending):
         return
     profile_columns = {
         cast(str, row[1])
@@ -278,7 +279,7 @@ def initialize_bundle(db: apsw.Connection, bundle_meta_seed: Mapping[str, str]) 
     target_version = current_schema_version(BUNDLE_MIGRATIONS)
     seed["storage_schema_version"] = str(target_version)
 
-    # Fresh installation has no dependent event rows, but 0013 still uses the same narrowly
+    # Fresh installation has no dependent event rows, but 0014 still uses the same narrowly
     # scoped migration authorization window as an upgrade.  The runtime writer authorizer is
     # restored before this function returns.
     with _migration_authorization_window(db):

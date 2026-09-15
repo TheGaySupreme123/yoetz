@@ -139,6 +139,7 @@ def test_receipt_document_is_frozen_and_exactly_shaped() -> None:
         "redactions",
         "sections",
         "children",
+        "semantic_provenance",
     )
     assert is_dataclass(document)
     assert ReceiptDocument.__slots__ == expected_fields
@@ -147,7 +148,7 @@ def test_receipt_document_is_frozen_and_exactly_shaped() -> None:
         setattr(document, "suppressed_finding_count", 1)
 
 
-def test_children_use_receipt_document_1_2_artifact_and_keep_inner_version() -> None:
+def test_children_use_receipt_document_1_3_artifact_and_keep_inner_version() -> None:
     """The additive artifact carries children while the inner document version stays 1.0.0."""
 
     wire = _variant("deterministic-current.case.json", "current_complete")
@@ -155,7 +156,7 @@ def test_children_use_receipt_document_1_2_artifact_and_keep_inner_version() -> 
     schema_versions = cast(list[dict[str, str]], versions["schema_versions"])
     for entry in schema_versions:
         if entry["schema_id"] == "receipts/receipt-document":
-            entry["schema_version"] = "1.2.0"
+            entry["schema_version"] = "1.3.0"
     wire["children"] = {"children": []}
 
     document = receipt_document_from_json(wire)

@@ -32,6 +32,7 @@ from yoetz.ports.plugin_artifacts import (
     ArtifactAuthority,
     McpOwnership,
     McpOwnershipState,
+    PluginArtifactError,
     PluginArtifactReason,
     PluginArtifactState,
     PluginFormatProfile,
@@ -1161,3 +1162,50 @@ def test_compatible_untested_version_is_admitted_with_provenance(tmp_path: Path)
         "version_unsupported": "2.1.232",
     }
     assert status_claude_code_plugin(below, artifact, commands=commands).version_provenance is None
+
+
+def test_refused_presence_surfaces_as_claude_error_before_any_mutation(tmp_path: Path) -> None:
+    interpreter = tmp_path / "bin" / "python3"
+    interpreter.parent.mkdir()
+    interpreter.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    interpreter.chmod(0o700)
+    artifact = render_claude_code_plugin(
+        mcp_ownership=McpOwnership.PLUGIN_MANAGED,
+        route_profile="policy",
+        yoetz_launcher=(str(interpreter), "-m", "yoetz"),
+    )
+    target = _target(tmp_path)
+    commands = _ClaudeFixture(artifact)
+    preview = preview_claude_code_plugin(
+        _REQUEST, target, ClaudeCodePluginAction.INSTALL, artifact, commands=commands
+    )
+
+    class _RefusingReview:
+        def consume_setup_authority(
+            self, authority: ArtifactAuthority, preview_digest: str
+        ) -> None:
+            raise AssertionError("setup authority is not the review lane")
+
+        def consume_artifact_review(
+            self, authority: ArtifactAuthority, preview_digest: str
+        ) -> None:
+            raise PluginArtifactError(PluginArtifactReason.HUMAN_AUTHORITY_UNAVAILABLE, {})
+
+    # The shared review port's neutral error must reach the Claude surface as the host error
+    # type with the port's reason, never escape the CLI as a traceback.
+    with pytest.raises(ClaudeCodeIntegrationError) as caught:
+        apply_claude_code_plugin(
+            _REQUEST,
+            target,
+            ClaudeCodePluginAction.INSTALL,
+            artifact,
+            accepted_preview_digest=preview.preview_digest,
+            authority=_authority(preview.preview_digest),
+            review=_RefusingReview(),
+            commands=commands,
+        )
+    assert caught.value.reason is PluginArtifactReason.HUMAN_AUTHORITY_UNAVAILABLE
+    assert isinstance(caught.value.__cause__, PluginArtifactError)
+    # Preview and status only list; no marketplace, install, or enable command may run.
+    assert all(call[:2] == ("plugin", "list") for call in commands.calls)
+    assert not Path(target.marketplace_root).exists()

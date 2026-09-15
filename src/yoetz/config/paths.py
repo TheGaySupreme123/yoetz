@@ -57,6 +57,10 @@ _INSTALLATION_ID: Final = re.compile(
 type IsolationBinding = Literal["ambient", "environment", "runtime_pin", "environment_and_pin"]
 _PRIVATE_DIR_MODE: Final = 0o700
 _VCS_MARKERS: Final = frozenset({".git", ".hg", ".svn", ".jj"})
+# ``9p`` (WSL 2 Windows drives and other virtio-9p shares), ``drvfs`` (WSL 1 Windows drives), and
+# ``virtiofs`` (VM shared folders, including newer WSL and Docker/Lima mounts) all proxy file
+# operations across a VM or host boundary. Yoetz has not certified their locking and crash
+# durability, so they are refused like a network share (issue #723): use the guest's own disk.
 _NETWORK_FILESYSTEMS_LINUX: Final = frozenset(
     {
         "9p",
@@ -64,6 +68,7 @@ _NETWORK_FILESYSTEMS_LINUX: Final = frozenset(
         "ceph",
         "cifs",
         "davfs",
+        "drvfs",
         "fuse.rclone",
         "fuse.sshfs",
         "glusterfs",
@@ -72,6 +77,7 @@ _NETWORK_FILESYSTEMS_LINUX: Final = frozenset(
         "smb3",
         "smbfs",
         "sshfs",
+        "virtiofs",
     }
 )
 _NETWORK_FILESYSTEMS_MACOS: Final = frozenset({"acfs", "afpfs", "nfs", "smbfs", "webdav"})

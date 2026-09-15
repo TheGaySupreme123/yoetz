@@ -113,7 +113,21 @@ def _data_dir_config(root: Path) -> tuple[Path, Path]:
     return config, data_dir
 
 
-def _codex_package_layout(root: Path, *, nested: bool) -> tuple[Path, Path]:
+def _codex_package_layout(
+    root: Path, *, nested: bool, platform_name: str = "darwin"
+) -> tuple[Path, Path]:
+    if platform_name == "linux":
+        native_package_directory = "codex-linux-x64"
+        native_package_version = "0.150.1-linux-x64"
+        native_relative = Path("vendor/x86_64-unknown-linux-musl/bin/codex")
+        native_os = "linux"
+        native_cpu = "x64"
+    else:
+        native_package_directory = "codex-darwin-arm64"
+        native_package_version = "0.150.1-darwin-arm64"
+        native_relative = Path("vendor/aarch64-apple-darwin/bin/codex")
+        native_os = "darwin"
+        native_cpu = "arm64"
     wrapper_root = root / "node_modules" / "@openai" / "codex"
     wrapper = wrapper_root / "bin" / "codex.js"
     wrapper.parent.mkdir(parents=True)
@@ -125,18 +139,18 @@ def _codex_package_layout(root: Path, *, nested: bool) -> tuple[Path, Path]:
                 "version": "0.150.1",
                 "bin": {"codex": "bin/codex.js"},
                 "optionalDependencies": {
-                    "@openai/codex-darwin-arm64": "npm:@openai/codex@0.150.1-darwin-arm64"
+                    f"@openai/{native_package_directory}": f"npm:@openai/codex@{native_package_version}"
                 },
             }
         ),
         encoding="utf-8",
     )
     native_root = (
-        wrapper_root / "node_modules" / "@openai" / "codex-darwin-arm64"
+        wrapper_root / "node_modules" / "@openai" / native_package_directory
         if nested
-        else wrapper_root.parent / "codex-darwin-arm64"
+        else wrapper_root.parent / native_package_directory
     )
-    native = native_root / "vendor" / "aarch64-apple-darwin" / "bin" / "codex"
+    native = native_root / native_relative
     native.parent.mkdir(parents=True)
     native.write_bytes(b"packaged-layout-probe")
     native.chmod(0o700)
@@ -144,9 +158,9 @@ def _codex_package_layout(root: Path, *, nested: bool) -> tuple[Path, Path]:
         json.dumps(
             {
                 "name": "@openai/codex",
-                "version": "0.150.1-darwin-arm64",
-                "os": ["darwin"],
-                "cpu": ["arm64"],
+                "version": native_package_version,
+                "os": [native_os],
+                "cpu": [native_cpu],
             }
         ),
         encoding="utf-8",
@@ -154,8 +168,30 @@ def _codex_package_layout(root: Path, *, nested: bool) -> tuple[Path, Path]:
     return wrapper, native
 
 
+@pytest.mark.parametrize(
+    ("platform_name", "machine", "executable_sha256", "source_identity"),
+    [
+        (
+            "darwin",
+            "arm64",
+            "sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b",
+            "openai-codex-npm-darwin-arm64-0.150.1",
+        ),
+        (
+            "linux",
+            "x86_64",
+            "sha256:abf1bb1643a79f73aa78ee627e111e02d4f8c98f25813a0cf6ce277709664386",
+            "openai-codex-npm-linux-x64-0.150.1",
+        ),
+    ],
+)
 def test_installed_wheel_resolves_nested_and_npm_prefix_codex_layouts(
-    built_dist: _BuiltDist, tmp_path: Path
+    built_dist: _BuiltDist,
+    tmp_path: Path,
+    platform_name: str,
+    machine: str,
+    executable_sha256: str,
+    source_identity: str,
 ) -> None:
     root = tmp_path / "install"
     home = root / "home"
@@ -167,14 +203,18 @@ def test_installed_wheel_resolves_nested_and_npm_prefix_codex_layouts(
     probe = (
         "import sys; from pathlib import Path; "
         "import yoetz.cli.codex_subscription as m; "
-        "sys.platform='darwin'; m.platform.machine=lambda: 'arm64'; "
-        "m._sha256_file=lambda _path: m._DARWIN_ARM64_EXECUTABLE_SHA256; "
+        f"sys.platform={platform_name!r}; m.platform.machine=lambda: {machine!r}; "
+        f"m._sha256_file=lambda _path: {executable_sha256!r}; "
         "print(Path(m.__file__).resolve()); "
         "print(*m.resolve_supported_codex_executable(Path(sys.argv[1])), sep='\\n')"
     )
 
     for nested in (True, False):
-        wrapper, native = _codex_package_layout(tmp_path / f"layout-{nested}", nested=nested)
+        wrapper, native = _codex_package_layout(
+            tmp_path / f"layout-{platform_name}-{nested}",
+            nested=nested,
+            platform_name=platform_name,
+        )
         result = subprocess.run(
             [str(installed_python), "-c", probe, str(wrapper)],
             capture_output=True,
@@ -190,8 +230,8 @@ def test_installed_wheel_resolves_nested_and_npm_prefix_codex_layouts(
         assert Path(lines[0]).is_relative_to(root / "tool" / "yoetz")
         assert lines[1:] == [
             str(native),
-            "sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b",
-            "openai-codex-npm-darwin-arm64-0.150.1",
+            executable_sha256,
+            source_identity,
         ]
         assert str(_REPO_ROOT).encode("utf-8") not in result.stdout
 

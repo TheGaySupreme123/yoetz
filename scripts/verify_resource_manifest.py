@@ -292,6 +292,7 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ("migrations/bundle/0011.sql", "migration", "application/sql", True),
     ("migrations/bundle/0012.sql", "migration", "application/sql", True),
     ("migrations/bundle/0013.sql", "migration", "application/sql", True),
+    ("migrations/bundle/0014.sql", "migration", "application/sql", True),
     ("migrations/catalog/0001.sql", "migration", "application/sql", True),
     ("migrations/catalog/0002.sql", "migration", "application/sql", True),
     ("migrations/catalog/0003.sql", "migration", "application/sql", True),
@@ -540,6 +541,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/events/check-recorded-1.2.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/events/claim-recorded-1.0.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -595,6 +602,18 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/events/finding-recorded-1.1.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/events/finding-recorded-1.3.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/events/finding-recorded-1.2.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,
@@ -680,12 +699,7 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ("schemas/findings/finding-1.0.0.schema.json", "json_schema", "application/schema+json", True),
     ("schemas/findings/finding-1.1.0.schema.json", "json_schema", "application/schema+json", True),
     ("schemas/findings/finding-1.2.0.schema.json", "json_schema", "application/schema+json", True),
-    (
-        "schemas/events/finding-recorded-1.2.0.schema.json",
-        "json_schema",
-        "application/schema+json",
-        True,
-    ),
+    ("schemas/findings/finding-1.3.0.schema.json", "json_schema", "application/schema+json", True),
     (
         "schemas/events/coordination-context-recorded-1.0.0.schema.json",
         "json_schema",
@@ -724,6 +738,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/findings/semantic-provenance-1.1.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/findings/semantic-provenance-1.2.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,
@@ -813,6 +833,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/operations/check-result-1.3.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/operations/check-result-1.2.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -820,6 +846,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/operations/publish-work-request-1.2.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/operations/receipt-result-1.3.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,
@@ -849,7 +881,19 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/operations/status-result-1.4.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/operations/status-result-1.3.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/receipts/receipt-document-1.3.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,
@@ -910,6 +954,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/consent/status-7.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/findings/runtime-attempt-evidence-1.1.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,
@@ -1330,6 +1380,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/version/version-manifest-2.3.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/version/version-manifest-2.2.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -1361,6 +1417,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "support/codex-evaluator/0.150.1/cell.json",
+        "compatibility_manifest",
+        "application/json",
+        True,
+    ),
+    (
+        "support/codex-evaluator/0.150.1/cell-linux-x64.json",
         "compatibility_manifest",
         "application/json",
         True,

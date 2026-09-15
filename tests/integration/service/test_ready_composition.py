@@ -10,7 +10,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 import apsw
 import pytest
@@ -388,7 +388,7 @@ async def test_replay_cancellation_joins_shielded_ledger_recovery_before_close(
     digest = "sha256:" + "0" * 64
     after = BundleIntegrity(
         task_id=task_id(route.task_id),
-        schema_version=13,
+        schema_version=14,
         frontier=Frontier.genesis(),
         history_digest=digest,
         event_count=0,
@@ -1251,7 +1251,7 @@ async def test_default_startup_bundle_upgrade_runs_real_effects_on_isolated_v12_
                 task_id=task_id,
                 route_generation=route_generation,
                 route_identity_digest=route_identity_digest,
-                storage_schema_version=13,
+                storage_schema_version=14,
                 owner_generation=2,
                 owner_nonce="fixture_nonce_0001",
                 last_verified_frontier=Frontier.genesis(),
@@ -1326,7 +1326,7 @@ async def test_default_startup_bundle_upgrade_runs_real_effects_on_isolated_v12_
     assert (backup_sets[0] / "backup-manifest.json").is_file()
     inspection = apsw.Connection(str(bundle), flags=apsw.SQLITE_OPEN_READONLY)
     try:
-        assert inspection.execute("PRAGMA user_version").fetchone() == (13,)
+        assert inspection.execute("PRAGMA user_version").fetchone() == (14,)
     finally:
         inspection.close(force=True)
 
@@ -1422,6 +1422,24 @@ async def test_ready_factory_starts_and_reads_repository_bound_setup(tmp_path: P
         )
         assert type(receipt_view) is LocalDisclosureReceiptView
         assert receipt_view.receipt.scope == setup_scope
+        # The same receipt must be reachable over ordinary control, not only through the port:
+        # the composed support-handler map used to omit both read methods (issue #730).
+        fetched = cast(
+            dict[str, Any],
+            await app.privacy_receipts_get(
+                JsonObject({"schema_version": "1.0.0", "receipt_id": receipt_id})
+            ),
+        )
+        assert fetched["outcome"] == "found"
+        assert fetched["receipt"]["kind"] == "local_disclosure"
+        assert fetched["receipt"]["receipt"]["receipt_id"] == receipt_id
+        listed = cast(
+            dict[str, Any],
+            await app.privacy_receipts_list(
+                JsonObject({"schema_version": "1.0.0", "filters": {}, "page_size": 50})
+            ),
+        )
+        assert [item["receipt"]["receipt_id"] for item in listed["receipts"]] == [receipt_id]
         request = StartRequest.model_validate(
             {
                 "protocol_version": "0.1",

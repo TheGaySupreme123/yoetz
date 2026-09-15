@@ -21,7 +21,7 @@ _SCRIPT_ROOT = Path(__file__).resolve().parent
 _DEFAULT_REPO_ROOT = _SCRIPT_ROOT.parent
 
 _MAX_PASSES: Final = 5
-_VERSION_MANIFEST_SCHEMA: Final = "version/version-manifest-2.2.0.schema.json"
+_VERSION_MANIFEST_SCHEMA: Final = "version/version-manifest-2.3.0.schema.json"
 _OWNED_ROOTS: Final = (
     "schemas",
     "src/yoetz/resources",
@@ -45,7 +45,7 @@ from yoetz.version import build_version_manifest, version_manifest_json
 # catalog loader used by every public request before claiming the package is usable.
 load_schema_catalog()
 schema = json.loads(
-    pathlib.Path("schemas/version/version-manifest-2.2.0.schema.json").read_bytes()
+    pathlib.Path("schemas/version/version-manifest-2.3.0.schema.json").read_bytes()
 )
 document = json.loads(version_manifest_json(build_version_manifest(), include_resources=True))
 Draft202012Validator(schema).validate(document)
@@ -174,6 +174,11 @@ def _check(repo_root: Path) -> bool:
 
 
 def _write_pass(repo_root: Path) -> bool:
+    if not (repo_root / "schemas" / _VERSION_MANIFEST_SCHEMA).exists():
+        if not _run(
+            repo_root, "generate_schemas.py", "--write", "--only", _VERSION_MANIFEST_SCHEMA
+        ):
+            return False
     steps = (
         ("generate_project_policy_fixture.py", "--write"),
         (

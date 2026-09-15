@@ -45,8 +45,9 @@ New setups preselect `gpt-5.6-luna` with reasoning effort `high`. When an existi
 binding is targeted, omitting `--model` preserves its exact model, including during account
 switching. Pass `--model` to change it intentionally.
 
-The selected executable can be an npm wrapper with the native package nested below that wrapper,
-an npm-prefix wrapper with `@openai/codex-darwin-arm64` hoisted beside the wrapper package in the
+The selected executable can be an npm wrapper with the matching native package nested below that
+wrapper (`@openai/codex-darwin-arm64` on macOS arm64 or `@openai/codex-linux-x64` on Linux x86_64),
+an npm-prefix wrapper with that same platform package hoisted beside the wrapper package in the
 same prefix, or the exact native `codex` executable itself. Yoetz resolves only those bounded
 locations derived from the selected path: it does not search PATH, unrelated prefixes, or arbitrary
 parent directories. Every form still requires the supported platform, package version, native
@@ -71,16 +72,25 @@ its own authentication in the dedicated home; that is separate from Yoetz config
 `disconnect` when you want Codex to log out, or `rollback` when you want to remove the Yoetz
 binding while preserving the home and installation.
 
-The initial closed cell is Codex npm `0.150.1` on macOS arm64, capability
-`codex-evaluator/0.150.1/v2`. The selected native binary digest, app-server v2 schema digest,
+The exact evaluator cells are Codex npm `0.150.1` on macOS arm64 and `0.150.1-linux-x64` on
+Linux x86_64. An x86_64 WSL2 Linux userspace follows the Linux cell when run there, but
+WSL-specific smoke evidence remains pending. Both use capability `codex-evaluator/0.150.1/v2`.
+The selected native binary digest, app-server v2 schema digest,
 capability-cell identity digest and evidence expiry, strict configuration digest, model, reasoning
 effort, and dedicated owner-private `CODEX_HOME` are bound in nonsecret config and rechecked before
 every attempt. Expired capability evidence fails before a child starts. A shell alias, neighboring
 version, moved binary, modified evaluator config, API key, proxy variable, or ambient Codex home is
-not a fallback. The only fallback is an API provider you explicitly pair with it (see
+not a fallback. Native Windows has no evaluator cell. The only fallback is an API provider you
+explicitly pair with it (see
 [Pairing a fallback endpoint](#pairing-a-fallback-endpoint)). Guided first-run, the prompt-loop
 provider menu, and `/provider` can log out the
 dedicated home first when you choose to switch ChatGPT accounts.
+
+On Linux, Codex's read-only sandbox needs bubblewrap (`bwrap`) and unprivileged user
+namespaces. A container or VM without them fails closed before any case is disclosed. Use an
+environment that provides both and keep the sandbox checks enabled. See the
+[evaluator runbook](../runbooks/codex-subscription-evaluator.md#linux-authenticated-smoke-evidence-2026-09-13)
+for the current acceptance evidence and remaining release checks.
 
 Read structural state without sending a task case:
 
@@ -100,7 +110,9 @@ When an attempt fails after the case was disclosed, the receipt keeps the closed
 `semantic_status` / `semantic_reason` pair and adds `runtime_evidence.failure_stage`: one fixed
 token such as `output_not_json`, `judgment_refs_duplicate`, `judgment_conclusion_mismatch`,
 `agent_message_count`, or `event_limit`. It tells you where validation stopped without keeping
-any of Codex's text. A `response_schema_invalid` result stays final and is not retried.
+any of Codex's text. A `response_schema_invalid` result stays final and is not retried. One
+stage, `token_usage_invalid`, can also appear on a successful review: Codex reported a token count
+that was malformed or went backwards, so the receipt keeps the judgment and leaves usage unknown.
 
 Setup, disconnect, and rollback recompose the local service afterwards. The subscription endpoint
 has unknown data-use posture, so Yoetz does not mark it as the Assisted recommendation. You may

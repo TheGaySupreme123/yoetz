@@ -681,7 +681,7 @@ class SqliteBundleUpgradeEffects:
                 raise _verification_failure("backup_preservation")
         # A restart after the DDL commit intentionally passes ``before=None``.  The immutable
         # machine-bound backup is then the only source of the original v12 facts; comparing the
-        # live v13 bundle to itself would make preservation vacuous.
+        # live v14 bundle to itself would make preservation vacuous.
         if not _integrity_matches(backup_integrity, after, projection=True):
             raise _verification_failure("backup_preservation")
 
@@ -821,9 +821,11 @@ class SqliteBundleUpgradeEffects:
             or JsonObject(
                 {
                     "kind": "yoetz.bundle-upgrade/1",
-                    "from_version": "12",
-                    "to_version": "13",
-                    "migration_ids": ("0013",),
+                    "from_version": str(before.schema_version),
+                    "to_version": "14",
+                    "migration_ids": tuple(
+                        f"{version:04d}" for version in range(before.schema_version + 1, 15)
+                    ),
                 }
             ),
             mode=BackupMode.MACHINE_BOUND,
@@ -905,7 +907,12 @@ class SqliteBundleUpgradeEffects:
             raise
         except (KeyStoreError, OSError, RuntimeError, TypeError, ValueError) as exc:
             raise _backup_failure("bundle_keys", retryable=False, cause=exc)
-        return BackupEvidence(target.task_id, before.frontier, manifest.manifest_digest)
+        return BackupEvidence(
+            target.task_id,
+            before.frontier,
+            manifest.manifest_digest,
+            backup_integrity.schema_version,
+        )
 
     def _try_verify_set(self, path: Path) -> VerifiedBackupSet | None:
         try:

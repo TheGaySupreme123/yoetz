@@ -1180,10 +1180,10 @@ async def _bundle_upgrade_targets(
                 continue
             # Current bundles without a pending upgrade do not need their privacy object set
             # re-hashed merely to prove that startup can skip them.  A stale source or an
-            # interrupted v13 operation still gets the exact roots that enter the coordinator's
+            # interrupted v14 operation still gets the exact roots that enter the coordinator's
             # plan digest and CAS checks.
-            needs_privacy_roots = schema_version == 12 or (
-                schema_version == 13
+            needs_privacy_roots = schema_version in {12, 13} or (
+                schema_version == BUNDLE_UPGRADE_TARGET_VERSION
                 and _bundle_upgrade_has_pending(catalog_db, installation_id, route.task_id)
             )
             if needs_privacy_roots:

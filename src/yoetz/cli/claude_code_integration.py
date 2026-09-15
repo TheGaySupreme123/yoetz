@@ -7,6 +7,10 @@ import sys
 from pathlib import Path
 from typing import Literal, cast
 
+from yoetz.adapters.integrations.artifact_presence import (
+    describe_artifact_presence,
+    select_artifact_user_presence,
+)
 from yoetz.adapters.integrations.claude_code_integration import (
     ClaudeCodeIntegrationError,
     ClaudeCodePluginAction,
@@ -21,7 +25,6 @@ from yoetz.adapters.integrations.claude_code_integration import (
     status_claude_code_plugin,
 )
 from yoetz.adapters.integrations.launcher import invoking_launcher
-from yoetz.adapters.integrations.macos_artifact_presence import MacOSArtifactUserPresence
 from yoetz.adapters.integrations.portable_plugin import (
     ArtifactUserPresencePort,
     ElevatedPortableArtifactReview,
@@ -313,6 +316,7 @@ def run_claude_code_plugin_command(
                             "--target-digest",
                             preview.preview_digest,
                         ],
+                        "human_presence": describe_artifact_presence(),
                         "requires_os_authenticated_prompt": True,
                     },
                     "host": {
@@ -340,7 +344,7 @@ def run_claude_code_plugin_command(
             sys.stderr.write("claude_code_plugin_exact_preview_acceptance_required\n")
             return 3
         review: PluginMutationReviewPort = ElevatedPortableArtifactReview(
-            MacOSArtifactUserPresence() if _presence is None else _presence,
+            select_artifact_user_presence() if _presence is None else _presence,
             _state=_state,
         )
         result = apply_claude_code_plugin(
