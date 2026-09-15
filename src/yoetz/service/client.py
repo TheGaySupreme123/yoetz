@@ -746,9 +746,13 @@ class ServiceClient(ControlClientPort):
     def _retire_call(self, rpc_id: str, future: asyncio.Future[ControlResult]) -> None:
         """Keep bounded correlation state for a terminal result that may still arrive."""
 
-        if not future.done():
+        if not future.done() or future.cancelled():
             self._retired_rpc_ids.add(rpc_id)
-            future.cancel()
+            if not future.done():
+                future.cancel()
+        else:
+            # The response can win the deadline race after the caller stops awaiting it.
+            future.exception()
 
     async def call(self, request: ControlCallRequest) -> ControlResult:
         self._ensure_live()
