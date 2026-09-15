@@ -120,8 +120,11 @@ async def test_the_repair_fact_reaches_safe_details_in_structured_output(
     error = cast(dict[str, object], structured["error"])
     assert error["code"] == PublicErrorCode.INVALID_REQUEST.value
     details = cast(dict[str, object], error["safe_details"])
-    assert set(details) == {"fields", "reasons", *_REPAIR_KEYS}
+    assert set(details) == {"continuation", "fields", "reasons", *_REPAIR_KEYS}
     assert details["reasons"] == ["extra_forbidden"]
+    # The repair fact's directive rides as the typed continuation (ADR-030): this producer is the
+    # only one that emits the ownership repair, and previously nothing attached its token.
+    assert details["continuation"] == "field_ownership_repair"
     assert details["repair_kind"] == "field_ownership"
     assert details["repair_field"] == "attempted_items"
     assert details["repair_selected_family"] == "claim_recorded"
@@ -139,6 +142,7 @@ async def test_the_repair_fact_reaches_the_compatible_text_channel(
 
     summary = render_safe_compact_summary(structured)
     assert "Repair: attempted_items is admitted only by the action_recorded payload" in summary
+    assert "Continuation: field_ownership_repair." in summary
     assert len(summary.encode("ascii")) <= 512
     content = cast(list[Any], getattr(result, "content"))
     assert content[0].text == summary
@@ -170,7 +174,8 @@ async def test_an_ambiguous_field_keeps_the_current_admitted_key_answer(
     _, structured = await _dry_run_result(monkeypatch, request)
     error = cast(dict[str, object], structured["error"])
     details = cast(dict[str, object], error["safe_details"])
-    assert set(details) == {"fields", "reasons"}
+    assert set(details) == {"continuation", "fields", "reasons"}
+    assert details["continuation"] == "input_correction_new_identity"
 
 
 def test_an_envelope_owned_key_is_not_called_misplaced_across_families() -> None:

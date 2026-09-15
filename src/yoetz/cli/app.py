@@ -32,6 +32,8 @@ from yoetz.cli.render import (
     render_human_error,
     render_human_receipt,
     render_human_status,
+    render_local_recovery_lines,
+    render_recovery_directive_lines,
 )
 from yoetz.domain.values import JsonObject
 from yoetz.ports.control import (
@@ -63,6 +65,7 @@ from yoetz.protocol.models import (
     StatusSuccessModel,
     public_model_to_wire,
 )
+from yoetz.protocol.recovery import continuation_for_reason, directive_for, timeout_operation_kind
 from yoetz.protocol.schemas import schema_document_for
 from yoetz.service.client import ServiceClient, accepted_but_unresponsive, connect_service
 from yoetz.service.control_protocol import public_error_code_for_control_reason
@@ -552,11 +555,16 @@ def _machine_scope_request_or_none() -> JsonObject | None:
 
 
 def _bounded_failure_line(reason: str, *, prefix: str | None = None) -> str:
-    """Render one bounded token with its remediation; the token itself stays first."""
+    """Render one bounded token with its remediation; the token itself stays first.
+
+    When the reason has a registered recovery directive (ADR-030), the directive lines follow on
+    their own lines, so a lifecycle refusal the MCP bridge would explain is explained here too.
+    """
 
     head = reason if prefix is None else f"{prefix}: {reason}"
     remediation = remediation_message(reason)
-    return head if remediation is None else f"{head}: {remediation}"
+    line = head if remediation is None else f"{head}: {remediation}"
+    return "\n".join([line, *render_local_recovery_lines(reason)])
 
 
 def _codex_subscription_cli_failure(error: BaseException) -> None:
@@ -607,9 +615,16 @@ def _singleton_holder_pid() -> int | None:
         return None
 
 
+def _annotate_first_line(text: str, suffix: str) -> str:
+    """Append a bounded annotation to the token line, ahead of any directive lines beneath it."""
+
+    head, separator, rest = text.partition("\n")
+    return f"{head}{suffix}{separator}{rest}"
+
+
 def _with_holder_pid(line: str) -> str:
     holder = _singleton_holder_pid()
-    return line if holder is None else f"{line} (holder pid {holder})"
+    return line if holder is None else _annotate_first_line(line, f" (holder pid {holder})")
 
 
 def _with_holder_identity(line: str) -> str:
@@ -632,7 +647,7 @@ def _with_holder_identity(line: str) -> str:
 def _with_correlation(line: str, error: ControlError) -> str:
     if error.correlation_id is None:
         return line
-    return f"{line}; correlation_id {error.correlation_id}"
+    return _annotate_first_line(line, f"; correlation_id {error.correlation_id}")
 
 
 def _holder_identity_json() -> dict[str, JsonValue] | None:
@@ -702,9 +717,25 @@ def _lifecycle_failure(error: LifecycleError) -> int:
     return exit_code_for(code)
 
 
-def _control_failure(error: ControlError, *, json_output: bool = False) -> int:
+def _control_failure(
+    error: ControlError, *, json_output: bool = False, operation: str | None = None
+) -> int:
     error = _bind_handshake_correlation(error)
     code = public_error_code_for_control_reason(error.reason)
+    if error.reason == "request_timeout" and operation is not None:
+        # The directive depends on what timed out (issue #669): a read proves nothing committed, a
+        # write may have, and a start may have without returning the ids a status query needs.
+        # Only the workflow commands know their operation; other callers keep the generic line.
+        kind = timeout_operation_kind(operation)
+        directive = directive_for(continuation_for_reason("request_timeout", operation_kind=kind))
+        lines = [
+            f"{code.value.lower()}: request_timeout: the local {operation} request did not answer "
+            "within its deadline"
+        ]
+        if directive is not None:
+            lines.extend(render_recovery_directive_lines(directive))
+        _stderr(_with_correlation("\n".join(lines), error))
+        return exit_code_for(code)
     if error.reason in {"service_incompatible", "protocol_mismatch"}:
         # The endpoint answered, but with a service of another installation or protocol
         # generation. Neither 'service run' (refused while the holder lives) nor a plain retry
@@ -815,7 +846,7 @@ async def _call_workflow(
     except OSError, ProtocolValueError, ValidationError, ValueError:
         return _usage_failure()
     except ControlError as error:
-        return _control_failure(error)
+        return _control_failure(error, operation=method)
 
 
 def _finish(code: int) -> None:

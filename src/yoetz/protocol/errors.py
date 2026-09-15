@@ -10,12 +10,16 @@ from types import MappingProxyType
 from typing import cast
 
 __all__ = [
+    "ADMITTED_CLAIM_REVISION_INVARIANTS",
+    "ADMITTED_CONTINUATION_TOKENS",
     "PROTOCOL_REASON_CODES",
+    "REASON_CODE_CONTINUATIONS",
     "SAFE_DETAIL_KEYS",
     "ProtocolValueError",
     "PublicErrorCode",
     "PublicOperationError",
     "SafeDetailValue",
+    "attach_reason_continuation",
     "normalize_safe_details",
 ]
 
@@ -242,6 +246,7 @@ SAFE_DETAIL_KEYS: tuple[str, ...] = (
     "field",
     "head_digest",
     "host_profile",
+    "invariant",
     "limit",
     "method",
     "operation",
@@ -264,6 +269,26 @@ SAFE_DETAIL_KEYS: tuple[str, ...] = (
     "writer_id",
 )
 
+# The closed claim-revision invariant vocabulary (ADR-030). ``yoetz.domain.events`` owns the rule
+# these name and cannot be imported here -- this module is a dependency root -- so the set is
+# literal and the domain fails at import if the two ever disagree. Before ADR-030 the invariant
+# travelled only inside the public error message, and the MCP text projector recovered it by
+# matching that whole sentence with a regex; carrying it as a typed detail is what retires that.
+ADMITTED_CLAIM_REVISION_INVARIANTS: frozenset[str] = frozenset(
+    {
+        "claim_id_must_be_fresh",
+        "claim_kind_must_match",
+        "limitation_refs_complete",
+        "limitation_refs_must_be_relevant_non_success_results",
+        "replacement_must_change_effective_claim",
+        "replacement_must_not_dispute",
+        "scope_overlap_required",
+        "supporting_refs_must_exclude_limitations",
+        "superseded_claim_must_be_effective",
+        "superseded_claim_must_exist",
+    }
+)
+
 _INTEGER_DETAIL_KEYS = frozenset(
     {"count", "limit", "pending_ttl_seconds", "retry_after_ms", "sequence"}
 )
@@ -271,14 +296,64 @@ _BOOLEAN_DETAIL_KEYS = frozenset({"availability_inherited"})
 # Closed token sets for the MCP bridge's host-binding availability facts (issue #469). The
 # binding identity is the bridge's host and route profile; `availability` names the one latched
 # state a later request identity may inherit.
-# `continuation` and the exact command literals are the typed initialization-required handoff
-# (issue #512): every value is a repository constant, so nothing caller-derived can ride these
-# keys onto the wire.
+# `continuation` and the exact command literals are typed handoffs, not free text: every value is a
+# repository constant, so nothing caller-derived can ride these keys onto the wire. The token set is
+# the recovery registry's own (issue #739), which began as the single initialization-required
+# continuation of issue #512; the registry owns the directive text each token stands for, and that
+# text never travels here.
+# The closed continuation vocabulary (issue #739). This module is a dependency root and holds no
+# internal imports, so the tokens are literal here and ``yoetz.protocol.recovery`` fails at import
+# time if its registry and this set ever disagree. Adding a token here without registering its
+# directive, or the reverse, is a build failure rather than a bare token reaching an agent.
+ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
+    {
+        "consent_ceremony_required",
+        "field_ownership_repair",
+        "frontier_refresh_required",
+        "input_correction_new_identity",
+        "operation_pending_inspect",
+        "read_timeout_new_identity",
+        "recovery_check_then_correct",
+        "resource_integrity_repair",
+        "service_holder_busy",
+        "service_replacement_exhausted",
+        "session_rebind_required",
+        "sorted_set_required",
+        "start_timeout_same_identity",
+        "storage_root_unsafe",
+        "vault_initialization_required",
+        "write_timeout_same_identity",
+    }
+)
+
+# Protocol reason codes whose recovery is fully determined by the reason alone (ADR-030). The map
+# lives here, beside the token set it ranges over, because attachment happens where every public
+# error is built: ``PublicOperationError`` adds the continuation at construction, so a producer that
+# names one of these reasons cannot ship without its directive. ``yoetz.protocol.recovery`` owns the
+# directive text and fails at import if a value here is not a registered token. ``request_timeout``
+# is deliberately absent: its directive depends on the operation kind and is resolved by the one
+# boundary that knows it (``continuation_for_reason``).
+REASON_CODE_CONTINUATIONS: Mapping[str, str] = MappingProxyType(
+    {
+        "duplicate_set_member": "sorted_set_required",
+        "endpoint_unsafe": "storage_root_unsafe",
+        "expected_frontier_required": "frontier_refresh_required",
+        "frontier_changed": "frontier_refresh_required",
+        "frontier_digest_mismatch": "frontier_refresh_required",
+        "operation_recovery_unavailable": "recovery_check_then_correct",
+        "schema_digest_mismatch": "resource_integrity_repair",
+        "session_superseded": "session_rebind_required",
+        "unsorted_set_field": "sorted_set_required",
+    }
+)
+if set(REASON_CODE_CONTINUATIONS.values()) - ADMITTED_CONTINUATION_TOKENS:
+    raise RuntimeError("reason_code_continuation_not_admitted")
+
 _TOKEN_DETAIL_VALUES: Mapping[str, frozenset[str]] = MappingProxyType(
     {
         "authorize_command": frozenset({"yoetz consent authorize"}),
         "availability": frozenset({"terminal_unavailable"}),
-        "continuation": frozenset({"vault_initialization_required"}),
+        "continuation": ADMITTED_CONTINUATION_TOKENS,
         "host_profile": frozenset({"generic", "codex", "claude", "cursor"}),
         "prepare_command": frozenset({"yoetz consent prepare vault_initialize"}),
         "review_command": frozenset({"yoetz consent review"}),
@@ -393,6 +468,10 @@ def _normalize_detail(key: str, value: object) -> SafeDetailValue | None:
         if type(value) is str and value in PROTOCOL_REASON_CODES:
             return value
         return None
+    if key == "invariant":
+        if type(value) is str and value in ADMITTED_CLAIM_REVISION_INVARIANTS:
+            return value
+        return None
     if key == "quarantine_code":
         if type(value) is str and value in _QUARANTINE_CODES:
             return value
@@ -453,6 +532,29 @@ def normalize_safe_details(value: object) -> Mapping[str, SafeDetailValue]:
     return MappingProxyType(normalized)
 
 
+def attach_reason_continuation(
+    details: Mapping[str, SafeDetailValue],
+) -> Mapping[str, SafeDetailValue]:
+    """Attach the continuation a frozen ``reason_code`` determines, when none travels already.
+
+    Every registered reason resolves to the same directive no matter which producer raised it, so
+    the attachment is made once here rather than at each raising site (ADR-030). A continuation the
+    producer chose explicitly is never overridden: the one boundary that knows more than the reason
+    (the MCP bridge for ``request_timeout``) has already said so. Key order stays the documented
+    ASCII order of ``SAFE_DETAIL_KEYS``.
+    """
+
+    if "continuation" in details:
+        return details
+    reason = details.get("reason_code")
+    token = REASON_CODE_CONTINUATIONS.get(reason) if type(reason) is str else None
+    if token is None:
+        return details
+    merged: dict[str, SafeDetailValue] = dict(details)
+    merged["continuation"] = token
+    return MappingProxyType({key: merged[key] for key in SAFE_DETAIL_KEYS if key in merged})
+
+
 def _validate_message(value: object) -> str:
     if type(value) is not str:
         raise ProtocolValueError("public_error_invalid_message")
@@ -497,7 +599,7 @@ class PublicOperationError(Exception):
             raise TypeError("public_error_retryable_wrong_type")
         if correlation_id is not None and not _valid_correlation_id(correlation_id):
             raise ProtocolValueError("public_error_invalid_correlation_id")
-        normalized_details = normalize_safe_details(safe_details)
+        normalized_details = attach_reason_continuation(normalize_safe_details(safe_details))
         object.__setattr__(self, "code", validated_code)
         object.__setattr__(self, "message", validated_message)
         object.__setattr__(self, "retryable", retryable)

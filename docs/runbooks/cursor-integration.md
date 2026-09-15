@@ -1033,3 +1033,16 @@ that release; older permanent declines remain respected. Acceptance only supplie
 instructions, and execution requires the user's explicit upgrade request. Package replacement does
 not itself prove host activation or data migration. Preserve the existing host roots, ownership and
 privacy choices; new settings such as Expanded review require a separate exact approval.
+
+## Recovery directives in errors (ADR-030)
+
+The native Cursor profile repeats the exact canonical JSON wire body in text `content`, matching
+`structuredContent`. Both channels carry `safe_details.continuation` when present; the consumer
+must resolve that token separately. Cursor does not use the bounded summary renderer and receives
+no additional summary fields or registry-resolved directive projection. The canonical body still
+includes the public error's wire `message` field.
+
+One host-specific fact already applies and is unchanged by ADR-030: the bridge does not carry
+`authorize_command` to Cursor, because Cursor is never an agent-chat attestation client. The
+canonical body carries only the commands admitted for that host, so it omits the authorize step
+rather than naming a command the host cannot use.

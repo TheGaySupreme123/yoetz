@@ -159,19 +159,90 @@ as a `Repair:` clause on the compatible text summary channel, because MCP hosts 
 to surface `structuredContent`.
 
 The same text channel also carries a bounded `Reason:` clause when `safe_details` holds a frozen
-protocol `reason_code`, optionally followed by a JSON-pointer `field` (issue #579). Both tokens are already
-allowlisted structural content; the projector re-gates them and never copies caller prose. Claude
-Code's generic MCP profile delivers only the text `content` for `isError` results, so without this
-clause an `EVENT_INVALID` set-order rejection arrives as a bare code. The native Cursor profile
-repeats the exact canonical JSON wire body in text `content`, which already includes those
-`safe_details`; tests lock both projections.
+protocol `reason_code`, optionally followed by a JSON-pointer `field` (issue #579), and a bounded
+`Rejected:` clause naming up to two `reasons`/`fields` validation locations (with the remainder
+counted) when a schema rejection carries those lists instead. Every token is re-gated against the
+closed validation-reason set and the frozen pointer shape; the projector never copies caller prose.
+Claude Code's generic MCP profile delivers only the text `content` for `isError` results, so
+without these clauses an `EVENT_INVALID` set-order rejection arrived as a bare code and a malformed
+`actor_id` arrived without its field. The native Cursor profile repeats the exact canonical JSON
+wire body in text `content`, which already includes those `safe_details`; tests lock both
+projections.
 
-For `claim_revision_mismatch`, the generic text projection additionally carries `Invariant:` and
-`Correction:` clauses when the message exactly matches the checked-in domain error shape and its
-registered invariant and field agree with `safe_details`. The clauses are generated from a closed
-MCP registry; the projector never echoes the public error message or infers an invariant from a
-field alone. A changed or unrecognized message therefore retains only the bounded `Reason:`
-clause, and this text-only repair does not add a wire field.
+Every agent-facing surface additionally renders a **typed recovery directive** when
+`safe_details` holds a registered `continuation` token (ADR-030, issue #739). The token is the only
+part that travels: `yoetz.protocol.recovery` holds the frozen directive sentence, an optional
+`yoetz://guidance/...` pointer with a section anchor, and an optional bounded nudge, and each
+renderer reconstructs them locally. No `safe_details` key and no `public-error` schema version was
+added to carry that prose, and a third-party consumer reading structured JSON resolves the token
+through this section.
+
+`yoetz.protocol.errors` is a dependency root and holds the admitted token set literally as
+`ADMITTED_CONTINUATION_TOKENS`, and the reason-to-token map literally as
+`REASON_CODE_CONTINUATIONS`; `yoetz.protocol.recovery` fails at import if its registry and those
+disagree, so a token can never be admitted onto the wire without a directive behind it. The token
+is attached where every public error is built: `PublicOperationError` adds the continuation its
+`reason_code` maps to at construction, unless the producer already chose one, so a kernel,
+application, service, bridge, or CLI producer that names a mapped reason ships the directive
+without naming it. Two disjoint reason vocabularies resolve to tokens: protocol reason codes
+through that map (and `continuation_for_reason`), and local lifecycle, instance, and ceremony
+reasons through `continuation_for_local_reason`. An overlap between them is an import-time
+failure.
+
+`request_timeout` is the one reason whose directive depends on the operation kind, which only the
+boundary that issued the request knows (`timeout_operation_kind`): a timed-out read
+(`read_timeout_new_identity`) proves nothing committed and directs a new read identity; a timed-out
+write (`write_timeout_same_identity`) leaves the outcome unknown and directs `status
+view=operation` under the same `request_id`; and a timed-out `start`
+(`start_timeout_same_identity`) leaves it unknown without the session and writer ids that view
+requires, so it directs one exact replay of the same start body, as the shipped recovery table's
+lost-start branch has always required (issue #669). When the caller cannot say which it was, no
+continuation travels rather than the wrong one.
+
+A body the schema validator rejected before any write is a **correction, not a retry**. The MCP
+bridge's argument validator is the only producer of location-shaped `safe_details` (`fields` and
+`reasons` lists), and it attaches `input_correction_new_identity` to every such rejection: the
+field pointer and authoring hint say what to fix, and the directive says the corrected body is
+submitted once under a new `request_id` rather than resent or treated as an ambiguous write. The
+`publish_work` draft validator attaches the same token to every non-retryable `EVENT_INVALID`
+whose reason has no directive of its own; it is classified at that producer rather than mapped
+from the reason, because the same validation reasons also name corrupt stored records elsewhere,
+where "correct your input" would be false. Two
+facts a boundary knows beyond the locations override that token: a unique field-ownership repair
+(issue #266) attaches `field_ownership_repair`, and an unreachable recovery oracle
+(`operation_recovery_unavailable`) attaches `recovery_check_then_correct`, which requires the
+original `request_id` to have a known outcome before any corrected submission.
+
+A coverage ratchet requires every member of `PROTOCOL_REASON_CODES` to resolve to a directive or
+carry an explicit exemption, so a newly registered reason code cannot reach an agent as a bare
+token with nothing to do about it.
+
+On the 512-byte MCP text channel the directive is budgeted after the identity and reason clauses,
+and optional parts are dropped from the least load-bearing end — nudge, then guidance pointer, then
+carried commands. The error identity is never dropped to fit advice. The CLI has no such ceiling
+and renders `Continuation:`, `Next:`, `Commands:`, `Guidance:`, and the nudge on separate lines
+beneath the existing `CODE: message` line, and appends the same lines to a bounded lifecycle,
+instance, or ceremony refusal line whose local reason has a registered directive. Frozen command
+literals already allowlisted on `safe_details` (`prepare_command`, `review_command`,
+`authorize_command`) are rendered in that fixed order; which of them travel is decided upstream, so
+the clause reports what is present.
+
+For `claim_revision_mismatch`, `safe_details` carries an allowlisted `invariant` naming the closed
+domain rule that rejected the draft, and both the MCP text projection and the CLI render an
+`Invariant:` plus `Correction:` clause from it. The corrective phrases live in the shared recovery
+registry beside the continuation directives (ADR-030), so the same rejection reads the same way on
+both surfaces; the CLI previously rendered no correction at all.
+
+The invariant vocabulary is closed and gated twice: `yoetz.protocol.errors` holds
+`ADMITTED_CLAIM_REVISION_INVARIANTS` literally because it is a dependency root, `yoetz.domain.events`
+reuses that set rather than restating it, and `yoetz.protocol.recovery` fails at import unless every
+admitted invariant has a correction. An unregistered token is stripped by the normalizer and the
+clause is omitted.
+
+Until ADR-030 the invariant travelled only inside the public error message, and the projector
+recovered it by matching that whole sentence with a regex — so a reworded message silently cost the
+agent the correction. The clause is now independent of message wording, and the projector still
+never echoes the message.
 
 Every MCP result also carries a bounded ASCII text projection (at most 512 bytes) for hosts that
 drop `structuredContent`. A successful projection includes the first valid returned frontier's
