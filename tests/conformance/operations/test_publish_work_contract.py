@@ -116,8 +116,9 @@ def test_ordinary_channel_rejects_reserved_families(family: str) -> None:
 
     assert caught.value.code is PublicErrorCode.EVENT_INVALID
     assert caught.value.safe_details == {
-        "reason_code": "event_family_not_admitted",
+        "continuation": "input_correction_new_identity",
         "field": "/event_drafts/0/schema",
+        "reason_code": "event_family_not_admitted",
     }
 
 

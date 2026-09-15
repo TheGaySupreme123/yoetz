@@ -179,11 +179,11 @@ _DIRECTIVES: Final = (
         token="input_correction_new_identity",
         directive=(
             "Yoetz rejected this request body before any write, so retryable=false covers only "
-            "this exact body. Correct the named field per the schema hint and submit the corrected "
-            "body once under a NEW request_id."
+            "this exact body. Correct the named field and submit the corrected body once under a "
+            "NEW request_id; do not resend it unchanged."
         ),
         guidance_uri=_WORKFLOW_ERRORS,
-        nudge="A rejected body is not an ambiguous write; do not resend it unchanged.",
+        nudge="A rejected body is not an ambiguous write; do not mint a task or sibling to escape it.",
     ),
     RecoveryDirective(
         token="recovery_check_then_correct",

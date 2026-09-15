@@ -76,7 +76,10 @@ validator refused before any write can only be fixed by sending a different body
 safety floor said only the former, and an agent that read it literally treated a malformed
 `actor_id` as terminal. The bridge's argument validator, the sole producer of location-shaped
 `safe_details`, therefore attaches `input_correction_new_identity`, whose directive names the
-identity rule (a new `request_id`, once) and distinguishes the case from an ambiguous write. A
+identity rule (a new `request_id`, once) and distinguishes the case from an ambiguous write; the
+`publish_work` draft validator attaches it to every non-retryable `EVENT_INVALID` without a
+directive of its own, classified there because the same reason tokens also describe corrupt stored
+records where the instruction would be false. A
 unique field-ownership repair and an unreachable recovery oracle are the two facts that override it
 with their own directives. The guidance floor now states the same rule in the same words.
 

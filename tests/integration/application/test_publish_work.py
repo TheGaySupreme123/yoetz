@@ -295,8 +295,9 @@ async def test_forbidden_family_rejects_before_object_publication() -> None:
     # The rejected draft is named by ordinal and owning field so a multi-draft batch does not
     # have to be re-derived to find the one bad member.
     assert caught.value.safe_details == {
-        "reason_code": "event_family_not_admitted",
+        "continuation": "input_correction_new_identity",
         "field": "/event_drafts/0/schema",
+        "reason_code": "event_family_not_admitted",
     }
     assert len(objects._data) == before  # pyright: ignore[reportPrivateUsage]
     assert app.runtime.release_count == 1

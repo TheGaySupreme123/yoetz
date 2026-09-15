@@ -203,7 +203,11 @@ A body the schema validator rejected before any write is a **correction, not a r
 bridge's argument validator is the only producer of location-shaped `safe_details` (`fields` and
 `reasons` lists), and it attaches `input_correction_new_identity` to every such rejection: the
 field pointer and authoring hint say what to fix, and the directive says the corrected body is
-submitted once under a new `request_id` rather than resent or treated as an ambiguous write. Two
+submitted once under a new `request_id` rather than resent or treated as an ambiguous write. The
+`publish_work` draft validator attaches the same token to every non-retryable `EVENT_INVALID`
+whose reason has no directive of its own; it is classified at that producer rather than mapped
+from the reason, because the same validation reasons also name corrupt stored records elsewhere,
+where "correct your input" would be false. Two
 facts a boundary knows beyond the locations override that token: a unique field-ownership repair
 (issue #266) attaches `field_ownership_repair`, and an unreachable recovery oracle
 (`operation_recovery_unavailable`) attaches `recovery_check_then_correct`, which requires the
