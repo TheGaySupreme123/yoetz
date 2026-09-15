@@ -3557,12 +3557,8 @@ def _control_v2_5_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         # serializer can emit (including Cursor's generation identity).
         observation_envelope = cast(dict[str, JsonValue], definitions["observation_envelope"])
         envelope_properties = cast(dict[str, JsonValue], observation_envelope["properties"])
-        structural_payload = cast(
-            dict[str, JsonValue], envelope_properties["structural_payload"]
-        )
-        structural_properties = cast(
-            dict[str, JsonValue], structural_payload["properties"]
-        )
+        structural_payload = cast(dict[str, JsonValue], envelope_properties["structural_payload"])
+        structural_properties = cast(dict[str, JsonValue], structural_payload["properties"])
         structural_properties.update(
             {
                 "correlation_kind": {
