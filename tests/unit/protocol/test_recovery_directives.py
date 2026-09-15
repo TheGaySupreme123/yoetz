@@ -71,9 +71,13 @@ class TestRatchet:
         import yoetz.protocol.recovery as recovery
 
         monkeypatch.setattr(
-            recovery, "_LOCAL_REASON_CONTINUATIONS", {"request_timeout": "read_timeout_new_identity"}
+            recovery,
+            "_LOCAL_REASON_CONTINUATIONS",
+            {"request_timeout": "read_timeout_new_identity"},
         )
-        with pytest.raises(RuntimeError, match="recovery_local_reason_collides_with_protocol_reason"):
+        with pytest.raises(
+            RuntimeError, match="recovery_local_reason_collides_with_protocol_reason"
+        ):
             recovery._check_registry()  # pyright: ignore[reportPrivateUsage]
 
     def test_every_reason_code_has_a_disposition(self) -> None:
