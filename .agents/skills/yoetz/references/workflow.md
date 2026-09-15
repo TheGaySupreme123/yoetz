@@ -352,3 +352,14 @@ record. It only works while that identity is buffered. After delivery the result
 `promotion_window_closed` with `content_availability: not_retained`; it cannot recover omitted or
 expired bytes. Rerun or reacquire the current state when needed and record it as new evidence with
 its new time and subject state. Do not use that rerun to prove the historical state.
+
+
+## First-start contention recovery
+
+First-start recovery is separate from check recovery. A `start` busy error with reason
+`start_runtime_rebind_retry_ready`, `start_catalog_retry_ready`, or `start_busy_retry_ready`
+retains the reservation and releases its lease: replay the identical body and request ID once.
+For `start_lease_pending`, wait up to 60 seconds before that exact replay. If still unresolved,
+retain the request and correlation ID and say so. Never invent session/writer IDs for status,
+create a replacement task, or issue a check before start has returned usable IDs. An unclassified
+busy error does not prove lease release. See the workflow stop rules for the bounded continuation.

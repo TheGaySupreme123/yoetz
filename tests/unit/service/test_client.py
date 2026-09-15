@@ -942,7 +942,9 @@ async def test_late_timed_out_result_is_retired_without_poisoning_concurrent_cal
         if frame["kind"] == "call"
     )
 
-    healthy = asyncio.create_task(client.receipt(_receipt_request(23), deadline_ms=500))
+    # The second call tests correlation, not another timeout. Its completion is driven by
+    # the explicit reply below, so unrelated CI load cannot spend a second wall-clock budget.
+    healthy = asyncio.create_task(client.receipt(_receipt_request(23)))
     await _wait_for_sent(stream, 3)
     second = decode_control_frame(stream.sent[2])
     assert second["kind"] == "call"
