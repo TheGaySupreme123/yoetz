@@ -8,7 +8,7 @@ import logging
 import sys
 from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import anyio
 import pytest
@@ -737,9 +737,11 @@ async def test_response_loss_reconnects_once_with_identical_request(
 
 
 @pytest.mark.anyio
-async def test_write_timeout_preserves_unknown_outcome_and_same_request_remedy(
+async def test_start_timeout_directs_an_exact_replay_not_an_operation_query(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A lost first start returns no session or writer id, so the operation view is unusable."""
+
     client = _FakeClient(ControlError("request_timeout", retryable=True))
     _install_clients(monkeypatch, [client])
     runtime = bridge.build_bridge_runtime()
@@ -752,12 +754,52 @@ async def test_write_timeout_preserves_unknown_outcome_and_same_request_remedy(
     error = cast(dict[str, JsonValue], result.structuredContent["error"])
     assert error["code"] == "SERVICE_UNAVAILABLE"
     assert error["retryable"] is True
-    assert cast(dict[str, object], error["safe_details"])["reason_code"] == "request_timeout"
+    assert error["safe_details"] == {
+        "continuation": "start_timeout_same_identity",
+        "reason_code": "request_timeout",
+    }
+    assert error["message"] == (
+        "The local start timed out and may still have committed. Replay the exact same "
+        "start body once with the same request_id; the idempotent start path returns the "
+        "stored result or a typed boundary. Do not fabricate session or writer ids for a "
+        "status query."
+    )
+    text = cast(str, cast(list[Any], result.content)[0].text)
+    assert "Continuation: start_timeout_same_identity." in text
+    assert "view=operation" not in text
+    assert result.structuredContent["request_id"] == request["request_id"]
+    assert client.closed is False
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_write_timeout_preserves_unknown_outcome_and_same_request_remedy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient(ControlError("request_timeout", retryable=True))
+    _install_clients(monkeypatch, [client])
+    runtime = bridge.build_bridge_runtime()
+    request = _requests()["publish_work"]
+
+    result = await bridge.dispatch_publish_work(request, runtime)
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    error = cast(dict[str, JsonValue], result.structuredContent["error"])
+    assert error["code"] == "SERVICE_UNAVAILABLE"
+    assert error["retryable"] is True
+    assert error["safe_details"] == {
+        "continuation": "write_timeout_same_identity",
+        "reason_code": "request_timeout",
+    }
     assert error["message"] == (
         "The local operation timed out and may still have committed. Retry with the same "
         "request_id to recover the stored outcome; for an existing Yoetz session, status "
         "view=operation can inspect that request_id."
     )
+    text = cast(str, cast(list[Any], result.content)[0].text)
+    assert "Continuation: write_timeout_same_identity." in text
+    assert "view=operation" in text
     assert result.structuredContent["request_id"] == request["request_id"]
     assert client.closed is False
     await bridge.close_bridge_runtime(runtime)
