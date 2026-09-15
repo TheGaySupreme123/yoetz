@@ -2630,18 +2630,19 @@ def _privacy_gated_semantic_evaluator(
                     review_selection,
                     selected_refs,
                 )
-                semantic_case = build_semantic_case(
-                    case_id=semantic_case.case_id,
-                    frozen_case=frozen.case,
-                    dependency_digest=frozen.lease.dependency_digest,
-                    findings=typed_findings,
-                    review_context_profile=review_profile,
-                    review_selection=review_selection,
-                    policy_id=policy_id,
-                    policy_version=policy_version,
-                    lineage_evaluation=lineage_evaluation,
-                    resolved_content=resolved,
-                )
+                if resolved.items:
+                    semantic_case = build_semantic_case(
+                        case_id=semantic_case.case_id,
+                        frozen_case=frozen.case,
+                        dependency_digest=frozen.lease.dependency_digest,
+                        findings=typed_findings,
+                        review_context_profile=review_profile,
+                        review_selection=review_selection,
+                        policy_id=policy_id,
+                        policy_version=policy_version,
+                        lineage_evaluation=lineage_evaluation,
+                        resolved_content=resolved,
+                    )
             # The builder folds the gap into the packet coverage the reviewer sees; the check
             # result is a separate coverage fold, so carry the fact rather than re-deriving it.
             content_gaps = tuple(

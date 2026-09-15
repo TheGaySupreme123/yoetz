@@ -4772,3 +4772,7 @@ in chronological order. The semantic resolver always supplies `256`. It authenti
 the review policy's final count and aggregate excerpt byte limits. `FinalSemanticEvaluation` carries
 `case_content_gaps` so resolver omissions constrain check/receipt coverage independently of the
 provider's semantic success.
+
+Resolver-derived captured-content gaps downgrade current semantic-case coverage to partial, just
+like gaps found before packet selection. Existing older freshness states are preserved; an omitted
+or unavailable captured object cannot leave an otherwise current case labeled fully current.
