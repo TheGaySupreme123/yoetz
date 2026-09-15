@@ -673,9 +673,7 @@ def _persist_start_mappings(
             # file has not been applied yet.  Inspect every target before replaying or
             # queueing any operation; otherwise a stale host alias can cause its task
             # alias to become a partial, routable bind.
-            for mapping, snapshot, prior in zip(
-                ordered, pending_states, existing, strict=True
-            ):
+            for mapping, snapshot, prior in zip(ordered, pending_states, existing, strict=True):
                 if snapshot.present:
                     if snapshot.conflicting:
                         if is_scoped_child_session_id(mapping.codex_session_id):
