@@ -65,6 +65,17 @@ def _error(**safe_details: object) -> dict[str, object]:
 
 
 class TestRatchet:
+    def test_local_reasons_cannot_shadow_operation_dependent_protocol_reasons(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import yoetz.protocol.recovery as recovery
+
+        monkeypatch.setattr(
+            recovery, "_LOCAL_REASON_CONTINUATIONS", {"request_timeout": "read_timeout_new_identity"}
+        )
+        with pytest.raises(RuntimeError, match="recovery_local_reason_collides_with_protocol_reason"):
+            recovery._check_registry()  # pyright: ignore[reportPrivateUsage]
+
     def test_every_reason_code_has_a_disposition(self) -> None:
         """A reason code with neither a directive nor an exemption is the regression to catch."""
 

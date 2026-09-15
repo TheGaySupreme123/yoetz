@@ -147,8 +147,11 @@ outcome for `complete`, and replay after an exact typed continuation and require
 `pending`; retain and report `quarantined` or unknown state. A timeout does not authorize a fresh
 task. A `retryable: false` error is terminal except for its exact typed continuation: do not probe
 with new requests or other operations. Errors carry that continuation as a typed
-`safe_details.continuation` token and repeat its directive in the text channel; a token is an
-instruction from this guidance, never a prediction. `input_correction_new_identity` is the one
+`safe_details.continuation` token. Hosts using bounded summaries repeat the registry-resolved
+directive in text, with its guidance pointer and nudge when the budget permits. Cursor receives
+the canonical JSON wire body in both channels, including the token and carried safe details;
+it does not receive a separate resolved-token projection. A token is an instruction from this
+guidance, never a prediction. `input_correction_new_identity` is the one
 continuation that is a correction rather than a retry: the schema validator rejected the body
 before any write, so correct the named field and submit the corrected body once under a new
 `request_id`; do not resend it unchanged, and do not treat the rejection as an ambiguous write.

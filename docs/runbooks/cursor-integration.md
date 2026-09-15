@@ -1036,11 +1036,13 @@ privacy choices; new settings such as Expanded review require a separate exact a
 
 ## Recovery directives in errors (ADR-030)
 
-The native Cursor profile repeats the exact canonical JSON wire body in text `content`, so this host
-receives the `continuation` token in structured form as well as in the bounded text projection. Both
-renderings resolve the same registry entry; neither carries directive prose on the wire.
+The native Cursor profile repeats the exact canonical JSON wire body in text `content`, matching
+`structuredContent`. Both channels carry `safe_details.continuation` when present; the consumer
+must resolve that token separately. Cursor does not use the bounded summary renderer and receives
+no additional summary fields or registry-resolved directive projection. The canonical body still
+includes the public error's wire `message` field.
 
 One host-specific fact already applies and is unchanged by ADR-030: the bridge does not carry
 `authorize_command` to Cursor, because Cursor is never an agent-chat attestation client. The
-commands clause reports whichever commands travel, so on this host the same continuation renders
-without the authorize step rather than naming a command the host cannot use.
+canonical body carries only the commands admitted for that host, so it omits the authorize step
+rather than naming a command the host cannot use.

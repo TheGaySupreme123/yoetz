@@ -634,9 +634,7 @@ def _check_registry() -> None:
     # The two reason vocabularies are disjoint by construction. An overlap means a local adapter
     # reason was mistaken for a protocol reason code, which is how three CLI lifecycle reasons
     # were nearly registered as protocol reasons while this module was written.
-    if set(_LOCAL_REASON_CONTINUATIONS) & (
-        set(_REASON_CONTINUATIONS) | REASON_CODE_DIRECTIVE_EXEMPTIONS
-    ):
+    if set(_LOCAL_REASON_CONTINUATIONS) & PROTOCOL_REASON_CODES:
         raise RuntimeError("recovery_local_reason_collides_with_protocol_reason")
     # ``yoetz.protocol.errors`` is a dependency root and cannot import this module, so it holds
     # the admitted token set literally. Locking the two here means a token can never be admitted
