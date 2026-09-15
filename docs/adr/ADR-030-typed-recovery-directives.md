@@ -58,6 +58,36 @@ itself then added a 33rd key, `invariant`, under that unchanged schema. Adding a
 therefore a live option for facts a consumer genuinely needs structurally; it is simply the wrong
 carrier for prose.
 
+### The token is attached where the error is built
+
+The first implementation mapped reason codes to tokens but attached them only in one MCP timeout
+branch, so a real `unsorted_set_field` rejection reached the model with the registered directive
+absent. A reason code determines its directive regardless of which producer raised it, so
+`PublicOperationError` attaches the mapped token at construction, from a map held literally in the
+dependency root beside the admitted token set. A producer that already chose a continuation is
+never overridden; that is how the one boundary with more information than the reason (the MCP
+bridge, for timeouts) says so. Raising sites still classify Tier-4 facts into tokens; they no
+longer have to remember to attach the token a reason already implies.
+
+### Rejected input is a correction, not a retry
+
+`retryable: false` means "do not resend this body". It never meant "stop": a body the schema
+validator refused before any write can only be fixed by sending a different body. The shipped
+safety floor said only the former, and an agent that read it literally treated a malformed
+`actor_id` as terminal. The bridge's argument validator, the sole producer of location-shaped
+`safe_details`, therefore attaches `input_correction_new_identity`, whose directive names the
+identity rule (a new `request_id`, once) and distinguishes the case from an ambiguous write. A
+unique field-ownership repair and an unreachable recovery oracle are the two facts that override it
+with their own directives. The guidance floor now states the same rule in the same words.
+
+### A timed-out `start` is its own kind
+
+The generic write directive (read `status view=operation`, replay only on `absent`) requires the
+session and writer ids that a lost first `start` never returned. The recovery table has always
+excepted that case with one exact replay under the same `request_id`; the directive registry now
+carries the exception as `start_timeout_same_identity` rather than handing a first start a write
+directive it cannot follow.
+
 ### Four tiers, classified at the raising site
 
 Every fact in an error belongs to exactly one tier, decided where it is known:
@@ -114,6 +144,10 @@ never sacrificed to fit advice.
 - Recovery rules now exist in two places — `guidance/*.md` and this registry — and must move
   together. The guidance-anchor test couples them; a directive that contradicts its own guidance
   section is a documentation bug, not a rendering one.
+- The `frontier_refresh_required` directive follows the shipped replay semantics: `publish_work`
+  stores a frontier conflict as a retryable failure under the original `request_id`, and the
+  producer's own message directs an idempotent retry under that same id. A directive that told the
+  agent to mint a new `request_id` would have contradicted the message beside it.
 - Provider and semantic failures gain typed failure tokens (issue #742) rather than an exemption
   from the Tier-4 rule. Some diagnostic nuance is genuinely lost at the agent-facing boundary and
   remains recoverable locally through the `correlation_id`, which never crosses the wire. That is

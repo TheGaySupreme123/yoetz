@@ -9,6 +9,7 @@ from typing import Final, cast
 
 from pydantic import BaseModel
 
+from yoetz.mcp.errors import VALIDATION_REASON_TOKENS
 from yoetz.protocol.canonical import JsonValue, ensure_canonical_value
 from yoetz.protocol.errors import PublicErrorCode, normalize_safe_details
 from yoetz.protocol.ids import IdKind, is_valid_id
@@ -23,6 +24,13 @@ __all__ = [
 ]
 
 _MAX_SUMMARY_BYTES: Final = 512
+# A validation location pointer as ``yoetz.mcp.errors`` builds it: at most eight frozen
+# presentation-schema segments or bounded indexes. Re-gated here so a list member that is not that
+# exact shape is never rendered, whatever put it on the envelope.
+_VALIDATION_POINTER: Final = re.compile(
+    r"^(?:/(?:[a-z][a-z0-9_]{0,63}|0|[1-9][0-9]?)){1,8}$", re.ASCII
+)
+_MAX_NAMED_VALIDATION_LOCATIONS: Final = 2
 _SAFE_TOKEN: Final = re.compile(r"^[A-Za-z0-9_+.-]{1,128}$", re.ASCII)
 _GAP_CODE: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)
 # Closed shape for the frozen field and family tokens the repair clause may carry (issue #266).
@@ -336,6 +344,45 @@ def _reason_location_clause(error: Mapping[str, JsonValue]) -> str:
     return f" Reason: {gated_reason}."
 
 
+def _validation_location_clause(error: Mapping[str, JsonValue]) -> str:
+    """Render the frozen location tokens of a schema rejection, or "" when none travel.
+
+    A tool-argument rejection carries ``fields`` and ``reasons`` lists rather than a single
+    ``reason_code``/``field`` pair, and those lists are not members of the protocol allowlist, so
+    the text channel previously dropped them entirely: an agent that sent a malformed actor id was
+    told only ``Error INVALID_REQUEST; retryable: no`` (issue #739). Every rendered token is
+    re-gated against the closed reason set and the pointer shape; the two lists must agree in
+    length, and at most two locations are named with the remainder counted.
+    """
+
+    details = error.get("safe_details")
+    if not isinstance(details, Mapping):
+        return ""
+    typed = cast(Mapping[str, JsonValue], details)
+    fields = typed.get("fields")
+    reasons = typed.get("reasons")
+    if not isinstance(fields, Sequence) or not isinstance(reasons, Sequence):
+        return ""
+    if isinstance(fields, str) or isinstance(reasons, str) or len(fields) != len(reasons):
+        return ""
+    named: list[str] = []
+    for field, reason in zip(
+        cast(Sequence[JsonValue], fields), cast(Sequence[JsonValue], reasons), strict=True
+    ):
+        if type(reason) is not str or reason not in VALIDATION_REASON_TOKENS:
+            return ""
+        if type(field) is not str or _VALIDATION_POINTER.fullmatch(field) is None:
+            return ""
+        named.append(f"{reason} at {field}")
+    if not named:
+        return ""
+    shown = "; ".join(named[:_MAX_NAMED_VALIDATION_LOCATIONS])
+    remainder = len(named) - _MAX_NAMED_VALIDATION_LOCATIONS
+    if remainder > 0:
+        shown += f" (+{remainder} more)"
+    return f" Rejected: {shown}."
+
+
 def _claim_revision_clause(error: Mapping[str, JsonValue]) -> str:
     """Render the closed claim-revision invariant and its correction from typed details.
 
@@ -390,7 +437,8 @@ def summary_for_public_error(envelope: object) -> str:
     )
     prefix = f"Error {code}; retryable: {retry_text}; correlation: {correlation_text}."
     extra = (
-        f"{_repair_clause(error)}{_reason_location_clause(error)}{_claim_revision_clause(error)}"
+        f"{_repair_clause(error)}{_reason_location_clause(error)}"
+        f"{_validation_location_clause(error)}{_claim_revision_clause(error)}"
     )
     # Priority order (issue #739): identity, then what was wrong, then what to do about it. The
     # continuation is budgeted against what the identity and location clauses already spent, so a

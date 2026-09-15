@@ -27,12 +27,13 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Final
+from typing import Final, Literal
 
 from yoetz.protocol.errors import (
     ADMITTED_CLAIM_REVISION_INVARIANTS,
     ADMITTED_CONTINUATION_TOKENS,
     PROTOCOL_REASON_CODES,
+    REASON_CODE_CONTINUATIONS,
 )
 
 __all__ = [
@@ -41,12 +42,27 @@ __all__ = [
     "REASON_CODE_DIRECTIVE_EXEMPTIONS",
     "RECOVERY_DIRECTIVES",
     "RecoveryDirective",
+    "TimeoutOperationKind",
+    "WRITE_OPERATIONS",
     "continuation_for_local_reason",
     "continuation_for_reason",
     "correction_for_invariant",
     "covered_reason_codes",
     "directive_for",
+    "timeout_operation_kind",
 ]
+
+# The three ways a local request can time out, which is the one distinction a reason code alone
+# cannot carry (issue #669): a read proves nothing committed, a write leaves the outcome unknown but
+# recoverable through the operation view, and a ``start`` leaves it unknown *without* the session
+# and writer ids that view requires.
+type TimeoutOperationKind = Literal["read", "write", "start"]
+
+# The workflow operations that append to the ledger. Shared by the MCP bridge and the CLI so both
+# classify a timed-out operation the same way; ``status`` is the one read.
+WRITE_OPERATIONS: Final[frozenset[str]] = frozenset(
+    {"start", "publish_work", "check", "respond", "receipt"}
+)
 
 # Bounds chosen against the 512-byte ASCII ceiling in ``yoetz.mcp.summaries``: an error identity
 # clause plus a reason/location clause plus a directive plus a guidance pointer has to fit, with
@@ -100,6 +116,16 @@ _DIRECTIVES: Final = (
         nudge="Do not mint a fresh request_id, task, or sibling to escape an ambiguous write.",
     ),
     RecoveryDirective(
+        token="start_timeout_same_identity",
+        directive=(
+            "This start timed out and MAY already have committed. A lost start returns no session "
+            "or writer id, so do not query operation status: replay the exact same start body once "
+            "with this same request_id."
+        ),
+        guidance_uri=_WORKFLOW_RECOVERY,
+        nudge="The start idempotency path returns the stored result or a typed boundary.",
+    ),
+    RecoveryDirective(
         token="service_replacement_exhausted",
         directive=(
             "An incompatible local service holder could not be superseded within the automatic "
@@ -149,13 +175,33 @@ _DIRECTIVES: Final = (
         ),
         guidance_uri=_PUBLICATION_SETS,
     ),
+    RecoveryDirective(
+        token="input_correction_new_identity",
+        directive=(
+            "Yoetz rejected this request body before any write, so retryable=false covers only "
+            "this exact body. Correct the named field per the schema hint and submit the corrected "
+            "body once under a NEW request_id."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="A rejected body is not an ambiguous write; do not resend it unchanged.",
+    ),
+    RecoveryDirective(
+        token="recovery_check_then_correct",
+        directive=(
+            "This body was rejected before any write, but whether an earlier request under this "
+            "request_id already committed could not be checked. Read status view=operation for it "
+            "once the service answers, then correct under a NEW request_id."
+        ),
+        guidance_uri=_WORKFLOW_RECOVERY,
+        nudge="Do not resubmit until the original request_id has a known outcome.",
+    ),
     # --- ledger and session state (issues #308, #326) ---------------------------------------
     RecoveryDirective(
         token="frontier_refresh_required",
         directive=(
             "The expected frontier no longer matches the ledger, so this write was not applied. "
-            "Read current status, rebuild the frontier from that response, and resubmit with a "
-            "new request_id."
+            "Read status for the current frontier, set expected_frontier from it, and retry "
+            "idempotently with this same request_id."
         ),
         guidance_uri=_PUBLICATION_RECOVERY,
         nudge="A frontier conflict means the ledger moved, not that your content was wrong.",
@@ -218,20 +264,11 @@ RECOVERY_DIRECTIVES: Final[Mapping[str, RecoveryDirective]] = MappingProxyType(
 CONTINUATION_TOKENS: Final[frozenset[str]] = frozenset(RECOVERY_DIRECTIVES)
 
 
-# Protocol reason codes whose recovery is fully determined by the reason alone.
-_REASON_CONTINUATIONS: Final[Mapping[str, str]] = MappingProxyType(
-    {
-        "duplicate_set_member": "sorted_set_required",
-        "endpoint_unsafe": "storage_root_unsafe",
-        "expected_frontier_required": "frontier_refresh_required",
-        "frontier_changed": "frontier_refresh_required",
-        "frontier_digest_mismatch": "frontier_refresh_required",
-        "operation_recovery_unavailable": "operation_pending_inspect",
-        "schema_digest_mismatch": "resource_integrity_repair",
-        "session_superseded": "session_rebind_required",
-        "unsorted_set_field": "sorted_set_required",
-    }
-)
+# Protocol reason codes whose recovery is fully determined by the reason alone. The map itself is
+# held literally in ``yoetz.protocol.errors`` (a dependency root that cannot import this module),
+# because that is where every ``PublicOperationError`` attaches the token at construction; this
+# module owns the directive each value stands for and checks the two against each other below.
+_REASON_CONTINUATIONS: Final[Mapping[str, str]] = REASON_CODE_CONTINUATIONS
 
 # Reasons the reason code alone cannot resolve, because the correct recovery genuinely differs by
 # operation kind. Resolved in ``continuation_for_reason``; held here so the ratchet counts them as
@@ -486,25 +523,52 @@ def directive_for(token: object) -> RecoveryDirective | None:
     return RECOVERY_DIRECTIVES.get(token)
 
 
+_TIMEOUT_CONTINUATIONS: Final[Mapping[TimeoutOperationKind, str]] = MappingProxyType(
+    {
+        "read": "read_timeout_new_identity",
+        "write": "write_timeout_same_identity",
+        "start": "start_timeout_same_identity",
+    }
+)
+
+
+def timeout_operation_kind(
+    operation: object, *, write_operations: frozenset[str] = WRITE_OPERATIONS
+) -> TimeoutOperationKind | None:
+    """Classify a timed-out operation name, or None when the name is not a known operation.
+
+    ``start`` is a write whose lost response carries no route ids, so it is its own kind: the
+    generic write recovery ("read status view=operation") is an instruction a first start cannot
+    follow, and the shipped guidance has always excepted it (replay the exact start once).
+    """
+
+    if type(operation) is not str:
+        return None
+    if operation == "start":
+        return "start"
+    if operation in write_operations:
+        return "write"
+    return "read"
+
+
 def continuation_for_reason(
-    reason_code: object, *, write_operation: bool | None = None
+    reason_code: object, *, operation_kind: TimeoutOperationKind | None = None
 ) -> str | None:
     """Return the continuation token for a typed reason, or None when none is registered.
 
-    ``write_operation`` resolves the one reason whose recovery genuinely differs by operation
-    kind: a timed-out read proves nothing committed, while a timed-out write leaves the outcome
-    unknown and must be recovered under its original identity (issue #669). When the caller cannot
-    say which it was, no directive travels rather than the wrong one.
+    ``operation_kind`` resolves the one reason whose recovery genuinely differs by operation
+    kind: a timed-out read proves nothing committed, a timed-out write leaves the outcome unknown
+    and must be recovered under its original identity, and a timed-out ``start`` must be replayed
+    outright because the operation view needs ids it never returned (issue #669). When the caller
+    cannot say which it was, no directive travels rather than the wrong one.
     """
 
     if type(reason_code) is not str:
         return None
     if reason_code == "request_timeout":
-        if write_operation is True:
-            return "write_timeout_same_identity"
-        if write_operation is False:
-            return "read_timeout_new_identity"
-        return None
+        if operation_kind is None:
+            return None
+        return _TIMEOUT_CONTINUATIONS[operation_kind]
     return _REASON_CONTINUATIONS.get(reason_code)
 
 

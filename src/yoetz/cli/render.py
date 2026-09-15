@@ -18,7 +18,12 @@ from yoetz.protocol.models import (
     StatusOperationPageModel,
     StatusSuccessModel,
 )
-from yoetz.protocol.recovery import correction_for_invariant, directive_for
+from yoetz.protocol.recovery import (
+    RecoveryDirective,
+    continuation_for_local_reason,
+    correction_for_invariant,
+    directive_for,
+)
 
 __all__ = [
     "render_human_awaiting_human",
@@ -27,6 +32,8 @@ __all__ = [
     "render_human_findings",
     "render_human_receipt",
     "render_human_status",
+    "render_local_recovery_lines",
+    "render_recovery_directive_lines",
 ]
 
 
@@ -170,6 +177,40 @@ def render_human_receipt(result: ReceiptSuccessModel) -> str:
     return "\n".join(lines)
 
 
+def render_recovery_directive_lines(
+    directive: RecoveryDirective, *, commands: Sequence[str] = ()
+) -> list[str]:
+    """Render one frozen directive the way every CLI error surface shows it.
+
+    The CLI has no 512-byte ceiling, so unlike the MCP text projection it renders the whole
+    directive, any carried commands, its guidance pointer, and its nudge on separate lines.
+    """
+
+    lines = [f"Continuation: {directive.token}", f"Next: {directive.directive}"]
+    if commands:
+        lines.append("Commands: " + "; ".join(commands))
+    if directive.guidance_uri is not None:
+        lines.append(f"Guidance: {directive.guidance_uri}")
+    if directive.nudge is not None:
+        lines.append(directive.nudge)
+    return lines
+
+
+def render_local_recovery_lines(reason: object) -> list[str]:
+    """Return the directive lines for a CLI lifecycle, instance, or ceremony reason, or [].
+
+    These reasons never become a public error envelope: the CLI prints a bounded token line and
+    exits. Before ADR-030 the line carried a remediation sentence and nothing else, so the same
+    condition that gets a typed directive over MCP got none here. The lookup is the local-reason
+    vocabulary only; a protocol reason code deliberately resolves to nothing through it.
+    """
+
+    directive = directive_for(continuation_for_local_reason(reason))
+    if directive is None:
+        return []
+    return render_recovery_directive_lines(directive)
+
+
 def _error_recovery_lines(error: PublicErrorModel) -> list[str]:
     """Return the frozen recovery directive lines for a typed continuation, or an empty list.
 
@@ -202,7 +243,6 @@ def _error_recovery_lines(error: PublicErrorModel) -> list[str]:
     directive = directive_for(gated.get("continuation"))
     if directive is None:
         return lines
-    lines.extend([f"Continuation: {directive.token}", f"Next: {directive.directive}"])
     gated_commands = normalize_safe_details(
         {key: source.get(key) for key in ("prepare_command", "review_command", "authorize_command")}
     )
@@ -211,12 +251,7 @@ def _error_recovery_lines(error: PublicErrorModel) -> list[str]:
         for key in ("prepare_command", "review_command", "authorize_command")
         if type(gated_commands.get(key)) is str
     ]
-    if commands:
-        lines.append("Commands: " + "; ".join(commands))
-    if directive.guidance_uri is not None:
-        lines.append(f"Guidance: {directive.guidance_uri}")
-    if directive.nudge is not None:
-        lines.append(directive.nudge)
+    lines.extend(render_recovery_directive_lines(directive, commands=commands))
     return lines
 
 

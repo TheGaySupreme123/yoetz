@@ -733,8 +733,9 @@ async def test_unsorted_obligation_ids_match_on_dry_run_and_publish() -> None:
     assert preview.value.code is PublicErrorCode.EVENT_INVALID
     assert real.value.code is PublicErrorCode.EVENT_INVALID
     expected = {
-        "reason_code": "unsorted_set_field",
+        "continuation": "sorted_set_required",
         "field": "/event_drafts/0/payload/obligation_ids",
+        "reason_code": "unsorted_set_field",
     }
     assert dict(preview.value.safe_details) == expected
     assert dict(real.value.safe_details) == expected
@@ -1233,8 +1234,9 @@ async def test_partial_result_claim_repair_preflights_and_preserves_history() ->
             cast(Application, app), PublishWorkRequestModel.model_validate(incomplete_wire)
         )
     assert rejected.value.safe_details == {
-        "reason_code": "claim_revision_mismatch",
         "field": "/event_drafts/0/payload/limitation_refs",
+        "invariant": "limitation_refs_complete",
+        "reason_code": "claim_revision_mismatch",
     }
     assert "limitation_refs_complete" in rejected.value.message
     assert len(objects._data) == object_count  # pyright: ignore[reportPrivateUsage]
@@ -1265,8 +1267,9 @@ async def test_partial_result_claim_repair_preflights_and_preserves_history() ->
             cast(Application, app), PublishWorkRequestModel.model_validate(disputed_wire)
         )
     assert contradiction.value.safe_details == {
-        "reason_code": "claim_revision_mismatch",
         "field": "/event_drafts/0/payload/disputes_refs",
+        "invariant": "replacement_must_not_dispute",
+        "reason_code": "claim_revision_mismatch",
     }
     assert "replacement_must_not_dispute" in contradiction.value.message
 
@@ -1294,8 +1297,9 @@ async def test_partial_result_claim_repair_preflights_and_preserves_history() ->
             cast(Application, app), PublishWorkRequestModel.model_validate(overwrite_wire)
         )
     assert identity.value.safe_details == {
-        "reason_code": "claim_revision_mismatch",
         "field": "/event_drafts/0/payload/claim_id",
+        "invariant": "claim_id_must_be_fresh",
+        "reason_code": "claim_revision_mismatch",
     }
     assert "claim_id_must_be_fresh" in identity.value.message
 
@@ -1393,8 +1397,9 @@ async def test_partial_result_claim_repair_preflights_and_preserves_history() ->
             cast(Application, app), PublishWorkRequestModel.model_validate(stale_wire)
         )
     assert ineffective.value.safe_details == {
-        "reason_code": "claim_revision_mismatch",
         "field": "/event_drafts/0/payload/supersedes_claim_refs",
+        "invariant": "superseded_claim_must_be_effective",
+        "reason_code": "claim_revision_mismatch",
     }
     assert "superseded_claim_must_be_effective" in ineffective.value.message
 
@@ -1440,8 +1445,9 @@ async def test_claim_replacement_must_change_effective_meaning() -> None:
             cast(Application, app), PublishWorkRequestModel.model_validate(wire)
         )
     assert rejected.value.safe_details == {
-        "reason_code": "claim_revision_mismatch",
         "field": "/event_drafts/0/payload/supersedes_claim_refs",
+        "invariant": "replacement_must_change_effective_claim",
+        "reason_code": "claim_revision_mismatch",
     }
     assert "replacement_must_change_effective_claim" in rejected.value.message
 
@@ -1523,8 +1529,9 @@ async def test_claim_replacement_links_a_limitation_whose_action_is_unrecorded()
             cast(Application, app), PublishWorkRequestModel.model_validate(silent_wire)
         )
     assert rejected.value.safe_details == {
-        "reason_code": "claim_revision_mismatch",
         "field": "/event_drafts/0/payload/limitation_refs",
+        "invariant": "limitation_refs_complete",
+        "reason_code": "claim_revision_mismatch",
     }
     assert "limitation_refs_complete" in rejected.value.message
 

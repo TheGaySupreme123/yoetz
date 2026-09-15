@@ -1005,6 +1005,14 @@ Codex consumes structured MCP results, so the `continuation` token arrives in `s
 bounded text projection repeats the resolved directive for parity. No Codex-specific behavior is
 configured.
 
+The observed Codex failure this covers: a `start` with `actor_id` `codex:/root` was rejected as
+`INVALID_REQUEST` with `fields: ["/actor/actor_id"]`, `reasons: ["invalid_type_or_value"]`, and
+no continuation, and the text channel carried neither the field nor a way forward. The same
+rejection now carries `input_correction_new_identity` and its text reads
+`Rejected: invalid_type_or_value at /actor/actor_id.` followed by the directive to submit the
+corrected body once under a new `request_id`. The regression case is
+`tests/unit/mcp/test_recovery_directive_delivery.py`, which replays that exact body.
+
 Provider-side failures reaching Codex through the app-server path keep their existing stage-typed
 diagnostics (issue #529). Classifying those failures into typed recovery tokens is tracked
 separately on issue #742 and is not part of ADR-030's first implementation.

@@ -214,6 +214,7 @@ async def test_task_workflow_returns_current_binding_for_superseded_session() ->
     assert caught.value.code is PublicErrorCode.SESSION_NOT_FOUND
     assert caught.value.retryable is False
     assert caught.value.safe_details == {
+        "continuation": "session_rebind_required",
         "reason_code": "session_superseded",
         "task_id": _TASK,
         "session_id": _SESSION,

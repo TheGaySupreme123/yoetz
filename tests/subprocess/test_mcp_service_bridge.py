@@ -834,7 +834,10 @@ async def test_public_operation_error_keeps_event_invalid_not_internal_error(
     assert result.structuredContent is not None
     error = result.structuredContent["error"]
     assert error["code"] == "EVENT_INVALID"
-    assert error["safe_details"] == {"reason_code": "unsorted_set_field"}
+    assert error["safe_details"] == {
+        "continuation": "sorted_set_required",
+        "reason_code": "unsorted_set_field",
+    }
     assert error["code"] != "INTERNAL_ERROR"
     assert result.structuredContent["request_id"] == _requests()["publish_work"]["request_id"]
     await bridge.close_bridge_runtime(runtime)

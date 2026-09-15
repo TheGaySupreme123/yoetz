@@ -101,7 +101,11 @@ from yoetz.protocol.models import (
     StatusResult,
     public_model_to_wire,
 )
-from yoetz.protocol.recovery import continuation_for_reason
+from yoetz.protocol.recovery import (
+    WRITE_OPERATIONS,
+    continuation_for_reason,
+    timeout_operation_kind,
+)
 from yoetz.service.client import (
     ServiceClient,
     accepted_but_unresponsive,
@@ -214,7 +218,7 @@ _PUBLISH_RECOVERY_UNCHECKED_CAVEAT: Final = (
     "request_id itself if it already names a committed operation."
 )
 _PUBLISH_RECOVERY_UNAVAILABLE_REASON: Final = "operation_recovery_unavailable"
-_WRITE_OPERATIONS: Final = frozenset({"start", "publish_work", "check", "respond", "receipt"})
+_WRITE_OPERATIONS: Final = WRITE_OPERATIONS
 _REQUEST_TEMPLATES_GUIDANCE_URI: Final = "yoetz://guidance/request-templates.md"
 _GUIDANCE_BY_OPERATION: Final = MappingProxyType(
     {
@@ -1382,8 +1386,18 @@ def _control_error_result(
             safe_details={"reason_code": "privacy_projection_unavailable"},
         )
     if error.reason == "request_timeout":
-        write_operation = operation in _WRITE_OPERATIONS
-        if write_operation:
+        operation_kind = timeout_operation_kind(operation, write_operations=_WRITE_OPERATIONS)
+        if operation_kind == "start":
+            # A lost start returns neither session nor writer id, so the operation view the
+            # generic write recovery names cannot be queried. The shipped guidance excepts this
+            # case explicitly: replay the exact start once under the same request_id.
+            message = (
+                "The local start timed out and may still have committed. Replay the exact same "
+                "start body once with the same request_id; the idempotent start path returns the "
+                "stored result or a typed boundary. Do not fabricate session or writer ids for a "
+                "status query."
+            )
+        elif operation_kind == "write":
             message = (
                 "The local operation timed out and may still have committed. Retry with the same "
                 "request_id to recover the stored outcome; for an existing Yoetz session, status "
@@ -1398,7 +1412,7 @@ def _control_error_result(
         # message, which the native text channel drops by design; a typed continuation carries it
         # to the model that has to act on it (issue #669).
         timeout_details: dict[str, object] = {"reason_code": "request_timeout"}
-        continuation = continuation_for_reason("request_timeout", write_operation=write_operation)
+        continuation = continuation_for_reason("request_timeout", operation_kind=operation_kind)
         if continuation is not None:
             timeout_details["continuation"] = continuation
         return _control_public_error_result(

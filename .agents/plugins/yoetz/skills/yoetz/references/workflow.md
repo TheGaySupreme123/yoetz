@@ -146,7 +146,14 @@ follow the state branches in the recovery table: replay once only for `absent`, 
 outcome for `complete`, and replay after an exact typed continuation and required approval only for
 `pending`; retain and report `quarantined` or unknown state. A timeout does not authorize a fresh
 task. A `retryable: false` error is terminal except for its exact typed continuation: do not probe
-with new requests or other operations. Read
+with new requests or other operations. Errors carry that continuation as a typed
+`safe_details.continuation` token and repeat its directive in the text channel; a token is an
+instruction from this guidance, never a prediction. `input_correction_new_identity` is the one
+continuation that is a correction rather than a retry: the schema validator rejected the body
+before any write, so correct the named field and submit the corrected body once under a new
+`request_id`; do not resend it unchanged, and do not treat the rejection as an ambiguous write.
+A timed-out `start` carries `start_timeout_same_identity`: replay the exact start once with the
+same `request_id`, as the recovery table's lost-start branch requires. Read
 [Recovery](coverage-and-receipts.md#recovery) only when an error, outage, or inherited
 unavailability requires it. Delegates inheriting `terminal_unavailable` make no Yoetz calls; only
 the coordinator performs a named repair.

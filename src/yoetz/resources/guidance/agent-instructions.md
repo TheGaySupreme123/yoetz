@@ -51,7 +51,10 @@ integers such as frontier `sequence` and pagination `limit` are JSON strings. Re
 through `status`, never live SQLite databases/catalog or product source. Yoetz development tasks
 may inspect source and isolated tests; this grants no live-storage authority.
 
-On `retryable: false`, do not probe or mint a new request; follow only the exact typed continuation.
+On `retryable: false`, do not probe or resend the same body; follow only the exact typed
+`continuation`. One continuation is a correction, not a retry: when `INVALID_REQUEST` or
+`EVENT_INVALID` names a rejected field (`input_correction_new_identity`), nothing was written, so
+fix that field and submit the corrected body once under a new `request_id`.
 An inherited `terminal_unavailable` means delegates make no calls. Read recovery guidance for the
 one permitted coordinator repair. Never run service lifecycle commands for `INTERNAL_ERROR` or a
 result that did not name that command. Follow exact continuations and same-request recovery

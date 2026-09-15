@@ -4,15 +4,22 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from yoetz.cli.render import render_human_error
-from yoetz.mcp.summaries import _MAX_SUMMARY_BYTES, summary_for_public_error
+from yoetz.mcp.summaries import (
+    _MAX_SUMMARY_BYTES,  # pyright: ignore[reportPrivateUsage]
+    summary_for_public_error,
+)
 from yoetz.protocol.errors import (
     ADMITTED_CLAIM_REVISION_INVARIANTS,
     PROTOCOL_REASON_CODES,
+    REASON_CODE_CONTINUATIONS,
     SAFE_DETAIL_KEYS,
+    PublicErrorCode,
+    PublicOperationError,
     normalize_safe_details,
 )
 from yoetz.protocol.models import PublicErrorModel
@@ -25,6 +32,7 @@ from yoetz.protocol.recovery import (
     correction_for_invariant,
     covered_reason_codes,
     directive_for,
+    timeout_operation_kind,
 )
 
 _GUIDANCE_ROOT = Path(__file__).resolve().parents[3] / "guidance"
@@ -98,15 +106,38 @@ class TestRegistryBounds:
 
 
 class TestReasonResolution:
-    def test_read_and_write_timeouts_resolve_to_different_continuations(self) -> None:
-        """The distinction #669 reported as lost is the whole point of the operation kind."""
+    def test_read_write_and_start_timeouts_resolve_to_different_continuations(self) -> None:
+        """The distinction #669 reported as lost is the whole point of the operation kind.
 
-        assert continuation_for_reason("request_timeout", write_operation=False) == (
+        ``start`` is its own kind: a lost first start returns neither session nor writer id, so
+        the generic write recovery (read ``status view=operation``) is an instruction it cannot
+        follow, and the shipped guidance excepts it with an exact same-request_id replay.
+        """
+
+        assert continuation_for_reason("request_timeout", operation_kind="read") == (
             "read_timeout_new_identity"
         )
-        assert continuation_for_reason("request_timeout", write_operation=True) == (
+        assert continuation_for_reason("request_timeout", operation_kind="write") == (
             "write_timeout_same_identity"
         )
+        assert continuation_for_reason("request_timeout", operation_kind="start") == (
+            "start_timeout_same_identity"
+        )
+
+    def test_operation_names_classify_into_the_three_timeout_kinds(self) -> None:
+        assert timeout_operation_kind("start") == "start"
+        for write in ("publish_work", "check", "respond", "receipt"):
+            assert timeout_operation_kind(write) == "write"
+        assert timeout_operation_kind("status") == "read"
+        assert timeout_operation_kind(None) is None
+
+    def test_start_timeout_directive_never_prescribes_the_operation_view(self) -> None:
+        """The write directive requires ids a lost start never returned."""
+
+        start = RECOVERY_DIRECTIVES["start_timeout_same_identity"]
+        assert "view=operation" not in start.directive
+        assert "same request_id" in start.directive
+        assert "view=operation" in RECOVERY_DIRECTIVES["write_timeout_same_identity"].directive
 
     def test_unknown_operation_kind_carries_no_timeout_continuation(self) -> None:
         """Silence beats asserting a commit claim the caller could not establish."""
@@ -122,6 +153,53 @@ class TestReasonResolution:
         assert directive_for(None) is None
         assert directive_for("not_a_registered_token") is None
         assert continuation_for_reason(object()) is None
+
+
+class TestAttachmentAtConstruction:
+    """The reason map is applied where every public error is built, not at each raising site.
+
+    The first version of the registry mapped reasons to tokens but attached nothing: production
+    use was one MCP timeout branch, so an ``unsorted_set_field`` rejection reached the model with
+    the registered directive absent. Attachment now happens in ``PublicOperationError`` itself.
+    """
+
+    @pytest.mark.parametrize("reason", sorted(REASON_CODE_CONTINUATIONS))
+    def test_every_mapped_reason_attaches_its_token_when_the_error_is_built(
+        self, reason: str
+    ) -> None:
+        error = PublicOperationError(
+            PublicErrorCode.EVENT_INVALID, "message", False, safe_details={"reason_code": reason}
+        )
+        assert error.safe_details.get("continuation") == REASON_CODE_CONTINUATIONS[reason]
+        assert list(error.safe_details) == sorted(error.safe_details)
+
+    def test_a_producer_chosen_continuation_is_never_overridden(self) -> None:
+        error = PublicOperationError(
+            PublicErrorCode.SERVICE_UNAVAILABLE,
+            "message",
+            True,
+            safe_details={
+                "reason_code": "frontier_changed",
+                "continuation": "session_rebind_required",
+            },
+        )
+        assert error.safe_details["continuation"] == "session_rebind_required"
+
+    def test_an_unmapped_reason_attaches_nothing(self) -> None:
+        error = PublicOperationError(
+            PublicErrorCode.INTERNAL_ERROR,
+            "message",
+            False,
+            safe_details={"reason_code": "internal_error"},
+        )
+        assert "continuation" not in error.safe_details
+
+    def test_the_frontier_directive_agrees_with_the_shipped_replay_semantics(self) -> None:
+        """publish_work stores a frontier conflict as a retryable failure under the same request_id."""
+
+        directive = RECOVERY_DIRECTIVES["frontier_refresh_required"].directive
+        assert "same request_id" in directive
+        assert "new request_id" not in directive.lower()
 
 
 class TestNativeTextProjection:
@@ -247,8 +325,7 @@ class TestSafeDetailBounds:
             ClaimRevisionMismatch("obligation_refs", "scope_overlap_required"), event_index=0
         ).bind_correlation_id(_CORRELATION_ID)
         public = error.as_public_dict()
-        details = public["safe_details"]
-        assert isinstance(details, dict)
+        details = cast(dict[str, object], public["safe_details"])
         assert len(details) <= 32
         PublicErrorModel.model_validate(public)
 

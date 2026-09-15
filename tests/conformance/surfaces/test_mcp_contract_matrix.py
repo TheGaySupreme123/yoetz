@@ -133,9 +133,13 @@ def test_public_error_and_validation_summaries_are_sanitized() -> None:
     )
     multi_location_error = cast(dict[str, object], multi_location_result["error"])
     assert multi_location_error["safe_details"] == {
+        "continuation": "input_correction_new_identity",
         "fields": ["/request_id", "/client"],
         "reasons": ["missing", "extra_forbidden"],
     }
+    multi_location_summary = render_safe_compact_summary(multi_location_result)
+    assert "Rejected: missing at /request_id; extra_forbidden at /client." in multi_location_summary
+    assert "Continuation: input_correction_new_identity." in multi_location_summary
 
     class _Request(BaseModel):
         model_config = ConfigDict(extra="forbid")
@@ -274,7 +278,11 @@ def test_unknown_nested_payload_key_keeps_the_extra_forbidden_reason() -> None:
         safe_details=locations,
     )
     details = cast(dict[str, object], cast(dict[str, object], wire["error"])["safe_details"])
-    assert details == {"fields": ["/event_drafts/0/payload"], "reasons": ["extra_forbidden"]}
+    assert details == {
+        "continuation": "input_correction_new_identity",
+        "fields": ["/event_drafts/0/payload"],
+        "reasons": ["extra_forbidden"],
+    }
 
 
 def test_unknown_tool_message_is_sanitized() -> None:

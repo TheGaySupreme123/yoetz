@@ -10,7 +10,12 @@ from typing import Final, cast
 from pydantic import ValidationError
 
 from yoetz.protocol.canonical import JsonValue
-from yoetz.protocol.errors import SAFE_DETAIL_KEYS, PublicErrorCode, PublicOperationError
+from yoetz.protocol.errors import (
+    REASON_CODE_CONTINUATIONS,
+    SAFE_DETAIL_KEYS,
+    PublicErrorCode,
+    PublicOperationError,
+)
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import FRONTIER_LEAVES, OperationFailureModel
 
@@ -24,6 +29,7 @@ from yoetz.protocol.schemas import (
 )
 
 __all__ = [
+    "VALIDATION_REASON_TOKENS",
     "authoring_hint",
     "build_last_resort_internal_error_result",
     "build_public_error_result",
@@ -196,6 +202,12 @@ _SAFE_VALUE_ERROR_REASON_TOKENS: Final = frozenset(
     {"paired_field_required", "conditional_field_required", "extra_forbidden"}
 )
 _EXTRA_FORBIDDEN_REASON: Final = "extra_forbidden"
+# Every ``reasons`` member a validation location can carry. The text projector re-gates against
+# this closed set before naming one, so the list on the wire and the token in the summary can
+# never disagree, and nothing outside it -- however it got onto an envelope -- is ever rendered.
+VALIDATION_REASON_TOKENS: Final[frozenset[str]] = frozenset(
+    {*_SAFE_VALIDATION_REASONS.values(), *_SAFE_VALUE_ERROR_REASON_TOKENS, "invalid_type_or_value"}
+)
 _CONDITIONAL_FIELD_REQUIRED_REASON: Final = "conditional_field_required"
 _EVENT_DRAFT_PAYLOAD_FIELD_POINTER: Final = re.compile(
     r"/event_drafts/[0-9]{1,3}/payload/[a-z][a-z0-9_]{0,63}", re.ASCII
@@ -1475,6 +1487,13 @@ def _validated_failure(
 
 _FIELD_OWNERSHIP_REPAIR_KIND: Final = "field_ownership"
 _FIELD_OWNERSHIP_TEMPLATE_URI: Final = "yoetz://guidance/request-templates.md"
+# The continuation for a body the schema validator rejected before any write (ADR-030). It is the
+# same rejection whatever field failed, so it is classified once here, at the only producer of
+# location-shaped ``safe_details``, rather than per reason token: the field pointer and authoring
+# hint already say *what* to fix, and the directive says that fixing it is a correction under a
+# new request identity, not a retry of a terminal error.
+_INPUT_CORRECTION_CONTINUATION: Final = "input_correction_new_identity"
+_FIELD_OWNERSHIP_CONTINUATION: Final = "field_ownership_repair"
 
 
 def _field_ownership_repair(locations: Sequence[Mapping[str, str]]) -> dict[str, str] | None:
@@ -1545,6 +1564,21 @@ def build_public_error_result(
         repair = _field_ownership_repair(locations)
         if repair is not None:
             details.update(repair)
+        # A location-shaped rejection is always caller input the validator refused. The reason
+        # code rides beside the locations only when a boundary knows something the locations do
+        # not (the recovery oracle was unreachable), and that fact decides the directive; otherwise
+        # the ownership repair, when one applies, is the more specific instruction.
+        reason_continuation = (
+            REASON_CODE_CONTINUATIONS.get(details_reason_code)
+            if type(details_reason_code) is str
+            else None
+        )
+        if reason_continuation is not None:
+            details["continuation"] = reason_continuation
+        elif repair is not None:
+            details["continuation"] = _FIELD_OWNERSHIP_CONTINUATION
+        else:
+            details["continuation"] = _INPUT_CORRECTION_CONTINUATION
         public_error: dict[str, object] = {
             "code": code.value,
             "message": message,

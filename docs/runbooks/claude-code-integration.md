@@ -823,5 +823,11 @@ This is the host where the gap was observed: before ADR-030 a `VAULT_LOCKED` res
 `safe_details` already carried `vault_initialization_required` and its prepare command reached the
 model as `Error VAULT_LOCKED; retryable: no; correlation: err_...` and nothing else (issue #740).
 
+The same projection names the rejected location of a schema-validation failure (`Rejected:
+<reason> at <pointer>`), which this host previously lost entirely because the `fields`/`reasons`
+lists are not protocol safe-detail keys. A timed-out `start` receives `start_timeout_same_identity`
+(replay the exact start once) rather than the write directive, which needs ids a lost start never
+returned.
+
 No Claude-specific behavior is configured: the projection is host-neutral and lives in
 `yoetz.mcp.summaries`.
