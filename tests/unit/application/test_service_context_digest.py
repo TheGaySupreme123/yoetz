@@ -402,7 +402,10 @@ async def test_invalid_context_digest_is_rejected_before_status_mirroring(
         await app.publish_work(_request(_disposition(supplied)))
 
     assert failure.value.code is PublicErrorCode.INVALID_REQUEST
-    assert failure.value.safe_details == {"reason_code": "coordination_detection_mismatch"}
+    assert failure.value.safe_details == {
+        "reason_code": "coordination_detection_mismatch",
+        "continuation": "lineage_state_refresh",
+    }
     assert runtime.route_calls == 1
     assert runtime.released == [runtime.routed]
     assert projects.admit_calls == 1

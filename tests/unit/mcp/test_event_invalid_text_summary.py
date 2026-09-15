@@ -92,21 +92,46 @@ def test_claim_revision_text_names_the_closed_invariant_and_correction() -> None
     assert len(summary.encode("ascii")) <= 512
 
 
-def test_claim_revision_text_rejects_tampered_message_or_field_binding() -> None:
+def test_claim_revision_text_is_independent_of_the_error_message() -> None:
+    """ADR-030: the invariant is a typed safe detail, so message wording cannot change it.
+
+    This test previously asserted the opposite -- that a tampered message must suppress the
+    Invariant clause -- because the projector recovered the invariant by matching the whole
+    message with a regex, and message integrity was therefore load-bearing. Now the invariant
+    travels as an allowlisted detail, so a reworded, tampered, or truncated message costs the
+    agent nothing. Caller prose still never reaches the channel.
+    """
+
     wire = _claim_revision_failure().model_dump(mode="json", by_alias=True)
     error = cast(dict[str, object], wire["error"])
     error["message"] = "secret caller prose"
     summary = render_safe_compact_summary(wire)
-    assert "Invariant:" not in summary
+    assert "Invariant: limitation_refs_complete." in summary
     assert "secret caller prose" not in summary
     assert "Reason: claim_revision_mismatch at /event_drafts/7/payload/limitation_refs." in summary
+
+
+def test_claim_revision_text_drops_an_unregistered_invariant() -> None:
+    """The closed vocabulary is the fence now that the message shape is not."""
 
     wire = _claim_revision_failure().model_dump(mode="json", by_alias=True)
     error = cast(dict[str, object], wire["error"])
     details = cast(dict[str, object], error["safe_details"])
-    details["field"] = "/event_drafts/7/payload/supporting_refs"
+    details["invariant"] = "invariant_that_was_never_registered"
     summary = render_safe_compact_summary(wire)
     assert "Invariant:" not in summary
+    assert "invariant_that_was_never_registered" not in summary
+    assert "Reason: claim_revision_mismatch at /event_drafts/7/payload/limitation_refs." in summary
+
+
+def test_claim_revision_text_without_an_invariant_keeps_the_reason_clause() -> None:
+    wire = _claim_revision_failure().model_dump(mode="json", by_alias=True)
+    error = cast(dict[str, object], wire["error"])
+    details = cast(dict[str, object], error["safe_details"])
+    del details["invariant"]
+    summary = render_safe_compact_summary(wire)
+    assert "Invariant:" not in summary
+    assert "Reason: claim_revision_mismatch at /event_drafts/7/payload/limitation_refs." in summary
 
 
 @pytest.mark.parametrize(

@@ -273,7 +273,7 @@ def test_schema_registry_is_complete() -> None:
                 in {
                     "config/yoetz-config-1.1.0.schema.json",
                     "events/check-recorded-1.1.0.schema.json",
-                "findings/runtime-attempt-evidence-1.1.0.schema.json",
+                    "findings/runtime-attempt-evidence-1.1.0.schema.json",
                     "events/claim-recorded-1.1.0.schema.json",
                     "events/event-draft-1.1.0.schema.json",
                     "events/evidence-recorded-1.1.0.schema.json",

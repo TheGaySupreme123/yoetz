@@ -2398,7 +2398,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert derived_counts == _EXPECTED_RESULT_PATTERN_COUNTS
 
     assert type(rules) is tuple
-    assert len(rules) == 1150
+    assert len(rules) == 1151
     assert rules == tuple(sorted(rules, key=_test_rule_sort_key))
 
     rule_keys = {
@@ -2419,7 +2419,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
         for rule in rules
         if rule.method == "publish_work" and rule.segments == publish_summary_segments
     )
-    assert len(publish_summary_rules) == 24
+    assert len(publish_summary_rules) == 25
     assert all(rule.status_view is None for rule in publish_summary_rules)
 
     expected_publish = _expected_publish_summary_rules(models)
@@ -3078,7 +3078,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 5_831
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 5_834
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:
@@ -3100,7 +3100,7 @@ def test_schema_name_derivation_and_version_maps_are_exact() -> None:
         "7.0.0",
         "1.4.0",
     }
-    assert set(event_versions.values()) == {"1.0.0", "1.1.0", "1.2.0"}
+    assert set(event_versions.values()) == {"1.0.0", "1.1.0", "1.2.0", "1.3.0"}
     assert event_versions["action_recorded"] == "1.0.0"
     assert event_versions["evidence_recorded"] == "1.2.0"
     assert event_versions["check_recorded"] == "1.2.0"

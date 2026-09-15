@@ -137,13 +137,13 @@ def test_bundle_run_migrations_applies_pending_versions_from_schema_version_one(
     ).fetchone() == (1,)
 
 
-def test_bundle_migration_0013_preserves_event_history_and_admits_current_families() -> None:
+def test_bundle_migration_0014_preserves_event_history_and_admits_current_families() -> None:
     bundle = apsw.Connection(":memory:")
     bundle.execute("PRAGMA foreign_keys = ON")
     bundle.execute("PRAGMA trusted_schema = OFF")
     event_rebuild_version = current_schema_version(BUNDLE_MIGRATIONS)
     event_rebuild_index = next(
-        index for index, migration in enumerate(BUNDLE_MIGRATIONS) if migration.version == "0013"
+        index for index, migration in enumerate(BUNDLE_MIGRATIONS) if migration.version == "0014"
     )
     main_frontier = event_rebuild_version - 1
     with bundle:
@@ -157,8 +157,8 @@ def test_bundle_migration_0013_preserves_event_history_and_admits_current_famili
             "('protocol_version', '0.1'), "
             "('import_schema_version', '1')"
         )
-        # The released 0.2 migrations occupy 0010-0012. Apply them before
-        # exercising the 0.3 events-table rebuild at 0013.
+        # The released 0.2 migrations occupy 0010-0013. Apply them before
+        # exercising the 0.3 events-table rebuild at 0014.
         for migration in BUNDLE_MIGRATIONS[9:event_rebuild_index]:
             bundle.execute(migration.ddl.decode("utf-8"))
         bundle.execute(
@@ -212,7 +212,7 @@ def test_bundle_migration_0013_preserves_event_history_and_admits_current_famili
 
     assert report.from_version == main_frontier
     assert report.to_version == event_rebuild_version
-    assert report.applied_versions == ("0013",)
+    assert report.applied_versions == ("0014",)
     assert bundle.execute("PRAGMA user_version").fetchone() == (event_rebuild_version,)
     assert bundle.execute("PRAGMA foreign_keys").fetchone() == (1,)
     assert bundle.execute("PRAGMA legacy_alter_table").fetchone() == (0,)

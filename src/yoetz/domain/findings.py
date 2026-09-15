@@ -484,13 +484,13 @@ class RuntimeTokenUsage:
                 self.total_tokens,
             )
         ):
-            raise ProtocolValueError("invalid_runtime_token_usage")
+            raise ProtocolValueError("invalid_token_usage")
         if (
             self.cached_input_tokens > self.input_tokens
             or self.reasoning_output_tokens > self.output_tokens
             or self.input_tokens + self.output_tokens != self.total_tokens
         ):
-            raise ProtocolValueError("invalid_runtime_token_usage")
+            raise ProtocolValueError("invalid_token_usage")
 
     @property
     def aggregate(self) -> TokenUsage:
@@ -938,18 +938,18 @@ def _runtime_token_usage_from_json(value: JsonValue) -> RuntimeTokenUsage:
         reason="runtime_attempt_evidence_json_shape_invalid",
     )
     return RuntimeTokenUsage(
-        input_tokens=_parse_uint53_wire(source["input_tokens"], "invalid_runtime_token_usage"),
+        input_tokens=_parse_uint53_wire(source["input_tokens"], "invalid_token_usage"),
         cached_input_tokens=_parse_uint53_wire(
-            source["cached_input_tokens"], "invalid_runtime_token_usage"
+            source["cached_input_tokens"], "invalid_token_usage"
         ),
         cache_write_input_tokens=_parse_uint53_wire(
-            source["cache_write_input_tokens"], "invalid_runtime_token_usage"
+            source["cache_write_input_tokens"], "invalid_token_usage"
         ),
-        output_tokens=_parse_uint53_wire(source["output_tokens"], "invalid_runtime_token_usage"),
+        output_tokens=_parse_uint53_wire(source["output_tokens"], "invalid_token_usage"),
         reasoning_output_tokens=_parse_uint53_wire(
-            source["reasoning_output_tokens"], "invalid_runtime_token_usage"
+            source["reasoning_output_tokens"], "invalid_token_usage"
         ),
-        total_tokens=_parse_uint53_wire(source["total_tokens"], "invalid_runtime_token_usage"),
+        total_tokens=_parse_uint53_wire(source["total_tokens"], "invalid_token_usage"),
     )
 
 

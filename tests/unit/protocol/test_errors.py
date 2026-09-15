@@ -617,7 +617,10 @@ def test_registered_refusal_reason_survives_public_error_projection() -> None:
             False,
             safe_details={"reason_code": reason},
         )
-        assert error.safe_details == {"reason_code": reason}
+        expected_details = {"reason_code": reason}
+        if reason in errors_module.REASON_CODE_CONTINUATIONS:
+            expected_details["continuation"] = errors_module.REASON_CODE_CONTINUATIONS[reason]
+        assert error.safe_details == expected_details
 
 
 def test_operation_error_is_bounded() -> None:
@@ -743,6 +746,7 @@ def test_safe_details_allowlist_and_types_are_exact() -> None:
         "field",
         "head_digest",
         "host_profile",
+        "invariant",
         "limit",
         "method",
         "operation",
@@ -809,6 +813,7 @@ def test_safe_details_allowlist_and_types_are_exact() -> None:
             "component": _SafeEnum.READY,
             "continuation": "vault_initialization_required",
             "count": 0,
+            "invariant": "scope_overlap_required",
             "expected_version": "V2-rc.1",
             "field": "/payload/~0/~1//",
             "head_digest": "genesis",

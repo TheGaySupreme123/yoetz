@@ -187,7 +187,7 @@ def _versions() -> ReceiptVersionSlice:
         ),
         # Keep this workflow on the current receipt artifact so the latest catalog schema's
         # required additive children section is present in the projected document.
-        schema_versions=(SchemaVersionEntry("receipts/receipt-document", "1.2.0"),),
+        schema_versions=(SchemaVersionEntry("receipts/receipt-document", "1.3.0"),),
         resource_manifest_digest=_DIGEST,
     )
 

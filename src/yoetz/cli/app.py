@@ -48,6 +48,7 @@ from yoetz.cli.render import (
     render_human_error,
     render_human_receipt,
     render_human_status,
+    render_local_recovery_lines,
 )
 from yoetz.domain.values import JsonObject
 from yoetz.ports.control import (
@@ -558,11 +559,16 @@ def _machine_scope_request_or_none() -> JsonObject | None:
 
 
 def _bounded_failure_line(reason: str, *, prefix: str | None = None) -> str:
-    """Render one bounded token with its remediation; the token itself stays first."""
+    """Render one bounded token with its remediation; the token itself stays first.
+
+    When the reason has a registered recovery directive (ADR-030), the directive lines follow on
+    their own lines, so a lifecycle refusal the MCP bridge would explain is explained here too.
+    """
 
     head = reason if prefix is None else f"{prefix}: {reason}"
     remediation = remediation_message(reason)
-    return head if remediation is None else f"{head}: {remediation}"
+    line = head if remediation is None else f"{head}: {remediation}"
+    return "\n".join([line, *render_local_recovery_lines(reason)])
 
 
 def _codex_subscription_cli_failure(error: BaseException) -> None:
@@ -613,9 +619,16 @@ def _singleton_holder_pid() -> int | None:
         return None
 
 
+def _annotate_first_line(text: str, suffix: str) -> str:
+    """Append a bounded annotation to the token line, ahead of any directive lines beneath it."""
+
+    head, separator, rest = text.partition("\n")
+    return f"{head}{suffix}{separator}{rest}"
+
+
 def _with_holder_pid(line: str) -> str:
     holder = _singleton_holder_pid()
-    return line if holder is None else f"{line} (holder pid {holder})"
+    return line if holder is None else _annotate_first_line(line, f" (holder pid {holder})")
 
 
 def _lifecycle_exit_code(error: BaseException) -> int | None:
@@ -645,19 +658,24 @@ def _lifecycle_failure(error: LifecycleError) -> int:
     return exit_code_for(code)
 
 
-def _control_failure(error: ControlError, *, json_output: bool = False) -> int:
+def _control_failure(
+    error: ControlError, *, json_output: bool = False, operation: str | None = None
+) -> int:
     return _shared_control_failure(
         error,
         json_output=json_output,
+        operation=operation,
         stderr_writer=_stderr,
         stdout_writer=_stdout_json,
     )
 
 
-def control_failure(error: ControlError, *, json_output: bool = False) -> int:
+def control_failure(
+    error: ControlError, *, json_output: bool = False, operation: str | None = None
+) -> int:
     """Render a control-channel failure using the shared CLI taxonomy."""
 
-    return _control_failure(error, json_output=json_output)
+    return _control_failure(error, json_output=json_output, operation=operation)
 
 
 type WorkflowRequest = (
@@ -711,7 +729,7 @@ async def _call_workflow(
     except OSError, ProtocolValueError, ValidationError, ValueError:
         return _usage_failure()
     except ControlError as error:
-        return _control_failure(error)
+        return _control_failure(error, operation=method)
 
 
 def _finish(code: int) -> None:

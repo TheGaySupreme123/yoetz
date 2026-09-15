@@ -841,7 +841,12 @@ async def test_public_operation_error_surfaces_as_ok_false_not_internal_error() 
     assert isinstance(result.body, PublishWorkResult)
     assert result.body.root.ok is False
     assert result.body.root.error.code is PublicErrorCode.EVENT_INVALID
-    assert result.body.root.error.safe_details == {"reason_code": "unsorted_set_field"}
+    # The directive token is attached when the application builds the error and survives the
+    # daemon's wire projection unchanged (ADR-030).
+    assert result.body.root.error.safe_details == {
+        "continuation": "sorted_set_required",
+        "reason_code": "unsorted_set_field",
+    }
     assert result.body.root.request_id == body.request_id
     assert result.body.root.error.correlation_id.startswith("err_")
     assert application.publish_work_calls == 1

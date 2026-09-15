@@ -203,7 +203,24 @@ def _validate_v10_bundle_layout(
         )
         if len(row) == 1 and type(row[0]) is str
     }
-    if has_content_profiles and not has_lineage_summary and required_v12_tables <= tables:
+    usage_columns = {
+        cast(str, row[1]) for row in db.execute("PRAGMA table_info(semantic_attempts)")
+    }
+    required_usage_columns = {
+        "usage_input_tokens",
+        "usage_cached_input_tokens",
+        "usage_cache_write_input_tokens",
+        "usage_output_tokens",
+        "usage_reasoning_output_tokens",
+        "usage_total_tokens",
+    }
+    usage_layout_valid = current < 13 or required_usage_columns <= usage_columns
+    if (
+        has_content_profiles
+        and not has_lineage_summary
+        and required_v12_tables <= tables
+        and usage_layout_valid
+    ):
         return
     raise RuntimeError("schema_upgrade_path_unknown")
 

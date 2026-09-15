@@ -164,7 +164,10 @@ async def test_disagreeing_public_selectors_refuse_before_child_mutation(
         with pytest.raises(PublicOperationError) as refused:
             await service.app.start(request, repository_privacy_context=_REPOSITORY)
         assert refused.value.code is PublicErrorCode.SESSION_CONFLICT
-        assert refused.value.safe_details == {"reason_code": "selector_conflict"}
+        assert refused.value.safe_details == {
+            "reason_code": "selector_conflict",
+            "continuation": "lineage_state_refresh",
+        }
         assert await service.app.start_catalog.list_child_task_ids(parent.task_id) == before
         child_route = await service.app.start_catalog.task_route(delegated.attach_handle.task_id)
         assert child_route is not None

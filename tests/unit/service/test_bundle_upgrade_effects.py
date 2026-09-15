@@ -518,7 +518,7 @@ async def test_backup_authenticates_and_copies_present_encrypted_objects(
     after = _before(bundle)
     fenced.replay_digest = after.projection_digest
 
-    # A process restart after the 0013 DDL leaves no in-memory v12 facts.  The effects layer must
+    # A process restart after the 0014 DDL leaves no in-memory v12 facts.  The effects layer must
     # still compare the immutable backup to the post-DDL snapshot before accepting replay.
     replay_after_restart = await effects.verify_replay(target, None, after, evidence)
     assert replay_after_restart == before.projection_digest

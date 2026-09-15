@@ -470,7 +470,10 @@ async def test_locationless_validation_failure_still_carries_the_availability_si
     error = _error(result)
     assert error["code"] == PublicErrorCode.INVALID_REQUEST.value
     details = cast(dict[str, object], error["safe_details"])
-    assert details == {"reason_code": "operation_recovery_unavailable"}
+    assert details == {
+        "continuation": "recovery_check_then_correct",
+        "reason_code": "operation_recovery_unavailable",
+    }
     await bridge.close_bridge_runtime(runtime)
 
 

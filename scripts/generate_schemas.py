@@ -2927,6 +2927,7 @@ def _event_draft_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
             }
         )
 
+    add_branch("check_recorded", "1.2.0")
     add_branch("session_opened", "1.2.0")
     add_branch("finding_recorded", "1.2.0")
     add_branch("finding_recorded", "1.3.0")
@@ -2982,6 +2983,15 @@ def _opaque_unknown_event_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonVa
     unknown = cast(dict[str, JsonValue], definitions["unknown_event_schema"])
     exclusion = cast(dict[str, JsonValue], unknown["not"])
     values = cast(list[JsonValue], exclusion["anyOf"])
+    for family in ("check_recorded", "finding_recorded"):
+        values.append(
+            {
+                "additionalProperties": False,
+                "properties": {"name": {"const": family}, "version": {"const": "1.2.0"}},
+                "required": ["name", "version"],
+                "type": "object",
+            }
+        )
     values.append(
         {
             "additionalProperties": False,
@@ -3770,13 +3780,13 @@ def _control_v2_7_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         + "operations/publish-work-request-1.2.0.schema.json",
         SCHEMA_NAMESPACE + "operations/check-request-1.0.0.schema.json": SCHEMA_NAMESPACE
         + "operations/check-request-1.1.0.schema.json",
-        SCHEMA_NAMESPACE + "operations/check-result-1.1.0.schema.json": SCHEMA_NAMESPACE
+        SCHEMA_NAMESPACE + "operations/check-result-1.2.0.schema.json": SCHEMA_NAMESPACE
         + "operations/check-result-1.3.0.schema.json",
         SCHEMA_NAMESPACE + "operations/status-request-1.1.0.schema.json": SCHEMA_NAMESPACE
         + "operations/status-request-1.2.0.schema.json",
-        SCHEMA_NAMESPACE + "operations/status-result-1.2.0.schema.json": SCHEMA_NAMESPACE
+        SCHEMA_NAMESPACE + "operations/status-result-1.3.0.schema.json": SCHEMA_NAMESPACE
         + "operations/status-result-1.4.0.schema.json",
-        SCHEMA_NAMESPACE + "operations/receipt-result-1.1.0.schema.json": SCHEMA_NAMESPACE
+        SCHEMA_NAMESPACE + "operations/receipt-result-1.2.0.schema.json": SCHEMA_NAMESPACE
         + "operations/receipt-result-1.3.0.schema.json",
     }
 

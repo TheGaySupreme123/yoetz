@@ -133,9 +133,13 @@ def test_public_error_and_validation_summaries_are_sanitized() -> None:
     )
     multi_location_error = cast(dict[str, object], multi_location_result["error"])
     assert multi_location_error["safe_details"] == {
+        "continuation": "input_correction_new_identity",
         "fields": ["/request_id", "/client"],
         "reasons": ["missing", "extra_forbidden"],
     }
+    multi_location_summary = render_safe_compact_summary(multi_location_result)
+    assert "Rejected: missing at /request_id; extra_forbidden at /client." in multi_location_summary
+    assert "Continuation: input_correction_new_identity." in multi_location_summary
 
     class _Request(BaseModel):
         model_config = ConfigDict(extra="forbid")
@@ -274,7 +278,11 @@ def test_unknown_nested_payload_key_keeps_the_extra_forbidden_reason() -> None:
         safe_details=locations,
     )
     details = cast(dict[str, object], cast(dict[str, object], wire["error"])["safe_details"])
-    assert details == {"fields": ["/event_drafts/0/payload"], "reasons": ["extra_forbidden"]}
+    assert details == {
+        "continuation": "input_correction_new_identity",
+        "fields": ["/event_drafts/0/payload"],
+        "reasons": ["extra_forbidden"],
+    }
 
 
 def test_unknown_tool_message_is_sanitized() -> None:
@@ -336,12 +344,12 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert publish_descriptor.input_schema_ref.endswith("publish-work-request-1.2.0.schema.json")
     assert publish_descriptor.output_schema_ref.endswith("publish-work-result-1.0.0.schema.json")
     check_descriptor = descriptor_for("check")
-    assert check_descriptor.output_schema_ref.endswith("check-result-1.2.0.schema.json")
+    assert check_descriptor.output_schema_ref.endswith("check-result-1.3.0.schema.json")
     status_descriptor = descriptor_for("status")
     assert status_descriptor.input_schema_ref.endswith("status-request-1.2.0.schema.json")
-    assert status_descriptor.output_schema_ref.endswith("status-result-1.3.0.schema.json")
+    assert status_descriptor.output_schema_ref.endswith("status-result-1.4.0.schema.json")
     receipt_descriptor = descriptor_for("receipt")
-    assert receipt_descriptor.output_schema_ref.endswith("receipt-result-1.2.0.schema.json")
+    assert receipt_descriptor.output_schema_ref.endswith("receipt-result-1.3.0.schema.json")
     for descriptors in TOOL_DESCRIPTORS.values():
         assert {item.name for item in descriptors if item.annotations.read_only} == {
             "status",
@@ -660,8 +668,8 @@ def _subscription_receipt_result() -> dict[str, Any]:
                 {"policy_id": "work-integrity", "policy_version": "0.1.0"},
             ],
             "schema_versions": [
-                {"schema_id": "findings/finding", "schema_version": "1.2.0"},
-                {"schema_id": "receipts/receipt-document", "schema_version": "1.2.0"},
+                {"schema_id": "findings/finding", "schema_version": "1.3.0"},
+                {"schema_id": "receipts/receipt-document", "schema_version": "1.3.0"},
             ],
             "resource_manifest_digest": _SUBSCRIPTION_DIGEST,
         },

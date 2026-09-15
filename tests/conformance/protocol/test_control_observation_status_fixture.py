@@ -49,7 +49,7 @@ def test_selection_runtime_status_is_valid_only_on_additive_26_wire(
     assert expected["selection_runtime_present"] is True
 
 
-def test_active_26_control_result_tracks_current_workflow_result_schemas() -> None:
+def test_released_26_control_result_retains_its_workflow_result_schemas() -> None:
     document = cast(
         dict[str, Any],
         strict_json_parse((_SCHEMA_ROOT / "service/control-result-2.6.0.schema.json").read_bytes()),

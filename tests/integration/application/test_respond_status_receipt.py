@@ -3037,9 +3037,10 @@ async def test_receipt_prefix_replay_conflict_is_retryable_with_repair_facts() -
     assert caught.value.code is PublicErrorCode.FRONTIER_CONFLICT
     assert caught.value.retryable is True
     assert dict(caught.value.safe_details) == {
+        "continuation": "frontier_refresh_required",
+        "head_digest": head.head_digest,
         "reason_code": "frontier_changed",
         "sequence": int(head.sequence),
-        "head_digest": head.head_digest,
     }
 
     stale_digest_wire: dict[str, JsonValue] = {

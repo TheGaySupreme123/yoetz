@@ -198,7 +198,7 @@ def _versions() -> ReceiptVersionSlice:
         ),
         # The current receipt writer emits the additive child section.  Its inner document
         # schema_version remains 1.0.0; the artifact selected by the version slice is 1.2.0.
-        schema_versions=(SchemaVersionEntry("receipts/receipt-document", "1.2.0"),),
+        schema_versions=(SchemaVersionEntry("receipts/receipt-document", "1.3.0"),),
         resource_manifest_digest=PROJECTION_DIGEST,
     )
 

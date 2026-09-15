@@ -68,7 +68,7 @@ def _synthetic_checkout(root: Path, *, inventory_count: int, reviewed_count: int
         "def version_manifest_json(manifest, *, include_resources=False):\n"
         "    return b'{}'\n",
     )
-    _write(root, "schemas/version/version-manifest-2.2.0.schema.json", '{"type":"object"}')
+    _write(root, "schemas/version/version-manifest-2.3.0.schema.json", '{"type":"object"}')
     _write(
         root,
         "scripts/verify_resource_manifest.py",
@@ -465,9 +465,9 @@ def test_write_regenerates_current_builder_owned_schema_without_changing_frozen_
 
     checkout = tmp_path / "checkout"
     _copy_checkout(checkout)
-    frozen_path = checkout / "schemas/operations/status-result-1.2.0.schema.json"
+    frozen_path = checkout / "schemas/operations/status-result-1.3.0.schema.json"
     frozen = frozen_path.read_bytes()
-    current_path = checkout / "schemas/operations/status-result-1.3.0.schema.json"
+    current_path = checkout / "schemas/operations/status-result-1.4.0.schema.json"
     expected = current_path.read_bytes()
     current = json.loads(expected)
     current["$defs"]["history_item"]["properties"]["summary_code"]["enum"].remove("child_accepted")
@@ -479,7 +479,7 @@ def test_write_regenerates_current_builder_owned_schema_without_changing_frozen_
     assert current_path.read_bytes() == expected
     assert frozen_path.read_bytes() == frozen
     assert (
-        checkout / "src/yoetz/resources/schemas/operations/status-result-1.3.0.schema.json"
+        checkout / "src/yoetz/resources/schemas/operations/status-result-1.4.0.schema.json"
     ).read_bytes() == expected
     checked = _run("--check", "--repo-root", str(checkout))
     assert checked.returncode == 0, checked.stderr + checked.stdout
@@ -491,7 +491,7 @@ def test_check_rejects_a_self_consistent_but_stale_cardinality_constant(tmp_path
 
     checkout = tmp_path / "checkout"
     _copy_checkout(checkout)
-    schema_path = checkout / "schemas/version/version-manifest-2.2.0.schema.json"
+    schema_path = checkout / "schemas/version/version-manifest-2.3.0.schema.json"
     document = cast(dict[str, Any], json.loads(schema_path.read_bytes()))
     counts = document["$defs"]["resource_counts"]["properties"]
     counts["migrations"]["const"] = str(int(counts["migrations"]["const"]) - 1)
@@ -525,3 +525,24 @@ def test_reviewed_count_mismatch_fails_before_any_generator_runs(tmp_path: Path)
     assert completed.returncode == 1
     assert "reviewed_resource_count_mismatch" in completed.stderr
     assert sentinel.read_text(encoding="utf-8") == "stale\n"
+
+
+@pytest.mark.slow
+def test_write_bootstraps_new_version_manifest_without_rewriting_released_schema(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "checkout"
+    _copy_checkout(checkout)
+    released = checkout / "schemas/version/version-manifest-2.2.0.schema.json"
+    original = released.read_bytes()
+    current = checkout / "schemas/version/version-manifest-2.3.0.schema.json"
+    expected = current.read_bytes()
+    current.unlink()
+
+    written = _run("--write", "--repo-root", str(checkout))
+
+    assert written.returncode == 0, written.stderr + written.stdout
+    assert released.read_bytes() == original
+    assert current.read_bytes() == expected
+    checked = _run("--check", "--repo-root", str(checkout))
+    assert checked.returncode == 0, checked.stderr + checked.stdout

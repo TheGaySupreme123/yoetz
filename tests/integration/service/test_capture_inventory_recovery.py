@@ -627,18 +627,23 @@ async def test_unmapped_parent_worker_candidates_do_not_starve_a_usable_mapping(
 
 
 @pytest.mark.anyio
-async def test_ambiguous_host_session_cannot_publish_an_inventory(tmp_path: Path) -> None:
+async def test_duplicate_host_session_binding_is_refused_before_inventory_change(
+    tmp_path: Path,
+) -> None:
     world = await _world(tmp_path)
     unrelated = tmp_path / "unrelated-project"
     unrelated.mkdir()
     other_workspace = world.local.workspace_commitment(str(unrelated))
     world.local.grant_consent(other_workspace)
-    world.local.bind_codex_session(other_workspace, world.host_session)
     try:
-        result = await world.coordinator.recover_capture_inventory(world.workspace)
-        assert result is ObservationCaptureRecoveryOutcome.MAPPING_MISSING
+        from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+
+        with pytest.raises(PublicOperationError) as refused:
+            world.local.bind_codex_session(other_workspace, world.host_session)
+        assert refused.value.code is PublicErrorCode.SESSION_CONFLICT
+        assert world.local.find_workspace_for_codex_session(world.host_session) == world.workspace
         assert world.routes.calls == []
-        assert not world.local.capture_reservation_bootstrap_ready(world.workspace)
+        assert not world.local.capture_reservation_bootstrap_ready(other_workspace)
     finally:
         world.coordinator.close()
 

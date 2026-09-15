@@ -10,12 +10,16 @@ from types import MappingProxyType
 from typing import cast
 
 __all__ = [
+    "ADMITTED_CLAIM_REVISION_INVARIANTS",
+    "ADMITTED_CONTINUATION_TOKENS",
     "PROTOCOL_REASON_CODES",
+    "REASON_CODE_CONTINUATIONS",
     "SAFE_DETAIL_KEYS",
     "ProtocolValueError",
     "PublicErrorCode",
     "PublicOperationError",
     "SafeDetailValue",
+    "attach_reason_continuation",
     "normalize_safe_details",
 ]
 
@@ -356,6 +360,7 @@ SAFE_DETAIL_KEYS: tuple[str, ...] = (
     "field",
     "head_digest",
     "host_profile",
+    "invariant",
     "limit",
     "method",
     "operation",
@@ -378,6 +383,26 @@ SAFE_DETAIL_KEYS: tuple[str, ...] = (
     "writer_id",
 )
 
+# The closed claim-revision invariant vocabulary (ADR-030). ``yoetz.domain.events`` owns the rule
+# these name and cannot be imported here -- this module is a dependency root -- so the set is
+# literal and the domain fails at import if the two ever disagree. Before ADR-030 the invariant
+# travelled only inside the public error message, and the MCP text projector recovered it by
+# matching that whole sentence with a regex; carrying it as a typed detail is what retires that.
+ADMITTED_CLAIM_REVISION_INVARIANTS: frozenset[str] = frozenset(
+    {
+        "claim_id_must_be_fresh",
+        "claim_kind_must_match",
+        "limitation_refs_complete",
+        "limitation_refs_must_be_relevant_non_success_results",
+        "replacement_must_change_effective_claim",
+        "replacement_must_not_dispute",
+        "scope_overlap_required",
+        "supporting_refs_must_exclude_limitations",
+        "superseded_claim_must_be_effective",
+        "superseded_claim_must_exist",
+    }
+)
+
 _INTEGER_DETAIL_KEYS = frozenset(
     {"count", "limit", "pending_ttl_seconds", "retry_after_ms", "sequence"}
 )
@@ -385,14 +410,187 @@ _BOOLEAN_DETAIL_KEYS = frozenset({"availability_inherited"})
 # Closed token sets for the MCP bridge's host-binding availability facts (issue #469). The
 # binding identity is the bridge's host and route profile; `availability` names the one latched
 # state a later request identity may inherit.
-# `continuation` and the exact command literals are the typed initialization-required handoff
-# (issue #512): every value is a repository constant, so nothing caller-derived can ride these
-# keys onto the wire.
+# `continuation` and the exact command literals are typed handoffs, not free text: every value is a
+# repository constant, so nothing caller-derived can ride these keys onto the wire. The token set is
+# the recovery registry's own (issue #739), which began as the single initialization-required
+# continuation of issue #512; the registry owns the directive text each token stands for, and that
+# text never travels here.
+# The closed continuation vocabulary (issue #739). This module is a dependency root and holds no
+# internal imports, so the tokens are literal here and ``yoetz.protocol.recovery`` fails at import
+# time if its registry and this set ever disagree. Adding a token here without registering its
+# directive, or the reverse, is a build failure rather than a bare token reaching an agent.
+ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
+    {
+        "consent_ceremony_required",
+        "field_ownership_repair",
+        "frontier_refresh_required",
+        "input_correction_new_identity",
+        "operation_pending_inspect",
+        "read_timeout_new_identity",
+        "recovery_check_then_correct",
+        "resource_integrity_repair",
+        "service_holder_busy",
+        "service_replacement_exhausted",
+        "session_rebind_required",
+        "sorted_set_required",
+        "start_timeout_same_identity",
+        "storage_root_unsafe",
+        "vault_initialization_required",
+        "write_timeout_same_identity",
+        "coordination_authority_review",
+        "coordination_policy_review",
+        "cursor_project_preview_review",
+        "lineage_attach_review",
+        "lineage_integrity_review",
+        "lineage_operation_recovery",
+        "lineage_service_review",
+        "lineage_state_refresh",
+        "lineage_terminal_review",
+    }
+)
+
+# Protocol reason codes whose recovery is fully determined by the reason alone (ADR-030). The map
+# lives here, beside the token set it ranges over, because attachment happens where every public
+# error is built: ``PublicOperationError`` adds the continuation at construction, so a producer that
+# names one of these reasons cannot ship without its directive. ``yoetz.protocol.recovery`` owns the
+# directive text and fails at import if a value here is not a registered token. ``request_timeout``
+# is deliberately absent: its directive depends on the operation kind and is resolved by the one
+# boundary that knows it (``continuation_for_reason``).
+REASON_CODE_CONTINUATIONS: Mapping[str, str] = MappingProxyType(
+    {
+        "duplicate_set_member": "sorted_set_required",
+        "endpoint_unsafe": "storage_root_unsafe",
+        "expected_frontier_required": "frontier_refresh_required",
+        "frontier_changed": "frontier_refresh_required",
+        "frontier_digest_mismatch": "frontier_refresh_required",
+        "operation_recovery_unavailable": "recovery_check_then_correct",
+        "schema_digest_mismatch": "resource_integrity_repair",
+        "session_superseded": "session_rebind_required",
+        "unsorted_set_field": "sorted_set_required",
+        "ambiguous_binding": "lineage_state_refresh",
+        "attach_handle_expired": "lineage_attach_review",
+        "attach_handle_invalid": "lineage_attach_review",
+        "attach_handle_reused": "lineage_attach_review",
+        "attach_handle_revoked": "lineage_attach_review",
+        "attach_result_invalid": "lineage_integrity_review",
+        "child_check_frontier_ahead_of_child": "lineage_integrity_review",
+        "child_check_frontier_missing": "lineage_integrity_review",
+        "child_check_frontier_without_check": "lineage_integrity_review",
+        "child_dependencies_not_canonical": "sorted_set_required",
+        "child_dependency_count_invalid": "lineage_integrity_review",
+        "child_finding_count_invalid": "lineage_integrity_review",
+        "child_findings_not_canonical": "sorted_set_required",
+        "child_frontier_missing": "lineage_integrity_review",
+        "child_gap_frontier_mismatch": "lineage_integrity_review",
+        "coordination_admission_required": "coordination_authority_review",
+        "coordination_consent_required": "coordination_authority_review",
+        "coordination_declaration_invalid": "lineage_integrity_review",
+        "coordination_detection_mismatch": "lineage_state_refresh",
+        "coordination_disposition_invalid": "lineage_integrity_review",
+        "coordination_evidence_missing": "lineage_integrity_review",
+        "coordination_generation_mismatch": "lineage_state_refresh",
+        "coordination_generation_revoked": "coordination_authority_review",
+        "coordination_grant_required": "coordination_authority_review",
+        "coordination_invalid": "lineage_integrity_review",
+        "coordination_obligation_conflict": "lineage_state_refresh",
+        "coordination_obligation_mismatch": "lineage_state_refresh",
+        "coordination_participants_unavailable": "lineage_service_review",
+        "coordination_recipient_mismatch": "lineage_state_refresh",
+        "coordination_resource_count_invalid": "lineage_integrity_review",
+        "coordination_route_unavailable": "lineage_service_review",
+        "coordination_runtime_unavailable": "lineage_service_review",
+        "coordination_source_policy_denied": "coordination_policy_review",
+        "coordination_source_unavailable": "lineage_service_review",
+        "coordination_task_pair_invalid": "lineage_integrity_review",
+        "coordination_tasks_not_canonical": "sorted_set_required",
+        "cross_repository_lineage_requires_grant": "coordination_authority_review",
+        "cursor_mcp_route_invalid": "cursor_project_preview_review",
+        "cursor_project_mcp_command_invalid": "cursor_project_preview_review",
+        "cursor_project_mcp_invalid": "cursor_project_preview_review",
+        "cursor_project_mcp_preview_required": "cursor_project_preview_review",
+        "finding_actionable_mismatch": "lineage_integrity_review",
+        "finding_resolution_mismatch": "lineage_integrity_review",
+        "general_project_membership_conflict": "lineage_state_refresh",
+        "host_lineage_annotation_invalid": "lineage_integrity_review",
+        "implicit_project_requires_opt_out": "lineage_state_refresh",
+        "invalid_continuation_expiry": "lineage_integrity_review",
+        "invalid_continuation_kind": "lineage_integrity_review",
+        "invalid_continuation_pending_id": "lineage_integrity_review",
+        "invalid_continuation_repository_setup": "lineage_integrity_review",
+        "invalid_external_runtime_authority": "coordination_authority_review",
+        "invalid_receipt_child_finding": "lineage_integrity_review",
+        "invalid_receipt_child_outcome": "lineage_integrity_review",
+        "invalid_receipt_children": "lineage_integrity_review",
+        "invalid_start_internal_result": "lineage_integrity_review",
+        "invalid_workspace_inspect": "lineage_integrity_review",
+        "lineage_acceptance_transition": "lineage_state_refresh",
+        "lineage_catalog_busy": "lineage_operation_recovery",
+        "lineage_catalog_migration_required": "lineage_service_review",
+        "lineage_child_missing": "lineage_state_refresh",
+        "lineage_child_not_found": "lineage_state_refresh",
+        "lineage_close_authority": "coordination_authority_review",
+        "lineage_cycle": "lineage_state_refresh",
+        "lineage_depth_limit": "lineage_state_refresh",
+        "lineage_event_contradiction": "lineage_integrity_review",
+        "lineage_event_invalid": "lineage_integrity_review",
+        "lineage_event_operation_conflict": "lineage_operation_recovery",
+        "lineage_event_operation_pending": "lineage_operation_recovery",
+        "lineage_event_result_invalid": "lineage_integrity_review",
+        "lineage_fanout_limit": "lineage_state_refresh",
+        "lineage_handle_conflict": "lineage_attach_review",
+        "lineage_handle_key_invalid": "lineage_integrity_review",
+        "lineage_handle_key_unavailable": "lineage_service_review",
+        "lineage_handle_missing": "lineage_attach_review",
+        "lineage_manifest_stale": "lineage_state_refresh",
+        "lineage_operation_conflict": "lineage_operation_recovery",
+        "lineage_operation_lease_expired": "lineage_operation_recovery",
+        "lineage_operation_not_found": "lineage_state_refresh",
+        "lineage_operation_phase": "lineage_integrity_review",
+        "lineage_operation_quarantined": "lineage_terminal_review",
+        "lineage_parent_not_found": "lineage_state_refresh",
+        "lineage_parent_session_invalid": "lineage_attach_review",
+        "lineage_phase_transition": "lineage_integrity_review",
+        "lineage_repository_mismatch": "lineage_state_refresh",
+        "lineage_request_identity_conflict": "lineage_operation_recovery",
+        "lineage_reservation_conflict": "lineage_operation_recovery",
+        "lineage_root_conflict": "lineage_state_refresh",
+        "lineage_root_dependency": "lineage_state_refresh",
+        "lineage_service_unavailable": "lineage_service_review",
+        "lineage_session_conflict": "lineage_state_refresh",
+        "lineage_session_not_active": "lineage_state_refresh",
+        "lineage_session_not_found": "lineage_state_refresh",
+        "lineage_session_scope": "lineage_state_refresh",
+        "lineage_task_conflict": "lineage_state_refresh",
+        "lineage_task_missing": "lineage_state_refresh",
+        "lineage_task_not_found": "lineage_state_refresh",
+        "lineage_transition_conflict": "lineage_state_refresh",
+        "lineage_work_terminal": "lineage_terminal_review",
+        "lineage_work_transition": "lineage_state_refresh",
+        "noncanonical_json": "lineage_integrity_review",
+        "observation_selection_session_limit": "lineage_state_refresh",
+        "project_dissolved": "lineage_terminal_review",
+        "project_member_already_unbound": "lineage_state_refresh",
+        "project_member_not_found": "lineage_state_refresh",
+        "project_not_found": "lineage_state_refresh",
+        "projection_unavailable": "lineage_service_review",
+        "receipt_child_manifest_mismatch": "lineage_integrity_review",
+        "receipt_children_not_canonical": "sorted_set_required",
+        "receipt_children_schema_version": "lineage_integrity_review",
+        "runtime_opening_authority": "coordination_authority_review",
+        "selector_conflict": "lineage_state_refresh",
+        "service_stamp_required": "lineage_service_review",
+        "session_lineage_fields_incomplete": "lineage_integrity_review",
+        "stored_result_shape_invalid": "lineage_integrity_review",
+    }
+)
+if set(REASON_CODE_CONTINUATIONS.values()) - ADMITTED_CONTINUATION_TOKENS:
+    raise RuntimeError("reason_code_continuation_not_admitted")
+
 _TOKEN_DETAIL_VALUES: Mapping[str, frozenset[str]] = MappingProxyType(
     {
         "authorize_command": frozenset({"yoetz consent authorize"}),
         "availability": frozenset({"terminal_unavailable"}),
-        "continuation": frozenset({"vault_initialization_required"}),
+        "continuation": ADMITTED_CONTINUATION_TOKENS,
         "host_profile": frozenset({"generic", "codex", "claude", "cursor"}),
         "prepare_command": frozenset({"yoetz consent prepare vault_initialize"}),
         "review_command": frozenset({"yoetz consent review"}),
@@ -507,6 +705,10 @@ def _normalize_detail(key: str, value: object) -> SafeDetailValue | None:
         if type(value) is str and value in PROTOCOL_REASON_CODES:
             return value
         return None
+    if key == "invariant":
+        if type(value) is str and value in ADMITTED_CLAIM_REVISION_INVARIANTS:
+            return value
+        return None
     if key == "quarantine_code":
         if type(value) is str and value in _QUARANTINE_CODES:
             return value
@@ -565,6 +767,29 @@ def normalize_safe_details(value: object) -> Mapping[str, SafeDetailValue]:
     if not normalized:
         return _EMPTY_SAFE_DETAILS
     return MappingProxyType(normalized)
+
+
+def attach_reason_continuation(
+    details: Mapping[str, SafeDetailValue],
+) -> Mapping[str, SafeDetailValue]:
+    """Attach the continuation a frozen ``reason_code`` determines, when none travels already.
+
+    Every registered reason resolves to the same directive no matter which producer raised it, so
+    the attachment is made once here rather than at each raising site (ADR-030). A continuation the
+    producer chose explicitly is never overridden: the one boundary that knows more than the reason
+    (the MCP bridge for ``request_timeout``) has already said so. Key order stays the documented
+    ASCII order of ``SAFE_DETAIL_KEYS``.
+    """
+
+    if "continuation" in details:
+        return details
+    reason = details.get("reason_code")
+    token = REASON_CODE_CONTINUATIONS.get(reason) if type(reason) is str else None
+    if token is None:
+        return details
+    merged: dict[str, SafeDetailValue] = dict(details)
+    merged["continuation"] = token
+    return MappingProxyType({key: merged[key] for key in SAFE_DETAIL_KEYS if key in merged})
 
 
 def _validate_message(value: object) -> str:
@@ -640,7 +865,7 @@ class PublicOperationError(Exception):
             raise TypeError("public_error_retryable_wrong_type")
         if correlation_id is not None and not _valid_correlation_id(correlation_id):
             raise ProtocolValueError("public_error_invalid_correlation_id")
-        normalized_details = normalize_safe_details(safe_details)
+        normalized_details = attach_reason_continuation(normalize_safe_details(safe_details))
         object.__setattr__(self, "code", validated_code)
         object.__setattr__(self, "message", validated_message)
         object.__setattr__(self, "retryable", retryable)

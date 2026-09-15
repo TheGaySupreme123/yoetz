@@ -267,7 +267,7 @@ async def test_safe_details_never_carries_the_internal_family_or_count_keys(
     error = cast(dict[str, object], structured["error"])
     assert error["code"] == PublicErrorCode.INVALID_REQUEST.value
     details = cast(dict[str, object], error["safe_details"])
-    assert set(details) == {"fields", "reasons"}
+    assert set(details) == {"continuation", "fields", "reasons"}
     assert details["reasons"] == ["extra_forbidden"]
     assert "family" not in details
     # `family_version` is an internal hint input like `family` and `count`, and travels the same

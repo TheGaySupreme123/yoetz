@@ -182,7 +182,7 @@ def test_migration_ddl_contains_only_reviewed_table_rebuilds(installed: _Install
                 "0011",
                 "0012",
                 "0013",
-        "0014",
+                "0014",
             ),
         ),
     ):

@@ -223,7 +223,8 @@ def _with_holder_identity(line: str) -> str:
 def _with_correlation(line: str, error: ControlError) -> str:
     if error.correlation_id is None:
         return line
-    return f"{line}; correlation_id {error.correlation_id}"
+    head, separator, rest = line.partition("\n")
+    return f"{head}; correlation_id {error.correlation_id}{separator}{rest}"
 
 
 def _holder_identity_json() -> dict[str, JsonValue] | None:
@@ -268,6 +269,7 @@ def control_failure(
     error: ControlError,
     *,
     json_output: bool = False,
+    operation: str | None = None,
     stderr_writer: Callable[[str], None] = stderr,
     stdout_writer: Callable[[JsonValue], None] = stdout_json,
 ) -> int:
@@ -275,6 +277,24 @@ def control_failure(
 
     error = _bind_handshake_correlation(error)
     code = public_error_code_for_control_reason(error.reason)
+    if error.reason == "request_timeout" and operation is not None:
+        from yoetz.cli.render import render_recovery_directive_lines
+        from yoetz.protocol.recovery import (
+            continuation_for_reason,
+            directive_for,
+            timeout_operation_kind,
+        )
+
+        kind = timeout_operation_kind(operation)
+        directive = directive_for(continuation_for_reason("request_timeout", operation_kind=kind))
+        lines = [
+            f"{code.value.lower()}: request_timeout: the local {operation} request did not answer "
+            "within its deadline"
+        ]
+        if directive is not None:
+            lines.extend(render_recovery_directive_lines(directive))
+        stderr_writer(_with_correlation("\n".join(lines), error))
+        return exit_code_for(code)
     if error.reason in _COORDINATION_CONTROL_ERROR_REASONS:
         remedy = _COORDINATION_CONTROL_GUIDANCE[error.reason]
         stderr_writer(f"{error.reason}: {remedy}")

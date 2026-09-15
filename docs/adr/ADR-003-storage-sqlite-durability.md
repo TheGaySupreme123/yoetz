@@ -139,18 +139,24 @@ effect of opening it.
 
 The restart-discoverable marker is the existing catalog `maintenance_operations` row, not a new
 marker table. `SqliteBundleUpgradeJournal` reserves `kind = 'migration'` with
-`requested_target_version = '13'`, a generated `request_id`, `migration_request_digest()` and
+`requested_target_version = '14'`, a generated `request_id`, `migration_request_digest()` and
 `migration_plan_digest()`. The plan binds the task, route identity/generation, subject frontier,
-privacy-root generation/digest, and migration ID `0013`. A pending row owns a lease and advances
+privacy-root generation/digest, supported source versions `12` and `13`, and migration IDs
+`0013`–`0014`. A pending row owns a lease and advances
 only through `reserved → backup_ready → schema_applied → replay_verified`; terminal rows carry the
 canonical `MigrationResult`, its backup manifest digest, and either `complete` or `quarantined`
 state. A restarted service inspects that row and the bundle schema, then resumes or refuses the
 same operation; it never creates a second migration for the same target.
 
-The supported automatic pair is released bundle schema `12` to candidate schema `13`, applying
-only migration `0013`. The migration preserves released bundle migrations `0010`, `0011`, and
-`0012`, and validates the consent-profile column plus events layout before allowing a legacy v10
-path to continue. A v10 layout that cannot be identified as the released shape fails as
+The supported automatic sources are bundle schemas `12` and `13`, targeting schema `14`.
+Schema `12` applies released provider-usage migration `0013` followed by lineage migration `0014`;
+schema `13` applies only `0014`. Released migrations `0010`–`0013` retain their exact bytes.
+The consent-profile column and events layout are checked before the lineage rebuild. A development
+schema `13` with the former lineage layout is refused rather than mistaken for the released
+provider-usage schema. The verified backup supplies the actual source version even after restart.
+Preservation digests represent absent v12 usage columns as NULL, matching migration `0013`, while
+retaining all existing v13 usage counters. A v10 layout that cannot be identified as the released
+shape fails as
 `schema_upgrade_path_unknown` before mutation; newer, missing, unsafe, or non-contiguous schemas
 fail closed as well.
 

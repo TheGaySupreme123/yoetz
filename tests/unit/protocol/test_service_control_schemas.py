@@ -828,12 +828,12 @@ def test_v27_control_check_uses_current_request_wire_and_coordination_pack() -> 
         "status-request-1.2.0.schema.json",
     }
     assert operation_refs("control-result-2.7.0.schema.json") == {
-        "check-result-1.2.0.schema.json",
+        "check-result-1.3.0.schema.json",
         "publish-work-result-1.0.0.schema.json",
-        "receipt-result-1.2.0.schema.json",
+        "receipt-result-1.3.0.schema.json",
         "respond-result-1.0.0.schema.json",
         "start-result-1.1.0.schema.json",
-        "status-result-1.3.0.schema.json",
+        "status-result-1.4.0.schema.json",
     }
 
     request: JsonValue = cast(

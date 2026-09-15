@@ -116,8 +116,9 @@ def test_ordinary_channel_rejects_reserved_families(family: str) -> None:
 
     assert caught.value.code is PublicErrorCode.EVENT_INVALID
     assert caught.value.safe_details == {
-        "reason_code": "event_family_not_admitted",
+        "continuation": "input_correction_new_identity",
         "field": "/event_drafts/0/schema",
+        "reason_code": "event_family_not_admitted",
     }
 
 
@@ -211,8 +212,9 @@ def test_unsorted_causal_parents_reject_as_event_invalid_unsorted_set_field() ->
     # The draft is located even when the rejection comes from a whole-draft invariant rather
     # than a single field.
     assert caught.value.safe_details == {
-        "reason_code": "unsorted_set_field",
+        "continuation": "sorted_set_required",
         "field": "/event_drafts/0",
+        "reason_code": "unsorted_set_field",
     }
 
 
@@ -242,8 +244,9 @@ def test_unsorted_payload_set_field_is_located_by_name() -> None:
 
     assert caught.value.code is PublicErrorCode.EVENT_INVALID
     assert caught.value.safe_details == {
-        "reason_code": "unsorted_set_field",
+        "continuation": "sorted_set_required",
         "field": "/event_drafts/0/payload/supporting_refs",
+        "reason_code": "unsorted_set_field",
     }
     assert "ascending ASCII" in caught.value.message
 
@@ -270,8 +273,9 @@ def test_unsorted_obligation_ids_name_the_field_and_the_ascii_rule() -> None:
 
     assert caught.value.code is PublicErrorCode.EVENT_INVALID
     assert caught.value.safe_details == {
-        "reason_code": "unsorted_set_field",
+        "continuation": "sorted_set_required",
         "field": "/event_drafts/0/payload/obligation_ids",
+        "reason_code": "unsorted_set_field",
     }
     assert "ascending ASCII" in caught.value.message
     assert "uniqueItems" in caught.value.message

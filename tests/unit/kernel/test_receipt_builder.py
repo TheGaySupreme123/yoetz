@@ -1265,3 +1265,40 @@ def test_selection_summary_and_input_loss_remain_distinct_in_all_receipt_formats
         assert "bounded source summaries" in rendered
         assert "historical loss remains a limitation after queue recovery" in rendered
         assert "new time and state only" in rendered
+
+
+def test_child_receipt_retains_provider_usage_under_the_combined_contract() -> None:
+    from yoetz.domain.receipts import ReceiptChildOutcome, ReceiptChildren
+    from yoetz.protocol.canonical import JsonValue
+    from yoetz.protocol.schemas import validate_schema_instance
+
+    provenance = _subscription_provenance()
+    receipt = _build(
+        _context(
+            check=_check(
+                CheckVerdict.NO_ISSUE_DETECTED, _coverage(), semantic_provenance=provenance
+            )
+        )
+    )
+    child = ReceiptChildOutcome(
+        child_task_id=task_id("tsk_00000000-0000-4000-8000-000000000099"),
+        outcome="unavailable",
+        later_manifest_ref=None,
+        tested_manifest_ref=None,
+        freshness="unknown",
+        findings=(),
+    )
+    receipt = replace(
+        receipt,
+        versions=replace(
+            receipt.versions,
+            schema_versions=(SchemaVersionEntry("receipts/receipt-document", "1.3.0"),),
+        ),
+        children=ReceiptChildren((child,)),
+    )
+    wire = receipt_document_to_json(receipt)
+    validate_schema_instance("receipt-document", "1.3.0", cast(JsonValue, wire))
+    restored = receipt_document_from_json(wire)
+    assert restored.children.children == (child,)
+    assert restored.semantic_provenance == provenance
+    assert restored == receipt

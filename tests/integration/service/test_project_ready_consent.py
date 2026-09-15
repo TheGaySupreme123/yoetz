@@ -254,7 +254,7 @@ async def test_ready_coordination_uses_persisted_source_task_policy_and_reopens_
                 source_workspace_commitment=right_source.workspace_ref_commitment,
                 project=project.project_id,
             )
-        assert denied.value.code is CoordinationErrorCode.CONSENT_REQUIRED
+        assert denied.value.code is CoordinationErrorCode.SOURCE_POLICY_DENIED
 
         detector = getattr(application, "coordination_detector")
         detection_id = new_id(IdKind.EVENT)
@@ -296,7 +296,8 @@ async def test_ready_coordination_uses_persisted_source_task_policy_and_reopens_
         assert len(deliveries) == 2
         assert {item.outcome for item in deliveries} == {"refused"}
         assert all(
-            item.reason_code == CoordinationErrorCode.CONSENT_REQUIRED.value for item in deliveries
+            item.reason_code == CoordinationErrorCode.SOURCE_POLICY_DENIED.value
+            for item in deliveries
         )
 
         allowed_policy = await _persist_task_policy(

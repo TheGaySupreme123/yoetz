@@ -277,6 +277,7 @@ async def test_superseded_session_returns_current_bounded_binding() -> None:
     assert caught.value.code is PublicErrorCode.SESSION_NOT_FOUND
     assert caught.value.retryable is False
     assert caught.value.safe_details == {
+        "continuation": "session_rebind_required",
         "reason_code": "session_superseded",
         "task_id": route.task_id,
         "session_id": route.session_id,

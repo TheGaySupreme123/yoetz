@@ -117,6 +117,7 @@ from yoetz.protocol.coverage import (
 )
 from yoetz.protocol.errors import (
     PROTOCOL_REASON_CODES,
+    REASON_CODE_CONTINUATIONS,
     ProtocolValueError,
     PublicErrorCode,
     PublicOperationError,
@@ -376,6 +377,7 @@ def _draft_subfield_of(exc: BaseException) -> str | None:
 
 
 _REGISTERED_EVENT_FAMILIES: Final = frozenset(schema.name for schema in PAYLOAD_TYPES)
+_INPUT_CORRECTION_CONTINUATION: Final = "input_correction_new_identity"
 
 
 def _declared_schema_name(value: JsonValue) -> str | None:
@@ -502,6 +504,13 @@ def _event_invalid(
             # Which draft failed is the difference between a one-line fix and re-deriving the
             # whole batch; a batch may carry up to MAX_EVENTS_PER_BATCH drafts.
             details["field"] = pointer
+    if not retryable and reason_code not in REASON_CODE_CONTINUATIONS:
+        # This producer is the one place that knows a non-retryable EVENT_INVALID rejected the
+        # caller's drafts before any append (ADR-030). The reason code alone cannot say so -- the
+        # same validation reasons also name corrupt stored records elsewhere -- so the correction
+        # directive is classified here rather than mapped from the reason. A reason with its own
+        # directive (set order, frontier) keeps it through the construction-time attachment.
+        details["continuation"] = _INPUT_CORRECTION_CONTINUATION
     return PublicOperationError(
         PublicErrorCode.EVENT_INVALID, message, retryable, safe_details=details
     )

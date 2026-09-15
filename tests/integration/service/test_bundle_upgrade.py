@@ -52,6 +52,7 @@ class _Clock:
 
 @dataclass(slots=True)
 class _Effects:
+    source_version: int = 12
     fail_replay: bool = False
     backup_error: BundleUpgradeError | None = None
     backups: list[tuple[str | None, BundleIntegrity]] = field(
@@ -73,7 +74,7 @@ class _Effects:
         if existing_manifest_digest is not None:
             assert existing_manifest_digest == _BACKUP_DIGEST
         self.backups.append((existing_manifest_digest, before))
-        return BackupEvidence(target.task_id, before.frontier, _BACKUP_DIGEST)
+        return BackupEvidence(target.task_id, before.frontier, _BACKUP_DIGEST, self.source_version)
 
     async def verify_replay(
         self,
@@ -234,17 +235,19 @@ def _coordinator(
 
 
 @pytest.mark.anyio
-async def test_v12_upgrade_is_backup_first_idempotent_and_fenced(
+@pytest.mark.parametrize("source_version", [12, 13])
+async def test_supported_upgrade_is_backup_first_idempotent_and_fenced(
+    source_version: int,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(connection_module, "verify_private_local_bundle", _allow_isolated_path)
     bundle = tmp_path / "ledger.sqlite3"
-    _build_bundle(bundle, version=12)
+    _build_bundle(bundle, version=source_version)
     catalog = _catalog(bundle)
     target = _target(bundle)
     clock = _Clock()
-    effects = _Effects()
+    effects = _Effects(source_version=source_version)
     holder_calls: list[tuple[str, ...]] = []
 
     report = await _coordinator(
@@ -255,6 +258,8 @@ async def test_v12_upgrade_is_backup_first_idempotent_and_fenced(
     ).run_before_ready((target,))
 
     assert len(report.migrated) == 1
+    assert report.migrated[0].from_version == str(source_version)
+    assert report.migrated[0].to_version == "14"
     assert report.already_current == ()
     assert len(effects.backups) == 1
     assert effects.replays == [effects.backups[0][1]]
@@ -724,3 +729,27 @@ async def test_post_commit_replay_failure_quarantines_and_restored_v12_is_not_cu
             effects=_Effects(),
         ).run_before_ready((complete_target,))
     assert restored_error.value.reason is BundleUpgradeReason.ROLLBACK_REQUIRED
+
+
+def test_usage_preservation_digest_normalizes_legacy_nulls_and_detects_counter_changes() -> None:
+    from yoetz.service.bundle_upgrade import (
+        _stream_table_digest,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    db = apsw.Connection(":memory:")
+    db.execute("CREATE TABLE semantic_attempts (attempt_id TEXT PRIMARY KEY)")
+    db.execute("INSERT INTO semantic_attempts VALUES ('attempt-1')")
+    before = _stream_table_digest(db, "semantic_attempts")
+    for column in (
+        "input_tokens",
+        "cached_input_tokens",
+        "cache_write_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+        "total_tokens",
+    ):
+        db.execute(f"ALTER TABLE semantic_attempts ADD COLUMN usage_{column} INTEGER")
+    assert _stream_table_digest(db, "semantic_attempts") == before
+    db.execute("UPDATE semantic_attempts SET usage_input_tokens=100, usage_total_tokens=100")
+    assert _stream_table_digest(db, "semantic_attempts") != before
+    db.close()
