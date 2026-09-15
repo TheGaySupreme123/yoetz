@@ -41,6 +41,8 @@ attach_handle_reused
 attach_handle_revoked
 attach_result_invalid
 byte_order_mark_forbidden
+catalog_busy
+catalog_maintenance_busy
 child_check_frontier_ahead_of_child
 child_check_frontier_missing
 child_check_frontier_without_check
@@ -267,6 +269,7 @@ response_fields_invalid
 response_projection_failed
 runtime_attempt_evidence_json_shape_invalid
 runtime_opening_authority
+runtime_rebind_busy
 schema_artifact_role_invalid
 schema_artifact_role_mismatch
 schema_bytes_invalid
@@ -296,6 +299,10 @@ service_unavailable
 session_lineage_fields_incomplete
 session_superseded
 set_member_not_ascii
+start_busy_retry_ready
+start_catalog_retry_ready
+start_lease_pending
+start_runtime_rebind_retry_ready
 stored_result_shape_invalid
 timestamp_not_utc
 timestamp_out_of_range
@@ -475,7 +482,7 @@ def test_public_error_code_membership() -> None:
 def test_protocol_reason_registry_is_exact_and_import_order_independent() -> None:
     source_values = cast(tuple[str, ...], getattr(errors_module, "_PROTOCOL_REASON_CODE_VALUES"))
     assert source_values == _EXPECTED_REASON_CODES
-    assert len(source_values) == 277
+    assert len(source_values) == 284
     assert source_values == tuple(sorted(source_values, key=str.encode))
     assert len(source_values) == len(set(source_values))
     assert PROTOCOL_REASON_CODES == frozenset(_EXPECTED_REASON_CODES)
