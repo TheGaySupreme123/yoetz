@@ -1146,7 +1146,7 @@ async def test_supersede_signals_only_a_live_foreign_identity_holder(
 async def test_cancelled_check_wait_consumes_late_result_without_cancelling_review() -> None:
     stream = _FakeStream()
     client = _client(stream, ControlClientKind.MCP_BRIDGE)
-    source = _receipt_request(31).model_dump(mode="json")
+    source = _receipt_request(31).model_dump(mode="json", exclude_none=True)
     for key in ("task_id", "format", "include", "redaction_profile"):
         source.pop(key)
     source["mode"] = "semantic_required"
