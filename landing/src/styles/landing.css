@@ -65,6 +65,8 @@ img { max-width: 100%; }
 .hero-copy { display: flex; flex-direction: column; align-items: center; text-align: center; }
 .hero-copy .ds-h1 { text-wrap: balance; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+/* Copy with a shorter phone variant: .d shows on desktop, .m on phones. */
+.m { display: none; }
 
 /* ---------- Hero explainer: agent claims → Yoetz checks → receipt ---------- */
 .hx {
@@ -300,6 +302,7 @@ em.new {
 .inside-section { background: var(--slate-50); padding: 96px 24px; border-top: 1px solid var(--slate-100); }
 .arch { max-width: 1040px; margin: 56px auto 0; padding: 18px 20px; background: #fff; border: 1px solid var(--slate-200); border-radius: 18px; overflow-x: auto; }
 .arch svg { width: 100%; min-width: 720px; height: auto; display: block; overflow: visible; }
+.arch-m { display: none; }
 .arch .art-txt.strong { font-weight: 600; fill: var(--slate-900); }
 .arch-notes { max-width: 1040px; margin: 36px auto 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 32px; }
 .arch-k { font-family: var(--font-mono); font-size: 12.5px; color: var(--brand-teal-700); margin-bottom: 8px; }
@@ -477,35 +480,71 @@ em.new {
   .hx-link, .hx-scan { display: none; }
 }
 @media (max-width: 760px) {
-  /* Below this the teal line would wrap under "Agents" and the wordmark's
-     bars would collide with it, so the wordmark takes its own line. */
-  .ds-h1 { font-size: clamp(38px, 9.5vw, 56px); }
-  .h1-logo { display: block; height: 1.55em; margin: 0 auto 0.04em; }
+  /* Two sentences, each its own block; the wordmark opens the second and
+     runs inline with it, as on desktop. */
+  .ds-h1 { font-size: clamp(34px, 9.5vw, 56px); }
+  .ds-h1 .line { text-wrap: balance; }
+  /* Room for the wordmark's bars, which rise above the line box. */
+  .ds-h1 .grad { margin-top: 0.75em; }
 }
 @media (max-width: 720px) {
+  /* Phones get a shorter page: no looping animations, no diagrams that need
+     a side scroll, and the button inside the first screen. */
+  .ds-hero { padding: 64px 20px 56px; }
+  .ds-cta-dark, .ds-section, .see-section, .inside-section { padding: 56px 20px; }
 
-  .see-inner { grid-template-columns: 1fr; gap: 36px; }
-  .see-art { max-width: 460px; }
+  /* Hero order: headline, one sentence, the button, hosts. The explainer
+     cards are desktop-only. */
+  .d { display: none; }
+  .m { display: inline; }
+  .hero-copy > .sr-only {
+    position: static; width: auto; height: auto; overflow: visible; clip: auto; white-space: normal;
+    font-size: 17px; line-height: 1.5; color: var(--slate-600); margin: 16px 0 0; max-width: 30ch; text-wrap: balance;
+  }
+  .hero-hosts-label, .inst-tab.agent .rec, .platform-note, a.hero-license, .hero-hosts em.new { display: none; }
+  .inst-note { margin-top: 14px; }
+  .host-pill { padding: 5px 10px; font-size: 12.5px; gap: 6px; }
+  .hero-copy .ds-h1 { order: 0; }
+  .hero-copy .sr-only { order: 1; }
+  .hero-installers { order: 2; margin-top: 30px; }
+  .hero-hosts { order: 3; margin-top: 34px; gap: 8px; }
+  .hero-meta { order: 4; margin-top: 26px; }
+  .hx { display: none; }
+  .hero-meta { flex-wrap: wrap; }
+  .hero-star { white-space: nowrap; }
+
   /* Hero on phones: agent setup only, no install tabs */
-  .ds-hero { padding-bottom: 48px; }
-  .term-body { height: 320px; font-size: 12.5px; }
   .inst-tab:not(.agent), .manual-panel { display: none !important; }
-  /* Explainer: compact on phones */
-  .hx { max-width: 340px; gap: 8px; font-size: 10.5px; margin-top: 28px; }
-  .hx-card { padding: 8px 10px 9px; border-radius: 10px; }
-  .hx-eyebrow { font-size: 9.5px; margin-bottom: 4px; }
-  .hx-row { gap: 6px; padding: 1px 5px; margin: 0 -5px; }
-  .hx-k { width: 52px; }
-  .hx-caret { width: 5px; height: 11px; }
-  .hero-installers { margin-top: 30px; }
   .inst-tabs { flex-direction: column; align-items: stretch; }
   .inst-tab.agent { height: 50px; justify-content: center; font-size: 16px; padding: 0 16px; gap: 8px; white-space: nowrap; }
   .inst-tab.agent .rec { font-size: 10.5px; padding: 2px 7px; }
   .agent-note { display: block; }
+
+  /* Working in the background: copy and the says-vs-did illustration.
+     The terminal replay is desktop-only. */
+  .see-inner { grid-template-columns: 1fr; gap: 0; }
+  .see-demo { display: none; }
+  .see-art { max-width: none; margin-top: 20px; padding: 10px 8px; }
+  .see-note { margin-top: 16px; }
+
+  /* Under the hood: the wide diagram needs a side scroll here, so a
+     top-to-bottom one takes its place, with one-line notes. */
+  .arch { display: none; }
+  .arch-m { display: block; max-width: 360px; margin: 24px auto 0; padding: 10px 8px; background: #fff; border: 1px solid var(--slate-200); border-radius: 16px; }
+  .arch-m svg { width: 100%; height: auto; display: block; overflow: visible; }
+  .arch-m .art-txt.strong { font-weight: 600; fill: var(--slate-900); }
+  .arch-notes { margin-top: 26px; gap: 14px; }
+  .arch-notes p { font-size: 14px; }
+
+  /* Coming soon: three short items, no mock ledgers. */
+  .nx { display: none; }
+  .next-grid { margin-top: 28px; }
 }
 @media (max-width: 560px) {
   .rc-line { grid-template-columns: 1fr; gap: 2px; }
-  .alpha-inner { flex-direction: column; align-items: flex-start; }
+  .alpha-inner { flex-direction: column; align-items: flex-start; gap: 20px; }
+  /* The row basis would become a 420px tall column here. */
+  .alpha-copy { flex: 0 0 auto; }
 }
 @media (max-width: 520px) {
   .inst-tabs { flex-direction: column; align-items: stretch; }

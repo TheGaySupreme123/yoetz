@@ -124,3 +124,39 @@ def test_copied_setup_prompt_matches_between_readme_and_landing() -> None:
     ):
         assert sentence in readme, sentence
         assert sentence in landing, sentence
+
+
+def test_linux_and_wsl_host_facts_are_stated_before_they_bite() -> None:
+    """The Linux/WSL parity sweep (#720–#725): dependencies, keyring, state, and cells named."""
+
+    page = _text("docs/usage/install-and-first-run.md")
+    assert re.search(r"^## Linux$", page, flags=re.MULTILINE)
+    collapsed = " ".join(page.split())
+    assert "sudo apt install bubblewrap" in collapsed
+    assert "`sandbox_unavailable`" in collapsed
+    assert "AppArmor" in collapsed
+    assert "Secret Service" in collapsed
+    assert "`path_on_network_filesystem`" in collapsed
+    assert "/mnt/c" in collapsed
+    assert "`platform_cell_untested`" in collapsed
+    assert "`human_authority_unavailable`" in collapsed
+    assert "src/yoetz" not in page and "uv run" not in page
+
+    guide = _collapsed("docs/usage/agent-start.md")
+    assert "`path_on_network_filesystem`" in guide
+    assert "sudo apt install bubblewrap" in guide
+    assert "`platform_cell_untested`" in guide
+    # Both plugin hosts say the same thing about Linux and WSL as their runbooks do.
+    assert guide.count("`human_authority_unavailable`") >= 2
+
+    for runbook in (
+        "docs/runbooks/claude-code-integration.md",
+        "docs/runbooks/cursor-integration.md",
+    ):
+        text = _text(runbook)
+        assert re.search(r"^## Linux and WSL$", text, flags=re.MULTILINE), runbook
+        assert "human_authority_unavailable" in text, runbook
+    facts = _collapsed("docs/runbooks/linux-and-wsl.md")
+    assert "keyring.backends.SecretService.Keyring" in facts
+    assert "keyring.backends.kwallet.DBusKeyring" in facts
+    assert "virtiofs" in facts and "drvfs" in facts and "9p" in facts

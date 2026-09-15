@@ -191,7 +191,8 @@ EVIDENCE_SCHEMA_VERSIONS: Final = (
     EVIDENCE_SCHEMA_VERSION,
 )
 CLAIM_SCHEMA_VERSION: Final = "1.1.0"
-SEMANTIC_EVENT_SCHEMA_VERSION: Final = "1.1.0"
+SEMANTIC_EVENT_SCHEMA_VERSION: Final = "1.2.0"
+SEMANTIC_EVENT_SCHEMA_VERSIONS: Final = ("1.1.0", SEMANTIC_EVENT_SCHEMA_VERSION)
 SESSION_EVENT_SCHEMA_VERSION: Final = "1.1.0"
 MAX_TEXT_BYTES: Final = 8_192
 MAX_REASON_BYTES: Final = 4_096
@@ -646,7 +647,7 @@ def _locator_key_kind(schema: EventSchema) -> str:
         or (schema.name == "evidence_recorded" and schema.version in EVIDENCE_SCHEMA_VERSIONS)
         or (
             schema.name in {"check_recorded", "finding_recorded"}
-            and schema.version == SEMANTIC_EVENT_SCHEMA_VERSION
+            and schema.version in SEMANTIC_EVENT_SCHEMA_VERSIONS
         )
     )
     if schema.version != SCHEMA_VERSION and not additive:
@@ -1734,11 +1735,17 @@ PAYLOAD_TYPES: Final[Mapping[EventSchema, type[EventPayload]]] = MappingProxyTyp
         EventSchema("claim_recorded", CLAIM_SCHEMA_VERSION): ClaimRecordedPayloadV1_1,
         EventSchema("plan_revised", SCHEMA_VERSION): PlanRevisedPayload,
         EventSchema("finding_recorded", SCHEMA_VERSION): Finding,
-        EventSchema("finding_recorded", SEMANTIC_EVENT_SCHEMA_VERSION): Finding,
+        **{
+            EventSchema("finding_recorded", version): Finding
+            for version in SEMANTIC_EVENT_SCHEMA_VERSIONS
+        },
         EventSchema("response_recorded", SCHEMA_VERSION): ResponseRecordedPayload,
         EventSchema("redaction_recorded", SCHEMA_VERSION): RedactionRecordedPayload,
         EventSchema("check_recorded", SCHEMA_VERSION): CheckRecordedPayload,
-        EventSchema("check_recorded", SEMANTIC_EVENT_SCHEMA_VERSION): CheckRecordedPayload,
+        **{
+            EventSchema("check_recorded", version): CheckRecordedPayload
+            for version in SEMANTIC_EVENT_SCHEMA_VERSIONS
+        },
         EventSchema("receipt_recorded", SCHEMA_VERSION): ReceiptRecordedPayload,
     }
 )

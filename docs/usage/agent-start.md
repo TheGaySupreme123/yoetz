@@ -43,6 +43,20 @@ On Windows:
 4. Connecting a Windows-native Codex, Claude Code, or Cursor to a Yoetz inside WSL is untested
    and not claimed. Register a host only from the same WSL environment; a Windows-side agent can
    still drive installation and local-only use through `wsl -e`.
+5. Keep Yoetz's state on the Linux filesystem: install and run from the WSL home, and never point
+   `YOETZ_ISOLATED_ROOT` or an instance root at a Windows drive under `/mnt/<letter>`. Yoetz
+   refuses such a path with `path_on_network_filesystem`; the project itself may live anywhere.
+6. Expect no system keyring in WSL: choose the Yoetz passphrase at the secure-storage question.
+   Ask the user to run `sudo apt install bubblewrap` if they will trust a check policy whose
+   checks deny network; without it those checks are rejected `sandbox_unavailable`. On a
+   Windows-on-ARM machine the Ubuntu is aarch64, an untested platform cell: `yoetz version --json`
+   lists `platform_cell_untested`, and you should say so to the user rather than claim support.
+
+On Linux, the same three facts apply — bubblewrap for network-denied checks, a Secret Service
+(GNOME Keyring or KWallet) for the system keyring or else a passphrase, and state on a local
+disk — and `yoetz setup status --json` reports all three under `platform` before you decide
+anything. Certified cells are macOS arm64 and Linux x86-64 (glibc 2.28+); other architectures
+install and report `platform_cell_untested`.
 
 ## 1. Install — you do this
 
@@ -54,10 +68,10 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 source "$HOME/.local/bin/env"
 ```
 
-Then install Yoetz:
+Then install the latest published Yoetz version:
 
 ```text
-uv tool install --managed-python --python 3.14.6 "yoetz==0.1.0"
+uv tool install --managed-python --python 3.14.6 yoetz
 yoetz version
 ```
 
@@ -198,8 +212,15 @@ consequential step — no install, no `setup run`, no registration until it is a
   through `wsl -e bash -lc "…"`. For host integration, Claude Code itself must run inside WSL 2,
   installed and launched from the WSL terminal; the Windows-side and WSL-side `~/.claude` are
   separate homes.
+- Linux and WSL: inspect the plugin preview for its approval mechanism. Linux-capable builds
+  use PAM through the trusted terminal; builds without that support refuse
+  `human_authority_unavailable`. The user enters their account password only in that terminal.
+  Successful installation does not establish native Linux host coverage. Claude Code can also
+  use a `yoetz mcp serve` entry in its own MCP configuration, added only after approval.
 - Integration: `yoetz integrate claude plugin preview`, then `install` after the user approves
-  the digest.
+  the digest and completes the supported platform's presence ceremony. On Linux-capable builds,
+  hand the `install` line to the user for the password prompt at their own terminal; running it
+  from the agent's Bash tool fails closed with `human_authority_unavailable`.
 
 **Cursor**
 
@@ -213,9 +234,15 @@ consequential step — no install, no `setup run`, no registration until it is a
   paste the guide into the chat.
 - Windows: Cursor's agent terminal is PowerShell on native Windows; run Yoetz commands through
   `wsl -e bash -lc "…"`. The Cursor integration is untested on Windows and WSL.
-- Integration: `yoetz integrate cursor plugin preview` with an explicit Cursor configuration
-  root and project, then `install` after approval. Cursor Cloud agents are not supported; install
-  from a local Cursor.
+- Linux and WSL: inspect the preview for a supported approval mechanism; builds without Linux
+  approval support refuse `human_authority_unavailable`. Linux IDE discovery remains unproven;
+  do not claim a native host cell from installation alone.
+  Cursor can use a `yoetz mcp serve` entry in its own MCP configuration, added only after approval.
+- Integration: `yoetz integrate cursor plugin preview` with an explicit Cursor configuration root
+  and project, then `install` after approval and the supported platform's presence ceremony.
+  On Linux-capable builds, hand the `install` line to the user for the password prompt at their
+  own terminal; the agent terminal fails closed with `human_authority_unavailable`.
+  Cursor Cloud agents are not supported; install from a local Cursor.
 
 **Any other agent**
 

@@ -156,9 +156,10 @@ def test_each_migration_family_has_contiguous_versions(installed: _Installed) ->
         "0010",
         "0011",
         "0012",
+        "0013",
     ]
     assert payload["catalog_current"] == 3
-    assert payload["bundle_current"] == 12
+    assert payload["bundle_current"] == 13
 
 
 def test_migration_ddl_contains_only_reviewed_table_rebuilds(installed: _Installed) -> None:
@@ -179,6 +180,7 @@ def test_migration_ddl_contains_only_reviewed_table_rebuilds(installed: _Install
                 "0010",
                 "0011",
                 "0012",
+                "0013",
             ),
         ),
     ):
@@ -238,7 +240,7 @@ def test_fresh_catalog_and_bundle_initialize_at_current_schema_version(
         "catalog_state": "current",
         "catalog_version": 3,
         "bundle_state": "current",
-        "bundle_version": 12,
+        "bundle_version": 13,
     }
 
 

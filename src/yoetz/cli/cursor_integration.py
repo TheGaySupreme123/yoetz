@@ -6,6 +6,10 @@ import sys
 from pathlib import Path
 from typing import Final, Literal, cast
 
+from yoetz.adapters.integrations.artifact_presence import (
+    describe_artifact_presence,
+    select_artifact_user_presence,
+)
 from yoetz.adapters.integrations.cursor_integration import (
     CursorIntegrationError,
     CursorPluginArtifact,
@@ -18,7 +22,6 @@ from yoetz.adapters.integrations.cursor_integration import (
     status_cursor_plugin,
 )
 from yoetz.adapters.integrations.launcher import invoking_launcher
-from yoetz.adapters.integrations.macos_artifact_presence import MacOSArtifactUserPresence
 from yoetz.adapters.integrations.portable_plugin import (
     ArtifactUserPresencePort,
     ElevatedPortableArtifactReview,
@@ -297,6 +300,7 @@ def run_cursor_plugin_command(
                             "--target-digest",
                             preview.preview_digest,
                         ],
+                        "human_presence": describe_artifact_presence(),
                         "requires_os_authenticated_prompt": True,
                     },
                     "format_profile": preview.format_profile.value,
@@ -320,7 +324,7 @@ def run_cursor_plugin_command(
         # itself consumes the ADR-016 ``review_only`` single-shot trusted review prepared for
         # this exact digest; the adapter refuses when that authority is absent or unproven.
         review: PluginMutationReviewPort = ElevatedPortableArtifactReview(
-            MacOSArtifactUserPresence() if _presence is None else _presence,
+            select_artifact_user_presence() if _presence is None else _presence,
             _state=_state,
         )
         authority = _artifact_authority(preview_digest, state=_state)

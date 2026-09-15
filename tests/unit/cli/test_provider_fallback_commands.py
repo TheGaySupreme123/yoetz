@@ -42,7 +42,7 @@ def _runtime():  # noqa: ANN202 - builder return type is the config model
         executable_path="/Applications/Codex.app/Contents/Resources/codex",
         executable_sha256=_DIGEST,
         runtime_version="0.150.1",
-        source_identity="openai-codex-darwin-arm64-0.150.1",
+        source_identity="openai-codex-npm-darwin-arm64-0.150.1",
         app_server_schema_sha256=_DIGEST,
         capability_cell_sha256=_DIGEST,
         isolated_config_sha256=_DIGEST,

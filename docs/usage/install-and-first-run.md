@@ -22,10 +22,10 @@ paste it into your terminal, then press Enter.
 After the PyPI installation finishes, run `yoetz` in your terminal to start setup.
 The npm command, `npx yoetz`, starts setup directly.
 
-The supported install path is Python via [`uv`](https://docs.astral.sh/uv/):
+Install the latest published version through Python via [`uv`](https://docs.astral.sh/uv/):
 
 ```text
-uv tool install --managed-python --python 3.14.6 "yoetz==0.1.0"
+uv tool install --managed-python --python 3.14.6 yoetz
 yoetz
 ```
 
@@ -44,6 +44,33 @@ Compatibility extras (the standard install already contains these exact dependen
 | `semantic-openai` | Existing install-command alias for the HTTP client and OpenAI SDK |
 | `portable-recovery` | Existing install-command alias for Argon2 recovery/passphrase support |
 
+## Linux
+
+Yoetz runs on macOS and Linux. The certified cells are macOS 11 or later on Apple silicon and
+glibc 2.28 or later Linux on x86-64. The package also installs on other Linux architectures, such
+as aarch64 (Raspberry Pi, Graviton, Asahi, or WSL on a Windows-on-ARM laptop); those installs are
+untested, not presumed compatible: `yoetz version --json` lists `platform_cell_untested` under
+`limitations`, `yoetz setup status --json` reports the cell, and `/doctor` shows the platform line
+as *not proven*. Nothing is refused there, and nothing is claimed either.
+
+Three things on Linux differ from macOS, and each is reported once, up front, by `/doctor` and
+`yoetz setup status --json` rather than discovered later:
+
+- **Approved checks that deny network need bubblewrap.** Install it before trusting a check
+  policy (Debian and Ubuntu: `sudo apt install bubblewrap`; Fedora: `sudo dnf install
+  bubblewrap`). Without a usable `bwrap`, every network-denied check is rejected as
+  `sandbox_unavailable`. Ubuntu 24.04 and later restrict unprivileged user namespaces through
+  AppArmor: use the distribution package, which ships the profile that permits `bwrap`; if a
+  hand-built copy still fails, `/doctor` says `bwrap_unusable` and names the sysctl to relax.
+  `yoetz observe checks status --json` reports the same `sandbox` answer per workspace.
+- **System secure storage needs a running Secret Service.** The "system keyring" choice at setup
+  means macOS Keychain on macOS and, on Linux, a Freedesktop Secret Service on your session bus
+  (GNOME Keyring, or KWallet through its Secret Service bridge). Headless sessions, servers, and
+  WSL usually have none. Setup then disables that option, states the reason, and offers a Yoetz
+  passphrase, which is the supported route there.
+- **State stays on a local disk.** A state directory on a network or cross-machine filesystem
+  is refused with `path_on_network_filesystem`; the message names the safe location.
+
 ## Windows
 
 Yoetz runs on macOS and Linux. On Windows it runs inside WSL 2 (Windows Subsystem for Linux),
@@ -59,15 +86,37 @@ every command except `yoetz version`, `--version`, and `--help` then refuses wit
    ```text
    curl -LsSf https://astral.sh/uv/install.sh | sh
    source "$HOME/.local/bin/env"
-   uv tool install --managed-python --python 3.14.6 "yoetz==0.1.0"
+   uv tool install --managed-python --python 3.14.6 yoetz
    yoetz
    ```
 
 Everything else on this page happens inside that Ubuntu window, including `yoetz service run` and
-the steps that need your own terminal. A coding agent driving the install from the Windows side
+the steps that need your own terminal. Installing the Cursor or Claude Code plugin is one of
+those steps: on Linux and inside WSL 2 it asks for your Linux account password in that terminal
+(the one you chose at first launch) before it changes anything, where macOS shows its own
+authentication dialog instead. A coding agent driving the install from the Windows side
 can run each command with `wsl -e bash -lc "..."`. Connecting a Windows-native Codex, Claude Code,
 or Cursor to a Yoetz inside WSL is untested and not claimed: connect from the same WSL
 environment, or keep Yoetz local-only through the CLI.
+
+Inside WSL, the [Linux](#linux) notes above apply, with these specifics:
+
+- **Keep Yoetz on the Linux filesystem.** Install and run it from your WSL home. Windows drives
+  under `/mnt/c` and the other drive letters reach Linux through a transport (`9p`, `drvfs`, or
+  `virtiofs`) whose locking and durability Yoetz has not certified, so a state directory there — including one
+  named by `YOETZ_ISOLATED_ROOT` — is refused with `path_on_network_filesystem`. Your projects
+  can live on a Windows drive; Yoetz's own state cannot.
+- **Choose a Yoetz passphrase.** A default WSL session has no Secret Service, so system secure
+  storage is unavailable and setup says why.
+- **Install bubblewrap** (`sudo apt install bubblewrap`) before trusting a check policy whose
+  checks deny network.
+- **Windows-on-ARM laptops** run an aarch64 Ubuntu, which is an untested platform cell (see
+  [Linux](#linux)); Yoetz installs and says so.
+- **Claude Code and Cursor plugins** need a supported approval mechanism. Inspect the plugin
+  preview: Linux-capable builds name PAM through the trusted terminal and ask for your Linux
+  account password there. Builds without Linux approval support refuse
+  `human_authority_unavailable`. Linux and WSL native host coverage remains unproven; both hosts
+  can use Yoetz over MCP with a `yoetz mcp serve` entry in their own configuration.
 
 ## First run
 
@@ -95,7 +144,9 @@ Setup is a linear path inside the interface, each finished step collapsing into 
    bound to the exact preview and policy digests that were displayed: if either has moved, the
    apply refuses as stale rather than proceeding.
 5. **Installation activity**, with each step reported only once its postcondition was checked.
-6. **Secure storage** — the system keyring, or a Yoetz passphrase. A passphrase is entered on the
+6. **Secure storage** — the system keyring (macOS Keychain, or a running Secret Service on
+   Linux; see [Linux](#linux)), or a Yoetz passphrase. When the keyring is unusable the option is
+   disabled with the reason stated. A passphrase is entered on the
    trusted terminal: input is masked with `*`, must be 16–1024 UTF-8 bytes with no control
    characters, and the helper re-prompts after invalid or mismatched input. Later changes use
    `yoetz service rotate-passphrase` (or **Change the passphrase** under `/service`).

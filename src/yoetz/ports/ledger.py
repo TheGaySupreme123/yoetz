@@ -15,6 +15,7 @@ from yoetz.domain.findings import (
     CheckVerdict,
     Finding,
     RankedFindings,
+    RuntimeTokenUsage,
     SemanticProvenance,
 )
 from yoetz.domain.values import (
@@ -934,6 +935,7 @@ class SemanticAttemptRecord:
     terminal_code: SemanticReason | None
     result_object_ref: ObjectRef | None
     started_at: datetime | None = None
+    token_usage: RuntimeTokenUsage | None = None
 
     def __post_init__(self) -> None:
         if self.started_at is not None:
@@ -958,8 +960,14 @@ class SemanticAttemptRecord:
             or self.result_object_ref.metadata.kind is not ObjectKind.SEMANTIC_RESPONSE
         ):
             raise _invalid()
+        if self.token_usage is not None and type(self.token_usage) is not RuntimeTokenUsage:
+            raise _invalid()
         if self.state == "started":
-            if self.terminal_code is not None or self.result_object_ref is not None:
+            if (
+                self.terminal_code is not None
+                or self.result_object_ref is not None
+                or self.token_usage is not None
+            ):
                 raise _invalid()
         elif self.state == "response_durable":
             if self.terminal_code is not None or self.result_object_ref is None:
@@ -1517,6 +1525,7 @@ class LedgerPort(Protocol):
         outcome: AttemptOutcome,
         result_object_ref: ObjectRef | None = None,
         terminal_code: SemanticReason | None = None,
+        token_usage: RuntimeTokenUsage | None = None,
     ) -> None: ...
 
     async def fail_semantic_job(

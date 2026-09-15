@@ -117,3 +117,27 @@ def test_explicit_owner_mismatch_precedes_later_classifiers(
     with pytest.raises(PathSafetyError) as caught:
         verify_private_local_bundle(repository, _probe=wrong_owner)
     assert caught.value.reason_code == "path_not_owned"
+
+
+@pytest.mark.parametrize("fstype", ["9p", "drvfs", "virtiofs"])
+def test_windows_drive_and_vm_share_transports_are_refused_like_a_network_share(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fstype: str
+) -> None:
+    """WSL 1 (drvfs), WSL 2 (9p), and virtiofs shares proxy locks across a VM boundary (#723)."""
+
+    shared = tmp_path / "mnt" / "c" / "yoetz"
+    shared.mkdir(mode=0o700, parents=True)
+    escaped = str(tmp_path / "mnt" / "c").replace(" ", "\\040")
+    probe = _probe(
+        tmp_path,
+        monkeypatch,
+        mount_table=f"C:\\134 {escaped} {fstype} rw 0 0\nrootfs / ext4 rw 0 0",
+    )
+
+    with pytest.raises(PathSafetyError) as error:
+        verify_private_local_bundle(shared, _probe=probe)
+    assert error.value.reason_code == "path_on_network_filesystem"
+
+    local = tmp_path / "home" / "yoetz"
+    local.mkdir(mode=0o700, parents=True)
+    verify_private_local_bundle(local, _probe=probe)

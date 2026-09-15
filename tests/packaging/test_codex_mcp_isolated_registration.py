@@ -84,12 +84,25 @@ for raw in sys.stdin.buffer:
 
 
 def _is_advertised_host() -> bool:
-    return sys.platform == "darwin" and platform.machine() == "arm64"
+    """Both ADR-007 certified cells run this regression; the Codex binary is the only host input.
+
+    The fixture MCP server is a Python stub, so nothing here is macOS-specific (issue #725). The
+    remaining skip below is the installed Codex 0.150.1 binary, which the runner must provide.
+    """
+
+    if sys.platform == "darwin":
+        return platform.machine() == "arm64"
+    if sys.platform.startswith("linux"):
+        return platform.machine() in {"x86_64", "amd64"}
+    return False
 
 
 pytestmark = pytest.mark.skipif(
     not _is_advertised_host(),
-    reason="the issue #561 host regression is the installed macOS arm64 Codex 0.150.1 cell",
+    reason=(
+        "the issue #561 regression runs on the certified macOS arm64 and Linux x86-64 cells "
+        "with an installed Codex 0.150.1; this host is neither"
+    ),
 )
 
 

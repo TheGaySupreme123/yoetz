@@ -243,6 +243,10 @@ def test_platform_verifiers_split_suites_and_bound_linux_alpha_claims() -> None:
         assert verifier.count("test_correct_hash_matching_the_real_wheel_installs_cleanly") == 2
         assert "pytest tests/subprocess \\" in verifier
         assert "pytest tests/integration \\" in verifier
+        # Actual vault composition rejects shared /tmp even when its leaf directory is 0700.
+        assert '(Path(os.environ["RUNNER_TEMP"]) / "yoetz-integration").resolve()' in verifier
+        integration = verifier.split("pytest tests/integration", 1)[1]
+        assert '--basetemp "$release_test_root"' in integration.split("\n      - name:", 1)[0]
         assert "export YZCI_DENY_NETWORK" not in verifier
         assert "export YOETZ_CANDIDATE_PYTHON" not in verifier
         assert verifier.count("YZCI_DENY_NETWORK=1 \\") == 2

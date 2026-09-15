@@ -63,9 +63,9 @@ def main() -> None:
     # These are additive contracts. Never traverse released 1.0 schemas: their
     # exact bytes remain frozen even when the runtime admits a new reason.
     for relative_path in (
-        "events/check-recorded-1.1.0.schema.json",
-        "findings/semantic-provenance-1.1.0.schema.json",
-        "operations/check-result-1.1.0.schema.json",
+        "events/check-recorded-1.2.0.schema.json",
+        "findings/semantic-provenance-1.2.0.schema.json",
+        "operations/check-result-1.2.0.schema.json",
     ):
         path = root / relative_path
         original = path.read_bytes()

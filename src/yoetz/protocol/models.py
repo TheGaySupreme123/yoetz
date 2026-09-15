@@ -1696,6 +1696,7 @@ _PUBLISH_SUMMARY_CATEGORY: Final[Mapping[tuple[str, str], DataCategory]] = Mappi
         ("response_recorded", "1.0.0"): DataCategory.FINDING_SUMMARY,
         ("finding_recorded", "1.0.0"): DataCategory.FINDING_SUMMARY,
         ("finding_recorded", "1.1.0"): DataCategory.FINDING_SUMMARY,
+        ("finding_recorded", "1.2.0"): DataCategory.FINDING_SUMMARY,
     }
 )
 _PUBLISH_FIXED_SUMMARY: Final[Mapping[tuple[str, str], str]] = MappingProxyType(
@@ -1706,6 +1707,7 @@ _PUBLISH_FIXED_SUMMARY: Final[Mapping[tuple[str, str], str]] = MappingProxyType(
         ("redaction_recorded", "1.0.0"): "redaction_recorded",
         ("check_recorded", "1.0.0"): "check_recorded",
         ("check_recorded", "1.1.0"): "check_recorded",
+        ("check_recorded", "1.2.0"): "check_recorded",
         ("receipt_recorded", "1.0.0"): "receipt_recorded",
     }
 )
@@ -3420,6 +3422,12 @@ _SEMANTIC_PROVENANCE_LEAVES: Final = (
     "runtime_evidence/turn_acknowledged",
     "runtime_evidence/turn_id",
     "runtime_evidence/upstream_body_observability",
+    "runtime_evidence/token_usage/cached_input_tokens",
+    "runtime_evidence/token_usage/cache_write_input_tokens",
+    "runtime_evidence/token_usage/input_tokens",
+    "runtime_evidence/token_usage/output_tokens",
+    "runtime_evidence/token_usage/reasoning_output_tokens",
+    "runtime_evidence/token_usage/total_tokens",
     "sampling_params/max_output_tokens",
     "sampling_params/seed",
     "sampling_params/temperature",
@@ -3977,6 +3985,7 @@ _RECEIPT_STRUCTURAL_POINTERS: Final = (
         "/document/findings/*/provenance",
         _SEMANTIC_PROVENANCE_LEAVES,
     )
+    + _prefix_leaf_patterns("/document/semantic_provenance", _SEMANTIC_PROVENANCE_LEAVES)
     + _prefix_leaf_patterns(
         "/document/obligations/*",
         ("obligation_id", "source_refs/*", "status"),
@@ -4195,7 +4204,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 927:
+    if len(result) != 1021:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

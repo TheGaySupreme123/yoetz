@@ -520,6 +520,8 @@ async def test_keychain_unavailable_disables_system_storage_but_offers_a_passphr
         assert view.view_name == "storage"
         options = _options(view)
         assert options[0].disabled is True
+        # The disabled row states the reason, never a bare "not available" (issue #721).
+        assert options[0].disabled_reason == ("no credential store is loaded; Yoetz needs a test")
         assert options[1].disabled is False
         assert _selected(view).key == "passphrase"
 

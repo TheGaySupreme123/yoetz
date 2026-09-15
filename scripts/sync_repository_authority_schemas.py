@@ -586,6 +586,28 @@ def _semantic_provenance_v24_result() -> dict[str, Any]:
     return generated
 
 
+def _semantic_provenance_v26_result() -> dict[str, Any]:
+    """Point the active control result at the current workflow result contracts.
+
+    Control-result 2.4 and 2.5 are released compatibility documents and retain their historical
+    result references. The active 2.6 envelope must follow the current check, receipt, and status
+    outputs so subscription-runtime evidence remains valid through the local control channel.
+    """
+
+    generated = _with_id("control-result", "2.6.0", _semantic_provenance_v24_result())
+    for old, new in (
+        ("check-result-1.1.0", "check-result-1.2.0"),
+        ("receipt-result-1.1.0", "receipt-result-1.2.0"),
+        ("status-result-1.2.0", "status-result-1.3.0"),
+    ):
+        _replace_schema_ref(
+            generated,
+            f"https://schemas.yoetz.dev/0.1/operations/{old}.schema.json",
+            f"https://schemas.yoetz.dev/0.1/operations/{new}.schema.json",
+        )
+    return generated
+
+
 def _selection_runtime_v26_result() -> dict[str, Any]:
     """Add the bounded optional selection projection to the new result wire.
 
@@ -595,7 +617,7 @@ def _selection_runtime_v26_result() -> dict[str, Any]:
     opaque commitments emitted by the local store; they cannot become a content carrier.
     """
 
-    generated = _with_id("control-result", "2.6.0", _semantic_provenance_v24_result())
+    generated = _semantic_provenance_v26_result()
     definitions = generated["$defs"]
 
     integer = {"maximum": _MAX_SAFE_INTEGER, "minimum": 0, "type": "integer"}

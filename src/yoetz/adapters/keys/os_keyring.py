@@ -8,6 +8,8 @@ import errno
 import hashlib
 import hmac
 import os
+import subprocess
+import sys
 from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -40,11 +42,13 @@ from yoetz.protocol.ids import IdKind, validate_id
 __all__ = [
     "AutoUnlockPassphraseStore",
     "FirstInstallKeyringAuthority",
+    "KeyringBackendReport",
     "KeyringInitializationBinding",
     "OSKeyringError",
     "OSKeyringProbe",
     "OSKeyringState",
     "OSVaultRootKeySource",
+    "describe_vault_keyring_backend",
 ]
 
 _SERVICE_NAME: Final = "yoetz.vault-root.v1"
@@ -101,6 +105,98 @@ def _guard_os_reason(exc: OSError) -> str:
     if exc.errno in _GUARD_PERMISSION_ERRNOS:
         return "bundle_permission_denied"
     return "guard_unavailable"
+
+
+# Fixed, platform-keyed statements of what the vault-root store needs (issue #721). The text
+# names the mechanism, never a path, a username, or anything read from the backend.
+_KEYRING_REQUIREMENTS: Final[Mapping[str, str]] = {
+    "Darwin": "macOS Keychain",
+    "Linux": (
+        "a running Freedesktop Secret Service (GNOME Keyring, or KWallet through its Secret "
+        "Service bridge) on the session D-Bus; headless Linux and WSL 2 normally have none, so "
+        "the vault passphrase is the supported route there"
+    ),
+}
+_KEYRING_REQUIREMENT_DEFAULT: Final = "macOS Keychain or a Freedesktop Secret Service"
+
+
+def _backend_id_of(backend: object) -> str:
+    return f"{type(backend).__module__}.{type(backend).__qualname__}"
+
+
+@dataclass(frozen=True, slots=True)
+class KeyringBackendReport:
+    """Why the system credential store is, or is not, usable for the vault root.
+
+    ``approved`` mirrors the vault-root allowlist exactly; auto-unlock accepts a wider set, but
+    an installation whose root key cannot live in an approved backend is a passphrase install.
+    """
+
+    backend_id: str
+    approved: bool
+    reason: str
+    requirement: str
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            "approved": self.approved,
+            "backend_id": self.backend_id,
+            "reason": self.reason,
+            "requirement": self.requirement,
+        }
+
+
+def _secret_service_available() -> bool:
+    """Probe only backend availability, without reading keys or unlocking a collection.
+
+    Keyring's priority probe checks the session bus and service name. Isolate it so an
+    unresponsive D-Bus cannot hold setup indefinitely; discard all backend output.
+    Isolated Python excludes workspace and PYTHONPATH modules from this trusted probe.
+    """
+
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed interpreter and probe, no shell
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                "from keyring.backends.SecretService import Keyring; "
+                "raise SystemExit(0 if Keyring.priority > 0 else 1)",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    except OSError, subprocess.SubprocessError:
+        return False
+    return result.returncode == 0
+
+
+def describe_vault_keyring_backend(
+    *, backend: object | None = None, system: str | None = None
+) -> KeyringBackendReport:
+    """Report the loaded keyring backend against the vault-root allowlist, with the reason."""
+
+    import platform
+
+    requirement = _KEYRING_REQUIREMENTS.get(
+        platform.system() if system is None else system, _KEYRING_REQUIREMENT_DEFAULT
+    )
+    if backend is None:
+        try:
+            backend = keyring.get_keyring()
+        except Exception:
+            return KeyringBackendReport("", False, "keyring_unavailable", requirement)
+    backend_id = _backend_id_of(backend)
+    if backend_id == "keyring.backends.fail.Keyring":
+        return KeyringBackendReport(backend_id, False, "keyring_unavailable", requirement)
+    if backend_id not in _APPROVED_BACKENDS:
+        return KeyringBackendReport(backend_id, False, "backend_not_approved", requirement)
+    if backend_id == "keyring.backends.SecretService.Keyring" and not _secret_service_available():
+        return KeyringBackendReport(backend_id, False, "keyring_unavailable", requirement)
+    return KeyringBackendReport(backend_id, True, "approved", requirement)
 
 
 class OSKeyringState(str, Enum):  # noqa: UP042
