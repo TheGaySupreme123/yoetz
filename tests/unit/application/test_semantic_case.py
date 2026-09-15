@@ -68,7 +68,7 @@ from yoetz.kernel.projections import EvidenceProjectionRecord
 from yoetz.kernel.reducers import replay
 from yoetz.ports.semantic import ExcerptDigestProvenance, SemanticCase
 from yoetz.protocol.canonical import JsonValue, strict_json_parse
-from yoetz.protocol.coverage import EvidenceImmutability
+from yoetz.protocol.coverage import EvidenceImmutability, LedgerFreshness
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import MAX_REVIEW_TEXT_BYTES, DataCategory
 
@@ -496,6 +496,7 @@ def test_native_captured_excerpt_without_resolution_preserves_gap_despite_omissi
             for row in semantic.packet.omissions
         )
     assert "captured_object_unavailable" in semantic.packet.coverage.known_gaps
+    assert semantic.packet.coverage.ledger_freshness is LedgerFreshness.PARTIAL
     assert b"Observation-captured tool output bytes" not in bounded_case_envelope(semantic)
 
 

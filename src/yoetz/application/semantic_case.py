@@ -1405,6 +1405,11 @@ def build_semantic_case(
     if captured_gaps:
         coverage = replace(
             coverage,
+            ledger_freshness=(
+                LedgerFreshness.PARTIAL
+                if coverage.ledger_freshness is LedgerFreshness.CURRENT
+                else coverage.ledger_freshness
+            ),
             known_gaps=tuple(
                 sorted(
                     {*coverage.known_gaps, *captured_gaps},
