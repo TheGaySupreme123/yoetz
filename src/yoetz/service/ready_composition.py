@@ -113,6 +113,10 @@ from yoetz.application.semantic_case import (
     build_semantic_case,
     semantic_case_to_candidate_context,
 )
+from yoetz.application.semantic_content import (
+    SemanticContentResolution,
+    resolve_semantic_content,
+)
 from yoetz.application.service import (
     ControlProjectionBinding,
     ReadyApplicationFactory,
@@ -2343,6 +2347,11 @@ def _privacy_gated_semantic_evaluator(
     fallback_max_retries: int = 2,
     configured_primary: ProviderBinding | None = None,
     lineage_source_gate: LineageSourceGate | None = None,
+    resolve_native_content: Callable[
+        [FrozenCase, TaskRuntime, ReviewSelectionPolicy, frozenset[str]],
+        Awaitable[SemanticContentResolution],
+    ]
+    | None = None,
 ):
     total_timeout = float(max(1, min(int(timeout_seconds), 300)))
     # The fallback endpoint owns its own deadline share (#582): a primary that spends its whole
@@ -2380,6 +2389,7 @@ def _privacy_gated_semantic_evaluator(
         # an unbound name there would turn a reportable failure into a second one.
         withheld: tuple[str, ...] = ()
         over_item_limit = False
+        content_gaps: tuple[str, ...] = ()
 
         def _on_lease_renewed(renewed: object) -> None:
             assert type(renewed) is _OpLease
@@ -2606,8 +2616,44 @@ def _privacy_gated_semantic_evaluator(
                 policy_version=policy_version,
                 lineage_evaluation=lineage_evaluation,
             )
+            if runtime is not None and resolve_native_content is not None:
+                # The first pure pass identifies selected captured records whose bytes are
+                # missing. Resolve only those records, then freeze their bytes into the case.
+                selected_refs = frozenset(
+                    item.subject_ref
+                    for item in semantic_case.packet.omissions
+                    if item.reason == "not_recorded"
+                )
+                resolved = await resolve_native_content(
+                    frozen,
+                    runtime,
+                    review_selection,
+                    selected_refs,
+                )
+                semantic_case = build_semantic_case(
+                    case_id=semantic_case.case_id,
+                    frozen_case=frozen.case,
+                    dependency_digest=frozen.lease.dependency_digest,
+                    findings=typed_findings,
+                    review_context_profile=review_profile,
+                    review_selection=review_selection,
+                    policy_id=policy_id,
+                    policy_version=policy_version,
+                    lineage_evaluation=lineage_evaluation,
+                    resolved_content=resolved,
+                )
             # The builder folds the gap into the packet coverage the reviewer sees; the check
             # result is a separate coverage fold, so carry the fact rather than re-deriving it.
+            content_gaps = tuple(
+                sorted(
+                    {
+                        gap
+                        for gap in semantic_case.packet.coverage.known_gaps
+                        if gap
+                        in {"captured_object_unavailable", "content_unselected", "content_redacted"}
+                    }
+                )
+            )
             over_item_limit = (
                 SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP
                 in semantic_case.packet.coverage.known_gaps
@@ -2658,6 +2704,7 @@ def _privacy_gated_semantic_evaluator(
                 return replace(
                     _map_egress_to_final(result, ids),
                     case_content_over_item_limit=over_item_limit,
+                    case_content_gaps=content_gaps,
                 )
 
             # Build the packet before anything durable exists. A packet that cannot be built is a
@@ -2684,6 +2731,7 @@ def _privacy_gated_semantic_evaluator(
                     operation_lease=current_lease[0],
                     withheld_review_categories=withheld,
                     case_content_over_item_limit=over_item_limit,
+                    case_content_gaps=content_gaps,
                 )
 
             # One durable semantic job per check: create/recover after freeze, before dispatch.
@@ -2841,6 +2889,7 @@ def _privacy_gated_semantic_evaluator(
                         operation_lease=current_lease[0],
                         withheld_review_categories=withheld,
                         case_content_over_item_limit=over_item_limit,
+                        case_content_gaps=content_gaps,
                     )
                 return FinalSemanticEvaluation(
                     status,
@@ -2851,6 +2900,7 @@ def _privacy_gated_semantic_evaluator(
                     operation_lease=current_lease[0],
                     withheld_review_categories=withheld,
                     case_content_over_item_limit=over_item_limit,
+                    case_content_gaps=content_gaps,
                     continuation=continuation,
                 )
 
@@ -2894,6 +2944,7 @@ def _privacy_gated_semantic_evaluator(
                 operation_lease=current_lease[0],
                 withheld_review_categories=withheld,
                 case_content_over_item_limit=over_item_limit,
+                case_content_gaps=content_gaps,
             )
 
     return _evaluate
@@ -3321,6 +3372,51 @@ async def provide_service_ready_context(
             installation_id,
         )
 
+    async def _resolve_native_content(
+        frozen: FrozenCase,
+        task_runtime: TaskRuntime,
+        selection: ReviewSelectionPolicy,
+        selected_refs: frozenset[str],
+    ) -> SemanticContentResolution:
+        # Resolve the locator through current catalog ownership. Local capture consent is
+        # independent from the outbound policy applied after case construction.
+        if not any(
+            str(ref) in selected_refs
+            and record.payload is not None
+            and record.payload.captured_object_id is not None
+            for ref, record in frozen.case.projection.evidence.items()
+        ):
+            return SemanticContentResolution(
+                f"{frozen.case.frontier.sequence}:{frozen.case.frontier.head_digest}",
+                {},
+            )
+        try:
+            workspace = await _local_workspace_commitment_for_source(task_runtime.task_id)
+        except PublicOperationError:
+            workspace = None
+        consent = None if workspace is None else local_observation.consent_for(workspace)
+        authorized = bool(config.observation.enabled and consent is not None and consent.active)
+        resolved = await resolve_semantic_content(
+            frozen_case=frozen.case,
+            runtime=task_runtime,
+            workspace=workspace or "hmac-sha256:" + "0" * 64,
+            authorized=authorized,
+            authorized_since=None if consent is None else consent.granted_at,
+            review_selection=selection,
+            selected_refs=selected_refs,
+        )
+        latest = None if workspace is None else local_observation.consent_for(workspace)
+        if latest != consent:
+            return await resolve_semantic_content(
+                frozen_case=frozen.case,
+                runtime=task_runtime,
+                workspace=workspace or "hmac-sha256:" + "0" * 64,
+                authorized=False,
+                review_selection=selection,
+                selected_refs=selected_refs,
+            )
+        return resolved
+
     versions = _receipt_versions(manifest)
     if not semantic_configured:
         semantic_evaluator = _semantic_not_configured
@@ -3344,6 +3440,7 @@ async def provide_service_ready_context(
             fallback_max_retries=2 if fallback_config is None else int(fallback_config.max_retries),
             configured_primary=candidate_binding,
             lineage_source_gate=lineage_semantic_gate,
+            resolve_native_content=_resolve_native_content,
         )
 
     async def _semantic_review(

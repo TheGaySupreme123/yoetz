@@ -1596,6 +1596,17 @@ class MemoryStartCatalogAdapter:
             self._state.revision += 1
             return _allocation(record, "reserved")
 
+    async def yield_lease(self, allocation: StartAllocation) -> None:
+        if type(allocation) is not StartAllocation:
+            raise _error(PublicErrorCode.INVALID_REQUEST)
+        now = self._clock.now_utc()
+        format_rfc3339_millis(now)
+        async with self._lock:
+            key, record = self._operation_for(allocation)
+            self._require_lease(record, allocation, now)
+            self._state.operations[key] = replace(record, lease_expires_at=now, updated_at=now)
+            self._state.revision += 1
+
     async def advance_phase(
         self,
         allocation: StartAllocation,
@@ -1834,7 +1845,11 @@ class MemoryStartCatalogAdapter:
             and record.lease_expires_at is not None
             and record.lease_expires_at > now
         ):
-            raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+            raise _error(
+                PublicErrorCode.OPERATION_PENDING,
+                retryable=True,
+                safe_details={"reason_code": "start_lease_pending"},
+            )
         if record.lease_generation is None:
             raise _error(PublicErrorCode.STORAGE_CORRUPT)
         reclaimed = replace(

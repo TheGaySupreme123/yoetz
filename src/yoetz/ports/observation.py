@@ -85,7 +85,9 @@ class TaskObservationPort(Protocol):
 
     async def revoke(self, command: ObservationRevokeCommand) -> ObservationStatus: ...
 
-    def list_envelopes(self, workspace: str) -> tuple[ObservationEnvelope, ...]: ...
+    def list_envelopes(
+        self, workspace: str, *, limit: int | None = None
+    ) -> tuple[ObservationEnvelope, ...]: ...
 
     def set_advice_snapshot(
         self, workspace: str, snapshot: AdviceSnapshot, updated_at: Timestamp

@@ -1150,3 +1150,15 @@ async def test_partial_rejection_keeps_accepted_challenges_and_declares_the_gap(
     )
     assert "Invented ref" not in raw
     assert "Accepted challenge" not in raw
+
+
+@pytest.mark.anyio
+async def test_native_resolution_omission_survives_successful_semantic_check() -> None:
+    app = _App(semantic=True)
+    app.semantic_result = replace(
+        _succeeded(SemanticJudgment("no_material_discrepancy", ())),
+        case_content_gaps=("captured_object_unavailable", "content_unselected"),
+    )
+    result = await execute_check_commit(app, _request("semantic_if_configured"))
+    assert {"captured_object_unavailable", "content_unselected"} <= set(result.coverage.known_gaps)
+    assert result.verdict.value != "no_issue_detected"

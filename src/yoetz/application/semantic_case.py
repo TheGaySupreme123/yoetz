@@ -19,11 +19,13 @@ from yoetz.application.check import (
     case_coverage,
     run_deterministic_policies,
 )
+from yoetz.application.semantic_content import SemanticContentResolution
 from yoetz.domain.events import (
     ActionKind,
     ClaimRecordedPayload,
     ClaimRecordedPayloadV1_1,
     DecisionRecordedPayload,
+    EvidenceDigestProvenance,
     EvidenceKind,
     EvidenceRecordedPayload,
     ObligationPublishedPayload,
@@ -414,6 +416,7 @@ def build_semantic_case(
     policy_id: str,
     policy_version: str,
     lineage_evaluation: LineageEvaluation | None = None,
+    resolved_content: SemanticContentResolution | None = None,
 ) -> SemanticCase:
     """Build one pre-egress semantic case from frozen authority only."""
 
@@ -431,6 +434,11 @@ def build_semantic_case(
             if meet != review_selection:
                 raise ValueError("review_selection_profile_mismatch")
 
+    if resolved_content is not None and resolved_content.frontier != (
+        f"{frozen_case.frontier.sequence}:{frozen_case.frontier.head_digest}"
+    ):
+        raise ValueError("semantic_content_frontier_mismatch")
+    captured_gaps: set[str] = set()
     selection = review_selection
     sections = frozenset(selection.sections)
     frontier_refs = frozenset(str(ref) for ref in frozen_case.allowed_ids)
@@ -993,6 +1001,41 @@ def build_semantic_case(
                         _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
                     )
                     continue
+            captured_text: str | None = None
+            if (
+                payload.captured_object_id is not None
+                and payload.digest_binding is not None
+                and payload.digest_binding.provenance
+                is EvidenceDigestProvenance.OBSERVATION_CAPTURED
+            ):
+                resolved = None if resolved_content is None else resolved_content.items.get(ref)
+                if resolved is None or resolved.content is None:
+                    omissions.append(
+                        _omit(
+                            ref,
+                            DataCategory.EVIDENCE_EXCERPT,
+                            excerpt_kind,
+                            "not_recorded"
+                            if resolved is None
+                            else resolved.omission or "not_recorded",
+                        )
+                    )
+                    captured_gaps.add(
+                        "captured_object_unavailable"
+                        if resolved is None
+                        else resolved.gap or "captured_object_unavailable"
+                    )
+                    continue
+                # The resolver's exact bytes must still match the immutable frozen evidence.
+                if payload.content_digest != "sha256:" + hashlib.sha256(
+                    resolved.content
+                ).hexdigest() or payload.digest_binding.byte_count != len(resolved.content):
+                    omissions.append(
+                        _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_recorded")
+                    )
+                    captured_gaps.add("captured_object_unavailable")
+                    continue
+                captured_text = resolved.content.decode("utf-8", errors="strict")
             digest_provenance: ExcerptDigestProvenance | None = None
             if payload.content_digest is not None:
                 binding = payload.digest_binding
@@ -1012,7 +1055,9 @@ def build_semantic_case(
                     approval_commitment=binding.approval_commitment,
                     approved_check_result_digest=binding.approved_check_result_digest,
                 )
-                if payload.description:
+                if captured_text is not None:
+                    text = captured_text
+                elif payload.description:
                     # Caller-authored narrative stays legible; digest identity rides on the
                     # excerpt ref instead of replacing the content (issue #176).
                     text = payload.description
@@ -1206,9 +1251,10 @@ def build_semantic_case(
                     )
                     continue
                 linked = tuple(
-                    item
-                    for item in (ref, str(record.payload.action_id), str(record.source_event_id))
-                    if item in allowed
+                    sorted(
+                        {ref, str(record.payload.action_id), str(record.source_event_id)} & allowed,
+                        key=str.encode,
+                    )
                 )[:16]
                 if not linked:
                     continue
@@ -1356,6 +1402,16 @@ def build_semantic_case(
         timeline_ids = [item.item_id]
 
     coverage = case_coverage(frozen_case, semantic=True)
+    if captured_gaps:
+        coverage = replace(
+            coverage,
+            known_gaps=tuple(
+                sorted(
+                    {*coverage.known_gaps, *captured_gaps},
+                    key=str.encode,
+                )
+            ),
+        )
     # Count only overflow on items the caps kept: an item dropped downstream is already disclosed
     # as an omission, and naming it here would report a shortening the reviewer never saw.
     if over_limit & {item.item_id for item in items}:

@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from yoetz.protocol.canonical import JsonValue, ensure_canonical_value
 from yoetz.protocol.errors import PublicErrorCode, normalize_safe_details
 from yoetz.protocol.ids import IdKind, is_valid_id
+from yoetz.protocol.start_recovery import start_recovery_guidance
 
 __all__ = [
     "render_safe_compact_summary",
@@ -285,7 +286,9 @@ def summary_for_public_error(envelope: object) -> str:
         else "unavailable"
     )
     prefix = f"Error {code}; retryable: {retry_text}; correlation: {correlation_text}."
-    extra = f"{_repair_clause(error)}{_reason_location_clause(error)}"
+    extra = f"{_repair_clause(error)}{_reason_location_clause(error)}" + start_recovery_guidance(
+        code, retryable, error.get("safe_details")
+    )
     try:
         return _bounded(prefix + extra)
     except ValueError:

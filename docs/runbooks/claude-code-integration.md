@@ -7,6 +7,13 @@ remote/web/cloud, synced/managed/user/local scopes, Agent SDK, or headless sessi
 
 ## What Yoetz generates
 
+Explicit MCP attachment shares the service's bounded contention recovery with Codex (#744).
+Generic MCP error text carries retry-ready start reasons and the exact-request continuation even
+when the host hides structured errors. A live `start_lease_pending` lease requires a bounded wait
+(up to 60 seconds) before replay; never invent writer IDs for a first-start status read. Hook
+deadlines still apply and a timed-out hook does not prove that start failed. This shared-path
+change does not extend Claude's observation profile or constitute native Claude execution evidence.
+
 The managed marketplace source contains:
 
 ```text
