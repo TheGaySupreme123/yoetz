@@ -8,6 +8,7 @@ public task cycle cannot hide a workspace-only scheduling regression.
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 from collections.abc import Mapping
 from datetime import timedelta
@@ -263,6 +264,13 @@ async def _create_unreferenced_object(service: MultiAgentService, task: StartInt
         )
         staged = await runtime.objects.stage(ObjectSource(data=b"aged-gc-orphan"), metadata)
         reference = await runtime.objects.finalize(staged)
+        # GC's grace window uses filesystem mtime, not the encrypted metadata timestamp.
+        # Put this synthetic object's filesystem clock on the same injected timeline so
+        # the scenario remains deterministic when the wall clock advances beyond it.
+        store = cast(EncryptedFilesObjectStore, runtime.objects)
+        path = store._path_for(reference.object_id)  # pyright: ignore[reportPrivateUsage]
+        instant = service.clock.now_utc().timestamp()
+        os.utime(path, (instant, instant), follow_symlinks=False)
         return reference.object_id
     finally:
         await service.app.runtime.release(runtime)

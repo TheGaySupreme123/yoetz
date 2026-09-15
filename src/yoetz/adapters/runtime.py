@@ -237,6 +237,7 @@ class _Entry:
     usages: int = 0
     # Leases claimed by _entry_for but not yet counted in usages (validate_fence window).
     pending: int = 0
+    rebind_waiters: int = 0
     poisoned: bool = False
     closed: bool = False
 
@@ -361,6 +362,7 @@ def _error(
 
 _STALE = "The ready service generation changed."
 _BUSY = "The task is temporarily busy."
+_START_REBIND_WAIT_SECONDS = 5.0
 
 
 class LocalBundleRuntime(BundleRuntimePort):
@@ -388,6 +390,7 @@ class LocalBundleRuntime(BundleRuntimePort):
         self._opening_writers: set[str] = set()
         self._usages: dict[int, _Entry] = {}
         self._lock = asyncio.Lock()
+        self._idle = asyncio.Condition(self._lock)
         self._opening_limit = asyncio.Semaphore(cache_policy.max_opening_tasks)
         self._closed = False
         self._require_ready()
@@ -746,7 +749,9 @@ class LocalBundleRuntime(BundleRuntimePort):
                 idle = [
                     candidate
                     for candidate in self._entries.values()
-                    if candidate.usages == 0 and candidate.pending == 0
+                    if candidate.usages == 0
+                    and candidate.pending == 0
+                    and not candidate.rebind_waiters
                 ]
                 while len(idle) > self._policy.max_idle_tasks:
                     candidate = idle.pop(0)
@@ -769,6 +774,7 @@ class LocalBundleRuntime(BundleRuntimePort):
         required_authority = self._authority_for(access)
         scope = self._scope_for_route(inspection.route)
         needs_writer = RuntimeCapability.WRITE in required_authority
+        rebind_deadline = asyncio.get_running_loop().time() + _START_REBIND_WAIT_SECONDS
         while True:
             self._require_ready()
             close_before_open: _Entry | None = None
@@ -781,6 +787,15 @@ class LocalBundleRuntime(BundleRuntimePort):
                         and entry.scope == scope
                         and required_authority.issubset(entry.authority)
                     ):
+                        # An admitted start gets a chance to drain the old session. Otherwise
+                        # repeated background reads could keep rebinding busy indefinitely.
+                        if entry.rebind_waiters and provision_mode is None:
+                            raise _error(
+                                PublicErrorCode.BUNDLE_BUSY,
+                                _BUSY,
+                                retryable=True,
+                                safe_details={"reason_code": "runtime_rebind_busy"},
+                            )
                         # Claim a pending lease before release so rebind cannot race the
                         # validate_fence window in _lease where usages is still zero.
                         if entry.pending >= self._policy.max_pending_leases_per_task:
@@ -808,6 +823,44 @@ class LocalBundleRuntime(BundleRuntimePort):
                         self._entries.move_to_end(task_id)
                         rebind_entry = entry
                     elif entry.usages or entry.pending:
+                        if (
+                            provision_mode is not None
+                            and self._same_bundle_route(entry.inspection.route, inspection.route)
+                            and entry.scope == scope
+                            and required_authority.issubset(entry.authority)
+                        ):
+                            if entry.rebind_waiters >= self._policy.max_pending_leases_per_task:
+                                raise self._capacity_error(
+                                    "task_pending_leases",
+                                    entry.rebind_waiters,
+                                    self._policy.max_pending_leases_per_task,
+                                )
+                            entry.rebind_waiters += 1
+                            waiting_entry = entry
+                            try:
+                                # Condition.wait releases the cache lock used by release and
+                                # pending-lease cleanup. Cancellation removes only this waiter.
+                                async with asyncio.timeout_at(rebind_deadline):
+                                    await self._idle.wait_for(
+                                        lambda: (
+                                            self._closed
+                                            or waiting_entry.poisoned
+                                            or (
+                                                waiting_entry.usages == 0
+                                                and waiting_entry.pending == 0
+                                            )
+                                        )
+                                    )
+                            except TimeoutError as exc:
+                                raise _error(
+                                    PublicErrorCode.BUNDLE_BUSY,
+                                    _BUSY,
+                                    retryable=True,
+                                    safe_details={"reason_code": "runtime_rebind_busy"},
+                                ) from exc
+                            finally:
+                                entry.rebind_waiters -= 1
+                            continue
                         raise _error(PublicErrorCode.BUNDLE_BUSY, _BUSY, retryable=True)
                     else:
                         entry.poisoned = True
@@ -877,6 +930,7 @@ class LocalBundleRuntime(BundleRuntimePort):
                         if self._entries.get(task_id) is rebind_entry:
                             rebind_entry.poisoned = True
                             self._entries.pop(task_id, None)
+                        self._idle.notify_all()
                     await self._close_entry(rebind_entry)
                     raise
                 return rebind_entry
@@ -1097,10 +1151,12 @@ class LocalBundleRuntime(BundleRuntimePort):
                 entry.usages += 1
                 entry.pending = max(0, entry.pending - 1)
                 self._usages[id(runtime)] = entry
+                self._idle.notify_all()
             return runtime
         except BaseException:
             async with self._lock:
                 entry.pending = max(0, entry.pending - 1)
+                self._idle.notify_all()
             raise
 
     def _versions(self) -> dict[str, str]:
@@ -1168,10 +1224,11 @@ class LocalBundleRuntime(BundleRuntimePort):
             if entry is None:
                 return
             entry.usages -= 1
+            self._idle.notify_all()
             idle = [
                 candidate
                 for candidate in self._entries.values()
-                if candidate.usages == 0 and candidate.pending == 0
+                if candidate.usages == 0 and candidate.pending == 0 and not candidate.rebind_waiters
             ]
             while len(idle) > self._policy.max_idle_tasks:
                 candidate = idle.pop(0)
@@ -1204,6 +1261,7 @@ class LocalBundleRuntime(BundleRuntimePort):
             if self._closed:
                 return
             self._closed = True
+            self._idle.notify_all()
             entries = list(self._entries.values())
             openings = list(self._opening.values())
             self._entries.clear()

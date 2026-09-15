@@ -1556,6 +1556,7 @@ historical session of the same task),
 `list_workspace_task_ids(workspace_ref_commitment) -> tuple[str, ...]` (task ids only, ascending,
 non-quarantined; no public MCP surface yet),
 `advance_phase(allocation, phase, result: EncryptedResultRef | None = None) -> StartAllocation`,
+`yield_lease(allocation) -> None`,
 `complete(allocation,
 EncryptedResultRef, StartCompletionEvidence)`, and `quarantine(allocation, SafeReason)`. `StartPhase` is
 `route_reserved`, `bundle_ready`, `lifecycle_committed`, `result_published`, `terminal`. IDs and
@@ -1584,6 +1585,33 @@ When a `result_published` allocation resumes, a deterministic verification or bi
 quarantines the allocation as `STORAGE_CORRUPT`; environmental object I/O remains pending and is
 returned as retryable `STORAGE_UNSAFE` so the same request can retry without losing the pinned
 result.
+
+An ordinary start that returns `BUNDLE_BUSY` after reservation attempts the shielded
+`CatalogLeaseYield` transition. `yield_lease` compares the pending row's exact owner generation,
+lease owner, lease generation, and unexpired expiry inside the catalog transaction, then sets
+only the expiry and update time to the current clock. It preserves the request digest, all
+allocated identities, phase, lifecycle event and pinned result. An exact replay reclaims that
+same allocation with a higher lease generation; a changed body still conflicts. Completed,
+quarantined, expired, and superseded leases cannot be yielded. Cancellation and ambiguous failures
+do not take this path, because they do not establish a stopped attempt. If yielding itself fails,
+the original busy error remains and no immediate-replay guarantee is made.
+
+`LocalBundleRuntime.provision_start` waits at most five seconds for a same-bundle, same-authority
+session rebind to drain active usages and pending fence validations. This is below the 60-second
+start lease. The condition releases the cache lock while waiting, bounds waiter admission by
+`max_pending_leases_per_task`, rejects new ordinary acquisitions of the old session while a start
+waits, and keeps waited entries out of idle eviction. Release, failed pending validation and
+shutdown wake the waiters; cancellation removes only the affected waiter. On wake, ordinary
+service readiness, route identity and ownership-fence checks still apply. Other route/authority
+conflicts retain their existing immediate refusal. `runtime_rebind_busy` identifies exhaustion of
+this wait or an ordinary acquisition held back by it; `catalog_busy` identifies an actual SQLite
+transaction lock and `catalog_maintenance_busy` identifies exclusive maintenance admission.
+After successful yield the reason becomes `start_runtime_rebind_retry_ready`,
+`start_catalog_retry_ready`, or conservatively `start_busy_retry_ready` for another producer.
+`start_lease_pending` identifies an exact replay while the same-generation lease is still live.
+These closed tokens support public recovery without publishing paths or caller content. They
+identify reproduced producers; they do not establish which producer caused historical native
+failures recorded in issue #744.
 
 `StartIdentityInput(task_title, workspace_ref?, external_ref?)` is a redacted one-shot value;
 `StartIdentityCommitments(title_commitment, workspace_ref_commitment?,
@@ -4725,3 +4753,26 @@ algorithm without copying every local class/function here. If a nominal type app
 modules, if memory and SQLite must both implement it, or if a value is serialized, it belongs in
 this registry first. This scope keeps one source of truth without turning the registry into an
 index of private implementation details.
+
+### Native semantic content resolution (#509)
+
+`application.semantic_content.ResolvedSemanticContent` carries authenticated immutable bytes or
+one typed per-item omission and coverage gap. `SemanticContentResolution` binds the evidence-ID
+mapping to one exact frozen case frontier. `resolve_semantic_content` is the application I/O seam:
+it reads only selected native Codex evidence through the mapped task's observation/object ports,
+authenticates complete bounded multipart groups, and applies current local observation consent.
+It grants no outbound authority. The pure `build_semantic_case` accepts this value, verifies the
+frozen evidence digest/length, and retains explicit omissions; ordinary caller-authored evidence
+narratives keep their existing behavior. Source snapshots retain unknown relation to current files.
+
+`TaskObservationPort.list_envelopes(workspace, limit=None)` preserves its historical unbounded
+reader default; a supplied integer limit in `1..256` returns the latest bounded task-owned window
+in chronological order. The semantic resolver always supplies `256`. It authenticates at most
+64 distinct objects of at most 4096 decoded bytes each, including all sibling parts, and applies
+the review policy's final count and aggregate excerpt byte limits. `FinalSemanticEvaluation` carries
+`case_content_gaps` so resolver omissions constrain check/receipt coverage independently of the
+provider's semantic success.
+
+Resolver-derived captured-content gaps downgrade current semantic-case coverage to partial, just
+like gaps found before packet selection. Existing older freshness states are preserved; an omitted
+or unavailable captured object cannot leave an otherwise current case labeled fully current.

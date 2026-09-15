@@ -326,6 +326,47 @@ unsupported claims and unbounded duplicate findings.
     that hides `mapping_missing` while a mapping file exists cannot mislabel a mapped retirement.
     `ledger_rejected` remains the terminal class for content and identity refusals.
 
+20. Selected native Codex captured evidence is resolved before semantic case construction
+    (issue #509). The application reads through the mapped task's observation and authenticated
+    object ports; the pure packet builder receives only immutable, frontier-bound resolution
+    values. A captured-object description is structural provenance, never a substitute for the
+    captured bytes. Without successful resolution the packet contains an explicit omission.
+
+    Resolution requires active local workspace observation consent, a capture timestamp within
+    that grant, a native `codex_hook` envelope, the exact task-derived evidence identity, matching
+    source commitment and correlation, complete multipart manifests, and authenticated content
+    whose task, kind, media type, digest, byte count and part metadata match. Every member of a
+    selected multipart group must authenticate. Current evidence redaction/unavailability wins
+    over retained object bytes. SQLite reconstructs descriptors for current referenced native
+    captures from the matching task-owned manifest and present object inventory before freezing
+    availability. That reconstruction does not assert physical availability: the ledger still
+    authenticates the object, and absent or deleted bytes remain unavailable. It repairs the
+    composed failure where recovery restored event payload descriptors but omitted independently
+    inventoried native captures.
+
+    Revocation, pause or a changed consent record while resolving
+    withholds the result. No new consent, profile or source authority is inferred from selection.
+
+    Input, locator, session-stream and message content are excluded before object reads. This
+    compatible 0.3 repair supports native Codex source/diff/tool-output objects; Claude and Cursor
+    captured objects remain explicitly unselected. It introduces no capture ticket or two-phase
+    transport protocol. Capture and outbound disclosure remain independent: the existing selected
+    review profile and privacy coordinator still authorize the exact provider case after local
+    resolution, and source consent is rechecked around resolution.
+
+    Reads are bounded to 64 candidate/object identities and 256 recent task-owned envelopes.
+    Each decoded part must fit both the review selection's byte limit and the resolver's 4096-byte native excerpt limit (below the shared semantic item ceiling); authenticated wrappers have a 10240-byte ceiling. The packet also enforces the
+    configured excerpt count and aggregate byte limits. Old, oversized, unavailable or excluded
+    items retain their own omissions and coverage gaps without vetoing valid neighbors. A missing
+    member cannot be reconstructed from another source or a later successful drain.
+
+    The state bound is the frozen captured snapshot identity and its present availability. It does
+    not establish that a source read still matches the current working file; native excerpts keep
+    `subject_state_relation=unknown` unless an independently recorded stronger relation exists.
+    Packet omissions propagate into the final check and receipt. Local fixture execution, native
+    hook execution, retained content, selected provider input, semantic result and follow-through
+    remain separate acceptance facts.
+
 ## Amendment — multi-task workspace observation home (2026-09-05, issue #494 / ADR-027)
 
 Decision 1 is unchanged: the observation writer remains a pure function of task and session.

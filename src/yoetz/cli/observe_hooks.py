@@ -903,15 +903,12 @@ def _resolve_observation_lane(
             return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
         if event_name in {"SubagentStart", "SubagentStop"}:
             return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
-        nested_session_id, nested_session_supplied, nested_session_valid = _nested_service_session_fact(
-            payload
+        nested_session_id, nested_session_supplied, nested_session_valid = (
+            _nested_service_session_fact(payload)
         )
         if nested_session_supplied and not nested_session_valid:
             return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
-        if (
-            nested_session_id is not None
-            and nested_session_id != reserved_mapping.yoetz_session_id
-        ):
+        if nested_session_id is not None and nested_session_id != reserved_mapping.yoetz_session_id:
             return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
         reserved_result = _narrow_tool_result(payload)
         if _result_task_id_is_malformed(reserved_result):
@@ -968,12 +965,8 @@ def _resolve_observation_lane(
         if child_lane is not None:
             child_mapping = load_mapping(child_lane, _state=_state)
             if child_mapping is not None:
-                if (
-                    (result_task_id is None or result_task_id == child_mapping.yoetz_task_id)
-                    and (
-                        nested_session_id is None
-                        or nested_session_id == child_mapping.yoetz_session_id
-                    )
+                if (result_task_id is None or result_task_id == child_mapping.yoetz_task_id) and (
+                    nested_session_id is None or nested_session_id == child_mapping.yoetz_session_id
                 ):
                     return _ObservationLane(host_session_id, child_lane, is_child=True)
                 # A stale host alias must not win over a service result naming
@@ -1012,9 +1005,8 @@ def _resolve_observation_lane(
         return result_lane
 
     parent_mapping = load_mapping(host_session_id, _state=_state)
-    if (
-        nested_session_id is not None
-        and (parent_mapping is None or nested_session_id != parent_mapping.yoetz_session_id)
+    if nested_session_id is not None and (
+        parent_mapping is None or nested_session_id != parent_mapping.yoetz_session_id
     ):
         # A nested Yoetz request names a service session different from the
         # held parent binding. Without a validated child lane this is foreign

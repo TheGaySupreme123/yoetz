@@ -26,6 +26,7 @@ from yoetz.domain.events import (
     AcceptedEvent,
     CheckRecordedPayload,
     EventSchema,
+    EvidenceDigestProvenance,
     FindingRecordedPayload,
     LedgerChain,
     LedgerRecord,
@@ -1868,7 +1869,45 @@ class SqliteLedger:
         self, session_id: str, frontier: Frontier, projection: ProjectionState
     ) -> CaseAvailabilityFacts:
         await self._ensure_recovered()
+        self._refresh_native_capture_refs(projection)
         return await self._oracle().load_case_availability(session_id, frontier, projection)
+
+    def _refresh_native_capture_refs(self, projection: ProjectionState) -> None:
+        """Rehydrate only live referenced native captures inventoried by observation.
+
+        Observation persists its encrypted objects independently of ledger payload objects.
+        Their descriptors must enter the oracle's availability snapshot after recovery too.
+        This restores descriptors only: the oracle still authenticates physical bytes before
+        declaring availability, and redacted/missing objects never earn readable coverage.
+        """
+        for record in projection.evidence.values():
+            payload = record.payload
+            if (
+                payload is None
+                or payload.captured_object_id is None
+                or payload.digest_binding is None
+                or payload.digest_binding.provenance
+                is not EvidenceDigestProvenance.OBSERVATION_CAPTURED
+                or not record.object_available
+            ):
+                continue
+            captured_id = payload.captured_object_id
+            self._state.object_refs.pop(captured_id, None)
+            row = self._db.execute(
+                "SELECT 1 FROM observation_content_manifests AS manifests "
+                "JOIN objects ON objects.object_id=manifests.object_id "
+                "WHERE manifests.object_id=? AND manifests.content_digest=? "
+                "AND manifests.content_bytes=? AND objects.state='present' "
+                "AND objects.kind='captured_content'",
+                (captured_id, payload.content_digest, payload.digest_binding.byte_count),
+            ).fetchone()
+            if row is None:
+                continue
+            self._state.object_refs[captured_id] = self._object_ref_from_inventory(
+                captured_id,
+                self._task_id,
+                "application/vnd.yoetz.observation-content+json",
+            )
 
     async def query_projection(self, query: ProjectionQuery) -> ProjectionPage:
         await self._ensure_recovered()
@@ -1906,6 +1945,7 @@ class SqliteLedger:
         request_digest: str,
     ) -> FrozenCase | CheckCommitResult:
         await self._ensure_recovered()
+        self._refresh_native_capture_refs(self._state.projection)
         result = await self._oracle().freeze_case(
             session_id, writer_id, expected_frontier, request_id, request_digest
         )

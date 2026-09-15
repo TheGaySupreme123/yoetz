@@ -18,6 +18,7 @@ from yoetz.protocol.models import (
     StatusProjectPageModel,
     StatusSuccessModel,
 )
+from yoetz.protocol.start_recovery import start_recovery_guidance
 
 __all__ = [
     "render_human_awaiting_human",
@@ -259,7 +260,8 @@ def render_human_error(error: PublicErrorModel) -> str:
     if type(error) is not PublicErrorModel:
         raise TypeError("public_error_invalid")
     suffix = " (retryable)" if error.retryable else ""
-    return f"{_token(error.code)}: {error.message}{suffix}"
+    recovery = start_recovery_guidance(error.code, error.retryable, error.safe_details)
+    return f"{_token(error.code)}: {error.message}{suffix}{recovery}"
 
 
 def render_human_awaiting_human(result: CheckAwaitingHumanModel) -> str:
