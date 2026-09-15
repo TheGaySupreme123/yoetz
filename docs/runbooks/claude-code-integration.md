@@ -810,3 +810,18 @@ that release; older permanent declines remain respected. Acceptance only supplie
 instructions, and execution requires the user's explicit upgrade request. Package replacement does
 not itself prove host activation or data migration. Preserve the existing host roots, ownership and
 privacy choices; new settings such as Expanded review require a separate exact approval.
+
+## Recovery directives in errors (ADR-030)
+
+Claude Code's generic MCP profile delivers only the text `content` for `isError` results, so this
+host is the one that most depends on the directive reaching the text channel. A public error
+carrying a registered `continuation` token renders its frozen directive, any carried consent
+commands, its guidance pointer, and its nudge inside the 512-byte text projection, dropped from the
+least load-bearing end when the budget is tight.
+
+This is the host where the gap was observed: before ADR-030 a `VAULT_LOCKED` result whose
+`safe_details` already carried `vault_initialization_required` and its prepare command reached the
+model as `Error VAULT_LOCKED; retryable: no; correlation: err_...` and nothing else (issue #740).
+
+No Claude-specific behavior is configured: the projection is host-neutral and lives in
+`yoetz.mcp.summaries`.

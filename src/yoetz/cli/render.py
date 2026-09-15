@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from enum import Enum
 
+from yoetz.protocol.errors import normalize_safe_details
 from yoetz.protocol.models import (
     CheckAwaitingHumanModel,
     CheckProjectedFindingModel,
@@ -17,6 +18,7 @@ from yoetz.protocol.models import (
     StatusOperationPageModel,
     StatusSuccessModel,
 )
+from yoetz.protocol.recovery import directive_for
 
 __all__ = [
     "render_human_awaiting_human",
@@ -168,13 +170,51 @@ def render_human_receipt(result: ReceiptSuccessModel) -> str:
     return "\n".join(lines)
 
 
+def _error_recovery_lines(error: PublicErrorModel) -> list[str]:
+    """Return the frozen recovery directive lines for a typed continuation, or an empty list.
+
+    The directive is reconstructed locally from the continuation token (issue #739); nothing is
+    read from the error message, and no line is rendered for a token the protocol normalizer does
+    not admit. The CLI has no 512-byte ceiling, so unlike the MCP text projection it renders the
+    whole directive, its guidance pointer, and its nudge on separate lines.
+    """
+
+    details = error.safe_details
+    if details is None:
+        return []
+    source = details if isinstance(details, Mapping) else None
+    if source is None:
+        return []
+    gated = normalize_safe_details({"continuation": source.get("continuation")})
+    directive = directive_for(gated.get("continuation"))
+    if directive is None:
+        return []
+    lines = [f"Continuation: {directive.token}", f"Next: {directive.directive}"]
+    gated_commands = normalize_safe_details(
+        {key: source.get(key) for key in ("prepare_command", "review_command", "authorize_command")}
+    )
+    commands = [
+        str(gated_commands[key])
+        for key in ("prepare_command", "review_command", "authorize_command")
+        if type(gated_commands.get(key)) is str
+    ]
+    if commands:
+        lines.append("Commands: " + "; ".join(commands))
+    if directive.guidance_uri is not None:
+        lines.append(f"Guidance: {directive.guidance_uri}")
+    if directive.nudge is not None:
+        lines.append(directive.nudge)
+    return lines
+
+
 def render_human_error(error: PublicErrorModel) -> str:
-    """Render only the bounded public error fields."""
+    """Render the bounded public error fields plus any typed recovery directive."""
 
     if type(error) is not PublicErrorModel:
         raise TypeError("public_error_invalid")
     suffix = " (retryable)" if error.retryable else ""
-    return f"{_token(error.code)}: {error.message}{suffix}"
+    head = f"{_token(error.code)}: {error.message}{suffix}"
+    return "\n".join([head, *_error_recovery_lines(error)])
 
 
 def render_human_awaiting_human(result: CheckAwaitingHumanModel) -> str:

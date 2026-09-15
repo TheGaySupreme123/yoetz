@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from yoetz.protocol.canonical import JsonValue, ensure_canonical_value
 from yoetz.protocol.errors import PublicErrorCode, normalize_safe_details
 from yoetz.protocol.ids import IdKind, is_valid_id
+from yoetz.protocol.recovery import RecoveryDirective, directive_for
 
 __all__ = [
     "render_safe_compact_summary",
@@ -289,6 +290,80 @@ def _repair_clause(error: Mapping[str, JsonValue]) -> str:
     return f" Repair: {field} is admitted only by the {owner} payload, not {selected}."
 
 
+# Frozen command keys whose values are repository literals gated by ``_TOKEN_DETAIL_VALUES``.
+# Rendered in this fixed order so the same continuation always reads the same way.
+_CONTINUATION_COMMAND_KEYS: Final = ("prepare_command", "review_command", "authorize_command")
+
+
+def _continuation_directive(error: Mapping[str, JsonValue]) -> RecoveryDirective | None:
+    """Return the registered directive for this error's continuation token, or None."""
+
+    details = error.get("safe_details")
+    if not isinstance(details, Mapping):
+        return None
+    typed = cast(Mapping[str, JsonValue], details)
+    # Re-gate through the protocol normalizer rather than trusting the envelope: the token must
+    # still be a member of the closed continuation set before anything is rendered from it.
+    gated = normalize_safe_details({"continuation": typed.get("continuation")})
+    return directive_for(gated.get("continuation"))
+
+
+def _continuation_command_clause(error: Mapping[str, JsonValue], *, byte_budget: int) -> str:
+    """Render whichever frozen commands this continuation carries, within the byte budget.
+
+    Which commands travel is decided upstream (a Cursor bridge carries no authorize command, for
+    instance), so the clause reports what is present rather than restating the directive's own
+    wording. Every value was admitted by the closed command token sets, so none is caller-derived.
+    """
+
+    details = error.get("safe_details")
+    if not isinstance(details, Mapping) or byte_budget <= 0:
+        return ""
+    typed = cast(Mapping[str, JsonValue], details)
+    candidate = {key: typed.get(key) for key in _CONTINUATION_COMMAND_KEYS}
+    gated = normalize_safe_details(candidate)
+    commands = [
+        str(gated[key]) for key in _CONTINUATION_COMMAND_KEYS if type(gated.get(key)) is str
+    ]
+    if not commands:
+        return ""
+    clause = " Commands: " + "; ".join(commands) + "."
+    if len(clause.encode("ascii", errors="replace")) > byte_budget:
+        return ""
+    return clause
+
+
+def _continuation_clause(error: Mapping[str, JsonValue], *, byte_budget: int) -> str:
+    """Render the frozen recovery directive for a typed continuation (issues #669, #739, #740).
+
+    Nothing here is copied from the public error message. The token is re-gated, the text is
+    looked up from the checked-in registry, and each optional part is added only when it still
+    fits. Parts are dropped from the least load-bearing end -- nudge, then guidance pointer, then
+    commands -- so a tight budget costs advice rather than the instruction itself.
+    """
+
+    directive = _continuation_directive(error)
+    if directive is None or byte_budget <= 0:
+        return ""
+    clause = f" Continuation: {directive.token}. {directive.directive}"
+    if len(clause.encode("ascii", errors="replace")) > byte_budget:
+        return ""
+    remaining = byte_budget - len(clause.encode("ascii", errors="replace"))
+    commands = _continuation_command_clause(error, byte_budget=remaining)
+    clause += commands
+    remaining -= len(commands.encode("ascii", errors="replace"))
+    if directive.guidance_uri is not None:
+        guidance = f" Guidance: {directive.guidance_uri}."
+        if len(guidance.encode("ascii", errors="replace")) <= remaining:
+            clause += guidance
+            remaining -= len(guidance.encode("ascii", errors="replace"))
+    if directive.nudge is not None:
+        nudge = f" {directive.nudge}"
+        if len(nudge.encode("ascii", errors="replace")) <= remaining:
+            clause += nudge
+    return clause
+
+
 def _reason_location_clause(error: Mapping[str, JsonValue]) -> str:
     """Render frozen reason_code and field pointer tokens, or "" when none travel on the error.
 
@@ -389,6 +464,12 @@ def summary_for_public_error(envelope: object) -> str:
     extra = (
         f"{_repair_clause(error)}{_reason_location_clause(error)}{_claim_revision_clause(error)}"
     )
+    # Priority order (issue #739): identity, then what was wrong, then what to do about it. The
+    # continuation is budgeted against what the identity and location clauses already spent, so a
+    # long field pointer costs advice rather than silently dropping the whole projection to bare
+    # identity through the except branch below.
+    spent = len((prefix + extra).encode("ascii", errors="replace"))
+    extra += _continuation_clause(error, byte_budget=_MAX_SUMMARY_BYTES - spent)
     try:
         return _bounded(prefix + extra)
     except ValueError:

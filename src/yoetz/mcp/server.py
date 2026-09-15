@@ -101,6 +101,7 @@ from yoetz.protocol.models import (
     StatusResult,
     public_model_to_wire,
 )
+from yoetz.protocol.recovery import continuation_for_reason
 from yoetz.service.client import (
     ServiceClient,
     accepted_but_unresponsive,
@@ -1381,7 +1382,8 @@ def _control_error_result(
             safe_details={"reason_code": "privacy_projection_unavailable"},
         )
     if error.reason == "request_timeout":
-        if operation in _WRITE_OPERATIONS:
+        write_operation = operation in _WRITE_OPERATIONS
+        if write_operation:
             message = (
                 "The local operation timed out and may still have committed. Retry with the same "
                 "request_id to recover the stored outcome; for an existing Yoetz session, status "
@@ -1392,6 +1394,13 @@ def _control_error_result(
                 "The local status read timed out and requested no write. Repeat the read with a "
                 "new request_id."
             )
+        # The read-versus-write distinction above was previously legible only in the free-form
+        # message, which the native text channel drops by design; a typed continuation carries it
+        # to the model that has to act on it (issue #669).
+        timeout_details: dict[str, object] = {"reason_code": "request_timeout"}
+        continuation = continuation_for_reason("request_timeout", write_operation=write_operation)
+        if continuation is not None:
+            timeout_details["continuation"] = continuation
         return _control_public_error_result(
             error,
             request_id,
@@ -1400,7 +1409,7 @@ def _control_error_result(
             message=message,
             retryable=True,
             host_profile=host_profile,
-            safe_details={"reason_code": "request_timeout"},
+            safe_details=timeout_details,
         )
     if error.reason in {"service_incompatible", "protocol_mismatch"}:
         # The one per-user endpoint is owned by a service of another Yoetz installation (or

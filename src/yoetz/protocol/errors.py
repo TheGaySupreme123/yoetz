@@ -10,6 +10,7 @@ from types import MappingProxyType
 from typing import cast
 
 __all__ = [
+    "ADMITTED_CONTINUATION_TOKENS",
     "PROTOCOL_REASON_CODES",
     "SAFE_DETAIL_KEYS",
     "ProtocolValueError",
@@ -271,14 +272,38 @@ _BOOLEAN_DETAIL_KEYS = frozenset({"availability_inherited"})
 # Closed token sets for the MCP bridge's host-binding availability facts (issue #469). The
 # binding identity is the bridge's host and route profile; `availability` names the one latched
 # state a later request identity may inherit.
-# `continuation` and the exact command literals are the typed initialization-required handoff
-# (issue #512): every value is a repository constant, so nothing caller-derived can ride these
-# keys onto the wire.
+# `continuation` and the exact command literals are typed handoffs, not free text: every value is a
+# repository constant, so nothing caller-derived can ride these keys onto the wire. The token set is
+# the recovery registry's own (issue #739), which began as the single initialization-required
+# continuation of issue #512; the registry owns the directive text each token stands for, and that
+# text never travels here.
+# The closed continuation vocabulary (issue #739). This module is a dependency root and holds no
+# internal imports, so the tokens are literal here and ``yoetz.protocol.recovery`` fails at import
+# time if its registry and this set ever disagree. Adding a token here without registering its
+# directive, or the reverse, is a build failure rather than a bare token reaching an agent.
+ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
+    {
+        "consent_ceremony_required",
+        "field_ownership_repair",
+        "frontier_refresh_required",
+        "operation_pending_inspect",
+        "read_timeout_new_identity",
+        "resource_integrity_repair",
+        "service_holder_busy",
+        "service_replacement_exhausted",
+        "session_rebind_required",
+        "sorted_set_required",
+        "storage_root_unsafe",
+        "vault_initialization_required",
+        "write_timeout_same_identity",
+    }
+)
+
 _TOKEN_DETAIL_VALUES: Mapping[str, frozenset[str]] = MappingProxyType(
     {
         "authorize_command": frozenset({"yoetz consent authorize"}),
         "availability": frozenset({"terminal_unavailable"}),
-        "continuation": frozenset({"vault_initialization_required"}),
+        "continuation": ADMITTED_CONTINUATION_TOKENS,
         "host_profile": frozenset({"generic", "codex", "claude", "cursor"}),
         "prepare_command": frozenset({"yoetz consent prepare vault_initialize"}),
         "review_command": frozenset({"yoetz consent review"}),

@@ -166,6 +166,37 @@ clause an `EVENT_INVALID` set-order rejection arrives as a bare code. The native
 repeats the exact canonical JSON wire body in text `content`, which already includes those
 `safe_details`; tests lock both projections.
 
+Every agent-facing surface additionally renders a **typed recovery directive** when
+`safe_details` holds a registered `continuation` token (ADR-030, issue #739). The token is the only
+part that travels: `yoetz.protocol.recovery` holds the frozen directive sentence, an optional
+`yoetz://guidance/...` pointer with a section anchor, and an optional bounded nudge, and each
+renderer reconstructs them locally. No `safe_details` key and no `public-error` schema version was
+added to carry that prose, and a third-party consumer reading structured JSON resolves the token
+through this section.
+
+`yoetz.protocol.errors` is a dependency root and holds the admitted token set literally as
+`ADMITTED_CONTINUATION_TOKENS`; `yoetz.protocol.recovery` fails at import if its registry and that
+set disagree, so a token can never be admitted onto the wire without a directive behind it. Two
+disjoint reason vocabularies resolve to tokens: protocol reason codes through
+`continuation_for_reason`, and local lifecycle, instance, and ceremony reasons through
+`continuation_for_local_reason`. An overlap between them is an import-time failure. `request_timeout`
+is the one reason whose directive depends on the operation kind: a timed-out read proves nothing
+committed and directs a new read identity, while a timed-out write leaves the outcome unknown and
+keeps same-`request_id` recovery (issue #669). When the caller cannot say which it was, no
+continuation travels rather than the wrong one.
+
+A coverage ratchet requires every member of `PROTOCOL_REASON_CODES` to resolve to a directive or
+carry an explicit exemption, so a newly registered reason code cannot reach an agent as a bare
+token with nothing to do about it.
+
+On the 512-byte MCP text channel the directive is budgeted after the identity and reason clauses,
+and optional parts are dropped from the least load-bearing end — nudge, then guidance pointer, then
+carried commands. The error identity is never dropped to fit advice. The CLI has no such ceiling
+and renders `Continuation:`, `Next:`, `Commands:`, `Guidance:`, and the nudge on separate lines
+beneath the existing `CODE: message` line. Frozen command literals already allowlisted on
+`safe_details` (`prepare_command`, `review_command`, `authorize_command`) are rendered in that
+fixed order; which of them travel is decided upstream, so the clause reports what is present.
+
 For `claim_revision_mismatch`, the generic text projection additionally carries `Invariant:` and
 `Correction:` clauses when the message exactly matches the checked-in domain error shape and its
 registered invariant and field agree with `safe_details`. The clauses are generated from a closed

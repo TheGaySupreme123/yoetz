@@ -998,3 +998,13 @@ that release; older permanent declines remain respected. Acceptance only supplie
 instructions, and execution requires the user's explicit upgrade request. Package replacement does
 not itself prove host activation or data migration. Preserve the existing host roots, ownership and
 privacy choices; new settings such as Expanded review require a separate exact approval.
+
+## Recovery directives in errors (ADR-030)
+
+Codex consumes structured MCP results, so the `continuation` token arrives in `safe_details` and the
+bounded text projection repeats the resolved directive for parity. No Codex-specific behavior is
+configured.
+
+Provider-side failures reaching Codex through the app-server path keep their existing stage-typed
+diagnostics (issue #529). Classifying those failures into typed recovery tokens is tracked
+separately on issue #742 and is not part of ADR-030's first implementation.
