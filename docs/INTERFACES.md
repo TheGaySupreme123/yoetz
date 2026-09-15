@@ -4773,6 +4773,10 @@ the review policy's final count and aggregate excerpt byte limits. `FinalSemanti
 `case_content_gaps` so resolver omissions constrain check/receipt coverage independently of the
 provider's semantic success.
 
+Resolver-derived captured-content gaps downgrade current semantic-case coverage to partial, just
+like gaps found before packet selection. Existing older freshness states are preserved; an omitted
+or unavailable captured object cannot leave an otherwise current case labeled fully current.
+
 ### Long semantic check waits on the 0.3 line (#746)
 
 `external_runtime.timeout_seconds` defaults to 900 seconds and accepts 1–3600. Explicit existing
