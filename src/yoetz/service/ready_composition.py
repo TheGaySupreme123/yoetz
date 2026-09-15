@@ -58,6 +58,7 @@ from yoetz.application.coordination import (
 from yoetz.application.egress import (
     PrivacyCoordinator,
     RepositoryGrantAdmission,
+    SemanticEgressAttemptUnknown,
     SemanticEgressAwaitingHuman,
     SemanticEgressBlocked,
     SemanticEgressProviderOutcome,
@@ -1883,6 +1884,8 @@ def _map_egress_to_final(
                 ),
             ),
         )
+    if type(result) is SemanticEgressAttemptUnknown:
+        return FinalSemanticEvaluation(SemanticStatus.UNAVAILABLE, SemanticReason.OUTCOME_UNKNOWN)
     if type(result) is SemanticEgressBlocked:
         return _map_blocked(result.outcome, result.reason)
     if type(result) is SemanticEgressProviderOutcome:
@@ -2010,7 +2013,7 @@ def _execution_from_json(value: object) -> _SemanticExecution:
     if primary_expires_at > expires_at:
         raise ValueError("semantic_execution_invalid")
     fallback_timeout = source["fallback_timeout_seconds"]
-    if type(fallback_timeout) is not int or not 1 <= fallback_timeout <= 300:
+    if type(fallback_timeout) is not int or not 1 <= fallback_timeout <= 3600:
         raise ValueError("semantic_execution_invalid")
     return _SemanticExecution(
         provider,
@@ -2353,10 +2356,10 @@ def _privacy_gated_semantic_evaluator(
     ]
     | None = None,
 ):
-    total_timeout = float(max(1, min(int(timeout_seconds), 300)))
+    total_timeout = float(max(1, min(int(timeout_seconds), 3600)))
     # The fallback endpoint owns its own deadline share (#582): a primary that spends its whole
     # timeout failing must not leave the fallback with nothing to run in.
-    fallback_timeout = float(max(1, min(int(fallback_timeout_seconds), 300)))
+    fallback_timeout = float(max(1, min(int(fallback_timeout_seconds), 3600)))
 
     def _endpoint_plan(
         role: Literal["primary", "fallback"], binding: ProviderBinding, retries: int
@@ -2759,10 +2762,8 @@ def _privacy_gated_semantic_evaluator(
                     from yoetz.ports.ledger import SemanticAttemptHandle as _Handle
 
                     assert type(handle) is _Handle
-                    # Rebuilt per attempt for a fresh request identity so authorization cannot
-                    # be reused. The envelope itself is a pure function of the case, so the
-                    # bytes are identical to the ones validated above; only the request id — and,
-                    # for a fallback attempt, the exact destination — differs.
+                    # Reclaim preserves the physical request identity. Reconcile its durable
+                    # admission before allowing this same attempt to reach the gateway again.
                     candidate = semantic_case_to_candidate_context(
                         semantic_case,
                         request_id=handle.provider_request_id,
@@ -2772,6 +2773,19 @@ def _privacy_gated_semantic_evaluator(
                     wait = await runtime.ledger.load_disclosure_wait(
                         handle.writer_id, handle.operation_id
                     )
+                    if type(privacy) is PrivacyCoordinator:
+                        recovered = await privacy.recover_started_attempt(
+                            handle.provider_request_id,
+                            semantic_case.case_digest,
+                            attempt_deadline,
+                        )
+                        if recovered is not None:
+                            return _map_egress_to_final(
+                                recovered,
+                                ids,
+                                attempt_id=handle.attempt_id,
+                                operation_request_id=frozen.lease.operation_id,
+                            )
                     if (
                         wait is not None
                         and wait.job_id == handle.job_id

@@ -231,3 +231,12 @@ not the same as it being useful); and `failed`/`coordinator_failure` is unconstr
 
 If you believe Yoetz disclosed, retained, or logged something these commitments forbid, treat it as
 a security report: [`SECURITY.md`](../../SECURITY.md), not a public issue.
+
+### Reviews that take longer
+
+Codex subscription reviews default to a 15-minute total budget. An explicitly configured shorter
+budget stays in effect; `external_runtime.timeout_seconds` accepts up to one hour. A host tool can
+stop waiting before the review finishes. Recover with the same check request and request ID:
+`OPERATION_PENDING` means the existing check is still running. Repeated waits do not start another
+review or reset its budget. A completed result still needs to qualify before it can resolve a
+finding or support a completion claim.

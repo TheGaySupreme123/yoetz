@@ -785,7 +785,8 @@ class ServiceClient(ControlClientPort):
                 except TimeoutError as exc:
                     if sent:
                         self._retire_call(request.rpc_id, future)
-                        await self._request_cancel(request.rpc_id)
+                        if request.method is not ControlMethod.CHECK:
+                            await self._request_cancel(request.rpc_id)
                     else:
                         future.cancel()
                         await self._fail_connection(
@@ -795,7 +796,8 @@ class ServiceClient(ControlClientPort):
         except asyncio.CancelledError:
             if sent:
                 self._retire_call(request.rpc_id, future)
-                await self._request_cancel(request.rpc_id)
+                if request.method is not ControlMethod.CHECK:
+                    await self._request_cancel(request.rpc_id)
             else:
                 future.cancel()
                 await self._fail_connection(ControlError("service_unavailable", retryable=True))
