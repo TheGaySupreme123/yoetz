@@ -197,7 +197,10 @@ than implementation notes.
    child's open reservation as abandoned with reason `attach_handle_expired`; this does not invent
    a lost session or claim that a host process stopped. The default recovery window after contact
    loss remains 300 seconds. The original consumed-handle start operation remains replayable after
-   handle expiry, subject to cancellation and the existing request identity fences.
+   handle expiry, subject to cancellation and the existing request identity fences. If the
+   process dies after that start operation commits but before the handle is consumed, the exact
+   original request may still finish consumption after expiry; a fresh request is refused as
+   expired and cannot rotate the child route.
 
 4. **Parent rollup is one level and severity-dependent.** A parent receipt projects only direct
    children from the frozen manifest. Current actionable findings on accepted children block

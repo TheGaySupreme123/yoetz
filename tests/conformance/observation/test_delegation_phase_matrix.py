@@ -350,6 +350,116 @@ async def test_same_session_attach_retry_is_idempotent_after_handle_consumption(
         assert len(routes) == 2
 
 
+async def test_attach_crash_after_child_start_recovers_only_the_exact_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The window between a committed child start and handle consumption must be recoverable.
+
+    A crash there leaves a started child route behind an unconsumed handle.  Once the handle
+    expires, every fresh request is still refused, but the exact original request must be able to
+    replay its committed start and finish the consumption without rotating the child route.
+    """
+
+    workspace = _workspace(tmp_path / "workspace")
+    async with multi_agent_service(tmp_path / "state") as service:
+        parent = await service.app.start(
+            StartRequest.model_validate(
+                {
+                    **_identity(),
+                    "mode": "create",
+                    "task_title": "attach crash parent",
+                    "workspace_ref": str(workspace),
+                    "external_ref": "attach-crash-parent",
+                    "requested_view": "compact",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        delegated = await service.app.start(
+            _delegate_request(parent.session_id, title="attach crash child"),
+            repository_privacy_context=_REPOSITORY,
+        )
+        assert delegated.attach_handle is not None
+        wire_handle = delegated.as_wire()["attach_handle"]
+        attach = StartRequest.model_validate(
+            {
+                **_identity(),
+                "mode": "attach",
+                "task_title": "attach crash child",
+                "attach_handle": wire_handle,
+                "requested_view": "compact",
+            }
+        )
+        catalog = cast(SqliteStartCatalog, service.app.start_catalog)
+        lineage = service.app.lineage
+        assert lineage is not None
+        store = cast(SqliteLineageStore, lineage.store)
+        operation = (await store.list_operations())[0]
+
+        original_attach = LineageCoordinator._attach_locked  # pyright: ignore[reportPrivateUsage]
+        crashes = 0
+
+        async def crash_once(self: LineageCoordinator, **kwargs: object) -> object:
+            nonlocal crashes
+            if crashes == 0:
+                crashes += 1
+                raise RuntimeError("crash after child start, before handle consumption")
+            return await original_attach(self, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(LineageCoordinator, "_attach_locked", crash_once)
+        with pytest.raises(RuntimeError):
+            await service.app.start(attach, repository_privacy_context=_REPOSITORY)
+        monkeypatch.undo()
+        assert crashes == 1
+
+        handle = await store.get_handle(operation.handle_digest)
+        assert handle is not None and handle.consumed_session_id is None
+        routes_after_crash = await catalog.recovery_routes()
+        assert len(routes_after_crash) == 2
+
+        service.clock.advance(seconds=301)
+
+        # A fresh request cannot use the expired capability, and does not rotate the child.
+        with pytest.raises(PublicOperationError) as expired:
+            await service.app.start(
+                StartRequest.model_validate(
+                    {
+                        **_identity(),
+                        "mode": "attach",
+                        "task_title": "attach crash child",
+                        "attach_handle": wire_handle,
+                        "requested_view": "compact",
+                    }
+                ),
+                repository_privacy_context=_REPOSITORY,
+            )
+        assert expired.value.code is PublicErrorCode.SESSION_CONFLICT
+        assert expired.value.safe_details["reason_code"] == "attach_handle_expired"
+        handle = await store.get_handle(operation.handle_digest)
+        assert handle is not None and handle.consumed_session_id is None
+
+        # The exact committed request replays its start and finishes consumption.
+        recovered = await service.app.start(attach, repository_privacy_context=_REPOSITORY)
+        assert recovered.task_id == delegated.attach_handle.task_id
+        handle = await store.get_handle(operation.handle_digest)
+        assert handle is not None and handle.consumed_session_id == recovered.session_id
+        routes = await catalog.recovery_routes()
+        assert tuple(route.task_id for route in routes) == tuple(
+            route.task_id for route in routes_after_crash
+        )
+        child = await store.get_task(recovered.task_id)
+        assert child is not None and child.active_session_id == recovered.session_id
+
+        # Recovery does not weaken the consumed contract afterwards.
+        again = await service.app.start(attach, repository_privacy_context=_REPOSITORY)
+        assert (again.task_id, again.session_id, again.writer_id) == (
+            recovered.task_id,
+            recovered.session_id,
+            recovered.writer_id,
+        )
+
+
 @pytest.mark.parametrize("ref_kind", ("forged", "dangling", "quarantined"))
 async def test_parent_reference_failures_are_typed_and_do_not_mint_children(
     tmp_path: Path,

@@ -483,7 +483,9 @@ the child token and records the same durable gap instead of a weaker annotation.
 
 Explicit cooperative correlation fields are validated before consuming the attach handle. A
 post-attach transient registry error remains recoverable with the exact request and consumed
-handle, including after expiry; a fresh request cannot reuse that capability. Subagent evidence
+handle, including after expiry; a fresh request cannot reuse that capability. A crash after the
+child start committed but before handle consumption is recovered the same way: the exact
+request finishes consumption after expiry, while any other request is refused as expired. Subagent evidence
 under `obs-ledger/1.7.0` distinguishes different parent tool calls. Copies that omit the parent
 call may produce separate evidence, while the registry merges only unambiguous aliases. Once a
 child-only annotation is bound, a later strong parent-call pair creates a separate annotation:

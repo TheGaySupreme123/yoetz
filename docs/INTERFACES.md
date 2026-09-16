@@ -1843,7 +1843,11 @@ without any attach is abandoned with reason `attach_handle_expired`; its session
 `ended`, since no attached session lost contact. Cancellation and write-off preserve the accepted
 edge. Evidence arriving after abandonment stays in the ledger and retains the incomplete outcome.
 An already consumed handle can replay its original start operation after the handle expiry;
-another request cannot reuse it, and revocation still fences replay.
+another request cannot reuse it, and revocation still fences replay. The same exact-request rule
+covers the crash window between a committed child start and handle consumption: after expiry,
+only the request whose start operation the catalog already recorded as complete for that child
+may finish consuming the still-unconsumed handle. Every other request is refused as expired
+before any callback can rotate the child route.
 
 Admitted native hook activity also renews its current task session when first accepted within
 60 seconds of its receipt timestamp. Duplicate delivery, session-stream history, stale or future

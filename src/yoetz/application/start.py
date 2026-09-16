@@ -1295,9 +1295,41 @@ async def _execute_handle_attach(
     if attach_model is None:
         raise _invalid_request()
     token = attach_model.handle
+
+    async def _replay_check(current_handle: AttachHandle) -> bool:
+        """Allow only a completed child-start operation to recover its capability.
+
+        The handle row intentionally stores no public request identity.  The start catalog does
+        store that identity, so consult its private operation lookup before a consumed capability
+        can invoke the callback.  This keeps a second request from rotating the child route and
+        then failing the single-use compare-and-set.  The durable start operation still performs
+        the full request-digest check when the callback runs.
+        """
+
+        lookup = getattr(app.start_catalog, "_operation_by_key", None)
+        if callable(lookup):
+            try:
+                record = cast(Callable[[str], object], lookup)(request.request_id)
+            except PublicOperationError, TypeError, ValueError:
+                return False
+            return (
+                getattr(record, "task_id", None) == current_handle.task_id
+                and getattr(record, "state", None) == "complete"
+            )
+        state = getattr(app.start_catalog, "_state", None)
+        operations = getattr(state, "operations", None)
+        if isinstance(operations, Mapping):
+            record = cast(Mapping[str, object], operations).get(request.request_id)
+            return (
+                getattr(record, "task_id", None) == current_handle.task_id
+                and getattr(record, "state", None) == "complete"
+            )
+        return False
+
     handle = await lineage.validate_attach(
         handle_value=token,
         repository_commitment=repository_privacy_commitment,
+        replay_check=_replay_check,
     )
     # The model repeats service-returned structural facts so a caller cannot swap a valid bearer
     # token into a request naming another child or expiry.  The token itself remains opaque and
@@ -1373,30 +1405,6 @@ async def _execute_handle_attach(
             # coordinator lock and would also create a split window between route and handle.
             sync_lineage=False,
         )
-
-    async def _replay_check(current_handle: AttachHandle) -> bool:
-        """Allow a consumed handle to replay only its existing child-start operation.
-
-        The handle row intentionally stores no public request identity.  The start catalog does
-        store that identity, so consult its private operation lookup before a consumed capability
-        can invoke the callback.  This keeps a second request from rotating the child route and
-        then failing the single-use compare-and-set.  The durable start operation still performs
-        the full request-digest check when the callback runs.
-        """
-
-        lookup = getattr(app.start_catalog, "_operation_by_key", None)
-        if callable(lookup):
-            try:
-                record = cast(Callable[[str], object], lookup)(request.request_id)
-            except PublicOperationError, TypeError, ValueError:
-                return False
-            return getattr(record, "task_id", None) == current_handle.task_id
-        state = getattr(app.start_catalog, "_state", None)
-        operations = getattr(state, "operations", None)
-        if isinstance(operations, Mapping):
-            record = cast(Mapping[str, object], operations).get(request.request_id)
-            return getattr(record, "task_id", None) == current_handle.task_id
-        return False
 
     result, snapshot = await lineage.attach_with_operation(
         handle_value=token,

@@ -1575,7 +1575,9 @@ class LineageCoordinator:
             # Validate the capability before invoking the callback.  _attach_locked repeats the
             # checks after the callback because the callback may cross a process/restart boundary
             # and because the same-session replay path must remain idempotent.
-            handle = await self._validate_attach_locked(digest, commitment)
+            handle = await self._validate_attach_locked(
+                digest, commitment, replay_check=replay_check
+            )
             if handle.consumed_session_id is not None:
                 # A used capability may replay only the exact child-start operation that consumed
                 # it.  A fresh request id must fail before invoking the callback; otherwise the
@@ -1615,6 +1617,7 @@ class LineageCoordinator:
                 session_id=session,
                 repository_commitment=commitment,
                 digest=digest,
+                admitted_operation=True,
             )
             return result, attached
 
@@ -1622,8 +1625,11 @@ class LineageCoordinator:
         self,
         digest: str,
         commitment: str | None,
+        *,
+        replay_check: Callable[[AttachHandle], Awaitable[bool]] | None = None,
+        admitted_operation: bool = False,
     ) -> AttachHandle:
-        """Validate one handle while ``self._lock`` is held."""
+        """Validate a capability or recover an already committed exact start operation."""
 
         handle = await self._store.get_handle(digest)
         if handle is None:
@@ -1638,7 +1644,12 @@ class LineageCoordinator:
                 "The attach handle has been revoked.",
                 reason="attach_handle_revoked",
             )
-        if handle.consumed_session_id is None and self._now() >= handle.expires_at:
+        if (
+            handle.consumed_session_id is None
+            and self._now() >= handle.expires_at
+            and not admitted_operation
+            and (replay_check is None or not await replay_check(handle))
+        ):
             raise _error(
                 PublicErrorCode.SESSION_CONFLICT,
                 "The attach handle has expired.",
@@ -1672,6 +1683,7 @@ class LineageCoordinator:
         session_id: str,
         repository_commitment: str | None,
         digest: str | None = None,
+        admitted_operation: bool = False,
     ) -> LineageSnapshot:
         """Consume a validated handle while ``self._lock`` is held."""
 
@@ -1679,7 +1691,9 @@ class LineageCoordinator:
         session = _id(IdKind.SESSION, session_id)
         commitment = _commitment(repository_commitment)
         handle_digest = self.handle_digest(value) if digest is None else _digest(digest)
-        handle = await self._validate_attach_locked(handle_digest, commitment)
+        handle = await self._validate_attach_locked(
+            handle_digest, commitment, admitted_operation=admitted_operation
+        )
         snapshot = await self._store.get_task(handle.task_id)
         if snapshot is None:  # guarded by _validate_attach_locked; keep the invariant explicit
             raise _error(
@@ -1726,58 +1740,19 @@ class LineageCoordinator:
         *,
         handle_value: str,
         repository_commitment: str | None = None,
+        replay_check: Callable[[AttachHandle], Awaitable[bool]] | None = None,
     ) -> AttachHandle:
-        """Validate a capability before a separate start reservation mutates the route.
+        """Validate before route mutation, allowing exact committed-operation recovery.
 
-        The check is deliberately read-only.  The consuming ``attach`` call remains the single
-        compare-and-set that binds a session, while callers can reject an expired, revoked, or
-        cross-repository handle before reserving a start operation.
+        Expiry refuses new starts. An existing completed start may still finish interrupted
+        capability consumption; its catalog replay must validate the full request digest.
         """
 
         value = _safe_handle(handle_value)
         commitment = _commitment(repository_commitment)
         digest = self.handle_digest(value)
-        now = self._now()
         async with self._lock:
-            handle = await self._store.get_handle(digest)
-            if handle is None:
-                raise _error(
-                    PublicErrorCode.SESSION_NOT_FOUND,
-                    "The attach handle was not found.",
-                    reason="attach_handle_invalid",
-                )
-            if handle.revoked:
-                raise _error(
-                    PublicErrorCode.SESSION_CONFLICT,
-                    "The attach handle has been revoked.",
-                    reason="attach_handle_revoked",
-                )
-            if handle.consumed_session_id is None and now >= handle.expires_at:
-                raise _error(
-                    PublicErrorCode.SESSION_CONFLICT,
-                    "The attach handle has expired.",
-                    reason="attach_handle_expired",
-                )
-            snapshot = await self._store.get_task(handle.task_id)
-            if snapshot is None:
-                raise _error(
-                    PublicErrorCode.STORAGE_CORRUPT,
-                    "The child task is missing.",
-                    reason="lineage_child_missing",
-                )
-            if commitment is not None and snapshot.repository_commitment != commitment:
-                raise _error(
-                    PublicErrorCode.SESSION_CONFLICT,
-                    "The attach identity conflicts.",
-                    reason="selector_conflict",
-                )
-            if snapshot.work_state is not WorkState.OPEN:
-                raise _error(
-                    PublicErrorCode.SESSION_CONFLICT,
-                    "The child work is no longer attachable.",
-                    reason="lineage_work_terminal",
-                )
-            return handle
+            return await self._validate_attach_locked(digest, commitment, replay_check=replay_check)
 
     async def self_register(
         self,

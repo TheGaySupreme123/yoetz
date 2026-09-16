@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
 from builders.ledger_adapters import FixedClock, FixedIds
 from yoetz.application.lineage import (
+    AttachHandle,
     DelegationRequest,
     LineageConfig,
     LineageCoordinator,
     LineageProjectAdmission,
     MemoryLineageStore,
 )
+from yoetz.domain.coordination import SessionHealth
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind
 
@@ -240,6 +243,142 @@ async def test_self_registration_records_the_same_admission_authority_for_replay
     )
     assert replay == child
     assert calls == 1
+
+
+class _MutableClock:
+    """Fixed clock whose current instant a test can advance past a handle expiry."""
+
+    def __init__(self) -> None:
+        self.current = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+
+    def now_utc(self) -> datetime:
+        return self.current
+
+    def monotonic_seconds(self) -> float:
+        return 1.0
+
+
+@pytest.mark.anyio
+async def test_expired_handle_recovers_only_the_committed_exact_start_operation() -> None:
+    """A crash between the durable child start and handle consumption must stay recoverable.
+
+    The child start commits inside the attach callback.  If the process dies before the single-use
+    compare-and-set, the handle stays unconsumed and may expire before the exact request is
+    retried.  Expiry still refuses every fresh request, but the exact committed operation must be
+    allowed to finish its consumption instead of stranding an already started child.
+    """
+
+    ids = FixedIds()
+    store = MemoryLineageStore()
+    clock = _MutableClock()
+    coordinator = LineageCoordinator(
+        store=store,
+        clock=clock,
+        ids=ids,
+        config=LineageConfig(attach_handle_ttl_seconds=1),
+        handle_key=b"attach-crash-window-test-key-long-enough",
+    )
+    parent_task_id = ids.new(IdKind.TASK)
+    parent_session_id = ids.new(IdKind.SESSION)
+    await coordinator.register_root(task_id=parent_task_id, session_id=parent_session_id)
+    reservation = await coordinator.reserve_delegation(
+        DelegationRequest(
+            operation_id=ids.new(IdKind.REQUEST),
+            request_digest=_digest("7"),
+            parent_task_id=parent_task_id,
+            parent_session_id=parent_session_id,
+        )
+    )
+    handle = reservation.attach_handle
+    digest = coordinator.handle_digest(handle.value)
+    exact_request_id = ids.new(IdKind.REQUEST)
+    child_session_id = ids.new(IdKind.SESSION)
+    committed = SimpleNamespace(task_id=reservation.task_id, session_id=child_session_id)
+    starts = 0
+
+    async def start_child(_handle: object) -> object:
+        nonlocal starts
+        starts += 1
+        return committed
+
+    async def crash_after_start(current: object) -> object:
+        # The child start committed durably; the process died before consumption.
+        await start_child(current)
+        raise RuntimeError("crash before handle consumption")
+
+    async def committed_for(current: AttachHandle) -> bool:
+        return current.task_id == reservation.task_id
+
+    async def foreign(_current: AttachHandle) -> bool:
+        return False
+
+    with pytest.raises(RuntimeError):
+        await coordinator.attach_with_operation(
+            handle_value=handle.value,
+            request_id=exact_request_id,
+            replay_check=foreign,
+            operation=crash_after_start,
+        )
+    stored = await store.get_handle(digest)
+    assert stored is not None and stored.consumed_session_id is None
+    assert starts == 1
+
+    clock.current += timedelta(seconds=2)
+
+    # Every fresh request sees an expired capability, before any callback can rotate the route.
+    with pytest.raises(PublicOperationError) as expired:
+        await coordinator.attach_with_operation(
+            handle_value=handle.value,
+            request_id=ids.new(IdKind.REQUEST),
+            replay_check=foreign,
+            operation=start_child,
+        )
+    assert expired.value.code is PublicErrorCode.SESSION_CONFLICT
+    assert expired.value.safe_details["reason_code"] == "attach_handle_expired"
+    assert starts == 1
+    for replay_check in (None, foreign):
+        with pytest.raises(PublicOperationError) as refused:
+            await coordinator.validate_attach(handle_value=handle.value, replay_check=replay_check)
+        assert refused.value.safe_details["reason_code"] == "attach_handle_expired"
+
+    # Only the exact committed operation may finish its interrupted consumption.
+    recovered = await coordinator.validate_attach(
+        handle_value=handle.value, replay_check=committed_for
+    )
+    assert recovered.task_id == reservation.task_id
+    result, snapshot = await coordinator.attach_with_operation(
+        handle_value=handle.value,
+        request_id=exact_request_id,
+        replay_check=committed_for,
+        operation=start_child,
+    )
+    assert result is committed
+    assert starts == 2
+    assert snapshot.task_id == reservation.task_id
+    assert snapshot.active_session_id == child_session_id
+    assert snapshot.session_health is SessionHealth.ACTIVE
+    stored = await store.get_handle(digest)
+    assert stored is not None and stored.consumed_session_id == child_session_id
+
+    # The consumed capability keeps its existing contract: exact replay is idempotent and a fresh
+    # request is refused as reuse, not as expiry.
+    again, replayed = await coordinator.attach_with_operation(
+        handle_value=handle.value,
+        request_id=exact_request_id,
+        replay_check=committed_for,
+        operation=start_child,
+    )
+    assert again is committed
+    assert replayed.active_session_id == child_session_id
+    with pytest.raises(PublicOperationError) as reused:
+        await coordinator.attach_with_operation(
+            handle_value=handle.value,
+            request_id=ids.new(IdKind.REQUEST),
+            replay_check=foreign,
+            operation=start_child,
+        )
+    assert reused.value.safe_details["reason_code"] == "attach_handle_reused"
+    assert starts == 3
 
 
 async def _false() -> bool:
