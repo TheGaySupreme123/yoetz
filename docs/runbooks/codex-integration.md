@@ -476,7 +476,10 @@ host spawns it, and the capability handle is not added to observation payloads. 
 `tool_use_id` and `tool_call_id` identify the attach call and must agree when both are supplied;
 `parent_tool_call_id` independently identifies the spawn call and may differ. Any explicitly
 malformed call identity blocks binding and persists `missing_subagent_identity` in the task
-observation ledger, including when the registry sidecar is unavailable.
+observation ledger, including when the registry sidecar is unavailable. Session-stream
+`SubAgentActivity` records follow the same rule: conflicting or malformed parent-call aliases
+cannot degrade to a child-only identity, so the `SubagentStart`/`SubagentStop` envelope drops
+the child token and records the same durable gap instead of a weaker annotation.
 
 Explicit cooperative correlation fields are validated before consuming the attach handle. A
 post-attach transient registry error remains recoverable with the exact request and consumed

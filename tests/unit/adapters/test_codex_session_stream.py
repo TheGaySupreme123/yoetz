@@ -1541,6 +1541,64 @@ def test_subagent_stream_accepts_explicit_parent_alias_but_ignores_item_id() -> 
     assert "tool_call_id" not in structural
 
 
+@pytest.mark.parametrize("kind", ["started", "completed"])
+@pytest.mark.parametrize(
+    "parent_aliases",
+    [
+        {"parent_tool_call_id": "spawn-call", "tool_use_id": "other-call"},
+        {"parent_tool_call_id": "spawn-call", "tool_call_id": "other-call"},
+        {"parent_tool_call_id": {"invalid": "token"}},
+        {"tool_use_id": {"invalid": "token"}},
+        {"tool_call_id": None},
+    ],
+)
+def test_subagent_stream_invalid_parent_alias_cannot_weaken_identity(
+    kind: str, parent_aliases: dict[str, Any]
+) -> None:
+    from yoetz.domain.host_lineage import host_lineage_from_envelope
+
+    record = CodexParsedRecord(
+        1,
+        0,
+        160,
+        "response_item",
+        "SubAgentActivity",
+        JsonObject(
+            {
+                "payload": {
+                    "agent_thread_id": "child-stream-1",
+                    "kind": kind,
+                    "type": "SubAgentActivity",
+                    **parent_aliases,
+                },
+                "type": "response_item",
+            }
+        ),
+    )
+    envelope = envelope_from_stream_record(
+        record,
+        session_commitment=_EMPTY,
+        cursor=ObservationCursor(
+            source_generation=1,
+            byte_position=160,
+            event_position=1,
+            last_source_commitment=_EMPTY,
+            mapping_version=STREAM_MAPPING_VERSION,
+        ),
+    )
+
+    assert envelope.event_kind in {"SubagentStart", "SubagentStop"}
+    assert envelope.gap_codes == (ObservationGapCode.MISSING_SUBAGENT_IDENTITY.value,)
+    assert "subagent_id" not in envelope.structural_payload
+    assert "parent_tool_call_id" not in envelope.structural_payload
+    assert host_lineage_from_envelope(envelope) is None
+    batch = materialize_observation_envelope(
+        envelope, task_id="tsk_00000000-0000-4000-8000-000000000001"
+    )
+    assert batch.skip_reason == "missing_subagent_identity"
+    assert batch.drafts == ()
+
+
 def test_unsupported_release_is_refused_durably_without_cursor_loss(tmp_path: Path) -> None:
     raw = _fixture_bytes(_UNSUPPORTED_0152, "future")
     path = tmp_path / "session.jsonl"
