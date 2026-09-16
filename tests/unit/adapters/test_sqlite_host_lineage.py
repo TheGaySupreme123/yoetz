@@ -415,3 +415,84 @@ async def test_binding_preflight_validates_all_selectors_without_mutation() -> N
         )
     finally:
         db.close(force=True)
+
+
+async def test_bound_child_only_row_cannot_absorb_later_strong_call() -> None:
+    from types import SimpleNamespace
+    from typing import cast
+
+    from yoetz.application.observation_coordinator import ObservationCoordinator
+    from yoetz.cli.observe_hooks import map_hook_payload_to_envelope
+
+    db = apsw.Connection(":memory:")
+    _schema(db)
+    parent, child_a, child_b = _task(), _task(), _task()
+    db.executemany(
+        "INSERT INTO task_routes(task_id, parent_task_id) VALUES (?, ?)",
+        ((parent, None), (child_a, parent), (child_b, parent)),
+    )
+    registry = _registry(db, _Clock())
+    coordinator = cast(ObservationCoordinator, SimpleNamespace(host_lineage_registry=registry))
+    strong = _observation("SubagentStop", "worker", parent_tool_call_id="call-b")
+    envelope = map_hook_payload_to_envelope(
+        "SubagentStop",
+        {"subagent_id": "worker", "parent_tool_call_id": "call-b"},
+        session_commitment=_SESSION,
+        event_ordinal=1,
+        key_material=b"k" * 32,
+        source_generation=1,
+    )
+
+    async def advice_refs() -> tuple[tuple[str, str], ...]:
+        return await ObservationCoordinator._lineage_refs_for_advice(  # pyright: ignore[reportPrivateUsage]
+            coordinator, parent, (envelope,)
+        )
+
+    try:
+        weak = await registry.record_host_lineage_observation(
+            parent,
+            _observation("SubagentStart", "worker"),
+            observed_session_commitment=_SESSION,
+            source=ObservationSource.CODEX_HOOK,
+        )
+        await registry.bind_provisional_annotation(parent, weak.correlation_id, child_a)
+        assert await registry.find_host_lineage_observation(parent, strong) is None
+        assert await advice_refs() == ()
+        for validate_only in (True, False):
+            assert (
+                await registry.bind_host_lineage_identity(
+                    parent,
+                    child_b,
+                    host="codex",
+                    subagent_id="worker",
+                    parent_tool_call_id="call-b",
+                    validate_only=validate_only,
+                )
+                is None
+            )
+        later = await registry.record_host_lineage_observation(
+            parent,
+            strong,
+            observed_session_commitment=_SESSION,
+            source=ObservationSource.CODEX_HOOK,
+        )
+        assert later.correlation_id != weak.correlation_id
+        assert later.bound_child_task_id is None
+        assert await advice_refs() == ((envelope.source_identity, later.correlation_id),)
+        bound = await registry.bind_host_lineage_identity(
+            parent,
+            child_b,
+            host="codex",
+            subagent_id="worker",
+            parent_tool_call_id="call-b",
+        )
+        assert bound is not None and bound.bound_child_task_id == child_b
+        assert await advice_refs() == ((envelope.source_identity, child_b),)
+        # Neither recording nor binding the stronger pair rewrites the earlier attribution.
+        prior = await registry.bind_provisional_annotation(parent, weak.correlation_id, child_a)
+        assert prior.parent_tool_call_id is None
+        assert prior.bound_child_task_id == child_a
+        restarted = _registry(db, _Clock())
+        assert await restarted.find_host_lineage_observation(parent, strong) == bound
+    finally:
+        db.close(force=True)

@@ -5896,7 +5896,11 @@ async def test_successor_route_cache_preserves_concurrent_lifecycle_changes(
 
 
 @pytest.mark.anyio
-async def test_missing_subagent_identity_is_durable_without_annotation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("event_kind", ["SubagentStop", "PostToolUse"])
+async def test_missing_subagent_identity_is_durable_without_annotation(
+    tmp_path: Path,
+    event_kind: str,
+) -> None:
     from types import SimpleNamespace
 
     from builders.ledger_adapters import FixedClock
@@ -5924,7 +5928,22 @@ async def test_missing_subagent_identity_is_durable_without_annotation(tmp_path:
         async def record_host_lineage_observation(self, *args: object, **kwargs: object) -> None:
             raise AssertionError("missing identity must not create an annotation")
 
+    append_request_id = PREFIX_BY_KIND[IdKind.REQUEST] + str(uuid.uuid4())
+
     class Coordinator(ObservationCoordinator):
+        async def _append_materialized(self, *args: object, **kwargs: object) -> tuple[object, ...]:  # type: ignore[override]
+            batch = cast(MaterializedObservationBatch, args[2])
+            return (
+                append_request_id,
+                canonical_digest({"missing_identity_test": True}),
+                None,
+                MATERIALIZATION_MAPPING_VERSION,
+                tuple(item.role for item in batch.drafts),
+            )
+
+        async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            pass
+
         async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
             pass
 
@@ -5938,8 +5957,10 @@ async def test_missing_subagent_identity_is_durable_without_annotation(tmp_path:
         mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
     )
     envelope = replace(
-        _envelope(session=session, kind="SubagentStop", identity="hook:missing-subagent"),
-        structural_payload=JsonObject({}),
+        _envelope(session=session, kind=event_kind, identity="hook:missing-subagent"),
+        structural_payload=JsonObject(
+            {"lineage_child_task_id": mapping.yoetz_task_id} if event_kind == "PostToolUse" else {}
+        ),
     )
     try:
         for expected in (

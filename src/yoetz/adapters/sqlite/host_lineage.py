@@ -372,6 +372,10 @@ class SqliteHostLineageRegistry(HostLineageRegistryPort):
     def _compatible(row: tuple[object, ...], commitments: _Commitments) -> bool:
         if len(row) != 14 or row[3] != commitments.subagent_id:
             return False
+        if row[12] is not None and row[4] is None and commitments.parent_tool_call_id is not None:
+            # Binding fixes the child attribution. A later strong pair cannot prove that a
+            # bound child-only observation belonged to that call, even with the same worker.
+            return False
         for index, incoming in (
             (4, commitments.parent_tool_call_id),
             (5, commitments.parent_conversation_id),
@@ -424,7 +428,7 @@ class SqliteHostLineageRegistry(HostLineageRegistryPort):
             alias_kind="strong",
         )
         # A full pair wins over a child-only alias. This also resolves a partial first row that
-        # later receives its stronger parent-tool alias without changing its public correlation.
+        # later receives its stronger parent-tool alias before binding to a cooperative child.
         compatible = [row for row in candidate_rows if self._compatible(row, commitments)]
         if exact_rows:
             if len(exact_rows) > 1:

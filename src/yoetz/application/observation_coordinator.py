@@ -108,7 +108,11 @@ from yoetz.domain.findings import (
     FindingKind,
     FindingOrigin,
 )
-from yoetz.domain.host_lineage import host_lineage_from_envelope, host_lineage_from_payload
+from yoetz.domain.host_lineage import (
+    HostLineageObservation,
+    host_lineage_from_envelope,
+    host_lineage_from_payload,
+)
 from yoetz.domain.observation import (
     OBSERVATION_BACKPRESSURE_REASON,
     OBSERVATION_CONTENT_CAPTURE_PENDING_REASON,
@@ -576,6 +580,15 @@ class CaptureBudgetBootstrapHook(Protocol):
     def __call__(
         self, workspace: str, runtime: TaskRuntime, store: TaskObservationPort, /
     ) -> Awaitable[bool]: ...
+
+
+def _native_child_start_observation(envelope: ObservationEnvelope) -> HostLineageObservation | None:
+    fields = envelope.structural_payload
+    return host_lineage_from_payload(
+        "codex",
+        "SubagentStart",
+        {key: fields[key] for key in ("subagent_id", "parent_tool_call_id") if key in fields},
+    )
 
 
 def _reject(reason: str, cursor: object | None = None) -> ObservationIngestResult:
@@ -2032,6 +2045,14 @@ class ObservationCoordinator:
                     gaps.discard(missing_identity)
                     if host_lineage_from_envelope(request.envelope) is None:
                         gaps.add(missing_identity)
+                elif (
+                    request.envelope.source is ObservationSource.CODEX_HOOK
+                    and request.envelope.event_kind == "PostToolUse"
+                    and "lineage_child_task_id" in request.envelope.structural_payload
+                    and _native_child_start_observation(request.envelope) is None
+                ):
+                    # Retain the gap in the task ledger before the optional registry sidecar.
+                    gaps.add(ObservationGapCode.MISSING_SUBAGENT_IDENTITY.value)
                 envelope = replace(
                     request.envelope,
                     content_object_refs=tuple(
@@ -2792,11 +2813,7 @@ class ObservationCoordinator:
         lineage = await coordinator.catalog.task_lineage(runtime.task_id)
         if lineage is None or lineage.parent_task_id != parent:
             return HostLineageRegistryReason.IDENTITY_CONFLICT.value
-        observation = host_lineage_from_payload(
-            "codex",
-            "SubagentStart",
-            {key: fields[key] for key in ("subagent_id", "parent_tool_call_id") if key in fields},
-        )
+        observation = _native_child_start_observation(envelope)
         if observation is None:
             return ObservationGapCode.MISSING_SUBAGENT_IDENTITY.value
         # All task authority above comes from admitted mapping/catalog state; only the native
@@ -2823,6 +2840,9 @@ class ObservationCoordinator:
     ) -> None:
         """Persist one normalized host signal without promoting it to authorship."""
 
+        missing_identity = ObservationGapCode.MISSING_SUBAGENT_IDENTITY.value
+        if missing_identity in envelope.gap_codes:
+            await self._local(partial(self.local.note_coverage_gap, workspace, missing_identity))
         registry = self.host_lineage_registry
         if registry is None:
             return

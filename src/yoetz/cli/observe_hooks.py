@@ -687,13 +687,22 @@ def _extract_structural(
 
         child_start = cooperative_start_identity(payload)
         fields.update(child_start)
-        if (
-            child_start
-            and "parent_tool_call_id" in payload
-            and _token_or_none(payload.get("parent_tool_call_id")) is None
-        ):
-            # An explicitly malformed spawn identity must not weaken into child-only matching.
-            fields.pop("subagent_id", None)
+        if child_start:
+            # Attach-call aliases must agree with each other, but the parent spawn call is
+            # a different identity. An invalid supplied family cannot weaken to child-only.
+            for names in (("tool_use_id", "tool_call_id"), ("parent_tool_call_id",)):
+                call_id, _valid = _consistent_alias_token(payload, names)
+                values = [
+                    source[name]
+                    for source in (payload, tool_input)
+                    if isinstance(source, Mapping)
+                    for name in names
+                    if name in source
+                ]
+                if values and (
+                    call_id is None or any(_token_or_none(value) is None for value in values)
+                ):
+                    fields.pop("subagent_id", None)
     selected = classification or classify_observation(payload, event_name)
     if selected.routine_candidate and (
         event_name in {"PreToolUse", "preToolUse"} or selected.proven_routine_success

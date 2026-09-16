@@ -472,13 +472,20 @@ writer, and parent identities. The service validates those fields against the ad
 mapping and persisted lineage before binding the annotation. A callback that arrives before
 `SubagentStart` can establish the same correlation for the later lifecycle hook. Missing or
 conflicting identity cannot bind another child. The parent does not need to know an ID before the
-host spawns it, and the capability handle is not added to observation payloads.
+host spawns it, and the capability handle is not added to observation payloads. On `PostToolUse`,
+`tool_use_id` and `tool_call_id` identify the attach call and must agree when both are supplied;
+`parent_tool_call_id` independently identifies the spawn call and may differ. Any explicitly
+malformed call identity blocks binding and persists `missing_subagent_identity` in the task
+observation ledger, including when the registry sidecar is unavailable.
 
 Explicit cooperative correlation fields are validated before consuming the attach handle. A
 post-attach transient registry error remains recoverable with the exact request and consumed
 handle, including after expiry; a fresh request cannot reuse that capability. Subagent evidence
 under `obs-ledger/1.7.0` distinguishes different parent tool calls. Copies that omit the parent
-call may produce separate evidence, while the registry merges only unambiguous aliases. A new
+call may produce separate evidence, while the registry merges only unambiguous aliases. Once a
+child-only annotation is bound, a later strong parent-call pair creates a separate annotation:
+the shared child token does not prove the call belonged to that previously bound child. Strong
+cooperative selectors and advice lookups use the same boundary. A new
 observation does not reuse a historical child-only evidence key when the missing discriminator
 cannot prove equivalence. Missing or malformed child identity is retained as a durable
 `missing_subagent_identity` gap without also creating an annotation for that event.

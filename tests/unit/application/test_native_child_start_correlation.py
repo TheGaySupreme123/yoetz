@@ -89,15 +89,35 @@ async def test_bridge_rejects_response_identity_before_recording(wrong_field: st
         catalog.task_lineage.assert_not_awaited()
 
 
-@pytest.mark.parametrize("identity", ["missing", "conflicting", "invalid_parent"])
+@pytest.mark.parametrize(
+    "identity",
+    [
+        "missing",
+        "conflicting",
+        "invalid_parent",
+        "invalid_tool_use",
+        "invalid_tool_call",
+        "conflicting_calls",
+        "null_call",
+    ],
+)
 async def test_bridge_missing_native_identity_cannot_make_annotation(identity: str) -> None:
     payload, ids = _callback()
     if identity == "missing":
         payload.pop("subagent_id")
     elif identity == "conflicting":
         payload["agent_id"] = "another-worker"
-    else:
+    elif identity == "invalid_parent":
         payload["parent_tool_call_id"] = {"not": "a-token"}
+    elif identity == "conflicting_calls":
+        payload["tool_call_id"] = "another-attach-call"
+    elif identity == "null_call":
+        payload["tool_call_id"] = None
+    else:
+        payload.pop("parent_tool_call_id")
+        payload["tool_use_id" if identity == "invalid_tool_use" else "tool_call_id"] = {
+            "not": "a-token"
+        }
     registry = SimpleNamespace(record_host_lineage_observation=AsyncMock())
     catalog = SimpleNamespace(
         task_lineage=AsyncMock(return_value=SimpleNamespace(parent_task_id=ids["parent_task_id"]))
@@ -124,8 +144,14 @@ async def test_bridge_missing_native_identity_cannot_make_annotation(identity: s
     registry.record_host_lineage_observation.assert_not_awaited()
 
 
-async def test_bridge_uses_admitted_history_and_spawn_call_not_attach_call() -> None:
+@pytest.mark.parametrize("parent_call", ["spawn-call", None])
+async def test_bridge_uses_admitted_history_and_spawn_call_not_attach_call(
+    parent_call: str | None,
+) -> None:
     payload, ids = _callback()
+    payload["tool_call_id"] = "attach-call"
+    if parent_call is None:
+        payload.pop("parent_tool_call_id")
     registry = SimpleNamespace(
         record_host_lineage_observation=AsyncMock(
             return_value=SimpleNamespace(correlation_id="corr")
@@ -159,7 +185,7 @@ async def test_bridge_uses_admitted_history_and_spawn_call_not_attach_call() -> 
     call = registry.record_host_lineage_observation.await_args
     assert call is not None
     assert call.args[0] == ids["parent_task_id"]
-    assert call.args[1].correlation.parent_tool_call_id == "spawn-call"
+    assert call.args[1].correlation.parent_tool_call_id == parent_call
     registry.bind_provisional_annotation.assert_awaited_once_with(
         ids["parent_task_id"], "corr", ids["task_id"]
     )
