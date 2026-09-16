@@ -428,6 +428,11 @@ as active.
 
 ## Multitask delegation after an outage
 
+The #499 lifecycle repair applies to cooperative Cursor children: activity renews session health,
+abandonment is durably service-stamped, and an unused expired handle leaves an abandoned
+reservation. The #507 native start-callback correlation bridge is Codex-only and does not change
+Cursor's unsupported native-subagent decision or earn a capability cell.
+
 Cursor subagents inherit the parent's MCP tools, so delegated workers reach the same `yoetz`
 bridge process. The bridge latches the first availability failure of that binding
 (`service_unavailable`, `service_incompatible`, `protocol_mismatch`, `endpoint_unsafe`,

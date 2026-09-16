@@ -190,6 +190,15 @@ than implementation notes.
    parent gap. Only a new manifest and a qualifying recheck can clear a live-child gap in a later
    receipt; the old receipt remains immutable.
 
+   **Lifecycle repair clarification (2026-09-16, #499).** The service appends an authenticated
+   `work_abandoned` event before projecting abandonment into the catalog, with idempotent recovery
+   after interruption. Successful session activity clears an earlier contact-loss deadline while
+   preserving any terminal work outcome. An unconsumed delegation handle that expires ends the
+   child's open reservation as abandoned with reason `attach_handle_expired`; this does not invent
+   a lost session or claim that a host process stopped. The default recovery window after contact
+   loss remains 300 seconds. The original consumed-handle start operation remains replayable after
+   handle expiry, subject to cancellation and the existing request identity fences.
+
 4. **Parent rollup is one level and severity-dependent.** A parent receipt projects only direct
    children from the frozen manifest. Current actionable findings on accepted children block
    clean-completion wording; the receipt is still produced and names the child and finding.

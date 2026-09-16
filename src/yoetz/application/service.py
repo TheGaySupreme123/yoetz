@@ -8,6 +8,7 @@ import hmac
 import inspect
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from typing import Literal, Protocol, cast
 
 from pydantic import BaseModel
@@ -15,6 +16,7 @@ from pydantic import BaseModel
 from yoetz.application.coordination import CoordinationParticipant
 from yoetz.application.egress import PrivacyCoordinator
 from yoetz.application.lineage import LineageCoordinator, LineageSnapshot, LineageStatus
+from yoetz.application.lineage_recovery import append_abandonment, lineage_recovery_runtime
 from yoetz.application.observation_advice_semantic import ObservationAdviceSemanticSupervisor
 from yoetz.application.observation_verification import ObservationVerificationSupervisor
 from yoetz.application.projects import ProjectApplication
@@ -1040,14 +1042,17 @@ class Application:
         session_id: str | None,
         request: object,
     ) -> None:
-        """Renew one authenticated live-session lease for a mutating workflow call.
+        """Renew contact for an authenticated workflow request, including routed status reads.
 
-        Lease renewal is deliberately separate from status reads.  The start catalog remains the
-        durable authority for session health; the lineage snapshot is repaired only when this
-        application uses an in-memory lineage store, so a contact-lost session can recover on its
-        first authorized activity without making a read path mutate state.
+        The start catalog owns session leases; the lineage projection separately retains recovery
+        deadlines. Renew both under the recovery fence so a formerly lost session cannot carry a
+        stale abandonment deadline into its next contact-loss window.
         """
 
+        async with self._lineage_publish_lock:
+            await self._renew_activity_session_locked(session_id, request)
+
+    async def _renew_activity_session_locked(self, session_id: str | None, request: object) -> None:
         if type(session_id) is not str:
             return
         binding = await self.start_catalog.session_binding(session_id)
@@ -1074,6 +1079,8 @@ class Application:
         if snapshot is None or (
             snapshot.active_session_id == session_id
             and snapshot.session_health is SessionHealth.ACTIVE
+            and snapshot.contact_lost_at is None
+            and snapshot.abandonment_deadline is None
         ):
             return
         if snapshot.active_session_id not in {None, session_id}:
@@ -1152,6 +1159,10 @@ class Application:
         calls this method implicitly.
         """
 
+        async with self._start_lock, self._lineage_publish_lock:
+            return await self._recover_lineage_locked()
+
+    async def _recover_lineage_locked(self) -> tuple[tuple[object, ...], tuple[object, ...]]:
         if self.lineage is None:
             raise PublicOperationError(
                 PublicErrorCode.SERVICE_UNAVAILABLE,
@@ -1184,7 +1195,13 @@ class Application:
             except OSError, TimeoutError:
                 # Environmental bundle/key availability is likewise retryable at this boundary.
                 continue
-        abandoned = tuple(await self.lineage.recover_abandoned())
+
+        async def record_abandonment(
+            snapshot: LineageSnapshot, reason: str, deadline: datetime
+        ) -> None:
+            await append_abandonment(self, snapshot, reason, deadline)
+
+        abandoned = tuple(await self.lineage.recover_abandoned(record_abandonment))
         return tuple(operations), (*expired, *abandoned)
 
     async def reconcile_lineage_publications(self) -> tuple[int, int]:
@@ -1218,19 +1235,25 @@ class Application:
                 continue
             task_id = snapshot.task_id
             route = await cast(Callable[[str], Awaitable[TaskRoute | None]], task_route)(task_id)
-            if route is None or route.state is not TaskRouteState.ACTIVE:
+            if route is None or route.state is TaskRouteState.QUARANTINED:
                 continue
             try:
-                runtime = await self.runtime.route(
-                    RouteCommand(
-                        session_id=route.session_id,
-                        writer_id=None,
-                        access=RouteAccess.PAYLOAD_READ,
-                        required_capabilities=frozenset(
-                            {RuntimeCapability.STRUCTURAL_READ, RuntimeCapability.PAYLOAD_READ}
-                        ),
+                if route.state is TaskRouteState.INITIALIZING:
+                    # A completed, never-attached delegation has an inert bundle, not a public
+                    # route. Its service event still fences parent cancel/write-off after a
+                    # crash between the abandonment append and catalog projection.
+                    runtime = await lineage_recovery_runtime(self, task_id)
+                else:
+                    runtime = await self.runtime.route(
+                        RouteCommand(
+                            session_id=route.session_id,
+                            writer_id=None,
+                            access=RouteAccess.PAYLOAD_READ,
+                            required_capabilities=frozenset(
+                                {RuntimeCapability.STRUCTURAL_READ, RuntimeCapability.PAYLOAD_READ}
+                            ),
+                        )
                     )
-                )
             except PublicOperationError as exc:
                 # Another ready request may briefly own the bundle opener, or the generation may
                 # be closing.  Leave that route for the next bounded sweep; hard storage errors
@@ -1267,6 +1290,7 @@ class Application:
                                 WorkClosedPayload,
                                 WorkCancelledPayload,
                                 WorkWrittenOffPayload,
+                                WorkAbandonedPayload,
                             ),
                         ):
                             continue
@@ -1302,6 +1326,10 @@ class Application:
                         elif isinstance(payload, WorkCancelledPayload):
                             await lineage.reconcile_owned_work(
                                 task_id=task_id, target=WorkState.CANCELLED
+                            )
+                        elif isinstance(payload, WorkAbandonedPayload):
+                            await lineage.reconcile_owned_work(
+                                task_id=task_id, target=WorkState.ABANDONED
                             )
                         else:
                             await lineage.reconcile_owned_work(
@@ -1644,6 +1672,10 @@ class Application:
             # this service generation.  A retry after a post-append failure can then reapply the
             # same idempotent transition without a second concurrent writer changing its target.
             async with self._lineage_publish_lock:
+                # A service abandonment (or earlier public lifecycle append) can be durable
+                # while its catalog projection is still open after an interrupted save. Repair
+                # that evidence before admitting another terminal event on this or a child task.
+                await self.reconcile_lineage_publications()
                 await self._validate_lineage_publication(request, payloads)
                 result = await execute_publish_work(self, request)  # pyright: ignore[reportArgumentType]
                 # Dry-run is explicitly non-mutating.  A real accepted or replayed publication is

@@ -331,6 +331,9 @@ async def test_same_session_attach_retry_is_idempotent_after_handle_consumption(
             }
         )
         first = await service.app.start(attach, repository_privacy_context=_REPOSITORY)
+        # Expiry fences first consumption, but cannot strand an authenticated retry of the
+        # already committed session after a response or host-correlation failure.
+        service.clock.advance(seconds=301)
         second = await service.app.start(attach, repository_privacy_context=_REPOSITORY)
         assert (second.task_id, second.session_id, second.writer_id) == (
             first.task_id,

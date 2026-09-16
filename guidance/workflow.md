@@ -230,6 +230,12 @@ its assignment. The child calls `start mode=attach` with that handle and publish
 returned session and writer. The parent keeps its original binding. A timeout requires the exact
 same request and `request_id`; never create another child to recover a pending delegation.
 
+On a supported Codex observation path, the child's native successful start callback supplies the
+host identity after spawning; the parent need not guess a future subagent ID. The service binds
+that identity only after validating the child's returned binding and parent relationship. Missing
+host identity or observation coverage leaves an explicit gap or provisional annotation. Inspect
+lineage after handoff; a successful handle attach alone does not prove host correlation.
+
 A child without a handle may create a separate task with `parent_session_id`. This is
 `self_registered` and `pending`: knowing a parent session is not authority to add blocking work.
 The parent may publish `child_accepted` or `child_rejected`. Acceptance never changes origin;
@@ -249,6 +255,10 @@ documented recovery window; the service records abandonment only after it expire
 remains visible with a gap. `delegation_cancelled` revokes the Yoetz capability, not the host
 process. `child_written_off` and cancellation preserve an accepted dependency and its incomplete
 outcome. Publish these lifecycle transitions through `publish_work`, using the request templates.
+
+Successful child activity renews session health without reopening terminal work. A handle that
+expires before its first attach leaves an abandoned reservation, not an indefinitely open child.
+The original consumed-handle request may replay after expiry; a new request cannot reuse it.
 
 Parent checks use the latest dependency manifest recorded in the parent's ledger. Receipt creation
 does not refresh it. If a newer manifest was recorded after the check, recheck for an updated

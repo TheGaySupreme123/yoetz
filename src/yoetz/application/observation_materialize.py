@@ -96,16 +96,16 @@ __all__ = [
     "stream_event_is_completed_tool",
 ]
 
-# 1.6 scopes the canonical/action/result identities to the source lane and
-# source generation.  This prevents a reused host call id from aliasing a
-# different session while preserving Codex hook/stream equivalence inside one
-# generation.  The previous task-scoped mapping remains replayable below.
-MATERIALIZATION_MAPPING_VERSION: Final = "obs-ledger/1.6.0"
+# 1.7 preserves parent-call discriminators for host subagent evidence. Partial
+# copies reconcile through registry aliases, not a weaker global evidence key.
+# 1.6 and earlier remain available for explicit historical replay.
+MATERIALIZATION_MAPPING_VERSION: Final = "obs-ledger/1.7.0"
 MATERIALIZATION_LEGACY_MAPPING_VERSIONS: Final = (
     "obs-ledger/1.4.0",
     "obs-ledger/1.3.0",
     "obs-ledger/1.2.0",
     "obs-ledger/1.5.0",
+    "obs-ledger/1.6.0",
 )
 # Mapping versions whose operation digest was bound to the routed Yoetz session
 # and its observation writer. A workflow reattach in the same host session
@@ -760,7 +760,7 @@ def materialize_observation_envelope(
     """Map one envelope to zero or more ledger drafts.
 
     ``mapping_version`` is the materialization schema, never the source cursor
-    version. New calls use the current ``obs-ledger/1.6.0`` default; a caller
+    version. New calls use the current ``obs-ledger/1.7.0`` default; a caller
     replaying an already committed historical operation may explicitly select
     one of the supported legacy versions.
 
@@ -815,6 +815,10 @@ def materialize_observation_envelope(
         gap
         for gap in envelope.gap_codes
         if not (gap == ObservationGapCode.UNPAIRED_EVENT.value and pairing_mode == "post_only")
+        and not (
+            gap == ObservationGapCode.MISSING_SUBAGENT_IDENTITY.value
+            and host_lineage_from_envelope(envelope) is not None
+        )
     )
     materialized_envelope = (
         envelope
@@ -1150,10 +1154,16 @@ def materialize_observation_envelope(
         # second annotation.
         lineage = host_lineage_from_envelope(envelope)
         if lineage is None:
-            return MaterializedObservationBatch(
-                (), coverage, channel, gaps, "missing_subagent_identity"
-            )
-        lineage_source = f"{lineage.logical_identity}:{lineage.phase}"
+            missing = ObservationGapCode.MISSING_SUBAGENT_IDENTITY.value
+            gaps = tuple(sorted({*gaps, missing}, key=str.encode))
+            coverage = _coverage_for(materialized_envelope, gaps=gaps)
+            return MaterializedObservationBatch((), coverage, channel, gaps, missing)
+        lineage_identity = (
+            lineage.logical_identity
+            if mapping == MATERIALIZATION_MAPPING_VERSION
+            else lineage.correlation.legacy_logical_identity
+        )
+        lineage_source = f"{lineage_identity}:{lineage.phase}"
         evidence = stable_observation_id(
             kind=IdKind.EVIDENCE,
             task_id=task_id,
@@ -1179,10 +1189,10 @@ def materialize_observation_envelope(
                     EvidenceKind.OTHER,
                     EvidenceImmutability.METADATA_ONLY,
                     envelope.receipt_time,
-                    reference=f"host-lineage:{lineage.logical_identity}",
+                    reference=f"host-lineage:{lineage_identity}",
                     description=(
                         f"Observed host subagent {phase}; origin=host_observed; "
-                        f"acceptance=pending; correlation={lineage.logical_identity}"
+                        f"acceptance=pending; correlation={lineage_identity}"
                     ),
                 ),
                 role="subagent",
@@ -1492,13 +1502,18 @@ def canonical_logical_identity(
 
     if type(envelope) is not ObservationEnvelope:
         return _logical_identity_digest(("opaque", "invalid"))
-    if mapping_version in set(MATERIALIZATION_LEGACY_MAPPING_VERSIONS):
+    if mapping_version in set(MATERIALIZATION_LEGACY_MAPPING_VERSIONS) - {"obs-ledger/1.6.0"}:
         return _legacy_logical_identity(envelope)
     lineage = host_lineage_from_envelope(envelope)
     if lineage is not None:
         # Hook and session-stream copies of one host subagent signal share a source-stable
         # identity. Keep the phase in the key so start and stop remain distinct.
-        return _logical_identity_digest(("subagent", lineage.logical_identity, lineage.phase))
+        identity = (
+            lineage.correlation.legacy_logical_identity
+            if mapping_version == "obs-ledger/1.6.0"
+            else lineage.logical_identity
+        )
+        return _logical_identity_digest(("subagent", identity, lineage.phase))
     structural = cast(Mapping[str, JsonValue], envelope.structural_payload)
     _pairing_mode, correlation_kind = _pairing_contract(envelope, structural)
     host_call = _correlation(structural, correlation_kind=correlation_kind)

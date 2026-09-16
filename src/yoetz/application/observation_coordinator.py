@@ -108,7 +108,7 @@ from yoetz.domain.findings import (
     FindingKind,
     FindingOrigin,
 )
-from yoetz.domain.host_lineage import host_lineage_from_envelope
+from yoetz.domain.host_lineage import host_lineage_from_envelope, host_lineage_from_payload
 from yoetz.domain.observation import (
     OBSERVATION_BACKPRESSURE_REASON,
     OBSERVATION_CONTENT_CAPTURE_PENDING_REASON,
@@ -656,6 +656,8 @@ class ObservationCoordinator:
     # Host observations are recorded in the service-owned catalog after local ingest accepts the
     # envelope. The registry is optional for pre-migration/test compositions.
     host_lineage_registry: HostLineageRegistryPort | None = None
+    observed_activity_hook: Callable[[str, str, str], Awaitable[None]] | None = None
+    observed_activity_max_age_seconds: int = 60
     _advice_event_ref_cache: dict[tuple[str, str], tuple[str, ...]] = field(
         default_factory=_empty_advice_event_ref_cache, init=False, repr=False
     )
@@ -1775,6 +1777,9 @@ class ObservationCoordinator:
             runtime: TaskRuntime | None = None
             store: TaskObservationPort | None = None
             route_history: list[LifecycleMapping] = []
+            completed_ingest: (
+                tuple[TaskRuntime, ObservationEnvelope, ObservationIngestResult] | None
+            ) = None
             stage = "runtime_route"
             try:
                 runtime, mapping = await self._route_observation_mapping(
@@ -2015,6 +2020,18 @@ class ObservationCoordinator:
                 if capture_budget_exhausted:
                     gaps.add(ObservationGapCode.CAPTURE_BUDGET_EXHAUSTED.value)
                     gaps.add(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
+                if request.envelope.event_kind in {
+                    "SubagentStart",
+                    "subagent_start",
+                    "subagentStart",
+                    "SubagentStop",
+                    "subagent_stop",
+                    "subagentStop",
+                }:
+                    missing_identity = ObservationGapCode.MISSING_SUBAGENT_IDENTITY.value
+                    gaps.discard(missing_identity)
+                    if host_lineage_from_envelope(request.envelope) is None:
+                        gaps.add(missing_identity)
                 envelope = replace(
                     request.envelope,
                     content_object_refs=tuple(
@@ -2048,7 +2065,9 @@ class ObservationCoordinator:
                 # restart or a prior partial failure can repair a missing annotation before
                 # reporting success.
                 stage = "host_lineage"
-                await self._record_host_lineage(runtime, workspace, envelope)
+                await self._record_host_lineage(
+                    runtime, workspace, envelope, writer_routes=legacy_writer_routes
+                )
 
                 # ACCEPTED and DUPLICATE both reconcile the durable ledger before
                 # reporting success. A DUPLICATE is never an early return: the
@@ -2061,6 +2080,16 @@ class ObservationCoordinator:
                     task_id=runtime.task_id,
                     captured_content=captured_content,
                 )
+                if batch.skip_reason == ObservationGapCode.MISSING_SUBAGENT_IDENTITY.value:
+                    # Persist this permanent loss even though no ledger evidence or annotation
+                    # can safely be attributed. DUPLICATE retries repair an interrupted write.
+                    await self._local(
+                        partial(
+                            self.local.note_coverage_gap,
+                            workspace,
+                            ObservationGapCode.MISSING_SUBAGENT_IDENTITY.value,
+                        )
+                    )
                 if batch.skip_reason is None and batch.drafts:
                     replay_role_sets: list[tuple[str, ...]] = []
                     # The inverse lost-order case is contentless first, then an
@@ -2434,8 +2463,6 @@ class ObservationCoordinator:
                     legacy_writer_id=predecessor_writer_id,
                     session_commitment=envelope.session_commitment,
                 )
-                stage = "lineage"
-                await self._sweep_lineage(runtime)
                 if staged_ticket is not None:
                     # The ledger/materialization path above has completed. A
                     # retry ticket is no longer needed, and deleting it now
@@ -2445,7 +2472,7 @@ class ObservationCoordinator:
                     await self._retire_capture_ticket(
                         workspace, runtime, store, staged_ticket, delete=True
                     )
-                return result
+                completed_ingest = (runtime, envelope, result)
             except PublicOperationError as exc:
                 if exc.retryable and exc.code in {
                     PublicErrorCode.OPERATION_PENDING,
@@ -2524,6 +2551,26 @@ class ObservationCoordinator:
                     with_context = getattr(self.runtime, "release", None)
                     if with_context is not None:
                         await with_context(runtime)
+            completed_runtime, completed_envelope, completed_result = completed_ingest
+            try:
+                # Never wait for the lineage mutation lock while retaining a runtime lease:
+                # attach holds that lock while it waits to rebind the same runtime.
+                await self._renew_observed_activity(
+                    completed_runtime,
+                    completed_envelope,
+                    disposition=completed_result.disposition,
+                    predecessor_session_id=predecessor_session_id,
+                    predecessor_writer_id=predecessor_writer_id,
+                )
+                await self._sweep_lineage(completed_runtime.task_id)
+            except Exception as exc:
+                record_unexpected_exception_without_raising(
+                    exc,
+                    component="application.observation_coordinator",
+                    operation="observation_ingest_lineage_failed",
+                )
+                return _reject(ObservationGapCode.SERVICE_UNAVAILABLE.value)
+            return completed_result
 
     async def ingest(self, envelope: ObservationEnvelope) -> ObservationIngestResult:
         """ObservationPort-shaped ingest without Codex session id → reject closed."""
@@ -2641,15 +2688,50 @@ class ObservationCoordinator:
             )
         return store
 
-    async def _sweep_lineage(self, runtime: TaskRuntime) -> None:
+    async def _renew_observed_activity(
+        self,
+        runtime: TaskRuntime,
+        envelope: ObservationEnvelope,
+        *,
+        disposition: ObservationIngestDisposition,
+        predecessor_session_id: str,
+        predecessor_writer_id: str,
+    ) -> None:
+        """Fresh native activity renews only its unchanged, currently admitted session."""
+
+        hook = self.observed_activity_hook
+        if (
+            hook is None
+            or disposition is not ObservationIngestDisposition.ACCEPTED
+            or envelope.source
+            not in {
+                ObservationSource.CODEX_HOOK,
+                ObservationSource.CLAUDE_HOOK,
+                ObservationSource.CURSOR_HOOK,
+            }
+            or envelope.event_kind in {"SessionEnd", "Stop", "SubagentStop"}
+            or runtime.session_id != predecessor_session_id
+            or runtime.writer_id
+            not in {
+                predecessor_writer_id,
+                observation_writer_id(runtime.task_id, predecessor_session_id),
+            }
+        ):
+            return
+        age = (self.clock.now_utc() - envelope.receipt_time.as_datetime()).total_seconds()
+        if not 0 <= age <= self.observed_activity_max_age_seconds:
+            return
+        await hook(runtime.task_id, predecessor_session_id, predecessor_writer_id)
+
+    async def _sweep_lineage(self, task_id: str) -> None:
         """Reconcile the task and its parent after observation materialization."""
 
         coordinator = self.lineage_coordinator
         if coordinator is None:
             return
         try:
-            await coordinator.sweep(runtime)
-            await coordinator.sweep_parent_of(runtime.task_id)
+            await coordinator.sweep_task(task_id)
+            await coordinator.sweep_parent_of(task_id)
         except Exception as exc:
             # Lineage is an advisory/reconciliation sidecar. The observation ledger remains
             # authoritative, so preserve the accepted observation and expose the failed sweep
@@ -2660,21 +2742,93 @@ class ObservationCoordinator:
                 operation="lineage_manifest_sweep_failed",
             )
 
+    async def _bind_native_child_start(
+        self,
+        runtime: TaskRuntime,
+        envelope: ObservationEnvelope,
+        *,
+        writer_routes: tuple[tuple[str, str], ...],
+    ) -> str | None:
+        """Join a native callback to its already admitted cooperative child route.
+
+        Result IDs cannot select a task. Only the mapped runtime is consulted, and its catalog
+        parent must match before any annotation is created. Recording the callback's native
+        identity first also makes later SubagentStart/Stop delivery order independent.
+        """
+
+        fields = envelope.structural_payload
+        if (
+            envelope.source is not ObservationSource.CODEX_HOOK
+            or envelope.event_kind != "PostToolUse"
+            or "lineage_child_task_id" not in fields
+        ):
+            return None
+        registry = self.host_lineage_registry
+        coordinator = self.lineage_coordinator
+        if registry is None or coordinator is None:
+            return HostLineageRegistryReason.IDENTITY_CONFLICT.value
+        child = fields.get("lineage_child_task_id")
+        session = fields.get("lineage_child_session_id")
+        writer = fields.get("lineage_child_writer_id")
+        parent = fields.get("lineage_parent_task_id")
+        admitted = set(writer_routes)
+        if runtime.writer_id is not None:
+            admitted.add((runtime.session_id, runtime.writer_id))
+        if (
+            child != runtime.task_id
+            or type(session) is not str
+            or type(writer) is not str
+            or (session, writer) not in admitted
+            or type(parent) is not str
+            or not is_valid_id(IdKind.TASK, parent)
+        ):
+            return HostLineageRegistryReason.IDENTITY_CONFLICT.value
+        lineage = await coordinator.catalog.task_lineage(runtime.task_id)
+        if lineage is None or lineage.parent_task_id != parent:
+            return HostLineageRegistryReason.IDENTITY_CONFLICT.value
+        observation = host_lineage_from_payload(
+            "codex",
+            "SubagentStart",
+            {key: fields[key] for key in ("subagent_id", "parent_tool_call_id") if key in fields},
+        )
+        if observation is None:
+            return ObservationGapCode.MISSING_SUBAGENT_IDENTITY.value
+        # All task authority above comes from admitted mapping/catalog state; only the native
+        # host correlation is supplied by the callback. The registry repeats parent ownership
+        # validation when binding, and both writes are replayable after a partial failure.
+        annotation = await registry.record_host_lineage_observation(
+            parent,
+            observation,
+            observed_session_commitment=envelope.session_commitment,
+            source=envelope.source,
+        )
+        await registry.bind_provisional_annotation(
+            parent, annotation.correlation_id, runtime.task_id
+        )
+        return None
+
     async def _record_host_lineage(
         self,
         runtime: TaskRuntime,
         workspace: str,
         envelope: ObservationEnvelope,
+        *,
+        writer_routes: tuple[tuple[str, str], ...] = (),
     ) -> None:
         """Persist one normalized host signal without promoting it to authorship."""
 
         registry = self.host_lineage_registry
         if registry is None:
             return
-        observation = host_lineage_from_envelope(envelope)
-        if observation is None:
-            return
         try:
+            gap = await self._bind_native_child_start(
+                runtime, envelope, writer_routes=writer_routes
+            )
+            if gap is not None:
+                await self._local(partial(self.local.note_coverage_gap, workspace, gap))
+            observation = host_lineage_from_envelope(envelope)
+            if observation is None:
+                return
             await registry.record_host_lineage_observation(
                 runtime.task_id,
                 observation,
@@ -2685,6 +2839,8 @@ class ObservationCoordinator:
             if exc.reason in {
                 HostLineageRegistryReason.ANNOTATION_AMBIGUOUS,
                 HostLineageRegistryReason.IDENTITY_CONFLICT,
+                HostLineageRegistryReason.BINDING_CONFLICT,
+                HostLineageRegistryReason.CHILD_NOT_FOUND,
             }:
                 # The event remains durable, but its host attribution is incomplete until a
                 # stronger alias can disambiguate it.
@@ -2865,7 +3021,15 @@ class ObservationCoordinator:
             route = (legacy_session_id or runtime.session_id, legacy_writer_id)
             if route not in writer_routes:
                 writer_routes.append(route)
+        lineage = host_lineage_from_envelope(envelope)
+        stronger_subagent_identity = (
+            lineage is not None and lineage.correlation.parent_tool_call_id is not None
+        )
         for (claim_digest, claim_operation_id, claim_mapping_version), claim_roles in replay_claims:
+            if stronger_subagent_identity and claim_mapping_version == "obs-ledger/1.6.0":
+                # That historical mapping omitted the parent call. Its operation cannot
+                # prove this stronger event belongs to the same invocation.
+                continue
             if self._stable_operation_id(claim_digest) != claim_operation_id:
                 raise PublicOperationError(
                     PublicErrorCode.STORAGE_CORRUPT,
@@ -2932,6 +3096,8 @@ class ObservationCoordinator:
         # identity shape; search it through the same task-wide lookup with the
         # legacy identity before staging so pre-1.6 rows remain replayable.
         for mapping_version in MATERIALIZATION_LEGACY_MAPPING_VERSIONS:
+            if stronger_subagent_identity and mapping_version == "obs-ledger/1.6.0":
+                continue
             legacy_identities = (
                 logical_identity,
                 canonical_logical_identity(envelope, mapping_version=mapping_version),

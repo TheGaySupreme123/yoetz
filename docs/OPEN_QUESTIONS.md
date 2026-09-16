@@ -159,6 +159,11 @@ affected claim, and for the first non-alpha release regardless.
 
 ### 0.2 re-dispositions — 2026-09-05
 
+The 2026-09-16 source-only #499/#507 repair adds durable lifecycle events and a validated Codex
+child-start correlation bridge. It does not change E-013 or any capability cell. Isolated source
+fixtures are separate from the still-required fresh installed native run and independent semantic
+review; see [Codex integration](runbooks/codex-integration.md#subagent-correlation-507).
+
 - **E-013 — Narrowed (was "not applicable" for v0.1.0; that row stays above as history).** What
   ships in 0.2: hook observation ingress exists for all three first-party hosts. The Codex plugin
   renders `PreToolUse`/`PostToolUse`/`PermissionRequest` hooks

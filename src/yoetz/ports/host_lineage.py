@@ -237,6 +237,7 @@ class HostLineageRegistryPort(Protocol):
         subagent_id: str | None = None,
         parent_tool_call_id: str | None = None,
         correlation_id: str | None = None,
+        validate_only: bool = False,
     ) -> HostLineageAnnotation | None: ...
 
 

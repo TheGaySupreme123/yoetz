@@ -1834,6 +1834,22 @@ without a host end event, and `ended` only for a host end event or explicit end.
 event never establishes permanent liveness. A live task is work `open` with at least one active
 session.
 
+Successful routed activity renews session health and clears any previous contact-loss deadline;
+it does not reopen terminal work. After lease loss, work remains open for
+`lineage.contact_lost_recovery_seconds` (default 300 seconds). Expiry appends one authenticated,
+service-stamped `work_abandoned` event to the child ledger before updating the catalog. Recovery
+replays that event idempotently after interruption. A parent-minted child whose handle expires
+without any attach is abandoned with reason `attach_handle_expired`; its session health stays
+`ended`, since no attached session lost contact. Cancellation and write-off preserve the accepted
+edge. Evidence arriving after abandonment stays in the ledger and retains the incomplete outcome.
+An already consumed handle can replay its original start operation after the handle expiry;
+another request cannot reuse it, and revocation still fences replay.
+
+Admitted native hook activity also renews its current task session when first accepted within
+60 seconds of its receipt timestamp. Duplicate delivery, session-stream history, stale or future
+timestamps, predecessor routes, and terminal host events do not renew a lease. The catalog binding
+is revalidated before renewal; an ended session is not revived by observation replay.
+
 **Origin, acceptance, and creation.** `origin` is immutable: `parent_minted | self_registered |
 host_observed`. Acceptance is parent-controlled: `pending → accepted` or `pending → rejected`,
 and accepted relationships cannot later be rejected. `mode=delegate` creates `parent_minted` plus
@@ -1868,6 +1884,27 @@ observation within its installation, parent task, and host. It returns the persi
 refuses conflicting or ambiguous aliases, and never updates observation timestamps or session
 ownership. Observation advice uses its bound child task ID, or its keyed correlation ID, alongside
 the original envelope reference. Rebuilding advice cannot manufacture lineage or refresh children.
+
+Explicit cooperative correlation selectors receive read-only registry validation before a child
+attach consumes its handle. Contradictory or ambiguous selectors return a typed refusal without
+rotating the child route. A transient final binding failure can replay the same durable start
+operation and consumed handle; it never creates another child. A supplied parent-call selector
+without the child identity needed to verify its commitment is refused.
+
+Codex's admitted successful native child-start callback may bridge handle-only attachment to the
+host annotation. It carries bounded child task/session/writer and parent task IDs; the service
+checks them against the mapped child route and persisted parent relation before binding the native
+subagent identity. This can record the correlation before the separate lifecycle hook arrives;
+later hooks reconcile through the same aliases. It never mints a task or redirects parent advice.
+Missing or contradictory identities remain coverage gaps. The observation mapping revision
+`obs-ledger/1.7.0` includes an available parent tool-call discriminator in materialized subagent
+identity. Incomplete hook/stream copies can retain separate evidence while the registry reconciles
+one unambiguous annotation; two distinct parent calls must not collapse into one evidence event.
+Historical mapping revisions keep their existing identity semantics. New subagent observations
+do not implicitly reuse an old child-only operation whose missing parent-call discriminator
+cannot prove equivalence; retained historical evidence is not rewritten.
+The callback fields are additive in control `2.8.0`; frozen control `2.7.0` and earlier retain
+their original shapes and reject those fields.
 
 **Project birth and coordination.** With `projects.auto_grouping` enabled, the second concurrent
 live task in one repository materializes an implicit repository project. When disabled, the task
@@ -1930,12 +1967,14 @@ measurement: it predates the current-main guidance and descriptor text carried b
 The current 0.3 descriptors advertise `start-request/1.1.0`, `publish-work-request/1.2.0`,
 `check-request/1.1.0`, and `status-request/1.2.0`, including separate child attach,
 self-registration, lifecycle, and coordination declaration and disposition examples. The current
-packaged measurement is 215,519 bytes (policy) and 215,773 bytes (strict), comprising 18,714/18,738
+packaged measurement after #499/#507 is 219,369 bytes (policy) and 219,623 bytes (strict), comprising 19,264/19,288
 bytes of initialize instructions, 12,958/13,044 bytes of tool descriptions, and 71,563 bytes of
 advertised input schemas. The reviewed aggregate ceiling is 220,000 bytes; the policy route's
-longest 1,000-byte destination disclosure measures 222,526 bytes and the derived disclosure ceiling
+longest 1,000-byte destination disclosure measures 226,376 bytes and the derived disclosure ceiling
 is 227,000 bytes. Public lifecycle families are advertised; service-stamped delegation declarations
 and child manifests remain excluded from ordinary publication.
+The #499/#507 guidance consumes 3,850 aggregate bytes over the integrated 215,519/215,773-byte
+baseline; no MCP tool or advertised input-schema field is added by this repair.
 
 ### Immutable objects and keys
 

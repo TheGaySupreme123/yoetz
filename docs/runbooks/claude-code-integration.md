@@ -392,6 +392,12 @@ them.
 
 ### Task-tool subagents and attribution (#506)
 
+The #499 lifecycle repair applies to cooperative Claude children: successful routed activity
+renews session health, abandonment is a service-stamped ledger event, and an unused expired handle
+leaves an abandoned reservation. The #507 native start-callback correlation bridge is Codex-only;
+it does not establish new Claude host support. Existing Claude cooperative identity and native
+evidence boundaries below remain in force.
+
 The exact pinned capability cell remains `claude-code-cli-local-project-2.1.241`. The earlier
 installed Claude Code `2.1.261` fixture proves native child-hook delivery in an evidence-only
 plugin. The latest installed binary reported `2.1.263`; it was exercised in a fresh isolated

@@ -766,6 +766,35 @@ def _mapping_state_before_start(
         return load_mapping(codex_session_id, _state=_state), True
 
 
+def cooperative_start_identity(payload: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    """Extract only service-returned child lineage facts from an owned start callback.
+
+    These are correlation candidates, never routing authority. The observation service must
+    compare them with its already admitted child route and persisted parent relationship.
+    """
+
+    if payload.get("tool_name") not in YOETZ_START_TOOL_NAMES:
+        return {}
+    result = _extract_start_result(payload.get("tool_response"))
+    if result is None or result.get("ok") is not True or result.get("outcome") == "delegated":
+        return {}
+    fields: dict[str, JsonValue] = {}
+    for name, kind in (
+        ("task_id", IdKind.TASK),
+        ("session_id", IdKind.SESSION),
+        ("writer_id", IdKind.WRITER),
+        ("parent_task_id", IdKind.TASK),
+    ):
+        value = result.get(name)
+        if type(value) is not str or not is_valid_id(kind, value):
+            return {}
+        target = "lineage_parent_task_id" if name == "parent_task_id" else "lineage_child_" + name
+        fields[target] = value
+    if fields["lineage_child_task_id"] == fields["lineage_parent_task_id"]:
+        return {}
+    return fields
+
+
 def bind_start_mapping_outcome(
     payload: Mapping[str, JsonValue],
     *,

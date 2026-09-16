@@ -1211,3 +1211,156 @@ async def test_attached_child_can_continue_after_parent_work_closes(
         )
         assert isinstance(child_action, PublishWorkInternalResult)
         assert child_action.task_id == attached.task_id
+
+
+@pytest.mark.parametrize("observed_first", [False, True])
+async def test_native_handle_attach_correlates_without_declared_host_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, observed_first: bool
+) -> None:
+    """The blessed handle-only flow merges its native callback in either arrival order."""
+
+    workspace = _workspace(tmp_path / "workspace")
+    async with multi_agent_service(tmp_path / "state") as service:
+        app = service.app
+        monkeypatch.setenv("YOETZ_ISOLATED_ROOT", str(service.root))
+        parent = await app.start(
+            StartRequest.model_validate(
+                {
+                    **_identity(),
+                    "mode": "create",
+                    "task_title": "Bridge parent",
+                    "workspace_ref": str(workspace),
+                    "external_ref": "bridge-parent",
+                    "requested_view": "compact",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        host_session = "native-shared-bridge-session"
+        state = service.root / "state"
+        assert (
+            bind_start_mapping_outcome(
+                {
+                    "session_id": host_session,
+                    "tool_name": "mcp__yoetz__start",
+                    "tool_response": {"structuredContent": parent.as_wire()},
+                },
+                _state=state,
+            )
+            == "bound"
+        )
+        local = LocalObservationStore(_state=state)
+        workspace_commitment = local.workspace_commitment(str(workspace))
+        local.grant_consent(workspace_commitment)
+        from yoetz.domain.values import timestamp_from_datetime
+
+        monkeypatch.setattr(
+            "yoetz.cli.observe_hooks._now", lambda: timestamp_from_datetime(service.clock.now_utc())
+        )
+
+        async def ingest_hook(payload: Mapping[str, object]) -> ObservationIngestRequest:
+            assert (
+                handle_observe(
+                    event_name=None,
+                    stdin_bytes=json.dumps(payload).encode(),
+                    stdout=io.BytesIO(),
+                    workspace=str(workspace),
+                    _state=state,
+                    skip_service=True,
+                )
+                == 0
+            )
+            rows = local.list_pending_outbox_rows(workspace_commitment)
+            assert len(rows) == 1
+            row = rows[0]
+            result = observation_ingest_result_from_json(
+                await app.observation_ingest(
+                    observation_ingest_request_to_json(
+                        ObservationIngestRequest(
+                            codex_session_id=row.codex_session_id,
+                            envelope=row.envelope,
+                        )
+                    )
+                )
+            )
+            assert result.disposition.value == "accepted", result
+            assert local.acknowledge_outbox_row(workspace_commitment, row)
+            return ObservationIngestRequest(
+                codex_session_id=row.codex_session_id, envelope=row.envelope
+            )
+
+        observed = {
+            "hook_event_name": "SubagentStart",
+            "session_id": host_session,
+            "subagent_id": "native-worker",
+            "parent_tool_call_id": "spawn-call",
+        }
+        if observed_first:
+            await ingest_hook(observed)
+        delegated = await app.start(
+            StartRequest.model_validate(
+                {
+                    **_identity(),
+                    "mode": "delegate",
+                    "task_title": "Bridge child",
+                    "session_id": parent.session_id,
+                    "requested_view": "compact",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        attached = await app.start(
+            StartRequest.model_validate(
+                {
+                    **_identity(),
+                    "mode": "attach",
+                    "task_title": "Bridge child",
+                    "attach_handle": delegated.as_wire()["attach_handle"],
+                    "requested_view": "compact",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        callback = {
+            "hook_event_name": "PostToolUse",
+            "session_id": host_session,
+            "subagent_id": "native-worker",
+            "parent_tool_call_id": "spawn-call",
+            "tool_use_id": "attach-call",
+            "tool_name": "mcp__yoetz__start",
+            "tool_response": {"structuredContent": attached.as_wire()},
+        }
+        assert bind_start_mapping_outcome(callback, _state=state) == "bound"
+        before_activity = await app.start_catalog.task_session_state(attached.session_id)
+        assert before_activity is not None
+        service.clock.advance(seconds=30)
+        callback_request = await ingest_hook(callback)
+        after_activity = await app.start_catalog.task_session_state(attached.session_id)
+        assert after_activity is not None
+        assert after_activity.lease_expires_at is not None
+        assert before_activity.lease_expires_at is not None
+        assert after_activity.lease_expires_at > before_activity.lease_expires_at
+        service.clock.advance(seconds=10)
+        replay = observation_ingest_result_from_json(
+            await app.observation_ingest(observation_ingest_request_to_json(callback_request))
+        )
+        assert replay.disposition.value == "duplicate"
+        after_replay = await app.start_catalog.task_session_state(attached.session_id)
+        assert after_replay is not None
+        assert after_replay.lease_expires_at == after_activity.lease_expires_at
+        parent_mapping = load_mapping(host_session, _state=state)
+        assert parent_mapping is not None and parent_mapping.yoetz_task_id == parent.task_id
+        if not observed_first:
+            await ingest_hook(observed)
+        await ingest_hook({**observed, "hook_event_name": "SubagentStop"})
+        registry = app.host_lineage_registry
+        assert registry is not None
+        assert await registry.list_provisional_annotations(parent.task_id) == ()
+        from yoetz.domain.host_lineage import host_lineage_from_payload
+
+        signal = host_lineage_from_payload("codex", "SubagentStop", observed)
+        assert signal is not None
+        annotation = await registry.find_host_lineage_observation(parent.task_id, signal)
+        assert annotation is not None and annotation.bound_child_task_id == attached.task_id
+        assert annotation.observed_phases == ("start", "stop")
+        assert await app.start_catalog.list_child_task_ids(parent.task_id) == (attached.task_id,)

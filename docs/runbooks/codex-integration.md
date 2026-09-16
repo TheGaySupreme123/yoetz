@@ -462,11 +462,40 @@ callback naming an unbound child also produce a gap; they cannot enqueue parent 
 parent advice and frontier notices. Pending lifecycle writes and existing alias ownership are
 checked before publishing a child route. A contended write leaves a durable retry for that single
 route; replay cannot change its task owner. `SubagentStart` and
-`SubagentStop` remain parent lineage signals. These local routes neither mint cooperative children
-nor supply missing registry correlation, and they are excluded from parent session recovery and
+`SubagentStop` remain parent lineage signals. Local routes by themselves do not mint cooperative
+children or establish registry correlation, and they are excluded from parent session recovery and
 parent stream reconciliation.
 
-The isolated native cell below proves the parent-minted path for the reviewed legacy
+The #507 source repair adds a Codex bridge for the blessed handle-only flow. A native successful
+child `start` callback carries its host subagent identity and bounded returned task, session,
+writer, and parent identities. The service validates those fields against the admitted child
+mapping and persisted lineage before binding the annotation. A callback that arrives before
+`SubagentStart` can establish the same correlation for the later lifecycle hook. Missing or
+conflicting identity cannot bind another child. The parent does not need to know an ID before the
+host spawns it, and the capability handle is not added to observation payloads.
+
+Explicit cooperative correlation fields are validated before consuming the attach handle. A
+post-attach transient registry error remains recoverable with the exact request and consumed
+handle, including after expiry; a fresh request cannot reuse that capability. Subagent evidence
+under `obs-ledger/1.7.0` distinguishes different parent tool calls. Copies that omit the parent
+call may produce separate evidence, while the registry merges only unambiguous aliases. A new
+observation does not reuse a historical child-only evidence key when the missing discriminator
+cannot prove equivalence. Missing or malformed child identity is retained as a durable
+`missing_subagent_identity` gap without also creating an annotation for that event.
+
+**2026-09-16 source-only repair boundary (#499/#507):** isolated source fixtures cover the
+lifecycle and correlation changes above. No native Codex process, Yoetz workflow, live receipt,
+or cooperative-child proof was produced during this repair phase. Fresh installed native
+validation with the corrected candidate and the requested independent semantic review remains
+required. E-013 and host capability cells are unchanged. The historical native records below
+retain their original limits.
+
+Fresh accepted native activity on the current mapped session renews its lease. Delayed delivery
+older than 60 seconds, stream history, duplicate replay, predecessor sessions, and terminal host
+events do not. A silent child still enters contact loss and the configured recovery window;
+source edits by themselves cannot prove continuing contact when observation is unavailable.
+
+The isolated native cell below exercises the parent-minted path for the reviewed legacy
 `codex-cli 0.150.1` profile. Broader host profiles need their own execution evidence; host hooks
 alone never mint a child.
 

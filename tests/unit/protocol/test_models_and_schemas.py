@@ -2994,7 +2994,7 @@ def test_schema_catalog_reports_complete_registry() -> None:
     assert SCHEMA_NAMESPACE == "https://schemas.yoetz.dev/0.1/"
     assert SCHEMA_MANIFEST_SCHEMA == "yoetz.schema-manifest/1.0.0"
     assert SCHEMA_MANIFEST_VERSION == "1.0.0"
-    assert SCHEMA_MEMBER_COUNT == 187
+    assert SCHEMA_MEMBER_COUNT == 191
     assert len(catalog.documents) == SCHEMA_MEMBER_COUNT
 
     paths = tuple(document.relative_path for document in catalog.documents)
@@ -3078,7 +3078,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 5_834
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 6_054
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:
@@ -3096,7 +3096,7 @@ def test_schema_name_derivation_and_version_maps_are_exact() -> None:
         "1.1.0",
         "1.2.0",
         "1.3.0",
-        "2.7.0",
+        "2.8.0",
         "7.0.0",
         "1.4.0",
     }

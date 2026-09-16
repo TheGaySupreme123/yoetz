@@ -347,3 +347,71 @@ async def test_registry_reports_child_anchor_context_conflict_without_duplicate_
         assert len(await registry.list_provisional_annotations(parent)) == 1
     finally:
         db.close(force=True)
+
+
+async def test_binding_preflight_validates_all_selectors_without_mutation() -> None:
+    db = apsw.Connection(":memory:")
+    _schema(db)
+    parent, child = _task(), _task()
+    db.executemany(
+        "INSERT INTO task_routes(task_id, parent_task_id) VALUES (?, ?)",
+        ((parent, None), (child, parent)),
+    )
+    clock = _Clock()
+    registry = _registry(db, clock)
+    try:
+        annotation = await registry.record_host_lineage_observation(
+            parent,
+            _observation("SubagentStart", "worker", parent_tool_call_id="call-a"),
+            observed_session_commitment=_SESSION,
+            source=ObservationSource.CODEX_HOOK,
+        )
+        clock.advance()
+        for selectors in (
+            {"correlation_id": annotation.correlation_id, "parent_tool_call_id": "call-b"},
+            {
+                "correlation_id": annotation.correlation_id,
+                "subagent_id": "worker",
+                "parent_tool_call_id": "call-b",
+            },
+            {"correlation_id": "malformed", "subagent_id": "worker"},
+        ):
+            with pytest.raises(HostLineageRegistryError) as error:
+                await registry.bind_host_lineage_identity(
+                    parent,
+                    child,
+                    correlation_id=selectors.get("correlation_id"),
+                    subagent_id=selectors.get("subagent_id"),
+                    parent_tool_call_id=selectors.get("parent_tool_call_id"),
+                )
+            assert error.value.reason is HostLineageRegistryReason.IDENTITY_CONFLICT
+        # Unknown direct selectors cannot be ignored to bind another annotation.
+        assert (
+            await registry.bind_host_lineage_identity(
+                parent, child, correlation_id="hmac-sha256:" + "0" * 64, subagent_id="worker"
+            )
+            is None
+        )
+        validated = await registry.bind_host_lineage_identity(
+            parent,
+            child,
+            host="codex",
+            subagent_id="worker",
+            parent_tool_call_id="call-a",
+            correlation_id=annotation.correlation_id,
+            validate_only=True,
+        )
+        assert validated == annotation
+        assert await registry.list_provisional_annotations(parent) == (annotation,)
+        bound = await registry.bind_host_lineage_identity(
+            parent, child, host="codex", subagent_id="worker", parent_tool_call_id="call-a"
+        )
+        assert bound is not None and bound.bound_child_task_id == child
+        assert (
+            await registry.bind_host_lineage_identity(
+                parent, child, correlation_id=annotation.correlation_id, validate_only=True
+            )
+            == bound
+        )
+    finally:
+        db.close(force=True)

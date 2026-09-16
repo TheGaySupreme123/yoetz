@@ -689,7 +689,16 @@ def test_v25_observation_wire_tracks_domain_structural_keys_without_rewriting_v2
     v25_properties = request_v25["$defs"]["observation_envelope"]["properties"][
         "structural_payload"
     ]["properties"]
-    expected_observation_keys = set(_STRUCTURAL_KEYS) - _ROUTINE_SUMMARY_STRUCTURAL_KEYS
+    expected_observation_keys = (
+        set(_STRUCTURAL_KEYS)
+        - _ROUTINE_SUMMARY_STRUCTURAL_KEYS
+        - {
+            "lineage_child_task_id",
+            "lineage_child_session_id",
+            "lineage_child_writer_id",
+            "lineage_parent_task_id",
+        }
+    )
     assert set(v25_properties) == expected_observation_keys
     assert set(v24_properties) == expected_observation_keys
     assert v25_properties["pairing_mode"] == {
@@ -1102,3 +1111,29 @@ def test_status_bounds_backup_privacy_audit_and_confidential_absence() -> None:
 
     # Cross-field lifecycle combinations are intentionally owned by Wave C's ServiceStatus model;
     # the frozen schema only proves bounded structural serialization.
+
+
+def test_v28_native_child_start_bridge_round_trip_preserves_frozen_v27() -> None:
+    """Native correlation candidates need the successor closed control contract."""
+
+    frame = _current_cli_observation_frame(
+        source="codex_hook",
+        codex_session_id="native-child-lane",
+        structural={
+            "hook_name": "PostToolUse",
+            "tool_name": "mcp__yoetz__start",
+            "subagent_id": "native-worker",
+            "parent_tool_call_id": "spawn-call",
+            "lineage_child_task_id": "tsk_00000000-0000-4000-8000-000000000001",
+            "lineage_child_session_id": "ses_00000000-0000-4000-8000-000000000002",
+            "lineage_child_writer_id": "wri_00000000-0000-4000-8000-000000000003",
+            "lineage_parent_task_id": "tsk_00000000-0000-4000-8000-000000000004",
+        },
+    )
+    validate_schema_instance("control-request", "2.8.0", cast(JsonValue, frame))
+    parsed = parse_control_request(decode_control_frame(encode_control_frame(frame)))
+    assert isinstance(parsed, ControlCallRequest)
+    assert isinstance(parsed.body, JsonObject)
+    assert canonical_encode(parsed.body) == canonical_encode(frame["body"])
+    with pytest.raises(ProtocolValueError):
+        validate_schema_instance("control-request", "2.7.0", cast(JsonValue, frame))

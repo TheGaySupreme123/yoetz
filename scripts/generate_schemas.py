@@ -3750,6 +3750,33 @@ def _control_project_result_schema() -> dict[str, JsonValue]:
     }
 
 
+def _control_v2_8_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Extend frozen 2.7 with native cooperative-child correlation candidates."""
+
+    source = (
+        Path(__file__).resolve().parent.parent
+        / "schemas"
+        / entry.relative_path.replace("2.8.0", "2.7.0")
+    )
+    document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    if entry.schema_name == "control-request":
+        definitions = cast(dict[str, JsonValue], document["$defs"])
+        envelope = cast(dict[str, JsonValue], definitions["observation_envelope"])
+        properties = cast(dict[str, JsonValue], envelope["properties"])
+        structural = cast(dict[str, JsonValue], properties["structural_payload"])
+        fields = cast(dict[str, JsonValue], structural["properties"])
+        fields.update(
+            {
+                "lineage_child_task_id": _control_id_schema("task_id"),
+                "lineage_child_session_id": _control_id_schema("session_id"),
+                "lineage_child_writer_id": _control_id_schema("writer_id"),
+                "lineage_parent_task_id": _control_id_schema("task_id"),
+            }
+        )
+    return document
+
+
 def _control_v2_7_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Derive the 0.3 project-control contract from the frozen main 2.6 wire.
 
@@ -6240,6 +6267,38 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         lambda: __import__("yoetz.ports.control", fromlist=["ControlResult"]).ControlResult,
     ),
     _RegistryEntry(
+        "service/control-hello-2.8.0.schema.json",
+        "control-hello",
+        "2.8.0",
+        "request_result",
+        "local-control",
+        lambda: __import__("yoetz.ports.control", fromlist=["ControlRequest"]).ControlRequest,
+    ),
+    _RegistryEntry(
+        "service/control-hello-result-2.8.0.schema.json",
+        "control-hello-result",
+        "2.8.0",
+        "request_result",
+        "local-control",
+        lambda: __import__("yoetz.ports.control", fromlist=["ControlResult"]).ControlResult,
+    ),
+    _RegistryEntry(
+        "service/control-request-2.8.0.schema.json",
+        "control-request",
+        "2.8.0",
+        "request_result",
+        "local-control",
+        lambda: __import__("yoetz.ports.control", fromlist=["ControlRequest"]).ControlRequest,
+    ),
+    _RegistryEntry(
+        "service/control-result-2.8.0.schema.json",
+        "control-result",
+        "2.8.0",
+        "request_result",
+        "local-control",
+        lambda: __import__("yoetz.ports.control", fromlist=["ControlResult"]).ControlResult,
+    ),
+    _RegistryEntry(
         "service/service-status-1.0.0.schema.json",
         "service-status",
         "1.0.0",
@@ -6338,6 +6397,10 @@ _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
         "service/control-hello-result-2.7.0.schema.json",
         "service/control-request-2.7.0.schema.json",
         "service/control-result-2.7.0.schema.json",
+        "service/control-hello-2.8.0.schema.json",
+        "service/control-hello-result-2.8.0.schema.json",
+        "service/control-request-2.8.0.schema.json",
+        "service/control-result-2.8.0.schema.json",
     }
 )
 
@@ -6637,6 +6700,13 @@ def build_schema_documents(
             "service/control-result-2.7.0.schema.json",
         }:
             normalized = _control_v2_7_schema(entry)
+        elif entry.relative_path in {
+            "service/control-hello-2.8.0.schema.json",
+            "service/control-hello-result-2.8.0.schema.json",
+            "service/control-request-2.8.0.schema.json",
+            "service/control-result-2.8.0.schema.json",
+        }:
+            normalized = _control_v2_8_schema(entry)
         elif entry.relative_path == "operations/publish-work-request-1.1.0.schema.json":
             normalized = _publish_work_request_schema(entry)
         elif entry.relative_path == "operations/publish-work-request-1.2.0.schema.json":

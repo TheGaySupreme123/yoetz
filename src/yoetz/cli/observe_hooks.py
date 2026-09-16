@@ -662,6 +662,7 @@ def _extract_structural(
             # checked.  Remove it on an invalid/conflicting family.
             fields.pop("parent_tool_call_id", None)
             fields.pop("tool_call_id", None)
+            fields.pop("subagent_id", None)
     else:
         tool_call_id = _token_or_none(payload.get("tool_use_id")) or _token_or_none(
             payload.get("tool_call_id")
@@ -681,6 +682,18 @@ def _extract_structural(
         digest = _token_or_none(nested.get("changed_paths_digest"))
         if digest is not None and "changed_paths_digest" not in fields:
             fields["changed_paths_digest"] = digest
+    if event_name == "PostToolUse":
+        from yoetz.cli.hooks import cooperative_start_identity
+
+        child_start = cooperative_start_identity(payload)
+        fields.update(child_start)
+        if (
+            child_start
+            and "parent_tool_call_id" in payload
+            and _token_or_none(payload.get("parent_tool_call_id")) is None
+        ):
+            # An explicitly malformed spawn identity must not weaken into child-only matching.
+            fields.pop("subagent_id", None)
     selected = classification or classify_observation(payload, event_name)
     if selected.routine_candidate and (
         event_name in {"PreToolUse", "preToolUse"} or selected.proven_routine_success

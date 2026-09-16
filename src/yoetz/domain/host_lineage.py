@@ -161,13 +161,17 @@ class HostLineageCorrelation:
 
     @property
     def logical_identity(self) -> str:
-        """Return the source-stable identity used for idempotent observation materialization.
+        """Return the strongest portable identity without discarding a supplied parent call.
 
-        Hook and stream copies can disagree about the optional parent call or conversation
-        context.  Materialization therefore keys one parent task's evidence on the child token;
-        the service annotation registry still uses ``correlation_identity`` and its aliases to
-        reconcile the stronger pair without merging across parent tasks.
+        Partial host copies reconcile through the service registry's aliases. A pure
+        materializer cannot equate a child-only copy with every distinct parent call.
         """
+
+        return self.correlation_identity
+
+    @property
+    def legacy_logical_identity(self) -> str:
+        """Preserve the pre-1.7 child-only key for explicit historical replay."""
 
         return "lineage:" + canonical_digest(
             {"host": self.host, "subagent_id": self.subagent_id}
@@ -339,8 +343,12 @@ def host_lineage_from_payload(
     )
     if not parent_tool_aliases_valid:
         return None
-    parent_conversation_id = _token(payload.get("parent_conversation_id"))
-    conversation_id = _token(payload.get("conversation_id"))
+    parent_conversation_id, parent_context_valid = _consistent_alias_token(
+        payload, ("parent_conversation_id",)
+    )
+    conversation_id, conversation_valid = _consistent_alias_token(payload, ("conversation_id",))
+    if not parent_context_valid or not conversation_valid:
+        return None
     status = _token(payload.get("result_status")) or _token(payload.get("status"))
     duration = payload.get("duration_ms")
     if duration is None:
