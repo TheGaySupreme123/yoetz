@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Protocol, cast
 
 from yoetz.domain.values import Frontier
+from yoetz.observability.logging import record_bounded_counts_without_raising
 from yoetz.ports.diagnostics import DiagnosticsPort, RuntimeCapability
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
 from yoetz.ports.keys import BundleKeys, KeyStoreError, KeyStoreReason
@@ -865,6 +866,20 @@ class LocalBundleRuntime(BundleRuntimePort):
                                         )
                                     )
                             except TimeoutError as exc:
+                                for operation, count in (
+                                    ("runtime_rebind_timeout_usages", waiting_entry.usages),
+                                    ("runtime_rebind_timeout_pending", waiting_entry.pending),
+                                    (
+                                        "runtime_rebind_timeout_callbacks",
+                                        len(waiting_entry.rebind_callbacks),
+                                    ),
+                                ):
+                                    record_bounded_counts_without_raising(
+                                        component="service.runtime",
+                                        operation=operation,
+                                        outcome="runtime_rebind_busy",
+                                        counts={"operation_count": count},
+                                    )
                                 raise _error(
                                     PublicErrorCode.BUNDLE_BUSY,
                                     _BUSY,
