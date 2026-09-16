@@ -172,6 +172,103 @@ async def test_start_rebind_wait_cancellation_generation_and_shutdown(
     await runtime.close()
 
 
+@pytest.mark.anyio
+async def test_start_rebind_notifies_background_owner_before_waiting() -> None:
+    """A foreground attach gives a cooperative background owner a chance to release its lease."""
+
+    route, writer = _route()
+    harness = _Harness(1, route, writer)
+    runtime = await open_local_bundle_runtime(
+        _context(frozenset(RuntimeCapability)),
+        _Catalog(route),
+        _Vault(),
+        harness.factories(),
+        _Diagnostics(),
+        object(),
+    )
+    assert isinstance(runtime, LocalBundleRuntime)
+    command = RouteCommand(
+        route.session_id, writer, RouteAccess.WRITE, frozenset({RuntimeCapability.WRITE})
+    )
+    held = await runtime.route(command)
+    callback_called = asyncio.Event()
+
+    def yield_background_owner() -> None:
+        callback_called.set()
+        asyncio.create_task(runtime.release(held))
+
+    assert runtime.register_rebind_callback(held, yield_background_owner)
+    new_route = replace(route, session_id=_id(IdKind.SESSION, 746))
+    attach = asyncio.create_task(
+        runtime._entry_for(  # pyright: ignore[reportPrivateUsage]
+            _Inspection(new_route, frozenset({writer})),
+            RouteAccess.WRITE,
+            provision_mode=BundleProvisionMode.ATTACHED,
+        )
+    )
+    await asyncio.wait_for(callback_called.wait(), 5)
+    entry = await asyncio.wait_for(attach, 5)
+    assert entry.inspection.route.session_id == new_route.session_id
+    assert entry.rebind_waiters == 0
+    rebound = await runtime._lease(  # pyright: ignore[reportPrivateUsage]
+        entry, frozenset({RuntimeCapability.WRITE}), RouteAccess.WRITE, writer
+    )
+    await runtime.release(rebound)
+    await runtime.close()
+
+
+@pytest.mark.anyio
+async def test_rebind_callback_lifetime_is_scoped_to_each_runtime_lease() -> None:
+    """Releasing one shared entry user cannot erase another owner's yield callback."""
+
+    route, writer = _route()
+    harness = _Harness(1, route, writer)
+    runtime = await open_local_bundle_runtime(
+        _context(frozenset(RuntimeCapability)),
+        _Catalog(route),
+        _Vault(),
+        harness.factories(),
+        _Diagnostics(),
+        object(),
+    )
+    assert isinstance(runtime, LocalBundleRuntime)
+    command = RouteCommand(
+        route.session_id, writer, RouteAccess.WRITE, frozenset({RuntimeCapability.WRITE})
+    )
+    first = await runtime.route(command)
+    second = await runtime.route(command)
+    first_called = asyncio.Event()
+    second_called = asyncio.Event()
+
+    def first_callback() -> None:
+        first_called.set()
+
+    def second_callback() -> None:
+        second_called.set()
+        asyncio.create_task(runtime.release(second))
+
+    assert runtime.register_rebind_callback(first, first_callback)
+    assert runtime.register_rebind_callback(second, second_callback)
+    await runtime.release(first)
+
+    new_route = replace(route, session_id=_id(IdKind.SESSION, 747))
+    attach = asyncio.create_task(
+        runtime._entry_for(  # pyright: ignore[reportPrivateUsage]
+            _Inspection(new_route, frozenset({writer})),
+            RouteAccess.WRITE,
+            provision_mode=BundleProvisionMode.ATTACHED,
+        )
+    )
+    await asyncio.wait_for(second_called.wait(), 5)
+    rebound = await asyncio.wait_for(attach, 5)
+    assert not first_called.is_set()
+    leased = await runtime._lease(  # pyright: ignore[reportPrivateUsage]
+        rebound, frozenset({RuntimeCapability.WRITE}), RouteAccess.WRITE, writer
+    )
+    await runtime.release(leased)
+    await runtime.close()
+
+
 def _id(kind: IdKind, value: int) -> str:
     raw = bytearray(value.to_bytes(16, "big"))
     raw[6] = (raw[6] & 0x0F) | 0x40

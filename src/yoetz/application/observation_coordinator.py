@@ -4840,6 +4840,13 @@ class ObservationCoordinator:
         owned = deferred_runtime
         if owned is None:
             owned = await self._route_observation_runtime(runtime.task_id, runtime.session_id)
+        callback_registered = False
+
+        def no_rebind() -> None:
+            return
+
+        rebind_callback: Callable[[], None] = no_rebind
+        unregister_rebind: Callable[[TaskRuntime, Callable[[], None]], None] | None = None
         try:
             owned_store = self._observation_store(owned)
             repository = self._advice_semantic_repository(owned_store)
@@ -4864,6 +4871,34 @@ class ObservationCoordinator:
             )
             bound_runtime = owned
 
+            def rebind_callback() -> None:
+                supervisor.request_rebind(workspace)
+
+            register_rebind_obj = getattr(self.runtime, "register_rebind_callback", None)
+            unregister_rebind_obj = getattr(self.runtime, "unregister_rebind_callback", None)
+            register_rebind = (
+                cast(
+                    Callable[[TaskRuntime, Callable[[], None]], bool],
+                    register_rebind_obj,
+                )
+                if callable(register_rebind_obj)
+                else None
+            )
+            unregister_rebind = (
+                cast(
+                    Callable[[TaskRuntime, Callable[[], None]], None],
+                    unregister_rebind_obj,
+                )
+                if callable(unregister_rebind_obj)
+                else None
+            )
+            callback_registered = False
+            if register_rebind is not None:
+                try:
+                    callback_registered = bool(register_rebind(bound_runtime, rebind_callback))
+                except Exception:
+                    callback_registered = False
+
             async def _after() -> None:
                 await self._run_advice(
                     workspace,
@@ -4874,6 +4909,8 @@ class ObservationCoordinator:
                 )
 
             async def _release() -> None:
+                if callback_registered and unregister_rebind is not None:
+                    unregister_rebind(bound_runtime, rebind_callback)
                 await self.runtime.release(bound_runtime)
 
             registered = supervisor.register(
@@ -4885,11 +4922,15 @@ class ObservationCoordinator:
                 )
             )
             if not registered:
+                if callback_registered and unregister_rebind is not None:
+                    unregister_rebind(bound_runtime, rebind_callback)
                 if deferred_runtime is None:
                     await self.runtime.release(owned)
                 supervisor.notify(workspace)
                 return False
         except BaseException:
+            if callback_registered and unregister_rebind is not None:
+                unregister_rebind(owned, rebind_callback)
             if deferred_runtime is None:
                 await self.runtime.release(owned)
             raise

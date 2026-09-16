@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol, cast
 
 from yoetz.domain.values import Frontier
@@ -238,6 +238,11 @@ class _Entry:
     # Leases claimed by _entry_for but not yet counted in usages (validate_fence window).
     pending: int = 0
     rebind_waiters: int = 0
+    # Background owners can cooperatively yield work when an explicit start needs to rebind this
+    # bundle. Callbacks are process-local and never cross the public runtime boundary.
+    rebind_callbacks: dict[int, Callable[[], None]] = field(
+        default_factory=dict[int, Callable[[], None]]
+    )
     poisoned: bool = False
     closed: bool = False
 
@@ -837,6 +842,14 @@ class LocalBundleRuntime(BundleRuntimePort):
                                 )
                             entry.rebind_waiters += 1
                             waiting_entry = entry
+                            for callback in tuple(entry.rebind_callbacks.values()):
+                                try:
+                                    callback()
+                                except Exception:
+                                    # A cooperative background owner cannot make the foreground
+                                    # start fail closed. Its lease remains counted until the owner
+                                    # retires normally, and the bounded wait still applies.
+                                    continue
                             try:
                                 # Condition.wait releases the cache lock used by release and
                                 # pending-lease cleanup. Cancellation removes only this waiter.
@@ -1224,6 +1237,7 @@ class LocalBundleRuntime(BundleRuntimePort):
             if entry is None:
                 return
             entry.usages -= 1
+            entry.rebind_callbacks.pop(id(runtime), None)
             self._idle.notify_all()
             idle = [
                 candidate
@@ -1238,10 +1252,50 @@ class LocalBundleRuntime(BundleRuntimePort):
         for entry in evictions:
             await self._close_entry(entry)
 
+    def register_rebind_callback(self, runtime: TaskRuntime, callback: Callable[[], None]) -> bool:
+        """Register a process-local callback for foreground rebind admission.
+
+        Background owners use this to yield an in-flight, cancellable operation when an explicit
+        start is waiting for the same bundle. The callback is advisory: the runtime keeps the
+        usage counted until the owner releases it, and no callback data is persisted or exposed.
+        """
+
+        if type(runtime) is not TaskRuntime or not callable(callback):
+            return False
+        # Registration is a synchronous service-loop lifecycle operation. The runtime cache
+        # lock is never awaited here, so _entry_for cannot interleave with this lookup or map
+        # update on the owning loop.
+        entry = self._usages.get(id(runtime))
+        if entry is None or entry.poisoned or entry.closed:
+            return False
+        token = id(runtime)
+        entry.rebind_callbacks[token] = callback
+        if entry.rebind_waiters:
+            try:
+                callback()
+            except Exception:
+                entry.rebind_callbacks.pop(token, None)
+                return False
+        return True
+
+    def unregister_rebind_callback(
+        self, runtime: TaskRuntime, callback: Callable[[], None]
+    ) -> None:
+        """Remove one process-local foreground-rebind callback."""
+
+        if type(runtime) is not TaskRuntime:
+            return
+        entry = self._usages.get(id(runtime))
+        if entry is None:
+            return
+        if entry.rebind_callbacks.get(id(runtime)) is callback:
+            entry.rebind_callbacks.pop(id(runtime), None)
+
     async def _close_entry(self, entry: _Entry) -> None:
         if entry.closed:
             return
         entry.closed = True
+        entry.rebind_callbacks.clear()
         try:
             await asyncio.shield(
                 self._factories.close_entry(

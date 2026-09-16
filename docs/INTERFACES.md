@@ -3648,6 +3648,19 @@ Independent verification support (local control, not MCP):
   and `SessionEnd` keeps the host-clamped 3 seconds for local ingest only; its outbox intent is
   retried by a later hook or the service sweeper, and it is not an advice channel.
 
+  An explicit foreground `start` session rebind has priority over this optional advisory lane. When
+  the runtime admits the bounded rebind wait, it signals the registered advice worker to yield. A
+  pending row is left pending; an in-flight provider dispatch is cancelled through the worker's
+  ordinary cancellation path and recorded as `cancelled` before the drain releases its task
+  runtime. That local row is not proof that a physical provider call did not start: if the privacy
+  audit consumed authorization, its `receipt_pending` state remains an independently recoverable
+  `SemanticEgressAttemptUnknown` and is never redispatched by this advisory lane. The cancelled
+  packet is never treated as successful, and the resulting `advice_semantic_unavailable` coverage
+  remains visible. This cooperative yield applies only to additive observation advice; an explicit
+  required semantic check keeps its own operation and recovery contract. The foreground start
+  retains its request identity and continues through the existing bounded same-request recovery
+  when the runtime becomes available.
+
 Native ordinary-work capture adds a separate, closed profile selection to that workspace consent.
 `LocalObservationConsent.content_capture_profiles` is a sorted set containing at most
 `claude-code-ordinary-observation-v1` and `cursor-ordinary-observation-v1`; absent legacy fields
