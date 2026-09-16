@@ -2546,11 +2546,17 @@ class ObservationCoordinator:
                 return _reject(ObservationGapCode.SERVICE_UNAVAILABLE.value)
             finally:
                 if runtime is not None:
-                    if store is not None:
-                        await self._publish_capture_backlog(workspace, runtime, store)
-                    with_context = getattr(self.runtime, "release", None)
-                    if with_context is not None:
-                        await with_context(runtime)
+                    try:
+                        if store is not None:
+                            await self._publish_capture_backlog(workspace, runtime, store)
+                    finally:
+                        # Backlog feedback is optional.  A cancelled hook or a
+                        # failed feedback read must never strand the routed
+                        # runtime lease: the next same-bundle attach would see
+                        # a permanently live owner and remain BUNDLE_BUSY.
+                        with_context = getattr(self.runtime, "release", None)
+                        if with_context is not None:
+                            await with_context(runtime)
             completed_runtime, completed_envelope, completed_result = completed_ingest
             try:
                 # Never wait for the lineage mutation lock while retaining a runtime lease:
