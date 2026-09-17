@@ -91,11 +91,13 @@ function main() {
     return;
   }
 
-  // `uvx yoetz==<version>` reuses the tool environment installed above, so the
-  // child is the same persistent launcher `~/.local/bin/yoetz` points at.
+  // A versionless `uvx yoetz` runs the installed tool environment, never a
+  // cache-backed one, so the child is the same persistent launcher that
+  // `~/.local/bin/yoetz` points at. The exact version was pinned by the install
+  // above; repeating it here could only ever select a different environment.
   const result = spawnSync(
     "uvx",
-    ["--python", "3.14", `yoetz==${version}`, ...process.argv.slice(2)],
+    ["--python", "3.14", "yoetz", ...process.argv.slice(2)],
     { stdio: "inherit", shell: false },
   );
 

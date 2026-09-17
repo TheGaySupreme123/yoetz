@@ -219,3 +219,23 @@ def test_default_codex_home_is_only_ever_an_existing_owner_directory(
     link = tmp_path / "link"
     link.symlink_to(home / ".codex")
     assert discovery_module.default_codex_home({"CODEX_HOME": str(link)}) == home / ".codex"
+
+
+def test_default_codex_home_treats_an_unresolvable_home_as_no_offer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_home(cls: type[Path]) -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    def no_expansion(self: Path) -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(Path, "home", classmethod(no_home))
+    monkeypatch.setattr(Path, "expanduser", no_expansion)
+    explicit = tmp_path / "explicit-codex"
+    explicit.mkdir()
+
+    assert discovery_module.default_codex_home({}) is None
+    assert discovery_module.default_codex_home({"CODEX_HOME": "~/.codex"}) is None
+    # An absolute CODEX_HOME still wins even when the home directory cannot be resolved.
+    assert discovery_module.default_codex_home({"CODEX_HOME": str(explicit)}) == explicit

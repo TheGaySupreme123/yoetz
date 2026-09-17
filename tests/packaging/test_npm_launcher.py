@@ -72,10 +72,9 @@ def test_launcher_delegates_to_pinned_uvx(tmp_path: Path) -> None:
     # Exact version-pinned passthrough and child exit-code propagation.
     assert completed.returncode == 7
     version = _package()["version"]
-    assert (
-        record.read_text(encoding="utf-8").strip()
-        == f"--python 3.14 yoetz=={version} status --json"
-    )
+    # Versionless: `uvx` then runs the tool environment installed just above rather than
+    # resolving a possibly cache-backed environment for the same version.
+    assert record.read_text(encoding="utf-8").strip() == "--python 3.14 yoetz status --json"
     # The same exact version is made a persistent uv tool first, so host hooks and MCP
     # entries bind a launcher that survives `uv cache clean` (issue #766).
     assert uv_record.read_text(encoding="utf-8").splitlines() == [

@@ -201,14 +201,17 @@ def default_codex_home(environ: Mapping[str, str] | None = None) -> Path | None:
 
     env = os.environ if environ is None else environ
     raw = env.get("CODEX_HOME")
-    candidates: list[Path] = []
+    candidates: list[Callable[[], Path]] = []
     if raw:
-        candidates.append(Path(raw).expanduser())
-    candidates.append(Path.home() / ".codex")
-    for candidate in candidates:
+        candidates.append(lambda: Path(raw).expanduser())
+    candidates.append(lambda: Path.home() / ".codex")
+    for build in candidates:
+        # ``expanduser`` and ``Path.home`` raise ``RuntimeError`` when no home directory can
+        # be resolved; that is "no offer", not a crash, exactly like a missing directory.
         try:
+            candidate = build()
             if candidate.is_absolute() and not candidate.is_symlink() and candidate.is_dir():
                 return candidate
-        except OSError:
+        except OSError, RuntimeError:
             continue
     return None
