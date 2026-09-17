@@ -2830,6 +2830,54 @@ class ObservationCoordinator:
         )
         return None
 
+    async def _bind_child_session_start(
+        self,
+        runtime: TaskRuntime,
+        envelope: ObservationEnvelope,
+    ) -> tuple[bool, str | None]:
+        """File a child rollout header's own start signal under its admitted parent task.
+
+        Codex multi-agent v2 publishes the delegation in the child rollout's ``session_meta``
+        header, which only the child's own session observes (issue #754). Filing it the ordinary
+        way would name the child as its own parent, so the parent task comes from admitted
+        catalog lineage — never from the host's ``parent_thread_id`` token, which cannot select a
+        task. The first member says this envelope is handled here and must not also be recorded
+        against the observing task.
+        """
+
+        fields = envelope.structural_payload
+        if (
+            envelope.source is not ObservationSource.CODEX_SESSION_STREAM
+            or envelope.event_kind != "SubagentStart"
+            or fields.get("stream_kind") != "session_meta"
+        ):
+            return False, None
+        registry = self.host_lineage_registry
+        coordinator = self.lineage_coordinator
+        if registry is None or coordinator is None:
+            return True, HostLineageRegistryReason.IDENTITY_CONFLICT.value
+        observation = host_lineage_from_envelope(envelope)
+        if observation is None:
+            # The envelope already carries ``missing_subagent_identity``; noting it is the
+            # caller's first step, so this stays a silent no-op rather than a second gap.
+            return True, None
+        lineage = await coordinator.catalog.task_lineage(runtime.task_id)
+        parent = None if lineage is None else lineage.parent_task_id
+        if parent is None:
+            # The host says this thread is a delegated child, but no admitted lineage links it
+            # to a parent task. Retain the bounded gap instead of inventing an attribution.
+            return True, HostLineageRegistryReason.CHILD_NOT_FOUND.value
+        annotation = await registry.record_host_lineage_observation(
+            parent,
+            observation,
+            observed_session_commitment=envelope.session_commitment,
+            source=envelope.source,
+        )
+        await registry.bind_provisional_annotation(
+            parent, annotation.correlation_id, runtime.task_id
+        )
+        return True, None
+
     async def _record_host_lineage(
         self,
         runtime: TaskRuntime,
@@ -2852,6 +2900,11 @@ class ObservationCoordinator:
             )
             if gap is not None:
                 await self._local(partial(self.local.note_coverage_gap, workspace, gap))
+            handled, child_gap = await self._bind_child_session_start(runtime, envelope)
+            if child_gap is not None:
+                await self._local(partial(self.local.note_coverage_gap, workspace, child_gap))
+            if handled:
+                return
             observation = host_lineage_from_envelope(envelope)
             if observation is None:
                 return

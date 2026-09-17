@@ -164,6 +164,15 @@ child-start correlation bridge. It does not change E-013 or any capability cell.
 fixtures are separate from the still-required fresh installed native run and independent semantic
 review; see [Codex integration](runbooks/codex-integration.md#subagent-correlation-507).
 
+The #754 follow-up teaches that bridge Codex 0.153.4 multi-agent v2: the delegated child's own
+rollout header is an identity source, and `token_usage_record` plus 0.153.4's new fractional JSON
+leaves stop counting as coverage gaps. It flips no capability cell and earns no exact rollout
+profile — 0.153.4 stays on the structural compatibility profile — and the v2 evidence read from a
+stopped isolated instance is observation, not certification. Whether 0.153.4 emits
+`SubAgentActivity` with `multi_agent_v2=false`, whether its `SubagentStart` hook payload carries
+`subagent_id`, and whether a delegated child thread ever runs the hook bridge all remain open; see
+[Codex integration](runbooks/codex-integration.md#multi-agent-v2-01534-754).
+
 - **E-013 — Narrowed (was "not applicable" for v0.1.0; that row stays above as history).** What
   ships in 0.2: hook observation ingress exists for all three first-party hosts. The Codex plugin
   renders `PreToolUse`/`PostToolUse`/`PermissionRequest` hooks

@@ -183,6 +183,14 @@ than implementation notes.
    accepted delegation or cooperative self-registration binds that identity. Issues #506–#508 own
    the evidence and host-specific mapping decisions.
 
+   **Child-observed host identity clarification (2026-09-16, #754).** A host may name a delegation
+   only in the child's own transcript (Codex multi-agent v2 puts it in the child rollout's
+   `session_meta` header). Such an observation is still a *parent* annotation: the parent task is
+   the one admitted catalog lineage already records for the observing child, never a host token in
+   the payload, and the annotation is bound to the observing child task in the same write. This
+   adds no creation path — it cannot mint, accept, or reparent a child, and an observing session
+   with no admitted parent keeps a bounded coverage gap instead of an attribution.
+
 3. **Work and session state do not collapse.** A child may be `open`, `closed`, `cancelled`,
    `abandoned`, or `written_off` as work, while each session independently reports
    `active`, `contact_lost`, or `ended`. `abandoned` is terminal and incomplete; `cancelled` and

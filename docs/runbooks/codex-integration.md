@@ -502,6 +502,79 @@ validation with the corrected candidate and the requested independent semantic r
 required. E-013 and host capability cells are unchanged. The historical native records below
 retain their original limits.
 
+### Multi-agent v2 (0.153.4, #754)
+
+Codex `0.153.4` with `multi_agent_version=v2` expresses a delegation in two places, and Yoetz
+reads both:
+
+- the **parent** rollout carries `SubAgentActivity` nested in `event_msg` → `item_completed` →
+  `item` (never as a `response_item`). Its `agent_thread_id` is the child thread, its `kind` is
+  `started` once per delegation and `interacted` for every later exchange, and its `id` is a
+  `call_…` token that is not published as `parent_tool_call_id`: only an explicit parent alias
+  ever fills that field. `interacted` is an understood kind that names no lifecycle transition,
+  so it opens no second annotation and is not an `unsupported_event` gap;
+- the **child** rollout's own `session_meta` header carries `thread_source: subagent`, `id` (the
+  child thread), `parent_thread_id`, `agent_path`, `agent_nickname`, and `multi_agent_version`.
+  Its `session_id` is the *parent* thread, so only `id` is ever the child key. Yoetz maps that
+  header to a `SubagentStart` whose `subagent_id` is the child thread; both spellings of the
+  spawning thread (`parent_thread_id` and `source.subagent.thread_spawn.parent_thread_id`) must
+  agree, and a header naming itself is refused. A header that declares `thread_source: subagent`
+  with no usable distinct identity is the one shape that earns `missing_subagent_identity`; an
+  ordinary user thread declares no child and earns no gap.
+
+Because the child observes that header in its own session, filing it the ordinary way would name
+the child as its own parent. The parent task therefore comes from admitted catalog lineage, never
+from the host's `parent_thread_id` token, and the annotation is then bound to the observing child
+task — the same shape as the native `PostToolUse` child-start bridge. With no admitted lineage the
+observation keeps a bounded `host_lineage_child_not_found` gap instead of inventing attribution.
+Both sources produce the same correlation identity for one delegation (the child thread), so a
+parent-observed spawn and a child-observed header merge into one annotation rather than two.
+
+`agent_path` and `agent_nickname` are **not** lineage identity. `agent_path` names an agent
+definition, not a delegation instance: the same path repeats across every exchange with that agent
+and across repeat delegations to it, and its `/root/…` shape is barred from structural payloads by
+design. `agent_message` `author`/`recipient` carry the same paths and are treated the same way.
+
+Two record families 0.153.4 adds are admitted as structurally ignored rather than mapped:
+`inter_agent_communication_metadata` (already in the vocabulary) and `token_usage_record` (new,
+admitted on the structural compatibility profile only). 0.153.4 also added fractional leaves to
+ordinary rows — `internal_chat_message_metadata_passthrough.create_time` on every `response_item`
+and `rate_limits.*.used_percent` on `token_count`. The canonical value model has no float, so the
+parser normalizes such a leaf to `null` in the mapped record and keeps the line; before that, one
+fractional leaf refused the whole line as `json_profile_unsupported`. No structural field Yoetz
+maps is ever a float, and the line's commitment is still taken over its raw bytes.
+
+**2026-09-16 v2 observation cell (`multi_agent_v2=true`, read-only, not a certification).** Source
+`12796f74` (PR #752 head), wheel `yoetz-0.2.1`, pinned test instance `df507f`, Codex `0.153.4`,
+originator `Codex Desktop`. Read from the stopped instance's artifacts after the run:
+
+| Fact | Observed |
+|---|---|
+| Parent rollout record families | `event_msg` 152, `response_item` 118, `token_usage_record` 36, `inter_agent_communication_metadata` 8, `world_state` 3, `session_meta`/`turn_context` 1 each |
+| Parent `SubAgentActivity` | 8, all nested in `event_msg.item_completed`; `kind` `started` 2, `interacted` 6; 0 as `response_item` |
+| Child rollouts | 2, each `thread_source: subagent` with `parent_thread_id` equal to the parent thread and `session_id` equal to the parent thread |
+| Annotations produced | 0 host annotations, 0 aliases, 2 consumed attach handles |
+| Parser result at that revision | 174 of 319 parent lines refused (138 `json_profile_unsupported` from the new fractional leaves, 36 `unknown_wrapper_type` from `token_usage_record`) |
+| Parser result after this change | 319 of 319 parent lines and 218 of 218 child lines mapped, no per-line reason codes, no `unsupported_event` |
+| Stream cursor at stop | event position 77, byte 956,771 of 2,268,686 — the first `SubAgentActivity` is at line 91 |
+
+The 50 `unsupported_event` rows in the parent ledger are exactly the 40 fractional-leaf refusals
+plus the 10 `token_usage_record` lines inside those first 77 positions. The run produced no
+annotation for two independent reasons: the delegation rows were past the last consumed position
+(the hook-driven reconcile stalled, #753), and neither child's own session observed its own
+rollout, because the observation cursor and workspace binding for a child thread are established
+by that thread's hooks and no hook reached those child sessions (0 observation events, 0 cursors
+in both child ledgers).
+
+**Not established by that transcript.** Whether `0.153.4` still emits `SubAgentActivity` with
+`multi_agent_v2=false`; whether the v2 `SubagentStart` hook payload carries `subagent_id` (every
+hook after 14:39:59Z hit the degraded path, #753); whether `agent_path` is stable across session
+rotation; and whether a delegated child thread ever runs the hook bridge, which is what would let
+the child-header identity source fire natively. The child-header path is proven against fixture
+IMP-015 and the registry bridge, not against a native v2 run. `0.153.4` remains admitted under the
+structural compatibility profile: it earns no exact rollout profile and no certified host cell from
+this evidence, so its admission stays `partially_understood`.
+
 Fresh accepted native activity on the current mapped session renews its lease. Delayed delivery
 older than 60 seconds, stream history, duplicate replay, predecessor sessions, and terminal host
 events do not. A silent child still enters contact loss and the configured recovery window;

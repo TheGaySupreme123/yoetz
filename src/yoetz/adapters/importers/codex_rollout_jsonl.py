@@ -170,17 +170,25 @@ SUPPORTED_ROLLOUT_PROFILES: Final[Mapping[str, CodexCapabilityProfile]] = Mappin
 )
 # The structural compatibility profile (issue #656). Its ``cli_version`` is the literal token
 # ``compatible`` — it never names a release — and its vocabulary is the union of every exact
-# profile, so a header naming an unproven release parses the wrappers and items Yoetz already
-# understands while everything else stays a bounded ``unsupported_event`` gap.
+# profile plus the structurally ignored families below, so a header naming an unproven release
+# parses the wrappers and items Yoetz already understands while everything else stays a bounded
+# ``unsupported_event`` gap.
 CODEX_ROLLOUT_COMPATIBLE_VERSION_TOKEN: Final = "compatible"
 CODEX_ROLLOUT_COMPATIBLE_PROFILE_ID: Final = "codex-rollout-jsonl/compatible/v1"
+# Wrapper families that only the compatibility profile admits (issue #754). ``token_usage_record``
+# is per-turn accounting telemetry a real Codex 0.153.4 multi-agent v2 transcript emits on every
+# turn (fixture IMP-015). Yoetz reads no structural field from it, so admitting the family turns
+# a per-line coverage gap into a bounded ignored line. It stays out of every exact profile: no
+# certified release has been proven to emit it.
+_COMPATIBLE_ONLY_WRAPPER_TYPES: Final = ("token_usage_record",)
 _COMPATIBLE_WRAPPER_TYPES: Final = tuple(
     sorted(
         {
             wrapper
             for profile in SUPPORTED_ROLLOUT_PROFILES.values()
             for wrapper in profile.wrapper_types
-        },
+        }
+        | set(_COMPATIBLE_ONLY_WRAPPER_TYPES),
         key=str.encode,
     )
 )
@@ -481,7 +489,18 @@ def _parse_json_line(content: bytes) -> dict[str, object]:
 
 
 def _redact_json_tree(value: dict[str, object]) -> dict[str, object]:
-    """Redact only decoded JSON strings so punctuation and tree shape stay intact."""
+    """Redact decoded JSON strings and drop unrepresentable numeric leaves.
+
+    Tree shape stays intact: strings are redacted in place and a fractional number becomes
+    ``null`` in the same position. The canonical value model has no float (``float_forbidden``),
+    and Codex 0.153.4 added fractional leaves to ordinary rows — ``rate_limits.*.used_percent``
+    on ``token_count`` and ``internal_chat_message_metadata_passthrough.create_time`` on every
+    ``response_item`` (issue #754). Before this normalization one such leaf refused the whole
+    line as ``json_profile_unsupported``, which cost 40 of the 50 unsupported rows in the
+    observed v2 run. No structural field Yoetz maps is ever a float — identifiers are tokens and
+    ``exit_code`` is an integer — so the mapped record loses nothing structural, and the line's
+    own commitment is still taken over its raw bytes.
+    """
 
     def redact(item: object, depth: int = 0) -> object:
         if depth > _MAX_JSON_DEPTH:
@@ -489,6 +508,8 @@ def _redact_json_tree(value: dict[str, object]) -> dict[str, object]:
         if type(item) is str:
             redacted, _detected = redact_sensitive_content(item.encode("utf-8", errors="strict"))
             return redacted.decode("utf-8", errors="strict")
+        if type(item) is float:
+            return None
         if type(item) is list:
             return [redact(child, depth + 1) for child in cast(list[object], item)]
         if type(item) is dict:

@@ -125,6 +125,17 @@ changes is admission:
   `0.153.4` transcript was available when this amendment was written**, so the matrix proves the
   admission policy, not the actual `0.153.4` event families; those still need their own fixtures
   before `0.153.4` can become an exact profile or advertise `session_stream`.
+- IMP-015 (`rollout-multi-agent-v2-0.153.4`, issue #754) adds those event families: its key shapes
+  are transcribed from a real `0.153.4` multi-agent v2 run, with canary values only. Two policy
+  consequences follow. `token_usage_record` joins the structural compatibility vocabulary as a
+  family Yoetz reads no structural field from — the compatible profile is now the union of the
+  exact profiles *plus* such proven ignored families, and no exact profile gains it. A fractional
+  JSON leaf (`0.153.4` added `create_time` and `used_percent` to ordinary rows) is normalized to
+  `null` in the mapped record instead of refusing its line as `json_profile_unsupported`: no
+  structural field Yoetz maps is ever a float, and the line's commitment is still taken over its
+  raw bytes. IMP-015 is compatibility evidence, not certification: `0.153.4` still has no exact
+  profile, no parser proof, and no `session_stream` facet, and its admission stays
+  `partially_understood`.
 
 Parser compatibility grants no capture consent, no egress authority, and no semantic-evaluator
 authority.

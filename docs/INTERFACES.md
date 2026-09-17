@@ -1910,6 +1910,23 @@ cannot prove equivalence; retained historical evidence is not rewritten.
 The callback fields are additive in control `2.8.0`; frozen control `2.7.0` and earlier retain
 their original shapes and reject those fields.
 
+**Codex multi-agent v2 child identity (#754).** Under `multi_agent_version=v2` a delegated child's
+own rollout header is an identity source: a `session_meta` whose `thread_source` is `subagent`
+maps to a `SubagentStart` whose `subagent_id` is that header's `id` — the child thread. The
+header's `session_id` is the *parent* thread and is never the child key; both spellings of the
+spawning thread (`parent_thread_id` and `source.subagent.thread_spawn.parent_thread_id`) must
+agree, and a header naming itself is refused. Only a header that declares `thread_source:
+subagent` without a usable distinct identity earns `missing_subagent_identity`. That observation
+belongs to the child's own session, so the annotation is filed under the parent task named by
+admitted catalog lineage — never by the host's `parent_thread_id`, which cannot select a task —
+and then bound to the observing child task, the same shape as the native child-start callback.
+With no admitted lineage the observation keeps a bounded `host_lineage_child_not_found` gap. The
+parent-side signal is unchanged: a `SubAgentActivity` item's `agent_thread_id` is the same child
+thread, so the two sources reconcile into one annotation. `agent_path`, `agent_nickname`, and
+`agent_message` `author`/`recipient` name an agent definition rather than a delegation instance;
+they are never lineage identity or aliases. A `SubAgentActivity` `kind` of `interacted` is a known
+non-lifecycle kind: it carries no phase and is not a coverage gap.
+
 **Project birth and coordination.** With `projects.auto_grouping` enabled, the second concurrent
 live task in one repository materializes an implicit repository project. When disabled, the task
 is admitted without creating a project row (#497). General or multi-repository projects are explicit
