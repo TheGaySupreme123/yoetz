@@ -333,8 +333,9 @@ availability, structured-output interoperability, provider data use, or E-007 ca
    `yoetz`, version locked to the PyPI version) and `bin/yoetz.js`, which requires `uv` on PATH
    (printing install guidance and exiting nonzero otherwise), makes the exact version a
    persistent tool with `uv tool install --quiet --python 3.14 yoetz==<version>` (a no-op once
-   present), and delegates to `uvx --python 3.14 yoetz==<version>` with untouched arguments and
-   the child's exact exit code. It bundles no Python, downloads nothing itself, and duplicates no
+   present), and delegates to a versionless `uvx --python 3.14 yoetz`, which runs that installed
+   tool environment rather than a cache-backed one, with untouched arguments and the child's
+   exact exit code. It bundles no Python, downloads nothing itself, and duplicates no
    wizard logic — first-run behavior lives once, in the Python CLI. The persistent install was
    added for issue #766: host hooks and MCP entries bind the absolute launcher that configured
    them, and a bare `uvx` bound them to uv's prunable cache, so `uv cache clean` silently broke
