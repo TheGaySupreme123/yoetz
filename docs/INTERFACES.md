@@ -3594,7 +3594,14 @@ Shared closed types:
   events as the first durable subject anchors, while standing session conditions use the stable
   lifecycle event. Once a readable condition finding exists, later evidence-window or frontier
   changes update the observation snapshot and coverage/gap state without appending another
-  `finding_recorded` event.
+  `finding_recorded` event. When the rule-specific cause is one host tool call, that cause is the
+  logical call — source, session commitment, source generation, and the admitted
+  `correlation_id`/`tool_call_id`, or the envelope's source identity when neither is observed —
+  and never the observed phase or event position. `edit_after_successful_check` therefore reports
+  one condition for a paired `PreToolUse`/`PostToolUse` edit while retaining both phases in its
+  evidence refs; a post-only profile reports its single observed phase, two calls remain two
+  conditions, and a call id reused across a source, session, or generation boundary stays
+  separate.
   Snapshot construction is session-scoped: a mapped session's snapshot is built from that
   session's own retained envelopes and session-scoped lifecycle/gap health (resolved from the
   ingest envelope's session commitment or the durable workspace session route), never from every

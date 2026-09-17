@@ -493,6 +493,11 @@ intent close before the bounded service drain; advice-bearing events remain sync
 `additional_context` stays on the current hook response. Legacy edit/MCP hooks keep their existing
 output behavior, and automatic Stop follow-up messages remain disabled. Hook success never
 substitutes for an explicit command/test exit fact.
+Stale-verification advice is scoped to the logical tool call rather than the observed phase, so a
+`preToolUse`/`postToolUse` pair carrying one call identity reports one
+`edit_after_successful_check` finding with both phases as evidence. The reviewed post-only
+structural profile is unchanged and still reports one finding for its one observed phase; Yoetz
+does not fabricate a pre-event to complete a pair (issue #680).
 For ordinary MCP tool events, `tool_output` contains tool-domain data. Only the outer MCP
 `isError`/`is_error` signal contributes execution status; nested `status`, `outcome`, `success`,
 and exit-like fields do not describe the host execution. Built-in shell outcomes retain their

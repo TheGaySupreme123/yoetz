@@ -305,6 +305,16 @@ def _resolved_tool(
     return _tool(envelope) or fallback.get(key), key
 
 
+def _is_edit_envelope(envelope: ObservationEnvelope, tool: str | None) -> bool:
+    """Return whether one envelope is structural evidence of a state edit."""
+
+    if tool is not None and tool in _EDIT_TOOLS:
+        return True
+    # Also treat apply_patch action writes.
+    action = envelope.structural_payload.get(_FIELD_ACTION)
+    return action in {"write", "edit", "delete"} or _changed_paths_digest(envelope) is not None
+
+
 def _candidate(
     kind: FindingKind,
     rule_code: str,
@@ -382,27 +392,36 @@ def _edits_after_check(
             last_success_pos = max(last_success_pos or 0, check.cursor_event_position)
     if last_success_pos is None:
         return []
-    results: list[ObservationAdviceCandidate] = []
+    # One logical host edit is observed twice on paired profiles: a PreToolUse
+    # attempt and a PostToolUse result.  Group the observed phases by the
+    # source/session/generation-fenced call key so the stale-verification
+    # condition keeps one identity per logical edit (#680).  A post-only
+    # profile (current Cursor) still yields one group per envelope through the
+    # ``source_identity`` fallback in ``_tool_correlation_key``, and two
+    # distinct calls — or the same call id across a source, session, or
+    # generation boundary — remain separate keys.
+    originating_tools, fallback_tools = _tool_resolution(envelopes)
+    grouped: dict[_ToolCorrelationKey, list[ObservationEnvelope]] = {}
     for envelope in envelopes:
-        tool = _tool(envelope)
-        if tool is None or tool not in _EDIT_TOOLS:
-            # Also treat apply_patch action writes.
-            action = envelope.structural_payload.get(_FIELD_ACTION)
-            if (
-                action not in {"write", "edit", "delete"}
-                and _changed_paths_digest(envelope) is None
-            ):
-                continue
-        if envelope.cursor.event_position > last_success_pos:
-            results.append(
-                _candidate(
-                    FindingKind.STALE_EVIDENCE_FOR_CHANGED_STATE,
-                    "edit_after_successful_check",
-                    "rerun_approved_check",
-                    (_envelope_ref(envelope),),
-                    f"edit-after-check:{envelope.cursor.event_position}",
-                )
+        tool, key = _resolved_tool(envelope, originating_tools, fallback_tools)
+        if key is None or not _is_edit_envelope(envelope, tool):
+            continue
+        grouped.setdefault(key, []).append(envelope)
+    results: list[ObservationAdviceCandidate] = []
+    for key, phases in grouped.items():
+        if not any(phase.cursor.event_position > last_success_pos for phase in phases):
+            continue
+        # The call key identifies the condition; the phase refs prove it.
+        cause_digest = canonical_digest({"correlation_key": key})
+        results.append(
+            _candidate(
+                FindingKind.STALE_EVIDENCE_FOR_CHANGED_STATE,
+                "edit_after_successful_check",
+                "rerun_approved_check",
+                tuple(_envelope_ref(phase) for phase in phases),
+                f"edit-after-check:{cause_digest.removeprefix('sha256:')}",
             )
+        )
     return results
 
 

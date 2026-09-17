@@ -124,6 +124,13 @@ unsupported claims and unbounded duplicate findings.
    event. Once a readable finding for that condition exists, later evidence-window or frontier
    changes do not append another `finding_recorded` event. The current observation snapshot and
    coverage/gap state retain the changing evidence context without growing the durable finding set.
+   A rule whose cause is one host tool call keys its detail token on the logical call, never on the
+   observed phase or event position: the `PreToolUse` and `PostToolUse` phases of one edit are one
+   condition. The key is fenced by source, session commitment, source generation, and the admitted
+   `correlation_id`/`tool_call_id`, falling back to the envelope's source identity so a post-only
+   profile still reports its one observed phase without a fabricated pre-event. Two tool calls
+   remain two conditions, a call id reused across a source, session, or generation boundary never
+   coalesces, and both phases stay in the evidence refs (issue #680).
 
 8. `provenance_disputed` is the fourth `ResponseDisposition`. It records that the responder
    contests the finding's authorship or provenance premise, requires a non-empty reason, and may

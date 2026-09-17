@@ -309,6 +309,13 @@ A background Bash launch
 is recorded as partial until the host supplies completion evidence. These decisions do not add
 filesystem or batch observation.
 
+Stale-verification advice is scoped to the logical tool call, not to the observed phase. On this
+profile one edit is observed twice — a `PreToolUse` attempt and a `PostToolUse` result sharing the
+normalized `tool_call_id` (Claude's `tool_use_id`) — and the pair reports one
+`edit_after_successful_check` finding whose evidence refs name each observed phase (issue #680).
+Where only the result is observed, that single phase is the whole condition; no pre-event is
+fabricated.
+
 Select these hooks with `--observation-profile ordinary` on the existing Claude plugin
 preview/install/update/status commands, or on `yoetz integrate claude plugin export` for a
 development directory. Repeat the same profile when applying an exact preview. To return to

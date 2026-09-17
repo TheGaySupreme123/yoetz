@@ -14,6 +14,7 @@ from yoetz.domain.observation import (
 )
 from yoetz.domain.values import JsonObject, Timestamp
 from yoetz.kernel.policies.observation_advice import (
+    ObservationAdviceCandidate,
     ObservationAdviceContext,
     ObservationCheckFact,
     ObservationCompositionFact,
@@ -286,6 +287,145 @@ def test_edit_after_successful_check() -> None:
     )
     assert any(item.rule_code == "edit_after_successful_check" for item in findings)
     assert any(item.kind is FindingKind.STALE_EVIDENCE_FOR_CHANGED_STATE for item in findings)
+
+
+def _stale_candidates(
+    envelopes: tuple[ObservationEnvelope, ...],
+) -> tuple[ObservationAdviceCandidate, ...]:
+    return tuple(
+        item
+        for item in observation_advice_findings(
+            ObservationAdviceContext(
+                envelopes=envelopes,
+                lifecycle=ObservationLifecycle.ACTIVE,
+                gaps=(),
+            )
+        )
+        if item.rule_code == "edit_after_successful_check"
+    )
+
+
+def _paired_edit(
+    *,
+    call_id: str,
+    pre_pos: int,
+    post_pos: int,
+    prefix: str = "hook",
+) -> tuple[ObservationEnvelope, ObservationEnvelope]:
+    """One logical host edit observed as a PreToolUse/PostToolUse pair."""
+
+    return (
+        _envelope(
+            "PreToolUse",
+            pos=pre_pos,
+            identity=f"{prefix}:{call_id}-pre",
+            payload={
+                "tool_name": "Write",
+                "tool_call_id": call_id,
+                "action": "claude_tool_pending",
+                "changed_paths_digest": _DIGEST,
+            },
+        ),
+        _envelope(
+            "PostToolUse",
+            pos=post_pos,
+            identity=f"{prefix}:{call_id}-post",
+            payload={
+                "tool_name": "Write",
+                "tool_call_id": call_id,
+                "action": "claude_tool_success",
+                "success": True,
+                "changed_paths_digest": _DIGEST,
+            },
+        ),
+    )
+
+
+def test_paired_edit_phases_yield_one_stale_candidate() -> None:
+    """Issue #680: pre/post phases of one host edit are one condition."""
+
+    check = _envelope(
+        "PostToolUse",
+        pos=1,
+        identity="hook:check",
+        payload={"tool_name": "shell", "exit_status": 0, "correlation_id": "check-1"},
+    )
+    candidates = _stale_candidates((check, *_paired_edit(call_id="call-1", pre_pos=2, post_pos=3)))
+    assert len(candidates) == 1
+    # Both mapped phases prove the one condition without identifying it.
+    assert candidates[0].evidence_refs == ("hook:call-1-post", "hook:call-1-pre")
+
+
+def test_stale_candidate_identity_survives_a_growing_evidence_window() -> None:
+    check = _envelope(
+        "PostToolUse",
+        pos=1,
+        identity="hook:check",
+        payload={"tool_name": "shell", "exit_status": 0, "correlation_id": "check-1"},
+    )
+    pre, post = _paired_edit(call_id="call-1", pre_pos=2, post_pos=3)
+    pre_only = _stale_candidates((check, pre))
+    paired = _stale_candidates((check, pre, post))
+    assert len(pre_only) == 1
+    assert len(paired) == 1
+    assert pre_only[0].detail_token == paired[0].detail_token
+
+
+def test_distinct_tool_calls_remain_distinct_stale_candidates() -> None:
+    check = _envelope(
+        "PostToolUse",
+        pos=1,
+        identity="hook:check",
+        payload={"tool_name": "shell", "exit_status": 0, "correlation_id": "check-1"},
+    )
+    candidates = _stale_candidates(
+        (
+            check,
+            *_paired_edit(call_id="call-1", pre_pos=2, post_pos=3),
+            *_paired_edit(call_id="call-2", pre_pos=4, post_pos=5),
+        )
+    )
+    assert len({item.detail_token for item in candidates}) == 2
+
+
+def test_reused_call_id_across_generations_does_not_coalesce() -> None:
+    check = _envelope(
+        "PostToolUse",
+        pos=1,
+        identity="hook:check",
+        payload={"tool_name": "shell", "exit_status": 0, "correlation_id": "check-1"},
+    )
+    first_pre, first_post = _paired_edit(call_id="call-1", pre_pos=2, post_pos=3)
+    later_pre, later_post = _paired_edit(call_id="call-1", pre_pos=4, post_pos=5, prefix="gen2")
+    later_pre = replace(later_pre, cursor=replace(later_pre.cursor, source_generation=2))
+    later_post = replace(later_post, cursor=replace(later_post.cursor, source_generation=2))
+    candidates = _stale_candidates((check, first_pre, first_post, later_pre, later_post))
+    assert len({item.detail_token for item in candidates}) == 2
+
+
+def test_post_only_profile_emits_one_candidate_for_its_one_phase() -> None:
+    """Cursor's current post-only profile needs no fabricated pre-event."""
+
+    check = _envelope(
+        "PostToolUse",
+        pos=1,
+        identity="cursor:check",
+        payload={"tool_name": "shell", "exit_status": 0},
+    )
+    edit = _envelope(
+        "PostToolUse",
+        pos=2,
+        identity="cursor:edit",
+        payload={
+            "tool_name": "Write",
+            "action": "claude_tool_success",
+            "success": True,
+            "changed_paths_digest": _DIGEST,
+        },
+    )
+    candidates = _stale_candidates((check, edit))
+    assert len(candidates) == 1
+    assert candidates[0].evidence_refs == ("cursor:edit",)
 
 
 def test_completion_without_verification() -> None:
