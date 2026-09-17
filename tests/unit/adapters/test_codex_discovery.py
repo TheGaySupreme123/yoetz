@@ -228,7 +228,9 @@ def test_default_codex_home_treats_an_unresolvable_home_as_no_offer(
         raise RuntimeError("Could not determine home directory.")
 
     def no_expansion(self: Path) -> Path:
-        raise RuntimeError("Could not determine home directory.")
+        if str(self).startswith("~"):
+            raise RuntimeError("Could not determine home directory.")
+        return self
 
     monkeypatch.setattr(Path, "home", classmethod(no_home))
     monkeypatch.setattr(Path, "expanduser", no_expansion)
