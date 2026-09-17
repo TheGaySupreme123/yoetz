@@ -817,7 +817,7 @@ def test_interactive_wizard_selects_harness_then_installation_and_requires_y_or_
     assert "Select a harness to connect to Yoetz" in result.stdout
     assert "Detected Codex installations:" in result.stdout
     assert "Select the Codex installation to configure" in result.stdout
-    assert "Exact existing Codex home paired with /b/codex" in result.stdout
+    assert "Codex home used by /b/codex" in result.stdout
     assert "Choose how Yoetz should review work:" in result.stdout
     assert "complete Yoetz Codex project integration" in result.stdout
     assert "MCP server name: yoetz" in result.stdout

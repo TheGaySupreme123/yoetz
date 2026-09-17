@@ -142,6 +142,7 @@ class FakeRuntime:
     applied: list[tuple[str, str | None]] = field(default_factory=lambda: [])
     # Which route each half of the integration asked for, so a test can assert they agree.
     planned_routes: list[str | None] = field(default_factory=lambda: [])
+    suggested_codex_home_value: Path | None = None
     planned_codex_homes: list[Path] = field(default_factory=lambda: [])
     applied_routes: list[str] = field(default_factory=lambda: [])
     applied_codex_homes: list[Path] = field(default_factory=lambda: [])
@@ -162,6 +163,9 @@ class FakeRuntime:
     @property
     def opened_titles(self) -> tuple[str, ...]:
         return tuple(reversed(self.opened))
+
+    def suggested_codex_home(self) -> Path | None:
+        return self.suggested_codex_home_value
 
     def discover_harnesses(self) -> tuple[HarnessOption, ...]:
         return self.harnesses

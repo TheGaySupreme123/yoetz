@@ -1,11 +1,14 @@
 # yoetz npm launcher
 
-This package is a **delegation launcher only**. `npx yoetz` runs the exact
-pinned Python distribution `yoetz==<this package's version>` through
-[`uv`](https://docs.astral.sh/uv/), which must already be installed. The launcher:
+This package is a **delegation launcher only**. `npx yoetz` installs the exact
+pinned Python distribution `yoetz==<this package's version>` as a persistent tool through
+[`uv`](https://docs.astral.sh/uv/), which must already be installed, and runs it. The launcher:
 
 - bundles no Python, no dependencies, and no Yoetz code;
-- downloads nothing itself — `uvx` performs the provenance-carrying install from PyPI;
+- downloads nothing itself — `uv tool install --python 3.14` performs the provenance-carrying
+  install from PyPI (fetching the Python 3.14 runtime on demand), and `uvx` runs that same
+  persistent environment, so the `yoetz` command is on `PATH` afterwards and agents connected
+  from `npx yoetz` survive `uv cache clean`;
 - passes every argument through unchanged and exits with the child's exit code, reporting the
   conventional `128+n` when the child is killed by a signal so `npx yoetz` and the Python
   console script are interchangeable in a script that inspects exit codes;
