@@ -74,18 +74,21 @@ carrying them after the fix: a later clean check never erases what was caught.
 ## Install
 
 ```sh
-# One-off run (needs uv: https://docs.astral.sh/uv/)
-uvx yoetz
-
 # Install the latest published version from PyPI — the canonical distribution
 uv tool install --managed-python --python 3.14.6 yoetz
 
-# Via npm — a dependency-free launcher for the exact same PyPI package (needs uv)
+# Via npm — a dependency-free launcher that makes the same persistent uv install (needs uv)
 npx yoetz
+
+# One-off run without installing (needs uv: https://docs.astral.sh/uv/)
+uvx --python 3.14 yoetz
 ```
 
-The npm package bundles no Python and no Yoetz code and never installs `uv` itself; it only
-launches the exact matching Python distribution. Yoetz runs on macOS and Linux (certified on
+Yoetz needs Python 3.14. You do not need to have it: `uv` downloads the exact interpreter on
+demand, whatever other Pythons are on the machine, and the install is not affected by them.
+`pip install yoetz` on an older Python cannot work, because the package requires 3.14. The npm
+package bundles no Python and no Yoetz code and never installs `uv` itself; it makes the same
+`uv tool install` and launches the exact matching Python distribution. Yoetz runs on macOS and Linux (certified on
 macOS arm64 and Linux x86-64 (glibc 2.28+); other Linux architectures install and report themselves as untested —
 see [Linux](docs/usage/install-and-first-run.md#linux)); on Windows, install it inside WSL 2 — see
 [Windows](docs/usage/install-and-first-run.md#windows).

@@ -261,7 +261,12 @@ class CodexMcpAdapter:
         # Embedded clients retain the historical bare command. An installed CLI with missing
         # or modified launcher evidence must never quietly fall back to PATH.
         if invoking_launcher() is not None:
-            raise McpRegistrationError(McpRegistrationReason.HARNESS_UNAVAILABLE, {})
+            # A group- or world-writable prefix (Homebrew's ``/opt/homebrew``), a symlinked
+            # script, or a modified console script: the launcher exists but cannot prove
+            # itself, and the way out is a persistent owner-only install (issue #766).
+            raise McpRegistrationError(
+                McpRegistrationReason.HARNESS_UNAVAILABLE, {"detail": "launcher_unproven"}
+            )
         return self._serve_command, None
 
     def _classify_get(

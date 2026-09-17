@@ -92,3 +92,32 @@ def test_bare_invocation_without_tty_still_prints_help(
     assert result.exit_code == 0
     assert "Usage" in result.output
     assert "Refresh status" not in result.output
+
+
+def test_bare_tty_first_run_without_the_full_screen_ui_reaches_the_wizard(
+    menu_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``YOETZ_TUI=0`` (or no Textual) on a first run must open the prompt wizard, not die
+    with ``internal_error`` because the fallback call forgot a required argument (#766)."""
+
+    import yoetz.cli.setup as setup_module
+
+    received: dict[str, object] = {}
+
+    async def fake_wizard(**kwargs: object) -> int:
+        received.update(kwargs)
+        return 0
+
+    monkeypatch.setenv("YOETZ_TUI", "0")
+    monkeypatch.setattr(setup_module, "should_offer_first_run", lambda: True)
+    monkeypatch.setattr(setup_module, "run_setup_wizard", fake_wizard)
+    result = _RUNNER.invoke(cli.app, [], input="q\n")
+    assert result.exit_code == 0, result.output
+    assert "internal_error" not in result.output
+    assert received == {
+        "non_interactive": False,
+        "codex_path": None,
+        "codex_home": None,
+        "accept": False,
+        "json_output": False,
+    }

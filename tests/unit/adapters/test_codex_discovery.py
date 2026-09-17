@@ -186,3 +186,58 @@ def test_discovery_never_mutates_the_candidate(tmp_path: Path) -> None:
     probe = _Probe((str(binary.parent),), {})
     discover_codex_binaries(_probe=probe)
     assert (binary.read_bytes(), stat.S_IMODE(binary.stat().st_mode)) == before
+
+
+def test_default_codex_home_prefers_codex_home_then_the_dotfile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    explicit = tmp_path / "explicit-codex"
+    explicit.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    assert discovery_module.default_codex_home({"CODEX_HOME": str(explicit)}) == explicit
+    assert discovery_module.default_codex_home({}) == home / ".codex"
+
+
+def test_default_codex_home_is_only_ever_an_existing_owner_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    # Nothing exists: the caller asks instead of inventing a home.
+    assert discovery_module.default_codex_home({}) is None
+    # A CODEX_HOME that does not exist falls through to the dotfile, not to a guess.
+    (home / ".codex").mkdir()
+    assert discovery_module.default_codex_home({"CODEX_HOME": str(tmp_path / "missing")}) == (
+        home / ".codex"
+    )
+    # A symlinked home is never offered.
+    link = tmp_path / "link"
+    link.symlink_to(home / ".codex")
+    assert discovery_module.default_codex_home({"CODEX_HOME": str(link)}) == home / ".codex"
+
+
+def test_default_codex_home_treats_an_unresolvable_home_as_no_offer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_home(cls: type[Path]) -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    def no_expansion(self: Path) -> Path:
+        if str(self).startswith("~"):
+            raise RuntimeError("Could not determine home directory.")
+        return self
+
+    monkeypatch.setattr(Path, "home", classmethod(no_home))
+    monkeypatch.setattr(Path, "expanduser", no_expansion)
+    explicit = tmp_path / "explicit-codex"
+    explicit.mkdir()
+
+    assert discovery_module.default_codex_home({}) is None
+    assert discovery_module.default_codex_home({"CODEX_HOME": "~/.codex"}) is None
+    # An absolute CODEX_HOME still wins even when the home directory cannot be resolved.
+    assert discovery_module.default_codex_home({"CODEX_HOME": str(explicit)}) == explicit

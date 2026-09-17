@@ -827,3 +827,21 @@ def test_apply_unregistration_is_noop_when_absent() -> None:
     assert result.action is McpRegistrationAction.NOOP
     assert result.state_after is McpRegistrationState.ABSENT
     assert [call[1:3] for call in runner.calls] == [("mcp", "get"), ("mcp", "list")]
+
+
+def test_preview_names_an_unproven_launcher_instead_of_falling_back_to_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A console script that cannot prove itself (group-writable prefix, symlink, modified
+    RECORD) must not register a bare ``yoetz`` and must say which condition it hit (#766)."""
+
+    monkeypatch.setattr("yoetz.adapters.integrations.codex_mcp.installed_launcher", lambda: None)
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.codex_mcp.invoking_launcher", lambda: "/opt/homebrew/bin/yoetz"
+    )
+    runner = _Runner(_absent_outputs())
+    with pytest.raises(McpRegistrationError) as caught:
+        anyio.run(lambda: CodexMcpAdapter(runner).preview_registration(_BINARY))
+    assert caught.value.reason is McpRegistrationReason.HARNESS_UNAVAILABLE
+    assert caught.value.safe_details == {"detail": "launcher_unproven"}
+    assert all(call[1:3] != ("mcp", "add") for call in runner.calls)
