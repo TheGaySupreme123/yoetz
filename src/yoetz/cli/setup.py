@@ -25,7 +25,10 @@ from typing import Final, Literal, cast
 import anyio
 import typer
 
-from yoetz.adapters.integrations.codex_discovery import discover_codex_binaries
+from yoetz.adapters.integrations.codex_discovery import (
+    default_codex_home,
+    discover_codex_binaries,
+)
 from yoetz.adapters.integrations.codex_marketplace import (
     ActivationPreview,
     ActivationState,
@@ -1238,6 +1241,7 @@ async def _codex_integration_step(
         return {
             "outcome": "failed",
             "reason": error.reason.value,
+            "detail": error.safe_details.get("detail"),
             "state": None,
             "plugin": {"outcome": "skipped", "presence": None},
             "plugin_activation": {"outcome": "skipped", "state": "unknown"},
@@ -2419,12 +2423,20 @@ async def run_setup_wizard(
     except _UsageExit as failure:
         return failure.code
 
-    if chosen is not None and codex_home is None and interactive:
-        codex_home = Path(
-            typer.prompt(
-                f"Exact existing Codex home paired with {chosen.executable_path}",
-            )
-        ).expanduser()
+    if chosen is not None and codex_home is None:
+        # Offer the home a person would otherwise have to type. Interactive runs confirm or
+        # replace it; non-interactive runs bind it and report it, so an agent driving setup
+        # never has to guess ``--codex-home`` (issue #766).
+        suggested = default_codex_home()
+        if interactive:
+            codex_home = Path(
+                typer.prompt(
+                    f"Codex home used by {chosen.executable_path}",
+                    default=None if suggested is None else str(suggested),
+                )
+            ).expanduser()
+        else:
+            codex_home = suggested
 
     review_mode: Literal["local_only", "semantic", "deferred"] = (
         _choose_review_mode() if interactive else "deferred"

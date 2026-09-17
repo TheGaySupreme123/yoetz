@@ -7,7 +7,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Protocol
@@ -17,6 +17,7 @@ from yoetz.ports.integrations import HarnessId
 
 __all__ = [
     "CodexProbe",
+    "default_codex_home",
     "discover_codex_binaries",
 ]
 
@@ -187,3 +188,27 @@ def discover_codex_binaries(*, _probe: CodexProbe | None = None) -> tuple[Harnes
                 break
     binaries.sort(key=lambda binary: binary.executable_path)
     return tuple(binaries)
+
+
+def default_codex_home(environ: Mapping[str, str] | None = None) -> Path | None:
+    """The Codex home a person would otherwise have to type: ``$CODEX_HOME`` or ``~/.codex``.
+
+    This is an offer, never a decision: callers show it for confirmation (interactive) or
+    report it as the bound home (non-interactive). It is returned only when it already exists
+    as an absolute, non-symlink directory, so a typo or a fresh machine yields ``None`` and the
+    caller asks instead of inventing a home.
+    """
+
+    env = os.environ if environ is None else environ
+    raw = env.get("CODEX_HOME")
+    candidates: list[Path] = []
+    if raw:
+        candidates.append(Path(raw).expanduser())
+    candidates.append(Path.home() / ".codex")
+    for candidate in candidates:
+        try:
+            if candidate.is_absolute() and not candidate.is_symlink() and candidate.is_dir():
+                return candidate
+        except OSError:
+            continue
+    return None

@@ -326,6 +326,13 @@ class YoetzRuntime:
 
         return tuple(reversed(self._opened_titles))
 
+    def suggested_codex_home(self) -> Path | None:
+        """``$CODEX_HOME`` or ``~/.codex`` when it exists, offered for confirmation."""
+
+        from yoetz.adapters.integrations.codex_discovery import default_codex_home
+
+        return default_codex_home()
+
     def discover_harnesses(self) -> tuple[HarnessOption, ...]:
         from yoetz.adapters.integrations.codex_discovery import discover_codex_binaries
 

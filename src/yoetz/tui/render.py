@@ -163,10 +163,13 @@ def render_detection(detection: Detection, width: int) -> tuple[str, ...]:
 
     lines: list[str] = ["Detected:"]
     if detection.harnesses:
-        first = detection.harnesses[0]
-        lines.append(_bullet(Level.VERIFIED, f"{first.label} {first.version_text}"))
-        for extra in detection.harnesses[1:]:
-            lines.append(_bullet(Level.VERIFIED, f"{extra.label} {extra.version_text}"))
+        for harness in detection.harnesses:
+            # The label already names the version when one was reported; repeating it
+            # printed "Codex CLI 0.153.4 0.153.4" (issue #766).
+            text = harness.label
+            if harness.reported_version is None:
+                text = f"{text} ({harness.version_text})"
+            lines.append(_bullet(Level.VERIFIED, text))
     else:
         lines.append(_bullet(Level.OPTIONAL, "No supported agent installation found"))
     if detection.project_name is not None:

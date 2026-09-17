@@ -2638,8 +2638,8 @@ def setup_run(
 ) -> None:
     """Run the guided first-run setup wizard."""
 
-    if (codex_path is None) != (codex_home is None):
-        raise typer.BadParameter("--codex-path and --codex-home must be provided together")
+    if codex_home is not None and codex_path is None:
+        raise typer.BadParameter("--codex-home requires --codex-path")
     chosen_route = _validated_route_profile(route_profile)
 
     operation = _setup_operation("run_setup_wizard")
@@ -4258,6 +4258,7 @@ def root(
                 lambda: operation(
                     non_interactive=False,
                     codex_path=None,
+                    codex_home=None,
                     accept=False,
                     json_output=False,
                 )
