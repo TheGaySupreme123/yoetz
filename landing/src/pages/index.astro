@@ -10,7 +10,11 @@ const NPM = "https://www.npmjs.com/package/yoetz";
 const VERSION = landingPackage.version;
 const RELEASES = `${GITHUB}/releases`;
 const ROADMAP = `${GITHUB}/issues`;
-const INSTALL_COMMAND = `uv tool install --managed-python --python 3.14.6 "yoetz==${VERSION}"`;
+// Unpinned on purpose: the site must never name a version PyPI does not have (a pinned
+// 0.2.0 shipped once and failed every PyPI install). uv resolves the latest release and
+// fetches Python 3.14 itself, whatever other Pythons the machine has.
+const INSTALL_COMMAND = "uv tool install --managed-python --python 3.14.6 yoetz";
+const NPM_COMMAND = "npx yoetz";
 const AGENT_PROMPT = `I want to install Yoetz (${GITHUB}). Start by fetching its agent install guide and follow it exactly:
 
 curl -fsSL https://raw.githubusercontent.com/TheGaySupreme123/yoetz/main/docs/usage/agent-start.md
@@ -271,7 +275,7 @@ const next = [
             <div class="manual-panel" id="manual-panel" hidden>
               <span class="manual-label">Copy a command</span>
               <button class="inst-tab" type="button" data-key="pypi" data-command={INSTALL_COMMAND}>Install with PyPI</button>
-              <button class="inst-tab" type="button" data-key="npm" data-command="npx yoetz">Install with npm</button>
+              <button class="inst-tab" type="button" data-key="npm" data-command={NPM_COMMAND}>Install with npm</button>
             </div>
 
             <div class="next-steps" id="copy-toast" role="status" aria-live="polite" hidden>
@@ -687,6 +691,8 @@ const next = [
       const nsFoot = document.getElementById("ns-foot");
       const nsClose = document.getElementById("ns-close");
       const SETUP_TIME = "About two to three minutes.";
+      const UV_NOTE =
+        "Needs `uv` (curl -LsSf https://astral.sh/uv/install.sh | sh); it fetches Python 3.14 itself, so your other Pythons do not matter.";
       const HOST_NOTE =
         "Setup connects Codex. For Claude Code or Cursor, run `yoetz integrate claude plugin preview` or `yoetz integrate cursor plugin preview` afterwards.";
       // Steps may carry `code` spans marked with backticks; everything is built as text nodes.
@@ -737,12 +743,12 @@ const next = [
           const copied = await copyText(cmd);
           const steps = tab.dataset.key === "pypi"
             ? [
-                "Paste the command into your terminal and press Enter to install.",
+                `Paste the command into your terminal and press Enter to install. ${UV_NOTE}`,
                 `Run \`yoetz\` to start setup, and answer its questions. ${SETUP_TIME}`,
                 HOST_NOTE,
               ]
             : [
-                "Paste the command into your terminal and press Enter. `npx yoetz` installs Yoetz and starts setup.",
+                `Paste the command into your terminal and press Enter. \`npx yoetz\` installs Yoetz and starts setup. ${UV_NOTE}`,
                 `Answer setup’s questions in your terminal. ${SETUP_TIME}`,
                 HOST_NOTE,
               ];
