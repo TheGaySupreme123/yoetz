@@ -778,6 +778,10 @@ def observe_status(
         codex_home=codex_home,
     )
     diagnostics = hook_diagnostic_summary(_state=_state)
+    # A refused routine-read summary costs only its lane's bounded account, but
+    # an operator must be able to name that cause instead of reading a bare
+    # "incomplete or stale" coverage note (issue #753).
+    summary_refusals = store.summary_refusals(commitment)
     reclaim_guidance = (
         "reclaim with 'yoetz observe reclaim --workspace .'"
         if root == Path.cwd().resolve()
@@ -835,6 +839,7 @@ def observe_status(
                 "quarantine_reclaimed_count": quarantine_reclaimed,
                 "mapping_present": mapping_present,
                 "hook_diagnostics": diagnostics,
+                "summary_refusals": summary_refusals,
                 "plugin_activation": plugin_activation,
             },
             json_output=True,
@@ -873,6 +878,17 @@ def observe_status(
         "hook_diagnostics": canonical_encode(diagnostics).decode("utf-8"),
         "advice_frontier": status.advice_frontier or "none",
         "gaps": ",".join(status.gaps) if status.gaps else "none",
+        "summary_refusals": (
+            "none"
+            if not summary_refusals
+            else "; ".join(
+                f"{entry.get('source')} generation {entry.get('source_generation')} "
+                f"identity {entry.get('source_identity')} position {entry.get('event_position')} "
+                f"inputs {entry.get('input_count')} reason {entry.get('reason')} "
+                f"({entry.get('disposition')})"
+                for entry in summary_refusals[-4:]
+            )
+        ),
         "hook_coverage": str(status.source_coverage.get(ObservationSource.CODEX_HOOK, False)),
         "stream_coverage": str(
             status.source_coverage.get(ObservationSource.CODEX_SESSION_STREAM, False)

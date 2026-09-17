@@ -24,9 +24,11 @@ from pathlib import Path
 from typing import Final, TypeVar, cast
 
 from yoetz.adapters.integrations.observation_admission import (
+    ROUTINE_SUMMARY_INVALID_GAP,
     AdmissionBuffer,
     AdmissionPlan,
     SummaryBuilder,
+    SummaryRefusal,
     admission_buffer_from_json,
     admission_buffer_to_json,
     flush_admission,
@@ -206,6 +208,10 @@ _MAX_SESSION_REPLAY_KEYS: Final = 256
 # to stay within the state bound.
 _MAX_CODEX_SESSION_BINDINGS: Final = 256
 _MAX_SESSION_GAP_CODES: Final = 8
+# One refused routine-read summary per lane is enough to name the cause; the
+# lane is drained on the first refusal, so this bound is never reached by a
+# repeating failure, only by many distinct ones.
+_MAX_SUMMARY_REFUSALS: Final = 16
 _MAX_CAPTURE_BACKLOG_ROUTES: Final = 256
 _MAX_CAPTURE_TICKET_RESERVATIONS: Final = 512
 _MAX_CAPTURE_CONTENT_BYTES: Final = 128 * 1024 * 1024
@@ -1195,6 +1201,12 @@ class _WorkspaceState:
     selection_loss_ranges: tuple[JsonObject, ...] = ()
     selection_last_loss_notice_ms: int | None = None
     selection_loss_notice_pending: bool = False
+    # Bounded, deduplicated account of every buffered lane whose routine-read
+    # summary the builder refused. The members were admitted individually with
+    # a `routine_summary_invalid` gap, so this names the cause once instead of
+    # letting an anonymous sweep exception repeat every minute (issue #753).
+    selection_summary_refusals: tuple[JsonObject, ...] = ()
+    selection_summary_refusal_notice_pending: bool = False
     # (codex_session_id, envelope, reason, quarantined_at). The timestamp is
     # store-authored at quarantine time so the age bound measures time *in*
     # quarantine, never the (possibly much older) envelope receipt time.
@@ -5279,7 +5291,94 @@ class LocalObservationStore:
                     envelope.event_kind == "RoutineReadSummary" for _, envelope in plan.deliveries
                 ),
             )
+            self._note_summary_refusals(state, plan.refusals)
             self._reclaim_optional_selection_cache(state, plan)
+            self._save(workspace, state)
+            return True
+
+    def _note_summary_refusals(
+        self, state: _WorkspaceState, refusals: tuple[SummaryRefusal, ...]
+    ) -> None:
+        """Record one bounded account per refused lane, deduplicated by member.
+
+        The refused lane is drained by the same plan, so a repeated refusal can
+        only come from a genuinely new member. That is what makes this an
+        at-most-once record rather than the per-sweep exception origin line the
+        daemon used to repeat every minute (issue #753).
+        """
+
+        if not refusals:
+            return
+        entries = list(state.selection_summary_refusals)
+        known = {
+            (
+                entry.get("source"),
+                entry.get("session"),
+                entry.get("source_generation"),
+                entry.get("source_identity"),
+            )
+            for entry in entries
+        }
+        observed_at = self._wall_timestamp()
+        recorded = False
+        for refusal in refusals:
+            self._note_gap_state(state, ROUTINE_SUMMARY_INVALID_GAP)
+            self._note_session_gap_state(
+                state, refusal.session_commitment, ROUTINE_SUMMARY_INVALID_GAP
+            )
+            identity = (
+                refusal.source,
+                refusal.session_commitment,
+                refusal.source_generation,
+                refusal.source_identity,
+            )
+            if identity in known:
+                continue
+            known.add(identity)
+            recorded = True
+            if len(entries) >= _MAX_SUMMARY_REFUSALS:
+                entries.pop(0)
+            entries.append(
+                JsonObject(
+                    {
+                        "source": refusal.source,
+                        "session": refusal.session_commitment,
+                        "source_generation": refusal.source_generation,
+                        "source_identity": refusal.source_identity,
+                        "byte_position": refusal.byte_position,
+                        "event_position": refusal.event_position,
+                        "last_event_position": refusal.last_event_position,
+                        "input_count": refusal.input_count,
+                        "reason": refusal.reason,
+                        "observed_at": observed_at.wire,
+                        "disposition": "admitted_individually",
+                    }
+                )
+            )
+        state.selection_summary_refusals = tuple(entries)
+        if recorded:
+            state.selection_summary_refusal_notice_pending = True
+
+    def summary_refusals(self, workspace: str) -> tuple[JsonObject, ...]:
+        """Return the bounded account of every refused routine-read summary.
+
+        This is deliberately separate from ``selection_accounting``: that
+        projection's shape is frozen by the local control-result schema, while
+        this is a local-only cause record read by ``observe status`` and by the
+        owner's diagnostics.
+        """
+
+        with self._lock:
+            return self._load(workspace).selection_summary_refusals
+
+    def consume_summary_refusal_notice(self, workspace: str) -> bool:
+        """Report a new refused summary once so one hook can name the cause."""
+
+        with self._lock:
+            state = self._load(workspace)
+            if not state.selection_summary_refusal_notice_pending:
+                return False
+            state.selection_summary_refusal_notice_pending = False
             self._save(workspace, state)
             return True
 
@@ -8946,6 +9045,10 @@ class LocalObservationStore:
             "selection_loss_ranges": state.selection_loss_ranges,
             "selection_last_loss_notice_ms": state.selection_last_loss_notice_ms,
             "selection_loss_notice_pending": state.selection_loss_notice_pending,
+            "selection_summary_refusals": state.selection_summary_refusals,
+            "selection_summary_refusal_notice_pending": (
+                state.selection_summary_refusal_notice_pending
+            ),
             "read_protections": tuple(
                 read_protection_to_json(item) for item in state.read_protections
             ),
@@ -9992,6 +10095,15 @@ class LocalObservationStore:
                 int | None, raw.get("selection_last_loss_notice_ms")
             ),
             selection_loss_notice_pending=raw.get("selection_loss_notice_pending") is True,
+            selection_summary_refusals=tuple(
+                JsonObject(cast(Mapping[str, JsonValue], item))
+                for item in cast(tuple[JsonValue, ...], raw.get("selection_summary_refusals", ()))[
+                    :_MAX_SUMMARY_REFUSALS
+                ]
+            ),
+            selection_summary_refusal_notice_pending=(
+                raw.get("selection_summary_refusal_notice_pending") is True
+            ),
             session_workspaces=session_workspaces,
             cursors=cursors,
             dedup=set(dedup_order),

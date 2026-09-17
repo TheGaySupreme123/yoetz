@@ -17,12 +17,14 @@ from yoetz.domain.observation import (
     ROUTINE_READ_SUMMARY_SCHEMA,
     ObservationCursor,
     ObservationEnvelope,
+    ObservationGapCode,
     observation_cursor_to_json,
     observation_envelope_from_json,
     observation_envelope_to_json,
     observation_selection_route,
     routine_read_summary_identity,
 )
+from yoetz.domain.observation_selection import envelope_outcome_state
 from yoetz.domain.values import JsonObject, JsonValue, validate_sha256_digest
 from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.errors import ProtocolValueError
@@ -67,10 +69,32 @@ class AdmissionBuffer:
 
 
 @dataclass(frozen=True, slots=True)
+class SummaryRefusal:
+    """Bounded identity of one lane whose routine-read summary was refused.
+
+    The builder reports the invariant it refused, not which member violated it,
+    so this names the lane by its head member's native identity and cursor plus
+    the lane's last cursor. That is enough to locate the inputs in the local
+    store without retaining any host content.
+    """
+
+    source: str
+    session_commitment: str
+    source_identity: str
+    source_generation: int
+    byte_position: int
+    event_position: int
+    last_event_position: int
+    input_count: int
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class AdmissionPlan:
     buffer: AdmissionBuffer
     deliveries: tuple[tuple[str, ObservationEnvelope], ...]
     deferred: bool
+    refusals: tuple[SummaryRefusal, ...] = ()
 
 
 def _call_identity(envelope: ObservationEnvelope) -> object:
@@ -79,46 +103,24 @@ def _call_identity(envelope: ObservationEnvelope) -> object:
     )
 
 
-_ROUTINE_SUCCESS_STATUSES: Final = frozenset({"success", "succeeded", "ok", "completed", "passed"})
-_ROUTINE_FAILURE_STATUSES: Final = frozenset(
-    {
-        "failure",
-        "failed",
-        "error",
-        "errored",
-        "denied",
-        "aborted",
-        "cancelled",
-        "canceled",
-        "timeout",
-        "timed_out",
-        "interrupted",
-        "partial",
-        "partially_completed",
-    }
-)
 _ROUTINE_SUMMARY_ALLOWED_GAPS: Final = frozenset({"content_unselected", "observation_input_loss"})
+ROUTINE_SUMMARY_INVALID_GAP: Final = ObservationGapCode.ROUTINE_SUMMARY_INVALID.value
 
 
 def _proven_routine_success(envelope: ObservationEnvelope) -> bool:
-    """Apply the same fail-closed outcome precedence as materialization."""
+    """Re-derive the selection classifier's outcome from the envelope itself.
 
-    structural = envelope.structural_payload
-    status = structural.get("result_status")
-    lowered = status.lower() if type(status) is str else None
-    exit_status = structural.get("exit_status")
-    if (
-        (type(exit_status) is int and not isinstance(exit_status, bool) and exit_status != 0)
-        or structural.get("denied") is True
-        or structural.get("success") is False
-        or lowered in _ROUTINE_FAILURE_STATUSES
-    ):
-        return False
-    return (
-        (type(exit_status) is int and not isinstance(exit_status, bool) and exit_status == 0)
-        or structural.get("success") is True
-        or lowered in _ROUTINE_SUCCESS_STATUSES
-    )
+    This deliberately shares one definition with ``classify_observation``
+    instead of applying a second, stricter rule over the lossy structural copy
+    of the host payload.  The strict copy accepted only a top-level
+    ``exit_status``/``success``/``result_status`` fact, while the classifier
+    proves a routine success from the host's nested result carriers or from the
+    native post-hook fallback.  Every real Codex post takes one of the latter
+    shapes, so the two predicates disagreed and this builder refused inputs the
+    planner had already buffered as successes (issue #753).
+    """
+
+    return envelope_outcome_state(envelope.structural_payload, envelope.event_kind) == "success"
 
 
 def build_routine_read_summary(
@@ -288,21 +290,65 @@ def build_routine_read_summary(
     )
 
 
+def _demoted(envelope: ObservationEnvelope) -> ObservationEnvelope:
+    """Carry the refusal as a durable coverage gap on the individual input."""
+
+    if ROUTINE_SUMMARY_INVALID_GAP in envelope.gap_codes:
+        return envelope
+    gaps = tuple(sorted({*envelope.gap_codes, ROUTINE_SUMMARY_INVALID_GAP}, key=str.encode))
+    try:
+        return replace(envelope, gap_codes=gaps)
+    except ProtocolValueError:
+        # A full or otherwise unrepresentable gap set must not cost the input
+        # its individual delivery; the lane-level account still records it.
+        return envelope
+
+
+def _summary_refusal(members: tuple[ObservationEnvelope, ...], reason: str) -> SummaryRefusal:
+    head = members[0]
+    return SummaryRefusal(
+        source=head.source.value,
+        session_commitment=head.session_commitment,
+        source_identity=head.source_identity,
+        source_generation=head.cursor.source_generation,
+        byte_position=head.cursor.byte_position,
+        event_position=head.cursor.event_position,
+        last_event_position=members[-1].cursor.event_position,
+        input_count=len(members),
+        reason=reason,
+    )
+
+
 def _flush_lane(
     inputs: tuple[BufferedInput, ...], summary_builder: SummaryBuilder
-) -> tuple[tuple[str, ObservationEnvelope], ...]:
-    """Flush source order; incomplete attempts never enter a success summary."""
+) -> tuple[tuple[tuple[str, ObservationEnvelope], ...], tuple[SummaryRefusal, ...]]:
+    """Flush source order; incomplete attempts never enter a success summary.
+
+    A builder that refuses one group is an accounting failure for that group
+    alone.  Its members are still accepted observations, so they are admitted
+    individually with a ``routine_summary_invalid`` coverage gap and the lane is
+    drained.  Re-raising here left the offending input buffered forever, so
+    every later sweep and every hook pre-flush raised again and observation
+    ingestion stopped for the rest of the session (issue #753).
+    """
 
     deliveries: list[tuple[str, ObservationEnvelope]] = []
+    refusals: list[SummaryRefusal] = []
     successes: list[ObservationEnvelope] = []
     previous: BufferedInput | None = None
 
     def flush_successes() -> None:
-        if successes and previous is not None:
-            deliveries.append(
-                (previous.host_session, summary_builder(tuple(successes), previous.fence))
-            )
-            successes.clear()
+        if not successes or previous is None:
+            return
+        members = tuple(successes)
+        successes.clear()
+        try:
+            summary = summary_builder(members, previous.fence)
+        except ProtocolValueError as exc:
+            refusals.append(_summary_refusal(members, exc.reason_code))
+            deliveries.extend((previous.host_session, _demoted(item)) for item in members)
+            return
+        deliveries.append((previous.host_session, summary))
 
     for item in inputs:
         if previous is not None and (
@@ -318,7 +364,7 @@ def _flush_lane(
             successes.append(item.envelope)
         previous = item
     flush_successes()
-    return tuple(deliveries)
+    return tuple(deliveries), tuple(refusals)
 
 
 def plan_admission(
@@ -345,8 +391,15 @@ def plan_admission(
     same_lane = tuple(item for item in buffer.inputs if item.lane == lane)
     other_lanes = tuple(item for item in buffer.inputs if item.lane != lane)
     deliveries: list[tuple[str, ObservationEnvelope]] = []
+    refusals: list[SummaryRefusal] = []
+
+    def flush(entries: tuple[BufferedInput, ...]) -> None:
+        lane_deliveries, lane_refusals = _flush_lane(entries, summary_builder)
+        deliveries.extend(lane_deliveries)
+        refusals.extend(lane_refusals)
+
     if same_lane and any(item.fence != fence for item in same_lane):
-        deliveries.extend(_flush_lane(same_lane, summary_builder))
+        flush(same_lane)
         same_lane = ()
     pending = tuple(item for item in same_lane if item.kind == "pending")
     is_pre = envelope.event_kind == "PreToolUse"
@@ -357,9 +410,11 @@ def plan_admission(
     ):
         eligible = False
     if not eligible:
-        deliveries.extend(_flush_lane(same_lane, summary_builder))
+        flush(same_lane)
         deliveries.append((host_session, envelope))
-        return AdmissionPlan(AdmissionBuffer(other_lanes), tuple(deliveries), False)
+        return AdmissionPlan(
+            AdmissionBuffer(other_lanes), tuple(deliveries), False, tuple(refusals)
+        )
 
     if pending:
         pre = pending[-1]
@@ -376,7 +431,7 @@ def plan_admission(
         else:
             # An interleaved operation must not pass an unresolved attempt in
             # source order. Publish the earlier pending attempt first.
-            deliveries.extend(_flush_lane(same_lane, summary_builder))
+            flush(same_lane)
             same_lane = ()
 
     same_lane += (
@@ -396,9 +451,13 @@ def plan_admission(
         or len(same_lane) >= SUMMARY_MAX_INPUTS
         or len(other_lanes) + len(same_lane) > MAX_BUFFERED_INPUTS
     ):
-        deliveries.extend(_flush_lane(same_lane, summary_builder))
-        return AdmissionPlan(AdmissionBuffer(other_lanes), tuple(deliveries), False)
-    return AdmissionPlan(AdmissionBuffer(other_lanes + same_lane), tuple(deliveries), True)
+        flush(same_lane)
+        return AdmissionPlan(
+            AdmissionBuffer(other_lanes), tuple(deliveries), False, tuple(refusals)
+        )
+    return AdmissionPlan(
+        AdmissionBuffer(other_lanes + same_lane), tuple(deliveries), True, tuple(refusals)
+    )
 
 
 def flush_admission(
@@ -420,6 +479,7 @@ def flush_admission(
         lanes.setdefault(item.lane, []).append(item)
     keep: list[BufferedInput] = []
     deliveries: list[tuple[str, ObservationEnvelope]] = []
+    refusals: list[SummaryRefusal] = []
     for lane in sorted(lanes):
         entries = lanes[lane]
         selected = host_session is None or any(
@@ -432,10 +492,14 @@ def flush_admission(
             for item in entries
         )
         if selected and (force or due):
-            deliveries.extend(_flush_lane(tuple(entries), summary_builder))
+            lane_deliveries, lane_refusals = _flush_lane(tuple(entries), summary_builder)
+            deliveries.extend(lane_deliveries)
+            refusals.extend(lane_refusals)
         else:
             keep.extend(entries)
-    return AdmissionPlan(AdmissionBuffer(tuple(keep)), tuple(deliveries), bool(keep))
+    return AdmissionPlan(
+        AdmissionBuffer(tuple(keep)), tuple(deliveries), bool(keep), tuple(refusals)
+    )
 
 
 def admission_buffer_to_json(buffer: AdmissionBuffer) -> JsonValue:

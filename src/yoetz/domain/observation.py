@@ -399,6 +399,12 @@ class ObservationGapCode(str, Enum):  # noqa: UP042 - exact durable wire enum
     CONTENT_REDACTED = "content_redacted"
     ROUTINE_READ_SUMMARY_DETAIL_OMITTED = "routine_read_detail_omitted"
     ROUTINE_READ_SUMMARY_INVALID = "routine_read_summary_invalid"
+    # Distinct from ``routine_read_summary_invalid`` above, which describes a
+    # delivered summary envelope that materialization refused.  This one
+    # describes a summary that was never built: the admission flush refused one
+    # buffered lane, so its members were admitted individually instead of being
+    # represented by a bounded summary account (issue #753).
+    ROUTINE_SUMMARY_INVALID = "routine_summary_invalid"
     SELECTION_ROUTE_CHANGED = "selection_route_changed"
     POLICY_UNTRUSTED = "policy_untrusted"
     VERIFICATION_STALE = "verification_stale"

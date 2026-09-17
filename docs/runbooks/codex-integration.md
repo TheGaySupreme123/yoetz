@@ -663,6 +663,14 @@ proven-success read can enter a summary. Ambiguous shell composition, nonzero or
 outcomes, and caller-supplied `routine_read` labels stay protected. Codex session-stream records
 remain a separate structural source and are outside this native selection/content path.
 
+Codex states a tool result under `tool_response`, so the proof that a read succeeded is normally
+nested rather than a top-level field. The selector and the summary builder share one definition of
+that proof; where they disagreed, the buffered account refused every Codex-shaped post and
+observation ingestion stopped for the rest of the session (issue #753). A refused summary now
+admits its reads individually with a `routine_summary_invalid` coverage gap, names the lane once in
+`yoetz observe status`, and records the bounded `routine_summary_invalid` hook reason instead of
+the opaque `observe` token. The behavior is shared by every host ingress, not Codex-specific.
+
 Use the owner controls after an exact preview:
 
 ```text

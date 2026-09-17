@@ -3181,12 +3181,24 @@ def handle_observe(
             # A protected event is a conservative workspace subject-state
             # boundary. Flush earlier accounts before its individual identity.
             material_boundary = not classification.routine_candidate
-            flush_ok = store.flush_selected_admission(
-                workspace_commitment,
-                summary_builder=build_routine_read_summary,
-                force=material_boundary or resolved_event in {"SessionStart", "SessionEnd"},
-                material_boundary=material_boundary,
-            )
+            try:
+                flush_ok = store.flush_selected_admission(
+                    workspace_commitment,
+                    summary_builder=build_routine_read_summary,
+                    force=material_boundary or resolved_event in {"SessionStart", "SessionEnd"},
+                    material_boundary=material_boundary,
+                )
+            except ProtocolValueError:
+                # A refused routine-read summary now drains its own lane, so
+                # this is a residual structural defect in the buffered account.
+                # It must degrade this one hook with a bounded reason, never
+                # reach the outer handler as the opaque `observe` token that
+                # made a permanently wedged flush unreadable (issue #753).
+                flush_ok = False
+                _stderr_line(
+                    "hook_observe_degraded: admission_flush_invalid; observation durability unknown"
+                )
+                record_hook_diagnostic("admission_flush_invalid", resolved_event, _state=_state)
             envelope = map_hook_payload_to_envelope(
                 resolved_event,
                 payload,
@@ -3439,6 +3451,17 @@ def handle_observe(
                     )
             elif local_result.disposition.value == "accepted":
                 store.note_selection_omission(workspace_commitment)
+            if (
+                local_result.disposition.value == "accepted"
+                and store.consume_summary_refusal_notice(workspace_commitment)
+            ):
+                # The inputs were admitted individually; only the bounded
+                # summary account for that lane was lost.
+                _stderr_line(
+                    "hook_observe_degraded: routine_summary_invalid; "
+                    "reads admitted individually; see observe status"
+                )
+                record_hook_diagnostic("routine_summary_invalid", resolved_event, _state=_state)
 
             # Persist session end so lifecycle can report STOPPED once every bound
             # session has ended.

@@ -4069,6 +4069,28 @@ Summary delivery creates one metadata-only evidence record with `routine_read_de
 coverage, not a per-call content or verification claim. A changed task route is rejected before
 the observation cursor advances.
 
+There is one definition of a proven routine success. `classify_observation` resolves it from the
+host payload, its bounded nested result carriers, and the native post-hook fallback, and the
+ingress records that decision on the envelope. A caller holding an envelope rather than a payload
+re-derives the same state with `envelope_outcome_state` over the fields the envelope retains, with
+the recorded `hook_name` standing in for the host's `hook_event_name` echo; a stream envelope
+records no `hook_name` and still requires an explicit outcome fact. A second, stricter rule over
+the lossy structural copy accepted only a top-level `exit_status`/`success`/`result_status` fact,
+so it refused every Codex-shaped post the planner had already buffered as a success (issue #753).
+
+Refusing to summarize one buffered lane is an accounting loss for that lane, never a stop. The
+flush admits that lane's members individually with the durable `routine_summary_invalid` coverage
+gap — distinct from `routine_read_summary_invalid`, which describes a delivered summary envelope
+that materialization refused — commits the remaining lanes, and drains the buffer. The workspace
+retains one bounded, deduplicated refusal account per refused lane (source, session commitment,
+source generation, the lane head's native identity and cursor, input count, and the protocol reason
+code). `observe status` reports that account beside the `routine_summary_invalid` coverage gap — it
+is a local cause record, separate from the selection-accounting projection whose shape the local
+control-result schema freezes — so the cause is named once instead of an anonymous sweep exception
+repeating every minute. A hook whose own pre-flush still fails structurally records the bounded
+`admission_flush_invalid` reason, and a hook that observed a refusal records
+`routine_summary_invalid`; neither degrades to the bare `observe` token.
+
 `ObservationSelection` separates Focused/Detailed from the 512/2,048/8,192 count profiles.
 `ObservationSelectionSettings` resolves a live session override, then an explicit workspace
 selection, then the default. Each profile also has finite queue/state byte bounds and protected
