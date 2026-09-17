@@ -106,6 +106,8 @@ _APPROVAL_DOMAIN = b"yoetz/privacy-audit/local-approval/v1\x00"
 _AUTHORIZATION_DOMAIN = b"yoetz/privacy-audit/authorization/v1\x00"
 _CURSOR_DOMAIN = b"yoetz/privacy-audit/receipt-cursor/v1\x00"
 _MAX_DISCLOSURE_ATTEMPT_LOOKUP_ROWS: Final = 16
+# One bounded startup sweep never terminalizes more parked attempts than this.
+_MAX_RECONCILE_STARTED_ATTEMPTS: Final = 256
 
 _PRIVACY_POLICY_WIRE_SCHEMA_VERSION: Final = "1.1.0"
 _WIRE_CHANNEL_ORDER: Final = (
@@ -2081,6 +2083,66 @@ class CatalogPrivacyAudit:
         except (TypeError, ValueError) as exc:
             raise ValueError("privacy_audit_attempt_corrupt") from exc
 
+    async def load_started_disclosure_attempt(self, request_id: str) -> PrivacyAuditState | None:
+        """Find the disclosure audit row for one physical request identity alone.
+
+        A background advisory dispatch that is cancelled mid-attempt never observes the prepared
+        case digest, but it does own the exact request identity it minted.  The request identity
+        is unique per physical attempt, so this bounded lookup authenticates the single matching
+        disclosure row the same way ``load_disclosure_attempt`` does and reports its durable
+        state.  It never resumes, redispatches, or mints anything.
+        """
+
+        if type(request_id) is not str:
+            raise TypeError("privacy_disclosure_attempt_lookup_invalid")
+        try:
+            validate_id(IdKind.REQUEST, request_id)
+        except ValueError as exc:
+            raise ValueError("privacy_disclosure_attempt_lookup_invalid") from exc
+        rows = self._db.execute(
+            """SELECT proposal_id, request_id, subject_lookup_identity, state,
+                      policy_digest, created_at, authorization_id, dispatch_id, receipt_id,
+                      subject_structural_canonical
+               FROM privacy_audit_records
+               WHERE request_id = ? AND subject_kind = 'disclosure'
+               LIMIT ?""",
+            (request_id, _MAX_DISCLOSURE_ATTEMPT_LOOKUP_ROWS + 1),
+        ).fetchall()
+        if len(rows) > 1:
+            raise ValueError("privacy_audit_attempt_ambiguous")
+        if not rows:
+            return None
+        row = rows[0]
+        if len(row) != 10 or type(row[9]) is not bytes:
+            raise ValueError("privacy_audit_attempt_corrupt")
+        try:
+            structural_bytes = cast(bytes, row[9])
+            structural = _mapping(strict_json_parse(structural_bytes))
+            if canonical_encode(structural) != structural_bytes:
+                raise ValueError("privacy_audit_attempt_corrupt")
+            lookup_identity = row[2]
+            if type(lookup_identity) is not str or not hmac.compare_digest(
+                _mac(self._key, _LOOKUP_DOMAIN, structural_bytes), lookup_identity
+            ):
+                raise ValueError("privacy_audit_attempt_corrupt")
+            reservation = PrivacyAuditReservation(
+                cast(str, row[0]),
+                request_id,
+                cast(str, row[2]),
+                cast(str, row[3]),
+                self._policy_generation(cast(str, row[4])),
+                parse_rfc3339_millis(row[5]),
+            )
+            return PrivacyAuditState(
+                reservation,
+                cast(str, row[3]),
+                cast(str | None, row[6]),
+                cast(str | None, row[7]),
+                cast(str | None, row[8]),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("privacy_audit_attempt_corrupt") from exc
+
     async def load_disclosure_proposal(self, proposal_id: str) -> DisclosureProposal | None:
         row = self._db.execute(
             """SELECT content_object_id, content_plaintext_size, content_commitment,
@@ -2869,6 +2931,107 @@ class CatalogPrivacyAudit:
                 )
                 if changed != 1:
                     raise ValueError("privacy_egress_receipt_conflict")
+
+    async def park_attempt_reconciliation(self, dispatch_id: str, receipt: EgressReceipt) -> None:
+        """Park the ``outcome_unknown`` receipt an admitted attempt owes if nothing better lands.
+
+        The consume CAS is the last authority transition: from that point the physical attempt
+        owes exactly one terminal receipt, and only the gateway holds the exact final request
+        body, its keyed commitment, and the authorization/registry binding that receipt must
+        carry.  Parking that pre-built receipt beside the ``receipt_pending`` row keeps the
+        recovery material durable across a crash without asserting any outcome: the row stays
+        nonterminal until ``complete_egress`` records the real result or
+        ``reconcile_started_attempts`` terminalizes the parked unknown.
+        """
+
+        if type(receipt) is not EgressReceipt:
+            raise TypeError("privacy_egress_receipt_invalid")
+        canonical = _receipt_bytes(receipt)
+        digest = canonical_digest(strict_json_parse(canonical))
+        now = self._clock.now_utc()
+        async with self._lock:
+            with _transaction(self._db):
+                self._db.execute(
+                    """UPDATE privacy_audit_records
+                       SET attempt_result_structural_canonical = ?,
+                           attempt_result_commitment = ?, updated_at = ?
+                       WHERE dispatch_id = ? AND state = 'receipt_pending'
+                         AND receipt_id IS NULL""",
+                    (canonical, digest, format_rfc3339_millis(now), dispatch_id),
+                )
+
+    async def reconcile_started_attempts(self, consumed_before: datetime, limit: int) -> int:
+        """Terminalize parked ``receipt_pending`` attempts that outlived their dispatcher.
+
+        Bounded and idempotent: only rows consumed strictly before ``consumed_before`` (the
+        current service start) are considered, so a live in-flight attempt is never closed, and
+        a row that already carries a receipt is skipped.  Nothing here re-enters the provider,
+        mints authority, or invents an outcome — it records the exact parked
+        ``transport_failed/outcome_unknown`` receipt the admitted attempt already owed.
+        """
+
+        if type(consumed_before) is not datetime or type(limit) is not int or limit < 1:
+            raise ValueError("privacy_audit_reconcile_invalid")
+        bound = min(limit, _MAX_RECONCILE_STARTED_ATTEMPTS)
+        now = self._clock.now_utc()
+        reconciled = 0
+        async with self._lock:
+            rows = self._db.execute(
+                """SELECT dispatch_id, attempt_result_structural_canonical,
+                          attempt_result_commitment
+                   FROM privacy_audit_records
+                   WHERE state = 'receipt_pending' AND receipt_id IS NULL
+                     AND attempt_result_structural_canonical IS NOT NULL
+                     AND consumed_at < ?
+                   ORDER BY consumed_at, proposal_id
+                   LIMIT ?""",
+                (format_rfc3339_millis(consumed_before), bound),
+            ).fetchall()
+            for row in rows:
+                dispatch_id = row[0]
+                canonical = row[1]
+                digest = row[2]
+                if type(dispatch_id) is not str or type(canonical) is not bytes:
+                    raise ValueError("privacy_audit_row_corrupt")
+                parked = _mapping(strict_json_parse(canonical))
+                if canonical_encode(parked) != canonical or type(digest) is not str:
+                    raise ValueError("privacy_audit_row_corrupt")
+                receipt_id = parked.get("receipt_id")
+                outcome = parked.get("outcome")
+                reason = parked.get("safe_failure_reason")
+                finished_at = parked.get("finished_at")
+                if (
+                    type(receipt_id) is not str
+                    or type(outcome) is not str
+                    or type(reason) is not str
+                    or type(finished_at) is not str
+                ):
+                    raise ValueError("privacy_audit_row_corrupt")
+                with _transaction(self._db):
+                    reconciled += (
+                        self._db.execute(
+                            """UPDATE privacy_audit_records
+                               SET state = 'attempt_completed',
+                                   receipt_id = ?, receipt_outcome = ?, receipt_reason = ?,
+                                   receipt_canonical = ?, receipt_digest = ?,
+                                   receipt_finished_at = ?, updated_at = ?
+                               WHERE dispatch_id = ? AND state = 'receipt_pending'
+                                 AND receipt_id IS NULL""",
+                            (
+                                receipt_id,
+                                outcome,
+                                reason,
+                                canonical,
+                                digest,
+                                finished_at,
+                                format_rfc3339_millis(now),
+                                dispatch_id,
+                            ),
+                        )
+                        .getconnection()
+                        .changes()
+                    )
+        return reconciled
 
     def _policy_generation(self, policy_digest: str) -> int:
         row = self._db.execute(

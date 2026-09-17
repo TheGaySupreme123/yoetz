@@ -250,6 +250,15 @@ For an `external_runtime_oauth` profile, the equivalent attempt identity is the 
 runtime authority plus exact runtime evidence, not a vault credential handle. Post-acknowledgement
 ambiguity is terminal `outcome_unknown`; it does not mint a replacement attempt.
 
+Starting a session takes priority over the optional background review, so a review already in
+flight can be cut short. Once a request has been authorized and sent, that cannot un-send it: the
+receipt for that attempt is recorded as `transport_failed` with reason `outcome_unknown`, which
+says the request left your machine and its answer never came back. Nothing is sent again. If the
+service stops before the receipt lands, it is written once when the service next starts, before any
+new request can go out. The background note for that session is marked cancelled and names the
+attempt and provider it reconciled, so `yoetz privacy receipts` accounts for every authorization
+that was spent. A cancelled note that names neither means nothing was sent.
+
 When you are auditing a run rather than the installation, the
 [semantic dogfood runbook](../runbooks/semantic-dogfood.md) gives the preflight and the provenance
 gate: which route the agent actually got, and how to read `semantic_provenance`.

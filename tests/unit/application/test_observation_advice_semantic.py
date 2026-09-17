@@ -391,6 +391,85 @@ def test_dispatch_exception_and_cancellation_are_recorded_not_succeeded() -> Non
         assert row.finding_ids == ()
 
 
+def test_cancellation_reconciliation_is_bounded_and_never_fabricates_provenance() -> None:
+    """A cancelled row records reconciled egress provenance, or plain ``cancelled`` (#755).
+
+    The reconciliation is shielded so cancellation cannot drop it, and bounded so a stuck or
+    failing reconciler can never hold the foreground rebind open. Neither path may invent a
+    success, a finding, or a second dispatch.
+    """
+
+    _db, repository = _repository()
+    stuck = asyncio.Event()
+    cases: tuple[tuple[str, str | None, str], ...] = (
+        ("d", "egr_30000000-0000-4000-8000-0000000000d1", "reconciled"),
+        ("e", None, "unconsumed"),
+        ("f", None, "raises"),
+        ("0", None, "stuck"),
+    )
+    for marker, receipt, mode in cases:
+        basis = "sha256:" + marker * 64
+        session = _SESSION[:-1] + marker
+        repository.schedule(
+            workspace=_COMMITMENT,
+            yoetz_session_id=session,
+            basis_digest=basis,
+            subject_digest=basis,
+            coverage_gaps=(),
+            packet_json=b"{}",
+            enqueued_at=_clock(),
+            max_pending=16,
+        )
+        dispatches = 0
+
+        async def dispatch(
+            _attempt: ObservationAdviceSemanticAttempt,
+        ) -> ObservationAdviceSemanticOutcome:
+            nonlocal dispatches
+            dispatches += 1
+            raise asyncio.CancelledError
+
+        async def reconcile(
+            _attempt: ObservationAdviceSemanticAttempt,
+            *,
+            _receipt: str | None = receipt,
+            _mode: str = mode,
+        ) -> ObservationAdviceSemanticOutcome | None:
+            if _mode == "raises":
+                raise RuntimeError("audit unreadable")
+            if _mode == "stuck":
+                await stuck.wait()
+            if _receipt is None:
+                return None
+            return ObservationAdviceSemanticOutcome(
+                status="cancelled",
+                failure_reason="cancelled",
+                attempt_receipt=_receipt,
+                provider_identity="provider-under-test",
+            )
+
+        worker = ObservationAdviceSemanticWorker(
+            repository=repository,
+            dispatch=dispatch,
+            service_generation=1,
+            lease_owner="svc-1",
+            now=_clock,
+            lease_expires_at=_later,
+            reconcile_cancelled=reconcile,
+            reconcile_timeout_seconds=0.05,
+        )
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(worker.run_once())
+
+        row = repository.lookup(yoetz_session_id=session, basis_digest=basis)
+        assert row is not None
+        assert (row.status, row.failure_reason) == ("cancelled", "cancelled")
+        assert row.finding_ids == ()
+        assert row.attempt_receipt == receipt
+        assert row.provider_identity == (None if receipt is None else "provider-under-test")
+        assert dispatches == 1
+
+
 def test_restart_reclaims_a_foreign_generation_lease_without_reporting_success() -> None:
     """A row left running by a previous service generation is re-attempted, never succeeded."""
 

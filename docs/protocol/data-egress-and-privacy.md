@@ -268,7 +268,11 @@ authorization, or an unbound provider denies egress but never erases determinist
 Dispatch ambiguity (for example a connection drop mid-request) records `transport_failed` /
 `outcome_unknown` — never "unsent," and never a blind retry. Cancellation before any I/O leaves a
 proposal pending until an explicit denial or expiry; cancellation after possible I/O records
-`transport_failed`/`outcome_unknown` with the exact final-request-body commitment. Provider
+`transport_failed`/`outcome_unknown` with the exact final-request-body commitment. That receipt is
+built before the provider call and parked beside the nonterminal row, so a cancelled attempt
+records it through a shielded write and a dispatcher that died first is closed by one bounded,
+idempotent startup reconciliation — before any new physical attempt is admitted, and only over
+attempts consumed before the current service start. Neither path re-enters the provider. Provider
 refusal, timeout, or invalid output completes semantic review as `incomplete_check` while
 deterministic results remain fully available — semantic failure never discards a deterministic
 result.

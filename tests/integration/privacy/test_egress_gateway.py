@@ -239,6 +239,22 @@ class _RaisingEvaluatorFactory(_FakeExternalFactory):
         return _Raiser()
 
 
+class _CancellingEvaluatorFactory(_FakeExternalFactory):
+    """A factory whose transport is cancelled mid-attempt, after the consume CAS (issue #755)."""
+
+    def build_evaluator(
+        self, binding: object, credential: object, request_commitment: object
+    ) -> object:
+        del binding, credential, request_commitment
+
+        class _Cancelled:
+            async def evaluate(self, case: object, deadline: object) -> object:
+                del case, deadline
+                raise asyncio.CancelledError
+
+        return _Cancelled()
+
+
 class _LocalSocketHandle:
     def __init__(self, service_generation: int, profile_digest: str, response: bytes) -> None:
         self._service_generation = service_generation
@@ -291,6 +307,7 @@ class _FullPrivacyAudit:
         self._local_state: dict[str, str] = {}
         self.decision_receipts: list[tuple[str, EgressReceipt]] = []
         self.egress_receipts: list[tuple[str, EgressReceipt]] = []
+        self.parked_receipts: list[tuple[str, EgressReceipt]] = []
         self.consume_local_calls: list[tuple[str, str]] = []
 
     def seed_authorized(self, authorization: EgressAuthorization) -> None:
@@ -313,6 +330,9 @@ class _FullPrivacyAudit:
 
     async def complete_egress(self, dispatch_id: str, receipt: EgressReceipt) -> None:
         self.egress_receipts.append((dispatch_id, receipt))
+
+    async def park_attempt_reconciliation(self, dispatch_id: str, receipt: EgressReceipt) -> None:
+        self.parked_receipts.append((dispatch_id, receipt))
 
     async def complete_decision(self, reservation_id: str, receipt: EgressReceipt) -> None:
         self.decision_receipts.append((reservation_id, receipt))
@@ -1454,6 +1474,60 @@ def test_evaluator_exception_yields_transport_failed_without_reusable_authorizat
     # though the second attempt's transport is never actually invoked.
     assert len(minter.mint_calls) == 2
     assert factory.built == []  # the raising factory never registers a built evaluator list
+
+
+def test_cancelled_admitted_attempt_still_records_its_outcome_unknown_receipt() -> None:
+    """A consumed authorization owes exactly one terminal receipt, cancellation included (#755).
+
+    A foreground runtime rebind cancels the in-flight advisory attempt after the consume CAS.
+    ``asyncio.CancelledError`` is a ``BaseException``: before this fix it skipped the receipt
+    entirely and left the audit row ``receipt_pending`` with no recovery path. The gateway now
+    parks the owed ``outcome_unknown`` receipt before the provider call and records it through a
+    shielded write, then lets cancellation propagate so the rebind is not held open.
+    """
+
+    clock = _Clock()
+    audit = _FullPrivacyAudit()
+    minter = _CredentialMinter()
+    factory = _CancellingEvaluatorFactory(_script_factory)
+    gateway = _gateway(audit=audit, clock=clock, credential_minter=minter, external_factory=factory)
+    policy = _policy(external_enabled=True, local_enabled=False)
+    effective = EffectivePrivacyPolicy(policy, 1, policy.policy_digest)
+    human = _human_authority(available=True)
+
+    async def run() -> EgressAuthorization:
+        await _reconcile_repository(gateway, effective, human)
+        authorization = _authorization(
+            authorization_id="aut_60000000-0000-4000-8000-000000000097",
+            policy_digest=policy.policy_digest,
+            service_generation=human.service_generation,
+        )
+        audit.seed_authorized(authorization)
+        case = _case(
+            case_id="cas_60000000-0000-4000-8000-000000000098",
+            authorization=authorization,
+            payload=canonical_encode({"note": "hello"}),
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await gateway.dispatch_external_semantic(case, authorization, _deadline(clock))
+        return authorization
+
+    authorization = asyncio.run(run())
+
+    assert audit.authorization_state(authorization.authorization_id) == "consumed"
+    # Exactly one terminal receipt, and it is honest about the unknown provider outcome.
+    assert len(audit.egress_receipts) == 1
+    dispatch_id, receipt = audit.egress_receipts[0]
+    assert receipt.outcome is PrivacyOutcome.TRANSPORT_FAILED
+    assert receipt.safe_failure_reason is PrivacyReason.OUTCOME_UNKNOWN
+    assert receipt.dispatch_id == dispatch_id
+    assert receipt.authorization_id == authorization.authorization_id
+    assert receipt.request_commitment is not None
+    # The same receipt was parked as durable recovery material before the provider call, so a
+    # crash in that window is reconcilable rather than stranded.
+    assert len(audit.parked_receipts) == 1
+    assert audit.parked_receipts[0] == (dispatch_id, receipt)
+    assert len(minter.mint_calls) == 1
 
 
 def test_external_runtime_authority_never_mints_a_vault_credential_and_records_unknown() -> None:
