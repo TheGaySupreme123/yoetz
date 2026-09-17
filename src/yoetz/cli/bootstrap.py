@@ -11,6 +11,7 @@ import dataclasses
 import os
 import sys
 from collections.abc import Callable, Mapping
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
@@ -21,6 +22,7 @@ from pydantic import BaseModel
 
 from yoetz.cli.exits import exit_code_for
 from yoetz.domain.coordination import CoordinationErrorCode
+from yoetz.domain.values import format_rfc3339_millis
 from yoetz.ports.control import (
     ControlClientKind,
     ControlError,
@@ -158,6 +160,12 @@ def plain_json(value: object) -> JsonValue:
         return cast(JsonValue, value)
     if isinstance(value, Enum):
         return cast(JsonValue, value.value)
+    if type(value) is datetime:
+        # Privacy receipts and other control results carry real ``datetime`` fields
+        # (``finished_at``, ``dispatch_started_at``).  They render as the one canonical
+        # timestamp the wire already uses; a naive or non-UTC value stays a typed refusal
+        # rather than an invented rendering (issue #731).
+        return format_rfc3339_millis(value)
     if isinstance(value, BaseModel):
         return cast(JsonValue, value.model_dump(mode="json", by_alias=True, exclude_none=False))
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
