@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from yoetz.adapters.check_sandbox import LinuxCheckSandbox
 from yoetz.adapters.integrations.codex_lifecycle import mapping_from_start_ids, store_mapping
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.cli import observe as observe_cli
@@ -1719,3 +1720,59 @@ def test_explicit_recovery_uses_full_mapping_for_compressed_rollout_variant(
     )
     status = store.status(ObservationStatusQuery(workspace_commitment))
     assert "unsupported_format" in status.gaps
+
+
+def _write_check_policy(workspace: Path) -> None:
+    policy_dir = workspace / ".yoetz"
+    policy_dir.mkdir()
+    (policy_dir / "checks.toml").write_bytes(
+        b'format = "yoetz.approved-check-policy/1"\n'
+        b"\n"
+        b"[[checks]]\n"
+        b'id = "smoke"\n'
+        b'argv = ["/usr/bin/true"]\n'
+        b"timeout_seconds = 10\n"
+        b"network = false\n"
+    )
+
+
+@pytest.mark.parametrize("reason", ["bwrap_missing", "bwrap_unusable", "ready"])
+def test_checks_status_names_the_probed_sandbox_outcome(
+    tmp_path: Path, capsys: object, monkeypatch: pytest.MonkeyPatch, reason: str
+) -> None:
+    """`observe checks status` carries the host sandbox answer, not just the policy state.
+
+    The dependency is named once here (issue #720); `yoetz service status` deliberately does not
+    report it, because sandbox availability is a fact about the host running the check.
+    """
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_check_policy(workspace)
+    bwrap = tmp_path / "bwrap"
+    if reason != "bwrap_missing":
+        bwrap.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
+        bwrap.chmod(0o755)
+    sandbox = LinuxCheckSandbox(
+        bwrap=str(bwrap),
+        _probe=lambda _argv: 0 if reason == "ready" else 1,
+        _true="/usr/bin/true",
+    )
+    availability = sandbox.availability()
+    monkeypatch.setattr(observe_cli, "probe_check_sandbox", sandbox.availability)
+
+    code = observe_cli.observe_checks_status(
+        workspace=str(workspace), json_output=True, _state=tmp_path / "state"
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)  # type: ignore[attr-defined]
+    assert payload["sandbox"] == {
+        "mechanism": "bubblewrap",
+        "reason": reason,
+        "remediation": availability.remediation,
+        "status": "ready" if reason == "ready" else "unavailable",
+    }
+    assert payload["state"] == "untrusted"
+    if reason != "ready":
+        assert payload["sandbox"]["remediation"] != ""

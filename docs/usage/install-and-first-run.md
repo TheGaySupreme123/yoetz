@@ -62,7 +62,10 @@ Three things on Linux differ from macOS, and each is reported once, up front, by
   `sandbox_unavailable`. Ubuntu 24.04 and later restrict unprivileged user namespaces through
   AppArmor: use the distribution package, which ships the profile that permits `bwrap`; if a
   hand-built copy still fails, `/doctor` says `bwrap_unusable` and names the sysctl to relax.
-  `yoetz observe checks status --json` reports the same `sandbox` answer per workspace.
+  Sandbox readiness is a fact about the computer that runs your checks, so exactly three
+  places answer it: `/doctor`, `yoetz setup status --json`, and
+  `yoetz observe checks status --json` (per workspace). `yoetz service status` reports the
+  local service itself and stays silent about the sandbox.
 - **System secure storage needs a running Secret Service.** The "system keyring" choice at setup
   means macOS Keychain on macOS and, on Linux, a Freedesktop Secret Service on your session bus
   (GNOME Keyring, or KWallet through its Secret Service bridge). Headless sessions, servers, and

@@ -2050,6 +2050,16 @@ below is the sole narrow path-bearing exception. `service_status` is available w
 task operations are not. MCP cannot invoke lifecycle, privacy-control, or observation-control
 methods.
 
+`ServiceStatus` (wire schema `service-status-1.0.0`, closed to unknown fields) describes the
+singleton service holder only, and carries no approved-check sandbox field. Approved-check sandbox
+availability — `CheckSandboxAvailability(status, mechanism, reason, remediation)` with the closed
+reason set `ready|bwrap_missing|bwrap_unusable|sandbox_exec_missing|platform_unsupported` — is a
+live capability probe of the process that asks, not a property of that holder, so it is reported by
+the invoking client on exactly three surfaces: `yoetz observe checks status` (`sandbox`),
+`yoetz setup status --json` (`platform.check_sandbox`), and `/doctor`. This is the recorded revision of
+issue #720's "report it in `yoetz service status`"; the rationale and the Linux/WSL operator detail
+live in [`runbooks/linux-and-wsl.md`](runbooks/linux-and-wsl.md#approved-check-sandbox).
+
 The versioned ordinary-control hello may carry one optional trusted `workspace_locator` derived by
 the client itself: CLI/UI use their actual process working directory and the MCP bridge uses its
 configured/session working directory. It is never populated from an operation body or public
