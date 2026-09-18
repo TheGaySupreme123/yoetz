@@ -29,13 +29,32 @@ uv tool install --managed-python --python 3.14.6 yoetz
 yoetz
 ```
 
-`uvx yoetz` works for a one-off run. If you are a coding agent installing Yoetz on a user's
-behalf, follow [Agent start](agent-start.md) instead — setup's questions require the human's own
-terminal. With `uv` already installed, `npx yoetz` delegates to the same exact-version `uvx` path.
-The launcher pins the
-exact Python distribution, passes arguments through unchanged, inherits stdio so the child sees
-your real terminal, and propagates exit codes — including `128+n` for a signal. It installs
-nothing itself: when `uv` is missing it prints the install command and stops.
+**Python.** Yoetz needs Python 3.14 and `uv` provides it: with `--managed-python` it downloads
+the exact interpreter on demand, so it does not matter which other Pythons are installed, which
+one `python3` resolves to, or whether pyenv, Homebrew, or a system Python is on your `PATH`. The
+install is unaffected by them and touches none of them. Only two configurations block it, and both
+say so in the error: `uv` configured never to download Pythons (`python-downloads = "never"`), and
+`uv` configured to use system interpreters only (`python-preference = "only-system"`) on a machine
+without 3.14. `pip install yoetz` or `pipx install yoetz` on an older Python cannot work; the
+package requires 3.14, and a pip that resolves it anyway is not installing Yoetz.
+
+**Where it lands.** `uv tool install` places the `yoetz` command in `~/.local/bin`. If a new
+terminal cannot find it, run `uv tool update-shell` once and open another terminal. Install into a
+directory only you can write: a group-writable prefix (Homebrew's `/opt/homebrew`, or a shared
+`venv`) is refused when Yoetz binds itself into an agent, because the agent would then launch a
+program anyone in that group can replace. The `uv tool` location is owner-only by construction.
+
+`uvx --python 3.14 yoetz` works for a one-off run, but do not connect an agent from it: a one-off
+run lives in `uv`'s cache, and connecting an agent binds the agent to that exact launcher. If you
+are a coding agent installing Yoetz on a user's behalf, follow [Agent start](agent-start.md)
+instead — setup's questions require the human's own terminal. With `uv` already installed,
+`npx yoetz` makes the same persistent `uv tool install` (a no-op when it is already there) and
+then runs that exact version, so the `yoetz` command lands in `~/.local/bin` (see above if a new
+terminal cannot find it) and agents connected from `npx yoetz` keep working after
+`uv cache clean`. The launcher passes arguments
+through unchanged, inherits stdio so the child sees your real terminal, and propagates exit codes
+— including `128+n` for a signal. It bundles and downloads nothing itself: when `uv` is missing it
+prints the install command and stops.
 
 Compatibility extras (the standard install already contains these exact dependencies):
 

@@ -329,10 +329,15 @@ availability, structured-output interoperability, provider data use, or E-007 ca
 6. **The npm launcher is a protected public distribution surface (amends ADR-007 decision 7).**
    `support/npm-launcher/` contains a dependency-free `package.json` (registry name
    `yoetz`, version locked to the PyPI version) and `bin/yoetz.js`, which requires `uv` on PATH
-   (printing install guidance and exiting nonzero otherwise) and delegates to
-   `uvx yoetz==<version>` with untouched arguments and the child's exact exit code. It bundles no
-   Python, downloads nothing itself, and duplicates no wizard logic — first-run behavior lives
-   once, in the Python CLI. The separate deliberate release decision was made for v0.1.0 on
+   (printing install guidance and exiting nonzero otherwise), makes the exact version a
+   persistent tool with `uv tool install --quiet --python 3.14 yoetz==<version>` (a no-op once
+   present), and delegates to a versionless `uvx --python 3.14 yoetz`, which runs that installed
+   tool environment rather than a cache-backed one, with untouched arguments and the child's
+   exact exit code. It bundles no Python, downloads nothing itself, and duplicates no
+   wizard logic — first-run behavior lives once, in the Python CLI. The persistent install was
+   added for issue #766: host hooks and MCP entries bind the absolute launcher that configured
+   them, and a bare `uvx` bound them to uv's prunable cache, so `uv cache clean` silently broke
+   every connected host. The separate deliberate release decision was made for v0.1.0 on
    2026-08-20 (issue #366): the tagged workflow publishes the exact prebuilt npm tarball only after
    matching PyPI publication, using npm trusted publishing and post-publication byte verification.
 

@@ -76,10 +76,20 @@ yoetz version
 ```
 
 `uv tool install` places `yoetz` in `~/.local/bin`. If a new terminal cannot find it, run
-`uv tool update-shell` once and open another terminal. `uvx yoetz` works for a one-off run. With
-`uv` already installed, `npx yoetz` launches the same exact-version PyPI package and installs
-nothing itself. The compatibility extras are aliases the standard install already contains — do
-not add them.
+`uv tool update-shell` once and open another terminal. With `uv` already installed, `npx yoetz`
+makes the same persistent `uv tool install` and launches that exact version. The compatibility
+extras are aliases the standard install already contains — do not add them.
+
+Do not worry about which Pythons the machine has. Yoetz needs Python 3.14 and `--managed-python`
+makes `uv` download exactly that interpreter on demand; pyenv, Homebrew, system, and project
+Pythons are neither used nor touched. Never substitute `pip install yoetz`, `pipx`, or a project
+virtual environment: an older Python cannot satisfy the package, and a shared or group-writable
+prefix (Homebrew's `/opt/homebrew`) is refused when Yoetz connects an agent, because the agent
+would then launch a program others can replace. Do not connect an agent from a one-off
+`uvx yoetz` run either; it lives in `uv`'s cache and a later `uv cache clean` would break the
+connection. If the install fails, read the `uv` error: the only two blocking configurations are
+`python-downloads = "never"` and `python-preference = "only-system"` without a 3.14 present, and
+both name themselves.
 
 ## 2. Setup — guide it in the conversation
 

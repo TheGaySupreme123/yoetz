@@ -641,13 +641,16 @@ class YoetzTui(App[int]):
     async def _choose_codex_home(self, option: HarnessOption) -> Path | None:
         """Collect the exact home paired with one selected executable; never infer it."""
 
+        suggested = self.runtime.suggested_codex_home()
         while True:
             entry = TextEntryView(
                 name="codex-home-path",
-                title="Pair this Codex executable with its exact home",
+                title="Confirm the Codex home for this installation",
                 label=f"Codex home used by {option.executable_path}",
+                initial="" if suggested is None else str(suggested),
                 placeholder="/absolute/path/to/.codex",
                 empty_is_cancel=False,
+                hint="enter to confirm · edit the path if Codex uses another home · esc to cancel",
             )
             if await self.ask(entry) is None:
                 return None
@@ -999,7 +1002,7 @@ class YoetzTui(App[int]):
             state = {
                 "yoetz_owned": "connected",
                 "absent": "not connected",
-                "foreign_present": "blocked — another tool owns the name",
+                "foreign_present": "blocked — Codex already has a non-Yoetz MCP server named yoetz",
             }.get(mcp, mcp)
         privacy = await self.runtime.privacy_posture()
         vault = await self.runtime.vault_posture()

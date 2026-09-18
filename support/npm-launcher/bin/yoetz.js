@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 "use strict";
 
-// Delegation-only launcher: `npx yoetz ...` runs the exact pinned Python
-// distribution through uv. It never bundles Python, never downloads code
-// itself, and never rewrites arguments — the Python CLI owns every behavior,
-// including the first-run experience on a bare interactive invocation.
+// Delegation-only launcher: `npx yoetz ...` installs the exact pinned Python
+// distribution as a persistent uv tool and runs it through uv. It never bundles
+// Python, never downloads code itself, and never rewrites arguments — the Python
+// CLI owns every behavior, including the first-run experience on a bare
+// interactive invocation.
 //
 // Because stdio is inherited, the child sees the *real* terminal: the same
 // stdin/stdout TTY checks that gate the full-screen interface, and the same
@@ -62,9 +63,41 @@ function main() {
     return;
   }
 
+  // Make the exact version a persistent uv tool first (a no-op when it already
+  // is). Hooks and MCP entries bind the absolute path of the launcher that
+  // configured them; a bare `uvx` would bind them to uv's prunable cache and a
+  // later `uv cache clean` would silently break every host integration. uv
+  // still performs the provenance-carrying install from PyPI; this launcher
+  // bundles and downloads nothing. `--python 3.14` lets uv fetch the runtime
+  // when no suitable interpreter is present, whatever other Pythons exist.
+  const install = spawnSync(
+    "uv",
+    ["tool", "install", "--quiet", "--python", "3.14", `yoetz==${version}`],
+    { stdio: "inherit", shell: false },
+  );
+  if (install.error || install.status !== 0) {
+    const reported = install.error
+      ? install.error.message
+      : `'uv tool install' exited with status ${install.status}`;
+    fail([
+      `yoetz: could not install the Python distribution 'yoetz==${version}' with uv.`,
+      "",
+      `Reported: ${reported}`,
+      "",
+      "Yoetz needs Python 3.14. uv downloads it on demand unless Python downloads are",
+      "disabled in your uv configuration; the message above names the exact cause.",
+      `See ${INSTALL_DOCS}`,
+    ]);
+    return;
+  }
+
+  // A versionless `uvx yoetz` runs the installed tool environment, never a
+  // cache-backed one, so the child is the same persistent launcher that
+  // `~/.local/bin/yoetz` points at. The exact version was pinned by the install
+  // above; repeating it here could only ever select a different environment.
   const result = spawnSync(
     "uvx",
-    [`yoetz==${version}`, ...process.argv.slice(2)],
+    ["--python", "3.14", "yoetz", ...process.argv.slice(2)],
     { stdio: "inherit", shell: false },
   );
 
