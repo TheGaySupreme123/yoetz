@@ -1079,7 +1079,7 @@ class PrivacyPolicy:
     def withheld_review_categories(self) -> tuple[DataCategory, ...]:
         """Categories the review selects but the inference channel will not let out.
 
-        Non-empty means the semantic reviewer receives a case with holes in exactly the places
+        Non-empty means the AI-powered reviewer receives a case with holes in exactly the places
         the review profile claimed to fill. That is a legitimate configuration — narrowing egress
         is always allowed — but it must never be silent, because the review still reports
         ``succeeded`` while being unable to answer the question it was asked.

@@ -632,7 +632,7 @@ def materialize_observation_inspection_snapshot(
 
     Inspection facts and excerpts are independently encrypted before this seam. The ledger binds
     their exact secret-scanned plaintext digests and object identities, while descriptions remain
-    structural so observation intake does not silently become semantic-review egress.
+    structural so observation intake does not silently become AI-powered review egress.
     """
 
     baseline = coverage_for_channel(PublicationChannel.HOOK_OBSERVED)

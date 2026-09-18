@@ -587,9 +587,9 @@ def render_provider_stored(posture: ProviderPosture, width: int) -> tuple[str, .
     else:
         lines.append(_bullet(Level.UNPROVEN, "Live provider connection has not been tested"))
     if posture.semantic_ready:
-        lines.append(_bullet(Level.VERIFIED, "External semantic review is structurally ready"))
+        lines.append(_bullet(Level.VERIFIED, "External AI-powered review is structurally ready"))
     else:
-        lines.append(_bullet(Level.UNPROVEN, "External semantic review is not yet proven ready"))
+        lines.append(_bullet(Level.UNPROVEN, "External AI-powered review is not yet proven ready"))
     if posture.blockers:
         lines.append("")
         lines.append("Still required:")
@@ -598,7 +598,7 @@ def render_provider_stored(posture: ProviderPosture, width: int) -> tuple[str, .
 
 
 def render_provider_failure(message: str, width: int) -> tuple[str, ...]:
-    """A provider failure never downgrades local deterministic readiness."""
+    """A provider failure never downgrades local-check readiness."""
 
     body = max(width - 2, 24)
     lines = [_bullet(Level.BLOCKED, "Provider test failed"), ""]

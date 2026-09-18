@@ -155,9 +155,9 @@ becomes host-derived.
     document, status field, or summary may imply one from another: source, rendered artifact,
     installed bytes, host discovery, host activation, skill delivery, MCP owner, MCP binding, MCP
     runtime, model-controlled use, trigger capability, observation consent, observation evidence,
-    service readiness, semantic readiness, provider dispatch, privacy receipt, and the final
-    workflow receipt. Format validation in particular proves none of activation, observation,
-    semantic dispatch, or closure.
+    service readiness, AI-powered review readiness, provider dispatch, privacy receipt, and the
+    final workflow receipt. Format validation in particular proves none of activation, observation,
+    AI-powered review dispatch, or closure.
 
 11. **Authority: standalone mutation is assigned to ADR-016 `review_only`.** The
     install/remove/activation-apply paths of the new ports must consume the ADR-016 `review_only`
@@ -309,7 +309,8 @@ scope/private-marketplace delivery and profile `claude-code-cli-local-project-2.
 Claude products and scopes stay explicit unpopulated cells. `defaultEnabled:false` is required.
 Source generation, project marketplace registration, cached installation, discovery, enabled
 setting, loaded-session root, skill use, MCP owner/binding/runtime/model call, hook
-configuration/delivery/consented evidence, semantic dispatch, privacy receipt, and workflow
+configuration/delivery/consented evidence, AI-powered review dispatch, privacy receipt, and
+workflow
 receipt remain independent facts.
 
 `ClaudeCodeMcpSource` is exactly

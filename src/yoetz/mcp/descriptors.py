@@ -1508,7 +1508,7 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "Records a bounded batch of agent-published work events and returns the accepted event "
         "range and coverage. When `dry_run` is false, this appends records to the local Yoetz "
         "ledger; it "
-        "does not publish to GitHub or run a semantic evaluation. It has no information about "
+        "does not publish to GitHub or run an AI-powered evaluation. It has no information about "
         "work outside that batch. Every set-valued "
         "reference list in a draft envelope or payload (obligation_refs, obligation_ids, "
         "supporting_refs, and the other canonical set fields) is admitted only when its members "
@@ -1559,23 +1559,23 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "Read status view=findings with filter.include_resolved=true after repair: "
         "not returned is not resolved. "
         "This call cannot widen privacy "
-        "authority: an active semantic route was selected by the owner during setup as a bounded "
+        "authority: an active AI-powered review route was selected by the owner during setup as a bounded "
         "standing policy, and check cannot change its route, workspace, scope, categories, "
         "retention ceiling, or credential authority. Whether a case is dispatched stays enforced "
         "by the installed route binding and privacy policy. A pre-invocation approval refusal or "
         "hold is an invocation-authorization event, not a Yoetz result: Yoetz did not run, so "
-        "do not report a semantic status or outbound dispatch. When semantic review was "
+        "do not report an AI-powered review status or outbound dispatch. When AI-powered review was "
         "explicitly requested or mode is semantic_required, pause and present the manual approval "
         "request for the exact proposed check body and request_id. Approval authorizes that "
         "invocation only; it does not change Yoetz privacy policy, repository authority, "
         "disclosure decisions, credentials, or outbound-admission rules. Do not "
-        "publish a completion claim, request a receipt, create a fresh semantic check, or switch "
+        "publish a completion claim, request a receipt, create a fresh AI-powered check, or switch "
         "to deterministic_only while approval is pending. An unambiguous, still-applicable "
-        "first-party instruction for this exact semantic action may present the manual approval "
+        "first-party instruction for this exact AI-powered review action may present the manual approval "
         "request without redundant prose, but never bypasses that approval. After approval, "
         "invoke the exact same proposed check body and request_id; if Yoetz then returns "
         "awaiting_human, follow its separate continuation. After denial, cancellation, or expiry, "
-        "continue without semantic review only after the user explicitly chooses that fallback. "
+        "continue without AI-powered review only after the user explicitly chooses that fallback. "
         "Omit scope for the whole case, "
         "or send both claim_ids and obligation_ids as arrays of unique ids; two empty arrays also "
         "mean the whole case, and sending only one of the two keys is rejected. Call it after "
@@ -1592,7 +1592,7 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "It is distinct from a one-use decision; recover either handoff through operation status "
         "or replay this exact original request with the same request_id, never a fresh request. "
         "Denial, expiry, cancellation, stale authority, or incomplete review means no dispatch. "
-        "Semantic "
+        "AI-powered "
         "review that does not succeed is a coverage gap rather than a retry problem: "
         "not_configured, blocked_by_policy, and human_denied will not change without owner "
         "action; unavailable and timeout already spent that job's own attempt budget; "
@@ -1612,7 +1612,7 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "Records an acknowledgement, provenance dispute, or rejection for one finding at the "
         "result frontier of the check that returned it, not its subject_frontier. This appends one "
         "finding-response record to the local Yoetz ledger; it does not publish to "
-        "GitHub or run a semantic evaluation. It does not resolve other findings or establish "
+        "GitHub or run an AI-powered evaluation. It does not resolve other findings or establish "
         "that underlying work changed. "
         "A provenance_disputed response contests the finding's authorship or provenance premise "
         "rather than its conclusion, requires a reason, and never resolves the finding. "
@@ -1660,7 +1660,7 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "markdown or text; json is an owner-export format that stricter agent-context policies may "
         "block. Call it once at the end, and again only if material state changed since the "
         "previous receipt, after the last material deliverable covered by the claim. Final prose "
-        "must state the actual actionable unresolved count, checked scope and frontier, semantic "
+        "must state the actual actionable unresolved count, checked scope and frontier, AI-powered "
         "review status and reason and material coverage gaps. Distinguish unanswered findings, "
         "unresolved blockers and coverage-only gaps. A receipt is not a pass. Guidance: "
         "yoetz://guidance/coverage-and-receipts.md.",
@@ -1682,7 +1682,7 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
 )
 
 _STRICT_CHECK_DESCRIPTION_SUFFIX: Final = (
-    " Under the strict route profile, this route will not request external semantic review."
+    " Under the strict route profile, this route will not request external AI-powered review."
 )
 _STRICT_TOOL_DESCRIPTORS: Final = tuple(
     replace(
@@ -1728,22 +1728,22 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "policy": MappingProxyType(
             {
                 "start": "sha256:674be421dff412ecf8ac0b7914c55f69a620d2990f143ca86b24228ecaf306d5",
-                "publish_work": "sha256:092a54d14263c168a97d63f1e06aa34d2bf79fa9744dc6e6a92d877c21e8517e",
-                "check": "sha256:0466eeebfb57b429813fd909e315f54958304853a19261e62964bea2e135a9a8",
-                "respond": "sha256:aae662c47d45abbbffcc8551d890a5fac798846fc7dd34ba526d54d0bf0bd989",
+                "publish_work": "sha256:f4c4145eb92be5a2f57326138d1c0018b336a2d11cb7cc83f0c48dcde3bb4ec6",
+                "check": "sha256:60cc2a7b08cc694d563a45c72ed9e0afc2b255cf87e7a13ad22e7c994fbebae4",
+                "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
                 "status": "sha256:31f9fc04fd8437d6ede3e58035ed463a2f97b399904497815bc8daafa7c14fa6",
-                "receipt": "sha256:f7b78f396361f25fccb395413453ead8a4696533be807eb03b97d397bf202845",
+                "receipt": "sha256:5af0465a90f7fdc8b95f3287066c06ab19a0cb0f3ccb852de05fca1c401581f9",
                 "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
             }
         ),
         "strict": MappingProxyType(
             {
                 "start": "sha256:674be421dff412ecf8ac0b7914c55f69a620d2990f143ca86b24228ecaf306d5",
-                "publish_work": "sha256:092a54d14263c168a97d63f1e06aa34d2bf79fa9744dc6e6a92d877c21e8517e",
-                "check": "sha256:b528e509fbc7932d3effb49c09835ca91717f1fa6202a4a64705fdebdffcfded",
-                "respond": "sha256:aae662c47d45abbbffcc8551d890a5fac798846fc7dd34ba526d54d0bf0bd989",
+                "publish_work": "sha256:f4c4145eb92be5a2f57326138d1c0018b336a2d11cb7cc83f0c48dcde3bb4ec6",
+                "check": "sha256:bd2cf70138107a82ee02e4b3dd89adc9a40bf91da0a3a6d55a6701fc46d474eb",
+                "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
                 "status": "sha256:31f9fc04fd8437d6ede3e58035ed463a2f97b399904497815bc8daafa7c14fa6",
-                "receipt": "sha256:f7b78f396361f25fccb395413453ead8a4696533be807eb03b97d397bf202845",
+                "receipt": "sha256:5af0465a90f7fdc8b95f3287066c06ab19a0cb0f3ccb852de05fca1c401581f9",
                 "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
             }
         ),
@@ -1751,8 +1751,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:948fc316b409c98d76ede64cf1a4ab51e1ead1c24480e62755e349d60106fcb2",
-        "strict": "sha256:96048c04d296b24666812ce28f907655688ea3b44f782d6cf282be6624dd0de0",
+        "policy": "sha256:cae0331be83ba8a17e646facfb8733311a40f17bd6c33054acce1bb9bbb78aeb",
+        "strict": "sha256:dedc76ee897207d9e84925b44f0dfdaa6a2ae1aa1490fd17c7a76f6092d0e900",
     }
 )
 
@@ -1855,9 +1855,9 @@ def server_instructions(
     if profile != "policy":
         return (
             f"{base}\n\nRoute profile: {profile}. "
-            "This route will not request external semantic review for this process lifetime.\n"
+            "This route will not request external AI-powered review for this process lifetime.\n"
         )
-    tail = "External semantic review follows the configured policy."
+    tail = "External AI-powered review follows the configured policy."
     if semantic_destination is not None:
         tail += " " + semantic_destination.sentence
     return f"{base}\n\nRoute profile: {profile}. {tail}\n"

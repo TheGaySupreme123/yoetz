@@ -112,19 +112,18 @@ Guide these decisions in order:
    integration is skipped and everything else still works.
 2. **Project trust** (full-screen interface only) — applies to the whole repository root shown,
    not just the current folder; the prompt wizard folds trust into the approval in 4.
-3. **Review mode** — semantic review or local only. If the user explicitly wants semantic review,
-   recommend Expanded first for the deepest useful in-scope review and explain Assisted as the
-   lower-disclosure semantic option. This answer also
-   picks the registered MCP route: policy (`yoetz mcp serve`) vs strict
-   (`yoetz mcp serve --semantic off`, which can never dispatch external review). Local-only is
-   zero-configuration and fully useful.
+3. **Review mode** — AI-powered review or local only. If the user explicitly wants AI-powered
+   review, recommend Expanded first for the deepest useful in-scope review and explain Assisted as
+   the lower-disclosure AI-powered option. This answer also picks the registered MCP route: policy
+   (`yoetz mcp serve`) vs strict (`yoetz mcp serve --semantic off`, which can never dispatch
+   external review). Local-only is zero-configuration and fully useful.
 4. **Approve the exact proposed change** — project skill, plugin/hook sources, MCP registration;
    digest-bound, explicit, no default answer.
 5. **Secret storage** — system secure storage or a Yoetz passphrase. The full-screen interface
    asks; the prompt wizard uses secure storage automatically and offers a passphrase only when it
    is unavailable.
 
-If they choose semantic review, additionally choose a **provider and model** (reviewed presets, a
+If they choose AI-powered review, additionally choose a **provider and model** (reviewed presets, a
 custom HTTPS origin, or skip for now) and a **privacy policy** (five options, one recommended with
 its reason and trade-off). On a capable Codex route, the final repository grant decision can be an
 exact current-chat approve or deny after the v6 before/after preview is shown; repository, policy,
@@ -160,19 +159,19 @@ recommendations. Each answer decides the next step; stop after each and wait.
    No / (if several) which one." Recommend yes when one is found; with none, say integration is
    skipped and everything else still works.
 2. **Review mode.** "How should Yoetz review your work? (a) Local only: nothing leaves this
-   computer, no account or key needed, every deterministic check works. (b) Semantic review: an
-   AI model also reviews, which sends parts of your work to a provider you pick." Recommend local
-   only for a first install unless they already want model review; if they choose semantic,
-   recommend Expanded first and name Assisted as the lower-disclosure option.
+   computer, no account or key needed, every local check works. (b) AI-powered review: an AI model
+   also reviews, which sends parts of your work to a provider you pick." Recommend local only for a
+   first install unless they already want model review; if they choose AI-powered review, recommend
+   Expanded first and name Assisted as the lower-disclosure option.
 3. **The exact change.** Show the preview (project skill, plugin and hook sources, MCP
    registration) and ask "Apply exactly this? Approve / Deny." No recommendation and no default:
    this one is theirs.
 4. **Secret storage**, only if the wizard reports system secure storage unavailable: "Yoetz needs
    a place for secrets. Use a passphrase you choose? You will type it in your terminal."
-5. **Provider and model**, only after semantic review: list the presets from
+5. **Provider and model**, only after AI-powered review: list the presets from
    `yoetz provider catalog --json` with their suggested models and ask which one, or skip for
    now. Recommend the preset whose retention terms match what they told you about privacy.
-6. **Privacy policy**, only after semantic review: name the five options, recommend one with its
+6. **Privacy policy**, only after AI-powered review: name the five options, recommend one with its
    reason and trade-off, and ask which. Their choice is applied only through the terminal
    ceremony or the exact prepared chat grant.
 7. **Credential**: never a question. Hand over the terminal for `yoetz provider credential set`.
@@ -261,7 +260,7 @@ consequential step — no install, no `setup run`, no registration until it is a
   `yoetz`. The Windows rule is the same on every host. If the host has a question tool, check
   whether it pauses the agent; if it does not, or there is none, ask in chat and wait.
 
-## 3. Before recommending a semantic provider — inspect the installed catalog
+## 3. Before recommending an AI-powered review provider — inspect the installed catalog
 
 Run this read-only command instead of relying on model memory or a stale guide:
 
@@ -277,8 +276,8 @@ path, and leave every setup decision with the user.
 
 ## 4. Afterwards, recommend finishing credentials — the user decides
 
-If the provider, credential, or privacy steps were skipped, semantic review stays unavailable
-while deterministic checks keep working. `yoetz provider status --json` names each blocker and its
+If the provider, credential, or privacy steps were skipped, AI-powered review stays unavailable
+while local checks keep working. `yoetz provider status --json` names each blocker and its
 `next_command`. Recommend once:
 
 ```text
@@ -340,10 +339,12 @@ yoetz integrate codex mcp status --json   # only when Codex integration was set 
   connection; `semantic_ready: true` means configured, not proven working; credential state is
   `credential_connected` `true`/`false`/`null` — never describe the key.
 - `semantic_ready` is structural readiness, `yoetz privacy show` and the repository grant are
-  disclosure authority, and only a completed check/evaluate receipt proves live semantic dispatch.
-  A Codex login or model listing is readiness evidence, not privacy consent or dispatch proof.
+  disclosure authority, and only a completed check/evaluate receipt proves live AI-powered review
+  dispatch. A Codex login or model listing is readiness evidence, not privacy consent or dispatch
+  proof.
 
 Once integration is live, your operating instructions come from the guidance Yoetz serves —
 [`guidance/`](../../guidance/), starting with `agent-instructions.md`. For registration
 troubleshooting see [`docs/runbooks/codex-integration.md`](../runbooks/codex-integration.md); for
-what egress means before enabling any, [Privacy and semantic review](privacy-and-semantic-review.md).
+what egress means before enabling any, [Privacy and AI-powered
+review](privacy-and-semantic-review.md).

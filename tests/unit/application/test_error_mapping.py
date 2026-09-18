@@ -236,7 +236,7 @@ def test_known_failure_families_map_to_expected_public_codes() -> None:
 
     # Each six-operation module raises only codes drawn from validation/frontier/storage/fallback;
     # a provider or cancellation code appearing here would mean a module invented a new mapping
-    # instead of degrading gracefully (semantic failure folds into ``incomplete_check`` and never
+    # instead of degrading gracefully (AI-powered review failure folds into ``incomplete_check`` and never
     # becomes a public error; cancellation propagates as ``asyncio.CancelledError``, not a code).
     allowed = _VALIDATION_CODES | _FRONTIER_CODES | _STORAGE_CODES | _FALLBACK_CODES
     for name, expected_codes in _MODULE_CODE_INVENTORY.items():

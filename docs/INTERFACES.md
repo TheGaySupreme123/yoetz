@@ -5,6 +5,21 @@ MUST use these names verbatim; a name shared across modules is registered here f
 Python-flavored natural language and describe intent — the implementation under `src/yoetz/` is the
 executable truth.
 
+## Product vocabulary
+
+Human-facing text says **local checks** and **AI-powered review**; the wire says
+`deterministic` and `semantic`. The identifiers below are frozen wire contracts and never
+change; the product words are their human names.
+
+| Product word | Wire identifiers |
+|---|---|
+| local check / local finding / local-check case | `FindingOrigin.deterministic`, `CheckType` `deterministic`, `CheckMode` `deterministic_only`, `SemanticReason` `deterministic_mode`, gap `no_unresolved_deterministic_findings`, `DeterministicCase`, `DETERMINISTIC_RESULT`, `kernel/deterministic_checks.py` |
+| AI-powered review / AI-powered finding / AI-powered review case | `FindingOrigin.semantic_model_derived`, `CheckMode` `semantic_if_configured` / `semantic_required`, `semantic_status` / `semantic_reason`, `semantic_provenance`, `semantic_attempts`, `semantic_job`, `yoetz.semantic-case/2`, `ports/semantic.py`, `--semantic off` |
+| local-only check (no AI-powered review) | `deterministic_only`, gap `semantic_review_not_requested` |
+
+"Deterministic" elsewhere in this registry keeps its ordinary meaning — reproducible ordering,
+replay, digests, and equality — and is not a check kind.
+
 ## 1. Identifiers (`protocol/ids.py`)
 
 All Yoetz-generated public IDs: `<prefix>_<lowercase canonical RFC 4122 UUIDv4>` from the OS
@@ -255,7 +270,7 @@ required `respond` request. Status `compact`/`obligations` projections likewise 
 kind-valid obligation IDs as fit, and receipt projections carry open obligation IDs plus
 schema-gated ASCII-safe coverage gap codes, so a text-only host can recover closure work and name
 an honest limitation without copying obligation or gap prose. Caller-controlled prose, malformed
-identifiers, and malformed digests are never admitted to this text channel. A deterministic
+identifiers, and malformed digests are never admitted to this text channel. A local
 finding's structured `detail` may name only its closed policy facts and typed server IDs; it never
 copies ledger-authored prose.
 
@@ -397,7 +412,7 @@ free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from code
   (1 MiB). v0.1 rejects cap-plus-one exact-source imports rather than claiming chunk support.
 - `MAX_SEMANTIC_ITEM_BYTES = 16_384` (16 KiB);
   `MAX_SEMANTIC_CASE_BYTES = 262_144` (256 KiB), measured over canonical minimized case bytes.
-- Semantic review structure: `MAX_REVIEW_TEXT_BYTES = 4_096`,
+- AI-powered review structure: `MAX_REVIEW_TEXT_BYTES = 4_096`,
   `MAX_REVIEW_TIMELINE_ITEMS = 64`, `MAX_REVIEW_ASSESSMENTS = 64`,
   `MAX_REVIEW_CHANGE_OBSERVATIONS = 32`, `MAX_REVIEW_EXCERPTS = 16`,
   `MAX_REVIEW_OMISSIONS = 64`, and `MAX_REVIEW_CHALLENGES = 3`.
@@ -494,7 +509,7 @@ No arithmetic averaging exists anywhere.
 
 `known_gaps` remains an exact sorted-unique set with a 64-code wire bound. The ledger append
 boundary owns the corresponding task-global receipt-capacity invariant: before committing a
-proposed batch, it freezes the healthy-storage deterministic case for the proposed projection and
+proposed batch, it freezes the healthy-storage local-check case for the proposed projection and
 unions its gap codes with the applicable check coverage, receipt applicability gaps, and every
 current retained finding coverage selected by the receipt successor rule. Exactly 64 distinct
 codes is admitted; a 65th distinct code rejects the whole batch atomically as `LIMIT_EXCEEDED`
@@ -689,31 +704,31 @@ attempt returned after it lost lease/deadline authority;
 `stale` means a once-valid result no longer matches the frozen frontier/dependency digest. These
 states are distinct and there is no second `completed` spelling.
 
-`awaiting_human` is the one **nonterminal** semantic status. Under the per-request confirmation
-posture, one exact prepared case is waiting on a local disclosure decision: the check operation,
-semantic job, and physical attempt stay open, no provider was reached, and no verdict or
-completion-grade coverage exists yet. Approval resumes the *same* request, attempt, provider
-request id, proposal, and case digest. The durable suspension lives in `semantic_disclosure_waits`
-(bundle schema 5), which is one-use. A missing standing repository grant stops earlier: only the
-check operation is suspended, before provider construction, job creation, credential inspection,
-or dispatch. Bundle migration 0006 records `operations.suspension_kind=repository_grant`
-transactionally on that exact operation; status reads that durable discriminator and never
-reconstructs it from mutable current authority. The marker clears only when that same operation
-resumes or terminalizes. While the marker is set, the operation is not an active frozen-case
-barrier: observation-authored appends proceed, and same-request replay re-installs the barrier
-when it reclaims the lease (issue #445). Only a successfully read, valid, exactly bound
-`RepositoryPrivacyAuthority(grant_state="missing")` may create this suspension. An unbound or
-mismatched route, missing commitment, closed coordinator, invalid or unavailable policy,
+`awaiting_human` is the one **nonterminal** AI-powered review status. Under the per-request
+confirmation posture, one exact prepared case is waiting on a local disclosure decision: the check
+operation, AI-powered review job, and physical attempt stay open, no provider was reached, and no
+verdict or completion-grade coverage exists yet. Approval resumes the *same* request, attempt,
+provider request id, proposal, and case digest. The durable suspension lives in
+`semantic_disclosure_waits` (bundle schema 5), which is one-use. A missing standing repository grant
+stops earlier: only the check operation is suspended, before provider construction, job creation,
+credential inspection, or dispatch. Bundle migration 0006 records
+`operations.suspension_kind=repository_grant` transactionally on that exact operation; status reads
+that durable discriminator and never reconstructs it from mutable current authority. The marker
+clears only when that same operation resumes or terminalizes. While the marker is set, the operation
+is not an active frozen-case barrier: observation-authored appends proceed, and same-request replay
+re-installs the barrier when it reclaims the lease (issue #445). Only a successfully read, valid,
+exactly bound `RepositoryPrivacyAuthority(grant_state="missing")` may create this suspension. An
+unbound or mismatched route, missing commitment, closed coordinator, invalid or unavailable policy,
 unavailable reconciliation capability, or activation/reconciliation failure is terminal
 `blocked_by_policy/scope_not_authorized`, with no provider construction, job, attempt, dispatch, or
 trusted-approval instruction. Neither suspension branch is committed as a terminal result.
 
-Bundle restart recovery reconstructs the pending check operation, semantic job, physical attempt,
-and disclosure wait as one resumable state. Restoring only the wait marker is insufficient: the
-attempt coordinator would have no job to reclaim and could not preserve the approved provider
-request identity. A denial, expiry, stale-authority result, or cancellation terminalizes the job
-and attempt first, then resolves the one-use wait; a crash between those writes recovers the
-terminal job and finishes the wait cleanup without dispatching or minting a replacement attempt.
+Bundle restart recovery reconstructs the pending check operation, AI-powered review job, physical
+attempt, and disclosure wait as one resumable state. Restoring only the wait marker is insufficient:
+the attempt coordinator would have no job to reclaim and could not preserve the approved provider
+request identity. A denial, expiry, stale-authority result, or cancellation terminalizes the job and
+attempt first, then resolves the one-use wait; a crash between those writes recovers the terminal
+job and finishes the wait cleanup without dispatching or minting a replacement attempt.
 
 The agent-facing handoff preserves that state distinction. Both a missing standing repository grant
 and a one-use `confirm_every_request` decision are nonterminal `awaiting_human` continuations bound
@@ -737,7 +752,7 @@ Every status is paired with one required closed `SemanticReason`, never prose or
 `audit_reservation_unavailable`, `receipt_persistence_unknown`, `deadline_authority_lost`,
 `lease_authority_lost`, `frontier_changed`, `dependency_changed`, `route_semantic_ceiling`,
 `case_capacity_exceeded`, `coordinator_failure`. `route_semantic_ceiling` is paired with `blocked_by_policy` when a strict
-MCP process receives a semantic check request; it is a route-local ceiling, not a durable-policy
+MCP process receives an AI-powered check request; it is a route-local ceiling, not a durable-policy
 decision.
 `protocol/models.py` owns both enum objects, the immutable exhaustive status/reason relation, and
 its pair and final-provenance-binding validators. `domain/events.py`, `domain/findings.py`, and `ports/semantic.py` import those same
@@ -783,7 +798,7 @@ provider-attempt provenance and imports/re-exports the final type; it does not d
 
 The exact final provenance fields are provider/profile/version/model identities; prompt, schema,
 policy, and privacy-policy digests; sampling parameters; latency; optional provider request,
-usage, cost, and failure facts; semantic-attempt ID; dispatch kind; exactly one external
+usage, cost, and failure facts; AI-powered review attempt ID; dispatch kind; exactly one external
 authorization or local-disclosure reservation; durable privacy-receipt ID; external request
 commitment when applicable; and the validated terminal status/reason pair. The exact Python fields
 and wire conversions are frozen in `domain/findings.md` and
@@ -805,10 +820,10 @@ authorized the physical dispatch — the same value carried by `ApprovedOutbound
 `EgressAuthorization.policy_digest`, and `EgressReceipt.policy.policy_digest`. A provider adapter
 never asserts them. On a successful dispatch they are never placeholder or all-zero values.
 
-A deterministic candidate/finding forbids provenance. A semantic-model-derived candidate/finding
+A local candidate/finding forbids provenance. An AI-powered (model-derived) candidate/finding
 requires receipt-finalized provenance whose status/reason is exactly
 `succeeded/semantic_completed`; failed, refused, stale, late, invalid, timeout, or unavailable
-attempt provenance remains valid check accounting but can never justify a semantic finding.
+attempt provenance remains valid check accounting but can never justify an AI-powered finding.
 
 `finding_from_json`/`finding_to_json` and
 `semantic_provenance_from_json`/`semantic_provenance_to_json` are the sole codecs. The finding
@@ -821,7 +836,7 @@ the current runtime evidence schema. It records one cumulative `total` snapshot 
 reasoning output are subsets and are never added again; cache-write input remains a separate
 provider counter with no assumed arithmetic relationship. Repeated snapshots are replaced rather
 than summed. Missing usage remains absent, and malformed or regressing matching snapshots leave a
-closed `token_usage_invalid` diagnostic without invalidating an otherwise valid semantic judgment.
+closed `token_usage_invalid` diagnostic without invalidating an otherwise valid AI-powered judgment.
 Only the exact active thread and turn are accepted, and no account identifiers or raw provider
 notification body is retained.
 
@@ -833,10 +848,10 @@ Work-integrity finding kinds (`FindingKind`):
 `ledger_stale_or_incomplete`, `weak_or_stale_response` (flags a hollow or stale rejection/waiver).
 Research/evidence-assessment kinds: `evidence_does_not_support_claim`, `diff_does_not_match_account`,
 `material_limitation_omitted`, `questionable_finding_rejection` (flags a current hollow
-rejection/waiver of a deterministic finding).
+rejection/waiver of a local finding).
 
 Those two response predicates overlap on one case: a current rejection or waiver of a
-deterministic finding whose support is inadmissible under both packs' evidence criteria. Each pack
+local finding whose support is inadmissible under both packs' evidence criteria. Each pack
 is a closed rule table that cannot observe the other, so both still report it. The check
 composition layer resolves the overlap, dropping `weak_or_stale_response` only when
 `questionable_finding_rejection` was actually produced for the same finding and response event in
@@ -853,7 +868,7 @@ The ownership partition is exhaustive and disjoint: the first ten kinds belong t
 not a `PolicyPack` value and it never appears as `Finding.policy_id`.
 
 Finding kind identifies the problem, not who detected it. The research-evidence pack may produce
-the latter four deterministically, and a semantic reviewer may propose the same kinds. `origin`
+the latter four as local checks, and an AI-powered reviewer may propose the same kinds. `origin`
 alone distinguishes `deterministic` from `semantic_model_derived`; provenance rules follow origin,
 not the kind token.
 
@@ -890,33 +905,35 @@ gap/check-type identities are not strength scores.
 
 The complete ascending `rank_key` is `(priority, -actionable, -artifact_ordinal,
 -immutability_ordinal, -freshness_ordinal, -authorship_ordinal, -real_check_present,
-known_gap_count, origin_ordinal, finding_id_bytes)`, where `origin_ordinal` is 0 for deterministic
-and 1 for semantic-model-derived. Thus deterministic precedes semantic only after all materiality,
+known_gap_count, origin_ordinal, finding_id_bytes)`, where `origin_ordinal` is 0 for `deterministic`
+and 1 for `semantic_model_derived`. Thus local findings precede AI-powered findings only after all
+materiality,
 actionability, evidence, and coverage facts tie, and unsigned ASCII `finding_id` bytes are always
 the final tie-break.
 
-`kernel/ranking.py` owns `CheckCompleteness = complete|coverage_incomplete|required_incomplete`
-and `RankingContext(coverage: Coverage, completeness: CheckCompleteness)`. The application derives
-that context from terminal check facts before ranking. Its coverage is the component-wise weakest
-material coverage across the frozen case, every deterministic assessment/basis and candidate,
-semantic dependencies/outcomes, every explicit unknown/redaction/freshness gap, and all findings
-before capping. `required_incomplete` means a required deterministic pack failed or a material
-`semantic_required` path terminated without valid success; `coverage_incomplete` means required
-checks completed but material coverage is missing/redacted/unknown/stale or an optional requested
-semantic path yielded no usable evidence; `complete` means required packs completed with no
-material gap and semantic work succeeded or was not required/not material.
+`kernel/ranking.py` owns `CheckCompleteness = complete|coverage_incomplete|required_incomplete` and
+`RankingContext(coverage: Coverage, completeness: CheckCompleteness)`. The application derives that
+context from terminal check facts before ranking. Its coverage is the component-wise weakest
+material coverage across the frozen case, every local-check assessment/basis and candidate,
+AI-powered review dependencies/outcomes, every explicit unknown/redaction/freshness gap, and all
+findings before capping. `required_incomplete` means a required local policy pack failed or a
+material `semantic_required` path terminated without valid success; `coverage_incomplete` means
+required checks completed but material coverage is missing/redacted/unknown/stale or an optional
+requested AI-powered review path yielded no usable evidence; `complete` means required packs
+completed with no material gap and AI-powered review work succeeded or was not required/not
+material.
 
 Verdict enum (`CheckVerdict`): `action_required`, `no_issue_detected`, `insufficient_coverage`,
 `incomplete_check`. Never `pass`.
 
-`RankedFindings` is exactly the frozen four-field value
-`(findings: tuple[Finding, ...], suppressed_count: int, verdict: CheckVerdict,
-coverage: Coverage)`. `findings` is the ordered selected set after the optional one-slot semantic
-diversity rule, not necessarily the ordinary top-N prefix. `coverage` is always the full
-`RankingContext.coverage`; suppression or slot replacement never strengthens it. Verdict
-precedence is `required_incomplete -> incomplete_check`, else either closed completion-scope gap ->
-`insufficient_coverage`, else any selected actionable finding -> `action_required`, else
-`coverage_incomplete -> insufficient_coverage`, else `no_issue_detected` with an empty selection.
+`RankedFindings` is exactly the frozen four-field value `(findings: tuple[Finding, ...],
+suppressed_count: int, verdict: CheckVerdict, coverage: Coverage)`. `findings` is the ordered
+selected set after the optional one-slot AI-powered-finding diversity rule, not necessarily the
+ordinary top-N prefix. `coverage` is always the full `RankingContext.coverage`; suppression or slot
+replacement never strengthens it. Verdict precedence is `required_incomplete -> incomplete_check`,
+else either closed completion-scope gap -> `insufficient_coverage`, else any selected actionable
+finding -> `action_required`, else `coverage_incomplete -> insufficient_coverage`, else
+`no_issue_detected` with an empty selection.
 
 `ReceiptConclusion`, owned by `domain/receipts.py`, is exactly
 `no_unresolved_deterministic_findings`, `unresolved_findings_remain`, or
@@ -932,16 +949,16 @@ remain visible, but the gap dominates both the check verdict and receipt conclus
 completion scope cannot support an action-required completion verdict.
 
 `domain/receipts.py` owns the exact schema-shaped `ReceiptDocument`, `ReceiptVersionSlice`,
-policy/schema version entries, obligation/response/gap/redaction records, and canonical sections.
-It owns receipt-only enums; response disposition and waiver scope reuse `domain/findings.py`, and
-the boundary `ReceiptRedactionProfile` reuses `protocol/models.py`. The document field inventory
-is exactly the receipt-document schema, including `suppressed_finding_count`, and it has no
-post-append result frontier. An applicable semantic check contributes its selected
-  `semantic_provenance`, including bounded per-attempt token usage; deterministic or historical
-  receipts omit that optional field so their prior bytes remain unchanged.
-  The receipt provenance represents the applicable provider result; usage for failed, expired, or
-  late physical retries remains in the durable semantic-attempt ledger and internal accounting,
-  rather than being invented into that public provenance.
+policy/schema version entries, obligation/response/gap/redaction records, and canonical sections. It
+owns receipt-only enums; response disposition and waiver scope reuse `domain/findings.py`, and the
+boundary `ReceiptRedactionProfile` reuses `protocol/models.py`. The document field inventory is
+exactly the receipt-document schema, including `suppressed_finding_count`, and it has no post-append
+result frontier. An applicable AI-powered check contributes its selected `semantic_provenance`,
+including bounded per-attempt token usage; local-only or historical receipts omit that optional
+field so their prior bytes remain unchanged. The receipt provenance represents the applicable
+provider result; usage for failed, expired, or late physical retries remains in the durable
+AI-powered review attempt ledger and internal accounting, rather than being invented into that
+public provenance.
 
 `receipt_document_from_json`/`receipt_document_to_json` are the sole document codecs.
 `render_receipt_compact(document) -> str` returns one bounded string; there is no v0.1
@@ -949,7 +966,7 @@ post-append result frontier. An applicable semantic check contributes its select
 finding coverage using `coverage.weakest`; every explicit receipt-gap code must also occur in the
 top-level known-gap set, and the fold must equal that top-level coverage.
 
-Shared structural gap codes for optional semantic relevance review (distinct families):
+Shared structural gap codes for optional AI-powered relevance review (distinct families):
 
 - `optional_semantic_review_blocked_by_policy` — blocked before dispatch by network-egress policy;
 - `optional_semantic_review_registration_drift` — the explicit Codex strict route ceiling blocked
@@ -961,7 +978,7 @@ Shared structural gap codes for optional semantic relevance review (distinct fam
   status/reason/provenance binding is unchanged;
 - `semantic_review_not_configured` — evaluator/provider not configured;
 - `semantic_relevance_review_not_run` — evaluation failed/timed out/unavailable without a clean pass;
-- `semantic_review_not_requested` — deterministic-only check; semantic review was never requested.
+- `semantic_review_not_requested` — local-only check; AI-powered review was never requested.
 
 A `deterministic_only` check that follows a blocked or unavailable review carries that earlier
 code forward alongside `semantic_review_not_requested`. The stop-rules make a blocked review a
@@ -971,7 +988,7 @@ The drift code never carries: it is re-added fresh on the strict-ceiling path on
 the live applied-route record, so a `mcp remove` (which clears the record) or a strict reinstall
 cannot leave a stale drift claim on a later check.
 
-Completion-scope gaps are a separate deterministic case family. When a completion claim exists and
+Completion-scope gaps are a separate local-check case family. When a completion claim exists and
 the readable effective current plan declares zero obligations, exactly one applies:
 
 - `completion_scope_undeclared` — the effective plan has no obligation refs and no typed
@@ -995,31 +1012,30 @@ Three further codes describe a review that did run but could not deliver everyth
 
 Post-validation fences each challenge independently: a rejected challenge costs only itself, the
 challenges beside it still become findings, and the drop is declared through this gap. A judgment
-that fails the *structural* fence yields no semantic findings at all and is recorded as
+that fails the *structural* fence yields no AI-powered findings at all and is recorded as
 `invalid` / `semantic_judgment_rejected` — never as a failed request. A check always commits its
-deterministic findings, whatever the reviewer returned.
+local findings, whatever the reviewer returned.
 
-The not-configured and not-run codes share the honest compact limitation that semantic relevance
+The not-configured and not-run codes share the honest compact limitation that AI-powered relevance
 review was not run; they must not reuse blocked-by-policy wording. The not-requested code marks every
-deterministic-only check and forces coverage incompleteness without changing the deterministic
+local-only check and forces coverage incompleteness without changing the local-check
 verdict.
 
 Ready check composition resolves the configured external provider against the live
-generation-fenced registry for every semantic check. A provider binding activated after ready
+generation-fenced registry for every AI-powered check. A provider binding activated after ready
 composition can therefore serve a later check without a service restart; a binding removed after
 composition cannot be used from the stale readiness snapshot. Exact credential-record presence is
 checked structurally without reading the secret; minting secret material remains dispatch-time only.
 
-A semantic check also appends one bounded diagnostic record when no provider endpoint is bound, its
-task route is inactive, the exact configured binding is absent from the live registry, or the outer
-check coordinator catches an evaluator exception. A missing exact credential record shares the
+An AI-powered check also appends one bounded diagnostic record when no provider endpoint is bound,
+its task route is inactive, the exact configured binding is absent from the live registry, or the
+outer check coordinator catches an evaluator exception. A missing exact credential record shares the
 credential-unavailable path. These paths use exactly one operation token:
 `semantic_not_dispatched_provider_unbound`, `semantic_not_dispatched_route_inactive`,
-`semantic_not_dispatched_credential_unavailable`, or
-`semantic_not_dispatched_coordinator_failure`. The reason is a closed structural token; provider
-identity, exception text, payload, and paths remain forbidden from this sink. Exceptions contained
-inside the production composition evaluator retain the existing `semantic_evaluation_failed`
-operation.
+`semantic_not_dispatched_credential_unavailable`, or `semantic_not_dispatched_coordinator_failure`.
+The reason is a closed structural token; provider identity, exception text, payload, and paths
+remain forbidden from this sink. Exceptions contained inside the production composition evaluator
+retain the existing `semantic_evaluation_failed` operation.
 
 Two further check-path operations describe a review that did reach a provider:
 `semantic_judgment_rejected` records a structurally unusable judgment, and
@@ -1093,10 +1109,10 @@ coverage.
   the replacement writes `superseded_by_claim_id` onto each target's `ClaimProjectionRecord` (the
   snapshot key is emitted only when set, so pre-existing snapshots stay byte-identical), and
   `effective_claim_ids` reads that field. Redacting the correcting event therefore cannot resurrect
-  its target as a current claim, and cannot free that target for a second correction. Deterministic
-  current-claim rules, semantic claim sections, and receipt current-claim selection consume that
-  set. Projection and status history retain both old and replacement records; finding resolution
-  remains a later-check transition and never deletion. `disputes_refs` and
+  its target as a current claim, and cannot free that target for a second correction. Local-check
+  current-claim rules, AI-powered review claim sections, and receipt current-claim selection consume
+  that set. Projection and status history retain both old and replacement records; finding
+  resolution remains a later-check transition and never deletion. `disputes_refs` and
   `decision_recorded.supersedes_event_id` are not claim-supersession aliases.
 - `EvidenceObjectSource` is the frozen `(evidence_id, source_event_id)` pair. `ReplayIndex` is the
   frozen non-plaintext `(frontier, head_digest, payload_event_by_object,
@@ -1184,76 +1200,72 @@ coverage.
 - `rank_findings(deterministic, semantic, context: RankingContext, max_findings) -> RankedFindings`
   (the exact stable `rank_key` is registered in §8; suppressed count, verdict, and the full
   weakest-material coverage baseline are retained with the ordered selection).
-- `ReceiptFindingState`, owned by `kernel/receipt_builder.py`, is exactly
-  `(finding_id, resolved)`. The ordered tuple contains one latest current row per issue key; its
-  boolean is the one shared proof-based answer, `kernel/finding_resolution.finding_is_resolved`,
-  read from the projection: a same-issue successor replaces the old row and starts unresolved,
-  while only a later qualifying check resolves the current row (registered under the finding
-  view below). A response disposition never resolves it. Resolved rows stay in the document's
-  `findings` as history; the summary section's `items` are exactly their ascending ids (the one
-  section every include level carries), and the fixed summary/findings templates append “One
-  earlier finding was resolved by a later qualifying check and remains visible as history.” (or
-  the plural form) so a reader can tell resolved history from current findings and from coverage
-  gaps. Renderers derive the current set as `findings` minus those ids; nothing else in the frozen
-  `receipt-document/1.0.0` shape changes.
-  `ReceiptBuildContext` is exactly `(projection,
-  subject_frontier, availability, coverage, gaps, finding_states, applicable_check)`, where
-  `availability` is the current `CaseAvailabilityFacts`, `coverage` is the weakest material fold,
-  `gaps` is the exact sorted typed `CaseGap` tuple after check/semantic/availability accounting, and
-  `applicable_check` is the exact readable `CheckRecordedPayload` that still applies to this
-  material state or `None`. The application folds coverage from the frozen current case, the
-  applicable check, and every retained current finding row. When a historical finding contributes
-  a gap absent from the recovered current case/check, that code remains in top-level coverage and
-  is represented once by the task-global internal marker `retained_finding_coverage:<code>`; the
-  finding's own coverage remains unchanged. A check applies when no event appended after the
-  check's own record supersedes it under `kernel/reducers.invalidates_recorded_check`: the atomic
-  check-result events — the `finding_recorded` records it returned and its `check_recorded` — land
-  with it and never revoke it (a deterministic candidate that re-derives a live recorded finding
-  with the same kind, policy, and subject refs keeps that finding's ID and is cited in
-  `returned_finding_ids`
-  without a duplicate `finding_recorded` event); an immaterial advance — `receipt_recorded`, `session_opened`,
+- `ReceiptFindingState`, owned by `kernel/receipt_builder.py`, is exactly `(finding_id, resolved)`.
+  The ordered tuple contains one latest current row per issue key; its boolean is the one shared
+  proof-based answer, `kernel/finding_resolution.finding_is_resolved`, read from the projection: a
+  same-issue successor replaces the old row and starts unresolved, while only a later qualifying
+  check resolves the current row (registered under the finding view below). A response disposition
+  never resolves it. Resolved rows stay in the document's `findings` as history; the summary
+  section's `items` are exactly their ascending ids (the one section every include level carries),
+  and the fixed summary/findings templates append “One earlier finding was resolved by a later
+  qualifying check and remains visible as history.” (or the plural form) so a reader can tell
+  resolved history from current findings and from coverage gaps. Renderers derive the current set as
+  `findings` minus those ids; nothing else in the frozen `receipt-document/1.0.0` shape changes.
+  `ReceiptBuildContext` is exactly `(projection, subject_frontier, availability, coverage, gaps,
+  finding_states, applicable_check)`, where `availability` is the current `CaseAvailabilityFacts`,
+  `coverage` is the weakest material fold, `gaps` is the exact sorted typed `CaseGap` tuple after
+  check, AI-powered review, and availability accounting, and `applicable_check` is the exact
+  readable `CheckRecordedPayload` that still applies to this material state or `None`. The
+  application folds coverage from the frozen current case, the applicable check, and every retained
+  current finding row. When a historical finding contributes a gap absent from the recovered current
+  case/check, that code remains in top-level coverage and is represented once by the task-global
+  internal marker `retained_finding_coverage:<code>`; the finding's own coverage remains unchanged.
+  A check applies when no event appended after the check's own record supersedes it under
+  `kernel/reducers.invalidates_recorded_check`: the atomic check-result events — the
+  `finding_recorded` records it returned and its `check_recorded` — land with it and never revoke it
+  (a local-check candidate that re-derives a live recorded finding with the same kind, policy, and
+  subject refs keeps that finding's ID and is cited in `returned_finding_ids` without a duplicate
+  `finding_recorded` event); an immaterial advance — `receipt_recorded`, `session_opened`,
   `session_resumed` — never revokes it; a readable `response_recorded` answering a finding the check
-  itself returned never revokes it; and a finding-free suffix consisting entirely of
-  service-stamped observation-authored records never revokes it. Those latter advances carry the
+  itself returned never revokes it; and a finding-free suffix consisting entirely of service-stamped
+  observation-authored records never revokes it. Those latter advances carry the
   `check_current_as_of_earlier_frontier` gap. An observation-authored `finding_recorded`, every
   other material-family event, a response to a finding the check did not return, and a response
   whose payload is unreadable all revoke it. Frontier equality is not the rule: a check necessarily
   advances the frontier past the subject it tested. The application constructs this context; the
   builder never imports a port type or re-derives applicability.
-- `build_receipt(context, receipt_id, task_id, session_id, generated_at,
-  versions: ReceiptVersionSlice, redaction_profile, include) -> ReceiptDocument`. Every
-  nondeterministic input is explicit; the
-  builder reads no clock or ID source. `ReceiptDocument` contains its identity, generation time,
-  subject frontier, exact nonnegative `suppressed_finding_count`, and optional
+- `build_receipt(context, receipt_id, task_id, session_id, generated_at, versions:
+  ReceiptVersionSlice, redaction_profile, include) -> ReceiptDocument`. Every nondeterministic input
+  is explicit; the builder reads no clock or ID source. `ReceiptDocument` contains its identity,
+  generation time, subject frontier, exact nonnegative `suppressed_finding_count`, and optional
   `semantic_provenance` from the applicable latest check, but not the post-append result frontier
-  (which would create a digest self-reference). When no applicable semantic attempt exists, the
-  receipt omits that field, preserving historical deterministic receipt bytes. `ReceiptResult`
-  carries both subject and post-commit result frontiers. The provenance and token counters name
-  that selected semantic attempt; they are not a sum across retries or recovery attempts.
-- Receipt boundary tokens are closed: `ReceiptFormat` is `json|markdown|text`, `ReceiptInclude`
-  is `summary|standard|full`, and `ReceiptRedactionProfile` is
+  (which would create a digest self-reference). When no applicable AI-powered review attempt exists,
+  the receipt omits that field, preserving historical local-only receipt bytes. `ReceiptResult`
+  carries both subject and post-commit result frontiers. The provenance and token counters name that
+  selected AI-powered review attempt; they are not a sum across retries or recovery attempts.
+- Receipt boundary tokens are closed: `ReceiptFormat` is `json|markdown|text`, `ReceiptInclude` is
+  `summary|standard|full`, and `ReceiptRedactionProfile` is
   `full_local|default_local_export|redacted_share`. `include` changes only the registered section
-  detail level; it never suppresses required conclusion, coverage, gap, or limitation material.
-  The top-level truth-bearing tuples are selected before presentation and are independent of
-  `include`; summary emits sections `(summary, limitations_and_coverage,
-  version_and_policy_identity)`, standard inserts `(outstanding_work,
-  findings_and_dispositions)`, and full additionally inserts `evidence_and_claim_basis` before
-  limitations. Profiles then apply the frozen field matrix: `full_local` retains every allowed
-  selected text field; `default_local_export` clears obligation summaries and receipt-gap details
-  but retains finding text and response reasons; `redacted_share` additionally omits semantic
-  finding rows and rejected/waived response rows while retaining deterministic ID-only findings,
-  acknowledged responses, structural IDs, conclusion, coverage, gaps, versions, and the bounded
-  semantic provenance/token-usage counters. Every omitted protected content leaf is counted once
-  in the sorted `ReceiptRedaction` rows; omitted structural IDs and enum/relation fields are not
-  content-redaction counts. Sections are regenerated only from retained structural values and
-  fixed templates; they never copy omitted text. Therefore a
-  profile/include transform that changes selected fields or sections changes the canonical
-  document and digest; it is not a render-only rewrite. Conclusion, subject frontier, suppression,
-  weakest coverage, and material gap codes are invariant and may only stay equal or weaken.
-  Receipt completion-scope wording is selected only from the shared current-plan scope state and
-  fixed templates: “scope was never declared”; “the plan declared none, reason:
-  `<no_obligations_reason>`”; or “declared obligations are all resolved.” The interpolation is the
-  bounded closed enum value, never caller-controlled plan summary, revision reason, or other prose.
+  detail level; it never suppresses required conclusion, coverage, gap, or limitation material. The
+  top-level truth-bearing tuples are selected before presentation and are independent of `include`;
+  summary emits sections `(summary, limitations_and_coverage, version_and_policy_identity)`,
+  standard inserts `(outstanding_work, findings_and_dispositions)`, and full additionally inserts
+  `evidence_and_claim_basis` before limitations. Profiles then apply the frozen field matrix:
+  `full_local` retains every allowed selected text field; `default_local_export` clears obligation
+  summaries and receipt-gap details but retains finding text and response reasons; `redacted_share`
+  additionally omits AI-powered finding rows and rejected/waived response rows while retaining local
+  ID-only findings, acknowledged responses, structural IDs, conclusion, coverage, gaps, versions,
+  and the bounded AI-powered review provenance/token-usage counters. Every omitted protected content
+  leaf is counted once in the sorted `ReceiptRedaction` rows; omitted structural IDs and
+  enum/relation fields are not content-redaction counts. Sections are regenerated only from retained
+  structural values and fixed templates; they never copy omitted text. Therefore a profile/include
+  transform that changes selected fields or sections changes the canonical document and digest; it
+  is not a render-only rewrite. Conclusion, subject frontier, suppression, weakest coverage, and
+  material gap codes are invariant and may only stay equal or weaken. Receipt completion-scope
+  wording is selected only from the shared current-plan scope state and fixed templates: “scope was
+  never declared”; “the plan declared none, reason: `<no_obligations_reason>`”; or “declared
+  obligations are all resolved.” The interpolation is the bounded closed enum value, never
+  caller-controlled plan summary, revision reason, or other prose.
 - `PolicyPack` is the frozen data-only selector `(policy_id, policy_version)`; it contains no
   callback or dynamic rule source. Its ids are `work-integrity/0.1.0`,
   `research-evidence/0.1.0`
@@ -1304,8 +1316,8 @@ Its methods are:
 - `load_semantic_job(writer_id, operation_id) -> SemanticJobRecord | None`;
 - `list_semantic_attempts(job_id) -> tuple[SemanticAttemptRecord, ...]` (ordinal-sorted bounded
   audit rows; no raw provider text);
-- `renew_leases(lease) -> OperationLease` — pending semantic jobs derive their live ownership
-  bound from the authenticated `yoetz.semantic-case/2` execution expiry plus five seconds,
+- `renew_leases(lease) -> OperationLease` — pending AI-powered review jobs derive their live
+  ownership bound from the authenticated `yoetz.semantic-case/2` execution expiry plus five seconds,
   with operation/job renewal committed atomically. Reclaim preserves started or response-durable
   attempt identity. Local terminal recovery after that bound does not extend provider authority;
 - `reclaim_operation(writer_id, operation_id, request_digest) -> OperationLease | PendingVerdict`;
@@ -1380,36 +1392,36 @@ The exact shared frozen records, also owned by `ports/ledger.py`, are:
   retry_after_ms: int | None)`, where retry time is present only for `live` and is bounded by the
   remaining lease lifetime.
 
-Semantic attempt budget (ADR-006): `ProviderProfileConfig.timeout_seconds` is the total
-semantic-operation deadline; `max_retries` (0..2) is the maximum additional physical attempts
-(so physical budget is `1 + max_retries`, at most three). Yoetz owns the retry loop with SDK
-`max_retries=0`. Transient retries are admitted only for timeout / transport / rate-limited
+AI-powered review attempt budget (ADR-006): `ProviderProfileConfig.timeout_seconds` is the total
+AI-powered review operation deadline; `max_retries` (0..2) is the maximum additional physical
+attempts (so physical budget is `1 + max_retries`, at most three). Yoetz owns the retry loop with
+SDK `max_retries=0`. Transient retries are admitted only for timeout / transport / rate-limited
 classes. One further class shares the same physical budget: `invalid / response_content_invalid`
 (the provider was reached and answered, but the answer was incomplete or overlong) admits at most
 one repair retry per job (issue #348) — the same frozen case resubmitted as a fresh physical
 attempt, with no sampling, provider, model, category, or retention widening; a repaired attempt is
 closed as `expired` with that terminal code so it stays in accounting, and a second
-`response_content_invalid` answer terminates honestly as `invalid / response_content_invalid`
-(never `retry_budget_exhausted`) with `attempted_count=2`. The repair count is rebuilt from durable
-attempt rows (`repair_retries_from_rows`), not coordinator memory, so it survives an
-`awaiting_human` replay. `response_schema_invalid`, `semantic_judgment_rejected`, policy blocks,
-human denial, secret detection, invalid case, stale frontier, refusal, quota exhaustion, and
-exhausted authority never retry. `confirm_every_request` requires a fresh foreground decision per
-physical attempt, the repair attempt included. Attempt accounting (`attempted_count`, `selected_attempt_id`, terminal reason counts,
-`exhausted`) is reconstructed from durable job/attempt rows via `load_semantic_job` +
-`list_semantic_attempts` — not from memory-only coordinator state. When
-`enqueue_semantic_job` recovers an already-terminal job (`succeeded` / `failed` /
-`quarantined`), the attempt loop must not call `claim_semantic_job`; it rebuilds the final
-status/reason (and selected judgment/provenance from the durable `SEMANTIC_RESPONSE` object on
-success) so crash-after-select or crash-after-final-failure remains reproducible. The operation
-lease starts with the existing 60-second floor. Once a `semantic-case/2` job is present, renewal
-reads that authenticated frozen object and extends both the operation and its active semantic job
-to the persisted total execution expiry plus the fixed five-second cleanup grace. A shorter
-execution therefore narrows the lease to its own expiry plus grace; a longer execution is
-extended once and later renewals preserve that same bounded expiry. The caller's process deadline
-and provider admission/approval deadlines remain unchanged. A valid provider result must not
-become `operation_pending` solely because the old 60-second floor elapsed inside the frozen
-semantic deadline, and renewal never extends authority past the authenticated bound.
+`response_content_invalid` answer terminates honestly as `invalid / response_content_invalid` (never
+`retry_budget_exhausted`) with `attempted_count=2`. The repair count is rebuilt from durable attempt
+rows (`repair_retries_from_rows`), not coordinator memory, so it survives an `awaiting_human`
+replay. `response_schema_invalid`, `semantic_judgment_rejected`, policy blocks, human denial, secret
+detection, invalid case, stale frontier, refusal, quota exhaustion, and exhausted authority never
+retry. `confirm_every_request` requires a fresh foreground decision per physical attempt, the repair
+attempt included. Attempt accounting (`attempted_count`, `selected_attempt_id`, terminal reason
+counts, `exhausted`) is reconstructed from durable job/attempt rows via `load_semantic_job` +
+`list_semantic_attempts` — not from memory-only coordinator state. When `enqueue_semantic_job`
+recovers an already-terminal job (`succeeded` / `failed` / `quarantined`), the attempt loop must not
+call `claim_semantic_job`; it rebuilds the final status/reason (and selected judgment/provenance
+from the durable `SEMANTIC_RESPONSE` object on success) so crash-after-select or
+crash-after-final-failure remains reproducible. The operation lease starts with the existing
+60-second floor. Once a `semantic-case/2` job is present, renewal reads that authenticated frozen
+object and extends both the operation and its active AI-powered review job to the persisted total
+execution expiry plus the fixed five-second cleanup grace. A shorter execution therefore narrows the
+lease to its own expiry plus grace; a longer execution is extended once and later renewals preserve
+that same bounded expiry. The caller's process deadline and provider admission/approval deadlines
+remain unchanged. A valid provider result must not become `operation_pending` solely because the old
+60-second floor elapsed inside the frozen AI-powered review deadline, and renewal never extends
+authority past the authenticated bound.
 
 These field sets are closed: `OperationLease` and `SemanticAttemptHandle` carry the complete
 owner/lease/frontier/dependency compare-and-swap fence, while job, selected-attempt, and pending
@@ -1417,10 +1429,10 @@ records carry only their listed durable state. `advance_check_phase` binds the d
 local-result/case object when that transition promises recoverability. The pending operation's
 `resume_object_ref` is the sole current row pointer: `CHECK_RESUME` at `reserved`, atomically
 replaced by `DETERMINISTIC_RESULT` at `local_ready` and retained through later nonterminal phases;
-the deterministic envelope authenticates its prior full-case pointer for verified reopen. The
-deterministic envelope also stamps the kernel's rendered finding-text contract digest
+the local-result envelope authenticates its prior full-case pointer for verified reopen. The
+local-result envelope also stamps the kernel's rendered finding-text contract digest
 (`DETERMINISTIC_TEXT_CONTRACT_DIGEST`); on replay, a checkpoint whose bindings verify but whose
-stamp is absent or from different wording is superseded — the deterministic phase recomputes from
+stamp is absent or from different wording is superseded — the local-check phase recomputes from
 the unchanged frozen case — never `STORAGE_CORRUPT`, so a finding-wording upgrade cannot wedge an
 in-flight check on its own request id. No
 memory-only phase-object map is recovery authority. Recovery of that resume pointer is
@@ -1565,7 +1577,7 @@ unrepresentable probe serializes as the token `unavailable` rather than a histor
 Protocol, engine, projection (`yoetz/0.1.0`), object format, policy-pack ids, and
 `storage_schema` (`1`, the slice's static storage identity — not catalog/bundle counters and not
 SQLite `user_version`) are package contract facts. `provider_profiles` is the packaged
-`support/runtime-support.json` inventory, not a live semantic-evaluator census; an empty catalog
+`support/runtime-support.json` inventory, not a live AI-powered evaluator census; an empty catalog
 in `development_unverified` support does not prove an evaluator is absent. MCP and CLI
 `status view=versions` share this producer; `route_profile` remains an application overlay of the
 serving process. Kernel evaluation does not read this live environment. Historical check/receipt
@@ -1583,15 +1595,15 @@ folds every readable `check_recorded` event into each finding's projection recor
 `resolved_by_check_event_id` (`FindingProjectionRecord`; the snapshot key is emitted only when set,
 so pre-existing snapshots stay byte-identical). A check resolves a current row only when all of
 these hold: its recorded `subject_frontier` is at or after the finding's ingestion sequence; every
-finding it returned is readable and none shares the row's issue key; `suppressed_count` is zero;
-the execution for the row's `(policy_id, policy_version)` is `run/completed`; its normalized
-`scope` is whole-case or names one of the row's `subject_refs`; its coverage `ledger_freshness` is
-not `stale_after_material_change|unknown`; and its `known_gaps` lie within the proof class's closed
-tolerated set. `redacted_gap` also blocks by default. One deterministic-only exception admits it
-when the finding's own recorded coverage was readable and the check-wide gap set contains only
-tolerated codes including at least one host-observation code; this keeps unrelated host capture
-limits from making a structured-ledger repair permanently unprovable. For deterministic rows the
-tolerated set is the semantic-review absence/weakness codes
+finding it returned is readable and none shares the row's issue key; `suppressed_count` is zero; the
+execution for the row's `(policy_id, policy_version)` is `run/completed`; its normalized `scope` is
+whole-case or names one of the row's `subject_refs`; its coverage `ledger_freshness` is not
+`stale_after_material_change|unknown`; and its `known_gaps` lie within the proof class's closed
+tolerated set. `redacted_gap` also blocks by default. One local-only exception admits it when the
+finding's own recorded coverage was readable and the check-wide gap set contains only tolerated
+codes including at least one host-observation code; this keeps unrelated host capture limits from
+making a structured-ledger repair permanently unprovable. For local rows the tolerated set is the
+AI-powered review absence/weakness codes
 (`semantic_review_not_requested|semantic_review_not_configured|
 semantic_relevance_review_not_run|optional_semantic_review_blocked_by_policy|
 optional_semantic_review_registration_drift|
@@ -1600,31 +1612,30 @@ semantic_case_content_over_item_limit`) plus the evidence-strength codes
 (`evidence_content_digest_only|evidence_content_withheld|evidence_digest_subject_legacy_unknown`)
 and the host-observation codes (`captured_object_unavailable|content_unselected|
 host_outcome_unavailable|unpaired_event`). Those host codes remain receipt coverage limitations;
-they only stop vetoing deterministic absence proof because deterministic packs judge structured
-event payloads and typed coverage, never captured-object bytes. If missing content matters to the
-rule, the completed pack re-fires the issue or returns its own coverage finding. The exception also
-requires the finding's original coverage to contain only the pre-existing semantic/evidence/host-
-observation tolerances and to have freshness outside `stale_after_material_change|redacted_gap|unknown`.
-For `semantic_model_derived` rows only the evidence-strength codes are tolerated, and the check
-must also record
-`succeeded/semantic_completed`. Any other gap — redacted or unavailable payloads, redacted
-objects, missing refs, unknown events, completion scope, import range, or a code not in the list — blocks
-both proof classes. A deterministic-only check therefore never resolves a semantic finding, and a
-weakened semantic review never resolves one either. A check that returns a finding again clears
+they only stop vetoing local absence proof because local packs judge structured event payloads and
+typed coverage, never captured-object bytes. If missing content matters to the rule, the completed
+pack re-fires the issue or returns its own coverage finding. The exception also requires the
+finding's original coverage to contain only the pre-existing AI-powered review, evidence, and
+host-observation tolerances and to have freshness outside
+`stale_after_material_change|redacted_gap|unknown`. For `semantic_model_derived` rows only the
+evidence-strength codes are tolerated, and the check must also record
+`succeeded/semantic_completed`. Any other gap — redacted or unavailable payloads, redacted objects,
+missing refs, unknown events, completion scope, import range, or a code not in the list — blocks
+both proof classes. A local-only check therefore never resolves an AI-powered finding, and a
+weakened AI-powered review never resolves one either. A check that returns a finding again clears
 that row's proof; a resolved row is excluded from finding-ID reuse (`prior_finding_ids`), so a
 re-fired issue is a successor under a fresh id that starts unresolved while the resolved row keeps
 its proof; redacting the proving check clears the proof and the `redacted_event` marker names why.
 Weak, skipped, failed, capped, stale, and non-overlapping checks do nothing and never reopen
-resolution while its proof remains visible. `finding_is_resolved(state, finding_id)` is the one
-read every surface uses (receipt finding states, `receipt_blocking_finding_count`, the status
-finding row's `resolved`): proof present, and the latest response, if any, readable and not
+resolution while its proof remains visible. `finding_is_resolved(state, finding_id)` is the one read
+every surface uses (receipt finding states, `receipt_blocking_finding_count`, the status finding
+row's `resolved`): proof present, and the latest response, if any, readable and not
 `provenance_disputed`. The released `status-result` 1.1.0 finding item pins `provenance_disputed`
 rows to `resolved=false`; the rule honours that pin, so such a row stays receipt-blocking until a
-versioned status result lifts it.
-Therefore `CheckRecordedPayload` carries required normalized `scope` (both tuples empty means
-whole case; the ledger records the request's normalized scope, never a synthetic whole-case value)
-and required exact `policy_executions`; policies/frontier/returned IDs alone cannot prove
-applicability.
+versioned status result lifts it. Therefore `CheckRecordedPayload` carries required normalized
+`scope` (both tuples empty means whole case; the ledger records the request's normalized scope,
+never a synthetic whole-case value) and required exact `policy_executions`;
+policies/frontier/returned IDs alone cannot prove applicability.
 
 `include_resolved` absent/false adds `resolved=false`, while true removes only that predicate;
 `include_unavailable` has the identical rule for `available=true`. Filters are otherwise ANDed.
@@ -1653,18 +1664,18 @@ remain structural. Page coverage is `coverage.weakest` over every accepted envel
 effective frontier plus all projection/object/read caps, independent of filter/page; gaps are its
 exact sorted unique known-gap tokens.
 
-`candidate_findings` is the one registered exception to that last rule, because a deterministic
+`candidate_findings` is the one registered exception to that last rule, because a local-check
 rule evaluates one whole frozen case and no repository can page a rule evaluation. It loads
 `ProjectionState` plus the authoritative accepted-record prefix through that frontier, calls
 `load_case_availability` and the same `build_deterministic_case` used by check freeze, runs only the
-deterministic packs, and pages
+local packs, and pages
 the resulting tuple in pure application code. It never constructs a `ProjectionQuery`. The
 exception covers rule evaluation only; ordinary row filtering stays at the storage boundary. Its
 rows are `CandidateFinding` values ordered by the registered finding rank facts, with final ties
 broken by canonical policy/rule/complete-subject emission order because candidates have no
 `finding_id`. The durable `findings` view instead uses canonical `finding_id` bytes for its final
-tie. Candidate parity covers only deterministic findings; a recorded check may independently add
-validated semantic findings. The view returns no `CheckVerdict` and allocates no ID: only a
+tie. Candidate parity covers only local findings; a recorded check may independently add
+validated AI-powered findings. The view returns no `CheckVerdict` and allocates no ID: only a
 recorded `check` produces either, so nothing the view returns can be responded to, waived, or cited
 in a receipt (`application/status.md`, `application/check.md`).
 
@@ -1939,7 +1950,8 @@ read may simply be repeated.
 The private `ControlCallRequest` envelope may carry `route_profile=policy|strict` only for `check`
 and `status`. It is set by the MCP bridge from its immutable process profile, is absent from public
 operation request models, and is rejected on every other control method. `strict` prevents
-`check` from requesting semantic runtime capability or dispatching an evaluator; an agent cannot
+`check` from requesting the AI-powered review (`semantic`) runtime capability or dispatching an
+evaluator; an agent cannot
 weaken or select this field.
 
 `ControlError` carries one bounded reason, a `retryable` flag, and an optional service-minted
@@ -2407,8 +2419,8 @@ snapshot, and the configured provider route, then proposes only the frozen candi
 denial, expiry, replay, malformed preview, or unsupported client yields no policy/provider mutation.
 Agents guide setup, installation, and settings changes in normal conversation, recommend with
 trade-offs, and treat explicit current user intent as final for supported product choices. When the
-user explicitly asks for semantic-review depth, Expanded is recommended first and Assisted is
-explained as the lower-disclosure semantic option. Recommendations never override technical
+user explicitly asks for AI-powered review depth, Expanded is recommended first and Assisted is
+explained as the lower-disclosure AI-powered review option. Recommendations never override technical
 authority, policy, never-send, credential, destructive-action, or evidence boundaries.
 
 A consent action is recorded approved only after its operation result is validated as the exact
@@ -2479,7 +2491,7 @@ The closed privacy enums are:
 - `PrivacyProfile`: `local_only`, `confirm_every_request`, `minimal_external`,
   `trusted_provider`;
 - `ReviewContextProfile`: `structural`, `goal_aware`, `assisted`, `expanded`, `custom`; it is
-  orthogonal to `PrivacyProfile` and controls deterministic semantic-case selection only;
+  orthogonal to `PrivacyProfile` and controls deterministic AI-powered review case selection only;
 - `EgressChannel`: exactly `llm_inference`, `product_telemetry`, `crash_diagnostics`,
   `update_checks`, `capability_testing`;
 - `LocalDisclosureSink`: `local_model`, `agent_context`, `local_human_view`,
@@ -2525,23 +2537,23 @@ The closed privacy enums are:
 `self_authored`, `other_writer`, `imported`, or `engine_derived_from_self_authored`. It is computed
 server-side from the ledger, never asserted by a caller. An item is `self_authored` only when every
 contributing accepted event was written by the requesting `writer_id` in this session at or before
-the frozen frontier. Kernel prose derived solely from such events — a deterministic finding's
+the frozen frontier. Kernel prose derived solely from such events — a local finding's
 `summary`/`detail` whose `subject_refs` are all `self_authored` — is
-`engine_derived_from_self_authored`. Semantic findings are never either value: reviewer prose is
+`engine_derived_from_self_authored`. AI-powered findings are never either value: reviewer prose is
 provider-derived and stays under the ordinary ceiling. Import-derived material is always
 `imported`, even when the importing writer matches, because the agent did not author what the
 importer observed.
 
 The `agent_context` ceiling is therefore provenance-conditional rather than a flat category set.
 Items whose provenance is `self_authored` or `engine_derived_from_self_authored` project to the
-requesting writer at the ceiling's data classes without needing a category grant: returning an
-agent the prose it just published, or a deterministic finding computed only from it, discloses
-nothing that host does not already hold. Everything else — `other_writer`, `imported`, and all
-semantic findings — requires the explicit `agent_context_categories` grant. `sensitive_confidential`
-and every `ForbiddenDataKind` remain absolute regardless of provenance; self-authorship never
-unlocks a class, only a category the host demonstrably already has. Provenance is recomputed at
-projection time against the frozen frontier and is never cached across frontiers, and each
-projection still reserves and completes its `AgentProjectionAuditSubject` receipt.
+requesting writer at the ceiling's data classes without needing a category grant: returning an agent
+the prose it just published, or a local finding computed only from it, discloses nothing that host
+does not already hold. Everything else — `other_writer`, `imported`, and all AI-powered findings —
+requires the explicit `agent_context_categories` grant. `sensitive_confidential` and every
+`ForbiddenDataKind` remain absolute regardless of provenance; self-authorship never unlocks a class,
+only a category the host demonstrably already has. Provenance is recomputed at projection time
+against the frozen frontier and is never cached across frontiers, and each projection still reserves
+and completes its `AgentProjectionAuditSubject` receipt.
 
 `PrivacyPolicyStorePort` alone loads/intersects and mutates the machine ceiling plus
 repository/task/request overlays. Its `repository_authority(scope) -> RepositoryPrivacyAuthority`
@@ -2769,15 +2781,15 @@ facts. The recommended policy's explicit guard turns currency into a runtime pre
 policy may turn it off through a trusted loosening transition and then carries no upstream
 no-training claim.
 
-### Semantic evaluation
+### AI-powered evaluation
 
-External semantic profiles declare one credential authority. `yoetz_vault_api_credential` means
-the ready service mints an attempt-bound vault handle for an exact HTTP provider profile.
-`external_runtime_oauth` means an exact vendor runtime owns login, refresh, storage, and upstream
-authentication; the gateway supplies only `ExternalRuntimeAuthority(dispatch_id,
-request_body_digest, request_commitment, service_generation, monotonic_deadline)`. The two
-authorities are bound alone or paired as one primary plus exactly one fallback (issue #582);
-nothing else pairs.
+External AI-powered review provider profiles declare one credential authority.
+`yoetz_vault_api_credential` means the ready service mints an attempt-bound vault handle for an
+exact HTTP provider profile. `external_runtime_oauth` means an exact vendor runtime owns login,
+refresh, storage, and upstream authentication; the gateway supplies only
+`ExternalRuntimeAuthority(dispatch_id, request_body_digest, request_commitment, service_generation,
+monotonic_deadline)`. The two authorities are bound alone or paired as one primary plus exactly one
+fallback (issue #582); nothing else pairs.
 
 **Fallback endpoint pairing (issue #582).** `[semantic_fallback]` is a nonsecret config table
 (`SemanticFallbackConfig`; `yoetz-config-1.2.0`, with `1.1.0` frozen) with the single field
@@ -2843,44 +2855,42 @@ options map. Expired capability evidence fails before child launch. `account/rea
 discovery, login, and logout are structural app-server operations and never a task-content probe.
 
 `SemanticEvaluatorPort.evaluate(case: ApprovedProviderCase, deadline: Deadline) -> SemanticResult`
-makes
-at most one physical provider request. `SemanticResult` is the closed union
-`SemanticResultSuccess | SemanticResultRefused | SemanticResultTimeout |
-SemanticResultInvalid | SemanticResultLate | SemanticResultUnavailable`; expected refusal,
-timeout, invalid, late, and unavailable outcomes are values. `SemanticCase` remains an internal
-pre-egress candidate and is never provider input. It contains a structured `ReviewPacket`: goal and
-obligations, claims and decisions, a material ordered timeline, deterministic findings plus
-`FindingBasis`, change observations, coverage, targeted recorded excerpts, and an omission manifest.
-The owning `DeterministicCase` freezes a canonical material-history tail before semantic selection:
-at most 64 accepted plan, obligation, decision, action, result, evidence, claim, finding, response,
-and check events, in ingestion order, with at most 512 KiB of canonical payload. Payload retention
-is newest-first; over-budget retained payload is `not_selected`, legacy history is `not_recorded`,
-source redaction is `redacted_never_send`, and an exact omitted-before count represents older
-events. `structural` emits only event identity/order/digest/visibility as
-`bounded_structural_metadata`. Goal-aware detail is emitted as separate `task_description`,
-`obligation_text`, `claim_text`, `decision_excerpt`, `command_metadata`, `evidence_excerpt`, or
-`finding_summary` items. Exact action command text is removed unless
-`include_exact_command_text` is independently true. Every item remains separately policy-selected,
-scanned, authorized, and receipted; the frozen slice grants no egress authority.
-Its reference allowlist is the union of `frontier_refs` (IDs present at frozen frontier F) and
-`local_check_refs` (new deterministic finding IDs already pinned in this check's durable local
-result); both sets and their union are case-digest inputs. The semantic `frontier_refs` set is the
-dependency closure of retained packet metadata, canonical payload items, recorded findings, and
-their typed recorded dependencies/source-event identities. It may be smaller than the deterministic
-case's complete allowlist. `omitted_reference_count` counts the excluded frontier IDs, is bound into
-the case digest, and travels as a canonical integer string in the envelope and assembled packet.
-`semantic_reference_scope_reduced` marks the packet, check, status and receipt coverage as partial;
-selection grants no additional content/disclosure authority. Captured prose is not scanned to
-invent structural dependencies. The complete deterministic case and its integrity checks remain
-unchanged.
+makes at most one physical provider request. `SemanticResult` is the closed union
+`SemanticResultSuccess | SemanticResultRefused | SemanticResultTimeout | SemanticResultInvalid |
+SemanticResultLate | SemanticResultUnavailable`; expected refusal, timeout, invalid, late, and
+unavailable outcomes are values. `SemanticCase` remains an internal pre-egress candidate and is
+never provider input. It contains a structured `ReviewPacket`: goal and obligations, claims and
+decisions, a material ordered timeline, local findings plus `FindingBasis`, change observations,
+coverage, targeted recorded excerpts, and an omission manifest. The owning `DeterministicCase`
+freezes a canonical material-history tail before AI-powered review selection: at most 64 accepted
+plan, obligation, decision, action, result, evidence, claim, finding, response, and check events, in
+ingestion order, with at most 512 KiB of canonical payload. Payload retention is newest-first;
+over-budget retained payload is `not_selected`, legacy history is `not_recorded`, source redaction
+is `redacted_never_send`, and an exact omitted-before count represents older events. `structural`
+emits only event identity/order/digest/visibility as `bounded_structural_metadata`. Goal-aware
+detail is emitted as separate `task_description`, `obligation_text`, `claim_text`,
+`decision_excerpt`, `command_metadata`, `evidence_excerpt`, or `finding_summary` items. Exact action
+command text is removed unless `include_exact_command_text` is independently true. Every item
+remains separately policy-selected, scanned, authorized, and receipted; the frozen slice grants no
+egress authority. Its reference allowlist is the union of `frontier_refs` (IDs present at frozen
+frontier F) and `local_check_refs` (new local finding IDs already pinned in this check's durable
+local result); both sets and their union are case-digest inputs. The AI-powered review
+`frontier_refs` set is the dependency closure of retained packet metadata, canonical payload items,
+recorded findings, and their typed recorded dependencies/source-event identities. It may be smaller
+than the local-check case's complete allowlist. `omitted_reference_count` counts the excluded
+frontier IDs, is bound into the case digest, and travels as a canonical integer string in the
+envelope and assembled packet. `semantic_reference_scope_reduced` marks the packet, check, status
+and receipt coverage as partial; selection grants no additional content/disclosure authority.
+Captured prose is not scanned to invent structural dependencies. The complete local-check case and
+its integrity checks remain unchanged.
 
-If the retained required structure still exceeds 131,072 bytes, semantic composition returns
-`failed/case_capacity_exceeded` before creating a semantic job or invoking a provider.
-This additive reason belongs to the current 1.1 check/provenance schemas; released 1.0 schemas
-retain their original bytes. Deterministic findings remain recorded; no provider attempt is consumed and provenance stays null. The shared
-check/receipt gap is `semantic_case_capacity_exceeded`. A narrower claim/obligation scope is a new
-check, not a replay of the terminal request. Changing a text length or finding limit alone does not
-guarantee enough capacity.
+If the retained required structure still exceeds 131,072 bytes, AI-powered review composition
+returns `failed/case_capacity_exceeded` before creating an AI-powered review job or invoking a
+provider. This additive reason belongs to the current 1.1 check/provenance schemas; released 1.0
+schemas retain their original bytes. Local findings remain recorded; no provider attempt is consumed
+and provenance stays null. The shared check/receipt gap is `semantic_case_capacity_exceeded`. A
+narrower claim/obligation scope is a new check, not a replay of the terminal request. Changing a
+text length or finding limit alone does not guarantee enough capacity.
 
 `TargetedExcerptRef` identifies a bounded excerpt already captured or agent-published inside the
 frozen case and links it mechanically to a claim, obligation, finding, action, result, or evidence
@@ -2902,24 +2912,24 @@ discrepancy, alternative interpretation, direct main-agent message,
 state_unresolved_limitation`), and uncertainty. Post-validation resolves every cited action/result/
 evidence/frontier-finding/local-check-finding ref to its canonical frozen event/obligation/claim
 roots; only those roots become public `Finding.subject_refs`. A local-check ID is never serialized
-as a dangling public subject. Accepted, ranked challenge prose maps into the existing semantic
+as a dangling public subject. Accepted, ranked challenge prose maps into the existing AI-powered
 finding summary/detail; it does not add a public result field. The main agent
 replies through the existing `respond`/`publish_work` operations and rechecks.
 
-Provider generation and consumption share one owning wire model,
-`ProviderJudgmentModel` in `protocol/models.py` (with `ProviderChallengeModel`). The constrained-
-output JSON Schema sent to Responses/Chat Completions hosts is generated from that model
-(`JUDGMENT_JSON_SCHEMA` / `schemas/findings/provider-judgment-1.0.0.schema.json`);
-`normalize_judgment` validates through the same model before constructing domain
-`SemanticJudgment`/`ReviewerChallenge`. The schema expresses closed `FindingKind` and next-step
-enums, one-to-sixteen citable subject refs with prefix/pattern and uniqueness, non-empty
-byte-bounded prose (the provider schema conservatively caps Unicode code points so every admitted
-string fits the 4 KiB UTF-8 domain boundary), zero-to-three challenges, conclusion/challenge
-coupling via explicit union branches, and `additionalProperties: false`. Reference order has no
-semantic meaning: valid refs are ASCII-canonicalized on acceptance; invented enums, empty prose,
-duplicate refs, non-citable IDs, and conclusion contradictions are never normalized into
-acceptance. The generated schema proves what Yoetz requested, not that every host enforces it — a
-nonconforming host response degrades to an invalid semantic result, never a fabricated pass.
+Provider generation and consumption share one owning wire model, `ProviderJudgmentModel` in
+`protocol/models.py` (with `ProviderChallengeModel`). The constrained- output JSON Schema sent to
+Responses/Chat Completions hosts is generated from that model (`JUDGMENT_JSON_SCHEMA` /
+`schemas/findings/provider-judgment-1.0.0.schema.json`); `normalize_judgment` validates through the
+same model before constructing domain `SemanticJudgment`/`ReviewerChallenge`. The schema expresses
+closed `FindingKind` and next-step enums, one-to-sixteen citable subject refs with prefix/pattern
+and uniqueness, non-empty byte-bounded prose (the provider schema conservatively caps Unicode code
+points so every admitted string fits the 4 KiB UTF-8 domain boundary), zero-to-three challenges,
+conclusion/challenge coupling via explicit union branches, and `additionalProperties: false`.
+Reference order has no semantic meaning: valid refs are ASCII-canonicalized on acceptance; invented
+enums, empty prose, duplicate refs, non-citable IDs, and conclusion contradictions are never
+normalized into acceptance. The generated schema proves what Yoetz requested, not that every host
+enforces it — a nonconforming host response degrades to an invalid AI-powered review result, never a
+fabricated pass.
 
 Invalid-result reasons stay exact without retaining provider plaintext: empty/non-JSON or
 constrained-schema mismatch → `response_schema_invalid` (`failure_class=response_schema`);
@@ -2957,15 +2967,14 @@ or workspace IDs, prompt/reasoning/event/stderr text, and an asserted upstream b
 forbidden. `turn_acknowledged=true` plus ambiguous transport or cleanup maps to
 `unavailable/outcome_unknown` and is not retriable.
 
-`semantic_required` means semantic success is required for a complete verdict, not required for
-returning already-computed local truth. Missing approved external/local capability, privacy block,
-forbidden/uncertain context, human denial or expiry, provider refusal, timeout, invalid output,
-exhausted retry, audit failure, late response, or stale response completes with the frozen
-deterministic findings, no semantic findings, an exact closed semantic status/reason pair,
-weakened coverage, and
-`verdict=incomplete_check`. It never throws away the deterministic result or substitutes
-`insufficient_coverage`. Malformed input or storage failure before deterministic durability remains
-an ordinary operation error.
+`semantic_required` means AI-powered review success is required for a complete verdict, not required
+for returning already-computed local truth. Missing approved external/local capability, privacy
+block, forbidden/uncertain context, human denial or expiry, provider refusal, timeout, invalid
+output, exhausted retry, audit failure, late response, or stale response completes with the frozen
+local findings, no AI-powered findings, an exact closed AI-powered review status/reason pair,
+weakened coverage, and `verdict=incomplete_check`. It never throws away the local-check result or
+substitutes `insufficient_coverage`. Malformed input or storage failure before local-check
+durability remains an ordinary operation error.
 
 ### Time, IDs, and diagnostics
 
@@ -3138,7 +3147,7 @@ checks the bound session/writer and the fixed importer actor/client/channel meta
 that publication only once. The record stays available across restart until terminal import
 completion, then is consumed. Denial creates no record. Any source, manifest, plan, target,
 profile/version, mapping-version, or limit change produces another target digest and cannot reuse
-the decision. This is a local intake permission and does not authorize semantic-review or other
+the decision. This is a local intake permission and does not authorize AI-powered review or other
 egress.
 
 Importer publication identity is permanently reserved in both directions: the publishing
@@ -3292,83 +3301,80 @@ Shared closed types:
   rename fencing and exposes records to the READY service. A stable spool UUID enters source
   identity, so crash replay is at-least-once and normal local ingest deduplicates it. Pending spool
   work projects `source_lag`; it is not an acknowledged observation.
-- `AdviceSnapshot` — ranked `AdviceItem` values (finding id, deterministic rule code, priority,
-  summary, evidence-linked detail, next action, evidence refs, coverage, freshness) plus exact
-  evidence basis, confidence/coverage, recommended next action, freshness, and suppression
-  identity. It surfaces through nonblocking observation/
-  integration hooks and through ordinary public `status` (and existing finding/coverage machinery);
-  it is never a seventh MCP tool. Deterministic observation-advice policies derive the snapshot
-  from retained envelopes (and optional inspect/approved-check/composition facts) even with zero
-  cooperative Yoetz MCP publications. Optional semantic advice is additive only, through the
-  privacy gateway, over minimized approved packets. Deterministic finding identity is condition-
-  scoped over policy, kind, rule code, and rule-specific cause; rolling or accumulating evidence
-  refs never participate in identity. Envelope-linked candidates use only their mapped ledger
-  events as the first durable subject anchors, while standing session conditions use the stable
-  lifecycle event. Once a readable condition finding exists, later evidence-window or frontier
-  changes update the observation snapshot and coverage/gap state without appending another
-  `finding_recorded` event.
-  Snapshot construction is session-scoped: a mapped session's snapshot is built from that
-  session's own retained envelopes and session-scoped lifecycle/gap health (resolved from the
-  ingest envelope's session commitment or the durable workspace session route), never from every
-  retained workspace envelope. The workspace-wide aggregate remains the operator surface
-  (`yoetz observe status`) and the source of deliberately workspace-standing machine conditions;
-  it is not an input to a mapped task snapshot (ADR-022 decision 14).
-  Hook-channel delivery is relevance-scoped: task-scoped conditions come from the mapped Yoetz
-  session snapshot when one exists, otherwise from the current Codex session's retained envelopes.
-  The workspace-wide snapshot is not a fallback for task-scoped work. Deliberately workspace-
-  standing machine conditions remain deliverable from that workspace snapshot at the documented
-  session-boundary cadence (`SessionStart` and `Stop`). The agent-visible context carries only
-  the bounded rule, action, and evidence token; deciding whether the advice belongs to the
-  current target never requires inspecting Yoetz storage. The snapshot's
+- `AdviceSnapshot` — ranked `AdviceItem` values (finding id, local rule code, priority, summary,
+  evidence-linked detail, next action, evidence refs, coverage, freshness) plus exact evidence
+  basis, confidence/coverage, recommended next action, freshness, and suppression identity. It
+  surfaces through nonblocking observation/ integration hooks and through ordinary public `status`
+  (and existing finding/coverage machinery); it is never a seventh MCP tool. Local
+  observation-advice policies derive the snapshot from retained envelopes (and optional
+  inspect/approved-check/composition facts) even with zero cooperative Yoetz MCP publications.
+  Optional AI-powered advice is additive only, through the privacy gateway, over minimized approved
+  packets. Local finding identity is condition- scoped over policy, kind, rule code, and
+  rule-specific cause; rolling or accumulating evidence refs never participate in identity.
+  Envelope-linked candidates use only their mapped ledger events as the first durable subject
+  anchors, while standing session conditions use the stable lifecycle event. Once a readable
+  condition finding exists, later evidence-window or frontier changes update the observation
+  snapshot and coverage/gap state without appending another `finding_recorded` event. Snapshot
+  construction is session-scoped: a mapped session's snapshot is built from that session's own
+  retained envelopes and session-scoped lifecycle/gap health (resolved from the ingest envelope's
+  session commitment or the durable workspace session route), never from every retained workspace
+  envelope. The workspace-wide aggregate remains the operator surface (`yoetz observe status`) and
+  the source of deliberately workspace-standing machine conditions; it is not an input to a mapped
+  task snapshot (ADR-022 decision 14). Hook-channel delivery is relevance-scoped: task-scoped
+  conditions come from the mapped Yoetz session snapshot when one exists, otherwise from the current
+  Codex session's retained envelopes. The workspace-wide snapshot is not a fallback for task-scoped
+  work. Deliberately workspace- standing machine conditions remain deliverable from that workspace
+  snapshot at the documented session-boundary cadence (`SessionStart` and `Stop`). The agent-visible
+  context carries only the bounded rule, action, and evidence token; deciding whether the advice
+  belongs to the current target never requires inspecting Yoetz storage. The snapshot's
   `recommended_next_action` remains the kernel token, including `refresh_observation`. Hook
-  `additionalContext` maps that machine-condition token to a host-shell next step
-  (`yoetz observe status`) rather than naming a nonexistent MCP tool or CLI verb. Codex hook stdout
-  is event-specific:
-  `SessionStart` / `PostToolUse` / `UserPromptSubmit` emit `hookSpecificOutput.additionalContext`;
-  `Stop` emits `decision: block` plus `reason` (Codex's hooks reference, re-read 2026-08-28,
-  still gives Stop / SubagentStop only the common output fields plus `decision`/`reason`, and
-  documents `decision: block` as a continuation prompt; `stop_hook_active` plus delivery identity
-  are the loop guard); `SessionEnd` always emits `{}`
+  `additionalContext` maps that machine-condition token to a host-shell next step (`yoetz observe
+  status`) rather than naming a nonexistent MCP tool or CLI verb. Codex hook stdout is
+  event-specific: `SessionStart` / `PostToolUse` / `UserPromptSubmit` emit
+  `hookSpecificOutput.additionalContext`; `Stop` emits `decision: block` plus `reason` (Codex's
+  hooks reference, re-read 2026-08-28, still gives Stop / SubagentStop only the common output fields
+  plus `decision`/`reason`, and documents `decision: block` as a continuation prompt;
+  `stop_hook_active` plus delivery identity are the loop guard); `SessionEnd` always emits `{}`
   because the host discards its stdout and a peek/commit there would consume undelivered advice.
-  Claude Code hook stdout uses `hookSpecificOutput.additionalContext` for every advice-bearing
-  event in the installed profile: `SessionStart`, `PostToolUse`, `PostToolUseFailure`, and `Stop`.
-  The raw host event is retained in `hookEventName` even though `PostToolUseFailure` shares Yoetz's
-  internal `PostToolUse` advice cadence. At `Stop`, Claude Code documents `additionalContext` as
-  non-error feedback that continues through the same loop guard; the Claude ingress therefore
-  never emits `decision: block`, and its `SessionEnd` emits `{}`. The renderer also knows Claude's
+  Claude Code hook stdout uses `hookSpecificOutput.additionalContext` for every advice-bearing event
+  in the installed profile: `SessionStart`, `PostToolUse`, `PostToolUseFailure`, and `Stop`. The raw
+  host event is retained in `hookEventName` even though `PostToolUseFailure` shares Yoetz's internal
+  `PostToolUse` advice cadence. At `Stop`, Claude Code documents `additionalContext` as non-error
+  feedback that continues through the same loop guard; the Claude ingress therefore never emits
+  `decision: block`, and its `SessionEnd` emits `{}`. The renderer also knows Claude's
   `SubagentStart` / `SubagentStop` output shapes, but the current native hook profile does not
   advertise either event; adding them requires a separately reviewed profile expansion and proof.
   Cursor has a separate native contract: raw `sessionStart` emits `additional_context`; raw `stop`
   advice is disabled because `followup_message` auto-submits a user message; and `afterFileEdit`,
   `afterMCPExecution`, and `sessionEnd` emit `{}`. Cursor leases and commits advice only for a
   nonempty `sessionStart` object after its bytes are written successfully. Output-less events never
-  lease or consume advice or frontier-motion notices.
-  Advice projection is bounded by the domain wire limits: each item carries at most 16 evidence
-  refs and a snapshot carries at most 64 ranked findings. The evidence-basis digest still commits
-  to every policy candidate, ref, semantic coverage input, and discarded condition. When a
-  projection limit is reached, the visible coverage carries `advice_evidence_refs_truncated` or
-  `advice_ranked_findings_truncated`; if those markers would exceed the 64-gap coverage bound,
-  `advice_coverage_gaps_truncated` remains visible and the complete gap set stays committed in
-  the basis digest. Invalid semantic finding ids are discarded, invalid semantic text falls back
-  to service-authored safe text, and `advice_semantic_output_invalid` weakens coverage. Length-capped
-  semantic summaries/details carry `advice_semantic_text_truncated` so the clipping is explicit. A
-  host/tool `result_status=completed` outcome is not an authored completion claim; completion advice
-  requires an explicit `claim_kind` value such as `completion`, `done`, or `finished`.
-  Observation semantic advice is asynchronous (issue #619): the advice build never calls a
-  provider. `application/observation_advice_semantic.ObservationAdviceSemanticScheduler` looks up
-  or enqueues one durable attempt row in `observation_advice_semantic_attempts` (migration 0012),
-  keyed by (workspace commitment, Yoetz session, pre-semantic evidence basis), storing the exact
-  scoped observation gap tuple and the minimized packet that carries it. Repeated identical builds
-  coalesce onto that row; a newer basis for the same session supersedes that session's
-  unattempted pending rows (`cancelled` / `superseded`) and keeps every completed row's receipt. At
-  most 16 rows may be pending or running per task bundle; the next schedule is recorded
-  `unavailable` / `queue_full` with no attempt. A row that is `pending` or `running` adds the
-  coverage gap `advice_semantic_pending`; a `failed`, `unavailable`, or `cancelled` row adds
+  lease or consume advice or frontier-motion notices. Advice projection is bounded by the domain
+  wire limits: each item carries at most 16 evidence refs and a snapshot carries at most 64 ranked
+  findings. The evidence-basis digest still commits to every policy candidate, ref, AI-powered
+  review coverage input, and discarded condition. When a projection limit is reached, the visible
+  coverage carries `advice_evidence_refs_truncated` or `advice_ranked_findings_truncated`; if those
+  markers would exceed the 64-gap coverage bound, `advice_coverage_gaps_truncated` remains visible
+  and the complete gap set stays committed in the basis digest. Invalid AI-powered finding ids are
+  discarded, invalid AI-powered review text falls back to service-authored safe text, and
+  `advice_semantic_output_invalid` weakens coverage. Length-capped AI-powered summaries/details
+  carry `advice_semantic_text_truncated` so the clipping is explicit. A host/tool
+  `result_status=completed` outcome is not an authored completion claim; completion advice requires
+  an explicit `claim_kind` value such as `completion`, `done`, or `finished`. Observation AI-powered
+  advice is asynchronous (issue #619): the advice build never calls a provider.
+  `application/observation_advice_semantic.ObservationAdviceSemanticScheduler` looks up or enqueues
+  one durable attempt row in `observation_advice_semantic_attempts` (migration 0012), keyed by
+  (workspace commitment, Yoetz session, pre-review evidence basis), storing the exact scoped
+  observation gap tuple and the minimized packet that carries it. Repeated identical builds coalesce
+  onto that row; a newer basis for the same session supersedes that session's unattempted pending
+  rows (`cancelled` / `superseded`) and keeps every completed row's receipt. At most 16 rows may be
+  pending or running per task bundle; the next schedule is recorded `unavailable` / `queue_full`
+  with no attempt. A row that is `pending` or `running` adds the coverage gap
+  `advice_semantic_pending`; a `failed`, `unavailable`, or `cancelled` row adds
   `advice_semantic_unavailable` with its closed reason (`authorization_missing`,
   `provider_unavailable`, `provider_failed`, `output_invalid`, `queue_full`, `superseded`,
   `cancelled`, `interrupted`). Only a `succeeded` row with validated finding ids adds
-  `semantic_model_derived`; a succeeded attempt that returned no challenges is an honest receipt
-  and no finding.
+  `semantic_model_derived`; a succeeded attempt that returned no challenges is an honest receipt and
+  no finding.
 
 Independent verification support (local control, not MCP):
 
@@ -3404,26 +3410,27 @@ Independent verification support (local control, not MCP):
   output digest/byte count and encrypted output-object identity, subject state before/after, and
   freshness. It uses `evidence_recorded/1.1.0` with `approved_check` provenance; no cooperative
   request can mint that provenance.
-- Eligible observation capture is narrower than retention: tool output, selected changed-file
-  bytes, and workspace-diff bytes become `observation_captured` immutable evidence. For the
+- Eligible observation capture is narrower than retention: tool output, selected changed-file bytes,
+  and workspace-diff bytes become `observation_captured` immutable evidence. For the
   source-qualified profileless Codex hook arm, those bytes must be explicitly linked to the hook
-  event. Session-stream records are a separate source and are excluded from semantic selection;
-  tool input and path/locator content are also excluded from semantic selection. The Codex hook
-  extractor omits raw tool-input bytes but keeps the encrypted workspace locator needed by local
-  inspection and verification; existing structural evidence remains intact (issue #623). Visible messages, unsupported visible payloads,
-  and approved-check output do not enter this capture path. The repository privacy authority and
-  each provider attempt authorize semantic selection independently of local encrypted capture.
-  Inspection fact/excerpt objects materialize through their own idempotent evidence operation.
-  Missing, deleted, or pre-0008 bindings add `content_capture_unavailable`; deliberately excluded
-  retained kinds add `content_unselected`; retained redacted bytes add `content_redacted`; and a
-  bounded inspection prefix adds `truncated_payload`. Capture never upgrades to
-  `artifact_verified` or `independently_reproduced`.
+  event. Session-stream records are a separate source and are excluded from AI-powered review
+  selection; tool input and path/locator content are also excluded from AI-powered review selection.
+  The Codex hook extractor omits raw tool-input bytes but keeps the encrypted workspace locator
+  needed by local inspection and verification; existing structural evidence remains intact (issue
+  #623). Visible messages, unsupported visible payloads, and approved-check output do not enter this
+  capture path. The repository privacy authority and each provider attempt authorize AI-powered
+  review selection independently of local encrypted capture. Inspection fact/excerpt objects
+  materialize through their own idempotent evidence operation. Missing, deleted, or pre-0008
+  bindings add `content_capture_unavailable`; deliberately excluded retained kinds add
+  `content_unselected`; retained redacted bytes add `content_redacted`; and a bounded inspection
+  prefix adds `truncated_payload`. Capture never upgrades to `artifact_verified` or
+  `independently_reproduced`.
 - `ObservationVerificationSupervisor` — ready-lifecycle background owner that wakes on enqueue,
   discovers pending work at startup, drains one serialized check per workspace through the
   enforcing sandbox, reclaims expired leases, and stops before vault/runtime closure. Hook ingest
   never executes approved checks inside the hook RPC budget.
 - `ObservationAdviceSemanticSupervisor` / `ObservationAdviceSemanticWorker` — the same shape for
-  observation semantic advice (issue #619). The coordinator registers a per-workspace drain when
+  observation AI-powered advice (issue #619). The coordinator registers a per-workspace drain when
   an advice build leaves `advice_semantic_pending`, and rediscovers pending rows after service
   start. The worker claims one row at a time under a generation-fenced two-minute lease, resolves
   the task route, repository authority, and provider binding at dispatch time (never from the
@@ -3431,7 +3438,7 @@ Independent verification support (local control, not MCP):
   outcome, and re-runs advice for that workspace. A lease held by a previous service generation
   or past its expiry is reclaimed as `pending` and re-attempted; a row reclaimed three times
   terminates as `failed` / `interrupted`. An interrupted, cancelled, or unattempted row is never
-  a semantic success. Pure-ingress hook handlers declare
+  an AI-powered review success. Pure-ingress hook handlers declare
   `"async": true` only when the exact probed Codex version supports registration; older or unknown
   hosts run them synchronously with the declared 10-second budget so no event is dropped. Handlers
   that return `additionalContext` or a Stop `decision: block` stay synchronous with the same bound,
@@ -3451,32 +3458,32 @@ to this ordinary-profile set or accept a Claude/Cursor selector. Profile-free Co
 retains its structural contract, while its eligible hook content uses the fenced native handoff
 below.
 
-`yoetz observe content-enable`, `content-disable`, and `content-status` operate on the same canonical
-workspace as observation consent. Their JSON responses and `observe status` identify
-`content_capture_scope: ordinary_profiles` and `codex_hook_capture_scope: observation_consent`.
-The profile list, effective profile list, and `enabled`/`content_capture_enabled` describe only the
+`yoetz observe content-enable`, `content-disable`, and `content-status` operate on the same
+canonical workspace as observation consent. Their JSON responses and `observe status` identify
+`content_capture_scope: ordinary_profiles` and `codex_hook_capture_scope: observation_consent`. The
+profile list, effective profile list, and `enabled`/`content_capture_enabled` describe only the
 Claude Code and Cursor ordinary profiles. An empty list does not disable profileless Codex hooks,
 whose local authority follows observation consent and the runtime gate. Text status names the same
 scope. These are configuration facts, not proof of actual capture, successful execution, or
-semantic selection; those require evidence and the check/receipt (issue #622).
-The local content fence combines a durable per-workspace epoch
-with a persisted runtime-gate nonce; every real consent or runtime transition advances it, including
-pause/resume and off/on ABA cycles, and legacy state receives a fresh epoch before authority is
-accepted. Pause, disable, and revoke must fence retained native content reads and subsequent
-semantic disclosure as well as future capture. A task-store snapshot is not independent authority
-after a local consent change. Selection into a semantic case additionally
-requires authenticated captured-object provenance, case membership, source/session/phase binding,
-and the effective privacy selection. Captured bytes remain bounded advisory evidence; they do not
-prove that a command passed, a file was independently inspected, or a reviewer acted on the bytes.
+AI-powered review selection; those require evidence and the check/receipt (issue #622). The local
+content fence combines a durable per-workspace epoch with a persisted runtime-gate nonce; every real
+consent or runtime transition advances it, including pause/resume and off/on ABA cycles, and legacy
+state receives a fresh epoch before authority is accepted. Pause, disable, and revoke must fence
+retained native content reads and subsequent AI-powered review disclosure as well as future capture.
+A task-store snapshot is not independent authority after a local consent change. Selection into an
+AI-powered review case additionally requires authenticated captured-object provenance, case
+membership, source/session/phase binding, and the effective privacy selection. Captured bytes remain
+bounded advisory evidence; they do not prove that a command passed, a file was independently
+inspected, or a reviewer acted on the bytes.
 
 The repository privacy commitment on a `TaskRoute` is an egress-policy key, not an observation
-workspace key. Semantic composition resolves the observation workspace only from the durable
-workspace-to-Yoetz-session route, verifies that route's task matches the exact runtime task, and
-rechecks that binding before disclosure. An inactive historical route is usable only for the same
-task. An absent, ambiguous, or mismatched route leaves captured content unavailable; the privacy
-commitment cannot substitute for the observation workspace.
-The coordinator records the accepted completed-tool session route before optional verification
-policy setup. Native captured-content selection does not require an approved-check policy.
+workspace key. AI-powered review composition resolves the observation workspace only from the
+durable workspace-to-Yoetz-session route, verifies that route's task matches the exact runtime task,
+and rechecks that binding before disclosure. An inactive historical route is usable only for the
+same task. An absent, ambiguous, or mismatched route leaves captured content unavailable; the
+privacy commitment cannot substitute for the observation workspace. The coordinator records the
+accepted completed-tool session route before optional verification policy setup. Native
+captured-content selection does not require an approved-check policy.
 
 Observation consent is one project-level confirmation recorded as a private workspace commitment.
 Consent, status, pause, resume, revoke, setup probes, and hook ingress all canonicalize an explicit
@@ -3523,39 +3530,38 @@ and removes the ticket after the ledger append; it never remints an equivalent c
 Native chunks and recovered manifests must also match the envelope's source commitment and its
 admitted host correlation or native source/label identity before they can become captured evidence.
 For `codex_hook`, only explicitly linked tool output, selected changed-file/code bytes, and
-workspace-diff bytes are eligible for semantic selection. Session-stream records remain outside
-this native handoff and are excluded from semantic selection. Tool input and path/locator content
-are excluded from semantic selection too. The Codex hook extractor omits raw `TOOL_INPUT` bytes
-while retaining structural tool identity and correlation. It keeps the encrypted
-`WORKSPACE_LOCATOR` from SessionStart because the local inspection and verification scheduler
-opens that locator to resolve the workspace and its approved-check policy. Removing it would
-break a supported local consumer. Neither kind becomes semantic content; ordinary Claude/Cursor
-profile contracts remain unchanged (issue #623). Missing or conflicting native binding metadata retains
-`content_capture_unavailable`, including when materialization is called independently of semantic
-review. A terminal structural rejection retires only its exact admitted capture ticket so it
-cannot permanently block later checks; retryable coordination retains that ticket for the next
-attempt.
+workspace-diff bytes are eligible for AI-powered review selection. Session-stream records remain
+outside this native handoff and are excluded from AI-powered review selection. Tool input and
+path/locator content are excluded from AI-powered review selection too. The Codex hook extractor
+omits raw `TOOL_INPUT` bytes while retaining structural tool identity and correlation. It keeps the
+encrypted `WORKSPACE_LOCATOR` from SessionStart because the local inspection and verification
+scheduler opens that locator to resolve the workspace and its approved-check policy. Removing it
+would break a supported local consumer. Neither kind becomes AI-powered review content; ordinary
+Claude/Cursor profile contracts remain unchanged (issue #623). Missing or conflicting native binding
+metadata retains `content_capture_unavailable`, including when materialization is called
+independently of AI-powered review. A terminal structural rejection retires only its exact admitted
+capture ticket so it cannot permanently block later checks; retryable coordination retains that
+ticket for the next attempt.
 
-`content_capture_pending` means encrypted staging is durable while structural ledger ingest is
-still pending. It is separate from `operation_pending`, which is generic observation back-pressure
-and makes no claim that content was retained. Up to 512 `staging`/`pending` tickets may be
-outstanding per workspace; revoked tombstones are excluded from that quota but retained to fence
-ABA reuse. A new check/frozen-case acquisition sees an outstanding ticket in the same bundle
-transaction and returns retryable `OPERATION_PENDING`; retrying the same request is idempotent.
-When a new CHECK encounters this barrier, READY performs a bounded listing for the exact routed
-task and reconciles each ticket against current local content authority before one freeze retry.
-This task-local preflight retires tickets
-whose authority is absent, inactive, revoked, runtime-disabled, profile-unselected, or from an old
-authority generation, including tickets left without a structural outbox row; matching active
-tickets retain the retryable barrier. A completed same-request replay returns without inspecting
-newer tickets. It does not rewrite captured history or encrypted objects.
+`content_capture_pending` means encrypted staging is durable while structural ledger ingest is still
+pending. It is separate from `operation_pending`, which is generic observation back-pressure and
+makes no claim that content was retained. Up to 512 `staging`/`pending` tickets may be outstanding
+per workspace; revoked tombstones are excluded from that quota but retained to fence ABA reuse. A
+new check/frozen-case acquisition sees an outstanding ticket in the same bundle transaction and
+returns retryable `OPERATION_PENDING`; retrying the same request is idempotent. When a new CHECK
+encounters this barrier, READY performs a bounded listing for the exact routed task and reconciles
+each ticket against current local content authority before one freeze retry. This task-local
+preflight retires tickets whose authority is absent, inactive, revoked, runtime-disabled,
+profile-unselected, or from an old authority generation, including tickets left without a structural
+outbox row; matching active tickets retain the retryable barrier. A completed same-request replay
+returns without inspecting newer tickets. It does not rewrite captured history or encrypted objects.
 The capture lane can stage while a heavy append runs, while its bounded object/manifest writes stay
 serialized. This boundary provides local encrypted durability only: there is no plaintext spool or
 offline guarantee, and a host kill or service failure before authenticated staging may leave the
-honest `content_capture_unavailable` gap. Captured-content staging does not authorize semantic
-egress: repository privacy selection and provider-attempt authorization remain independent. Codex's
-historical session-stream path is unchanged and excluded from this native ticket lane; shared
-replay, generation-fence, and teardown behavior applies across hosts.
+honest `content_capture_unavailable` gap. Captured-content staging does not authorize AI-powered
+review egress: repository privacy selection and provider-attempt authorization remain independent.
+Codex's historical session-stream path is unchanged and excluded from this native ticket lane;
+shared replay, generation-fence, and teardown behavior applies across hosts.
 
 Admission-independent recovery (#695) uses private application methods, not a new RPC:
 `LocalObservationStore.capture_inventory_recovery_needed(workspace)` reports unknown scope or
@@ -3593,7 +3599,7 @@ Outcome semantics and back-pressure vocabulary (ADR-022 decisions 12–13):
   completion evidence. For mappings without such an event contract, a payload with no outcome fact
   records `UNKNOWN` and its ledger entries carry the `host_outcome_unavailable` known gap. Check
   coverage and receipts fold that gap into one bounded code regardless of how many observed calls
-  lack outcome semantics; the deterministic research-evidence policy does not mint one
+  lack outcome semantics; the local research-evidence policy does not mint one
   `material_limitation_omitted` candidate per such record. Observed work facts (durable per-call
   action/result records), the acquisition limitation (`host_outcome_unavailable` coverage gap),
   actionable findings (explicit `FAILURE`/`PARTIAL`, cooperative `UNKNOWN`), and receipt gaps stay
@@ -3620,184 +3626,177 @@ phase has durable manifests, later equivalent-source chunks cannot expand its st
 content-independent core role tuple is also a replay candidate: if a core-only operation committed
 before content arrived, the later copy reuses it and records `content_capture_unavailable` rather
 than reminting its event IDs or retroactively upgrading its coverage. The role-scoped operation
-digest can therefore find either committed ordering without changing event IDs.
-Missing, incomplete, contradictory, or unreadable objects add `content_capture_unavailable` rather
-than being inferred. The durable repository claim is separately domain-scoped by the
-materialization mapping version and exact draft-role tuple, so phases of one host call with
-different materializations (for example pre-action versus paired action/result) cannot collide,
-while hook/stream copies of the same phase still share a claim and merge its two-bit source mask.
-The claim stores the source-independent materialization version, never the hook/stream cursor
-version (issue #309). Before staging under `obs-ledger/1.5.0`, replay first resolves the task-scoped
-current identity task-wide, so a reattached Yoetz session finds the operation its predecessor
-session committed (issue #560), and then checks the current and legacy observation writers for
-committed session-bound `1.4.0`, `1.3.0`, and `1.2.0` operations; a legacy hit repairs its claim
-with the original mapping version. A task-wide hit whose stored request digest differs is a
-conflicting reuse of the operation identity and fails closed as non-retryable
-`IDEMPOTENCY_CONFLICT`. Because a replayed `1.2.0` operation may be a pre-upgrade
-hook operation whose result is `UNKNOWN`, it still enters the correction path: the committed result
-is consulted through the replayed operation's accepted event ids (its `1.2.0` record identities
-cannot be re-derived), and a still-needed correction binds to that exact committed action. A later
-explicit session-stream outcome enriches an earlier hook `UNKNOWN` through an append-only
-`result_correction` linked to the same canonical action; it never rewrites, downgrades, or silently
-overwrites an explicit result. Exact correction retries replay; a contradictory explicit outcome
-appends under its outcome/exit-bound identity with a `dedup_conflict` gap. The correction is part of
-ingest acceptance: an unavailable, lagging, rebuilding, missing-result, or redacted-result
+digest can therefore find either committed ordering without changing event IDs. Missing, incomplete,
+contradictory, or unreadable objects add `content_capture_unavailable` rather than being inferred.
+The durable repository claim is separately domain-scoped by the materialization mapping version and
+exact draft-role tuple, so phases of one host call with different materializations (for example
+pre-action versus paired action/result) cannot collide, while hook/stream copies of the same phase
+still share a claim and merge its two-bit source mask. The claim stores the source-independent
+materialization version, never the hook/stream cursor version (issue #309). Before staging under
+`obs-ledger/1.5.0`, replay first resolves the task-scoped current identity task-wide, so a
+reattached Yoetz session finds the operation its predecessor session committed (issue #560), and
+then checks the current and legacy observation writers for committed session-bound `1.4.0`, `1.3.0`,
+and `1.2.0` operations; a legacy hit repairs its claim with the original mapping version. A
+task-wide hit whose stored request digest differs is a conflicting reuse of the operation identity
+and fails closed as non-retryable `IDEMPOTENCY_CONFLICT`. Because a replayed `1.2.0` operation may
+be a pre-upgrade hook operation whose result is `UNKNOWN`, it still enters the correction path: the
+committed result is consulted through the replayed operation's accepted event ids (its `1.2.0`
+record identities cannot be re-derived), and a still-needed correction binds to that exact committed
+action. A later explicit session-stream outcome enriches an earlier hook `UNKNOWN` through an
+append-only `result_correction` linked to the same canonical action; it never rewrites, downgrades,
+or silently overwrites an explicit result. Exact correction retries replay; a contradictory explicit
+outcome appends under its outcome/exit-bound identity with a `dedup_conflict` gap. The correction is
+part of ingest acceptance: an unavailable, lagging, rebuilding, missing-result, or redacted-result
 candidate-findings projection returns retryable `service_unavailable` and leaves the outbox row
 pending until the projection can prove and complete the correction. Duplicates retry incomplete
 content/store/ledger/verification/advice work idempotently. Stream cursor advancement occurs only
-after outbox insertion. Session end is
-generation-scoped; a newer start clears only the old stopped fence. Drain is bounded round-robin
-across workspace sessions under a nonblocking per-workspace lease; within one pass a
-`mapping_missing` rejection retires that session's remaining rows (stamped with the shared cause),
-and an ended unmapped session is terminally quarantined because no future mapping can deliver it,
-but only after atomically acquiring its lifecycle lock so an attach already in flight wins.
-The service sweeper yields with its partial summary once a pass has run for its 20-second budget,
-under the daemon's 30-second sweep deadline, so rows it resolved license the immediate re-sweep
-instead of being discarded as a deadline timeout. The
-installation maintenance gate covers one coordinator ingest at a time rather than the whole
-pass, so a backlog cannot hold ordinary workflow control behind local outbox bookkeeping; the
-workspace lease and the routed task fence still serialize each row against recovery and bundle
-rotation. Legacy hook-spool normalization uses one generation-owned worker, advances a durable
-byte cursor in bounded batches, and retains its claim future across cancellation, so a later pass
-cannot overlap the same rename-and-replay operation; generation close stops between batches. The
-route inspection and fence verification callbacks keep their synchronous SQLite snapshots off the
-control event loop. The
-manual `yoetz observe drain` repeats full FIFO passes while the previous pass resolved at least one
-row, bounded by the backlog size at entry, and reports `passes`, `pending_after`, and a closed
-`terminal`: `drained` (nothing pending), `retry_pending` (a pass resolved nothing; `reasons`
-names the retryable heads), `service_unavailable` (no connection; exit 20), or `pass_limit`
-(rows kept resolving until the bound, so a producer is still adding them). `yoetz observe status`
-reports `oldest_pending_receipt`, the receipt time of the oldest pending row, beside
-`last_successful_drain` (issue #564).
-A consented `SessionStart` auto-attaches by sending the service a `start` request in
+after outbox insertion. Session end is generation-scoped; a newer start clears only the old stopped
+fence. Drain is bounded round-robin across workspace sessions under a nonblocking per-workspace
+lease; within one pass a `mapping_missing` rejection retires that session's remaining rows (stamped
+with the shared cause), and an ended unmapped session is terminally quarantined because no future
+mapping can deliver it, but only after atomically acquiring its lifecycle lock so an attach already
+in flight wins. The service sweeper yields with its partial summary once a pass has run for its
+20-second budget, under the daemon's 30-second sweep deadline, so rows it resolved license the
+immediate re-sweep instead of being discarded as a deadline timeout. The installation maintenance
+gate covers one coordinator ingest at a time rather than the whole pass, so a backlog cannot hold
+ordinary workflow control behind local outbox bookkeeping; the workspace lease and the routed task
+fence still serialize each row against recovery and bundle rotation. Legacy hook-spool normalization
+uses one generation-owned worker, advances a durable byte cursor in bounded batches, and retains its
+claim future across cancellation, so a later pass cannot overlap the same rename-and-replay
+operation; generation close stops between batches. The route inspection and fence verification
+callbacks keep their synchronous SQLite snapshots off the control event loop. The manual `yoetz
+observe drain` repeats full FIFO passes while the previous pass resolved at least one row, bounded
+by the backlog size at entry, and reports `passes`, `pending_after`, and a closed `terminal`:
+`drained` (nothing pending), `retry_pending` (a pass resolved nothing; `reasons` names the retryable
+heads), `service_unavailable` (no connection; exit 20), or `pass_limit` (rows kept resolving until
+the bound, so a producer is still adding them). `yoetz observe status` reports
+`oldest_pending_receipt`, the receipt time of the oldest pending row, beside `last_successful_drain`
+(issue #564). A consented `SessionStart` auto-attaches by sending the service a `start` request in
 `create_or_attach` mode whose selector is the paired identity the start contract requires: the
 canonical workspace locator the hook already bound consent to as `workspace_ref`, and the
 host-session identity as `external_ref`; the service persists only HMAC commitments of both, and a
-hook that reached consent through the legacy session→workspace map without a canonical locator
-never sends an unpaired request (issue #459). The request validates through the public
-`StartRequest` contract before dispatch. If the new pair receives the exact
-`workspace_task_exists` conflict, the shared Claude Code/Codex/Cursor hook path may retry once with
-`mode=attach` only when the private local store already holds a valid mapping from a received,
-durably recorded same-host `SessionEnd`, every other bound host session is ended, and the candidate
-session belongs to that consented workspace and no other local workspace. All eligible mappings
-must name one task; within it, the newest mapping-file write wins and the host session ID breaks
-timestamp ties. The attach carries that selector plus the new host pair, while the control
-handshake carries the canonical workspace for repository privacy. The catalog requires the
-selector to remain active, the task to be the workspace's sole non-quarantined route, and no start
-for that route to be pending. Both calls share one five-second deadline. The response must retain
-the candidate's task ID. Recovery first takes a nonblocking workspace reservation and then holds
-ordered locks for every eligible ended same-host session through full candidate revalidation, the
-service RPC, authorized rewrites, and pruning; no observation-store lock spans the RPC. The
-revalidation includes unmapped sessions, cross-workspace ownership, mapping identities, and mapping
-recency. A busy workspace reservation returns `auto_attach_recovery_busy` without a service request.
-A busy candidate session lock or a changed snapshot falls back to the ordinary create/attach request. A successful recovery records the new mapping, rewrites every ended
-same-host predecessor mapping for that task to the rotated session and writer, and drains pending
-rows without publishing the intermediate conflict as a diagnostic. Predecessor rows still pending
-at rotation follow the `session_superseded` binding on ingest (the current task session and the
-observation writer derived for it) so they are acknowledged on the successor route rather than
-quarantined. With no eligible local selector, or
-when that attach fails, the ordinary typed failure path remains. Every failed attempt records a
-closed hook-diagnostic
+hook that reached consent through the legacy session→workspace map without a canonical locator never
+sends an unpaired request (issue #459). The request validates through the public `StartRequest`
+contract before dispatch. If the new pair receives the exact `workspace_task_exists` conflict, the
+shared Claude Code/Codex/Cursor hook path may retry once with `mode=attach` only when the private
+local store already holds a valid mapping from a received, durably recorded same-host `SessionEnd`,
+every other bound host session is ended, and the candidate session belongs to that consented
+workspace and no other local workspace. All eligible mappings must name one task; within it, the
+newest mapping-file write wins and the host session ID breaks timestamp ties. The attach carries
+that selector plus the new host pair, while the control handshake carries the canonical workspace
+for repository privacy. The catalog requires the selector to remain active, the task to be the
+workspace's sole non-quarantined route, and no start for that route to be pending. Both calls share
+one five-second deadline. The response must retain the candidate's task ID. Recovery first takes a
+nonblocking workspace reservation and then holds ordered locks for every eligible ended same-host
+session through full candidate revalidation, the service RPC, authorized rewrites, and pruning; no
+observation-store lock spans the RPC. The revalidation includes unmapped sessions, cross-workspace
+ownership, mapping identities, and mapping recency. A busy workspace reservation returns
+`auto_attach_recovery_busy` without a service request. A busy candidate session lock or a changed
+snapshot falls back to the ordinary create/attach request. A successful recovery records the new
+mapping, rewrites every ended same-host predecessor mapping for that task to the rotated session and
+writer, and drains pending rows without publishing the intermediate conflict as a diagnostic.
+Predecessor rows still pending at rotation follow the `session_superseded` binding on ingest (the
+current task session and the observation writer derived for it) so they are acknowledged on the
+successor route rather than quarantined. With no eligible local selector, or when that attach fails,
+the ordinary typed failure path remains. Every failed attempt records a closed hook-diagnostic
 reason instead of a silent absent mapping: `auto_attach_workspace_unbound`,
 `auto_attach_request_invalid`, `auto_attach_conflict` (session, idempotency, or request-identity
 conflict), `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
 `privacy_authority_required`, or the shared `service_unavailable`, `vault_locked`, `timeout`,
 `storage_unsafe`, and `storage_corrupt` tokens. Turn-boundary hooks retry auto-attach under a
 bounded budget and record the same typed cause next to the `auto_attach_retry_failed` path marker
-when no mapping results. Busy lifecycle mutations are durable: observation-local schema `/11` adds
-a bounded `pending_lifecycles` queue and source/session/generation-scoped paired-orphan identities,
+when no mapping results. Busy lifecycle mutations are durable: observation-local schema `/11` adds a
+bounded `pending_lifecycles` queue and source/session/generation-scoped paired-orphan identities,
 and hook or READY drains reconcile them under the same workspace and session reservations before
-routing rows. Historical false post-only diagnostics are retired only when retained envelope
-history is complete; their gap-history rows remain. Busy mapping writes use an atomic per-session handoff. Applying a handoff claims a separate
-file, retains concurrently queued updates, and replays an interrupted claim on the next attempt.
-A deferred clear superseded by a later generation cannot remove that generation's mapping.
-The `/11` extension requires a quiesced upgrade: stop the older Yoetz service and all host hooks,
-install the new runtime, then restart the service and every host integration before writing the new
-state. Mixed old and new writers are unsupported because a `/10` writer ignores the new fields and can
-erase pairing provenance when it saves.
-The resume/compact status read for a mapped session connects through the same consented
-workspace locator as the auto-attach `start` (`yoetz hooks session-start` derives it from
-`--workspace` or, absent that, the hook's own working directory), so the daemon's repository
-fence admits a live mapping (issue #578). A `SESSION_NOT_FOUND` answer (`session_superseded`, whose
-advisory now names the superseding task, session, and writer ids) or a `SESSION_CONFLICT` without a
-fence reason (a replaced writer route) classifies as `mapping_stale`, not service unavailability:
-the hook preserves the mapping, tells the agent to continue with the named ids or to call
-`start mode=attach` with the mapped session id, and accepts only a successful `start` result as
-authority for replacement ids. A `SESSION_CONFLICT` carrying `repository_identity_required` or
-`repository_identity_mismatch` is a live mapping the daemon could not bind to a repository: it
-records `status_workspace_unbound` / `status_workspace_mismatch`, keeps the mapping, and its
-advisory says not to re-attach. `cli/hooks.resolve_session_workspace` selects the probe's locator
-in a fixed order — explicit project path (not the bare `.`), host payload `cwd`, hook cwd — and
-returns a closed `SessionWorkspace.source`; beside a fence refusal the hook records the companion
-row `locator_source_explicit` / `locator_source_host_payload` / `locator_source_cwd` /
-`locator_absent` / `locator_unresolvable` (issue #659). An explicit path that fails
-canonicalization never falls through, and the daemon's fence still decides admission, so a derived
-locator can produce a typed mismatch but never access to another repository. The active-mapping context names the task, frontier, `session_id`,
-and `writer_id`, and says to continue the task with `start mode=attach` by that session id rather
-than a new ref pair (issue #580). The scoped `start` post-hook binder admits three host shapes —
-an object carrying `structuredContent` (Codex), a single-text-block content list whose text is the
-strict-JSON result, and a bare JSON string of the structured result (the shape Claude Code 2.1.251
-passes as `tool_response`, captured live 2026-09-04) — and records `start_bind_unparsed`,
-`start_bind_invalid_ids`, or `start_bind_write_failed` when a scoped successful start produced no
-mapping (issue #581). Only an explicit boolean `ok: false` is treated as a refused start and
-records nothing; a missing or non-boolean `ok` records `start_bind_unparsed`.
-`OPERATION_PENDING`, `BUNDLE_BUSY`, and
-`FRONTIER_CONFLICT` are transient status reads; vault and repository-privacy failures retain their
-distinct recovery advisories. `STORAGE_UNSAFE` and `STORAGE_CORRUPT` keep their own advisories
-because they prescribe opposite next steps — a fault that may be retried once versus invalid data
-that must not be retried and is escalated to the operator — and the hook records the same
-lowercase token (`storage_unsafe` / `storage_corrupt`) as a payload-free diagnostic so the
-advisory, `hook_diagnostics`, and `observe status` share one vocabulary (issue #338). The closed
-public-error table is exhaustive so a new code cannot
-silently inherit an unrelated advisory (issue #308). `observe status` retains the current and rotated
+routing rows. Historical false post-only diagnostics are retired only when retained envelope history
+is complete; their gap-history rows remain. Busy mapping writes use an atomic per-session handoff.
+Applying a handoff claims a separate file, retains concurrently queued updates, and replays an
+interrupted claim on the next attempt. A deferred clear superseded by a later generation cannot
+remove that generation's mapping. The `/11` extension requires a quiesced upgrade: stop the older
+Yoetz service and all host hooks, install the new runtime, then restart the service and every host
+integration before writing the new state. Mixed old and new writers are unsupported because a `/10`
+writer ignores the new fields and can erase pairing provenance when it saves. The resume/compact
+status read for a mapped session connects through the same consented workspace locator as the
+auto-attach `start` (`yoetz hooks session-start` derives it from `--workspace` or, absent that, the
+hook's own working directory), so the daemon's repository fence admits a live mapping (issue #578).
+A `SESSION_NOT_FOUND` answer (`session_superseded`, whose advisory now names the superseding task,
+session, and writer ids) or a `SESSION_CONFLICT` without a fence reason (a replaced writer route)
+classifies as `mapping_stale`, not service unavailability: the hook preserves the mapping, tells the
+agent to continue with the named ids or to call `start mode=attach` with the mapped session id, and
+accepts only a successful `start` result as authority for replacement ids. A `SESSION_CONFLICT`
+carrying `repository_identity_required` or `repository_identity_mismatch` is a live mapping the
+daemon could not bind to a repository: it records `status_workspace_unbound` /
+`status_workspace_mismatch`, keeps the mapping, and its advisory says not to re-attach.
+`cli/hooks.resolve_session_workspace` selects the probe's locator in a fixed order — explicit
+project path (not the bare `.`), host payload `cwd`, hook cwd — and returns a closed
+`SessionWorkspace.source`; beside a fence refusal the hook records the companion row
+`locator_source_explicit` / `locator_source_host_payload` / `locator_source_cwd` / `locator_absent`
+/ `locator_unresolvable` (issue #659). An explicit path that fails canonicalization never falls
+through, and the daemon's fence still decides admission, so a derived locator can produce a typed
+mismatch but never access to another repository. The active-mapping context names the task,
+frontier, `session_id`, and `writer_id`, and says to continue the task with `start mode=attach` by
+that session id rather than a new ref pair (issue #580). The scoped `start` post-hook binder admits
+three host shapes — an object carrying `structuredContent` (Codex), a single-text-block content list
+whose text is the strict-JSON result, and a bare JSON string of the structured result (the shape
+Claude Code 2.1.251 passes as `tool_response`, captured live 2026-09-04) — and records
+`start_bind_unparsed`, `start_bind_invalid_ids`, or `start_bind_write_failed` when a scoped
+successful start produced no mapping (issue #581). Only an explicit boolean `ok: false` is treated
+as a refused start and records nothing; a missing or non-boolean `ok` records `start_bind_unparsed`.
+`OPERATION_PENDING`, `BUNDLE_BUSY`, and `FRONTIER_CONFLICT` are transient status reads; vault and
+repository-privacy failures retain their distinct recovery advisories. `STORAGE_UNSAFE` and
+`STORAGE_CORRUPT` keep their own advisories because they prescribe opposite next steps — a fault
+that may be retried once versus invalid data that must not be retried and is escalated to the
+operator — and the hook records the same lowercase token (`storage_unsafe` / `storage_corrupt`) as a
+payload-free diagnostic so the advisory, `hook_diagnostics`, and `observe status` share one
+vocabulary (issue #338). The closed public-error table is exhaustive so a new code cannot silently
+inherit an unrelated advisory (issue #308). `observe status` retains the current and rotated
 hook-diagnostic history, but pairs every all-time reason count with `first_seen`, `last_seen`, and a
 count in the closed one-hour `window_seconds`; timings likewise date the all-time maximum and report
 a separate recent maximum. Unreadable or future timestamps remain retained but are never classified
 as recent, so a fixed historical failure cannot masquerade as live degradation (issue #310).
-Workspace-global rejections (`vault_locked`, disabled, paused) end the pass.
-A host's automatic reviewer holding a scoped semantic `check` before Yoetz receives it is recorded
-on the `PermissionDenied` event as `host_auto_review_denied` or `host_permission_rule_denied`
-(issue #467); it is host tool-call authorization, so no semantic status is ever inferred from it.
-Every host ingress (Codex, Claude Code, Cursor) that ingests nothing because of workspace binding
-records one payload-free diagnostic naming the dropped layer: `workspace_unresolvable` when an
-explicit `--workspace` locator cannot be canonicalized (an empty value from an unset
-`CLAUDE_PROJECT_DIR`, a missing, symlinked, or unsafe path), `workspace_unconsented` when the
-canonical locator carries no active consent, and `paused` when consent is paused. The fail-open
-`{}` stdout is unchanged; the diagnostic is what lets `observe status` distinguish a hook that
-fired and was dropped from one that never fired (issues #420, #435). `yoetz observe` verbs report
-the same pre-store conditions as typed public outcomes rather than `internal_error`:
-`workspace_unresolvable` exits `INVALID_REQUEST` (2) with its remediation, an unsafe local state
-path or unsafe lock-file shape exits `STORAGE_UNSAFE` (20), and a bounded open, permission,
-read-only, missing-parent, or lock-acquisition failure exits `SERVICE_UNAVAILABLE` (20) with reason
-`storage_unavailable` and a retry remediation. Existing invalid stored data remains
-`STORAGE_CORRUPT` (40), while non-filesystem defects still reach the `internal_error` boundary.
-The filesystem mapping renders only fixed reason/remediation text and never includes the raw
-exception or absolute state path. `--json` callers receive one `error` object carrying `code`,
-`reason`, `retryable`, `operation`, and the bounded message (issue #428).
-A `service_unavailable` rejection retires that session's lane for the pass while other sessions
-remain eligible; no later row may step over a failed lane head. Local observation-store acquisition is capped at two
-seconds for both the process-local reentrant lock and the cross-process flock. Hook timing rows
-attribute that queueing as `store_lock_wait`, cover the previously unwindowed resolve/deliver
-regions, and name any remaining wall-time difference as `unattributed`; nested store sub-stages are
-reported separately from the end-to-end partition (issues #310 and #311). A conflicting
-logical-identity claim rejects and quarantines only its own envelope as `dedup_conflict`; it does
-not establish bundle corruption or arm the session latch (issue #309). Coordinator and
-sweeper calls use separate bounded executors, so cancellation cannot strand an exit-blocking flock
-wait or exhaust the shared default executor. `observation_storage_corrupt` is terminal for its Codex
-session in the current READY generation: the coordinator remembers that session only after a
-bundle-level `STORAGE_CORRUPT`, later ingests are rejected without reopening the bundle, and the sweeper
-atomically moves that session's pending backlog to quarantine while healthy lanes continue. A new
-READY generation clears the in-memory suppression and permits one recovery probe. A successful
-probe removes that session from the local corruption set and resolves the workspace corruption gap
-only when no affected session remains. Quarantined detail is bounded by count, by the state byte
-budget, and by a 14-day age measured from a store-authored
-quarantined-at time behind the trusted-clock epoch fence; an operator can drop it explicitly with
-`yoetz observe reclaim`. Every drop — cap, age, or reclaim — retains aggregate commitment, count
-(evictions and reclaims counted separately), first/last receipt times, and
-`quarantine_detail_evicted`. The `truncated_payload` gap is live rather than permanent: a later
-save resolves its active flag only when that save evicts nothing and leaves one-eighth of the state
-budget free. Merely landing under the cap cannot clear the same loss it just recorded; the durable
-gap history remains after recovery, and renewed shedding reactivates it (issue #310).
+Workspace-global rejections (`vault_locked`, disabled, paused) end the pass. A host's automatic
+reviewer holding a scoped AI-powered `check` before Yoetz receives it is recorded on the
+`PermissionDenied` event as `host_auto_review_denied` or `host_permission_rule_denied` (issue #467);
+it is host tool-call authorization, so no AI-powered review status is ever inferred from it. Every
+host ingress (Codex, Claude Code, Cursor) that ingests nothing because of workspace binding records
+one payload-free diagnostic naming the dropped layer: `workspace_unresolvable` when an explicit
+`--workspace` locator cannot be canonicalized (an empty value from an unset `CLAUDE_PROJECT_DIR`, a
+missing, symlinked, or unsafe path), `workspace_unconsented` when the canonical locator carries no
+active consent, and `paused` when consent is paused. The fail-open `{}` stdout is unchanged; the
+diagnostic is what lets `observe status` distinguish a hook that fired and was dropped from one that
+never fired (issues #420, #435). `yoetz observe` verbs report the same pre-store conditions as typed
+public outcomes rather than `internal_error`: `workspace_unresolvable` exits `INVALID_REQUEST` (2)
+with its remediation, an unsafe local state path or unsafe lock-file shape exits `STORAGE_UNSAFE`
+(20), and a bounded open, permission, read-only, missing-parent, or lock-acquisition failure exits
+`SERVICE_UNAVAILABLE` (20) with reason `storage_unavailable` and a retry remediation. Existing
+invalid stored data remains `STORAGE_CORRUPT` (40), while non-filesystem defects still reach the
+`internal_error` boundary. The filesystem mapping renders only fixed reason/remediation text and
+never includes the raw exception or absolute state path. `--json` callers receive one `error` object
+carrying `code`, `reason`, `retryable`, `operation`, and the bounded message (issue #428). A
+`service_unavailable` rejection retires that session's lane for the pass while other sessions remain
+eligible; no later row may step over a failed lane head. Local observation-store acquisition is
+capped at two seconds for both the process-local reentrant lock and the cross-process flock. Hook
+timing rows attribute that queueing as `store_lock_wait`, cover the previously unwindowed
+resolve/deliver regions, and name any remaining wall-time difference as `unattributed`; nested store
+sub-stages are reported separately from the end-to-end partition (issues #310 and #311). A
+conflicting logical-identity claim rejects and quarantines only its own envelope as
+`dedup_conflict`; it does not establish bundle corruption or arm the session latch (issue #309).
+Coordinator and sweeper calls use separate bounded executors, so cancellation cannot strand an
+exit-blocking flock wait or exhaust the shared default executor. `observation_storage_corrupt` is
+terminal for its Codex session in the current READY generation: the coordinator remembers that
+session only after a bundle-level `STORAGE_CORRUPT`, later ingests are rejected without reopening
+the bundle, and the sweeper atomically moves that session's pending backlog to quarantine while
+healthy lanes continue. A new READY generation clears the in-memory suppression and permits one
+recovery probe. A successful probe removes that session from the local corruption set and resolves
+the workspace corruption gap only when no affected session remains. Quarantined detail is bounded by
+count, by the state byte budget, and by a 14-day age measured from a store-authored quarantined-at
+time behind the trusted-clock epoch fence; an operator can drop it explicitly with `yoetz observe
+reclaim`. Every drop — cap, age, or reclaim — retains aggregate commitment, count (evictions and
+reclaims counted separately), first/last receipt times, and `quarantine_detail_evicted`. The
+`truncated_payload` gap is live rather than permanent: a later save resolves its active flag only
+when that save evicts nothing and leaves one-eighth of the state budget free. Merely landing under
+the cap cannot clear the same loss it just recorded; the durable gap history remains after recovery,
+and renewed shedding reactivates it (issue #310).
 
 Public ingest failures use their `retryable` contract, not a spelling fallback. A non-retryable
 failure that is not already a narrower terminal class (`dedup_conflict` or
@@ -4076,7 +4075,8 @@ untested. Prompt and non-prompt setup surfaces compute the project-skill preview
 non-prompt front ends echo the MCP, skill, and plugin-activation preview digests, and any stale
 digest refuses the whole apply before a file is written. Setup separately reports
 `project_skill_installation`, structural plugin-source installation, `plugin_activation`, MCP
-registration, hooks/consent, service routing, and semantic readiness; none of those fields implies
+registration, hooks/consent, service routing, and AI-powered review readiness; none of those
+fields implies
 another. `plugin_activation` uses the closed state
 `active|installed_not_activated|not_installed|foreign`. `not_installed` is actual source
 absence only. A byte-present plugin tree that is not a current renderer variant — including
@@ -4199,31 +4199,29 @@ contains no unreviewed binding. A different root on an absolute registration is 
 repair target. No candidate from host configuration is executed to establish this proof.
 
 New previews prefer that proven absolute console script. An installed CLI without valid proof
-refuses registration instead of falling back to PATH; embedded callers without an invoking
-launcher retain bare-command compatibility. Existing bare and legacy registrations remain
-recognizable for removal or an explicit migration to the absolute current command. Absolute
-preview digests bind the launcher bytes and proposed command/root; registration also binds the
-observed command/root so drift invalidates approval. Applied-route records preserve the exact
-observed argv, including its absolute launcher; their command validator checks shape, never
-confers ownership. Older records remain readable, and an older reader that cannot parse an
-absolute record retains its existing fail-soft missing-record behavior. CLI and terminal previews
-display that exact argv; provider status and preflight consume the shared ownership observation.
-This changes no workflow request/result schema, hook contract, or receipt format. The proof is
-installation-local integrity, not authentication against a machine owner who can rewrite both
-the installed script and RECORD.
-Standalone `yoetz provider endpoint` retains its explicit credential next command. When endpoint
-binding is embedded in the composed setup wizard, that standalone handoff is suppressed because
-the wizard still owns privacy consent and confidential ingress. Every visible yes/no prompt near
-credential setup says that API-key entry has not started and accepts only yes/no; a separate
-heading announces the hidden trusted-console ceremony. Invalid visible-prompt input is never
-reflected by Yoetz. Provider credential failure reasons cross the report boundary only through a
-fixed nonsecret allowlist, while provider binding, credential storage, repository privacy, service
-state, and semantic readiness remain independent report components. Recovery commands are derived
-from the read-only committed/live status when available, with component results used only as a
-state-equivalent fallback, so failure in a later component cannot rewrite an already committed
-privacy grant.
-`setup status` rows carry `registration_state` and `registered_route_profile`; the
-`integrate <harness> mcp status` body carries `state` and `route_profile`.
+refuses registration instead of falling back to PATH; embedded callers without an invoking launcher
+retain bare-command compatibility. Existing bare and legacy registrations remain recognizable for
+removal or an explicit migration to the absolute current command. Absolute preview digests bind the
+launcher bytes and proposed command/root; registration also binds the observed command/root so drift
+invalidates approval. Applied-route records preserve the exact observed argv, including its absolute
+launcher; their command validator checks shape, never confers ownership. Older records remain
+readable, and an older reader that cannot parse an absolute record retains its existing fail-soft
+missing-record behavior. CLI and terminal previews display that exact argv; provider status and
+preflight consume the shared ownership observation. This changes no workflow request/result schema,
+hook contract, or receipt format. The proof is installation-local integrity, not authentication
+against a machine owner who can rewrite both the installed script and RECORD. Standalone `yoetz
+provider endpoint` retains its explicit credential next command. When endpoint binding is embedded
+in the composed setup wizard, that standalone handoff is suppressed because the wizard still owns
+privacy consent and confidential ingress. Every visible yes/no prompt near credential setup says
+that API-key entry has not started and accepts only yes/no; a separate heading announces the hidden
+trusted-console ceremony. Invalid visible-prompt input is never reflected by Yoetz. Provider
+credential failure reasons cross the report boundary only through a fixed nonsecret allowlist, while
+provider binding, credential storage, repository privacy, service state, and AI-powered review
+readiness remain independent report components. Recovery commands are derived from the read-only
+committed/live status when available, with component results used only as a state-equivalent
+fallback, so failure in a later component cannot rewrite an already committed privacy grant. `setup
+status` rows carry `registration_state` and `registered_route_profile`; the `integrate <harness> mcp
+status` body carries `state` and `route_profile`.
 
 **Host admission port (`adapters/integrations/host_admission.py`, issue #467).** `HostAdmissionState`
 is `absent|present|partial|foreign|unknown`; `HostAdmissionAction` is `grant|revoke|noop`;
@@ -4390,7 +4388,7 @@ the input for another host's manifest; projections share only the plan (ADR-023)
   `mcp_binding`, `mcp_runtime`, `model_use`, `trigger_capability`, `observation_consent`,
   `observation_evidence`, `service_readiness`, `semantic_readiness`, `provider_dispatch`,
   `privacy_receipt`, `workflow_receipt`. No facet implies another, and format validation proves
-  none of activation, observation, semantic dispatch, or closure (ADR-023).
+  none of activation, observation, AI-powered review dispatch, or closure (ADR-023).
 
 `PluginArtifactPort` methods are `preview_artifact`, `install_artifact`, `status_artifact`, and
 `remove_artifact`; interrupted-swap recovery is expressed through `status_artifact` reconciliation,
@@ -4938,8 +4936,8 @@ facade and are never MCP tools.
   `REQUIRED_SQLITE_SOURCE_ID`, `YOETZ_APPLICATION_ID`, `BUSY_TIMEOUT_MS`,
   `STATEMENT_CACHE_SIZE`, and `WRITER_QUEUE_DEPTH` as specified by the owning file/ADR-003.
 - `adapters/sqlite/repository.py`: implements `LedgerPort` (bounded append transaction,
-  operations/lease tables, semantic job/attempt persistence, projections). `CheckpointReport` is
-  the shared bounded result of `run_passive_checkpoint`.
+  operations/lease tables, AI-powered review job/attempt persistence, projections).
+  `CheckpointReport` is the shared bounded result of `run_passive_checkpoint`.
 - `adapters/sqlite/start_catalog.py`: implements `StartCatalogPort` (catalog schema + start state
   machine). Shared adapter values are `StartQuarantineCode`; exact functions
   `workspace_ref_commitment(lookup: MacKeyHandle, ...)` and
@@ -5028,23 +5026,21 @@ facade and are never MCP tools.
   guidance resource registry, and one `ServiceClient`; it owns no runtime/application/provider/key
   state. `read_guidance` does not use the service client. On the policy route
   `build_bridge_runtime` reads the service configuration once at startup, through the same
-  tolerant loader the logging sink uses, only to render the semantic destination disclosure
+  tolerant loader the logging sink uses, only to render the AI-powered review destination disclosure
   (issue #479); it keeps no configuration state and the strict route never reads it.
 - `mcp/descriptors.py`: the one owner of every agent-read string on the MCP surface — the six
-  workflow tool names, `read_guidance`, descriptions, and annotations, plus the `instructions`
-  text. All are loaded from the
-  packaged `guidance/` resources and verified against the resource manifest before use; none is
-  composed at runtime from user, task, provider, or environment values, with one typed exception:
-  the policy-route semantic destination disclosure (issue #479, ADR-018 destination-disclosure
-  amendment), which `mcp/semantic_destination.py` renders from validated configuration through a
-  closed catalog (`BUNDLED_ENDPOINT_HOSTS`, `DISCLOSABLE_PROVIDER_IDS`, `DISCLOSURE_PREFIX`,
-  `MAX_DISCLOSURE_ENCODED_BYTES`, `disclose_semantic_destination()`,
+  workflow tool names, `read_guidance`, descriptions, and annotations, plus the `instructions` text.
+  All are loaded from the packaged `guidance/` resources and verified against the resource manifest
+  before use; none is composed at runtime from user, task, provider, or environment values, with one
+  typed exception: the policy-route AI-powered review destination disclosure (issue #479, ADR-018
+  destination-disclosure amendment), which `mcp/semantic_destination.py` renders from validated
+  configuration through a closed catalog (`BUNDLED_ENDPOINT_HOSTS`, `DISCLOSABLE_PROVIDER_IDS`,
+  `DISCLOSURE_PREFIX`, `MAX_DISCLOSURE_ENCODED_BYTES`, `disclose_semantic_destination()`,
   `read_semantic_destination_disclosure()`) and hands to `server_instructions()` only as a
   `SemanticDestinationDisclosure`. Absent or invalid configuration renders as unknown, an
   off-catalog endpoint profile as an unknown host, an unlisted provider id as unlisted, and a
-  configured fallback endpoint beside the primary; strict instructions never carry it. Shared
-  values are
-  `ToolDescriptor`, `TOOL_DESCRIPTORS` (frozen `policy|strict` sets, each in the same order
+  configured fallback endpoint beside the primary; strict instructions never carry it. Shared values
+  are `ToolDescriptor`, `TOOL_DESCRIPTORS` (frozen `policy|strict` sets, each in the same order
   `tools/list` returns), `TOOL_DESCRIPTOR_DIGESTS`, `TOOL_DESCRIPTOR_SET_DIGEST`,
   `INITIALIZE_GUIDANCE_URIS`, `server_instructions()`, `ORDINARY_MCP_PUBLISH_EVENT_FAMILIES`,
   `PRESENTATION_INPUT_SCHEMA_BUDGETS`, `SERVER_INSTRUCTIONS_BUDGET`, `ADVERTISED_SURFACE_BUDGET`,
@@ -5058,23 +5054,21 @@ facade and are never MCP tools.
   for the packaged text alone and `max_encoded_bytes`, which adds the disclosure ceiling (once per
   advertised tool in the aggregate); `advertised_surface_metrics()` accepts the disclosure so the
   longest admissible passage can be measured. `ToolDescriptor.input_schema` is the tools/list
-  presentation
-  projection (inlined common shapes, ordinary publish event families, minimal examples), preserving
-  every catalogued schema-version branch for each advertised ordinary event family. Every shipped
-  worked example validates against that presentation schema as well as catalog admission;
-  `catalog_input_schema` / full catalog request schemas remain admission authority via
-  `*.model_validate`. `ToolDescriptor.output_schema` adds the MCP-required literal root
-  `type: object` to the equivalent success/error object union; `catalog_output_schema` preserves
-  the exact frozen catalogue bundle, and result admission remains owned by `*.model_validate`.
-  `status` and `read_guidance` carry `readOnlyHint=true`; `receipt` carries
-  `readOnlyHint=false` because it stages an object and appends a `receipt_recorded` event. Every
-  tool carries an explicit `idempotentHint=true`. Policy `check` carries `openWorldHint=true`;
-  strict `check` carries `openWorldHint=false` and names the external-semantic ceiling. The hint is
-  inspectable metadata, not enforcement; the route constraint above is authoritative. Initialize
-  instructions and MCP-originated `status(view=versions)` disclose the active profile; policy-route
-  initialize instructions additionally disclose the startup-read semantic destination. No
-  descriptor carries a
-  `destructiveHint`, because no Yoetz operation deletes recorded evidence. Descriptor and
+  presentation projection (inlined common shapes, ordinary publish event families, minimal
+  examples), preserving every catalogued schema-version branch for each advertised ordinary event
+  family. Every shipped worked example validates against that presentation schema as well as catalog
+  admission; `catalog_input_schema` / full catalog request schemas remain admission authority via
+  `*.model_validate`. `ToolDescriptor.output_schema` adds the MCP-required literal root `type:
+  object` to the equivalent success/error object union; `catalog_output_schema` preserves the exact
+  frozen catalogue bundle, and result admission remains owned by `*.model_validate`. `status` and
+  `read_guidance` carry `readOnlyHint=true`; `receipt` carries `readOnlyHint=false` because it
+  stages an object and appends a `receipt_recorded` event. Every tool carries an explicit
+  `idempotentHint=true`. Policy `check` carries `openWorldHint=true`; strict `check` carries
+  `openWorldHint=false` and names the external AI-powered review ceiling. The hint is inspectable
+  metadata, not enforcement; the route constraint above is authoritative. Initialize instructions
+  and MCP-originated `status(view=versions)` disclose the active profile; policy-route initialize
+  instructions additionally disclose the startup-read AI-powered review destination. No descriptor
+  carries a `destructiveHint`, because no Yoetz operation deletes recorded evidence. Descriptor and
   instruction text is bound by the same honesty lint as the guidance references: it may not say
   "verified", "proved", "authenticated", or "complete" except where the surrounding sentence states
   the exact sufficient coverage.
@@ -5219,7 +5213,7 @@ this registry first. This scope keeps one source of truth without turning the re
 index of private implementation details.
 
 
-### Status projection snapshots and semantic diagnostics (issues #674–#676)
+### Status projection snapshots and AI-powered review diagnostics (issues #674–#676)
 
 Status row queries reuse the already validated immutable current projection. Historical queries
 replay immutable prefixes off the event loop and retain at most eight frontier/view/session row
@@ -5230,13 +5224,13 @@ state. Workers never receive SQLite handles. Cancellation joins the worker, and 
 selection stops after the requested limit plus one matching row. First access to a view still
 builds its row index; large-query CPU cost and append/receipt cost are separate from responsiveness.
 
-Every exceptional semantic attempt diagnostic uses the original check request ID, an allowlisted
-exception category and a structural stage. Stages distinguish claim/recovery, privacy admission,
-dispatch entered (outcome uncertain), response mapping, response persistence and result commit.
-Provider invocation catches preserve their existing unknown-outcome semantics. Primary exception
-evidence is emitted before cleanup; cleanup records carry the same request join. Neither missing
-diagnostics nor null provenance proves that no provider executed. Diagnostics are best-effort;
-absence can mean that the sink was unavailable, and never licenses a retry.
+Every exceptional AI-powered review attempt diagnostic uses the original check request ID, an
+allowlisted exception category and a structural stage. Stages distinguish claim/recovery, privacy
+admission, dispatch entered (outcome uncertain), response mapping, response persistence and result
+commit. Provider invocation catches preserve their existing unknown-outcome semantics. Primary
+exception evidence is emitted before cleanup; cleanup records carry the same request join. Neither
+missing diagnostics nor null provenance proves that no provider executed. Diagnostics are
+best-effort; absence can mean that the sink was unavailable, and never licenses a retry.
 
 `yoetz service diagnostics --request-id req_…` reads matching owner-only records for the request
 returned by check/operation status. `--correlation-id err_…` remains supported; exactly one selector
@@ -5281,8 +5275,8 @@ Finding status `detail` appends a bounded explanation of the latest recorded che
 resolution requirements. Receipt findings/dispositions use the same explanation. Original finding
 payloads, proof qualification, `resolved`, blockers and historical identity are unchanged. A
 non-repeated finding with suppressed results, wrong policy/scope, weak freshness, unavailable proof,
-failed semantic review or disqualifying gaps is not described as repaired. Deterministic exceptions
-do not extend to semantic findings. Explanation text is under existing finding-content projection.
+failed AI-powered review or disqualifying gaps is not described as repaired. Local-check exceptions
+do not extend to AI-powered findings. Explanation text is under existing finding-content projection.
 
 Earlier-check receipt wording uses the recorded suffix classification: responses, finding-free
 observations, or a mixture. An unavailable classification stays neutral. It names the tested
@@ -5291,7 +5285,7 @@ observation can advance a frontier while the old check remains attributable. A n
 later material and does not promise to remove every gap.
 
 At completion or resolved-obligation frontiers, asserted command relations contribute
-`command_attempt_mismatch` or `command_attempt_uncorroborated` to the existing deterministic
+`command_attempt_mismatch` or `command_attempt_uncorroborated` to the existing local-check
 case/receipt gap vector. This prevents uncorroborated accounting from becoming execution proof.
 The latter means unknown observation, not non-execution. Receipt capacity computes the same union.
 

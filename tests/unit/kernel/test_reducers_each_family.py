@@ -530,7 +530,7 @@ def _check_with_partial_coverage(
     """Rewrite the fixture's ``check_recorded`` to the coverage a gap-declaring check records.
 
     ``application/check.py`` downgrades a check's own ``ledger_freshness`` to ``partial`` when the
-    check declares a coverage gap — a declined semantic review, for instance. No reviewed replay
+    check declares a coverage gap — a declined AI-powered review, for instance. No reviewed replay
     fixture carries such a check, so the projection's handling of one is rewritten here rather
     than by editing a frozen fixture. ``returned`` overrides the check's returned findings, which
     is what decides whether the fixture's later response supersedes it.

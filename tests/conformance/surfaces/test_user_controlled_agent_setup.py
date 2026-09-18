@@ -24,7 +24,7 @@ def test_shared_guidance_makes_conversation_primary_and_user_choice_final() -> N
         collapsed = " ".join(surface.split())
         assert "Normal conversation is the primary" in collapsed
         assert "recommend `expanded_review` first" in collapsed
-        assert "`assisted_review` as the lower-disclosure semantic" in collapsed
+        assert "`assisted_review` as the lower-disclosure AI-powered" in collapsed
         assert (
             "Recommendations are advisory" in collapsed
             or "A recommendation is advisory" in collapsed

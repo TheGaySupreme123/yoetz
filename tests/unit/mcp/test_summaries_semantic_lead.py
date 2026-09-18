@@ -1,4 +1,4 @@
-"""MCP check summaries lead with the semantic-not-requested limitation."""
+"""MCP check summaries lead with the AI-powered-review-not-requested limitation."""
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ def test_summary_for_deterministic_only_leads_with_semantic_not_requested() -> N
             "result_frontier": {"sequence": "3", "head_digest": "sha256:" + "a" * 64},
         }
     )
-    assert text.startswith("Semantic review not requested;")
-    assert "deterministic-only check verdict: no_issue_detected" in text
+    assert text.startswith("AI-powered review not requested;")
+    assert "local-only check verdict: no_issue_detected" in text
 
 
 def test_capacity_summary_names_non_dispatch_and_bounded_next_step() -> None:

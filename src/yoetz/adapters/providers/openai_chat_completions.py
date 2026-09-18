@@ -1,4 +1,4 @@
-"""OpenAI-compatible Chat Completions semantic-evaluation adapter.
+"""OpenAI-compatible Chat Completions AI-powered evaluation adapter.
 
 Three hosts publish an OpenAI-compatible Chat Completions endpoint but no Responses endpoint, so
 :mod:`yoetz.adapters.providers.openai_responses` cannot reach them: its profile pins
@@ -312,7 +312,7 @@ def normalize_response(
     latency_ms: int,
     late: bool = False,
 ) -> SemanticResult:
-    """Classify one provider response into the closed semantic-result union.
+    """Classify one provider response into the closed AI-powered review result union.
 
     Inspection order matches the Responses adapter: explicit refusal surface first, truncation and
     filtering next, parse/schema validity next, and late-arrival state last. A host that ignored

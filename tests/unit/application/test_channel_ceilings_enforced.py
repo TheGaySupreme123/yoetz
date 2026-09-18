@@ -1,4 +1,4 @@
-"""RT-privacy-egress-1: channel max_bytes/max_tokens/scope_ceiling fence semantic admission."""
+"""RT-privacy-egress-1: channel max_bytes/max_tokens/scope_ceiling fence AI-powered review admission."""
 
 from __future__ import annotations
 
@@ -364,7 +364,7 @@ async def test_scope_broader_than_ceiling_blocks() -> None:
 async def test_workspace_ceiling_admits_task_scoped_candidate() -> None:
     """The shipped assisted_review / expanded_review shape must keep working.
 
-    Those recipes commit ``scope_ceiling=workspace`` while every semantic case is task-scoped.
+    Those recipes commit ``scope_ceiling=workspace`` while every AI-powered review case is task-scoped.
     A task scope is narrower than a workspace ceiling, so it sits inside the consented
     authority and must be admitted rather than blocked as a scope mismatch.
     """

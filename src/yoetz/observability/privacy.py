@@ -110,7 +110,7 @@ _LOG_FIELDS: Final = frozenset(
         "engine_version",
         "policy_version",
         "sqlite_source_id_hash",
-        # Bounded structural accounting for one semantic review: what the reviewer returned and
+        # Bounded structural accounting for one AI-powered review: what the reviewer returned and
         # what became of it. Counts and one closed conclusion token only — never challenge text.
         "semantic_conclusion",
         "semantic_challenges_returned",

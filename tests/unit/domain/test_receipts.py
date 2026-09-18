@@ -294,7 +294,7 @@ def test_every_explicit_gap_occurs_in_coverage_summary() -> None:
 
 
 def test_semantic_review_not_configured_receipt_states_not_run() -> None:
-    """Requirement: receipt with semantic evaluator not configured discloses not-run."""
+    """Requirement: receipt with AI-powered evaluator not configured discloses not-run."""
 
     from yoetz.domain.receipts import (
         OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
@@ -310,7 +310,7 @@ def test_semantic_review_not_configured_receipt_states_not_run() -> None:
     for section in cast(list[dict[str, Any]], wire["sections"]):
         if section["key"] == "limitations_and_coverage":
             section["body"] = (
-                "Semantic relevance review was not run. "
+                "AI-powered relevance review was not run. "
                 f"Coverage is limited by: {SEMANTIC_REVIEW_NOT_CONFIGURED_GAP}."
             )
             section["items"] = [SEMANTIC_REVIEW_NOT_CONFIGURED_GAP]
@@ -320,10 +320,10 @@ def test_semantic_review_not_configured_receipt_states_not_run() -> None:
     assert SEMANTIC_REVIEW_NOT_CONFIGURED_GAP in {gap.code for gap in document.gaps}
     assert OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP not in {gap.code for gap in document.gaps}
     rendered = render_receipt_compact(document)
-    assert "semantic relevance review was not run" in rendered
-    assert "optional semantic review was blocked" not in rendered
+    assert "AI-powered relevance review was not run" in rendered
+    assert "optional AI-powered review was blocked" not in rendered
     assert "coverage is insufficient" in rendered
-    assert "no unresolved deterministic issue was found in the published record" not in rendered
+    assert "no unresolved local issue was found in the published record" not in rendered
 
 
 def test_semantic_relevance_review_not_run_gap_shares_not_run_wording() -> None:
@@ -340,18 +340,18 @@ def test_semantic_relevance_review_not_run_gap_shares_not_run_wording() -> None:
     for section in cast(list[dict[str, Any]], wire["sections"]):
         if section["key"] == "limitations_and_coverage":
             section["body"] = (
-                "Semantic relevance review was not run. "
+                "AI-powered relevance review was not run. "
                 f"Coverage is limited by: {SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP}."
             )
             section["items"] = [SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP]
         if section["key"] == "summary":
             section["body"] = "Coverage is insufficient at frontier 7."
     rendered = render_receipt_compact(receipt_document_from_json(wire))
-    assert "semantic relevance review was not run" in rendered
+    assert "AI-powered relevance review was not run" in rendered
 
 
 def test_semantic_review_not_run_never_hides_unresolved_findings() -> None:
-    """A semantic gap must not turn an unresolved deterministic receipt into a clean claim."""
+    """An AI-powered gap must not turn an unresolved local receipt into a clean claim."""
 
     from yoetz.domain.receipts import SEMANTIC_REVIEW_NOT_CONFIGURED_GAP
 
@@ -366,8 +366,8 @@ def test_semantic_review_not_run_never_hides_unresolved_findings() -> None:
     rendered = render_receipt_compact(document)
 
     assert "unresolved finding" in rendered
-    assert "semantic relevance review was not run" in rendered
-    assert "no unresolved deterministic issue" not in rendered
+    assert "AI-powered relevance review was not run" in rendered
+    assert "no unresolved local issue" not in rendered
     assert "blocked before dispatch" not in rendered
 
 
@@ -401,7 +401,7 @@ def test_render_receipt_human_projects_sections_and_advisory_count() -> None:
     )
     advisory_text = render_receipt_human(advisory, markdown=True)
     assert "## Limitations" in advisory_text
-    assert "Semantic review completed" in advisory_text
+    assert "AI-powered review completed" in advisory_text
     # material_limitation_omitted is actionable, so no extra coverage-limitation appendix.
     assert "do not by themselves select unresolved_findings_remain" not in advisory_text
 
@@ -454,7 +454,7 @@ def test_registration_drift_compact_names_policy_recovery() -> None:
     assert "If this strict route was not intended" in rendered
     assert "yoetz integrate codex mcp install --route-profile policy" in rendered
     assert "start a fresh Codex process" in rendered
-    assert "No provider attempt or semantic finding was recorded." in rendered
+    assert "No provider attempt or AI-powered finding was recorded." in rendered
 
 
 def test_genuine_strict_ceiling_compact_keeps_terminal_wording() -> None:
@@ -463,7 +463,7 @@ def test_genuine_strict_ceiling_compact_keeps_terminal_wording() -> None:
     wire = _variant("semantic-advisory.case.json", "predispatch_policy_block")
     rendered = render_receipt_compact(receipt_document_from_json(wire))
     assert rendered == (
-        "Yoetz receipt at frontier 22: coverage is insufficient because optional semantic "
+        "Yoetz receipt at frontier 22: coverage is insufficient because optional AI-powered "
         "review was blocked before dispatch by network-egress policy. No provider attempt "
-        "or semantic finding was recorded."
+        "or AI-powered finding was recorded."
     )

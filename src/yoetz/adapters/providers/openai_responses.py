@@ -1,7 +1,7 @@
-"""Native OpenAI Responses semantic-evaluation adapter for the approved external profile.
+"""Native OpenAI Responses AI-powered evaluation adapter for the approved external profile.
 
 This module is the live provider bridge: it turns an already-approved outbound case into a
-structured judgment and normalizes the provider's answer into Yoetz's closed semantic-result union
+structured judgment and normalizes the provider's answer into Yoetz's closed AI-powered review result union
 with provisional :class:`~yoetz.ports.semantic.ProviderAttemptProvenance`. It never manufactures
 final receipt-bound provenance, never retries internally, and never lets a real credential enter a
 reusable client, header, log, or exception. The ``openai``/``httpx`` SDK dependency is optional
@@ -814,7 +814,7 @@ def normalize_response(
     latency_ms: int,
     late: bool = False,
 ) -> SemanticResult:
-    """Classify one provider response into the closed semantic-result union.
+    """Classify one provider response into the closed AI-powered review result union.
 
     Inspection order is fixed: explicit refusal surface first, deadline/cancellation next,
     parse/schema validity next, and late-arrival state last.

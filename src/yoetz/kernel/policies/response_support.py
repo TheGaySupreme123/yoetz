@@ -1,4 +1,4 @@
-"""Shared response-evidence admissibility for deterministic policy packs."""
+"""Shared response-evidence admissibility for local policy packs."""
 
 from __future__ import annotations
 

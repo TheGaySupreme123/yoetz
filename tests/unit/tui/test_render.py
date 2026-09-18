@@ -324,7 +324,7 @@ def test_stored_configuration_is_never_reported_as_a_working_provider(
     assert "✓ Provider binding saved" in lines
     assert "✓ API key stored securely" in lines
     assert "! Live provider connection has not been tested" in lines
-    assert "! External semantic review is not yet proven ready" in lines
+    assert "! External AI-powered review is not yet proven ready" in lines
 
 
 def test_a_tested_provider_is_the_only_way_to_earn_the_verified_symbol() -> None:

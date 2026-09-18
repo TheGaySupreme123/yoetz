@@ -43,7 +43,7 @@ dependencies = [
 portable-recovery = ["argon2-cffi==25.1.0"]
 semantic-openai = [
     # Compatibility extra retained for existing install commands. The standard
-    # install now supports the first-run semantic-review choice.
+    # install now supports the first-run AI-powered review choice.
     "httpx==0.28.1",
     "openai==2.46.0",
 ]

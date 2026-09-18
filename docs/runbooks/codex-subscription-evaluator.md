@@ -1,6 +1,6 @@
-# Codex subscription semantic evaluator
+# Codex subscription AI-powered evaluator
 
-This runbook owns the exact `codex-chatgpt-subscription@1` cell. It is an external semantic
+This runbook owns the exact `codex-chatgpt-subscription@1` cell. It is an external AI-powered
 evaluator behind the ordinary Yoetz privacy gateway, not the Codex host integration and not an
 OpenAI Platform API profile.
 
@@ -108,19 +108,19 @@ its full negative-control checklist.
 One installed Linux VM run used Yoetz wheel
 `sha256:252ca337e2f002450fc5ae0649de2dbec29b70c12f1a0a6f768024e7acb4d68d`, the exact Linux x86_64
 Codex cell above, and a fresh dedicated ChatGPT home. The VM had working user namespaces and
-bubblewrap. At `2026-09-13 17:22 UTC`, one approved synthetic `Luna/high` `semantic_required`
-check completed through the Yoetz privacy gateway with `case_disclosed=true`,
-`turn_acknowledged=true`, and `process_cleanup=terminated`; a final task receipt was present. The
-receipt conclusion was `insufficient_coverage`, with `completion_scope_declared_none`,
-`evidence_content_digest_only`, and `semantic_challenges_rejected` recorded as coverage limits.
-The check recorded a privacy-receipt identifier, but the receipt get/list service handlers were
-unavailable (`method_forbidden`), so this evidence does not include a retrieved privacy receipt. This is one authenticated semantic smoke check, not
-two-check evaluator acceptance; no live token accounting was captured in this run. The default
-gVisor sandbox failed closed on the pre-disclosure `configWarning` because user namespaces were
-unavailable; do not bypass that guard. WSL-specific smoke and the full negative and release-acceptance
-matrix remain pending. After the probe, the supported tightening operation disabled external semantic
-review; disconnect confirmed logout and removed the dedicated binding, and rollback was
-idempotent. Both test sandboxes were then terminated.
+bubblewrap. At `2026-09-13 17:22 UTC`, one approved synthetic `Luna/high` `semantic_required` check
+completed through the Yoetz privacy gateway with `case_disclosed=true`, `turn_acknowledged=true`,
+and `process_cleanup=terminated`; a final task receipt was present. The receipt conclusion was
+`insufficient_coverage`, with `completion_scope_declared_none`, `evidence_content_digest_only`, and
+`semantic_challenges_rejected` recorded as coverage limits. The check recorded a privacy-receipt
+identifier, but the receipt get/list service handlers were unavailable (`method_forbidden`), so this
+evidence does not include a retrieved privacy receipt. This is one authenticated AI-powered review
+smoke check, not two-check evaluator acceptance; no live token accounting was captured in this run.
+The default gVisor sandbox failed closed on the pre-disclosure `configWarning` because user
+namespaces were unavailable; do not bypass that guard. WSL-specific smoke and the full negative and
+release-acceptance matrix remain pending. After the probe, the supported tightening operation
+disabled external AI-powered review; disconnect confirmed logout and removed the dedicated binding,
+and rollback was idempotent. Both test sandboxes were then terminated.
 
 ## Setup and reverse operations
 
@@ -270,8 +270,9 @@ group disappearance before the terminal receipt.
 Structural readiness, privacy authority, and live dispatch remain separate claims. `status` can show
 the exact binding, dedicated-home readiness, account mode, or model availability without authorizing
 disclosure. The machine privacy ceiling and exact repository grant independently permit or refuse a
-case. Only an admitted `evaluate()` child with a semantic attempt and terminal receipt proves that
-task bytes were dispatched; login success, model listing, or `semantic_ready: true` alone never does.
+case. Only an admitted `evaluate()` child with an AI-powered review attempt and terminal receipt
+proves that task bytes were dispatched; login success, model listing, or `semantic_ready: true`
+alone never does.
 
 ## Diagnosing a failed attempt
 
@@ -285,7 +286,7 @@ the same token as an owner-only diagnostic line (`semantic_composition` /
 | `capability_evidence_stale`, `launch_failed`, `initialize_invalid`, `login_required`, `model_unavailable`, `thread_invalid`, `predisclosure_event_forbidden` | Failed before the case crossed stdin. | Ordinary pre-disclosure transient/unsupported handling; nothing was disclosed. |
 | `turn_ack_invalid`, `tool_request_forbidden`, `event_forbidden`, `tool_event_forbidden` | The child broke the isolation contract. | Terminal, unavailable/unsupported profile, never an invalid model answer. A repeated forbidden event means the cell no longer matches Codex behavior: file it, do not widen the allowlist locally. |
 | `rate_limits_invalid` | Unrecognized bounded rate-limit bookkeeping. | Before disclosure: terminal unsupported profile. After acknowledgement: nonterminal diagnostic, including on an otherwise successful result; a later terminal stage replaces it. No account fields are retained. |
-| `token_usage_invalid` | A matching active-turn usage snapshot was malformed or regressed. | Nonterminal telemetry gap; preserve any earlier valid cumulative snapshot and never invalidate the semantic judgment solely for usage bookkeeping. |
+| `token_usage_invalid` | A matching active-turn usage snapshot was malformed or regressed. | Nonterminal telemetry gap; preserve any earlier valid cumulative snapshot and never invalidate the AI-powered judgment solely for usage bookkeeping. |
 | `turn_failed`, `model_rerouted` | Codex reported an authoritative native error or a different bound model. | Usage exhaustion maps to `provider_quota_exhausted`; HTTP 429 maps to `provider_rate_limited`. Only an independently authorized fallback may handle those reasons. Model rerouting remains terminal authorization refusal. |
 | `agent_message_count`, `output_empty`, `output_oversize`, `completion_mismatch` | The completion did not yield exactly one bounded, correlated final answer. | Terminal answer/completion validation (`response_schema_invalid`). |
 | `output_not_json` | The final answer was not strict JSON (prose, fenced code, trailing text). | Terminal; not retried. |
@@ -300,7 +301,7 @@ reported alongside a stage, never inferred from one.
 Use an exact packaged Yoetz build and an isolated logged-in evaluator home. Record these as
 separate claims:
 
-1. two `semantic_required` checks complete with distinct semantic attempts, one-use
+1. two `semantic_required` checks complete with distinct AI-powered review attempts, one-use
    authorizations, process groups, runtime evidence, and terminal privacy receipts;
 2. the judgments validate against the frozen schema and any corrective finding is handled through
    the normal `respond`/`publish_work`/recheck loop;

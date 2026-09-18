@@ -1,4 +1,4 @@
-"""Deterministic work-integrity policy pack."""
+"""Local work-integrity policy pack."""
 
 from __future__ import annotations
 
@@ -578,7 +578,7 @@ def _response_findings(case: DeterministicCase) -> list[DeterministicAssessment]
         stale = response.finding_frontier.sequence < finding.subject_frontier.sequence
         insufficient = not _response_support_admissible(case, response.evidence_refs)
         # This pack stays a closed rule table: it never inspects whether another pack would also
-        # report this response. A current unsupported rejection of a deterministic finding overlaps
+        # report this response. A current unsupported rejection of a local finding overlaps
         # research-evidence's questionable_finding_rejection, and the composition layer collapses
         # that overlap once it knows which packs actually ran.
         if not stale and not insufficient:

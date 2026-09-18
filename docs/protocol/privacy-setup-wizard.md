@@ -34,7 +34,7 @@ before proposing.
 | 1 | `network_egress` | Global ceiling: whether any Yoetz network egress may be permitted at all | boolean |
 | 2 | `local_models` | Whether local models are permitted | boolean |
 | 3 | `external_provider` | Which external provider/model/endpoint profile is trusted, and whether current data-use evidence is required | `{binding, require_current_provider_data_use_evidence}` or `none` |
-| 4 | `review_context` | Which deterministic selection strategy builds semantic review cases | `{profile, selection}` |
+| 4 | `review_context` | Which deterministic selection strategy builds AI-powered review cases | `{profile, selection}` |
 | 5 | `content_categories` | Which categories/classes may be sent to the external LLM binding | `{categories, data_classes}` |
 | 6 | `agent_context_categories` | Which categories/classes results may release to an agent-capable host, for material that host did not author | `{categories, data_classes}` |
 | 7 | `local_model_categories` | Which categories/classes the selected local model runtime may receive | `{categories, data_classes}` |
@@ -112,10 +112,10 @@ With no answers, the draft is `local_only`, `review_context=structural`, `networ
 five network channels disabled, no local model, no external or local-model content categories, and
 `agent_context_categories={categories:[bounded_structural_metadata, declared_file_type],
 data_classes:[public_structural]}`. Under this default, an unwidened agent still receives its own
-published prose and the deterministic findings computed solely from it — withholding a writer's own
+published prose and the local findings computed solely from it — withholding a writer's own
 words protects nothing and would break the `check → respond → recheck` loop. What the default
 withholds is exactly what the agent did not author: another writer's or subagent's material,
-imported events, and semantic reviewer prose, plus every `sensitive_confidential` item and the
+imported events, and AI-powered reviewer prose, plus every `sensitive_confidential` item and the
 entire never-send set, which no provenance ever unlocks. Ordinary human-readable rendering to an
 attached controlling terminal is the separate `local_human_view` sink and is not gated by question 6
 at all — reading your own unlocked terminal is not a third-party disclosure.
@@ -137,14 +137,14 @@ access and safety, legal, support, and abuse-monitoring exceptions remain promin
 facts. Unknown or stale posture removes the badge; a user can still pick Assisted or configure the
 route through `custom`, but the UI must not carry the recommendation's claim into that policy.
 
-### Agent-guided semantic intent
+### Agent-guided AI-powered review intent
 
 The general first-run recommendation above optimizes for disclosure minimization. A conversational
-agent has an additional explicit signal: when the current user says the desired outcome is semantic
-review depth, it recommends `expanded_review` first and explains `assisted_review` as the
-lower-disclosure semantic option. That recommendation is advisory and does not prepare or approve a
-grant. The agent explains all named recipes, records the user's selection, prepares one exact
-combined candidate, renders the complete substantive before/after diff, and asks for one final
+agent has an additional explicit signal: when the current user says the desired outcome is
+AI-powered review depth, it recommends `expanded_review` first and explains `assisted_review` as the
+lower-disclosure AI-powered review option. That recommendation is advisory and does not prepare or
+approve a grant. The agent explains all named recipes, records the user's selection, prepares one
+exact combined candidate, renders the complete substantive before/after diff, and asks for one final
 approve/deny decision bound to that candidate.
 
 An authority-capable agent may relay that exact current-chat decision. Preparation freezes the

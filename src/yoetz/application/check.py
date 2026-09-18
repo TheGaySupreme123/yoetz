@@ -1,4 +1,4 @@
-"""Deterministic check coordination and semantic-result validation fences."""
+"""Local check coordination and AI-powered review result validation fences."""
 
 from __future__ import annotations
 
@@ -167,7 +167,7 @@ class SemanticJudgmentRejected(ValueError):
 
     Deliberately narrower than the module's other ``ValueError``s: the commit path catches exactly
     this, so a rejected judgment records ``invalid``/``semantic_judgment_rejected`` and still
-    commits the deterministic findings, while a genuine coordinator bug keeps its old disposition.
+    commits the local findings, while a genuine coordinator bug keeps its old disposition.
     """
 
 
@@ -227,10 +227,10 @@ _EMPTY_SEMANTIC_REVIEW: Final = SemanticJudgmentReview((), 0, ())
 def _projected_finding_json(finding: Finding) -> JsonValue:
     """Adapt one encoded finding to the CHECK result's projected-finding shape.
 
-    ``findings/finding-1.0.0`` leaves ``provenance`` simply absent on a deterministic finding, and
+    ``findings/finding-1.0.0`` leaves ``provenance`` simply absent on a local finding, and
     ``finding_to_json`` honors that — it is the encoding events and receipt documents carry. The
     CHECK result's ``projected_finding`` is stricter: ``provenance`` is *required* and nullable, so
-    a deterministic finding must present it as an explicit null. This mirrors the top-level
+    a local finding must present it as an explicit null. This mirrors the top-level
     ``semantic_provenance`` immediately below, which the same result already emits that way.
     """
 
@@ -243,7 +243,7 @@ def _projected_finding_json(finding: Finding) -> JsonValue:
 def check_awaiting_human_json(result: CheckAwaitingHuman) -> dict[str, JsonValue]:
     """Serialize the nonterminal CHECK branch: a continuation, never a verdict.
 
-    No verdict, findings, coverage, or semantic provenance appear here. Emitting a
+    No verdict, findings, coverage, or AI-powered review provenance appear here. Emitting a
     completion-grade shape for a check that has not run would let a caller conclude from it.
     """
 
@@ -372,7 +372,7 @@ class FinalSemanticEvaluation:
     # Bounded structural attempt accounting reconstructed from durable rows when a job ran.
     # Not part of the frozen public check-result wire; owner recovery reads the ledger.
     attempt_accounting: object | None = None
-    # When the durable semantic phase renewed the check operation lease (lease TTL is 60s while
+    # When the durable AI-powered review phase renewed the check operation lease (lease TTL is 60s while
     # timeout_seconds may be longer), later phase advance / commit must use this CAS fence.
     operation_lease: OperationLease | None = None
     # Categories the review profile selected that the inference channel did not permit. A review
@@ -414,13 +414,13 @@ class FinalSemanticEvaluation:
                 raise _invalid("semantic_continuation_invalid")
 
 
-# Gaps that record a semantic review the task actually attempted and did not get. They are the
+# Gaps that record an AI-powered review the task actually attempted and did not get. They are the
 # environment's account of the missing review, never the caller's; `semantic_review_not_requested`
 # is deliberately absent because it is the one this set exists to disambiguate.
 # `optional_semantic_review_registration_drift` is deliberately absent too: it is re-added
 # fresh on the strict-ceiling path only after reading the live applied-route record, so
 # carrying it would let a stale drift claim survive a `mcp remove` (which clears the
-# record) or a strict reinstall on a later deterministic-only successor (issue #537).
+# record) or a strict reinstall on a later local-only successor (issue #537).
 _SEMANTIC_ATTEMPT_GAPS: Final = frozenset(
     {
         "semantic_case_capacity_exceeded",
@@ -458,14 +458,14 @@ def _strict_ceiling_route_drift(
 
 
 def carried_semantic_attempt_gaps(case: DeterministicCase, status: SemanticStatus) -> set[str]:
-    """Carry a superseded check's semantic-attempt gap onto a deterministic-only successor.
+    """Carry a superseded check's AI-powered review attempt gap onto a local-only successor.
 
-    A blocked or unavailable semantic review is normally followed by a ``deterministic_only``
+    A blocked or unavailable AI-powered review is normally followed by a ``deterministic_only``
     re-check, which is the stop-rule behaviour: a blocked review is a coverage gap, not a retry
     problem. That successor replaces ``latest_tested_state`` wholesale, so without this the only
     surviving disclosure is ``semantic_review_not_requested`` -- which attributes the missing
     review to the agent not asking, when the environment refused (issue #185). Carrying the
-    earlier gap forward keeps the receipt's account of *why* there is no semantic review.
+    earlier gap forward keeps the receipt's account of *why* there is no AI-powered review.
 
     The carry is task-level, not scope-bound: ``LatestTestedState`` records no scope, and the
     successor replaces it wholesale whatever its scope, so a gap from a differently-scoped
@@ -532,10 +532,10 @@ class _DurableDeterministicResult:
 
 
 class _DeterministicCheckpointSuperseded(Exception):
-    """The persisted deterministic result predates the current finding-text contract.
+    """The persisted local result predates the current finding-text contract.
 
     The checkpoint's bindings verified, so this is not corruption: the same digest-verified
-    frozen case is still available and the deterministic phase recomputes from it instead of
+    frozen case is still available and the local phase recomputes from it instead of
     failing the request (issue #340).
     """
 
@@ -697,7 +697,7 @@ async def _load_deterministic_result(
             )
             if (finding.summary, finding.detail) != rendered_text:
                 checkpoint_superseded = True
-                # Validate the deterministic assessment against the current rendering while
+                # Validate the local assessment against the current rendering while
                 # preserving the stored finding's structural fields for Finding validation.
                 candidate = CandidateFinding(
                     finding.kind,
@@ -724,7 +724,7 @@ async def _load_deterministic_result(
     except Exception as exc:
         raise PublicOperationError(
             PublicErrorCode.STORAGE_CORRUPT,
-            "The deterministic checkpoint is corrupt.",
+            "The local checkpoint is corrupt.",
             False,
         ) from exc
 
@@ -805,7 +805,7 @@ def _collapse_response_overlap(
 ) -> tuple[DeterministicAssessment, ...]:
     """Drop the work-integrity response finding when research-evidence reported the same response.
 
-    A current unsupported rejection or waiver of a deterministic finding satisfies both
+    A current unsupported rejection or waiver of a local finding satisfies both
     ``weak_or_stale_response`` and ``questionable_finding_rejection``. Each pack is a closed rule
     table that cannot see the other, so the collapse belongs here, where it is known which packs
     actually ran. Keying on the assessment research-evidence really produced -- rather than
@@ -953,7 +953,7 @@ async def _publish_deterministic_result(
     executions: tuple[CheckPolicyExecution, ...],
     request_digest_value: str,
 ) -> FrozenCase:
-    """Pin local finding identities and bases before optional semantic work."""
+    """Pin local finding identities and bases before optional AI-powered work."""
 
     if frozen.lease.phase is not CheckPhase.RESERVED:
         raise PublicOperationError(
@@ -964,7 +964,7 @@ async def _publish_deterministic_result(
     if len(assessments) != len(findings):
         raise PublicOperationError(
             PublicErrorCode.STORAGE_CORRUPT,
-            "The deterministic result is inconsistent.",
+            "The local result is inconsistent.",
             False,
         )
     operation = await runtime.ledger.lookup_operation(request.writer_id, request.request_id)
@@ -1119,7 +1119,7 @@ def validate_semantic_judgment(
     *,
     expected_frontier: Frontier,
 ) -> SemanticJudgmentReview:
-    """Fence semantic challenges to the exact frozen refs, coverage, and final provenance.
+    """Fence AI-powered challenges to the exact frozen refs, coverage, and final provenance.
 
     Each challenge is fenced independently against the same frozen case. A challenge that fails is
     dropped and counted by reason; the challenges beside it are unaffected, because nothing about
@@ -1130,7 +1130,7 @@ def validate_semantic_judgment(
     provenance that is not the final SUCCEEDED attempt means the *coordinator* handed this function
     the wrong inputs, not that the reviewer answered badly. They raise
     :class:`SemanticJudgmentRejected`, which the commit path converts into an honest
-    ``invalid``/``semantic_judgment_rejected`` semantic outcome rather than losing the check.
+    ``invalid``/``semantic_judgment_rejected`` AI-powered review outcome rather than losing the check.
     """
 
     if (
@@ -1231,7 +1231,7 @@ async def _semantic_evaluation(
     try:
         return await app.evaluate_semantic_check(frozen, deterministic, runtime)
     except Exception as exc:
-        # Optional/required semantic evaluator crash must never fabricate a clean semantic pass.
+        # Optional/required AI-powered evaluator crash must never fabricate a clean AI-powered review pass.
         record_unexpected_exception_without_raising(
             exc,
             component="check",
@@ -1269,7 +1269,7 @@ def _record_semantic_review_accounting(
     """Say what the reviewer produced and what became of it, on every dispatched review.
 
     Without this, "the model returned three challenges and none of them reached you" is invisible:
-    the check reports ``semantic_status: succeeded`` and zero semantic findings, which reads
+    the check reports ``semantic_status: succeeded`` and zero AI-powered findings, which reads
     identically to a reviewer that found nothing. The record is counts and closed tokens only, and
     it reconciles — ``returned == accepted + rejected`` and ``accepted == selected + suppressed``.
     """
@@ -1300,11 +1300,11 @@ def _record_semantic_review_accounting(
 def _judgment_rejected_evaluation(
     result: FinalSemanticEvaluation,
 ) -> FinalSemanticEvaluation:
-    """Restate a structurally unusable reviewer answer as the honest terminal semantic outcome.
+    """Restate a structurally unusable reviewer answer as the honest terminal AI-powered review outcome.
 
     ``SemanticStatus.INVALID`` / ``SEMANTIC_JUDGMENT_REJECTED`` has existed in the enum, the ledger
     CHECK constraints, and ``check-result-1.0.0`` since 0.1 and nothing had ever written it: the
-    rejection escaped as ``INVALID_REQUEST`` instead, taking the whole check — deterministic
+    rejection escaped as ``INVALID_REQUEST`` instead, taking the whole check — local
     findings included — with it. The provenance is the same attempt, restated to the outcome it
     actually reached, because the binding fence requires provenance and result to agree.
     """
@@ -1344,7 +1344,7 @@ async def execute_check_commit(
 ) -> CheckCommitResult | CheckAwaitingHuman:
     """Freeze, evaluate, rank, and atomically commit one check operation.
 
-    Returns ``CheckAwaitingHuman`` instead when the semantic phase is suspended on a local
+    Returns ``CheckAwaitingHuman`` instead when the AI-powered review phase is suspended on a local
     disclosure decision: nothing is committed and the operation stays resumable.
 
     ``_state`` isolates the applied-route drift probe (issue #537 slice C): production
@@ -1361,9 +1361,9 @@ async def execute_check_commit(
         RuntimeCapability.PAYLOAD_READ,
     }
     # A ready service grants SEMANTIC independently of the ordinary write route.  Preserve that
-    # admission on non-deterministic checks; otherwise the leased task runtime loses the
+    # admission on checks that are not local-only; otherwise the leased task runtime loses the
     # capability and reports provider_not_configured before the configured evaluator can run.
-    # An explicitly semantic request while semantic verification is disabled retains the existing
+    # An explicit AI-powered review request while AI-powered review is disabled retains the existing
     # honest not-configured result instead of becoming a routing failure.
     if (
         route_profile == "policy"
@@ -1446,7 +1446,7 @@ async def execute_check_commit(
             except _DeterministicCheckpointSuperseded:
                 # The checkpoint's bindings verified but its finding wording predates the
                 # current text contract. The frozen case is unchanged and digest-verified, so
-                # the deterministic phase recomputes from it instead of wedging the request
+                # the local phase recomputes from it instead of wedging the request
                 # behind a non-retryable STORAGE_CORRUPT (issue #340). The stale checkpoint
                 # keeps serving as the durable case pointer until commit clears it.
                 record_bounded_counts_without_raising(
@@ -1484,7 +1484,7 @@ async def execute_check_commit(
             deterministic,
             route_profile=route_profile,
         )
-        # Durable semantic attempts may renew the check lease (TTL 60s vs timeout up to 300s).
+        # Durable AI-powered review attempts may renew the check lease (TTL 60s vs timeout up to 300s).
         if semantic_result.operation_lease is not None:
             frozen = FrozenCase(frozen.case, semantic_result.operation_lease)
         # A check waiting on a local disclosure decision returns here, before ranking, phase
@@ -1543,8 +1543,8 @@ async def execute_check_commit(
                     expected_frontier=frozen.case.frontier,
                 )
             except SemanticJudgmentRejected as exc:
-                # The reviewer's answer is unusable, so the check has no semantic result — but the
-                # deterministic findings below were already earned and must still be committed.
+                # The reviewer's answer is unusable, so the check has no AI-powered review result — but the
+                # local findings below were already earned and must still be committed.
                 record_unexpected_exception_without_raising(
                     exc,
                     component="check",
@@ -1611,7 +1611,7 @@ async def execute_check_commit(
         )
         if completion_scope_incomplete:
             # Completion scope is the subject-level boundary named by ADR-019. Even a separately
-            # incomplete required semantic attempt cannot turn either closed scope gap into the
+            # incomplete required AI-powered review attempt cannot turn either closed scope gap into the
             # broader incomplete-check verdict.
             completeness = CheckCompleteness.COVERAGE_INCOMPLETE
         elif policy_failed or (request.mode == "semantic_required" and semantic_failed):

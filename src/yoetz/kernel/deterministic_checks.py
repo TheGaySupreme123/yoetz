@@ -1,4 +1,4 @@
-"""Pure deterministic case construction and versioned policy dispatch."""
+"""Pure local case construction and versioned policy dispatch."""
 
 from __future__ import annotations
 
@@ -435,7 +435,7 @@ DETERMINISTIC_FINDING_TEMPLATES: Final[
             "Replace or narrow the claim with exact accepted support or limitation references.",
         ),
         FindingKind.QUESTIONABLE_FINDING_REJECTION: DeterministicFindingTemplate(
-            "A deterministic finding was rejected without admissible support.",
+            "A local finding was rejected without admissible support.",
             "Provide current evidence for the rejection.",
         ),
     }
@@ -595,7 +595,7 @@ def _text_contract_corpus() -> tuple[JsonValue, ...]:
     )
 
 
-# The exact rendered-text contract of deterministic findings. A persisted DETERMINISTIC_RESULT
+# The exact rendered-text contract of local findings. A persisted DETERMINISTIC_RESULT
 # checkpoint stamps this digest; on replay, a stamp from different wording marks the checkpoint
 # superseded (recompute from the frozen case) instead of corrupt (issue #340).
 DETERMINISTIC_TEXT_CONTRACT_DIGEST: Final[str] = canonical_digest(_text_contract_corpus())
@@ -983,7 +983,7 @@ def finding_basis_from_json(value: JsonValue) -> FindingBasis:
 
 
 def deterministic_case_to_json(case: DeterministicCase) -> dict[str, JsonValue]:
-    """Encode one frozen deterministic case as its exact canonical JSON tree."""
+    """Encode one frozen local case as its exact canonical JSON tree."""
 
     if type(case) is not DeterministicCase:
         raise _invalid_case()
@@ -1041,7 +1041,7 @@ def deterministic_case_to_json(case: DeterministicCase) -> dict[str, JsonValue]:
 
 
 def deterministic_case_from_json(value: JsonValue) -> DeterministicCase:
-    """Decode and revalidate one exact deterministic-case JSON tree."""
+    """Decode and revalidate one exact local-case JSON tree."""
 
     try:
         frozen = freeze_json(value)
@@ -1455,7 +1455,7 @@ def build_deterministic_case(
     _projection_validated: bool = False,
     _replay_index: ReplayIndex | None = None,
 ) -> DeterministicCase:
-    """Freeze one exact accepted prefix into the pure deterministic-policy input.
+    """Freeze one exact accepted prefix into the pure local-policy input.
 
     ``_projection_validated`` and ``_replay_index`` are internal append-time seams. The
     SQLite/memory append path already replayed the same immutable prefix and passes the resulting
@@ -2010,7 +2010,7 @@ def run_deterministic_policies(
     case: DeterministicCase,
     policy: PolicyPack,
 ) -> DeterministicPolicyResult:
-    """Run one closed built-in policy pack over an immutable deterministic case."""
+    """Run one closed built-in policy pack over an immutable local case."""
 
     if type(case) is not DeterministicCase or type(policy) is not PolicyPack:
         raise _invalid_policy()

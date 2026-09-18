@@ -827,7 +827,7 @@ def test_claude_permission_denied_on_a_scoped_check_records_one_payload_free_dia
     """A host reviewer held the check before Yoetz saw it (issue #467).
 
     The typed reason is the separate representation #187 asked for: it is host tool-call
-    authorization, never a semantic status, and nothing from the host payload survives.
+    authorization, never an AI-powered review status, and nothing from the host payload survives.
     """
 
     store, _commitment = _consented_store(tmp_path)

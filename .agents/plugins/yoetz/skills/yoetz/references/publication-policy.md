@@ -34,7 +34,8 @@ These are not publishable transitions: reading or searching, running a command w
 - `evidence_recorded` — links bounded evidence identity; it does not upgrade its provenance.
 - `claim_recorded` — records a claim to be checked; it is not a verdict.
 - `result_recorded` — records an independently useful result assertion; it is not automatically accepted.
-- `finding_recorded` — records a deterministic or semantic challenge; it is not self-resolving.
+- `finding_recorded` — records a local-check or AI-powered review challenge; it is not
+  self-resolving.
 - `response_recorded` — records a response to a finding; it does not erase the finding.
 - `check_recorded` — records a check at one frontier; it becomes stale after material change.
 - `redaction_recorded` — records a bounded redaction fact; it does not prove forensic erasure.
@@ -96,7 +97,7 @@ is caller-authored narrative and is never treated as the bytes identified by `co
 
 ### Making a change reviewable
 
-When semantic review is expected, one evidence record can carry both legibility and identity: put
+When AI-powered review is expected, one evidence record can carry both legibility and identity: put
 the smallest problem-local changed hunk or test slice in `description`, and publish the matching
 `content_digest` with its `digest_binding`. The review excerpt shown to the reviewer is the
 `description`; the digest identity facts travel alongside it as excerpt provenance. A digest-bound
@@ -150,7 +151,7 @@ operations and does not add a composer or a new protocol field:
    `finding_frontier` and the current expected frontier; a response is a disposition, not proof of
    repair. The response frontier is the result frontier of the check that returned that finding.
 4. Run the final check deliberately. Select `semantic_required` when the user, effective policy, or
-   named acceptance criterion requires semantic review. If relying on the configured default, omit
+   named acceptance criterion requires AI-powered review. If relying on the configured default, omit
    `mode`; use `semantic_if_configured` only when review is known to be optional. Reserve
    `deterministic_only` for explicitly local/structural work or a deliberate no-egress choice, and
    disclose an unmet required review.
@@ -161,8 +162,8 @@ operations and does not add a composer or a new protocol field:
    or any other material record follows the check, run another check before requesting a receipt.
 6. Request `receipt` last. Read `closure_readiness.unanswered_finding_count` and
    `closure_readiness.receipt_blocking_finding_count`, then report those actual counts alongside the
-   receipt's checked frontier, semantic status/reason, and material coverage limits. After one
-   current-state recheck still fails to qualify, stop repeating an unchanged check, continue any
+   receipt's checked frontier, AI-powered review status/reason, and material coverage limits. After
+   one current-state recheck still fails to qualify, stop repeating an unchanged check, continue any
    distinct authorized repair, and disclose the remaining blocker.
 
 The optional `yoetz closure-prepare --session-id <returned-session> --writer-id <returned-writer>`
@@ -356,7 +357,7 @@ rejected with reason `ref_mirror_mismatch`, and the public error names the envel
 
 `occurred_at` is a caller assertion of when the event happened. Never guess it or round it to a convenient future value: use the best real RFC 3339 millisecond UTC time available. If the exact time is unknown, use an honest bounded approximation and understand that it remains a claim — the service does not check outside clocks and does not reject far-past, future, or out-of-order caller times.
 
-The service independently stamps `accepted_at` on acceptance. Both values are durable and bound into the entry digest. Ledger order, causality, supersession, optimistic concurrency, and receipt freshness use ingestion sequence and frontier, not caller time. `status` with `view=history` returns both clocks plus `occurred_at_consistency` on each item. The closed classification is `within_forward_skew_allowance` when caller time is no more than five seconds ahead of service acceptance and `ahead_of_forward_skew_allowance` otherwise. It exposes only that exact comparison; it does not verify the caller timestamp or make wall clock authoritative. The same two clocks and classification are carried into a new check's bounded frozen timeline so semantic review can see forward drift.
+The service independently stamps `accepted_at` on acceptance. Both values are durable and bound into the entry digest. Ledger order, causality, supersession, optimistic concurrency, and receipt freshness use ingestion sequence and frontier, not caller time. `status` with `view=history` returns both clocks plus `occurred_at_consistency` on each item. The closed classification is `within_forward_skew_allowance` when caller time is no more than five seconds ahead of service acceptance and `ahead_of_forward_skew_allowance` otherwise. It exposes only that exact comparison; it does not verify the caller timestamp or make wall clock authoritative. The same two clocks and classification are carried into a new check's bounded frozen timeline so AI-powered review can see forward drift.
 
 ## Multi-agent work
 
@@ -364,7 +365,7 @@ Publish bounded assignments and preserve each delegate's logical writer identity
 
 ## Forbidden content
 
-Never publish chain-of-thought or hidden reasoning; full prompts, transcripts, or conversation history; credentials or secrets; whole files, repositories, or broad unrelated source. When semantic review would otherwise be blind, publish only the smallest problem-local changed hunk or enclosing symbol needed, with source, state, and coverage labels. For material completion checks, publish the smallest state-bound diff/symbol and the directly relevant test or failure excerpt; never rely on self-asserted completion prose alone.
+Never publish chain-of-thought or hidden reasoning; full prompts, transcripts, or conversation history; credentials or secrets; whole files, repositories, or broad unrelated source. When AI-powered review would otherwise be blind, publish only the smallest problem-local changed hunk or enclosing symbol needed, with source, state, and coverage labels. For material completion checks, publish the smallest state-bound diff/symbol and the directly relevant test or failure excerpt; never rely on self-asserted completion prose alone.
 
 ## Mini-flows
 

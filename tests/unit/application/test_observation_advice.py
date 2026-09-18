@@ -259,7 +259,7 @@ def test_semantic_addon_dedup_preserves_indexes_and_fences_invalid_text() -> Non
     ]
     assert [item.finding_id for item in semantic_items] == [first, second]
     assert semantic_items[0].summary == "Model-derived observation note"
-    assert semantic_items[0].detail == "Additive semantic advice over minimized evidence"
+    assert semantic_items[0].detail == "Additive AI-powered advice over minimized evidence"
     assert semantic_items[1].summary == "Second safe summary"
     assert semantic_items[1].detail == "Second safe detail"
     assert "advice_semantic_output_invalid" in semantic_items[0].coverage.known_gaps

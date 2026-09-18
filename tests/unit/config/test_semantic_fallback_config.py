@@ -1,4 +1,4 @@
-"""Issue #582: the ``[semantic_fallback]`` pairing of the two external semantic authorities."""
+"""Issue #582: the ``[semantic_fallback]`` pairing of the two external AI-powered review authorities."""
 
 from __future__ import annotations
 

@@ -913,7 +913,7 @@ def test_coordinator_empty_client_projection_completes_one_durable_receipt() -> 
 
 
 def test_catalog_resume_finds_disclosure_by_case_digest() -> None:
-    """Semantic resume must translate the public case digest to the private audit identity."""
+    """AI-powered review resume must translate the public case digest to the private audit identity."""
 
     db = _database()
     _insert_task_route(db)
@@ -1175,7 +1175,7 @@ def authorization_request_id(authorization: EgressAuthorization) -> str:
 def test_completed_network_egress_receipt_is_retrievable_and_listable() -> None:
     """A stored network receipt reads back whole; it used to raise a deferred-codec error.
 
-    Issue #730: the only receipts a real semantic review records are network egress receipts,
+    Issue #730: the only receipts a real AI-powered review records are network egress receipts,
     and ``get_receipt`` refused every one of them while ``list_receipts`` silently dropped them.
     """
 

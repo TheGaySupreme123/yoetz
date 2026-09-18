@@ -1,9 +1,9 @@
-"""Semantic cases built from a recheck whose findings are already recorded (issue #304).
+"""AI-powered review cases built from a recheck whose findings are already recorded (issue #304).
 
 A recheck re-derives a live recorded finding under its recorded id (issue #186), so the same
 ``fnd_`` ref arrives both in ``allowed_ids`` (frozen ledger material) and in this run's findings.
 The builder used to strip the overlap from ``local_check_refs`` while still emitting the finding's
-deterministic assessment, and the boundary fence then rejected its own case — every check after
+local assessment, and the boundary fence then rejected its own case — every check after
 the first died with ``coordinator_failure`` before provider dispatch.
 """
 
@@ -135,7 +135,7 @@ def _recheck() -> tuple[DeterministicCase, tuple[Finding, ...], Finding]:
 
     first_case = _case()
     first_findings = _derived_findings(first_case)
-    assert first_findings, "the recheck scenario needs at least one deterministic finding"
+    assert first_findings, "the recheck scenario needs at least one local finding"
     # A prior recorded finding this run does not re-derive: same kind and policy, but a subject
     # tuple no current policy emits, so its identity matches no check #2 candidate.
     retired = replace(

@@ -95,7 +95,7 @@ GUIDANCE_RESOURCES: Final = (
         title="Yoetz coverage and receipts",
         description=(
             "Read before the first check call. The coverage vector, why a recorded finding stays "
-            "recorded, when to stop requesting semantic review, and how to word a conclusion."
+            "recorded, when to stop requesting AI-powered review, and how to word a conclusion."
         ),
         annotations=GuidanceResourceAnnotations(audience=("assistant",), priority=0.8),
     ),

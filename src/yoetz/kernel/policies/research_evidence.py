@@ -1,4 +1,4 @@
-"""Deterministic research-evidence policy pack."""
+"""Local research-evidence policy pack."""
 
 from __future__ import annotations
 

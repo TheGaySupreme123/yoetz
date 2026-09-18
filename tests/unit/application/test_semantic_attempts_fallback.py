@@ -1,4 +1,4 @@
-"""Issue #582: the primary/fallback endpoint pair inside one durable semantic job.
+"""Issue #582: the primary/fallback endpoint pair inside one durable AI-powered review job.
 
 The fake ledger and scripted dispatch come from ``test_semantic_attempts``; this file only adds a
 second scripted dispatch for the fallback endpoint and reads which one each ordinal reached.

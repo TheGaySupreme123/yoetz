@@ -47,7 +47,7 @@ the bare `yoetz` executable. Fix that host capability outside the artifact rathe
 shell configuration, environment, or credentials.
 
 Schema success proves only format validity. It does not prove host discovery, activation, skill
-delivery, MCP runtime, observation, semantic dispatch, or workflow closure.
+delivery, MCP runtime, observation, AI-powered review dispatch, or workflow closure.
 
 ## Preview, apply, status, and rollback
 

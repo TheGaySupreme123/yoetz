@@ -61,7 +61,7 @@ verify again. Retain the pre-migration backup and this evidence through your rel
 window.
 
 Do not describe data as "verified" beyond the exact integrity/replay/coverage checks performed.
-Migration does not refresh repository evidence or re-run semantic results.
+Migration does not refresh repository evidence or re-run AI-powered review results.
 
 ## 6. Interrupted or failed migration classification
 

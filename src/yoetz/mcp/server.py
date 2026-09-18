@@ -402,7 +402,7 @@ def build_bridge_runtime(
     for an already trusted host binding and for transport tests; it is never read from a public
     workflow request.
 
-    On the policy route the initialize instructions name the configured semantic review
+    On the policy route the initialize instructions name the configured AI-powered review
     destination (issue #479). The bridge reads its configuration once here, at startup, through
     the same tolerant loader the logging sink uses; an unreadable configuration renders as an
     unknown destination rather than blocking serving. ``semantic_destination`` is an internal

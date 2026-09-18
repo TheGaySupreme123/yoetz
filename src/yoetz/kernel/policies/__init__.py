@@ -1,1 +1,1 @@
-"""Side-effect-free deterministic policy-pack package boundary."""
+"""Side-effect-free local policy-pack package boundary."""

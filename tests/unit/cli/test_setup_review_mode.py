@@ -71,7 +71,7 @@ def test_choosing_semantic_review_configures_nothing_by_itself(
     """The answer selects a wizard branch; it is not consent and binds nothing.
 
     This is what keeps the seeded-``local_only`` claim true while the prompt recommends
-    semantic review: reaching egress still needs a provider binding, a stored credential, and
+    AI-powered review: reaching egress still needs a provider binding, a stored credential, and
     the separately reauthenticated policy commit, none of which this call performs.
     """
 

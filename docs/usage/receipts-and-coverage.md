@@ -17,7 +17,7 @@ never collapse into a number:
 | authorship | How well is the author established? (`self_asserted`, `harness_observed`, …) |
 | artifact observation | Did anything observe the artifacts, or only the published claims? (`published_only`, `hook_observed`, …) |
 | content visibility | How much content was actually looked at? (`none`, `digest_only`, `targeted_excerpt`, …) |
-| provenance | Deterministic, semantic-provider, imported, or participant-asserted? |
+| provenance | Local check, AI-powered review provider, imported, or participant-asserted? |
 | freshness | Is the evidence bound to the current state? (current, stale, unknown, redacted) |
 
 **The weakest material dependency bounds the conclusion.** Use the exact enum values the protocol
@@ -51,35 +51,35 @@ a human view of the same structured record.
 
 Honest:
 
-> Yoetz found no deterministic issue in the cooperatively published record at the stated frontier;
+> Yoetz found no local-check issue in the cooperatively published record at the stated frontier;
 > artifact observation remained published-only.
 
 Not honest:
 
 > Yoetz proved the implementation is complete and correct.
 
-## The trap: a clean deterministic-only check
+## The trap: a clean local-only check
 
 A clean `deterministic_only` check is **not** an implementation review. When mode is
-`deterministic_only`, or semantic status is `not_requested`, the coverage includes
+`deterministic_only`, or AI-powered review status is `not_requested`, the coverage includes
 `semantic_review_not_requested` and completeness is coverage-incomplete — even when the verdict
 reads `no_issue_detected`.
 
 Omit `mode` to retain the configured verification default. Use `semantic_if_configured` only when
-review is known to be optional. If the user, policy, or acceptance requires semantic review, select
-`semantic_required` for the final check and subsequent final rechecks. Reserve `deterministic_only`
-for explicitly local or structural checks, or a user-authorized deliberate no-egress choice;
-disclose the limitation and keep any required review unmet.
+review is known to be optional. If the user, policy, or acceptance requires AI-powered review,
+select `semantic_required` for the final check and subsequent final rechecks. Reserve
+`deterministic_only` for explicitly local or structural checks, or a user-authorized deliberate
+no-egress choice; disclose the limitation and keep any required review unmet.
 
-When you fall back to `deterministic_only` because a semantic attempt was blocked or unavailable,
-that earlier gap is carried forward next to `semantic_review_not_requested`, so the receipt records
-that the environment refused rather than that the review was never asked for.
+When you fall back to `deterministic_only` because an AI-powered review attempt was blocked or
+unavailable, that earlier gap is carried forward next to `semantic_review_not_requested`, so the
+receipt records that the environment refused rather than that the review was never asked for.
 
 ## Prose the reviewer will not see whole
 
-Publish accepts up to 8192 bytes of prose per field. One semantic case item carries at most 4096
-bytes. Text between those bounds records cleanly and then reaches the reviewer shortened — or, for
-a whole event payload, replaced by a marker carrying only its digest. Coverage names this with
+Publish accepts up to 8192 bytes of prose per field. One AI-powered review case item carries at most
+4096 bytes. Text between those bounds records cleanly and then reaches the reviewer shortened — or,
+for a whole event payload, replaced by a marker carrying only its digest. Coverage names this with
 `semantic_case_content_over_item_limit`. Keep prose you expect a reviewer to read under 4096 bytes.
 
 ## Completion scope is declared, not inferred
@@ -115,7 +115,7 @@ Forbidden after a candidate read: "I checked and found nothing."
 - Storing imported evidence. Imported evidence never gains cooperative authorship because Yoetz
   stored it.
 - A digest. It records identity, not content inspection.
-- Constructing TOML, a path, or metadata. That is not proof of wire dispatch or semantic review.
+- Constructing TOML, a path, or metadata. That is not proof of wire dispatch or AI-powered review.
 
 Only a capability-proven, consented observation arm with real observation evidence earns
 `hook_observed`. Absent, empty, paused, or degraded observation status does not.
@@ -138,10 +138,10 @@ What does resolve a finding is proof: a later check that tested the repaired rec
 same issue absent. That check must cover the finding — the whole case, or a scope that names the
 finding's subject — with the owning policy pack run to completion, nothing suppressed, and its
 proof inputs readable. Case-wide host-observation limitations (`captured_object_unavailable`,
-`content_unselected`, `host_outcome_unavailable`, and `unpaired_event`) do not veto a deterministic
+`content_unselected`, `host_outcome_unavailable`, and `unpaired_event`) do not veto a local
 finding's otherwise clean structured-ledger proof; they remain receipt coverage limitations. This
 exception requires the finding's own recorded coverage to have been readable; host-observation
-gaps on a hook-derived finding remain tolerated, and the exception never applies to a semantic
+gaps on a hook-derived finding remain tolerated, and the exception never applies to an AI-powered
 finding. Redacted or unavailable event payloads, redacted objects, missing references,
 unknown events, weak original finding coverage, suppression, stale state, scoped-away work, or a
 failed pack still change nothing, and a check that reports the same issue again keeps it current.

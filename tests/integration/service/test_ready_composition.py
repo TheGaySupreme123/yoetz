@@ -1620,7 +1620,7 @@ async def test_daemon_unlock_installs_real_application_and_dispatches_start(
 async def test_ready_factory_deterministic_check_records_semantic_not_requested_gap(
     tmp_path: Path,
 ) -> None:
-    """Deterministic-only checks under ready composition advertise the not-requested gap."""
+    """Local-only checks under ready composition advertise the not-requested gap."""
 
     tmp_path.chmod(0o700)
     clock = _Clock()
@@ -1673,7 +1673,7 @@ async def test_ready_factory_deterministic_check_records_semantic_not_requested_
                     **common,
                     "request_id": "req_00000000-0000-4000-8000-000000000201",
                     "mode": "create",
-                    "task_title": "Semantic gap under ready composition",
+                    "task_title": "AI-powered review gap under ready composition",
                     "requested_view": "compact",
                 }
             )
@@ -1699,7 +1699,7 @@ async def test_ready_factory_deterministic_check_records_semantic_not_requested_
                             "causal_parents": [],
                             "payload": {
                                 "plan_version": 1,
-                                "summary": "Semantic gap path.",
+                                "summary": "AI-powered review gap path.",
                                 "obligation_refs": [],
                             },
                             "artifact_refs": [],
@@ -1764,9 +1764,9 @@ async def test_ready_factory_deterministic_check_records_semantic_not_requested_
         assert "semantic_review_not_requested" not in resolved.coverage.known_gaps
 
         # The exact r4 dogfood request: semantic_required against an installation with no bound
-        # provider. SEMANTIC is now advertised whenever semantic is not disabled, so this path
+        # provider. SEMANTIC is now advertised whenever AI-powered review is not disabled, so this path
         # advances through SEMANTIC_WAIT; it must still commit an honest incomplete check rather
-        # than erroring or reporting a clean deterministic pass.
+        # than erroring or reporting a clean local pass.
         frontier = resolved.result_frontier
         required = await app.check(
             CheckRequest.model_validate(
@@ -1793,7 +1793,7 @@ async def test_ready_factory_deterministic_check_records_semantic_not_requested_
         assert required.semantic_reason.value == "provider_not_configured"
         assert required.verdict.value == "incomplete_check"
 
-        # Issue #185: the stop-rule fallback. An agent whose semantic attempt the environment
+        # Issue #185: the stop-rule fallback. An agent whose AI-powered review attempt the environment
         # refused re-checks with deterministic_only, and that successor replaces
         # latest_tested_state wholesale. Without the carry-forward the only surviving disclosure
         # is semantic_review_not_requested, which reads as the agent never having asked.
@@ -1925,7 +1925,7 @@ async def test_observation_provider_fact_tracks_live_credential_within_one_gener
     """The standing-advice provider fact follows the vault, not the READY snapshot (#265).
 
     The incident session was advised connect_provider at Stop right after a
-    successful semantic dispatch because the advice fact froze
+    successful AI-powered review dispatch because the advice fact froze
     ``semantic_ready=False`` at composition. The fact source must observe a
     credential stored or discarded mid-generation without recomposition, and
     must not fire the advice from registry lag alone.
