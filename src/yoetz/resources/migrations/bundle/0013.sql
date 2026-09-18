@@ -1,6 +1,6 @@
 PRAGMA application_id = 0x594F4554;
 
--- Migration 0013 retains bounded provider usage for every physical semantic attempt (issue #715).
+-- Migration 0013 retains bounded provider usage for every physical AI-powered review attempt (issue #715).
 -- These are structural counters only: no provider response, account identity, prompt, or secret is
 -- written to the task ledger. Legacy attempts remain NULL until a new provider result is observed.
 ALTER TABLE semantic_attempts ADD COLUMN usage_input_tokens INTEGER CHECK (

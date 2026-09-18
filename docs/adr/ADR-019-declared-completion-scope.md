@@ -43,7 +43,7 @@ authoritative ledger inputs, and inferring obligations from them would make repl
    conservatively blocked; unknown never collapses to zero.
 
 5. **A declared-none reason does not purchase verification coverage.** When a completion claim
-   exists and effective declared scope is zero, a check adds exactly one deterministic case gap:
+   exists and effective declared scope is zero, a check adds exactly one local-check case gap:
    `completion_scope_undeclared` without a reason or `completion_scope_declared_none` with one.
    Either gap forces coverage-incomplete, `insufficient_coverage`, and an insufficient-coverage
    receipt. A typed reason records the scope decision; it does not prove that the decision was

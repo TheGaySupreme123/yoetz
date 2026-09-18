@@ -41,7 +41,7 @@ def endpoint_profile_data_use_reviewed(endpoint_profile_id: str, *, now: datetim
     """True when this endpoint profile ships recommendation-eligible provider data-use evidence.
 
     A policy that sets ``require_current_provider_data_use_evidence`` against a profile this
-    returns ``False`` for cannot dispatch external semantic review at all, so setup surfaces the
+    returns ``False`` for cannot dispatch external AI-powered review at all, so setup surfaces the
     pairing before the operator commits it rather than at first dispatch.
     """
 

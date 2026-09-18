@@ -16,8 +16,9 @@ If startup remains blocked without an applicable recovery path, ask the user for
 guidance; do not invent a substitute workflow. Continuing without a ledger task is permitted
 only by the bounded optional-service fallback in
 [startup failure precedence](references/coverage-and-receipts.md#startup-failure-precedence).
-It is a local work ledger and deterministic checker: it records only what participants publish and does
-not observe the workspace, enforce a process, authenticate authorship, or prove correctness.
+It is a local work ledger and checker whose local checks run on your machine, with AI-powered
+review optional: it records only what participants publish and does not observe the workspace,
+enforce a process, authenticate authorship, or prove correctness.
 
 Before the first `start`, read [workflow.md](references/workflow.md). Before the first `check`,
 read [coverage-and-receipts.md](references/coverage-and-receipts.md). Before publishing work, read
@@ -52,12 +53,12 @@ The normal sequence is:
    `status view=findings` with `filter.include_resolved: true` and actual `resolved` state. “Not
    returned” is not “resolved.” If an older
    response or other material record follows the check, recheck before the receipt.
-7. Request a receipt last and report `unanswered_finding_count`,
-   `receipt_blocking_finding_count`, the checked frontier, semantic status/reason, and coverage
-   limits. Stop repeating an unchanged check when proof still cannot qualify; disclose the blocker.
+7. Request a receipt last and report `unanswered_finding_count`, `receipt_blocking_finding_count`,
+   the checked frontier, AI-powered review status/reason, and coverage limits. Stop repeating an
+   unchanged check when proof still cannot qualify; disclose the blocker.
 
 A portable plugin is a carrier only. Its presence, validation, installation, discovery, or host
-activation grants no privacy authority, provider authority, observation consent, semantic-review
+activation grants no privacy authority, provider authority, observation consent, AI-powered review
 coverage, or completion proof. MCP ownership is mode-specific and exclusive:
 
 - `external_registration` omits `mcp.json`; the existing host registration remains the sole owner.
@@ -69,7 +70,7 @@ Host recovery follows that integration's reported continuation; installed plugin
 live MCP runtime. Read the Recovery section of
 [coverage-and-receipts.md](references/coverage-and-receipts.md) when a route or binding fails.
 A host auto-review hold is not a Yoetz result; preserve the exact proposed
-request and do not switch to deterministic-only while required approval is pending.
+request and do not switch to local-only while required approval is pending.
 
 Same-task recovery comes before a new task. On an ambiguous write, use `status view=operation` with
 `filter.operation_request_id` set to the exact write request ID. Replay the exact original body with

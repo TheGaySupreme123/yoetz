@@ -625,7 +625,7 @@ class LocalContentCaptureAuthority:
 
     This snapshot contains no plaintext. Its generation and exact profile set
     are read under the owner-private local-store lock and are rechecked by the
-    semantic service immediately before it opens an object or dispatches a
+    AI-powered review service immediately before it opens an object or dispatches a
     packet. The local store remains authoritative while task-bundle consent
     propagation is pending.
     """
@@ -1183,7 +1183,7 @@ class _WorkspaceState:
     # separate from the human-readable consent fields because those fields
     # can return to an earlier value (pause/resume and disable/enable).  A
     # fresh nonce on every real authority transition prevents that ABA from
-    # revalidating an old semantic case.
+    # revalidating an old AI-powered review case.
     content_capture_epoch: str | None = None
     quarantine_evicted_count: int = 0
     quarantine_reclaimed_count: int = 0
@@ -4040,7 +4040,7 @@ class LocalObservationStore:
         plan_path_digests: object = (),
         semantic_addon: object | None = None,
     ) -> AdviceSnapshot | None:
-        """Recompute deterministic (and optional semantic) advice from retained envelopes."""
+        """Recompute local (and optional AI-powered) advice from retained envelopes."""
 
         from yoetz.application.observation_advice import (
             ObservationAdviceBuildInput,

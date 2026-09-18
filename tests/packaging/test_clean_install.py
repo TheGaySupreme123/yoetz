@@ -9,7 +9,7 @@ enables only its own named capability while leaving base behavior unchanged.
 
 Scope notes (documented, not silently narrowed):
 
-* A full "deterministic receipt" for the six-operation slice requires an unlocked vault. Unlocking
+* A full "local-only receipt" for the six-operation slice requires an unlocked vault. Unlocking
   a passphrase vault for real goes through ``TrustedForegroundConsole``, which deliberately
   requires a genuine foreground console (on POSIX it opens ``/dev/tty`` and checks
   ``os.tcgetpgrp``/isatty plus matching stdin/stderr terminal endpoints) -- a real security control,

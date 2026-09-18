@@ -8,11 +8,11 @@ and receipts before `check`. Setup/consent, vault/credential operations, transcr
 recommendation decisions route to the corresponding sections of request templates only when
 needed. Already-read guidance need not be fetched again while present in context.
 
-Use `semantic_if_configured` only when semantic review is known to be optional; omit `mode` when
+Use `semantic_if_configured` only when AI-powered review is known to be optional; omit `mode` when
 relying on the configured default. Select `semantic_required` for an explicit user requirement,
-effective policy, or named acceptance criterion requiring independent semantic judgment. Preserve
+effective policy, or named acceptance criterion requiring independent AI-powered judgment. Preserve
 required review and all host/disclosure approval boundaries. Installed guidance bytes alone prove
-neither activation nor semantic dispatch.
+neither activation nor AI-powered review dispatch.
 
 Both Cursor renderers select `skills/cursor/yoetz/SKILL.md`; the standalone generic portable export
 retains its neutral entrypoint. Cursor's entrypoint respects the active Plan/Ask/Agent mode, separates
@@ -172,7 +172,7 @@ Successful authentication consumes that pending once before install, replace, or
 Cancellation, an unavailable policy or PAM stack, timeout, a wrong or empty password, a
 stale/reused/mismatched pending, a terminal without the password, or `--accept` alone fails
 before mutation. This proof is installation authority only; it does not prove discovery,
-activation, skill delivery, MCP runtime/model use, hooks, observation, semantic review, or
+activation, skill delivery, MCP runtime/model use, hooks, observation, AI-powered review, or
 workflow completion.
 
 Replaying the same request and digest after a committed install or remove whose result was lost
@@ -227,25 +227,24 @@ Then invoke the exact intended Yoetz launcher to preview and install the project
 ```
 
 Install the native plugin with `--mcp-ownership external-registration` through the authenticated
-plugin lifecycle. Its launcher and isolated root must match the project entry. The project entry
-is `.cursor/mcp.json`, has the pinned launcher plus
-`mcp serve --host cursor --project-root ${workspaceFolder}`, and carries
-only the validated `YOETZ_ISOLATED_ROOT` environment binding when isolated. Strict mode appends
-`--semantic off`; omitting `--route-profile` preserves an existing owned route. The project
-registration command never launches a service and never grants semantic egress or host trust.
-The startup selector is validated against the exact owned project entry, launcher, route, and
-directory/configuration identity. It must match a repository in the active client's validated
-root inventory; empty or unsupported roots, malformed responses, timeouts, and mismatches still
-fail. A changed registration or selected repository retires the MCP session. Use the existing
-project admission commands for an authorized policy route.
+plugin lifecycle. Its launcher and isolated root must match the project entry. The project entry is
+`.cursor/mcp.json`, has the pinned launcher plus `mcp serve --host cursor --project-root
+${workspaceFolder}`, and carries only the validated `YOETZ_ISOLATED_ROOT` environment binding when
+isolated. Strict mode appends `--semantic off`; omitting `--route-profile` preserves an existing
+owned route. The project registration command never launches a service and never grants AI-powered
+review egress or host trust. The startup selector is validated against the exact owned project
+entry, launcher, route, and directory/configuration identity. It must match a repository in the
+active client's validated root inventory; empty or unsupported roots, malformed responses, timeouts,
+and mismatches still fail. A changed registration or selected repository retires the MCP session.
+Use the existing project admission commands for an authorized policy route.
 
 `project-mcp status` reports configuration ownership separately from unknown host trust and
 unobserved runtime binding. Open that project in Cursor, activate the changed server through
 Cursor's MCP controls, and use a fresh agent conversation. After changing the entry, disable and
 enable its project source to create a new connection, then verify the active command: Reload can
 retain an older process or cached definition. Verify a model-controlled `start`, native hook
-evidence, captured content, and authorized semantic dispatch separately. Multiple distinct roots
-still require a validated selector that matches one host-reported repository. Codex and Claude
+evidence, captured content, and authorized AI-powered review dispatch separately. Multiple distinct
+roots still require a validated selector that matches one host-reported repository. Codex and Claude
 Code retain their own existing registration paths.
 
 Reverse the registration with `project-mcp preview-remove`, then `project-mcp remove` using the
@@ -365,14 +364,14 @@ server the same way is undocumented and unverified; the acceptance cell in issue
 
 The other workflow calls have a local effect: `start`, `publish_work`, `respond`, and `receipt`
 append or read records in the local Yoetz ledger, while `status` and `read_guidance` read local or
-packaged state. None of these calls publishes to GitHub or invokes a semantic provider. This
-describes the effect after Yoetz receives the call; it does not predict Cursor's admission decision.
-Cursor Auto-review may still hold a non-allowlisted local call as a shared-state or external-workflow
-action, and Cursor provides no hook event for that classifier decision.
+packaged state. None of these calls publishes to GitHub or invokes an AI-powered review provider.
+This describes the effect after Yoetz receives the call; it does not predict Cursor's admission
+decision. Cursor Auto-review may still hold a non-allowlisted local call as a shared-state or
+external-workflow action, and Cursor provides no hook event for that classifier decision.
 
 For a held local call, use Cursor's visible approval control for that exact call if the workflow is
 authorized to continue. A hold before invocation is not a Yoetz result and creates no operation,
-semantic status, provider attempt, or receipt. After approval, let Cursor execute the exact held
+review status, provider attempt, or receipt. After approval, let Cursor execute the exact held
 call and continue from its returned result. If Cursor requires resubmission or the response is
 missing, retry the same request body and `request_id`. If the call may have started but its result
 is ambiguous, use `status view=operation` with the original request identity or replay that same
@@ -528,8 +527,8 @@ The bounded staging handoff can therefore survive a service restart, while a rev
 ticket remains an honest content gap. The installed Cursor IDE `3.19.7` fact is a candidate local
 host observation while this runbook's pinned compatibility cells remain unchanged; it cannot
 certify the ordinary profile without an exact isolated fixture and receipt evidence for native hook
-delivery, accepted content, semantic selection, and influence.
-Native semantic selection uses the accepted tool event's durable session route and does not
+delivery, accepted content, AI-powered review selection, and influence.
+Native AI-powered review selection uses the accepted tool event's durable session route and does not
 require an approved-check policy. Local capture consent and repository disclosure permission
 remain separate requirements.
 
@@ -587,7 +586,7 @@ content, independently of structural capacity. The one-second native content dra
 host hook deadlines still apply. A timeout, cancellation, incomplete content group, or service
 failure leaves partial/unknown coverage or `content_capture_unavailable` where the boundary
 permits; it is never silently converted to a successful routine summary. Capture status proves
-configuration only, not accepted bytes, semantic selection, or receipt coverage.
+configuration only, not accepted bytes, AI-powered review selection, or receipt coverage.
 
 Cursor has no `codex exec --json` import surface. Issue #301's bounded import authorization makes
 no Cursor adapter change; Cursor evidence continues through cooperative MCP and native
@@ -852,8 +851,8 @@ Cursor is not an allowlisted `yoetz consent authorize` attestation client in v0.
 agent-safe pending status and direct the user to a supported Codex attestation or local trusted
 command, but it must not emulate `vault_initialize` or `vault_passphrase_rotate` authorization.
 It still guides setup, installation, and settings choices in normal conversation and leaves each
-supported product choice with the user. When semantic review is the stated goal, it recommends
-Expanded first and explains Assisted as the lower-disclosure semantic option. It may show the full
+supported product choice with the user. When AI-powered review is the stated goal, it recommends
+Expanded first and explains Assisted as the lower-disclosure AI-powered option. It may show the full
 v6 repository privacy preview, but its missing chat-authority capability is a technical boundary:
 give the shortest exact trusted-local continuation and never silently downgrade the chosen recipe,
 provider, or model.
@@ -875,10 +874,10 @@ the 2026-08-29 measurement above recorded for a locked cell.
 | SDK fixture is present | metadata-only experimental scaffolding; no SDK activation or model-use claim exists |
 | Model sees only a compact sentence and loses structured fields | the native plugin is stale or a portable/external route won; verify the winning source includes `--host cursor`, reload the isolated app, and retry |
 | Installed MCP executable changed but Cursor still shows the old tool inventory | fully quit that exact Cursor testing app; Reload Window is not enough if a shared MCP helper survived. Verify its process exited, relaunch it with the same isolated profile, and re-prove discovery plus `tools/list` before claiming activation. `mcp.runtime.activation=full_restart_required` is this state. |
-| `semantic_required` returns `route_semantic_ceiling` while plugin status says route `policy` | activation mismatch, not an owner privacy decision; inspect `mcp.runtime`, fully quit the host, and do not mint a fresh semantic check against the stale process |
+| `semantic_required` returns `route_semantic_ceiling` while plugin status says route `policy` | activation mismatch, not an owner privacy decision; inspect `mcp.runtime`, fully quit the host, and do not mint a fresh AI-powered check against the stale process |
 | MCP resources load but every workflow call fails after a runtime upgrade | a pre-upgrade Yoetz service may still own the fixed endpoint; restart that exact service through the user-selected supervisor, then retry and require a returned task/session before claiming use |
 | Hook fires but status stays published-only | configuration/trigger is not accepted observation evidence |
-| Strict route has no semantic review | expected route ceiling; authorize a separate policy route when intended |
+| Strict route has no AI-powered review | expected route ceiling; authorize a separate policy route when intended |
 | Modified plugin cannot remove | preserved local change; inspect and resolve manually |
 | Install refuses `authority_required` after `--accept` | no `plugin_artifact_apply` review is prepared for that exact digest |
 | Install refuses `human_authority_unavailable` | the platform presence cell refused: on macOS LocalAuthentication was cancelled, unavailable, or timed out; on Linux or WSL 2 the password was wrong, empty, or cancelled, the command did not run from your own foreground terminal, or PAM is unavailable; any other platform has no cell; no mutation occurred |
@@ -896,9 +895,9 @@ dispatch without provenance, or workflow completion without a current receipt.
 
 A Cursor policy route may request the service-owned `codex-chatgpt-subscription@1` evaluator, but
 Cursor receives no Codex OAuth credential, home, app-server handle, or evaluator tool authority.
-Cursor plugin/MCP/hook activation and Cursor model use do not prove that semantic dispatch happened.
-A strict Cursor route must return `route_semantic_ceiling` with zero child launch. Follow the
-[subscription evaluator runbook](codex-subscription-evaluator.md) and keep host activation,
+Cursor plugin/MCP/hook activation and Cursor model use do not prove that AI-powered review dispatch
+happened. A strict Cursor route must return `route_semantic_ceiling` with zero child launch. Follow
+the [subscription evaluator runbook](codex-subscription-evaluator.md) and keep host activation,
 accepted observation, runtime evidence, privacy receipt, corrective influence, and workflow receipt
 as separate cells.
 
@@ -908,13 +907,13 @@ API provider serves a given attempt is a service-side dispatch decision recorded
 applies to dispatch authority regardless of which endpoint serves.
 
 
-### Large tasks and semantic failure recovery (#674–#676)
+### Large tasks and AI-powered review failure recovery (#674–#676)
 
-This host uses the shared service status snapshot cache and bounded semantic reference selection.
-A reduced reference scope reports `semantic_reference_scope_reduced`; it is not full-task semantic
-coverage. `failed/case_capacity_exceeded` and `semantic_case_capacity_exceeded` mean the required
-packet could not fit before any provider attempt. Select a smaller claim/obligation scope for a new
-check. Shorter prose alone need not fix structural capacity.
+This host uses the shared service status snapshot cache and bounded AI-powered review reference
+selection. A reduced reference scope reports `semantic_reference_scope_reduced`; it is not full-task
+AI-powered review coverage. `failed/case_capacity_exceeded` and `semantic_case_capacity_exceeded`
+mean the required packet could not fit before any provider attempt. Select a smaller
+claim/obligation scope for a new check. Shorter prose alone need not fix structural capacity.
 
 For `coordinator_failure`, use the check's original request ID with
 `yoetz service diagnostics --request-id req_…` to read bounded failure stages. Dispatch entry can

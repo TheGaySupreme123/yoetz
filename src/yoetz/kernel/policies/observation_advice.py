@@ -1,4 +1,4 @@
-"""Deterministic observation-advice policy pack over live observation envelopes."""
+"""Local observation-advice policy pack over live observation envelopes."""
 
 from __future__ import annotations
 
@@ -142,7 +142,7 @@ class ObservationInspectFact:
 
 @dataclass(frozen=True, slots=True)
 class ObservationCompositionFact:
-    # semantic_ready is the structural usability of the configured semantic
+    # semantic_ready is the structural usability of the configured AI-powered review
     # path — endpoint bound, factory available, configured credential present.
     # It claims nothing about repository-scoped dispatch authority, which is
     # resolved per check (#265).
@@ -588,7 +588,7 @@ def _provider_not_ready(
     composition: ObservationCompositionFact | None,
 ) -> list[ObservationAdviceCandidate]:
     # connect_provider is a standing machine action, so it must rest on facts
-    # that establish the operator has something to connect: semantic wanted
+    # that establish the operator has something to connect: AI-powered review wanted
     # but the configured path is structurally unusable. Absence from the
     # connected registry is not such a fact — activation is lazy and
     # repository-scoped, re-established automatically on dispatch (#265) —

@@ -3,7 +3,7 @@
 2026-07-28 run 4 dogfood: every ``check`` that produced at least one finding committed durably
 (``check_recorded`` and ``finding_recorded`` landed, the frontier advanced) and then failed to
 project, so the caller received ``INTERNAL_ERROR`` / ``response_projection_failed`` and never
-learned the verdict, the finding, or the semantic outcome. ``findings[]`` is the delivery channel
+learned the verdict, the finding, or the AI-powered review outcome. ``findings[]`` is the delivery channel
 for a check's entire answer, and it had never worked in any mode; the only reason this stayed
 hidden through three dogfoods is that no check had ever produced a finding.
 
@@ -13,7 +13,7 @@ configured ``strict=True``, where only a ``dict`` (or an instance of the target 
 for a nested model field; the scalar top-level fields sailed through while every nested entry was
 rejected. Behind that, the check result's ``projected_finding`` requires ``provenance`` to be
 present and nullable, while the ``findings/finding-1.0.0`` encoding events and receipts share
-leaves it absent on a deterministic finding — a second rejection the first one had masked.
+leaves it absent on a local finding — a second rejection the first one had masked.
 
 These cases run the real ready composition — real vault objects, the real privacy coordinator and
 shipped default policy, the real closed-model validation the daemon runs for an MCP bridge client —
@@ -86,7 +86,7 @@ _DIGEST = "sha256:" + "7" * 64
 async def _semantic_challenge(
     frozen: FrozenCase, findings: tuple[Finding, ...]
 ) -> FinalSemanticEvaluation:
-    """Hermetic second reviewer that challenges one real deterministic finding."""
+    """Hermetic second reviewer that challenges one real local finding."""
 
     del frozen
     assert findings
@@ -325,7 +325,7 @@ async def test_check_with_a_finding_projects_a_complete_success(
     assert finding["policy_version"] == expected.policy_version
     assert isinstance(finding["subject_frontier"], Mapping)
     assert isinstance(finding["coverage"], Mapping)
-    # A deterministic finding has no semantic provenance; the check result's projected finding
+    # A local finding has no AI-powered review provenance; the check result's projected finding
     # requires the key all the same, as an explicit null.
     assert "provenance" in finding
     executions = cast(list[Mapping[str, JsonValue]], projected["policy_executions"])

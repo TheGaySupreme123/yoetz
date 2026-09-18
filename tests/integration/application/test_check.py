@@ -735,7 +735,7 @@ async def test_drift_gap_is_reread_live_never_carried_after_remove(tmp_path: Pat
     A strict check with an applied-policy record carries both gaps; after
     ``clear_applied_route`` (what ``mcp remove`` runs on UNREGISTER→ABSENT) a fresh
     strict check re-reads live state and carries only the ceiling gap, and a
-    deterministic-only successor of the drift check carries only the ceiling gap.
+    local-only successor of the drift check carries only the ceiling gap.
     """
 
     from yoetz.application.applied_mcp_route import clear_applied_route, record_applied_route
@@ -778,7 +778,7 @@ async def test_drift_gap_is_reread_live_never_carried_after_remove(tmp_path: Pat
     )
     assert reread.coverage.known_gaps == ("optional_semantic_review_blocked_by_policy",)
 
-    # A deterministic-only successor of the drift check carries the ceiling gap only.
+    # A local-only successor of the drift check carries the ceiling gap only.
     frozen = _case()
     successor = replace(
         frozen.case,
@@ -841,7 +841,7 @@ async def test_semantic_evaluator_crash_degrades_to_not_run_without_false_clean(
     assert timeout_result.verdict.value != "no_issue_detected"
     assert SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP in timeout_result.coverage.known_gaps
 
-    # Deterministic findings remain intact (same unsupported-claim material from the frozen case).
+    # Local findings remain intact (same unsupported-claim material from the frozen case).
     assert {finding.kind.value for finding in crash_result.findings} == {
         finding.kind.value for finding in timeout_result.findings
     }
@@ -1083,7 +1083,7 @@ async def test_rejected_judgment_commits_the_check_instead_of_failing_the_reques
     Regression for a live failure: the post-validation ``ValueError`` escaped ``execute_check_commit``
     (which caught only ``ProtocolValueError``), reached the daemon catch-all, and became a
     non-retryable ``INVALID_REQUEST`` with no correlation id. No check was recorded at all, so the
-    deterministic findings were lost and nothing said why. ``SemanticStatus.INVALID`` /
+    local findings were lost and nothing said why. ``SemanticStatus.INVALID`` /
     ``SEMANTIC_JUDGMENT_REJECTED`` existed for exactly this and had never once been written.
 
     The structural fence is unreachable through the ordinary call (the coordinator passes the frozen
@@ -1110,7 +1110,7 @@ async def test_rejected_judgment_commits_the_check_instead_of_failing_the_reques
     assert result.semantic_provenance is not None
     assert result.semantic_provenance.status is SemanticStatus.INVALID
     assert result.semantic_provenance.reason is SemanticReason.SEMANTIC_JUDGMENT_REJECTED
-    # The whole point: the deterministic findings the user paid for still committed.
+    # The whole point: the local findings the user paid for still committed.
     assert result.findings
     assert all(finding.origin.value == "deterministic" for finding in result.findings)
     assert app.ledger.commit_count == 1

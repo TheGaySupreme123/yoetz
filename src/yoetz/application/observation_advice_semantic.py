@@ -1,11 +1,11 @@
-"""Bounded asynchronous semantic review for observation advice (issue #619).
+"""Bounded asynchronous AI-powered review for observation advice (issue #619).
 
 Hook ingest never calls a provider. The advice builder asks the scheduler for the durable
 attempt that matches the current evidence basis; when none exists it enqueues one minimized
 packet and reports ``advice_semantic_pending``. A generation-fenced background worker later
 claims the row, resolves repository-scoped provider authority at dispatch time, performs the
 privacy-gated attempt, and records the outcome. Only a ``succeeded`` row with validated output
-may add semantic advice; every other state stays a truthful bounded coverage gap.
+may add AI-powered advice; every other state stays a truthful bounded coverage gap.
 """
 
 from __future__ import annotations
@@ -276,7 +276,7 @@ def _repository_for(store: object) -> ObservationAdviceSemanticRepository | None
 
 @dataclass
 class ObservationAdviceSemanticWorker:
-    """Run one serialized, generation-fenced durable semantic attempt at a time."""
+    """Run one serialized, generation-fenced durable AI-powered review attempt at a time."""
 
     repository: ObservationAdviceSemanticRepository
     dispatch: AdviceSemanticDispatch
@@ -326,7 +326,7 @@ class ObservationAdviceSemanticWorker:
 
 @dataclass(frozen=True, slots=True)
 class AdviceSemanticDrainHandle:
-    """One workspace's durable semantic worker plus optional post-attempt hook."""
+    """One workspace's durable AI-powered worker plus optional post-attempt hook."""
 
     workspace_commitment: str
     worker: ObservationAdviceSemanticWorker
@@ -336,7 +336,7 @@ class AdviceSemanticDrainHandle:
 
 @dataclass
 class ObservationAdviceSemanticSupervisor:
-    """Generation-fenced background semantic advice owned by the ready lifecycle.
+    """Generation-fenced background AI-powered advice owned by the ready lifecycle.
 
     Mirrors ``ObservationVerificationSupervisor``: the hook path only enqueues and wakes it;
     provider attempts never execute inside a hook RPC budget. Restart recovery registers

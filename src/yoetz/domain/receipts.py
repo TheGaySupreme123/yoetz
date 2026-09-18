@@ -113,9 +113,9 @@ _NO_OBLIGATIONS_REASON_VALUES: Final = frozenset(
     {"exploratory_scope_unknown", "no_material_change", "single_atomic_change"}
 )
 
-# Structural receipt/check coverage gap codes for optional semantic relevance review.
+# Structural receipt/check coverage gap codes for optional AI-powered relevance review.
 # Distinct from policy-block; not-configured and evaluator failure share honest not-run wording.
-# semantic_review_not_requested marks every deterministic-only check (semantic never attempted).
+# semantic_review_not_requested marks every local-only check (AI-powered review never attempted).
 SEMANTIC_REVIEW_NOT_CONFIGURED_GAP: Final = "semantic_review_not_configured"
 SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP: Final = "semantic_relevance_review_not_run"
 # The review ran, but the inference channel withheld categories the review profile
@@ -126,7 +126,7 @@ SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP: Final = "semantic_review_context_withheld"
 # rather than letting the drop look like the reviewer having found nothing there.
 SEMANTIC_CHALLENGES_REJECTED_GAP: Final = "semantic_challenges_rejected"
 SEMANTIC_REVIEW_NOT_REQUESTED_GAP: Final = "semantic_review_not_requested"
-# Publish-side prose accepts twice what one semantic case item can carry, so text that publishes
+# Publish-side prose accepts twice what one AI-powered review case item can carry, so text that publishes
 # cleanly can still reach the reviewer shortened or replaced by a bounded-omission marker. The
 # gap names that window; without it the drop was reported as an ordinary `not_selected` omission
 # and read as a selection-policy choice the author had already made.
@@ -150,7 +150,7 @@ _SEMANTIC_REVIEW_NOT_RUN_GAPS: Final = frozenset(
 
 
 def semantic_coverage_gap_code(status: SemanticStatus, reason: SemanticReason) -> str | None:
-    """Map a terminal semantic outcome to the receipt/check structural gap code, or None.
+    """Map a terminal AI-powered review outcome to the receipt/check structural gap code, or None.
 
     This lives beside the gap constants rather than in the check application module because
     append-time receipt-capacity admission must fold the same code the receipt builder will
@@ -619,8 +619,8 @@ class ReceiptDocument:
     gaps: tuple[ReceiptGap, ...]
     redactions: tuple[ReceiptRedaction, ...]
     sections: tuple[ReceiptSection, ...]
-    # A receipt carries the provenance of the applicable semantic check when one exists.  The
-    # field is optional so historical deterministic receipts keep their exact frozen bytes and
+    # A receipt carries the provenance of the applicable AI-powered check when one exists.  The
+    # field is optional so historical local-only receipts keep their exact frozen bytes and
     # old readers can continue to omit it.
     semantic_provenance: SemanticProvenance | None = None
 
@@ -1086,7 +1086,7 @@ def receipt_document_to_json(document: ReceiptDocument) -> dict[str, object]:
         "redactions": [_redaction_to_json(value) for value in document.redactions],
         "sections": [_section_to_json(value) for value in document.sections],
     }
-    # Omit absent provenance rather than emitting null: deterministic and historical receipt
+    # Omit absent provenance rather than emitting null: local-only and historical receipt
     # documents therefore retain their exact pre-extension bytes.
     if document.semantic_provenance is not None:
         result["semantic_provenance"] = semantic_provenance_to_json(document.semantic_provenance)
@@ -1227,16 +1227,17 @@ def render_receipt_compact(document: ReceiptDocument) -> str:
         )
     if OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP in gap_codes:
         return (
-            prefix + "coverage is insufficient because optional semantic review was blocked by "
+            prefix + "coverage is insufficient because optional AI-powered review was blocked by "
             "the strict route ceiling while the last install applied the policy route. If this "
             "strict route was not intended, re-run `yoetz integrate codex mcp preview` and "
             "`yoetz integrate codex mcp install --route-profile policy`, then start a fresh "
-            "Codex process. No provider attempt or semantic finding was recorded."
+            "Codex process. No provider attempt or AI-powered finding was recorded."
         )
     if OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP in gap_codes:
         return (
-            prefix + "coverage is insufficient because optional semantic review was blocked before "
-            "dispatch by network-egress policy. No provider attempt or semantic finding was "
+            prefix
+            + "coverage is insufficient because optional AI-powered review was blocked before "
+            "dispatch by network-egress policy. No provider attempt or AI-powered finding was "
             "recorded."
         )
     if gap_codes & _SEMANTIC_REVIEW_NOT_RUN_GAPS:
@@ -1245,13 +1246,14 @@ def render_receipt_compact(document: ReceiptDocument) -> str:
             noun = "finding" if count == 1 else "findings"
             verb = "remains" if count == 1 else "remain"
             return (
-                prefix + f"{count} unresolved {noun} {verb}; semantic relevance review was not run."
+                prefix
+                + f"{count} unresolved {noun} {verb}; AI-powered relevance review was not run."
             )
         if document.conclusion is ReceiptConclusion.INSUFFICIENT_COVERAGE:
-            return prefix + "coverage is insufficient; semantic relevance review was not run."
+            return prefix + "coverage is insufficient; AI-powered relevance review was not run."
         return (
-            prefix + "no unresolved deterministic issue was found in the published record; "
-            "semantic relevance review was not run."
+            prefix + "no unresolved local issue was found in the published record; "
+            "AI-powered relevance review was not run."
         )
     if {
         "import_source_range_not_universal",
@@ -1272,10 +1274,9 @@ def render_receipt_compact(document: ReceiptDocument) -> str:
             and waiver.waiver_expiry >= document.generated_at
         ):
             return (
-                prefix
-                + "no unresolved deterministic findings are presented because the one finding "
-                f"has an active local-human finding-only waiver through {waiver.waiver_expiry.wire}. "
-                "The waiver does not apply to another frontier."
+                prefix + "no unresolved local findings are presented because the one finding "
+                "has an active finding-only waiver, recorded by a local human, through "
+                f"{waiver.waiver_expiry.wire}. The waiver does not apply to another frontier."
             )
         if document.conclusion is ReceiptConclusion.UNRESOLVED_FINDINGS_REMAIN:
             if not same_frontier:
@@ -1293,8 +1294,8 @@ def render_receipt_compact(document: ReceiptDocument) -> str:
     if any(finding.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED for finding in unresolved):
         return (
             prefix
-            + "one advisory semantic finding remains unresolved. Semantic review completed, but "
-            "it does not upgrade deterministic assurance or prove correctness."
+            + "one advisory AI-powered finding remains unresolved. AI-powered review completed, but "
+            "it does not upgrade local assurance or prove correctness."
         )
     if document.conclusion is ReceiptConclusion.UNRESOLVED_FINDINGS_REMAIN:
         if len(unresolved) == 3 and len(document.findings) == 3:
@@ -1320,8 +1321,7 @@ def render_receipt_compact(document: ReceiptDocument) -> str:
     )
     if outstanding_work == "Declared obligations are all resolved.":
         return (
-            prefix
-            + "declared obligations are all resolved. No unresolved deterministic findings were "
+            prefix + "declared obligations are all resolved. No unresolved local findings were "
             "recorded; this is not proof of correctness."
         )
 
@@ -1335,11 +1335,10 @@ def render_receipt_compact(document: ReceiptDocument) -> str:
     )
     if "referenced immutable object was available" in limitations:
         return (
-            prefix + "no unresolved deterministic findings were recorded. The referenced immutable "
+            prefix + "no unresolved local findings were recorded. The referenced immutable "
             "object was available at build time."
         )
     return (
-        prefix
-        + "no unresolved deterministic findings were recorded. Coverage is current cooperative "
-        "deterministic evidence; this is not proof of correctness."
+        prefix + "no unresolved local findings were recorded. Coverage is current cooperative "
+        "local evidence; this is not proof of correctness."
     )

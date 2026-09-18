@@ -449,7 +449,7 @@ class YoetzRuntime:
         if recipe == "metadata_only":
             return PrivacyRecommendation(
                 recipe,
-                "It enables semantic review while disclosing the least that still works, and "
+                "It enables AI-powered review while disclosing the least that still works, and "
                 "asks before every provider request.",
                 "In exchange, the reviewer sees structural metadata only, so it cannot judge "
                 "whether a claim is actually supported.",
@@ -458,7 +458,7 @@ class YoetzRuntime:
             recipe,
             "No current eligible exact provider route is configured, so this keeps network "
             "egress off entirely.",
-            "In exchange, there is no external semantic review at all.",
+            "In exchange, there is no external AI-powered review at all.",
         )
 
     # -- integration ----------------------------------------------------
@@ -1274,7 +1274,7 @@ class YoetzRuntime:
         layers.append(
             ReadinessLayer(
                 "local_checks",
-                "Local deterministic checks",
+                "Local checks",
                 LayerState.VERIFIED if vault.ready else LayerState.UNPROVEN,
                 detail="" if vault.ready else "the local service must be ready first",
             )
@@ -1404,10 +1404,10 @@ class YoetzRuntime:
             # Host admission is the owner's per-host, per-repository decision to let an
             # automatic reviewer admit the check (issue #467). Its own layer, because a ready
             # installation with no admission is exactly the state where a Claude auto-mode,
-            # Codex auto_review, or Cursor Auto-review session holds every semantic check.
+            # Codex auto_review, or Cursor Auto-review session holds every AI-powered check.
             ReadinessLayer(
                 "host_admission",
-                "Host auto-review admits the semantic check",
+                "Host auto-review admits the AI-powered check",
                 _host_admission_layer_state(provider),
                 detail=_host_admission_detail(provider),
             ),
@@ -1529,8 +1529,8 @@ class YoetzRuntime:
             limitations=gaps,
             semantic_available=False,
             freshness=str(getattr(coverage, "ledger_freshness", "unknown")),
-            verified=("deterministic checks recorded in this receipt",),
-            not_verified=("external semantic review did not contribute to this receipt",),
+            verified=("local checks recorded in this receipt",),
+            not_verified=("external AI-powered review did not contribute to this receipt",),
         )
 
     def _frontier(self, session: _WorkSession) -> object:

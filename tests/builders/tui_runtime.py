@@ -97,13 +97,13 @@ RECOMMEND_PRIVATE = PrivacyRecommendation(
     "private",
     "No current eligible exact provider route is configured, so this keeps network egress off "
     "entirely.",
-    "In exchange, there is no external semantic review at all.",
+    "In exchange, there is no external AI-powered review at all.",
 )
 # Verbatim from `YoetzRuntime.privacy_recommendation`. A fake that paraphrases lets a test
 # assert wording the product does not actually say.
 RECOMMEND_METADATA_ONLY = PrivacyRecommendation(
     "metadata_only",
-    "It enables semantic review while disclosing the least that still works, and asks before "
+    "It enables AI-powered review while disclosing the least that still works, and asks before "
     "every provider request.",
     "In exchange, the reviewer sees structural metadata only, so it cannot judge whether a "
     "claim is actually supported.",
@@ -421,7 +421,7 @@ class FakeRuntime:
                 ReadinessLayer("mcp_verified", "MCP verified", LayerState.VERIFIED),
                 ReadinessLayer("service_reachable", "Local service reachable", LayerState.VERIFIED),
                 ReadinessLayer("vault_ready", "Vault ready", LayerState.VERIFIED),
-                ReadinessLayer("local_checks", "Local deterministic checks", LayerState.VERIFIED),
+                ReadinessLayer("local_checks", "Local checks", LayerState.VERIFIED),
                 ReadinessLayer(
                     "semantic_review_ready", "Deeper review ready", LayerState.NOT_CONFIGURED
                 ),

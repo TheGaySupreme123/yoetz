@@ -46,16 +46,16 @@ authority at all.
    JSON-output, named-subcommand, and MCP-server invocation keeps its exact previous bytes,
    including the help text for a bare non-TTY invocation.
 
-2. **First run is folded into the interface rather than preceding it (amends ADR-012 decision 2
-   as ADR-013 left it).** There is no separate wizard pass followed by a menu. A terminal with no
+2. **First run is folded into the interface rather than preceding it (amends ADR-012 decision 2 as
+   ADR-013 left it).** There is no separate wizard pass followed by a menu. A terminal with no
    completion marker opens the interface in first-run mode, where welcome, detection, trust,
    preview, approval, activity, and finish are the opening steps of the same surface; completed
-   steps collapse into concise lines in the transcript above the active one. There is no
-   "step N of M" chrome, because the number of steps genuinely depends on what was found.
-   Founder-authorized amendment (2026-07-29): the opening flow ends with an explicit Local only
-   versus Add semantic review choice. Semantic review reuses the existing provider credential and
-   privacy ceremonies through terminal suspension; the completion marker is not written when
-   either ceremony is incomplete.
+   steps collapse into concise lines in the transcript above the active one. There is no "step N of
+   M" chrome, because the number of steps genuinely depends on what was found. Founder-authorized
+   amendment (2026-07-29): the opening flow ends with an explicit Local only versus Add AI-powered
+   review choice. AI-powered review reuses the existing provider credential and privacy ceremonies
+   through terminal suspension; the completion marker is not written when either ceremony is
+   incomplete.
 
    The privacy ceremony is scoped to the canonical repository derived by the service from the
    interface session's actual working directory. Git branches and linked worktrees share the common
@@ -115,8 +115,8 @@ authority at all.
 9. **Readiness layers are never collapsed.** Harness detected, MCP registered, MCP verified,
    plugin installed, hooks installed, project consent active, policy digest trusted, local
    service reachable, vault ready, provider binding saved, credential stored, provider transport
-   tested, semantic evaluator composed, machine privacy ceiling permits review, exact repository
-   grant active, and semantic review ready
+   tested, AI-powered evaluator composed, machine privacy ceiling permits review, exact repository
+   grant active, and AI-powered review ready
    each render as their own line with their own certainty. A stored provider binding is never
    rendered as a working provider, and an unavailable deeper review is rendered as a limitation.
 

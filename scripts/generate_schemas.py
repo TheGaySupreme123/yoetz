@@ -1306,7 +1306,7 @@ def _simple_versioned_schema(
 
 
 def _receipt_document_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
-    """Add optional applicable semantic provenance to the current receipt document."""
+    """Add optional applicable AI-powered review provenance to the current receipt document."""
 
     document = _simple_versioned_schema(
         entry,

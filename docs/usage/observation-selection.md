@@ -2,7 +2,7 @@
 
 Observation selection controls how much structural host activity Yoetz keeps for a workspace. It
 is a retention and capacity choice. It does not change what the host is allowed to do, what content
-may be captured, or what a semantic provider may receive.
+may be captured, or what an AI-powered review provider may receive.
 
 Focused with the standard capacity is the default. In Focused mode, Yoetz can account for proven
 successful routine reads, searches, and inventory calls in bounded summaries. A summary keeps the
@@ -123,9 +123,10 @@ the earlier state retroactively.
 Selection runs before optional native content extraction and structural admission. Native content
 capture is a separate authority decision. Claude Code and Cursor require their exact ordinary
 profile to be selected and separately enabled; Codex's supported hook capture arm follows active
-observation consent and is profileless. See [Privacy and semantic review](privacy-and-semantic-review.md)
-and the [Codex](../runbooks/codex-integration.md), [Claude Code](../runbooks/claude-code-integration.md),
-and [Cursor](../runbooks/cursor-integration.md) runbooks for host-specific setup and limits.
+observation consent and is profileless. See [Privacy and AI-powered
+review](privacy-and-semantic-review.md) and the [Codex](../runbooks/codex-integration.md), [Claude
+Code](../runbooks/claude-code-integration.md), and [Cursor](../runbooks/cursor-integration.md)
+runbooks for host-specific setup and limits.
 
 The native capture lane has workspace-wide limits independent of the selected queue: at most 512
 staging or pending capture tickets and 128 MiB of captured content. A larger structural profile

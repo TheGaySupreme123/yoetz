@@ -156,7 +156,7 @@ async def test_static_inventory_is_exact_and_verified() -> None:
     assert "yoetz://guidance/workflow.md" in BRIDGE_RUNTIME.instructions
     assert "yoetz://guidance/coverage-and-receipts.md" in BRIDGE_RUNTIME.instructions
     assert "Route profile: policy." in BRIDGE_RUNTIME.instructions
-    # #479: the policy bridge names its startup-read semantic destination (or states that it is
+    # #479: the policy bridge names its startup-read AI-powered review destination (or states that it is
     # unknown or none); the strict route never carries the passage.
     assert DISCLOSURE_PREFIX in BRIDGE_RUNTIME.instructions
     assert DISCLOSURE_PREFIX not in server_instructions("strict")

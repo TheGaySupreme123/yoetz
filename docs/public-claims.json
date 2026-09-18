@@ -4,7 +4,7 @@
   "claims": [
     {
       "claim_id": "mcp.host_declared_semantic_egress_ceiling",
-      "statement": "An MCP process launched as `yoetz mcp serve --semantic off` has an immutable strict route profile: Yoetz never requests semantic runtime capability or dispatches a semantic evaluator for that process, semantic requests are reported as blocked_by_policy with route_semantic_ceiling, and the result and receipt retain the resulting coverage gap.",
+      "statement": "An MCP process launched as `yoetz mcp serve --semantic off` has an immutable strict route profile: Yoetz never requests AI-powered review runtime capability or dispatches an AI-powered evaluator for that process, AI-powered review requests are reported as blocked_by_policy with route_semantic_ceiling, and the result and receipt retain the resulting coverage gap.",
       "scope": {
         "operations": [
           "check",
@@ -154,7 +154,7 @@
     },
     {
       "claim_id": "privacy.agent_guided_user_controlled_setup",
-      "statement": "A capable Yoetz agent guides supported installation, setup, and settings changes in ordinary conversation, explains and recommends consequential options, and treats the explicit current user's supported product choice as final. When semantic review is the stated goal it recommends expanded_review first and explains assisted_review as the lower-disclosure semantic alternative. An exact expanded_review repository grant exposes and binds the complete substantive before/after policy diff, repository authority, provider/model/endpoint, policy digests, target, and expiry; repository, policy-generation, route, target, expiry, replay, denial, and unsupported-client failures make no policy or provider mutation.",
+      "statement": "A capable Yoetz agent guides supported installation, setup, and settings changes in ordinary conversation, explains and recommends consequential options, and treats the explicit current user's supported product choice as final. When AI-powered review is the stated goal it recommends expanded_review first and explains assisted_review as the lower-disclosure AI-powered alternative. An exact expanded_review repository grant exposes and binds the complete substantive before/after policy diff, repository authority, provider/model/endpoint, policy digests, target, and expiry; repository, policy-generation, route, target, expiry, replay, denial, and unsupported-client failures make no policy or provider mutation.",
       "scope": {
         "authority_clients": [
           "codex"
@@ -402,7 +402,7 @@
     },
     {
       "claim_id": "privacy.local_model_same_fences",
-      "statement": "A separately configured local semantic model receives only an exact AF_UNIX disclosure path through the same classification, minimization, and never-send fence as any other sink; Yoetz never launches or downloads that runtime, and the separate process's own network authority is outside Yoetz's process claim.",
+      "statement": "A separately configured local AI-powered review model receives only an exact AF_UNIX disclosure path through the same classification, minimization, and never-send fence as any other sink; Yoetz never launches or downloads that runtime, and the separate process's own network authority is outside Yoetz's process claim.",
       "scope": {
         "sinks": [
           "local_model"
@@ -859,7 +859,7 @@
     },
     {
       "claim_id": "semantic.review_packet_and_agent_loop",
-      "statement": "An assisted semantic review receives the recorded goal, obligations, claims, material timeline, deterministic findings and their machine-readable bases, change and coverage facts, and bounded problem-local recorded excerpts selected under policy; missing content is always reported through an explicit omission reason rather than represented as unchanged or observed, and a post-validated reviewer challenge reaches the main agent only as an ordinary semantic finding, resolved through the existing respond, publish_work, and recheck loop with no model waiver authority and no provider-driven source-fetch channel.",
+      "statement": "An assisted AI-powered review receives the recorded goal, obligations, claims, material timeline, local findings and their machine-readable bases, change and coverage facts, and bounded problem-local recorded excerpts selected under policy; missing content is always reported through an explicit omission reason rather than represented as unchanged or observed, and a post-validated reviewer challenge reaches the main agent only as an ordinary AI-powered finding, resolved through the existing respond, publish_work, and recheck loop with no model waiver authority and no provider-driven source-fetch channel.",
       "scope": {
         "review_context": [
           "assisted",
@@ -894,7 +894,7 @@
     },
     {
       "claim_id": "storage.encrypted_payload_at_rest",
-      "statement": "Every event payload, captured command output or evidence, semantic case or response, receipt content, and service-owned bundle key is encrypted at rest under the ADR-004 key hierarchy; this protects against casual or at-rest disclosure such as a stolen disk or another local user, and explicitly does not protect against a compromised active user account, malicious root, or inspection of the ready service's own memory.",
+      "statement": "Every event payload, captured command output or evidence, AI-powered review case or response, receipt content, and service-owned bundle key is encrypted at rest under the ADR-004 key hierarchy; this protects against casual or at-rest disclosure such as a stolen disk or another local user, and explicitly does not protect against a compromised active user account, malicious root, or inspection of the ready service's own memory.",
       "scope": {
         "components": [
           "adapters/objects/encrypted_files.py",

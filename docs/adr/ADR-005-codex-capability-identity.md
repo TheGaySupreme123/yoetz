@@ -126,5 +126,5 @@ changes is admission:
   admission policy, not the actual `0.153.4` event families; those still need their own fixtures
   before `0.153.4` can become an exact profile or advertise `session_stream`.
 
-Parser compatibility grants no capture consent, no egress authority, and no semantic-evaluator
+Parser compatibility grants no capture consent, no egress authority, and no AI-powered evaluator
 authority.

@@ -624,7 +624,7 @@ class ObservationCoordinator:
         default_factory=ObservationAdviceContextBuilder
     )
     verification_supervisor: ObservationVerificationSupervisor | None = None
-    # Off-hook semantic advice (#619): the build only enqueues a durable row; this supervisor
+    # Off-hook AI-powered advice (#619): the build only enqueues a durable row; this supervisor
     # drains it through ``advice_semantic_dispatch`` and re-runs advice when it finishes.
     advice_semantic_supervisor: ObservationAdviceSemanticSupervisor | None = None
     advice_semantic_dispatch: AdviceSemanticDispatch | None = None
@@ -3930,7 +3930,7 @@ class ObservationCoordinator:
             return None
         # Bind the service-owned task/session route before any optional verification setup.
         # Policy loading and subject inspection are allowed to decline this event (for example
-        # when the workspace has no approved-check policy), but semantic captured-content
+        # when the workspace has no approved-check policy), but AI-powered review captured-content
         # selection still needs this durable task fence.  Recording it here keeps the route
         # coupled to the accepted PostToolUse envelope instead of making content visibility
         # depend on verification policy availability.
@@ -4503,7 +4503,7 @@ class ObservationCoordinator:
                 await cast(Awaitable[None], result)
 
     async def rediscover_pending_advice_semantic(self) -> None:
-        """Re-register drains for workspaces whose semantic advice rows are still pending.
+        """Re-register drains for workspaces whose AI-powered advice rows are still pending.
 
         Runs once after the ready-lifecycle supervisor starts. A row left ``running`` by a
         previous service generation is reclaimed by ``claim_next`` and re-attempted; it is never
@@ -4576,7 +4576,7 @@ class ObservationCoordinator:
         session_commitment: str | None = None,
         deferred_runtime: TaskRuntime | None = None,
     ) -> bool:
-        """Register (or wake) the workspace's semantic advice drain; never dispatch inline.
+        """Register (or wake) the workspace's AI-powered advice drain; never dispatch inline.
 
         Returns True when a new handle now owns ``deferred_runtime`` (or a freshly routed one)
         and will release it on idle. Without a supervisor or dispatch the pending row simply

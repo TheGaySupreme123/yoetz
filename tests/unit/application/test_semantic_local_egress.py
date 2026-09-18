@@ -71,7 +71,7 @@ class _Audit:
 
     async def authorize(self, *args: object) -> object:
         self.authorize_calls += 1
-        raise AssertionError("local semantic dispatch must not mint network authority")
+        raise AssertionError("on-device AI-powered review dispatch must not mint network authority")
 
     async def complete_local_disclosure(
         self, reservation_id: str, receipt: LocalDisclosureReceipt

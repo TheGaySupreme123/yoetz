@@ -461,14 +461,14 @@ def summary_for_check(envelope: object) -> str:
     reason = _safe_token(source.get("semantic_reason"))
     if status == "not_requested":
         prefix = (
-            f"Semantic review not requested; deterministic-only check verdict: {verdict}; "
+            f"AI-powered review not requested; local-only check verdict: {verdict}; "
             f"findings returned: {findings}; suppressed: {suppressed}; "
         )
     else:
         prefix = (
             f"Check verdict: {verdict}; findings returned: {findings}; suppressed: {suppressed}; "
         )
-    suffix = f"semantic status/reason: {status}/{reason}; {_frontier_clause(source)}."
+    suffix = f"AI-powered review status/reason: {status}/{reason}; {_frontier_clause(source)}."
     if reason == "case_capacity_exceeded":
         suffix += " No provider attempt; narrow claim/obligation scope for a new check."
     elif reason == "coordinator_failure":

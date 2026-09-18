@@ -103,7 +103,7 @@ generate and store one locally without any secret-bearing agent channel.
 
    **Expanded-review amendment (2026-09-03, issues #532/#533).** A capable agent guides supported
    setup, installation, and settings choices in normal conversation. Recommendations remain
-   advisory and explicit current user intent controls the supported outcome. When semantic review
+   advisory and explicit current user intent controls the supported outcome. When AI-powered review
    is the stated goal, the agent recommends Expanded first and explains Assisted as the
    lower-disclosure alternative. `repository_privacy_grant` admits `expanded_review` only through
    the same exact one-use envelope: preparation freezes the complete candidate and readable diff;

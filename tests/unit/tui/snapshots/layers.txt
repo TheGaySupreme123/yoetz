@@ -7,7 +7,7 @@
 ✓ Approved-check policy trusted     verified
 ✓ Local service reachable           verified — ready
 ✓ Vault ready                       verified — os_keyring
-✓ Local deterministic checks        verified
+✓ Local checks                      verified
 ○ Provider binding saved            not configured
 ○ Credential stored                 not configured
 ! Provider connection tested        not proven — no live probe has run

@@ -16,7 +16,7 @@ transcript, or one successful `check`, is never grounds for a blanket compatibil
 | Canonical encoding / digest domain version | `docs/adr/ADR-002-canonical-protocol.md`, `fixtures/canonical/` |
 | Storage schema and its ordered migration set | `version --json` (catalog 3, bundle 2), `migrations/` |
 | Object envelope / encryption / key / recovery artifact formats | `version --json` (object format `yoetz-object/1`) |
-| Projection engine/generation and deterministic policy/config digest | `version --json` (projection `yoetz/0.1.0`) |
+| Projection engine/generation and local policy/config digest | `version --json` (projection `yoetz/0.1.0`) |
 | Receipt schema and render version | `schemas/receipts/receipt-document-1.0.0.schema.json` |
 | Installed resource set / skill / reference compatibility | `version --json --resources`, `skills/codex/yoetz/manifest.json` |
 | CLI contract / MCP SDK / MCP protocol | `version --json` (MCP SDK `mcp==1.28.1`, protocol negotiated against the latest published revision) |
@@ -196,7 +196,8 @@ default, discovery/component inventory, hook declaration, fresh-session plugin/s
 registration, and connected plugin-owned strict MCP. A correlated model call was blocked by absent
 authentication in the isolated Claude config; only SessionStart/SessionEnd hook delivery was seen,
 and the separately installed older Yoetz lacked the new hook command. Model use, accepted
-observation, semantic dispatch, privacy receipt, and workflow receipt therefore remain unobserved
+observation, AI-powered review dispatch, privacy receipt, and workflow receipt therefore remain
+unobserved
 for that `2.1.241` cell. A later live capture (2026-09-04) on Claude Code `2.1.251` observed
 `PostToolUse` delivery for a scoped MCP tool with `tool_response` as one bare JSON string of the
 structured result; the binder admits that shape and a fixture pins it

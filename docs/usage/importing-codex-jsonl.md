@@ -1,7 +1,7 @@
 # Importing bounded Codex JSONL
 
 `yoetz import` is a local support command for a retained `codex exec --json` stream. It is not a
-seventh MCP operation, does not read Codex rollout files, and does not authorize semantic review
+seventh MCP operation, does not read Codex rollout files, and does not authorize AI-powered review
 or any other network disclosure.
 
 The request names an already-open Yoetz session/writer, the exact supported Codex profile, and at

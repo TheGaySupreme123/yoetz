@@ -51,6 +51,7 @@ _FORBIDDEN_IMPROVEMENT_PHRASES: Final = (
     "feedback improved the work",
     "feedback improved work quality",
     "semantic feedback improved",
+    "ai-powered feedback improved",
 )
 
 
@@ -147,9 +148,9 @@ def semantic_scoring_eligible(
     semantic_status: SemanticStatus,
     semantic_provenance_present: bool,
 ) -> bool:
-    """Mirror the semantic dogfood provenance gate for Stream C scoring eligibility.
+    """Mirror the AI-powered review dogfood provenance gate for Stream C scoring eligibility.
 
-    Strict profile never scores semantic quality. On policy profile, only statuses that represent
+    Strict profile never scores AI-powered review quality. On policy profile, only statuses that represent
     a real provider attempt with enforced provenance may score. ``failed`` is indeterminate.
     """
 
@@ -178,7 +179,7 @@ def classify_stream_c(
 ) -> tuple[StreamScore, bool]:
     """Return (stream_c score, scoring_eligible).
 
-    Strict or pre-dispatch blocked → ``not_tested``, never ``fail`` for “poor semantic feedback”.
+    Strict or pre-dispatch blocked → ``not_tested``, never ``fail`` for “poor AI-powered feedback”.
     """
 
     eligible = semantic_scoring_eligible(
@@ -199,7 +200,7 @@ def classify_stream_c(
         return "indeterminate", False
     if not eligible:
         return "not_tested", False
-    # Attempt scored: presence of semantic findings is observational, not a quality rubric here.
+    # Attempt scored: presence of AI-powered findings is observational, not a quality rubric here.
     # Quality pass/fail is left to human report; classifier only marks eligibility and non-fail
     # for blocked routes. A scorable attempt with zero findings is still ``pass`` for availability.
     _ = findings_semantic

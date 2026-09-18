@@ -1,4 +1,4 @@
-"""Optional additive semantic advice over minimized observation evidence packets."""
+"""Optional additive AI-powered advice over minimized observation evidence packets."""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ _FORBIDDEN_PACKET_KEYS: Final = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class SemanticAdviceAttemptRecord:
-    """Durable receipt for one semantic observation-advice attempt."""
+    """Durable receipt for one AI-powered observation-advice attempt."""
 
     provider_identity: str
     outcome: str
@@ -55,7 +55,7 @@ class SemanticAdviceAttemptRecord:
 
 @dataclass(frozen=True, slots=True)
 class NullSemanticAdvice:
-    """Deterministic-only path: semantic review is never invoked."""
+    """Local-only path: AI-powered review is never invoked."""
 
     def review(
         self, *, evidence_packet: Mapping[str, object]
@@ -102,7 +102,7 @@ class OptionalSemanticAdvice:
             return None
         try:
             raw = self._evaluator(evidence_packet)
-        except Exception as exc:  # noqa: BLE001 - provider failure must not weaken deterministic
+        except Exception as exc:  # noqa: BLE001 - provider failure must not weaken local
             digest = str(evidence_packet.get("evidence_basis_digest") or "sha256:" + ("0" * 64))
             record = SemanticAdviceAttemptRecord(
                 provider_identity=self._provider_identity,
@@ -139,7 +139,9 @@ class OptionalSemanticAdvice:
             next_action=str(next_action) if type(next_action) is str else None,
             summaries=(summary[:160],),
             details=(
-                str(raw.get("detail") or "Additive semantic advice over minimized evidence")[:240],
+                str(raw.get("detail") or "Additive AI-powered advice over minimized evidence")[
+                    :240
+                ],
             ),
             provider_identity=self._provider_identity,
             attempt_receipt=receipt,
@@ -176,7 +178,7 @@ def compose_observation_semantic_advisor(
     evaluator: Callable[[Mapping[str, object]], Mapping[str, object] | None] | None = None,
     on_attempt: Callable[[SemanticAdviceAttemptRecord], None] | None = None,
 ) -> SemanticAdvicePort:
-    """Ready-composition helper: privacy-gated when ready, else deterministic-only."""
+    """Ready-composition helper: privacy-gated when ready, else local-only."""
 
     if not semantic_configured or not semantic_ready or evaluator is None:
         return NullSemanticAdvice()

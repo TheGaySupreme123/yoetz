@@ -1273,7 +1273,7 @@ def observation_content_status(
                 else "none"
             )
             + "); Codex hook capture follows observation consent. "
-            "This status does not prove captured evidence or semantic selection."
+            "This status does not prove captured evidence or AI-powered selection."
         )
     return 0
 

@@ -619,7 +619,7 @@ def _finding_kinds(variant: dict[str, object]) -> frozenset[FindingKind]:
 
 
 def _raw_findings(variant: dict[str, object]) -> list[dict[str, object]]:
-    # Deterministic-origin variants store their payload under "findings"; accepted semantic-origin
+    # Local-origin variants store their payload under "findings"; accepted AI-powered-origin
     # findings (ADV-004's "semantic_present_irrelevant") store the same shape under
     # "accepted_semantic_findings" instead.
     raw = variant.get("findings") or variant.get("accepted_semantic_findings")
@@ -648,8 +648,8 @@ _FINDING_WIRE_KEYS = frozenset(
 
 def _decode_findings(variant: dict[str, object]) -> tuple[Finding, ...]:
     # Fixture finding objects carry extra fixture-authoring fields beyond the closed wire
-    # ``finding-1.0.0`` schema -- ``basis`` (the deterministic/semantic rule id, observed/missing
-    # facts, and state relation that document *why* the finding exists) and, for accepted semantic
+    # ``finding-1.0.0`` schema -- ``basis`` (the local/AI-powered rule id, observed/missing
+    # facts, and state relation that document *why* the finding exists) and, for accepted AI-powered
     # findings, ``reviewer_challenge``. Strip everything outside the real wire field set before
     # round-tripping through the real domain codec.
     findings: list[Finding] = []
@@ -877,7 +877,7 @@ def test_empty_completion_scope_fixture_keeps_declared_none_coverage_incomplete(
 
 
 def test_semantic_packet_and_challenge_fixtures_are_exact(fixture_loader: FixtureLoader) -> None:
-    """ADV-002, ADV-003, ADV-004, and ADV-009 lock their documented semantic-authority fences."""
+    """ADV-002, ADV-003, ADV-004, and ADV-009 lock their documented AI-powered review authority fences."""
 
     # ADV-002: the trigger's reviewer challenge asks the main agent for the smallest useful next
     # step, citing real refs; a fixture that discloses the failure carries no residual challenge.
@@ -908,8 +908,8 @@ def test_semantic_packet_and_challenge_fixtures_are_exact(fixture_loader: Fixtur
             )
     assert _finding_kinds(adv_003["closest_non_trigger_same_state"]) == frozenset()
 
-    # ADV-004: refs cited by an accepted semantic finding are limited to the case's own admissible
-    # set; an invented reference or a mutated deterministic basis is rejected before construction.
+    # ADV-004: refs cited by an accepted AI-powered finding are limited to the case's own admissible
+    # set; an invented reference or a mutated local basis is rejected before construction.
     adv_004 = _variants(_load_expected(fixture_loader, "ADV-004-irrelevant-evidence"))
     for rejected_name, expected_reason in (
         ("semantic_invented_ref", "rejected_reference_outside_case"),

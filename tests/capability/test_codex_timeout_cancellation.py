@@ -94,7 +94,7 @@ class _NoDisclosurePrivacy:
 
 async def _semantic_forbidden(frozen: object, findings: object) -> object:
     del frozen, findings
-    raise AssertionError("strict-local must never invoke the semantic evaluator")
+    raise AssertionError("strict-local must never invoke the AI-powered evaluator")
 
 
 def _versions() -> ReceiptVersionSlice:

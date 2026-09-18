@@ -129,7 +129,7 @@ def test_profileless_codex_status_names_the_ordinary_profile_scope(
     text = capsys.readouterr().out
     assert "scope=ordinary_profiles" in text
     assert "Codex hook capture follows observation consent" in text
-    assert "does not prove captured evidence or semantic selection" in text
+    assert "does not prove captured evidence or AI-powered selection" in text
 
     def no_activation_probe(*args: object, **kwargs: object) -> dict[str, JsonValue]:
         return {}

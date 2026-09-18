@@ -1,23 +1,23 @@
-# ADR-006 — Semantic provider profiles behind the privacy gateway
+# ADR-006 — AI-powered review provider profiles behind the privacy gateway
 
 **Status:** Working decision revised 2026-08-30 (issue #404 external-runtime authority). Ratification requires the privacy/egress gates in
 ADR-009 plus recorded capability fixtures against every advertised provider/model/endpoint profile.
 **Implemented by:** `src/yoetz/ports/semantic.py`,
 `src/yoetz/ports/privacy.py`, `src/yoetz/application/egress.py`,
 `src/yoetz/application/check.py`, `src/yoetz/adapters/providers/`, `src/yoetz/config/`,
-and semantic/privacy capability and conformance tests.
+and AI-powered review/privacy capability and conformance tests.
 
 ## Decisions
 
-1. **No direct provider path:** application, CLI, MCP, plugin, and integration code cannot call a
-   semantic provider. A candidate semantic context must traverse ADR-009's classification, policy,
-   local minimization/redaction/secret scan, exact prepared-case approval when required, durable
-   authorization, outbound gateway, and privacy-audit path. A provider adapter receives only an immutable
-   `ApprovedOutboundCase`; composition supplies no repository, bundle, transcript, environment,
-   log, database, keyring, or application-state handle. Standing external evaluation additionally
-   requires an exact current grant for the service-derived repository-privacy commitment beneath
-   the machine ceiling. A missing or mismatched repository grant fails before provider construction,
-   credential-handle minting, authorization, or dispatch.
+1. **No direct provider path:** application, CLI, MCP, plugin, and integration code cannot call an
+   AI-powered review provider. A candidate AI-powered review context must traverse ADR-009's
+   classification, policy, local minimization/redaction/secret scan, exact prepared-case approval
+   when required, durable authorization, outbound gateway, and privacy-audit path. A provider
+   adapter receives only an immutable `ApprovedOutboundCase`; composition supplies no repository,
+   bundle, transcript, environment, log, database, keyring, or application-state handle. Standing
+   external evaluation additionally requires an exact current grant for the service-derived
+   repository-privacy commitment beneath the machine ceiling. A missing or mismatched repository
+   grant fails before provider construction, credential-handle minting, authorization, or dispatch.
 2. **First external adapter:** official `openai` Python SDK (pinned `2.46.0`), Responses API with
    structured outputs (`responses.parse` + frozen `ProviderJudgmentModel` schema). A release names
    an exact tested provider/model/endpoint-profile tuple. A generic or merely
@@ -43,16 +43,17 @@ and semantic/privacy capability and conformance tests.
    Structured-output enforcement is recorded per profile from the vendor's own documentation, not
    assumed: a host documented to ignore `response_format` receives the judgment shape in the
    instruction instead, and any answer that is not the exact judgment shape degrades to an honest
-   invalid semantic result, never a fabricated pass. None of the five inherits official OpenAI
-   data-use or `assisted` eligibility; each carries an unknown data-use record until a reviewed one
-   exists. Being dispatchable is not being verified: advertising any of them as a working endpoint
-   still requires the exact model/endpoint capability fixture and live evidence E-007 names.
-3. **Local-model adapter:** v0.1 includes the contract for a separately configured local semantic
-   evaluator. Its endpoint is an owner-only, service-approved AF_UNIX socket profile; it performs no
-   DNS, AF_INET/AF_INET6 connection, redirect, proxy lookup, or fallback. It is a local disclosure
-   sink, not network egress, but still traverses classification, minimization, never-send scanning,
-   and local privacy auditing. A release advertises it only for exact model/endpoint profiles that
-   pass capability fixtures.
+   invalid AI-powered review result, never a fabricated pass. None of the five inherits official
+   OpenAI data-use or `assisted` eligibility; each carries an unknown data-use record until a
+   reviewed one exists. Being dispatchable is not being verified: advertising any of them as a
+   working endpoint still requires the exact model/endpoint capability fixture and live evidence
+   E-007 names.
+3. **Local-model adapter:** v0.1 includes the contract for a separately configured locally hosted
+   AI-powered evaluator. Its endpoint is an owner-only, service-approved AF_UNIX socket profile; it
+   performs no DNS, AF_INET/AF_INET6 connection, redirect, proxy lookup, or fallback. It is a local
+   disclosure sink, not network egress, but still traverses classification, minimization, never-send
+   scanning, and local privacy auditing. A release advertises it only for exact model/endpoint
+   profiles that pass capability fixtures.
 4. **Credentials:** provider credential bytes are owned by the unlocked local service vault. They
    never enter provider configuration values, CLI/MCP arguments, environment variables, files,
    logs, traces, transcripts, prompts, or LLM context. For each physical dispatch, the gateway
@@ -75,7 +76,7 @@ and semantic/privacy capability and conformance tests.
    over the exact final application body bytes, excluding authentication metadata and HTTP/TLS
    framing. No long-lived SDK client or default-header object holds the real key. Yoetz owns the retry
    budget: at most two retries, only for approved timeout/connection/429 classes, jittered backoff,
-   all within one total deadline and one durable semantic operation (per endpoint when a
+   all within one total deadline and one durable AI-powered review operation (per endpoint when a
    fallback endpoint is declared — see the fallback endpoint amendment below). **Amended
    2026-08-29 (issue #348):** inside that same budget and deadline, exactly one repair retry is
    also admitted after `invalid / response_content_invalid` — the provider was reached and its
@@ -95,15 +96,15 @@ and semantic/privacy capability and conformance tests.
    hidden multi-attempt budget. Crash/resume before authorization consumption remains the same
    attempt. Automatic profiles may retry within their existing policy/total deadline without a
    human prompt, but never reuse authorization or attempt identity.
-6. **Required semantic means verdict completeness, not operation availability:** deterministic
-   freeze and deterministic results always survive. With `semantic_required`, missing approved
-   capability, privacy-policy block, human denial or approval expiry, provider refusal, timeout,
-   invalid output, exhausted retry, late response, or stale response completes the check with
-   `verdict=incomplete_check`, no semantic findings, and the exact closed
-   `(SemanticStatus, SemanticReason)` pair. It does
-   not fail the operation or discard deterministic findings. `semantic_if_configured` may complete
-   with its deterministic verdict when semantic capability is absent or policy-disabled, while an
-   attempted but unsuccessful semantic evaluation is represented honestly in status and coverage.
+6. **Required AI-powered review means verdict completeness, not operation availability:**
+   local-check freeze and local-check results always survive. With `semantic_required`, missing
+   approved capability, privacy-policy block, human denial or approval expiry, provider refusal,
+   timeout, invalid output, exhausted retry, late response, or stale response completes the check
+   with `verdict=incomplete_check`, no AI-powered findings, and the exact closed `(SemanticStatus,
+   SemanticReason)` pair. It does not fail the operation or discard local findings.
+   `semantic_if_configured` may complete with its local-check verdict when AI-powered review
+   capability is absent or policy-disabled, while an attempted but unsuccessful AI-powered
+   evaluation is represented honestly in status and coverage.
 7. **Provenance has two truthful stages:** the adapter returns bounded
    `ProviderAttemptProvenance` containing only provider/profile/model/request/SDK/digest/usage/
    failure facts it knows at return time. It cannot name a privacy receipt that is not yet closed.
@@ -117,7 +118,7 @@ and semantic/privacy capability and conformance tests.
    structural provenance. Refused, malformed, truncated, late, or rejected provider plaintext is
    not retained merely for debugging. If a future opt-in encrypted diagnostic capture is added, it
    requires its own explicit local-human authorization and retention policy; it is not part of the
-   v0.1 semantic contract.
+   v0.1 AI-powered review contract.
 9. **Fake provider:** `adapters/providers/fake.py` is a scripted implementation behind the same
    policy-enforcing gateway. It supports results, delays, denials, refusals, malformed output, and
    late responses without network access. Tests may not inject the fake downstream of the gateway
@@ -141,7 +142,7 @@ and semantic/privacy capability and conformance tests.
     consent.
 12. **The recommended packet is rich but problem-local:** `assisted` contains the task goal,
     obligations, current completion/material claims, accepted decisions, a material ordered
-    timeline, deterministic findings and their machine-readable bases, change-observation facts,
+    timeline, local findings and their machine-readable bases, change-observation facts,
     coverage gaps, and bounded linked test/failure/evidence/source excerpts. The frozen case retains
     the newest 64 material accepted events in ingestion order with at most 512 KiB of canonical
     payload. Newest payloads win that byte budget; retained over-budget events are `not_selected`,
@@ -157,7 +158,7 @@ and semantic/privacy capability and conformance tests.
     refs, explains the discrepancy, states an alternative interpretation, addresses the main agent
     directly, and requests the smallest next step: act, provide evidence, revise the claim, dispute
     with evidence, or state an unresolved limitation. Post-validation maps an accepted challenge to
-    the existing semantic `Finding.summary/detail`; the main agent uses the existing `respond` and
+    the existing AI-powered `Finding.summary/detail`; the main agent uses the existing `respond` and
     `publish_work` operations, then runs `check` again. There is no provider-driven fetch loop, new
     event family, seventh public operation, or model waiver authority.
 14. **Recommendation eligibility is evidence-bound, not a brand promise:** every installed external
@@ -177,13 +178,13 @@ and semantic/privacy capability and conformance tests.
 
 ```mermaid
 flowchart LR
-    A["Main agent publishes goal, work, evidence, and claim"] --> B["Deterministic checks build findings plus exact bases"]
+    A["Main agent publishes goal, work, evidence, and claim"] --> B["Local checks build findings plus exact bases"]
     B --> C["Context profile selects timeline and problem-local recorded excerpts"]
     C --> D["Privacy policy classifies, minimizes, scans, and authorizes"]
     D -->|"authorized"| E["Reviewer model returns a bounded outcome"]
     E --> H["Terminal provider-attempt or local-model privacy receipt"]
-    H -->|"valid structured judgment"| F["Post-validation creates ordinary semantic findings"]
-    H -->|"refusal, invalid, timeout, or unavailable"| K["Record semantic gap and keep deterministic result"]
+    H -->|"valid structured judgment"| F["Post-validation creates ordinary AI-powered findings"]
+    H -->|"refusal, invalid, timeout, or unavailable"| K["Record AI-powered review gap and keep local-check result"]
     F --> J["Agent-context policy plus local disclosure receipt"]
     K --> J
     J --> G["Main agent responds, publishes work or evidence, and revises claims"]
@@ -214,29 +215,28 @@ excluded unless independently selected. Every variant distinguishes `not_recorde
 `withheld_by_policy`, and `redacted_never_send`; a history-window item carries the exact older-event
 count.
 
-## Deterministic fencing
+## Local-check fencing
 
-The semantic case is built from a frozen frontier and dependency digest. It carries separate
-`frontier_refs` (IDs present at the frozen frontier) and `local_check_refs` (deterministic finding
+The AI-powered review case is built from a frozen frontier and dependency digest. It carries
+separate `frontier_refs` (IDs present at the frozen frontier) and `local_check_refs` (local finding
 IDs allocated and durably pinned by this check); their union is bound into the case digest. This
-lets the reviewer discuss deterministic findings without pretending those post-frontier IDs were
-already in the ledger. Every deterministic finding carries a paired `FindingBasis` containing the
-rule ID, triggering observed facts, required-but-missing facts, subject-state relation, source
-availability, coverage gaps, and bounded supporting refs. Later disclosure-time
-`ChangeObservation` and content-visibility facts remain separate. `same`, `different`, and
-`unknown` retain their exact three-valued meaning; hidden or unrecorded source is never represented
-as `same`.
+lets the reviewer discuss local findings without pretending those post-frontier IDs were already in
+the ledger. Every local finding carries a paired `FindingBasis` containing the rule ID, triggering
+observed facts, required-but-missing facts, subject-state relation, source availability, coverage
+gaps, and bounded supporting refs. Later disclosure-time `ChangeObservation` and content-visibility
+facts remain separate. `same`, `different`, and `unknown` retain their exact three-valued meaning;
+hidden or unrecorded source is never represented as `same`.
 
 Approval is bound to the exact minimized case digest, provider/model/endpoint profile, purpose,
 composed machine/repository/task/request authority, policy version, and one dispatch. The provider
 is called outside every SQLite transaction.
-Post-validation rejects invented IDs, out-of-case quotes, coverage upgrades, deterministic-status
+Post-validation rejects invented IDs, out-of-case quotes, coverage upgrades, local-check-status
 claims, challenges without a material discrepancy or requested next step, and stale frontiers.
 Rejected output never projects a finding.
 
 ## Codex subscription-runtime amendment (2026-08-30, issue #404)
 
-External semantic authentication has two authorities. Existing HTTP profiles
+External AI-powered review authentication has two authorities. Existing HTTP profiles
 use `yoetz_vault_api_credential`. The exact `codex-chatgpt-subscription@1` profile uses
 `external_runtime_oauth`: one selected OpenAI Codex app-server owns ChatGPT login, refresh,
 credential storage, model discovery, and the upstream OpenAI request. Yoetz never reads or imports
@@ -266,13 +266,12 @@ require explicit setup to accept the new identity; no privacy authority migrates
 
 The same evaluator contract now has a separate Linux x86_64 implementation cell for Codex npm
 `0.150.1-linux-x64` (`@openai/codex-linux-x64`). Its native executable, source identity, package
-layout, platform, and capability-cell digest are distinct from the macOS arm64 cell; its
-app-server v2 schema, isolated configuration, model/reasoning contract, OAuth authority, and
-privacy/cleanup fences remain identical. An x86_64 WSL2 Linux userspace is eligible for the Linux
-cell, but WSL-specific smoke evidence is pending; this amendment creates no native Windows cell.
-The Linux cell remains an implementation candidate until its packaged Yoetz lifecycle and
-semantic-receipt evidence is complete. The empty `runtime-support.json` arrays therefore remain
-unchanged.
+layout, platform, and capability-cell digest are distinct from the macOS arm64 cell; its app-server
+v2 schema, isolated configuration, model/reasoning contract, OAuth authority, and privacy/cleanup
+fences remain identical. An x86_64 WSL2 Linux userspace is eligible for the Linux cell, but
+WSL-specific smoke evidence is pending; this amendment creates no native Windows cell. The Linux
+cell remains an implementation candidate until its packaged Yoetz lifecycle and AI-powered review
+receipt evidence is complete. The empty `runtime-support.json` arrays therefore remain unchanged.
 
 The gateway issues a secret-free, dispatch-bound `ExternalRuntimeAuthority` instead of minting a
 vault handle. The runtime may receive only the already-approved canonical case through stdin. Its
@@ -308,7 +307,7 @@ post-validation/finding path.
 
 ## Fallback endpoint amendment (2026-09-04, issue #582)
 
-Semantic review may bind one primary endpoint plus exactly one fallback endpoint. The pairing is
+AI-powered review may bind one primary endpoint plus exactly one fallback endpoint. The pairing is
 exactly the two external authorities above: the API provider (`[provider]`,
 `yoetz_vault_api_credential`) and the Codex ChatGPT subscription evaluator (`[external_runtime]`,
 `external_runtime_oauth`). A nonsecret `[semantic_fallback]` table with
@@ -344,29 +343,29 @@ configuration; swapping the primary keeps both bindings and both approvals.
 3. **Replay-safe endpoint selection.** Which endpoint an attempt uses is a pure function of the
    durable attempt rows before it and the immutable execution snapshot in the encrypted
    `SEMANTIC_CASE` object (`yoetz.semantic-case/2`), never mutable provider readiness. The snapshot
-   binds exact endpoints, initial primary availability, retry budgets, and UTC cutoff times.
-   Crash, restart, and `awaiting_human` replay resume the endpoint the attempt was claimed for;
-   changed configuration cannot reinterpret earlier ordinals. Every attempt still checks current
-   privacy authority for that frozen binding. Legacy terminal cases retain stored-result recovery;
-   pending cases lacking the snapshot terminate without dispatch rather than acquiring a newly
-   configured pairing (`coordinator_failure` before dispatch or during a disclosure wait,
-   an uncertain started attempt retains `outcome_unknown` durably and reports the provenance-free
-   public gap `receipt_persistence_unknown`). The internal attempt projection
-   exposes the existing durable `started_at` timestamp; usage counters are an additive nullable
-   bundle migration (0013), so legacy rows remain readable. An expired
-   resumed attempt without a disclosure wait preserves `outcome_unknown`; a known undispatched
-   expiry records `provider_timeout`. If provider-result provenance is unavailable on recovery,
-   the public result uses `receipt_persistence_unknown` while retaining the original durable reason.
-   Retained provider-result objects are recovered when their status and reason match that row.
-   **Lease/recovery amendment, 2026-09-07 (#616, #620):** live semantic operation and job leases
-   use the authenticated execution snapshot's total expiry plus five seconds for local cleanup,
-   rather than a renewable heartbeat. The current two-endpoint maximum makes that live bound
-   at most 605 seconds; a crash can consequently delay reclaim until that bound. Claim/reclaim
-   retains an existing `started` or `response_durable` attempt and its physical request identity.
-   A saved response is selected and recovered before any new attempt is considered. After the
-   execution bound, an already reclaimed ordinary operation lease may perform bounded local
-   terminal recovery; it cannot renew semantic execution or dispatch after the immutable provider
-   deadline. Provider deadlines and human approval expiry remain separate from lease ownership.
+   binds exact endpoints, initial primary availability, retry budgets, and UTC cutoff times. Crash,
+   restart, and `awaiting_human` replay resume the endpoint the attempt was claimed for; changed
+   configuration cannot reinterpret earlier ordinals. Every attempt still checks current privacy
+   authority for that frozen binding. Legacy terminal cases retain stored-result recovery; pending
+   cases lacking the snapshot terminate without dispatch rather than acquiring a newly configured
+   pairing (`coordinator_failure` before dispatch or during a disclosure wait, an uncertain started
+   attempt retains `outcome_unknown` durably and reports the provenance-free public gap
+   `receipt_persistence_unknown`). The internal attempt projection exposes the existing durable
+   `started_at` timestamp; usage counters are an additive nullable bundle migration (0013), so
+   legacy rows remain readable. An expired resumed attempt without a disclosure wait preserves
+   `outcome_unknown`; a known undispatched expiry records `provider_timeout`. If provider-result
+   provenance is unavailable on recovery, the public result uses `receipt_persistence_unknown` while
+   retaining the original durable reason. Retained provider-result objects are recovered when their
+   status and reason match that row. **Lease/recovery amendment, 2026-09-07 (#616, #620):** live
+   AI-powered review operation and job leases use the authenticated execution snapshot's total
+   expiry plus five seconds for local cleanup, rather than a renewable heartbeat. The current
+   two-endpoint maximum makes that live bound at most 605 seconds; a crash can consequently delay
+   reclaim until that bound. Claim/reclaim retains an existing `started` or `response_durable`
+   attempt and its physical request identity. A saved response is selected and recovered before any
+   new attempt is considered. After the execution bound, an already reclaimed ordinary operation
+   lease may perform bounded local terminal recovery; it cannot renew AI-powered review execution or
+   dispatch after the immutable provider deadline. Provider deadlines and human approval expiry
+   remain separate from lease ownership.
 4. **Every fallback attempt is a fresh physical attempt** under ADR-009: its own privacy
    evaluation against the exact fallback binding, authorization, dispatch identity, credential
    handle or `ExternalRuntimeAuthority`, and privacy receipt. Under `confirm_every_request` it
@@ -400,14 +399,14 @@ request, response, route, and receipt for the endpoint that served.
 
 ## Amendment: bounded reference scope and exceptional exits (#675, #676)
 
-The semantic packet selects a deterministic dependency closure from the frozen allowlist. Retained
-packet relations, canonical payload dependencies, recorded findings and source-event identities
-remain connected. Unrelated frontier IDs are counted as omitted, bound into the case digest, and
-reported through partial `semantic_reference_scope_reduced` coverage. The deterministic case is
-not reduced. The existing envelope byte limit and independent disclosure policy remain in force.
-Irreducible required structure fails before job/attempt creation with `case_capacity_exceeded` and
-`semantic_case_capacity_exceeded` coverage. Narrowing scope creates new work; it does not replay a
-terminal check or imply that the reduced packet reviewed the whole task.
+The AI-powered review packet selects a deterministic dependency closure from the frozen allowlist.
+Retained packet relations, canonical payload dependencies, recorded findings and source-event
+identities remain connected. Unrelated frontier IDs are counted as omitted, bound into the case
+digest, and reported through partial `semantic_reference_scope_reduced` coverage. The local-check
+case is not reduced. The existing envelope byte limit and independent disclosure policy remain in
+force. Irreducible required structure fails before job/attempt creation with
+`case_capacity_exceeded` and `semantic_case_capacity_exceeded` coverage. Narrowing scope creates new
+work; it does not replay a terminal check or imply that the reduced packet reviewed the whole task.
 
 Exceptional attempts retain a request-joined stage/category before cleanup. Dispatch entry is an
 uncertain execution boundary; null provenance and missing diagnostics are not non-dispatch proof.

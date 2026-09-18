@@ -1,4 +1,4 @@
-"""Bounded semantic-review values and the optional evaluator port."""
+"""Bounded AI-powered review values and the optional evaluator port."""
 
 from __future__ import annotations
 
@@ -659,7 +659,7 @@ def project_review_assessment(
     summary_item_id: str | None = None,
     detail_item_id: str | None = None,
 ) -> ReviewAssessment | ReviewAssessmentSkipped:
-    """Project one complete deterministic basis without truncating narrower outbound refs."""
+    """Project one complete local basis without truncating narrower outbound refs."""
 
     if type(assessment) is not DeterministicAssessment:
         raise _invalid_assessment()

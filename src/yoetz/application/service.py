@@ -236,7 +236,7 @@ class VerificationPolicy:
     def default_check_mode(
         self,
     ) -> Literal["deterministic_only", "semantic_if_configured", "semantic_required"]:
-        """Map the configured semantic default to the frozen check-request vocabulary."""
+        """Map the configured AI-powered review default to the frozen check-request vocabulary."""
 
         if self.semantic == "disabled":
             return "deterministic_only"
@@ -615,7 +615,7 @@ class Application:
     ready_recommendation_refresh: Callable[[], Awaitable[object]] | None = field(
         default=None, repr=False, compare=False
     )
-    # Off-hook observation-advice semantic attempts (#619); stopped with the verification
+    # Off-hook observation-advice AI-powered review attempts (#619); stopped with the verification
     # supervisor so no provider attempt outlives this generation's privacy coordinator.
     advice_semantic_supervisor: ObservationAdviceSemanticSupervisor | None = field(
         default=None, repr=False, compare=False

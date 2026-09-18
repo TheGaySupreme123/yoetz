@@ -11,10 +11,10 @@ and no public surface claims a reviewed design.
 
 ## Threat model
 
-Encryption protects event payloads, captured command output/evidence, semantic cases/responses,
-receipts, operation results containing user content, and service-owned bundle keys against casual
-or at-rest disclosure: other local users, backup media, a stolen disk, and accidental sharing of
-an application-data copy. It does not protect against a compromised active user account,
+Encryption protects event payloads, captured command output/evidence, AI-powered review
+cases/responses, receipts, operation results containing user content, and service-owned bundle keys
+against casual or at-rest disclosure: other local users, backup media, a stolen disk, and accidental
+sharing of an application-data copy. It does not protect against a compromised active user account,
 malicious root, inspection of the ready service's memory, or side channels. Structural metadata
 (bounded IDs, sizes, enums, versions, and timings) is deliberately visible.
 

@@ -458,7 +458,7 @@ def _wire_composed_provider_setup(
 def test_wizard_ambient_configuration_resolves_inside_the_hermetic_home() -> None:
     """The wizard's ``load_config({}, os.environ, None)`` reads never reach a developer's config.
 
-    ``setup run`` decides the route profile, the credential-probe prompt, and semantic readiness
+    ``setup run`` decides the route profile, the credential-probe prompt, and AI-powered review readiness
     from ambient configuration on purpose; the suite, not the product, owns keeping that read
     inside the per-test tree (issue #551). This pins the contract the ``tests/subprocess``
     ``conftest`` provides so a regression fails here rather than three unrelated cases below.
@@ -933,7 +933,7 @@ def test_semantic_first_run_suggests_and_selects_assisted_privacy_draft(
     monkeypatch.setattr(privacy_setup_module, "run_privacy_setup", privacy_setup)
     monkeypatch.setattr(provider_status_module, "provider_status_report", provider_status)
 
-    # Harness 1, semantic review, registration confirmation, then credential-probe consent.
+    # Harness 1, AI-powered review, registration confirmation, then credential-probe consent.
     result = _RUNNER.invoke(
         cli.app,
         ["setup", "run"],
@@ -1161,7 +1161,7 @@ def test_composed_wizard_reaches_semantic_readiness_after_hidden_credential_stor
     assert getattr(targets[0], "repository_privacy_commitment") == "hmac-sha256:" + "7" * 64
     assert "Hidden credential ceremony begins now" in result.stdout
     assert "Credential: ********" in result.stdout
-    assert "Semantic-advice readiness: ready" in result.stdout
+    assert "AI-powered advice readiness: ready" in result.stdout
 
 
 def test_no_codex_found_still_completes_with_guidance(wizard_env: dict[str, object]) -> None:
@@ -1313,7 +1313,7 @@ def test_integrate_mcp_status_names_the_registered_route(
     """Status has to distinguish the two owned registrations, or #132's conflation stays.
 
     Both serve commands classify as ``yoetz_owned``, so an operator reading only the state
-    cannot tell whether the agent route can request semantic review at all.
+    cannot tell whether the agent route can request AI-powered review at all.
     """
 
     for route_profile in ("strict", "policy"):
@@ -1938,7 +1938,7 @@ def test_provider_setup_success_reports_layers_without_ready_overclaim(
     assert "Privacy policy: configured" in plain
     assert "Transport probe: not demonstrated" in plain
     assert "Installed artifact evidence: not demonstrated" in plain
-    assert "not proof of live provider dispatch or semantic review" in plain
+    assert "not proof of live provider dispatch or AI-powered review" in plain
 
 
 @pytest.mark.parametrize(

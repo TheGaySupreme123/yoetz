@@ -89,14 +89,14 @@ line above the active one:
    bytes). When the keyring is unusable — no store loaded, or a backend Yoetz does not approve for
    the vault — the option is disabled with that reason and the passphrase is offered. Change it
    later with `/service` or `yoetz service rotate-passphrase`.
-7. **Review mode** — Local only, or Add semantic review.
-8. **Semantic setup, when selected** — an explicit choice between OpenAI API / compatible API and
-   Codex with ChatGPT subscription, followed by the matching secure API-key or Codex-owned login
-   flow and the trusted recommendation-first privacy ceremony.
+7. **Review mode** — Local only, or Add AI-powered review.
+8. **AI-powered review setup, when selected** — an explicit choice between OpenAI API / compatible
+   API and Codex with ChatGPT subscription, followed by the matching secure API-key or Codex-owned
+   login flow and the trusted recommendation-first privacy ceremony.
 9. **Finish**, with each readiness layer stated separately.
 
 You are never required to configure a provider: Local only is complete and useful. If you choose
-semantic review, setup does not claim completion until provider credentials and privacy approval
+AI-powered review, setup does not claim completion until provider credentials and privacy approval
 finish.
 
 If an MCP entry named `yoetz` already exists and Yoetz does not own it, setup stops there. You can
@@ -129,7 +129,7 @@ list:
 ```text
 Harness detected                    Local service reachable
 MCP registered                      Vault ready
-MCP verified                        Local deterministic checks
+MCP verified                        Local checks
 Guidance installed                  Provider binding saved
 Structural hooks installed          Credential stored
 Project consent active              Provider connection tested
@@ -137,7 +137,7 @@ Approved-check policy trusted       Deeper-review evaluator composed
                                     Privacy permits external review
                                     Deeper review ready
                                     Codex agent route permits deeper review
-                                    Host auto-review admits the semantic check
+                                    Host auto-review admits the AI-powered check
 ```
 
 The last four are deliberately separate lines, because each can be true while the others are not:
@@ -145,15 +145,15 @@ The last four are deliberately separate lines, because each can be true while th
 - **Privacy permits external review** — the effective privacy policy for this repository allows
   external LLM inference. Unknown when the policy could not be read; its detail line carries the
   policy summary.
-- **Deeper review ready** — the installation reports `semantic_ready`: semantic review enabled, a
+- **Deeper review ready** — the installation reports `semantic_ready`: AI-powered review enabled, a
   bound provider with a stored credential, a policy that permits inference, and an exact grant for
   this repository. Configured, not proven working. Otherwise the detail says external review is
   off.
 - **Codex agent route permits deeper review** — whether the registered Codex MCP route can dispatch
-  semantic review. A route registered as `strict` is verified installation-side and still shows
+  AI-powered review. A route registered as `strict` is verified installation-side and still shows
   here as not permitting review, with the command that changes it; unknown when the registration
   could not be read.
-- **Host auto-review admits the semantic check** — whether at least one host's automatic reviewer
+- **Host auto-review admits the AI-powered check** — whether at least one host's automatic reviewer
   has been admitted for this repository; the detail names each host as present or absent, and a
   stale admission that outlives its grant or route is called out for revocation.
 
@@ -221,15 +221,15 @@ Afterwards Yoetz reports what it actually knows:
 ✓ Provider binding saved
 ✓ API key stored securely
 ! Live provider connection has not been tested
-! External semantic review is not yet proven ready
+! External AI-powered review is not yet proven ready
 ```
 
 The subscription variant replaces the API-key line with `✓ Codex-managed ChatGPT login is
-available`. Its status is a structural account/model read with no task case. Live semantic proof
-still requires a privacy-authorized `check` and terminal provenance/receipt.
+available`. Its status is a structural account/model read with no task case. Live AI-powered review
+proof still requires a privacy-authorized `check` and terminal provenance/receipt.
 
 **This build exposes no bounded live provider probe**, so a connection test reports itself as
-unavailable rather than reporting a pass. A provider that fails never affects local deterministic
+unavailable rather than reporting a pass. A provider that fails never affects local-check
 readiness.
 
 ### `/work`, `/check`, `/receipt`
@@ -240,7 +240,7 @@ task index** — the local service exposes no task-listing operation and this in
 invent one — so tasks are reached by name.
 
 `/check` offers three modes, mapping to the existing check modes: use deeper review when
-available, require deeper review, or local deterministic checks only. An unavailable deeper
+available, require deeper review, or local checks only. An unavailable deeper
 review is reported as a limitation, never as a success.
 
 `/receipt` produces Markdown, plain text, or JSON. The readable view leads with the verdict, then

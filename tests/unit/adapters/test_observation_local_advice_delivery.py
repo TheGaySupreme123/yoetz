@@ -289,7 +289,7 @@ def test_usable_provider_receives_no_connect_provider_at_stop(
 
     The hook itself succeeds on every event — ``_run`` asserts exit code 0 — so
     an empty text is an advice-content verdict, not a delivery failure. This is
-    the shape of the incident session: semantic dispatch had just succeeded,
+    the shape of the incident session: AI-powered review dispatch had just succeeded,
     yet the frozen READY snapshot advised reconnecting the provider.
     """
 

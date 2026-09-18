@@ -1,4 +1,4 @@
-"""Canonical finding values, finalized semantic provenance, and ranking inputs."""
+"""Canonical finding values, finalized AI-powered review provenance, and ranking inputs."""
 
 from __future__ import annotations
 
@@ -467,7 +467,7 @@ class RuntimeTokenUsage:
 
     @property
     def aggregate(self) -> TokenUsage:
-        """Return the non-overlapping aggregate fields used by semantic provenance."""
+        """Return the non-overlapping aggregate fields used by AI-powered review provenance."""
 
         return TokenUsage(
             input_tokens=self.input_tokens,
@@ -1114,7 +1114,7 @@ def semantic_fallback_origin_to_json(value: SemanticFallbackOrigin) -> JsonObjec
 
 
 def semantic_provenance_from_json(value: JsonValue) -> SemanticProvenance:
-    """Decode one exact finalized semantic-provenance object."""
+    """Decode one exact finalized AI-powered review provenance object."""
 
     source = _require_json_object(
         value,
@@ -1187,7 +1187,7 @@ def semantic_provenance_from_json(value: JsonValue) -> SemanticProvenance:
 
 
 def semantic_provenance_to_json(value: SemanticProvenance) -> JsonObject:
-    """Encode finalized semantic provenance into its one closed wire object."""
+    """Encode finalized AI-powered review provenance into its one closed wire object."""
 
     if type(value) is not SemanticProvenance:
         raise ProtocolValueError("invalid_semantic_provenance")

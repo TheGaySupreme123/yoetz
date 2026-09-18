@@ -1577,10 +1577,10 @@ async def test_candidate_findings_uses_only_whole_case_path() -> None:
 
 async def test_candidate_parity_excludes_semantic_findings() -> None:
     """Deterministic candidate identity matches a same-frontier check independently of capping;
-    no semantic-origin finding has a candidate row.
+    no AI-powered finding has a candidate row.
 
-    The composed harness in this file runs with semantic verification disabled (deterministic
-    mode only, matching every other operation-contract test module), so a live semantic-origin
+    The composed harness in this file runs with AI-powered verification disabled (local
+    mode only, matching every other operation-contract test module), so a live AI-powered
     finding cannot be produced here; this asserts the origin invariant that does hold for every
     row actually returned.
     """

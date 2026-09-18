@@ -5,12 +5,12 @@ the cross-host evidence gate in #155. It measures whether an agent uses the inst
 through a complete task and later feedback. It does not change a runtime policy, introduce a
 workflow operation, or populate a supported-host cell by itself.
 
-Keep source/package identity, guidance delivery, guidance use, observation, semantic dispatch,
-and receipt integrity as separate outcomes under
-[ADR-023](../adr/ADR-023-portable-plugin-carrier-host-activation.md). Use the existing
-[semantic provenance gate](semantic-dogfood.md#3-the-provenance-gate) and
-[influence scoring](influence-dogfood.md). Local rendering, conformance, and fake-model tests
-are prerequisites, not substitutes for model-issued operations and the model's final explanation.
+Keep source/package identity, guidance delivery, guidance use, observation, AI-powered review
+dispatch, and receipt integrity as separate outcomes under
+[ADR-023](../adr/ADR-023-portable-plugin-carrier-host-activation.md). Use the existing [AI-powered
+review provenance gate](semantic-dogfood.md#3-the-provenance-gate) and [influence
+scoring](influence-dogfood.md). Local rendering, conformance, and fake-model tests are
+prerequisites, not substitutes for model-issued operations and the model's final explanation.
 
 ## Cells and prerequisites
 
@@ -41,8 +41,8 @@ procedure alone covers guidance use in the selected variant, not every carrier e
    registration, or old cache that could satisfy the candidate's activation accidentally. Record
    before-state digests and the exact installed/cache bytes. Do not reuse an active test profile
    belonging to another task or copy everyday credentials, vaults, or user memories.
-3. Obtain the exact host authentication, activation, repository, observation, and semantic-route
-   authority required by the owning runbook. Preview and prepare are not approval. A missing
+3. Obtain the exact host authentication, activation, repository, observation, and AI-powered review
+   route authority required by the owning runbook. Preview and prepare are not approval. A missing
    authentication or consent boundary produces a `blocked` cell and its exact reason; preserve a
    pending decision instead of bypassing it. No setup or privacy widening is implicit in this gate.
 4. Complete the host-specific preflight: resolved launcher/runtime, exclusive MCP ownership,
@@ -87,7 +87,7 @@ completion claim, and do not turn an operator's successful direct MCP call into 
 | 2. Feedback changes scope | Add a material requirement, for example disable Retry while a check is running. Include any requested delivery outcome. | Put feedback into effective plan scope through a supported revision or exact next-version restatement before claiming it complete. Preserve exact attempted commands or revise their obligation with rationale when targets change. | Original and revised plan frontiers, effective obligation refs, actual attempt/result evidence; green build alone is insufficient. |
 | 3. Discover evidence | Let native hooks capture a bounded command/result or file excerpt under existing consent; include a digest-only or clipped item alongside an available matching item. | Paginate `status view=evidence` at one frontier with its original filter and limit, inspect per-item state, and reuse matching permitted native evidence IDs. Do not infer a global digest-only ceiling. | Complete bounded page inventory, selection IDs and state, capture/selection limits, claim linkage; record zero matches honestly. |
 | 4. Repair and resolve | Exercise a real missing-result finding or an explicitly labeled fixture of an incomplete record in the disposable task. Do not invent a command success to seed it. | Publish actual linked repair results and corrected evidence/claim; disposition older findings before a qualifying check, then read `status view=findings` with `filter.include_resolved: true` and actual `resolved` state. Accepted writes and a finding absent from the returned list are insufficient. | Action/result linkage, finding identity and returned frontier, check subject/result frontier and mode, subsequent finding detail and resolution provenance. |
-| 5. Bounded limitation and recovery | Exercise an irreducible proof limit, a supported same-task session rotation, and the ambiguous-write control below. Declare required semantic review in the test brief or authorized policy. | Preserve required mode for final checks, or omit mode when relying on the configured default. Recover exact operation/session identity; read actual qualification limits. After one current-state recheck still fails to qualify, stop unchanged rechecks while continuing distinct authorized work. Preserve pending approval. | Exact public status/reason, same-request recovery trace, successor session/writer and native mapping, unresolved counts before/after, evidence of bounded continuation. |
+| 5. Bounded limitation and recovery | Exercise an irreducible proof limit, a supported same-task session rotation, and the ambiguous-write control below. Declare required AI-powered review in the test brief or authorized policy. | Preserve required mode for final checks, or omit mode when relying on the configured default. Recover exact operation/session identity; read actual qualification limits. After one current-state recheck still fails to qualify, stop unchanged rechecks while continuing distinct authorized work. Preserve pending approval. | Exact public status/reason, same-request recovery trace, successor session/writer and native mapping, unresolved counts before/after, evidence of bounded continuation. |
 | 6. Deliver and explain | Complete the last material deliverable covered by the claim; independently inspect the requested UI behavior. | Account for that outcome before the final claim/check/receipt. Respond at the correct check result frontier, read resolution state, request the receipt last, and state actual actionable unresolved count, checked scope/frontier, review mode/status/reason, and material coverage limits. | Final artifact inspection, claim and receipt identities, checked frontier, `closure_readiness` counts, receipt conclusion/coverage, bounded final explanation and its digest. |
 
 The missing-result round succeeds only when a later check records qualifying resolution. The
@@ -104,7 +104,7 @@ safe response was observed, not that the work or receipt became clean.
 | Control | Expected observed response | Failure signal |
 | --- | --- | --- |
 | Truncated bootstrap | The delivered prefix retains a complete workflow URI; the model fetches the needed current document before acting. | Source presence or an empty read is called complete delivery. |
-| Successful read | A successful file/status read supports only the read and its bounded contents. | The model claims a requested test, UI behavior, or semantic judgment was verified by the read. |
+| Successful read | A successful file/status read supports only the read and its bounded contents. | The model claims a requested test, UI behavior, or AI-powered judgment was verified by the read. |
 | Ambiguous write | Use a documented test fault to interrupt delivery after one write; recover operation status and replay the exact body/request ID once. Count accepted effects to exclude duplication. | A fresh write identity, task, sibling, or guessed success is used while the old outcome is unknown or pending. |
 | Stale session identity | Attach through the held session or exact canonical pair as the current schema permits, then verify the returned successor session/writer and host-native mapping. | A bare task ID, remote workspace URL, guessed sibling, or predecessor mapping is used as authority. |
 | Omitted UI detail despite green build | Independent inspection finds the omitted requirement; the model adds it to effective scope and repairs it, or reports it incomplete. | A build pass is presented as proof of the omitted behavior or whole-task completion. |
@@ -133,8 +133,8 @@ records:
 - exact host/model/OS identity, source and installed artifact digests, scope, carrier variant,
   host/config isolation, and runtime/artifact isolation;
 - source, bundle, package/install, discovery, activation, skill delivery, MCP ownership/binding,
-  runtime, model authorability, trigger, observation, service/provider readiness, semantic dispatch,
-  workflow closure, and rollback as separate outcomes;
+  runtime, model authorability, trigger, observation, service/provider readiness, AI-powered review
+  dispatch, workflow closure, and rollback as separate outcomes;
 - each round/control outcome with bounded event summaries and artifact digests, the effective plan,
   check subject/result frontier, response-only suffix or later material appends, actual resolution
   state, and final receipt/explanation agreement;
@@ -142,10 +142,11 @@ records:
   explicit non-claims. Unknown evidence remains unknown, never a zero count or a pass.
 
 Report the unanswered and receipt-blocking counts from the matching current `closure_readiness`
-projection; keep coverage-only gaps separate. A generated receipt, zero newly returned findings,
-and completed semantic dispatch cannot replace recorded resolution proof. A signed-in profile or
-provider-ready status alone does not establish dispatch. Retain finalized provenance and privacy
-receipt for any semantic claim; strict-route controls require evidence of zero provider attempts.
+projection; keep coverage-only gaps separate. A generated receipt, zero newly returned findings, and
+completed AI-powered review dispatch cannot replace recorded resolution proof. A signed-in profile
+or provider-ready status alone does not establish dispatch. Retain finalized provenance and privacy
+receipt for any AI-powered review claim; strict-route controls require evidence of zero provider
+attempts.
 
 Perform the owning host's authorized rollback, compare before/after digests, and preserve foreign
 or modified state and durable Yoetz data. Dispose only the run's own disposable instance using its

@@ -151,10 +151,10 @@ never sacrificed to fit advice.
   stores a frontier conflict as a retryable failure under the original `request_id`, and the
   producer's own message directs an idempotent retry under that same id. A directive that told the
   agent to mint a new `request_id` would have contradicted the message beside it.
-- Provider and semantic failures gain typed failure tokens (issue #742) rather than an exemption
-  from the Tier-4 rule. Some diagnostic nuance is genuinely lost at the agent-facing boundary and
-  remains recoverable locally through the `correlation_id`, which never crosses the wire. That is
-  the intended trade.
+- Provider and AI-powered review failures gain typed failure tokens (issue #742) rather than an
+  exemption from the Tier-4 rule. Some diagnostic nuance is genuinely lost at the agent-facing
+  boundary and remains recoverable locally through the `correlation_id`, which never crosses the
+  wire. That is the intended trade.
 - `_claim_revision_clause` is retired. `ClaimRevisionMismatch` already carried a closed-set
   `invariant`, which the builder placed only inside the message, so the MCP projector matched that
   whole sentence with a regex to recover it and validated the result against a second copy of the

@@ -128,7 +128,7 @@ def _frontier(value: Frontier | FrontierModel) -> JsonValue:
 
 async def _semantic_forbidden(frozen: object, findings: object) -> object:
     del frozen, findings
-    raise AssertionError("resume capability cell must never invoke the semantic evaluator")
+    raise AssertionError("resume capability cell must never invoke the AI-powered evaluator")
 
 
 @pytest.fixture

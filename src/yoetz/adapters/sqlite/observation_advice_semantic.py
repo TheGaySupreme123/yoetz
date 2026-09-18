@@ -1,4 +1,4 @@
-"""SQLite repository for generation-fenced observation-advice semantic attempts (#619)."""
+"""SQLite repository for generation-fenced observation-advice AI-powered review attempts (#619)."""
 
 from __future__ import annotations
 
@@ -244,7 +244,7 @@ class SqliteObservationAdviceSemanticRepository:
             ):
                 raise PublicOperationError(
                     PublicErrorCode.SESSION_CONFLICT,
-                    "Semantic advice lease is stale.",
+                    "AI-powered advice lease is stale.",
                     retryable=True,
                 )
             self._db.execute(

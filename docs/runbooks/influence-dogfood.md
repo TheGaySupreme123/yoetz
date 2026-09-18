@@ -11,9 +11,9 @@ recorded operational health and receipt honesty while demonstrating little attri
 revision. The postmortem's P1.6–P1.8 remediation items (policy-enabled qualitative route, seeded
 defect, intervention timing) are the experiment contract this runbook operationalizes.
 
-Semantic eligibility and the provenance gate stay in the
-[semantic dogfood runbook](semantic-dogfood.md) (#132). This runbook **consumes** that profile and
-gate; it does not redefine them.
+AI-powered review eligibility and the provenance gate stay in the [AI-powered review dogfood
+runbook](semantic-dogfood.md) (#132). This runbook **consumes** that profile and gate; it does not
+redefine them.
 
 For the 0.2 multi-round workflow and recovery follow-up, use
 [native guidance-use acceptance](native-guidance-acceptance.md). It adds fresh/stale-memory variants,
@@ -23,7 +23,7 @@ each named host cell while keeping package delivery separate from actual guidanc
 **Issue:** [#133](https://github.com/TheGaySupreme123/yoetz/issues/133).  
 **Design gate:** docs/test-only evaluation protocol — no public runtime behavior change.  
 **Out of scope here:** product fixes owned by #128–#132 (schema authorability, nested errors,
-undeclared scope, evidence provenance, semantic route preflight).
+undeclared scope, evidence provenance, AI-powered review route preflight).
 
 ---
 
@@ -36,7 +36,7 @@ sentence.
 |---|---|
 | Operational health | Tool listing, registration alone, or a successful dry-run |
 | Authoring / corrective UX | Service uptime without first-call success or public repair |
-| Semantic quality | A strict route that never attempted review; availability without a scored attempt |
+| AI-powered review quality | A strict route that never attempted review; availability without a scored attempt |
 | Work-product influence | Receipt wording, honesty-only rewrites, registration, or zero findings |
 
 Hard rules:
@@ -44,14 +44,15 @@ Hard rules:
 1. **Registration / tool listing is never activation or influence.** A registered MCP entry or a
    successful `tools/list` says what the host *could* launch, not that the agent used Yoetz, that a
    model was shown anything, or that any work changed.
-2. **Operational health ≠ authoring UX ≠ semantic quality ≠ work-product influence.** Score each
-   stream on its own evidence. A pass on A does not raise D.
+2. **Operational health ≠ authoring UX ≠ AI-powered review quality ≠ work-product influence.** Score
+   each stream on its own evidence. A pass on A does not raise D.
 3. **Receipt-wording changes are honesty influence (Stream A / integrity), never Stream D.**
    Softening a conclusion to match weakest coverage is integrity success, not proof the
    implementation improved.
-4. **Strict-route runs mark Stream C semantic quality `not_tested` (privacy pass), never “poor
-   semantic feedback.”** The route declined to attempt review; that is not a measurement of review
-   quality. See [semantic dogfood](semantic-dogfood.md) Profile A and §3 provenance gate.
+4. **Strict-route runs mark Stream C AI-powered review quality `not_tested` (privacy pass), never
+   “poor AI-powered feedback.”** The route declined to attempt review; that is not a measurement of
+   review quality. See [AI-powered review dogfood](semantic-dogfood.md) Profile A and §3 provenance
+   gate.
 5. **A zero-influence run with healthy service and honest receipt must not be summarized as “Yoetz
    improved the agent.”** Enforce the forbidden-summary check in §5.
 
@@ -79,8 +80,8 @@ Every influence dogfood report **must** contain four separately scored sections.
 |---|---|---|
 | **A Operational health** | Was Yoetz healthy? | Service completed intended ops honestly: listing/registration posture recorded, six tools visible when expected, start/attach, write accept/reject, dry-run non-evidential, status/check/receipt, latency/errors within experiment bounds |
 | **B Authoring / corrective UX** | Could the agent use it efficiently? | First-call success where required, rejection rate (excluding resource reads), identical structural retries bounded, source-inspection detours recorded, repair from **public** feedback alone, time-to-valid-plan / first obligation |
-| **C Semantic availability & quality** | Did the reviewer produce valid feedback? | **Only when** the [provenance gate](semantic-dogfood.md#3-the-provenance-gate) says an attempt happened: eligibility/preflight, dispatch + status/reason, packet coverage, finding specificity/actionability, FP/miss |
-| **D Agent influence** | Did that feedback **materially improve** the work? | Attributable work-product revision bound to a Yoetz output (finding, status frontier, or deterministic check outcome), with before→after action + evidence + recheck — or explicit `not_demonstrated` |
+| **C AI-powered review availability & quality** | Did the reviewer produce valid feedback? | **Only when** the [provenance gate](semantic-dogfood.md#3-the-provenance-gate) says an attempt happened: eligibility/preflight, dispatch + status/reason, packet coverage, finding specificity/actionability, FP/miss |
+| **D Agent influence** | Did that feedback **materially improve** the work? | Attributable work-product revision bound to a Yoetz output (finding, status frontier, or local check outcome), with before→after action + evidence + recheck — or explicit `not_demonstrated` |
 
 ### Stream A detail
 
@@ -99,7 +100,7 @@ time-to-first-obligation are primary timing metrics (see §4).
 
 ### Stream C detail
 
-Follow semantic dogfood profiles:
+Follow the AI-powered review dogfood profiles:
 
 - **Profile A (strict):** Stream C = `not_tested`. Do not score quality.
 - **Profile B (policy):** Stream C is eligible only after the provenance gate allows scoring. A
@@ -146,8 +147,8 @@ Before the first source edit of the work product under test, require:
    already supports `no_obligations_declared` + typed empty-scope reasons — the protocol must *use*
    it, not re-implement it);
 3. requested items + evidence expectations;
-4. experiment profile + semantic eligibility (link the [semantic dogfood](semantic-dogfood.md)
-   preflight and profile A/B).
+4. experiment profile + AI-powered review eligibility (link the [AI-powered review
+   dogfood](semantic-dogfood.md) preflight and profile A/B).
 
 If authoring prevents this gate → record **`authoring_early_publication_gate: failed`** (Stream B
 fail contribution). **Do not** silently switch to end-of-task publication and still claim Stream D
@@ -232,7 +233,7 @@ Include at least:
 | `work_product_influence` | `demonstrated` \| `not_demonstrated` |
 | `honesty_influence` | `yes` \| `no` |
 | `stream_a` … `stream_d` | Closed stream score tokens from §1 |
-| `experiment_profile` | `strict` \| `policy` (semantic dogfood Profile A/B) |
+| `experiment_profile` | `strict` \| `policy` (AI-powered review dogfood Profile A/B) |
 | `semantic_scoring_eligible` | Boolean from provenance gate |
 | `activation` | `none` \| `tools_listed` \| `registered_only` \| `session_ops` — registration/list alone is not session use |
 
@@ -265,7 +266,8 @@ Required final report shape:
 
 ### 5.2 Privacy hygiene
 
-Copy the semantic dogfood report hygiene (§5 there). A dogfood report is shared material. It carries:
+Copy the AI-powered review dogfood report hygiene (§5 there). A dogfood report is shared material.
+It carries:
 
 - credential state as **presence only** (`connected` / `not stored` / `unknown`) — never a value,
   prefix, length, or any property of the stored secret;
@@ -276,20 +278,20 @@ Copy the semantic dogfood report hygiene (§5 there). A dogfood report is shared
 
 ---
 
-## 6. Relationship to semantic dogfood
+## 6. Relationship to AI-powered review dogfood
 
-| Semantic profile | Stream C | Stream D |
+| AI-powered review profile | Stream C | Stream D |
 |---|---|---|
-| **A — strict / local-only** | `not_tested` (privacy pass; never “poor”) | May still score from **deterministic** findings, status frontiers, and closure — never from semantic review |
-| **B — policy-enabled** | Eligible only after provenance gate | May cite semantic findings only when the gate allows scoring those findings |
+| **A — strict / local-only** | `not_tested` (privacy pass; never “poor”) | May still score from **local** findings, status frontiers, and closure — never from AI-powered review |
+| **B — policy-enabled** | Eligible only after provenance gate | May cite AI-powered findings only when the gate allows scoring those findings |
 
-Influence dogfood always runs the semantic preflight when Stream C or semantic-cited Stream D is in
-scope. For strict Profile A runs that only care about deterministic influence, still record
-`experiment_profile: strict` and `stream_c: not_tested`.
+Influence dogfood always runs the AI-powered review preflight when Stream C or a Stream D that cites
+AI-powered findings is in scope. For strict Profile A runs that only care about local-check
+influence, still record `experiment_profile: strict` and `stream_c: not_tested`.
 
 Retained negative-control shape (historical reference task
 `019fc915-a0bd-7803-b5d9-d8cbb9c65981`): start early, plan after first edit, zero obligations,
-terminal-only completion graph, deterministic zero findings, semantic blocked by strict route,
+terminal-only completion graph, zero local findings, AI-powered review blocked by strict route,
 honesty-only final wording — Stream D `not_demonstrated`, Stream C `not_tested`, forbidden summary
 if prose claims improvement.
 
@@ -307,9 +309,10 @@ if prose claims improvement.
 
 ## See also
 
-- [Semantic dogfood runbook](semantic-dogfood.md) — profiles A/B, preflight, provenance gate.
+- [AI-powered review dogfood runbook](semantic-dogfood.md) — profiles A/B, preflight, provenance
+  gate.
 - [Codex integration runbook](codex-integration.md) — skill install, MCP registration, route profile.
-- [Privacy and semantic review](../usage/privacy-and-semantic-review.md) — durable policy that
+- [Privacy and AI-powered review](../usage/privacy-and-semantic-review.md) — durable policy that
   authorizes disclosure.
 - The 2026-08-03 codex-testing postmortem — root evidence and the P1.6–P1.8 remediation items —
   is a private drafting input under the gitignored `docs/postmortems/` and is not shipped; the

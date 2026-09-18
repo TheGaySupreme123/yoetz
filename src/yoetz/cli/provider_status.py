@@ -1,8 +1,8 @@
-"""Read-only semantic readiness report for operator surfaces.
+"""Read-only AI-powered review readiness report for operator surfaces.
 
-Reports the installation-local conditions that must all hold before external semantic review can
+Reports the installation-local conditions that must all hold before external AI-powered review can
 dispatch, without claiming a live provider smoke or writing any state. It separately reports the
-registered Codex MCP route, because a strict agent route cannot dispatch semantic review even
+registered Codex MCP route, because a strict agent route cannot dispatch AI-powered review even
 when every installation condition holds.
 """
 
@@ -236,7 +236,7 @@ async def mcp_route_observation(
     """Report exclusive external/plugin MCP ownership without inferring runtime success.
 
     A strict registration and a policy registration are both ``yoetz_owned``, so registration
-    state alone cannot tell an operator whether the agent route can dispatch semantic review at
+    state alone cannot tell an operator whether the agent route can dispatch AI-powered review at
     all. This probe adds the missing fact.
 
     Fail-soft is deliberate and load-bearing: this report exists to stay readable when the
@@ -716,7 +716,7 @@ async def provider_status_report(
     if registered_profile == "strict":
         # Scoped to the agent route on purpose. ADR-018 decision 2 makes the route ceiling
         # process-local, so a strict Codex registration does not stop a CLI or terminal check
-        # from dispatching semantic review — it is not an installation blocker.
+        # from dispatching AI-powered review — it is not an installation blocker.
         blockers.append(
             {
                 "condition": "mcp_route_profile",
@@ -822,7 +822,7 @@ async def provider_status_report(
             "mcp_route.observed false means ownership was not read unambiguously, not that no "
             "route exists.",
             "host_admission reports each host's own project-scoped rule admitting the "
-            "semantic check past its automatic reviewer; it is host tool-call authorization "
+            "AI-powered check past its automatic reviewer; it is host tool-call authorization "
             "and proves neither dispatch nor a Yoetz decision. unknown means the host file "
             "could not be read.",
         ),

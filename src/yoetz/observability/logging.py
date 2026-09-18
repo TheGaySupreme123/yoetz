@@ -476,7 +476,7 @@ def record_bounded_event_without_raising(
 ) -> str:
     """Emit bounded structural identity for a reviewed non-exception event.
 
-    Semantic review declining to dispatch is an expected operating state, not an unexpected
+    AI-powered review declining to dispatch is an expected operating state, not an unexpected
     exception, so it has no ``_exception_reason`` source; the caller passes the already-bounded
     reason token it is simultaneously reporting on the operation's own result channel. Both
     tokens are reviewed literals at the call site, and the sinks re-validate them against the
@@ -603,7 +603,7 @@ def record_bounded_counts_without_raising(
 ) -> str:
     """Emit bounded structural counters for a reviewed non-exception event.
 
-    Some outcomes are only legible as arithmetic: a semantic review that returned three challenges
+    Some outcomes are only legible as arithmetic: an AI-powered review that returned three challenges
     and produced no findings is not an error on any single call, so nothing raises and nothing is
     logged, and the loss is invisible. ``counts`` carries integers and closed tokens under names
     the sinks already allowlist; anything else is dropped there, exactly as for any other record.

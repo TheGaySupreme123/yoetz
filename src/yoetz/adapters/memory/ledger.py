@@ -340,7 +340,7 @@ class MemoryLedgerState:
     jobs: dict[str, SemanticJobRecord] = field(default_factory=lambda: {})
     job_by_case: dict[tuple[str, str, str], str] = field(default_factory=lambda: {})
     attempts: dict[str, _AttemptState] = field(default_factory=lambda: {})
-    # Keyed by job_id: at most one disclosure wait per semantic job.
+    # Keyed by job_id: at most one disclosure wait per AI-powered review job.
     disclosure_waits: dict[str, SemanticDisclosureWait] = field(default_factory=lambda: {})
     object_refs: dict[str, ObjectRef] = field(default_factory=lambda: {})
     # Transient freeze-acquisition holds: never persisted; a crash mid-freeze must drop them.
@@ -406,7 +406,7 @@ async def _semantic_execution_lease_bound(
     task: str,
     now: datetime,
 ) -> datetime | None:
-    """Return the authenticated semantic execution expiry plus cleanup grace.
+    """Return the authenticated AI-powered review execution expiry plus cleanup grace.
 
     The execution deadline is part of the frozen ``semantic-case/2`` object. Reading it through
     the exact object reference keeps lease renewal tied to the case that was prepared for this
@@ -2629,7 +2629,7 @@ class MemoryLedgerAdapter:
             )
             if not matches:
                 return None
-            # One operation binds at most one durable semantic job in practice; if multiple
+            # One operation binds at most one durable AI-powered review job in practice; if multiple
             # case digests exist (should not), return the most recently enqueued by attempt_count.
             return max(matches, key=lambda item: (item.attempt_count, item.job_id))
 

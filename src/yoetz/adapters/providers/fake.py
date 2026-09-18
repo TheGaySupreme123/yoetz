@@ -1,6 +1,6 @@
-"""Deterministic, network-free scripted semantic evaluator for tests only.
+"""Deterministic, network-free scripted AI-powered evaluator for tests only.
 
-This module gives the real privacy gateway, semantic coordinator, and post-validation path a
+This module gives the real privacy gateway, AI-powered review coordinator, and post-validation path a
 scripted stand-in for a live provider. It is reachable only from the explicit ``test-fake`` test
 composition: production strict-local, denied, and disabled paths construct no evaluator at all and
 never fall back to this fake. The fake never contacts a network, never depends on the OpenAI SDK,

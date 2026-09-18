@@ -141,7 +141,7 @@ jobs:
             exit 1
           fi
 
-      - name: Platform kill matrix — publication, check/semantic, checkpoint, backup, migration/restore, response serialization; owner-generation races
+      - name: Platform kill matrix — publication, check/AI-powered review, checkpoint, backup, migration/restore, response serialization; owner-generation races
         run: |
           uv run --locked pytest tests/subprocess/test_kill_matrix.py \
             tests/subprocess/test_process_owner_fencing.py \
@@ -238,7 +238,7 @@ jobs:
           print('sqlite source id', apsw.sqlite3_sourceid())
           "
 
-      - name: Platform kill matrix — publication, check/semantic, checkpoint, backup, migration/restore, response serialization; owner-generation races
+      - name: Platform kill matrix — publication, check/AI-powered review, checkpoint, backup, migration/restore, response serialization; owner-generation races
         run: |
           uv run --locked pytest tests/subprocess/test_kill_matrix.py \
             tests/subprocess/test_process_owner_fencing.py \

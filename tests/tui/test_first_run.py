@@ -594,7 +594,7 @@ async def test_semantic_review_is_the_recommended_answer_and_where_the_cursor_re
         assert view is not None
         assert view.view_name == "review-mode"
         assert [option.label for option in _options(view)] == [
-            "Add semantic review",
+            "Add AI-powered review",
             "Local only",
         ]
         assert _selected(view).key == "semantic"
@@ -636,9 +636,9 @@ async def test_abandoning_semantic_setup_offers_a_coherent_local_only_finish(
 ) -> None:
     """Backing out of the provider step must not leave a half-configured install.
 
-    Semantic was chosen, so the policy route is already registered. Without this the flow
+    AI-powered review was chosen, so the policy route is already registered. Without this the flow
     returns with that route in place, no provider behind it, and no marker written -- an
-    install that is neither local-only nor semantic, and says so nowhere.
+    install that is neither local-only nor AI-powered, and says so nowhere.
     """
 
     runtime = FakeRuntime()
@@ -695,7 +695,7 @@ async def test_declining_the_local_only_finish_says_setup_is_unfinished(
 async def test_the_approval_screen_shows_the_local_only_serve_command(
     make_app: MakeApp,
 ) -> None:
-    """Choosing local only must not show the command that permits semantic review."""
+    """Choosing local only must not show the command that permits AI-powered review."""
 
     runtime = FakeRuntime()
     app = make_app(first_run=True, runtime=runtime)
