@@ -195,6 +195,7 @@ def test_default_codex_home_prefers_codex_home_then_the_dotfile(
     (home / ".codex").mkdir(parents=True)
     explicit = tmp_path / "explicit-codex"
     explicit.mkdir()
+
     def fake_home(cls: type[Path]) -> Path:
         return home
 
@@ -209,6 +210,7 @@ def test_default_codex_home_is_only_ever_an_existing_owner_directory(
 ) -> None:
     home = tmp_path / "home"
     home.mkdir()
+
     def fake_home(cls: type[Path]) -> Path:
         return home
 
