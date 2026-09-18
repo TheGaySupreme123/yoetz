@@ -5,8 +5,8 @@
 
 ## Purpose
 
-The current product release line is **0.2**, with Linux/WSL compatibility fixes prepared as
-**0.2.1**. The dated v0.1 decisions below remain history; the 0.2 re-dispositions govern the
+The current product release line is **0.2**, with Linux/WSL compatibility fixes released as
+**0.2.1** and install-path fixes as **0.2.2**. The dated v0.1 decisions below remain history; the 0.2 re-dispositions govern the
 current line. Real WSL 2 and native Linux Claude/Cursor acceptance remain untested, and
 privacy-receipt CLI bugs #731 and #732 remain open (release tracking: #733). This version
 update does not close a gate or add a supported capability cell.
