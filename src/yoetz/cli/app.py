@@ -135,7 +135,7 @@ integrate_plugin_app = typer.Typer(
 )
 integrate_admission_app = typer.Typer(
     help=(
-        "Let a host's automatic tool-call reviewer admit the owner-authorized semantic check "
+        "Let a host's automatic tool-call reviewer admit the owner-authorized AI-powered check "
         "(project-scoped, previewed, digest-bound, reversible)."
     ),
     no_args_is_help=True,
@@ -165,7 +165,7 @@ credential_app = typer.Typer(
 )
 fallback_app = typer.Typer(
     help=(
-        "Manage the primary/fallback pairing of the two bound semantic endpoints "
+        "Manage the primary/fallback pairing of the two bound AI-powered review endpoints "
         "(Codex subscription and API provider)."
     ),
     no_args_is_help=True,
@@ -2018,7 +2018,7 @@ def mcp_serve(
         Literal["on", "off"],
         typer.Option(
             "--semantic",
-            help="Semantic route posture: on follows policy; off fixes a process-lifetime ceiling.",
+            help="AI-powered review route posture: on follows policy; off fixes a process-lifetime ceiling.",
         ),
     ] = "on",
     host: Annotated[
@@ -3614,7 +3614,7 @@ def provider_codex_subscription_rollback(json_output: _JSON = False) -> None:
 
 @provider_app.command("status")
 def provider_status(json_output: _JSON = False) -> None:
-    """Report whether external semantic review is structurally ready to dispatch."""
+    """Report whether external AI-powered review is structurally ready to dispatch."""
 
     from yoetz.cli.provider_status import run_provider_status
 

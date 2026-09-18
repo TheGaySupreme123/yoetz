@@ -135,7 +135,7 @@ def test_session_start_creates_binding_without_mcp_start(tmp_path: Path) -> None
 
 
 # ---------------------------------------------------------------------------
-# 2. Zero cooperative publications → deterministic advice
+# 2. Zero cooperative publications → local advice
 # ---------------------------------------------------------------------------
 
 
@@ -401,7 +401,7 @@ def test_approved_check_stale_when_digest_changes(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 6. Deterministic-only vs configured semantic-review
+# 6. Local-only vs configured AI-powered review
 # ---------------------------------------------------------------------------
 
 
@@ -723,7 +723,7 @@ def test_unknown_future_fields_record_gaps_continue_observation(tmp_path: Path) 
 
 
 # ---------------------------------------------------------------------------
-# 13. Secret-like command output never appears in status/logs/advice/semantic
+# 13. Secret-like command output never appears in status/logs/advice/AI-powered review
 # ---------------------------------------------------------------------------
 
 

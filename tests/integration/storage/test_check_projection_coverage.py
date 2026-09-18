@@ -207,7 +207,7 @@ async def test_check_populates_durable_aggregate_and_status_coverage(tmp_path: P
     ledger, db = file_sqlite_for(command, objects, path)
     accepted = await ledger.append_batch(command)
     # Coverage on the check payload is what the durable mirror must retain; include both
-    # check types so the aggregate proves semantic-derived coverage is not collapsed to none.
+    # check types so the aggregate proves AI-powered (model-derived) coverage is not collapsed to none.
     check_coverage = _checked_coverage(
         command.entries[0].coverage, CheckType.DETERMINISTIC, CheckType.SEMANTIC_MODEL_DERIVED
     )

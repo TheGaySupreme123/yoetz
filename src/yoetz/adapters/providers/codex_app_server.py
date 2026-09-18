@@ -1,4 +1,4 @@
-"""Exact Codex app-server semantic evaluator with Codex-owned ChatGPT OAuth.
+"""Exact Codex app-server AI-powered evaluator with Codex-owned ChatGPT OAuth.
 
 The adapter never opens or names Codex credential files.  It launches one exact, digest-bound
 native Codex executable with a dedicated owner-private ``CODEX_HOME``, performs structural
@@ -299,7 +299,7 @@ _MAX_MESSAGE_BYTES: Final = 1_048_576
 _MAX_EVENT_COUNT: Final = 4096
 _MAX_STDERR_BYTES: Final = 65_536
 _CLEANUP_GRACE_SECONDS: Final = 2.0
-# The semantic evaluator's request deadline is carried by ``Deadline`` and is intentionally
+# The AI-powered evaluator's request deadline is carried by ``Deadline`` and is intentionally
 # unrelated to the interactive login ceremony.  Keep this legacy name for callers/tests that
 # imported it while giving each native Codex login method its full supported window.
 _LOGIN_TIMEOUT_SECONDS: Final = 300.0
@@ -940,7 +940,7 @@ async def _initialize(runtime: _CodexProcess, profile: CodexAppServerProfile) ->
         {
             "clientInfo": {
                 "name": "yoetz_semantic_evaluator",
-                "title": "Yoetz bounded semantic evaluator",
+                "title": "Yoetz bounded AI-powered evaluator",
                 "version": "0.1.0",
             },
             "capabilities": {
@@ -1770,7 +1770,7 @@ class CodexAppServerEvaluator:
                 {
                     "clientInfo": {
                         "name": "yoetz_semantic_evaluator",
-                        "title": "Yoetz bounded semantic evaluator",
+                        "title": "Yoetz bounded AI-powered evaluator",
                         "version": "0.1.0",
                     },
                     "capabilities": {
@@ -1871,7 +1871,7 @@ class CodexAppServerEvaluator:
                         )
                     except ValueError:
                         # Usage is telemetry only. A malformed active-turn snapshot must not
-                        # turn an otherwise valid semantic judgment into a provider failure, and
+                        # turn an otherwise valid AI-powered judgment into a provider failure, and
                         # it must not erase a valid earlier cumulative snapshot.
                         failure_stage = "token_usage_invalid"
                     else:

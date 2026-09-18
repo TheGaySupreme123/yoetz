@@ -1,4 +1,4 @@
-"""Bounded asynchronous observation-advice semantic review (issue #619).
+"""Bounded asynchronous observation-advice AI-powered review (issue #619).
 
 Every test drives the real SQLite repository over an in-memory bundle and the real advice
 builder. No provider is ever called: the dispatch is a fake that records what it was handed.
@@ -125,8 +125,8 @@ def _builder() -> ObservationAdviceContextBuilder:
 def _rows(
     db: apsw.Connection, repository: SqliteObservationAdviceSemanticRepository
 ) -> tuple[ObservationAdviceSemanticAttempt, ...]:
-    """Every durable row in schedule order. The row is keyed by the pre-semantic evidence basis;
-    the snapshot's own basis digest is recomputed after the semantic gap is folded in."""
+    """Every durable row in schedule order. The row is keyed by the pre-review evidence basis;
+    the snapshot's own basis digest is recomputed after the AI-powered review gap is folded in."""
 
     keys = db.execute(
         "SELECT yoetz_session_id, basis_digest FROM observation_advice_semantic_attempts "

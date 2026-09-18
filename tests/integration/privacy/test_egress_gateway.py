@@ -1559,7 +1559,7 @@ def test_external_runtime_authority_never_mints_a_vault_credential_and_records_u
 def test_bundled_chat_completions_binding_reconciles_without_factory_unavailable() -> None:
     """A configured preset must become a live factory, not an unavailable-binding reconciliation.
 
-    `factory_unavailable` is invisible to the caller: the check still returns, the semantic review
+    `factory_unavailable` is invisible to the caller: the check still returns, the AI-powered review
     simply never happened. Asserting the real dispatch table against the real policy binding is the
     only place the config-to-gateway key agreement is proven.
     """

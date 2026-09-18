@@ -627,7 +627,7 @@ def test_builder_never_adds_new_findings_or_evidence() -> None:
 
 
 def test_semantic_review_not_configured_limitations_state_not_run() -> None:
-    """Requirement: receipt limitations disclose that semantic relevance review was not run."""
+    """Requirement: receipt limitations disclose that AI-powered relevance review was not run."""
 
     from yoetz.domain.receipts import SEMANTIC_REVIEW_NOT_CONFIGURED_GAP, render_receipt_compact
 
@@ -641,7 +641,7 @@ def test_semantic_review_not_configured_limitations_state_not_run() -> None:
         CheckVerdict.INSUFFICIENT_COVERAGE,
         coverage,
     )
-    # Override semantic outcome on the applicable check for documentation; gaps drive disclosure.
+    # Override AI-powered outcome on the applicable check for documentation; gaps drive disclosure.
     check = replace(
         check,
         semantic_status=SemanticStatus.NOT_CONFIGURED,
@@ -655,11 +655,11 @@ def test_semantic_review_not_configured_limitations_state_not_run() -> None:
         for section in receipt.sections
         if section.key is ReceiptSectionKey.LIMITATIONS_AND_COVERAGE
     )
-    assert limitations.body.startswith("Semantic relevance review was not run.")
+    assert limitations.body.startswith("AI-powered relevance review was not run.")
     assert SEMANTIC_REVIEW_NOT_CONFIGURED_GAP in limitations.items
     rendered = render_receipt_compact(receipt)
-    assert "semantic relevance review was not run" in rendered
-    assert "optional semantic review was blocked" not in rendered
+    assert "AI-powered relevance review was not run" in rendered
+    assert "optional AI-powered review was blocked" not in rendered
 
 
 @pytest.mark.parametrize("profile", tuple(ReceiptRedactionProfile))
@@ -917,7 +917,7 @@ def test_resolved_history_is_named_apart_from_current_findings_and_gaps() -> Non
     summary = sections[ReceiptSectionKey.SUMMARY]
     assert summary.items == (finding.finding_id,)
     assert summary.body == (
-        "No unresolved deterministic findings were recorded at frontier 2. One earlier finding "
+        "No unresolved local findings were recorded at frontier 2. One earlier finding "
         "was resolved by a later qualifying check and remains visible as history."
     )
     dispositions = sections[ReceiptSectionKey.FINDINGS_AND_DISPOSITIONS]
@@ -929,7 +929,7 @@ def test_resolved_history_is_named_apart_from_current_findings_and_gaps() -> Non
     assert resolved_finding_ids_for_render(receipt) == frozenset({finding.finding_id})
     assert unresolved_findings_for_render(receipt) == ()
     compact = render_receipt_compact(receipt)
-    assert "no unresolved deterministic findings were recorded" in compact
+    assert "no unresolved local findings were recorded" in compact
     assert "1 unresolved finding" not in compact
 
 
@@ -1067,7 +1067,7 @@ def test_receipt_carries_applicable_semantic_provenance_and_usage() -> None:
         if section.key is ReceiptSectionKey.VERSION_AND_POLICY_IDENTITY
     )
     assert (
-        "Semantic attempt usage: input=100, cached_input=60, cache_write_input=5, "
+        "AI-powered review attempt usage: input=100, cached_input=60, cache_write_input=5, "
         "output=20, reasoning_output=8, total=120 tokens."
     ) in version_section.body
     rendered = render_receipt_human(receipt, markdown=False)

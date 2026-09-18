@@ -401,7 +401,7 @@ async def test_a_stored_provider_is_never_reported_as_a_tested_one(
             await pilot.pause()
         text = transcript(app)
         assert "Live provider connection has not been tested" in text
-        assert "External semantic review is not yet proven ready" in text
+        assert "External AI-powered review is not yet proven ready" in text
 
 
 async def test_provider_setup_ends_with_an_honest_readiness_summary(
@@ -422,7 +422,7 @@ async def test_provider_setup_ends_with_an_honest_readiness_summary(
         ]
         text = transcript(app)
         assert "Live provider connection has not been tested" in text
-        assert "External semantic review is not yet proven ready" in text
+        assert "External AI-powered review is not yet proven ready" in text
 
 
 async def test_provider_setup_never_requests_a_key_without_an_exact_repository_grant(
@@ -646,9 +646,9 @@ async def test_check_offers_the_three_modes_and_passes_the_chosen_one_through(
         assert labels == [
             "Use deeper review when available",
             "Require deeper review",
-            "Local deterministic checks only",
+            "Local checks only",
         ]
-        await pilot.press("down", "down", "enter")  # deterministic only
+        await pilot.press("down", "down", "enter")  # local only
         await pilot.pause()
         assert runtime.checks == [("upload", CheckMode.DETERMINISTIC_ONLY)]
 

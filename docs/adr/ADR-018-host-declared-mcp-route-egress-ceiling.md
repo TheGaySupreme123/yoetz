@@ -6,12 +6,12 @@
 **Implemented by:** `src/yoetz/mcp/`, `src/yoetz/application/check.py`,
 `src/yoetz/ports/control.py`, `src/yoetz/service/`, and
 `src/yoetz/adapters/integrations/codex_mcp.py`.
-**Relates to:** ADR-006 (semantic provider profile), ADR-008 (local service/vault trust
+**Relates to:** ADR-006 (AI-powered review provider profiles), ADR-008 (local service/vault trust
 boundary), ADR-009 (data egress and privacy), and ADR-012 (first-run setup wizard).
 
 ## Context
 
-The durable privacy policy is the authority for whether an external semantic review may occur.
+The durable privacy policy is the authority for whether an external AI-powered review may occur.
 That is necessary, but it is not enough for a host that wants to grant unattended approval to a
 particular MCP server process. Such a host needs an inspectable upper bound on what that route can
 ask Yoetz to do for the lifetime of the process, independent of later policy widening.
@@ -19,7 +19,7 @@ ask Yoetz to do for the lifetime of the process, independent of later policy wid
 MCP `openWorldHint` communicates expected tool behaviour to a host, but is not authority. Advertising
 `check` as open-world while asking the host to auto-approve the process makes the host trust a
 runtime policy state it did not declare. Advertising it as closed while the route can still request
-semantic review would be dishonest.
+AI-powered review would be dishonest.
 
 ## Decisions
 
@@ -34,8 +34,8 @@ semantic review would be dishonest.
 
 2. **Strict is a ceiling, not a privacy policy.** The durable policy continues to authorize or deny
    disclosure. The strict route adds a stronger process-local limit: `check` never requests the
-   semantic runtime capability and never invokes a semantic evaluator. It does not disable
-   deterministic checks, local service IPC, receipts, or the other five operations.
+   AI-powered review runtime capability and never invokes an AI-powered evaluator. It does not
+   disable local checks, local service IPC, receipts, or the other five operations.
 
 3. **The public six-operation schemas stay host-neutral.** `route_profile` and the serving
    `host_profile` exist only in the private local control envelope between the MCP bridge and the
@@ -43,37 +43,37 @@ semantic review would be dishonest.
    `check` and `status`. Agent-supplied fields remain invalid under the frozen public request
    schema.
 
-4. **A requested review fails honestly under strict.** A semantic request returns
+4. **A requested review fails honestly under strict.** An AI-powered review request returns
    `semantic_status=blocked_by_policy` and
    `semantic_reason=route_semantic_ceiling`. `semantic_required` therefore returns an incomplete
-   result. The same reason and explicit gap are retained in the result and receipt; no deterministic
-   outcome is promoted to semantic coverage.
+   result. The same reason and explicit gap are retained in the result and receipt; no local-check
+   outcome is promoted to AI-powered review coverage.
 
 5. **Descriptor sets are frozen per profile.** The policy profile advertises
    `check.openWorldHint=true`. The strict profile advertises `false` and says that the route will not
-   request external semantic review. Both exact descriptor sets (six workflow tools plus
+   request external AI-powered review. Both exact descriptor sets (six workflow tools plus
    read-only `read_guidance`) and their set digests are conformance-tested. Annotations remain
    untrusted hints; enforcement is owned by the application route constraint.
 
 6. **Initialize and versions status disclose the active profile.** Initialize instructions name
    `policy` or `strict` and state the corresponding bounded promise. MCP-originated
    `status(view=versions)` includes the same route profile. On the policy route the instructions
-   also name the configured semantic review destination and payload bound, read once at bridge
+   also name the configured AI-powered review destination and payload bound, read once at bridge
    startup (destination-disclosure amendment below, issue #479).
 
 7. **Registration binds the exact command.** A host registration preview includes the exact argv,
    route profile, and digest. Zero-egress setup registers Codex with
    `yoetz mcp serve --host codex --semantic off`; an installation whose configured posture permits
-   semantic review registers `yoetz mcp serve --host codex`. A Yoetz-owned registration with the
+   AI-powered review registers `yoetz mcp serve --host codex`. A Yoetz-owned registration with the
    wrong profile requires a fresh digest-bound re-registration. A foreign same-name entry is still
    preserved.
 
 ## Consequences
 
 A host can inspect one process command and safely treat the strict route as incapable of external
-semantic dispatch through Yoetz, even if a local human later widens durable policy. The claim is
-deliberately narrower than “no network”: the MCP bridge still uses approved local IPC, and processes
-outside Yoetz remain outside this boundary.
+AI-powered review dispatch through Yoetz, even if a local human later widens durable policy. The
+claim is deliberately narrower than “no network”: the MCP bridge still uses approved local IPC, and
+processes outside Yoetz remain outside this boundary.
 
 There are now two reviewed descriptor digests and two owned Codex registration commands. Changing
 either command or either descriptor set is a public-contract change and must update this ADR,
@@ -161,7 +161,7 @@ be the authority for the host's process ceiling, and adding it would weaken the 
 **Set `openWorldHint=false` without enforcement.** Rejected: annotations are advisory metadata, not
 an enforcement mechanism.
 
-**Disable semantic review globally when strict is registered.** Rejected: a route-local trust
+**Disable AI-powered review globally when strict is registered.** Rejected: a route-local trust
 choice must not silently tighten other CLI, UI, or MCP processes.
 
 ## External-runtime amendment (2026-08-30, issue #404)
@@ -172,12 +172,12 @@ request either an HTTP `yoetz_vault_api_credential` attempt or a child-process
 authority, privacy authorization, nor Codex child launch, and reports the existing
 `blocked_by_policy/route_semantic_ceiling` pair. A policy route merely permits the ordinary privacy
 decision path; it does not imply ChatGPT login, model entitlement, repository approval, or a live
-semantic attempt.
+AI-powered review attempt.
 
 ## Destination-disclosure amendment (2026-09-06, issue #479)
 
 The #467 amendment made the owner's host admission the lever that admits the policy-route
-`check`; it left the initialize `instructions` saying only that external semantic review
+`check`; it left the initialize `instructions` saying only that external AI-powered review
 "follows the configured policy". A reviewer that reads descriptions — Codex copies the
 instructions into every tool description — therefore scored the call from no named destination,
 and a repository without admission had nothing better to show it. Decision 6 is extended: on the

@@ -1,4 +1,4 @@
-# Semantic dogfood runbook
+# AI-powered review dogfood runbook
 
 This runbook governs sessions that use Yoetz on Yoetz and then report a finding about it. Its
 purpose is to fix, **before** the first task action, which claim the run is allowed to make — so a
@@ -6,18 +6,18 @@ result is never read as evidence for a question the run's configuration made una
 
 It exists because of the 2026-08-03 codex-testing postmortem (a private drafting input under the
 gitignored `docs/postmortems/`, not shipped; this runbook is self-contained without it), which
-scored "did semantic feedback help?" against a session whose MCP route was `strict`. Yoetz
+scored "did AI-powered feedback help?" against a session whose MCP route was `strict`. Yoetz
 behaved correctly and reported honestly — `semantic_status=blocked_by_policy`,
 `semantic_reason=route_semantic_ceiling`, `semantic_provenance: null`, zero egress. The run simply
-could never have measured semantic usefulness. Nothing in the tooling said so in advance.
+could never have measured AI-powered review usefulness. Nothing in the tooling said so in advance.
 
 Three facts this runbook keeps apart:
 
 - **Registration is not activation.** A registered MCP entry says what Codex would launch, not that
   it launched or that a model was shown anything.
-- **Availability is not usefulness.** A route that *can* dispatch semantic review is not evidence
+- **Availability is not usefulness.** A route that *can* dispatch AI-powered review is not evidence
   that the review helped.
-- **A clean semantic judgment is not proof the implementation is correct.**
+- **A clean AI-powered judgment is not proof the implementation is correct.**
 
 ## 1. Pick the profile before you start
 
@@ -35,14 +35,14 @@ with `observed: true` and are likewise not Profile A.
 
 Claims this run may make:
 
-- zero external semantic egress through the Yoetz agent route
-- deterministic-check behaviour
+- zero external AI-powered review egress through the Yoetz agent route
+- local-check behaviour
 - receipt honesty — that the refusal is recorded with the exact status/reason and no promoted
-  deterministic outcome
+  local-check outcome
 
-Claims this run may **not** make: anything about semantic quality, usefulness, or influence.
-Record semantic usefulness as **not tested**. Never record it as "poor", "weak", or "absent" — the
-route declined to attempt it, which is not a measurement of it.
+Claims this run may **not** make: anything about AI-powered review quality, usefulness, or
+influence. Record AI-powered review usefulness as **not tested**. Never record it as "poor", "weak",
+or "absent" — the route declined to attempt it, which is not a measurement of it.
 
 ### Profile B — policy-enabled
 
@@ -54,8 +54,8 @@ route declined to attempt it, which is not a measurement of it.
    ceremony (`yoetz provider credential set`) or the Codex-managed subscription setup — with the
    privacy policy already in place before the run starts
 
-Claims this run may make: everything in Profile A, plus observations about semantic output, subject
-to the provenance gate in §3.
+Claims this run may make: everything in Profile A, plus observations about AI-powered output,
+subject to the provenance gate in §3.
 
 Explicitly: previewing a registration change from inside the session is allowed
 (`yoetz integrate codex mcp preview`). **Widening privacy policy from the agent channel is not.**
@@ -64,9 +64,9 @@ re-planned, it does not widen and continue.
 
 ## 2. Preflight sequence
 
-For Codex runs launched from a disposable worktree, first complete the stricter
-[Codex dogfood parity preflight](codex-dogfood.md). Its exact-worktree activation, consent, host
-delivery, observation, and rollback cells are not implied by the five semantic checks below.
+For Codex runs launched from a disposable worktree, first complete the stricter [Codex dogfood
+parity preflight](codex-dogfood.md). Its exact-worktree activation, consent, host delivery,
+observation, and rollback cells are not implied by the five AI-powered review checks below.
 
 Run all five before the first task action and record the output verbatim. Every command here is
 read-only and already exists — this runbook adds no command.
@@ -83,11 +83,11 @@ Fields to record from `yoetz provider status --json`:
 
 | Field | What it settles |
 |---|---|
-| `semantic_ready` | Whether **this installation** can dispatch semantic review at all. Installation-local; unchanged by route posture. |
+| `semantic_ready` | Whether **this installation** can dispatch AI-powered review at all. Installation-local; unchanged by route posture. |
 | `mcp_route.registered_profile` | Which route the Codex agent actually gets: `policy`, `strict`, or `null` when unread. |
 | `mcp_route.configured_profile` | Which route setup would register now. |
 | `mcp_route.observed` | `false` means the route could not be read — **not** that none is registered. |
-| `agent_route_semantic_ready` | Whether the **registered Codex route** can dispatch semantic review. This is the field that selects the profile. |
+| `agent_route_semantic_ready` | Whether the **registered Codex route** can dispatch AI-powered review. This is the field that selects the profile. |
 | `endpoint.role`, `fallback_endpoint` | Which bound endpoint is the primary and whether a fallback is declared (issue #582). `fallback_endpoint` absent means a single-endpoint install; when present, record both identities (provider, model, endpoint profile) — a later `fallback_from` in provenance must match. |
 | `fallback_credential_connected` | Presence-only credential state of the fallback (`true` / `false` / `null` when unknown), mirrored by the `fallback_provider_credential` blocker. It never moves `semantic_ready`: a primary can be ready while its fallback is not, and vice versa. |
 
@@ -189,8 +189,8 @@ fallback defect.
 
 ## 3. The provenance gate
 
-Whether a run may score semantic usefulness is derived from the check result, never asserted from
-configuration. The rule is protocol-enforced by `validate_semantic_provenance_binding`
+Whether a run may score AI-powered review usefulness is derived from the check result, never
+asserted from configuration. The rule is protocol-enforced by `validate_semantic_provenance_binding`
 (`src/yoetz/protocol/models.py`) and its totality is locked by test.
 
 **Read provenance together with `semantic_status` and `semantic_reason` — never alone.** Null
@@ -199,7 +199,7 @@ provenance (rows 1 and 3 below). `failed` is unconstrained: it may carry provena
 either way the attempt is indeterminate. Nor does the converse hold — provenance being *present*
 proves an attempt happened, not that it was useful.
 
-| `semantic_status` | `semantic_provenance` | May score semantic usefulness |
+| `semantic_status` | `semantic_provenance` | May score AI-powered review usefulness |
 |---|---|---|
 | any pre-dispatch status — `not_requested`, `not_configured`, `blocked_by_policy` (incl. `route_semantic_ceiling`), `blocked_forbidden_data`, `classification_uncertain`, `awaiting_human`, `human_denied`, `approval_expired` | `null` (enforced) | **No** — not attempted |
 | `succeeded`, `refused`, `timeout`, `invalid`, `late`, `stale`; or `unavailable` with `transport_unavailable` / `provider_rate_limited` / `provider_quota_exhausted` / `outcome_unknown` | present (enforced) | Yes; `outcome_unknown` proves an acknowledged attempt, not its outcome or usefulness |
@@ -224,9 +224,9 @@ the result says whether one *happened*.
 
 ## 4. What passing preflight does not prove
 
-- It does not prove a semantic review ran. That is the gate in §3.
+- It does not prove an AI-powered review ran. That is the gate in §3.
 - It does not prove the review was useful. Availability is not usefulness.
-- It does not prove the implementation under review is correct. A clean semantic judgment is one
+- It does not prove the implementation under review is correct. A clean AI-powered judgment is one
   observation, not a verdict.
 - It does not measure whether feedback changed the agent's behaviour. Influence measurement is
   governed by the [influence dogfood runbook](influence-dogfood.md) (issue
@@ -253,7 +253,7 @@ authorized to make and stop there.
 
 - [Codex dogfood parity](codex-dogfood.md) — exact-worktree preflight, postflight, and rollback.
 - [Codex integration runbook](codex-integration.md) — installing the skill and registering MCP.
-- [Privacy and semantic review](../usage/privacy-and-semantic-review.md) — the durable policy that
+- [Privacy and AI-powered review](../usage/privacy-and-semantic-review.md) — the durable policy that
   authorizes disclosure.
 - [Providers](../usage/providers.md) — the readiness conditions behind `semantic_ready`.
 - [Codex subscription evaluator](codex-subscription-evaluator.md) — exact runtime cell, weaker

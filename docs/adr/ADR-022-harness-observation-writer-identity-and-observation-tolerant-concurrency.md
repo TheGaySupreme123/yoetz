@@ -18,7 +18,7 @@ for moderator-approved issue #244 and the reopened issue #216 recurrence; 2026-0
 **Amended (continued):** 2026-09-06 for issue #616 (bounded host-hook maintenance: lightweight
 ordinary-profile ingress and bounded native-content draining, with cancellation limits kept
 explicit); 2026-09-06 for the native capture handoff and FIFO/check barrier contract; 2026-09-07
-for the source-qualified, profileless Codex hook capture handoff and its independent semantic
+for the source-qualified, profileless Codex hook capture handoff and its independent AI-powered review
 selection fence.
 **Implemented by:** `src/yoetz/application/observation_materialize.py`,
 `src/yoetz/application/observation_coordinator.py`, `src/yoetz/cli/observe_hooks.py`,
@@ -33,9 +33,9 @@ issues #214, #216, #217, #223, #224, #225, #226, #227, #244, #302, #320, #322, #
 **Proposed amendment for issue #231:** `provider_not_ready` remains bounded local advice, but the
 observation coordinator does not materialize it as an agent-facing finding. Provider readiness is a
 machine condition rather than a repair to the recorded work. A requested check still records the
-exact semantic status and coverage limitation, and receipts retain that limitation; the amendment
-does not make the affected receipt clean. This is the narrow option that preserves proof-based
-finding resolution and does not change `ResponseDisposition` or finding-kind traits.
+exact AI-powered review status and coverage limitation, and receipts retain that limitation; the
+amendment does not make the affected receipt clean. This is the narrow option that preserves
+proof-based finding resolution and does not change `ResponseDisposition` or finding-kind traits.
 
 ## Context
 
@@ -115,7 +115,7 @@ unsupported claims and unbounded duplicate findings.
    coverage on a contradictory explicit fact) to the exact committed legacy action and its committed
    action event as causal parent.
 
-7. Deterministic advice finding IDs are condition-scoped over policy, kind, rule code, and detail
+7. Local advice finding IDs are condition-scoped over policy, kind, rule code, and detail
    token. Evidence refs prove the condition but never identify it: several rules intentionally cite
    a rolling or accumulating envelope window. Candidate subject refs map only their source envelopes
    to ledger event ids; a standing condition with no envelope anchors to the session lifecycle
@@ -125,7 +125,7 @@ unsupported claims and unbounded duplicate findings.
 
 8. `provenance_disputed` is the fourth `ResponseDisposition`. It records that the responder
    contests the finding's authorship or provenance premise, requires a non-empty reason, and may
-   carry evidence, but is not scored as an evidence-free rejection by either deterministic policy
+   carry evidence, but is not scored as an evidence-free rejection by either local policy
    pack. It never resolves or erases the finding. Public compact/readiness projections expose two
    distinct counters: `unanswered_finding_count` decreases after any readable response, including a
    provenance dispute, while `receipt_blocking_finding_count` continues to count current actionable
@@ -417,25 +417,26 @@ rewrites, and pruning; contention or changed state falls back to the ordinary re
     excluded from that quota but retained as metadata-only tombstones to prevent reuse after an
     authority pause, disable, revoke, or re-enable ABA cycle. A new check/frozen-case acquisition
     observes an outstanding ticket under the same bundle transaction and installs the retryable
-    `OPERATION_PENDING` barrier atomically; the same request can retry after the ticket is
-    consumed without reminting content or ledger identities. A host kill or service failure before
+    `OPERATION_PENDING` barrier atomically; the same request can retry after the ticket is consumed
+    without reminting content or ledger identities. A host kill or service failure before
     authenticated staging completes may leave an honest content gap. There is no plaintext local
     spool or offline acceptance guarantee. The Codex arm admits only explicitly linked hook tool
-    output, selected changed-file/code bytes, and workspace-diff bytes for captured-content
-    evidence and semantic selection. Its session-stream records remain outside this native ticket
-    lane and are excluded from semantic selection. Tool input and path/locator content are excluded
-    from semantic selection too, although the current Codex hook path may still stage consented
-    input/locator chunks in the bounded encrypted local capture lane pending a follow-up staging
-    filter. Captured-content staging does not authorize egress: semantic-case selection still
-    requires effective repository privacy authority and an independently authorized provider/attempt
-    route. Codex's historical session-stream path otherwise remains unchanged, while the shared
-    generation, operation-replay, and teardown repairs apply to all hosts.
+    output, selected changed-file/code bytes, and workspace-diff bytes for captured-content evidence
+    and AI-powered review selection. Its session-stream records remain outside this native ticket
+    lane and are excluded from AI-powered review selection. Tool input and path/locator content are
+    excluded from AI-powered review selection too, although the current Codex hook path may still
+    stage consented input/locator chunks in the bounded encrypted local capture lane pending a
+    follow-up staging filter. Captured-content staging does not authorize egress: AI-powered review
+    case selection still requires effective repository privacy authority and an independently
+    authorized provider/attempt route. Codex's historical session-stream path otherwise remains
+    unchanged, while the shared generation, operation-replay, and teardown repairs apply to all
+    hosts.
 
     Acceptance of the Codex arm requires a blocked-FIFO capture with bounded acknowledgement,
-    guarded-store materialization through the semantic packet, and negative coverage for source,
-    correlation, task/session, authority-generation, multipart, cancellation, restart, and retry
-    fences. Metadata-only objects, a successful structural receipt, or a typed MCP result alone do
-    not prove that native Codex bytes became eligible provider input.
+    guarded-store materialization through the AI-powered review packet, and negative coverage for
+    source, correlation, task/session, authority-generation, multipart, cancellation, restart, and
+    retry fences. Metadata-only objects, a successful structural receipt, or a typed MCP result
+    alone do not prove that native Codex bytes became eligible provider input.
 
 ## Security and privacy consequences
 
@@ -446,11 +447,12 @@ not pass the observation predicate.
 
 The Codex native hook arm is source-qualified and profileless. Active local observation consent
 authorizes local encrypted capture for the exact `codex_hook` source; it does not authorize a
-Claude/Cursor content profile, semantic selection, or provider disclosure. Only linked output,
-changed-file/code, and workspace-diff roles can enter a semantic case after the repository privacy
-authority and the individual provider attempt authorize that case. Session-stream, input, and
-locator content remain excluded from semantic selection. Consented input/locator chunks may
-still be locally staged by the current hook path until the staging filter follow-up lands.
+Claude/Cursor content profile, AI-powered review selection, or provider disclosure. Only linked
+output, changed-file/code, and workspace-diff roles can enter an AI-powered review case after the
+repository privacy authority and the individual provider attempt authorize that case.
+Session-stream, input, and locator content remain excluded from AI-powered review selection.
+Consented input/locator chunks may still be locally staged by the current hook path until the
+staging filter follow-up lands.
 
 ADR-009 includes `other_writer` disclosure provenance. The production privacy enforcer currently
 ships without a provenance resolver. When that resolver is implemented, this harness writer must

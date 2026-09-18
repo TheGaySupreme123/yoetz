@@ -1,4 +1,4 @@
-"""Converge the reviewed pre-dispatch capacity reason in public semantic bindings."""
+"""Converge the reviewed pre-dispatch capacity reason in public AI-powered review bindings."""
 
 from __future__ import annotations
 

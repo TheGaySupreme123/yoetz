@@ -81,13 +81,13 @@ def render_human_findings(
 
 
 def render_human_check(result: CheckSuccessModel) -> str:
-    """Render an exact check verdict and bounded semantic status."""
+    """Render an exact check verdict and bounded AI-powered review status."""
 
     if type(result) is not CheckSuccessModel:
         raise TypeError("check_result_invalid")
     lines = [
         f"Verdict: {result.verdict}",
-        f"Semantic review: {_token(result.semantic_status)} ({_token(result.semantic_reason)})",
+        f"AI-powered review: {_token(result.semantic_status)} ({_token(result.semantic_reason)})",
         render_human_findings(result.findings),
     ]
     if _token(result.semantic_reason) == "case_capacity_exceeded":
@@ -276,7 +276,7 @@ def render_human_awaiting_human(result: CheckAwaitingHumanModel) -> str:
         raise TypeError("check_result_invalid")
     continuation = result.continuation
     lines = [
-        "Semantic review: awaiting_human (human_approval_required)",
+        "AI-powered review: awaiting_human (human_approval_required)",
         "",
         "This check is paused for trusted local privacy authority. No verdict yet.",
         "",

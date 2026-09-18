@@ -1,11 +1,11 @@
-"""Projecting the recovery view for a check stranded mid-semantic-dispatch.
+"""Projecting the recovery view for a check stranded mid-dispatch of its AI-powered review.
 
 The 2026-07-30 dogfood run left a check pending in ``SEMANTIC_WAIT`` and every subsequent
 ``status(view=operation)`` failed with an ``AttributeError``, recorded by the daemon as
 ``read_projection_failed``. Nothing reproduced it because the projection sweep points
 ``view=operation`` at a *completed publish* — the one operation kind whose recovery page carries
 nested accepted events — and the application-level status tests seed ``CheckPhase.RESERVED`` with
-no semantic job. Neither is the shape that broke: a *pending* operation projects a page where
+no AI-powered review job. Neither is the shape that broke: a *pending* operation projects a page where
 every optional field is absent.
 """
 
@@ -34,7 +34,7 @@ pytestmark = pytest.mark.anyio
 
 
 def _stranded_check(writer_id: str, operation_id: str, task_id: str) -> OperationRecord:
-    """A check parked mid-dispatch: pending, SEMANTIC_WAIT, deterministic result already durable."""
+    """A check parked mid-dispatch: pending, SEMANTIC_WAIT, local result already durable."""
 
     resume = ObjectRef(
         "obj_00000000-0000-4000-8000-0000000000cc",

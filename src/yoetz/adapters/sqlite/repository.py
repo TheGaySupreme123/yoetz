@@ -1077,7 +1077,7 @@ class SqliteLedger:
                     )
                 await asyncio.sleep(0)
             self._persist_quarantined_operations(tuple(newly_quarantined))
-            # Semantic jobs and attempts back every durable disclosure wait. Recovering only the
+            # AI-powered review jobs and attempts back every durable disclosure wait. Recovering only the
             # side-table marker makes operation status look resumable while the attempt
             # coordinator sees no job and cannot actually resume it after restart.
             for job_row in self._db.execute(
@@ -1965,7 +1965,7 @@ class SqliteLedger:
         """Capture every durable state component that a staged freeze could overwrite.
 
         The acquisition lock is intentionally released while the resume object is staged.  A
-        records-only comparison is insufficient during that window: semantic lifecycle writes
+        records-only comparison is insufficient during that window: AI-powered review lifecycle writes
         can advance operations, jobs, attempts, or object inventory without adding a ledger
         record.  Copy each mutable map so in-place mutations on the stable state object remain
         visible to the final compare.  Transient check reservations are merged separately because

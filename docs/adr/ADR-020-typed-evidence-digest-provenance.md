@@ -57,7 +57,7 @@ ordinary cooperative publication cannot claim.
    historical evidence does not weaken another conclusion. Redaction remains an independent
    availability limitation.
 
-7. **Semantic review never substitutes prose for digested bytes.** A typed digest contributes
+7. **AI-powered review never substitutes prose for digested bytes.** A typed digest contributes
    only bounded canonical provenance facts; unavailable legacy provenance becomes an explicit
    omission. Descriptions remain caller-authored narrative.
 
@@ -103,7 +103,8 @@ ordinary cooperative publication cannot claim.
 
 12. **Retention is not disclosure authority.** Observation materialization records generic
     structural descriptions and typed digest provenance; materialization itself does not open or
-    copy captured object bytes into semantic review. A later semantic selection may carry retained
+    copy captured object bytes into AI-powered review. A later AI-powered review selection may carry
+    retained
     bytes only when the service resolves the current consent arm for the exact closed host profile,
     task, session, and workspace, matches the durable evidence source event to the envelope's
     phase identity, verifies the object envelope/media type, the canonical inner wrapper, and its
@@ -128,7 +129,7 @@ ordinary cooperative publication cannot claim.
 ## Consequences
 
 Yoetz can reject a typed kind/subject contradiction at publication without pretending it inspected
-the bytes. Receipts and deterministic findings retain exact limitations for digest-only, withheld,
+the bytes. Receipts and local findings retain exact limitations for digest-only, withheld,
 redacted, and legacy evidence. Capability-owned approved-check/import/observation provenance stays
 unavailable to cooperative callers.
 

@@ -118,14 +118,14 @@ Setup, disconnect, and rollback recompose the local service afterwards. The subs
 has unknown data-use posture, so Yoetz does not mark it as the Assisted recommendation. You may
 still explicitly approve a bounded external-review policy. Login, plan name, and model listing are
 readiness facts collected by status or by the evaluate child—not privacy consent and not proof that
-a semantic turn ran. `semantic_ready: true` means the structural provider, machine-policy, and
-repository conditions are present. Privacy authority is a separate disclosure gate, and live
-semantic dispatch is a separate runtime event evidenced by the check/evaluate result and receipt.
-See the [exact evaluator runbook](../runbooks/codex-subscription-evaluator.md).
+an AI-powered review turn ran. `semantic_ready: true` means the structural provider, machine-policy,
+and repository conditions are present. Privacy authority is a separate disclosure gate, and live
+AI-powered review dispatch is a separate runtime event evidenced by the check/evaluate result and
+receipt. See the [exact evaluator runbook](../runbooks/codex-subscription-evaluator.md).
 
 ## Pairing a fallback endpoint
 
-Semantic review can bind one primary endpoint plus exactly one fallback. The pair is always the
+AI-powered review can bind one primary endpoint plus exactly one fallback. The pair is always the
 two authorities above — an API provider and the Codex ChatGPT subscription — in either order;
 two API providers cannot pair, and nothing becomes a fallback implicitly. The fallback serves only
 after the primary could not: two timeouts, connection failures, or rate limits in a row, one quota
@@ -150,12 +150,12 @@ yoetz provider codex-subscription setup --executable /absolute/path/to/codex --a
 ```
 
 `--as-fallback` requires the other authority to be bound already and reports `endpoint_role:
-fallback`; without the flag, binding one authority replaces the other as before. The fallback
-needs its own credential — the API key ceremony, or the digest-bound Codex login — and its own
-privacy approval: run `yoetz privacy setup` afterwards, which shows the second endpoint as
-`Fallback destination (after the primary cannot serve)` and asks you to approve both
-destinations together. Until you do, nothing is sent to the fallback. See
-[Privacy and semantic review](privacy-and-semantic-review.md#what-the-trusted-approval-screen-shows).
+fallback`; without the flag, binding one authority replaces the other as before. The fallback needs
+its own credential — the API key ceremony, or the digest-bound Codex login — and its own privacy
+approval: run `yoetz privacy setup` afterwards, which shows the second endpoint as `Fallback
+destination (after the primary cannot serve)` and asks you to approve both destinations together.
+Until you do, nothing is sent to the fallback. See [Privacy and AI-powered
+review](privacy-and-semantic-review.md#what-the-trusted-approval-screen-shows).
 
 To reverse or rearrange:
 
@@ -191,19 +191,19 @@ previous Enter-to-accept behavior. The remaining entries are a repository-review
 recent provider-recommended/current model families, never more than ten total, followed by an
 explicit **Custom model ID** option. No popularity ranking is claimed.
 
-The catalog was reviewed on 2026-08-10 against the provider-owned model sources: OpenAI
-[model guidance](https://developers.openai.com/api/docs/guides/latest-model), Fireworks
-[Responses API documentation](https://docs.fireworks.ai/guides/response-api), Anthropic
-[models overview](https://platform.claude.com/docs/en/about-claude/models/overview), Google
-[latest Gemini models](https://ai.google.dev/gemini-api/docs/latest-model), OpenRouter's
-[model catalog contract](https://openrouter.ai/docs/guides/overview/models), xAI's
-[model list](https://docs.x.ai/developers/models), and Vercel's
-[AI Gateway model catalog](https://vercel.com/ai-gateway/models).
-The Fireworks list also retains `accounts/fireworks/models/minimax-m3`, which has prior
-repository-recorded live semantic provenance. The lists are static so setup stays deterministic
-and opens no new network or credential channel; they can age, may not match account entitlements,
-and do not establish Yoetz's exact structured-output compatibility. Use the custom entry for any
-new, private, preview, region-specific, or omitted model.
+The catalog was reviewed on 2026-08-10 against the provider-owned model sources: OpenAI [model
+guidance](https://developers.openai.com/api/docs/guides/latest-model), Fireworks [Responses API
+documentation](https://docs.fireworks.ai/guides/response-api), Anthropic [models
+overview](https://platform.claude.com/docs/en/about-claude/models/overview), Google [latest Gemini
+models](https://ai.google.dev/gemini-api/docs/latest-model), OpenRouter's [model catalog
+contract](https://openrouter.ai/docs/guides/overview/models), xAI's [model
+list](https://docs.x.ai/developers/models), and Vercel's [AI Gateway model
+catalog](https://vercel.com/ai-gateway/models). The Fireworks list also retains
+`accounts/fireworks/models/minimax-m3`, which has prior repository-recorded live AI-powered review
+provenance. The lists are static so setup stays deterministic and opens no new network or credential
+channel; they can age, may not match account entitlements, and do not establish Yoetz's exact
+structured-output compatibility. Use the custom entry for any new, private, preview,
+region-specific, or omitted model.
 
 Scripts remain explicit and noninteractive:
 
@@ -304,7 +304,7 @@ daemon cannot keep dispatching the previous cell.
 
 ## Readiness (`yoetz provider status`)
 
-Before spending a run on semantic review, ask whether the six structural conditions hold:
+Before spending a run on AI-powered review, ask whether the six structural conditions hold:
 
 ```text
 yoetz provider status --json
@@ -331,7 +331,7 @@ login. ChatGPT `authMode` and the configured model/reasoning cell are proven lat
 same `evaluate()` child that will send the case, or by `yoetz provider codex-subscription status`.
 Failure stays `credential_unavailable`, never a misleading ready state.
 
-Conditions 4 and 5 are independent. Closing only one moves the failure without making semantic
+Conditions 4 and 5 are independent. Closing only one moves the failure without making AI-powered
 review work — the check reason changes, the outcome does not.
 
 With a fallback paired, conditions 3 and 4 are about the primary: `endpoint` reports
@@ -354,7 +354,7 @@ makes repository state unknown and readiness false rather than inheriting the ma
 ### The agent route is a separate verdict
 
 `semantic_ready` covers the six conditions above and nothing else. It says this repository-bound
-service view has the provider, machine-ceiling, and exact repository authority needed for semantic
+service view has the provider, machine-ceiling, and exact repository authority needed for AI-powered
 review. It does not say the Codex agent gets a route that will dispatch.
 
 Yoetz registers Codex with one of two serve commands, and both classify as `yoetz_owned` — so
@@ -405,15 +405,16 @@ registration state alone cannot tell them apart. The report therefore names the 
 
 **A strict registration does not make this repository-bound service view not-ready.** The strict
 route is a
-process-local ceiling (ADR-018): it stops that one MCP process from requesting semantic review. A
+process-local ceiling (ADR-018): it stops that one MCP process from requesting AI-powered review. A
 `yoetz check` from the CLI, or a check from the terminal interface, still dispatches normally. So
 `semantic_ready: true` alongside a strict route is not a contradiction — it means repository-bound
 capability exists while that Codex agent route cannot dispatch. A strict route adds a
 `mcp_route_profile` blocker marked `scope: "agent_route"`, and leaves the exit code alone.
 
-Neither verdict substitutes for the other. Reading `semantic_ready: true` and expecting semantic
+Neither verdict substitutes for the other. Reading `semantic_ready: true` and expecting AI-powered
 review through a strict agent route is exactly the conflation this field exists to prevent; see the
-[semantic dogfood runbook](../runbooks/semantic-dogfood.md) for the preflight that consumes it.
+[AI-powered review dogfood runbook](../runbooks/semantic-dogfood.md) for the preflight that
+consumes it.
 
 ### Where the route verdict is reported
 
@@ -438,8 +439,8 @@ The service derives repository identity from the client's actual/configured work
 resolves Git's common root, commits it under the installation key, and discards the raw path.
 Branches and linked worktrees share a grant; independent clones do not. Upgrades preserve accepted
 machine bytes and may only consume the bounded legacy carry-forward described in ADR-009. None of
-these structural verdicts substitutes for the installed-wheel two-repository semantic and receipt
-proof still outstanding under issue #139.
+these structural verdicts substitutes for the installed-wheel two-repository AI-powered review and
+receipt proof still outstanding under issue #139.
 
 ## The credential ceremony
 
@@ -465,7 +466,7 @@ the window.
 ## Binding a provider does not enable egress
 
 A bound provider plus a stored credential still sends nothing until privacy policy permits it. See
-[Privacy and semantic review](privacy-and-semantic-review.md). Every network channel is
+[Privacy and AI-powered review](privacy-and-semantic-review.md). Every network channel is
 independently authorized.
 
 **Configuration is also not readiness.** Storing a binding and a credential are two facts; a
@@ -476,13 +477,13 @@ interface reports them separately and always has:
 ✓ Provider binding saved
 ✓ API key stored securely
 ! Live provider connection has not been tested
-! External semantic review is not yet proven ready
+! External AI-powered review is not yet proven ready
 ```
 
 This build exposes no bounded live provider probe from the local service, so a connection test in
 the interface reports itself as unavailable rather than reporting a pass
 ([ADR-017](../adr/ADR-017-full-screen-terminal-interface.md), *Known limitations*). A provider
-that fails never downgrades local deterministic readiness.
+that fails never downgrades local-check readiness.
 
 ## Checking what you have
 

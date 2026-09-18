@@ -30,48 +30,46 @@ exactly those contracts and connects the steps without weakening any existing tr
    hand: Codex discovery, the runbook's check-then-add MCP registration behind
    preview→confirm→execute, a service reachability check, and the existing privacy and
    provider-credential ceremonies. Founder-authorized amendment (2026-08-04): before registration,
-   interactive first run chooses a complete `local_only` path or a semantic-review path.
-   Founder-authorized amendment (2026-08-05): the semantic-review path is offered first and is the
-   pre-selected answer in both the prompt-loop wizard and the terminal interface. This is a
-   property of that question only. It changes no seeded state: the durable policy an installation
-   starts with is still `local_only`, the answer binds no provider, stores no credential, and
-   commits no policy, and local-only remains one keystroke away. The reason for the
-   recommendation is that an installation that never reaches the semantic path can only ever
-   report deterministic coverage, and a first-run default that quietly guarantees that outcome
-   under-serves the operator who came for review. The same amendment requires that the answer be
-   taken *before* the MCP registration it determines, and that the registered route follow from it
-   — registering first and asking after is how a semantic install ends up ceilinged on the strict
-   route. The latter path
-   registers the policy route, configures the provider and credential, then renders one exact
-   recommended `assisted_review` policy only when the exact provider route has current reviewed
-   no-training evidence and retention no longer than 30 days; otherwise it recommends `private`.
-   Accepting that exact draft asks nothing further; declining
-   it opens the named recipes, which materialize directly into a draft, with only `custom`
-   reaching field-level configuration in five grouped sections. Both paths propose
-   the reviewed exact disclosure and hand widening to the separately reauthenticated trusted
-   decision ceremony. On a real local TTY it may invoke the
-   already-reviewed hidden-input vault initialize/unlock and credential ceremony; it adds no
-   secret field to wizard arguments, configuration, reports, MCP, or agent context. Noninteractive
-   setup remains a report plus explicit follow-up commands and never chooses egress. The semantic
+   interactive first run chooses a complete `local_only` path or an AI-powered review path.
+   Founder-authorized amendment (2026-08-05): the AI-powered review path is offered first and is the
+   pre-selected answer in both the prompt-loop wizard and the terminal interface. This is a property
+   of that question only. It changes no seeded state: the durable policy an installation starts with
+   is still `local_only`, the answer binds no provider, stores no credential, and commits no policy,
+   and local-only remains one keystroke away. The reason for the recommendation is that an
+   installation that never reaches the AI-powered review path can only ever report local-check
+   coverage, and a first-run default that quietly guarantees that outcome under-serves the operator
+   who came for review. The same amendment requires that the answer be taken *before* the MCP
+   registration it determines, and that the registered route follow from it — registering first and
+   asking after is how an AI-powered review install ends up ceilinged on the strict route. The
+   latter path registers the policy route, configures the provider and credential, then renders one
+   exact recommended `assisted_review` policy only when the exact provider route has current
+   reviewed no-training evidence and retention no longer than 30 days; otherwise it recommends
+   `private`. Accepting that exact draft asks nothing further; declining it opens the named recipes,
+   which materialize directly into a draft, with only `custom` reaching field-level configuration in
+   five grouped sections. Both paths propose the reviewed exact disclosure and hand widening to the
+   separately reauthenticated trusted decision ceremony. On a real local TTY it may invoke the
+   already-reviewed hidden-input vault initialize/unlock and credential ceremony; it adds no secret
+   field to wizard arguments, configuration, reports, MCP, or agent context. Noninteractive setup
+   remains a report plus explicit follow-up commands and never chooses egress. The AI-powered review
    `assisted_review` is repository-scoped, problem-local, and does not require recurring prompts
    after its trusted policy commit. Unknown, stale, broad, or account-unqualified evidence never
    earns the recommendation and remains an informed explicit choice only. It is a starting draft,
-   not consent. `private` remains the fail-safe no-egress choice, while Metadata only, expanded,
-   and custom policies remain explicit. `yoetz --privacy` enters
-   the same short recommended-first ceremony at any later time. **Amendment (issue #164,
-   2026-08-09):** when a user asks a capable first-party agent for help finishing exact provider
-   credential or repository privacy setup, the agent may relay an explicit current-chat instruction
-   through `yoetz consent authorize` after one warning without requiring a second local-terminal
-   ceremony. Yoetz binds the exact action but cannot independently authenticate the chat provenance;
-   the trusted CLI/TUI remains recommended and always available. The setup update advisory's version
-   parser is a declared, exactly pinned core dependency; a clean installed-artifact gate imports
-   and enters `setup run` so development-only transitive packages cannot hide a missing runtime
-   dependency. **Amendment (issues #204 and #205, 2026-08-12):** first-run setup asks whether the
-   proposed privacy policy should enable the structural PyPI update check (default yes). It carries
-   that boolean into the recommended or named recipe before rendering the exact candidate; it
-   changes no other recipe field, creates no authority itself, and never bypasses candidate
-   confirmation or the existing trusted service decision ceremony. Declining produces the genuine
-   zero-network `private` candidate rather than silently restoring the recipe default.
+   not consent. `private` remains the fail-safe no-egress choice, while Metadata only, expanded, and
+   custom policies remain explicit. `yoetz --privacy` enters the same short recommended-first
+   ceremony at any later time. **Amendment (issue #164, 2026-08-09):** when a user asks a capable
+   first-party agent for help finishing exact provider credential or repository privacy setup, the
+   agent may relay an explicit current-chat instruction through `yoetz consent authorize` after one
+   warning without requiring a second local-terminal ceremony. Yoetz binds the exact action but
+   cannot independently authenticate the chat provenance; the trusted CLI/TUI remains recommended
+   and always available. The setup update advisory's version parser is a declared, exactly pinned
+   core dependency; a clean installed-artifact gate imports and enters `setup run` so
+   development-only transitive packages cannot hide a missing runtime dependency. **Amendment
+   (issues #204 and #205, 2026-08-12):** first-run setup asks whether the proposed privacy policy
+   should enable the structural PyPI update check (default yes). It carries that boolean into the
+   recommended or named recipe before rendering the exact candidate; it changes no other recipe
+   field, creates no authority itself, and never bypasses candidate confirmation or the existing
+   trusted service decision ceremony. Declining produces the genuine zero-network `private`
+   candidate rather than silently restoring the recipe default.
 
    Repository scope comes only from the service's trusted locator path. CLI and TUI supply their
    actual working directory; MCP supplies its configured/session working directory. The service
@@ -403,14 +401,13 @@ plugin installation.
 
 A new user's path is now: `npx yoetz` or `uvx yoetz` → interactive wizard → detected-harness
 selection (Codex in v0.1) → installation selection when needed → explicit `Y`/`N` confirmation →
-local-only or semantic-review choice → discoverable project skill → structural plugin/hook sources
+local-only or AI-powered review choice → discoverable project skill → structural plugin/hook sources
 → route-matched Codex MCP registration → on-demand local service → trusted repository binding →
-local vault/provider ceremonies
-when semantic was chosen → recommendation-first privacy review → separately reauthenticated privacy
-decision.
-Each mutating step is previewed, digest-bound, and individually declinable; `yoetz setup status`
-reports the same posture read-only at any time. The CLI support-command matrix grows by one
-(`setup`), recorded in the conformance contract test in the same change.
+local vault/provider ceremonies when AI-powered review was chosen → recommendation-first privacy
+review → separately reauthenticated privacy decision. Each mutating step is previewed, digest-bound,
+and individually declinable; `yoetz setup status` reports the same posture read-only at any time.
+The CLI support-command matrix grows by one (`setup`), recorded in the conformance contract test in
+the same change.
 
 **Amendment (ADR-023, 2026-08-21, issue #149): host-derived artifact projection behind the
 unchanged wizard.** The setup ordering and user experience above do not change: project skill,
@@ -478,9 +475,9 @@ skippable by inherited shell configuration.
 
 Maintainer decision: new configurations propose `verification.semantic = "required"` and
 `verification.max_findings = 10` (the existing upper bound). Required review preserves completed
-deterministic results; absent, denied, unavailable or invalid providers yield the existing terminal
-semantic status and incomplete coverage, never fabricated success. Explicit `deterministic_only`
-remains the bounded local option.
+local-check results; absent, denied, unavailable or invalid providers yield the existing terminal
+AI-powered review status and incomplete coverage, never fabricated success. Explicit
+`deterministic_only` remains the bounded local option.
 
 Existing configuration files retain their explicit values. Missing verification leaves in an
 existing file resolve to the released `optional` / `3` defaults; loading and upgrades do not rewrite

@@ -140,9 +140,9 @@ class PrivacySetupAnswers:
     capability_testing: bool
     authorization_scope: AuthorizationScopeKind
     # The declared fallback destination (#582); approved together with the primary so the
-    # policy names the exact set of endpoints semantic review may reach.
+    # policy names the exact set of endpoints AI-powered review may reach.
     fallback_provider: ProviderBinding | None = None
-    # This request is distinct from semantic review: it carries only a fixed literal and is
+    # This request is distinct from AI-powered review: it carries only a fixed literal and is
     # available solely while a person is deliberately setting a provider credential.
     credential_probe: bool = False
 
@@ -265,7 +265,7 @@ def build_candidate_policy(
     ):
         raise ValueError("privacy_setup_local_model_binding_required")
     # External LLM binding is independent of the global ceiling: package update checks may
-    # raise network_egress_permitted without binding a semantic provider.
+    # raise network_egress_permitted without binding an AI-powered review provider.
     if answers.network_egress != (answers.external_provider is not None):
         raise ValueError("privacy_setup_provider_binding_required")
     if answers.credential_probe and not answers.network_egress:
@@ -376,9 +376,9 @@ def _output_is_controlling_tty() -> bool:
 
 
 _RECIPE_SUMMARIES: Final[dict[PrivacyRecipe, str]] = {
-    "private": "maximum confidentiality; no network egress or external semantic review",
+    "private": "maximum confidentiality; no network egress or external AI-powered review",
     "metadata_only": (
-        "strongest semantic privacy; structural metadata only and approval every request"
+        "strongest AI-powered review privacy; structural metadata only and approval every request"
     ),
     "assisted_review": (
         "better problem-specific feedback from bounded excerpts; "
@@ -401,10 +401,10 @@ _RECOMMENDATION_TRADEOFF: Final[
 ] = {
     "private": (
         "No eligible exact provider route is configured, so this keeps external review off.",
-        "Trade-off: no external semantic review at all; only local deterministic checks run.",
+        "Trade-off: no external AI-powered review at all; only local checks run.",
     ),
     "metadata_only": (
-        "It enables semantic review while disclosing the least that still works, and asks "
+        "It enables AI-powered review while disclosing the least that still works, and asks "
         "before every provider request.",
         "Trade-off: the reviewer sees structural metadata and declared file types only, so it "
         "cannot judge whether a claim is actually supported.",
@@ -745,11 +745,11 @@ def _ask_custom_answers(
             "none configured" if external is None else f"{external.provider_id}/{external.model_id}"
         )
         use_provider = typer.confirm(
-            f"Bind external semantic review to {provider_label}?", default=external is not None
+            f"Bind external AI-powered review to {provider_label}?", default=external is not None
         )
         if use_provider and fallback is not None:
             use_fallback = typer.confirm(
-                f"Authorize fallback semantic review to {fallback.provider_id}/{fallback.model_id}?",
+                f"Authorize fallback AI-powered review to {fallback.provider_id}/{fallback.model_id}?",
                 default=False,
             )
         if use_provider:
@@ -889,7 +889,7 @@ def _reconcile_host_admission(policy: PrivacyPolicy, workspace_locator: Path) ->
     Host admission (issue #467) is derived from the repository grant, so the trusted ceremony
     that changes the grant is the place where the reverse transition happens: a policy that no
     longer permits external review removes exactly the entries Yoetz wrote, and a policy that
-    does permit it names the hosts that will still hold every semantic check. Advisory output
+    does permit it names the hosts that will still hold every AI-powered check. Advisory output
     only; a failed sweep is reported, never hidden, and never fails the ceremony.
     """
 
@@ -912,7 +912,7 @@ def _reconcile_host_admission(policy: PrivacyPolicy, workspace_locator: Path) ->
                 typer.echo(
                     "  Note: no host auto-review admission for this repository on "
                     + ", ".join(missing)
-                    + ". An automatic reviewer there will still hold every semantic check."
+                    + ". An automatic reviewer there will still hold every AI-powered check."
                 )
                 typer.echo(
                     "  Run 'yoetz integrate <host> admission preview --project-root .' to let "
@@ -964,7 +964,7 @@ async def _warn_if_agent_route_cannot_dispatch(policy: PrivacyPolicy) -> None:
         return
     typer.echo("")
     typer.echo(
-        "  Note: the registered Codex MCP route is 'strict', which ceilings semantic review "
+        "  Note: the registered Codex MCP route is 'strict', which ceilings AI-powered review "
         "for that process regardless of this policy."
     )
     typer.echo(

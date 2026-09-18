@@ -1,4 +1,4 @@
-"""Contract tests for canonical finding and semantic-provenance values."""
+"""Contract tests for canonical finding and AI-powered review provenance values."""
 
 from __future__ import annotations
 

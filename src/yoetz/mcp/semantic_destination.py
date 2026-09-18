@@ -1,7 +1,7 @@
-"""Bounded, nonsecret disclosure of the policy route's semantic review destination.
+"""Bounded, nonsecret disclosure of the policy route's AI-powered review destination.
 
 Issue #479. A host's automatic tool-call reviewer reads the initialize ``instructions`` (Codex
-copies them into every tool description) and, before this module, saw only "external semantic
+copies them into every tool description) and, before this module, saw only "external AI-powered
 review follows the configured policy": no destination class and no payload bound. This module
 renders one bounded passage from the configuration the bridge reads at startup so the reviewer can
 score the call from a named destination rather than from nothing.
@@ -94,7 +94,7 @@ DISCLOSABLE_PROVIDER_IDS: Final[frozenset[str]] = frozenset(
 # text's own bound, so the initialize-instructions budget stays reviewable as two numbers.
 MAX_DISCLOSURE_ENCODED_BYTES: Final = 1_000
 
-DISCLOSURE_PREFIX: Final = "Semantic review destination, read once at bridge startup: "
+DISCLOSURE_PREFIX: Final = "AI-powered review destination, read once at bridge startup: "
 
 _HOSTNAME: Final = re.compile(
     r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*$",

@@ -119,7 +119,7 @@ actually measured at a pinned revision.
 This baseline exercises the Codex shaped local hook spool and local observation
 store in one process. It does not prove Claude Code or Cursor hook behavior,
 service RPC drain throughput, SQLite capture ticket exhaustion, native encrypted
-capture, restart or crash recovery, concurrent workspace writers, semantic
+capture, restart or crash recovery, concurrent workspace writers, AI-powered
 review, or receipt coverage. The eligible content byte estimate is not evidence
 that content was captured, delivered, selected for a check, or available for a
 receipt.

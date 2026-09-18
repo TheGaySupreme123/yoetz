@@ -1,6 +1,6 @@
 """Service-side authentication and selection of retained observation content.
 
-The semantic case builder stays pure. This module is the narrow application boundary that reads
+The AI-powered review case builder stays pure. This module is the narrow application boundary that reads
 the current observation consent, resolves only manifests referenced by current envelopes, verifies
 the encrypted object and canonical inner wrapper, and hands bounded frozen values to the builder.
 No structural event or outbox row is modified here, and no provider is contacted.
@@ -67,7 +67,7 @@ _MAX_WRAPPER_BYTES: Final = 1_048_576
 _CLAUDE_ORDINARY_PROFILE: Final = CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
 _CURSOR_ORDINARY_PROFILE: Final = CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
 # Codex's original observation grant predates the opt-in Claude/Cursor content
-# profile selector. This source token is an internal semantic scope label for
+# profile selector. This source token is an internal AI-powered review scope label for
 # that historical, profileless grant; it is never accepted as a local consent
 # profile or as a capture-only request profile.
 _CODEX_HISTORICAL_CAPTURE_SCOPE: Final = ObservationSource.CODEX_HOOK.value
@@ -230,7 +230,7 @@ class CapturedContentResolution:
     scope: CapturedContentScope | None
     content: tuple[CapturedSemanticContent, ...]
     gaps: tuple[str, ...]
-    # A local-store generation is carried back to the dispatch seam. The semantic
+    # A local-store generation is carried back to the dispatch seam. The AI-powered
     # case may contain authenticated bytes only while this same generation is
     # still active; a pause/disable/revoke therefore invalidates the case before
     # another object open or provider call.
@@ -735,7 +735,7 @@ async def resolve_captured_semantic_content(
     # The historical Codex grant is profileless and is admitted only after the
     # exact session route yields a CODEX_HOOK envelope with linked content. Keep
     # this as a candidate gate until then; an active local fence by itself must
-    # never create a semantic disclosure scope.
+    # never create an AI-powered review disclosure scope.
     codex_historical_candidate = (
         local_fence_provided
         and local_fence is not None
@@ -775,7 +775,7 @@ async def resolve_captured_semantic_content(
     allowed = frozenset(str(ref) for ref in frozen.case.allowed_ids)
     candidates, candidate_gaps = _projected_candidates(frozen, allowed=allowed)
     gaps.update(candidate_gaps)
-    # Metadata selection is bounded independently from semantic part admission:
+    # Metadata selection is bounded independently from AI-powered review part admission:
     # selecting only the first object ID could split a valid multipart group and
     # turn an otherwise admissible capture into a false unavailable gap.
     selected_objects = tuple(sorted(candidates, key=str.encode))[:_MAX_CAPTURED_SEMANTIC_PARTS]

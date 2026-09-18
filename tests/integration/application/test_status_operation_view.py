@@ -982,10 +982,10 @@ async def test_status_view_operation_page_from_corrupt_record_is_storage_corrupt
 async def test_status_view_operation_survives_a_stranded_semantic_wait_check() -> None:
     """Recovery must work for the shape that actually failed in production.
 
-    The 2026-07-30 dogfood run left a check pending in ``SEMANTIC_WAIT`` with a leased semantic
+    The 2026-07-30 dogfood run left a check pending in ``SEMANTIC_WAIT`` with a leased AI-powered review
     job and an attempt still ``started``, and every ``status(view=operation)`` against it failed
     with an AttributeError recorded as ``read_projection_failed``. The existing pending-operation
-    test seeds ``CheckPhase.RESERVED`` with no semantic job at all, which is why it never caught
+    test seeds ``CheckPhase.RESERVED`` with no AI-powered review job at all, which is why it never caught
     this: the failing state is specifically a check parked mid-dispatch.
     """
 
@@ -999,7 +999,7 @@ async def test_status_view_operation_survives_a_stranded_semantic_wait_check() -
         "yoetz-object/1",
         "bmk-1",
         ObjectMetadata(
-            # A check parked in SEMANTIC_WAIT has already produced its deterministic result.
+            # A check parked in SEMANTIC_WAIT has already produced its local result.
             ObjectKind.DETERMINISTIC_RESULT,
             "application/vnd.yoetz.deterministic-result+json",
             seed.task_id,

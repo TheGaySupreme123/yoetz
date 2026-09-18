@@ -1,10 +1,10 @@
 """Proof-based finding resolution: which later check may resolve which recorded finding.
 
 A finding is a historical fact and stays visible forever. Whether it is *current* is a separate
-fact, and only one kind of evidence may change it: a later deterministic check whose recorded
+fact, and only one kind of evidence may change it: a later local check whose recorded
 state contains the finding, whose matching policy pack ran to completion with nothing suppressed,
 whose scope covers the finding's subject, whose coverage carries no weakening gap for the
-finding's proof class, and which did not return the same issue again. A closed deterministic-only
+finding's proof class, and which did not return the same issue again. A closed local-only
 exception lets case-wide host-observation limitations remain on the receipt without vetoing clean
 structured-ledger proof. A response disposition never resolves a finding; it only answers it on
 the record. Weak, skipped, failed, capped, stale, unreadable, or non-overlapping checks do nothing,
@@ -48,12 +48,12 @@ __all__ = [
 
 IssueKey = tuple[object, ...]
 
-# Coverage gaps that describe only the semantic review's own absence or weakness. A
-# deterministic finding is proven absent by the deterministic pack that owns it, so these gaps
-# do not weaken that proof; for a semantic finding they do, because the semantic review is the
+# Coverage gaps that describe only the AI-powered review's own absence or weakness. A
+# local finding is proven absent by the local pack that owns it, so these gaps
+# do not weaken that proof; for an AI-powered finding they do, because the AI-powered review is the
 # proof. The registration-drift gap is one of these: it rides alongside the ceiling gap on a
 # strict check served while the applied record says policy, so a drift check still resolves
-# deterministic findings exactly like a plain ceiling check does (issue #537).
+# local findings exactly like a plain ceiling check does (issue #537).
 _SEMANTIC_ONLY_GAPS: Final = frozenset(
     {
         SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
@@ -81,10 +81,10 @@ _EVIDENCE_STRENGTH_GAPS: Final = frozenset(
         "evidence_digest_subject_legacy_unknown",
     }
 )
-# Host observation can leave case-wide limitations even when the deterministic policy's own
+# Host observation can leave case-wide limitations even when the local policy's own
 # structured ledger inputs were readable. These codes keep bounding the receipt, but do not veto
-# absence proof for an already-recorded deterministic finding whose original coverage was itself
-# readable. ``captured_object_unavailable`` belongs here because deterministic packs judge event
+# absence proof for an already-recorded local finding whose original coverage was itself
+# readable. ``captured_object_unavailable`` belongs here because local packs judge event
 # payloads and their typed coverage, never captured-object bytes; if that absence matters to a
 # rule, the pack re-fires the issue or returns its own coverage finding. Event-payload loss and
 # source redaction remain excluded and therefore block.
@@ -151,10 +151,10 @@ def _deterministic_freshness_proven(
     check: CheckRecordedPayload,
     gaps: frozenset[str],
 ) -> bool:
-    """Whether aggregate freshness still proves this deterministic issue absent.
+    """Whether aggregate freshness still proves this local issue absent.
 
     ``redacted_gap`` is normally unproven. The only exception is a closed host-observation class
-    on a check of a deterministic finding whose own recorded proof was readable. This prevents an
+    on a check of a local finding whose own recorded proof was readable. This prevents an
     unrelated unavailable capture from making repair impossible while keeping unknown freshness,
     stale state, unreadable original proof, and every unclassified gap fail-closed.
     """

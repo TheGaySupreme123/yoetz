@@ -173,9 +173,9 @@ documents that Yoetz cannot independently authenticate its chat provenance.
     provider, model, privacy level, install target, or ceremony. Only factual technical limits,
     unavailable authority, policy ceilings, target drift, never-send and credential/destructive
     invariants, or honest proof boundaries may block; the response names the concrete boundary and
-    shortest user-controlled continuation. When the user explicitly asks for semantic review, the
+    shortest user-controlled continuation. When the user explicitly asks for AI-powered review, the
     agent recommends Expanded first for review depth and explains Assisted as the lower-disclosure
-    semantic alternative before preparing the one exact combined action.
+    AI-powered review alternative before preparing the one exact combined action.
 
 ### Linux PAM deadline isolation (issue #719)
 

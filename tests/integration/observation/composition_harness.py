@@ -8,7 +8,7 @@ composition that exercises the intended pipeline shape:
 Production path that must replace interim pieces:
   - Agent A: ObservationCoordinator + ready_composition SQLite wiring + outbox ack
   - Agent B: unified setup (plugin+MCP+consent) + CodexSessionStreamLocator + auto reconcile
-  - Agent C: AdviceItem in ordinary status + CheckSandboxPort + semantic ready path
+  - Agent C: AdviceItem in ordinary status + CheckSandboxPort + AI-powered review ready path
 """
 
 from __future__ import annotations

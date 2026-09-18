@@ -3,7 +3,7 @@
 **Status:** Accepted (2026-08-29), acknowledged in
 [issue #432](https://github.com/TheGaySupreme123/yoetz/issues/432).
 **Implemented by:** `src/yoetz/domain/events.py`, `src/yoetz/kernel/claims.py`,
-`src/yoetz/kernel/reducers.py`, the deterministic policy packs, semantic-case and receipt builders,
+`src/yoetz/kernel/reducers.py`, the local policy packs, AI-powered review case and receipt builders,
 and the public claim schema, guidance, descriptors, and conformance suites.
 **Relates to:** ADR-002 (canonical protocol), ADR-019 (declared completion scope), and ADR-020
 (typed evidence digest provenance).
@@ -55,7 +55,7 @@ Append-only history must remain intact, so mutation or erasure is not an accepta
    task-wide. `unknown` is not silently upgraded into either support or a typed partial/failure.
 
    Disclosure is not that upgrade. `claim_discloses_result` reads only `limitation_refs` for a v1.1
-   claim, and the deterministic limitation policy treats a relevant `unknown` result as limiting,
+   claim, and the local limitation policy treats a relevant `unknown` result as limiting,
    so `limitation_refs` also *accepts* a relevant `unknown` result: it is the only field a v1.1
    claim has to disclose one, and without it `material_limitation_omitted` would be permanently
    unresolvable for exactly the claims this ADR introduces. Naming such a result states that it is
@@ -73,7 +73,7 @@ Append-only history must remain intact, so mutation or erasure is not an accepta
    SQLite append. Dry-run therefore proves that the proposed append is structurally effective
    without writing it.
 
-5. **Current evaluation is shared.** Deterministic policies, semantic claim selection, and receipt
+5. **Current evaluation is shared.** Local policies, AI-powered review claim selection, and receipt
    current-claim selection consume one replay-derived effective-claim set. Superseded claims stay
    available to history and historical finding projection. A qualifying recheck can mark findings
    against superseded claims resolved; it does not delete them.
@@ -107,7 +107,7 @@ accepted and later challenged. This is intentional: the rejection occurs before 
 append and gives the author an exact field/invariant plus status views needed to repair it.
 
 Narrowing has a further consequence worth stating outright: a correction that drops obligations
-from `obligation_refs` also sheds the claim-scoped deterministic findings that only the wider scope
+from `obligation_refs` also sheds the claim-scoped local findings that only the wider scope
 produced — `completion_with_open_obligations` and `failed_work_omitted` for the dropped span stop
 being raised against the effective claim, because no current completion claim covers that span any
 more. That is the narrowing decision doing its job, not an erasure: the superseded claim and its

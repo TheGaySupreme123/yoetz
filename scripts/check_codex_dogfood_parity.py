@@ -439,7 +439,7 @@ def _validate_out_of_scope_facets(
             if status != "unsupported":
                 raise _error("unadvertised_capability_facet_not_unsupported")
         elif status != "not_run":
-            # Optional semantic/influence work cannot carry an ignored pass, fail, or block. The
+            # Optional AI-powered review/influence work cannot carry an ignored pass, fail, or block. The
             # scope must be revised first so every performed or failed cell participates in the
             # aggregate conclusion.
             raise _error("out_of_scope_facet_not_not_run")

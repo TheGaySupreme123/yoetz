@@ -2,7 +2,7 @@
 
 In the supervised dogfood run the agent, on reaching a pending disclosure, went looking in
 Yoetz's SQLite catalog and product source for the pending id, issued a fresh check request, and
-told the user the task was complete before semantic closure. None of those are things the text
+told the user the task was complete before AI-powered closure. None of those are things the text
 told it to do — they are what an agent does when the text says nothing.
 """
 
@@ -89,7 +89,9 @@ def test_check_descriptor_handles_host_auto_review_before_invocation() -> None:
     assert "exact proposed check body and request_id" in description
     assert "does not change Yoetz privacy policy" in description
     assert "Do not publish a completion claim" in description
-    assert "continue without semantic review only after the user explicitly chooses" in description
+    assert (
+        "continue without AI-powered review only after the user explicitly chooses" in description
+    )
 
 
 @pytest.mark.parametrize("source", (_skill, _instructions))
@@ -215,5 +217,5 @@ def test_text_distinguishes_stale_runtime_from_a_genuine_route_ceiling(
 
     assert "activation mismatch" in text
     assert "full_restart_required" in text
-    assert "do not mint a fresh semantic check" in text
+    assert "do not mint a fresh ai-powered check" in text
     assert "never authorizes egress" in text

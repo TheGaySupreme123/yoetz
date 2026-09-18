@@ -3,7 +3,7 @@ Add rate limiting to the upload endpoint
 State                current
 Evidence             3
 Open findings        2
-Last check           deterministic only
+Last check           local only
 Frontier sequence    412
 Receipt              available
 
@@ -14,7 +14,7 @@ Checks
   work-integrity/0.1.0
 
 Coverage
-  no semantic review
+  no AI-powered review
 
 Findings
   P2 unsupported_claim (deterministic): no evidence links the claim

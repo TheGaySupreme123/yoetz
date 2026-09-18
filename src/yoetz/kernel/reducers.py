@@ -97,7 +97,7 @@ __all__ = [
 _MAX_SQLITE_SIGNED_INTEGER: Final = 2**63 - 1
 # A v1.1 completion claim must disclose every relevant typed non-success result. An `unknown`
 # outcome is not upgraded into a typed partial or failure (ADR-025 decision 3), so it is never
-# required -- but it is limiting to the deterministic limitation policy, so `limitation_refs` also
+# required -- but it is limiting to the local limitation policy, so `limitation_refs` also
 # accepts it as the disclosure channel a v1.1 claim would otherwise have none of.
 _TYPED_LIMITING_OUTCOMES: Final = frozenset({ResultOutcome.FAILURE, ResultOutcome.PARTIAL})
 _DISCLOSABLE_LIMITING_OUTCOMES: Final = _TYPED_LIMITING_OUTCOMES | {ResultOutcome.UNKNOWN}
@@ -1257,7 +1257,7 @@ def build_replay_index(events: tuple[LedgerRecord, ...]) -> ReplayIndex:
     This uses the same chain, payload-owner, evidence-association, and redaction-root checks as
     ``extend_replay_index`` while mutating local maps once.  The immutable ``ReplayIndex`` is
     created only after the complete prefix has been checked, so callers can safely retain it
-    across the subsequent deterministic-capacity validation.
+    across the subsequent local-case capacity validation.
     """
 
     if type(events) is not tuple:

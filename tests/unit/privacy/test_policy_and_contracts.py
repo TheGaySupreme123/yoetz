@@ -222,7 +222,7 @@ def test_review_recipes_recommend_a_reviewable_context_without_loosening_first_r
 
     Both halves matter together. A structural recipe sends no goal, obligations, claims,
     decisions or finding prose, so a reviewer given one cannot judge whether a claim is supported
-    — recommending it makes semantic review ceremonial. Config.toml generation-1 bootstrap remains
+    — recommending it makes AI-powered review ceremonial. Config.toml generation-1 bootstrap remains
     all-denied (fail-safe file seed). Durable product default separately enables structural
     package update checks only — never LLM task content — until the user commits a recipe.
     """

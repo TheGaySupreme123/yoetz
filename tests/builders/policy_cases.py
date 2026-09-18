@@ -1,4 +1,4 @@
-"""Small immutable deterministic cases for policy rule unit tests."""
+"""Small immutable local cases for policy rule unit tests."""
 
 from __future__ import annotations
 

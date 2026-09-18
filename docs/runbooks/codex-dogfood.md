@@ -157,7 +157,7 @@ of the following cells:
 | `mcp_runtime` | The exact isolated launcher starts the intended Yoetz MCP runtime. |
 | `model_mcp_call` | A correlated model-issued Yoetz MCP operation succeeds or returns its typed product result. |
 | `semantic_dispatch` | Every in-scope `semantic_required` check reaches a terminal typed status. |
-| `semantic_provenance` | Provenance matches the semantic result under the semantic dogfood gate. |
+| `semantic_provenance` | Provenance matches the AI-powered review result under the AI-powered review dogfood gate. |
 | `receipt` | Receipt conclusion and coverage match the recorded frontier and limitations. |
 | `corrective_influence` | Scored only when the influence runbook put it in scope; otherwise `not_run`. |
 
@@ -207,11 +207,12 @@ uv run python scripts/check_codex_dogfood_parity.py <report-outside-worktree.jso
 ```
 
 The full outcome cannot pass if preflight did not pass. Required postflight rows vary only by the
-four explicit scope booleans: advertised hooks, advertised session stream, required semantic
+four explicit scope booleans: advertised hooks, advertised session stream, required AI-powered
 review, and required influence measurement. Optional unsupported/not-run rows remain listed in the
 result instead of disappearing into an aggregate green status. A row excluded by scope must be
-`unsupported` for an unadvertised host capability or `not_run` for optional semantic/influence work;
-an out-of-scope pass, failure, or block is inconsistent evidence and invalidates the report.
+`unsupported` for an unadvertised host capability or `not_run` for optional AI-powered
+review/influence work; an out-of-scope pass, failure, or block is inconsistent evidence and
+invalidates the report.
 
 ## 7. Report shape and statuses
 
@@ -234,11 +235,11 @@ non-pass facet by class, and a digest of the bounded report.
 
 Final reporting walks the cells rather than replacing them with “integration passed”: packaging,
 installation, discovery, activation, skill delivery, MCP runtime, model authorability/use, hooks,
-consent, mapping, observation, session stream, semantic dispatch/provenance, receipt, corrective
-influence, rollback, and normal-target isolation.
+consent, mapping, observation, session stream, AI-powered review dispatch/provenance, receipt,
+corrective influence, rollback, and normal-target isolation.
 
 ## See also
 
 - [Codex integration](codex-integration.md) — plugin, skill, MCP, and observation surfaces.
-- [Semantic dogfood](semantic-dogfood.md) — route profiles and the provenance gate.
+- [AI-powered review dogfood](semantic-dogfood.md) — route profiles and the provenance gate.
 - [Influence dogfood](influence-dogfood.md) — attributable work-product change.

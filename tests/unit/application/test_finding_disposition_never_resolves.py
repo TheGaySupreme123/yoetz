@@ -6,7 +6,7 @@ Half of that was deliberate and still is: a disposition is an answer on the reco
 The other half was a defect (issue #458): ``application/receipt._finding_states`` hard-wired every
 current finding to ``resolved=False``, so a repaired record could never earn a clean receipt. These
 cases lock both halves of the contract the agent guidance now makes: dispositions never resolve,
-and a later deterministic qualifying check that finds the same issue absent does.
+and a later local qualifying check that finds the same issue absent does.
 """
 
 from __future__ import annotations

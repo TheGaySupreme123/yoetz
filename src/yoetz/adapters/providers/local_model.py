@@ -1,4 +1,4 @@
-"""Optional local AF_UNIX semantic-model adapter behind one service-approved endpoint profile.
+"""Optional local AF_UNIX AI-powered review model adapter behind one service-approved endpoint profile.
 
 The Yoetz adapter itself opens no network transport, performs no path discovery, DNS,
 AF_INET/AF_INET6, proxy lookup, redirect, subprocess launch, or package/model download, and never
@@ -116,7 +116,7 @@ class InstalledLocalModelProfileRegistry:
     """Immutable, artifact-owned allowlist of exact release-supported local-model tuples.
 
     A release with no passing exact local-runtime capability cell ships this registry empty and
-    reports local semantic inference unavailable; the existence of this adapter contract alone
+    reports local AI-powered inference unavailable; the existence of this adapter contract alone
     never advertises support. There is no dynamic discovery or user-extension mapping.
     """
 
@@ -221,7 +221,7 @@ def normalize_local_response(
     policy_digest: str,
     latency_ms: int,
 ) -> SemanticResult:
-    """Parse and validate one bounded local-model response into a closed semantic result.
+    """Parse and validate one bounded local-model response into a closed AI-powered review result.
 
     Missing installed tuple/socket/resolver/evidence, peer or generation mismatch, unsupported
     schema/model, refusal, or invalid/truncated output all return bounded status with no raw

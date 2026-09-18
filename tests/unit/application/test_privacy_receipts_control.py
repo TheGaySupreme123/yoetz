@@ -135,7 +135,7 @@ def _local_view(receipt_id: str = _RECEIPT, finished_at: datetime = _NOW) -> Pri
 
 
 def _network_view() -> PrivacyReceiptView:
-    """A completed subscription review: the receipt kind a real semantic check records."""
+    """A completed subscription review: the receipt kind a real AI-powered check records."""
 
     return NetworkEgressReceiptView(
         "network_egress",

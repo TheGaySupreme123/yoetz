@@ -919,7 +919,7 @@ async def test_sqlite_restart_mid_wait_recovers_the_same_attempt_and_resume_rout
     assert attempts[0].provider_request_id == recovered_attempts[0].provider_request_id
     assert privacy.calls == privacy.resume_calls == 1
 
-    # A second crash after the terminal semantic write but before the outer check commit must
+    # A second crash after the terminal AI-powered review write but before the outer check commit must
     # recover that terminal answer without calling either privacy entrypoint again.
     assert result.operation_lease is not None
     original._db.execute(  # pyright: ignore[reportPrivateUsage]

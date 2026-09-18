@@ -100,7 +100,7 @@ def _receipt_gap_codes_validated(
 ) -> tuple[str, ...]:
     """Return receipt gaps when the caller already replayed the exact record tuple.
 
-    This internal adapter seam skips only the duplicate genesis replay. It retains deterministic
+    This internal adapter seam skips only the duplicate genesis replay. It retains local
     case construction, reverse-index, availability, history, and coverage validation.
     """
 
@@ -122,7 +122,7 @@ def _receipt_gap_codes(
     """Build receipt gaps, optionally reusing an append-time replay result.
 
     The validated branch is private to ledger append admission. Its caller has just replayed the
-    exact ``records`` tuple and supplies that projection; the deterministic case still performs
+    exact ``records`` tuple and supplies that projection; the local case still performs
     all shape, index, availability, history, and coverage checks below.
     """
 
@@ -159,8 +159,8 @@ def _receipt_gap_codes(
         codes.add(_CHECK_NOT_APPLICABLE)
     elif check_record is not None and type(check_record.payload) is CheckRecordedPayload:
         codes.update(check_record.payload.coverage.known_gaps)
-        # The receipt builder folds the semantic outcome's structural gap separately from the
-        # recorded coverage. A legacy payload can carry a terminal semantic status whose code is
+        # The receipt builder folds the AI-powered review outcome's structural gap separately from the
+        # recorded coverage. A legacy payload can carry a terminal AI-powered review status whose code is
         # absent from ``known_gaps``; omitting it here would admit a state at exactly the bound
         # that receipt construction then pushes one code over.
         semantic_gap = semantic_coverage_gap_code(

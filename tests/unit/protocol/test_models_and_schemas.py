@@ -763,7 +763,7 @@ def _candidate_status_result_wire(*, omitted: bool = False) -> dict[str, JsonVal
             "reason": "local_disclosure_not_authorized",
         }
         if omitted
-        else "A deterministic candidate finding."
+        else "A local candidate finding."
     )
     result["page"] = {
         "items": [
@@ -1667,7 +1667,7 @@ def test_operation_cross_field_matrix() -> None:
     markdown_receipt = _receipt_result_wire()
     markdown_receipt["format"] = "markdown"
     markdown_receipt["document"] = None
-    markdown_receipt["human_text"] = "A deterministic receipt rendering."
+    markdown_receipt["human_text"] = "A local-only receipt rendering."
     models.ReceiptResultModel.model_validate(markdown_receipt)
     markdown_receipt["human_text"] = None
     with pytest.raises(ValidationError):
@@ -1814,7 +1814,7 @@ def test_semantic_provenance_partition_is_total_over_every_status_and_reason() -
 
     Reading ``semantic_provenance == null`` as "no provider attempt was made" is only sound
     while the partition is total. A status added later that fell through every branch would
-    make null ambiguous and silently break that inference — which is the one fact the semantic
+    make null ambiguous and silently break that inference — which is the one fact the AI-powered review
     dogfood gate is built on (``docs/runbooks/semantic-dogfood.md``, issue #132).
     """
 
@@ -2191,7 +2191,7 @@ def test_result_field_classification_is_closed() -> None:
     markdown_receipt = _receipt_result_wire()
     markdown_receipt["format"] = "markdown"
     markdown_receipt["document"] = None
-    markdown_receipt["human_text"] = "A deterministic receipt rendering."
+    markdown_receipt["human_text"] = "A local-only receipt rendering."
     markdown = models.public_model_to_wire(
         models.ReceiptResultModel.model_validate(markdown_receipt)
     )

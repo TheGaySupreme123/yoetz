@@ -1,4 +1,4 @@
-"""Failure-matrix coverage for resuming one-use semantic disclosure authority."""
+"""Failure-matrix coverage for resuming one-use AI-powered review disclosure authority."""
 
 from __future__ import annotations
 

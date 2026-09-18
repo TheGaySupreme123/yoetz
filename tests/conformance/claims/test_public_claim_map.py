@@ -185,7 +185,7 @@ def test_claim_words_do_not_outrun_evidence() -> None:
     review_loop = claims["semantic.review_packet_and_agent_loop"]
     review_loop_statement = cast(str, review_loop["statement"])
     for phrase in (
-        "deterministic findings and their machine-readable bases",
+        "local findings and their machine-readable bases",
         "bounded problem-local recorded excerpts",
         "explicit omission reason",
         "reviewer challenge",

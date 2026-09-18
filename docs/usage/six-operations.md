@@ -72,14 +72,14 @@ Authoring help for MCP: tool descriptions name `yoetz://guidance/publication-pol
 requests include nested field hints plus `yoetz://guidance/request-templates.md`.
 
 ### `check`
-Runs the deterministic policy packs over the recorded state and returns findings with an exact
+Runs the local policy packs over the recorded state and returns findings with an exact
 coverage vector. `mode` selects how much:
 
 | Mode | Use it when |
 |---|---|
 | Omitted | You intend to use the configured verification default. |
-| `semantic_if_configured` | Review is known to be optional. Runs semantic review if it is available; degrades honestly if not. |
-| `semantic_required` | The user, effective verification policy, or a named acceptance criterion requires independent semantic review. Preserve this choice for subsequent final checks. |
+| `semantic_if_configured` | Review is known to be optional. Runs AI-powered review if it is available; degrades honestly if not. |
+| `semantic_required` | The user, effective verification policy, or a named acceptance criterion requires independent AI-powered review. Preserve this choice for subsequent final checks. |
 | `deterministic_only` | Explicitly local or structural checks, or a user-authorized deliberate no-egress choice. Disclose `semantic_review_not_requested` and any unmet required review. |
 
 The configured `verification.semantic` default applies only when `mode` is omitted. An explicit
@@ -87,12 +87,12 @@ mode is honored by the runtime; the default is not a persistent task-level enfor
 Do not choose a weaker mode to shorten a repair check. Qualitative work alone does not make
 optional review mandatory, and none of these modes widens durable privacy authority.
 
-`semantic_required` never erases deterministic truth. If the provider is absent, denied by policy,
-refuses, times out, or returns stale or invalid output, you get the deterministic findings back with
-verdict `incomplete_check`, an explicit reason, and no semantic findings.
+`semantic_required` never erases local-check truth. If the provider is absent, denied by policy,
+refuses, times out, or returns stale or invalid output, you get the local findings back with
+verdict `incomplete_check`, an explicit reason, and no AI-powered findings.
 
 An unavailable required review remains an unmet requirement. Report completed implementation and
-tests separately; do not silently replace required semantic review with deterministic coverage.
+tests separately; do not silently replace required AI-powered review with local-check coverage.
 Optional terminal review gaps may be disclosed while continuing the task. Pending approvals must
 follow their exact continuation.
 
@@ -124,17 +124,16 @@ current rather than reusable. When no enforcing sandbox is available the outcome
 
 ### `respond`
 Answers a finding: accept and act, supply evidence, revise the claim, dispute with evidence, or
-state an unresolved limitation. **A response does not erase a finding**, and no disposition
-resolves one: an actionable finding keeps the receipt conclusion at `unresolved_findings_remain`
-until a later qualifying check finds the same issue absent from the repaired record, whichever
-disposition is recorded. The check must cover the finding, run its owning pack to completion with
-nothing suppressed, and read the proof inputs. For a deterministic finding with readable original
-coverage, case-wide `captured_object_unavailable`, `content_unselected`,
-`host_outcome_unavailable`, and `unpaired_event` limits remain receipt gaps but do not veto clean
-structured-ledger proof; they never relax semantic proof. A resolved finding stays visible as
-history. Recheck after any material edit, evidence change, or plan change. A readable response to a
-finding returned by the current check does not require a recheck; a redacted or unreadable response
-does.
+state an unresolved limitation. **A response does not erase a finding**, and no disposition resolves
+one: an actionable finding keeps the receipt conclusion at `unresolved_findings_remain` until a
+later qualifying check finds the same issue absent from the repaired record, whichever disposition
+is recorded. The check must cover the finding, run its owning pack to completion with nothing
+suppressed, and read the proof inputs. For a local finding with readable original coverage,
+case-wide `captured_object_unavailable`, `content_unselected`, `host_outcome_unavailable`, and
+`unpaired_event` limits remain receipt gaps but do not veto clean structured-ledger proof; they
+never relax AI-powered review proof. A resolved finding stays visible as history. Recheck after any
+material edit, evidence change, or plan change. A readable response to a finding returned by the
+current check does not require a recheck; a redacted or unreadable response does.
 
 ### `status`
 Reads current state — use it after a resume, a compaction, a handoff, or any uncertainty about what
@@ -200,7 +199,7 @@ publishable transitions.
 
 ### When to stop retrying
 
-Semantic review that does not succeed is a coverage gap, not a retry problem. `not_configured`,
+AI-powered review that does not succeed is a coverage gap, not a retry problem. `not_configured`,
 `blocked_by_policy`, and `human_denied` will not change without owner action. `unavailable` and
 `timeout` are retried inside a job, so by the time you see one that job already spent its attempt
 budget. An `invalid` answer with reason `response_content_invalid` (incomplete or overlong provider
@@ -212,7 +211,7 @@ gap with the recorded status and reason, and do not spend a third job on the sam
 
 On `OPERATION_PENDING`, read `status` with
 `view=operation` once and replay the same `request_id` once; if it is still pending, continue with
-a new deterministic-only request and say the earlier operation never reached a terminal result.
+a new local-only request and say the earlier operation never reached a terminal result.
 
 The agent-facing version of this loop, including when *not* to use Yoetz at all, is
 [`guidance/workflow.md`](../../guidance/workflow.md).

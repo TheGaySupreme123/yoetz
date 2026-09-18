@@ -33,7 +33,7 @@ def _prefix_through_check() -> tuple[tuple[LedgerRecord, ...], CheckRecordedPayl
 
 
 def test_admission_union_folds_the_semantic_outcome_gap() -> None:
-    """Admission counts the semantic gap the receipt builder adds outside recorded coverage.
+    """Admission counts the AI-powered review gap the receipt builder adds outside recorded coverage.
 
     ``execute_receipt`` folds ``semantic_coverage_gap_code`` separately from the applicable
     check payload's own ``known_gaps``. While admission skipped it, a state could be accepted

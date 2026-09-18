@@ -455,7 +455,7 @@ class YoetzTui(App[int]):
             else:
                 # The review answer decides which MCP command is registered, so it is asked
                 # before the registration -- and before the approval screen that shows that
-                # command. Registering first and asking after is how a semantic install ends
+                # command. Registering first and asking after is how an AI-powered review install ends
                 # up on the strict route.
                 review = await self._ask_review_mode(allow_back=True)
                 if review == BACK:
@@ -478,7 +478,7 @@ class YoetzTui(App[int]):
     async def _ask_review_mode(self, *, allow_back: bool = False) -> str | None:
         """Ask the posture question only; applying the answer belongs to the caller.
 
-        Semantic review is listed first, so it is where the cursor rests. That is a choice
+        AI-powered review is listed first, so it is where the cursor rests. That is a choice
         about this question, not about what an installation seeds: the durable policy is still
         ``local_only``, and this answer only leads to the provider binding, credential, and
         separately reauthenticated policy commit that egress actually requires.
@@ -491,14 +491,14 @@ class YoetzTui(App[int]):
                 options=[
                     Option(
                         "semantic",
-                        "Add semantic review",
+                        "Add AI-powered review",
                         "Recommended. Configure a provider, API key, and explicit privacy "
                         "boundary.",
                     ),
                     Option(
                         "local",
                         "Local only",
-                        "Deterministic checks; nothing leaves this computer.",
+                        "Local checks; nothing leaves this computer.",
                     ),
                 ],
                 hint="enter to choose · b to go back" if allow_back else "enter to choose",
@@ -530,7 +530,7 @@ class YoetzTui(App[int]):
         ):
             self.say(
                 Level.BLOCKED,
-                "Semantic setup is not complete",
+                "AI-powered review setup is not complete",
                 ("A provider binding, privacy policy, and stored credential are required.",),
             )
             await self._offer_local_only_finish(option, connected=connected, codex_home=codex_home)
@@ -544,11 +544,11 @@ class YoetzTui(App[int]):
         connected: bool,
         codex_home: Path | None = None,
     ) -> None:
-        """Leave a coherent installation when semantic setup does not complete.
+        """Leave a coherent installation when AI-powered review setup does not complete.
 
-        Semantic review was chosen, so the policy route is already registered. Returning here
+        AI-powered review was chosen, so the policy route is already registered. Returning here
         without a decision leaves that route registered with no provider behind it and no setup
-        marker written -- an install that is neither local-only nor semantic. Offer the finish
+        marker written -- an install that is neither local-only nor AI-powered. Offer the finish
         that makes it one of the two.
         """
 
@@ -1110,7 +1110,7 @@ class YoetzTui(App[int]):
                 Level.OPTIONAL,
                 "No Codex installation was found",
                 (
-                    "Yoetz still works locally: /check runs deterministic checks",
+                    "Yoetz still works offline: /check runs local checks",
                     "and /receipt produces an honest record.",
                 ),
             )
@@ -1670,7 +1670,7 @@ class YoetzTui(App[int]):
         if getattr(report, "outcome", "failed") not in {"configured", "unchanged"}:
             self.say(
                 Level.BLOCKED,
-                "Semantic privacy setup is not complete",
+                "AI-powered review privacy setup is not complete",
                 (f"Reason: {getattr(report, 'reason', 'privacy_setup_failed')}",),
             )
             return

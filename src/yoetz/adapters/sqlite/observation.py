@@ -691,7 +691,7 @@ class SqliteObservationStore:
 
         Historical route rows remain readable for observation-advice recovery, so
         ``codex_session_commitment_for_session`` intentionally keeps that older
-        behavior. Semantic captured-content selection needs the stronger tuple
+        behavior. AI-powered captured-content selection needs the stronger tuple
         to verify that the routed task matches the runtime before opening an
         object.
         """
