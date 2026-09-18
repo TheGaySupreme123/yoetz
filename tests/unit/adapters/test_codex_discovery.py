@@ -195,7 +195,11 @@ def test_default_codex_home_prefers_codex_home_then_the_dotfile(
     (home / ".codex").mkdir(parents=True)
     explicit = tmp_path / "explicit-codex"
     explicit.mkdir()
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    def fake_home(cls: type[Path]) -> Path:
+        return home
+
+    monkeypatch.setattr(Path, "home", classmethod(fake_home))
 
     assert discovery_module.default_codex_home({"CODEX_HOME": str(explicit)}) == explicit
     assert discovery_module.default_codex_home({}) == home / ".codex"
@@ -206,7 +210,11 @@ def test_default_codex_home_is_only_ever_an_existing_owner_directory(
 ) -> None:
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    def fake_home(cls: type[Path]) -> Path:
+        return home
+
+    monkeypatch.setattr(Path, "home", classmethod(fake_home))
 
     # Nothing exists: the caller asks instead of inventing a home.
     assert discovery_module.default_codex_home({}) is None
