@@ -1,115 +1,25 @@
-# Receipts, not promises
+Hey Product Hunt! 👋 I’m Shay, building Yoetz with my cofounder Daniel.
 
-*A Twitter thread about building Yoetz*
+I was using coding agents to compile a large Nasdaq-related database for my university research. They could do a lot of the work, but I kept finding small mistakes and instructions that hadn’t been followed. I wanted to focus on the research, not keep checking whether the agent had done everything I asked.
 
-Each numbered block is one post. Keep the line breaks.
+Daniel was running into similar problems with his studies. We both saw how powerful these tools were. We wanted to help them follow through, without having to keep nudging them ourselves.
 
----
+That’s why we built Yoetz. And building it felt a lot like the problem it solves.
 
-**1/**
+We used coding agents to write the product — Codex, Claude Code, Cursor. The same tools we were trying to keep honest. On paper that sounds neat. In practice it meant sitting next to a collaborator that can move a thousand files, and spending the day teaching it not to congratulate itself.
 
-an agent says “done.”
-tests passed. files moved. the summary is kind.
+We didn’t start with a demo. We started by writing down what the product was never allowed to say. Hundreds of spec files, then we built in waves, then we retired the specs once the code existed so we wouldn’t have two sources of truth. A coding agent will happily finish a sentence you didn’t mean to start. Someone has to stay the author of the shape.
 
-and somewhere quieter: did it do what you asked, or a nearby thing that learned to sound like completion?
+The good days were the ones a check came back with a finding. The agent says “tests pass,” but the recorded run happened before its latest code change. Yoetz flags that stale evidence so the agent can actually re-run the tests. That’s the feeling we were chasing: not “the agent is wrong,” just “this claim isn’t supported yet.”
 
-yoetz exists because that question would not leave.
+Yoetz isn’t another coding agent. It works alongside yours, using tools and supported hooks to record work evidence and check what supports the agent’s claims. It combines deterministic checks with optional model-powered review, then returns findings the agent can address.
 
-**2/**
+It doesn’t guarantee correct code. It shows what was checked, what wasn’t, and what still needs attention. Everything stays on your machine unless you say otherwise.
 
-in hebrew a *yoetz* is a counselor. someone who tells you what is true, not what is convenient.
+We even had to write that rule down for ourselves. Sometimes we ran Yoetz on the work of building Yoetz, got a healthy ledger and an honest receipt, and the agent still hadn’t changed the work. An honest receipt is not the same as “Yoetz helped.” If you’re going to build a product about not overclaiming, you don’t get to overclaim about building it.
 
-that’s the whole product.
+Yoetz is open source and local-first, with integrations for Codex, Claude Code, and Cursor. It’s still early.
 
-six operations. a ledger on your machine. a receipt that would rather say “we did not look” than “verified.”
+We’d love you to try it on a real task and tell us what it catches, what it misses, or where it gets in your way.
 
-**3/**
-
-the thing yoetz refuses to do is the point.
-
-it will not tell you the work is correct.
-
-it will tell you what was checked, at what coverage, and what is still open.
-
-building that refusal is what the last months were.
-
-**4/**
-
-we didn’t start with a demo.
-we started by deciding what must never be said.
-
-626 spec files. one owner each. then we built in waves: protocol, engine, ports, adapters, service, clients.
-
-when the walls were up we retired the drawings. the map is not the territory.
-
-**5/**
-
-a coding agent is tireless and locally brilliant.
-
-it will happily finish a sentence you did not mean to start.
-
-spec-first wasn’t ceremony. it was how a human stayed the author of the shape while machines laid the bricks.
-
-**6/**
-
-yoetz is a ledger for agent work.
-it was also built by agent work.
-
-codex, claude, cursor — the same hosts it now meets at the door — wrote the tests, the fences, and the words that must never claim too much.
-
-**7/**
-
-that’s the real story.
-
-you sit with a collaborator who can move a thousand files and spend the day teaching it not to congratulate itself.
-
-it reaches for “verified.”
-you put the word back on the shelf.
-
-**8/**
-
-you’re not fighting the model.
-you’re building a room in which it can be honest.
-
-helpfulness is its default. honesty is not.
-
-the good days were the ones a check came back red: tests older than the last edit. an obligation never evidenced. a receipt that would have lied.
-
-**9/**
-
-privacy is a wall, not a promise.
-
-one local service owns the keys. the cli, the mcp, the ui — they ask. they do not hold.
-
-nothing leaves unless a human said so. an agent cannot walk out with your repo by being helpful.
-
-clients never open the vault.
-
-**10/**
-
-we ran the product on the work of building the product.
-
-sometimes the ledger was healthy, the receipt was honest, and nothing in the work had actually changed.
-
-there is a runbook whose whole job is to stop one sentence: “yoetz helped.”
-
-an honest receipt is not influence.
-
-**11/**
-
-it was like learning a language that cannot say verified until it has earned the word.
-
-and then discovering you needed that language too.
-
-agents laid the bricks. a human decided what the building was for — and what it was forbidden to become.
-
-**12/**
-
-still pre-release. still not claiming more than the record.
-
-we built a small stubborn counselor between an agent and the word “done.”
-we used the agents to build it.
-we refused to let either of us say more than we had checked.
-
-not triumph.
-coverage.
+What do you still find yourself checking after your coding agent says it’s done?
