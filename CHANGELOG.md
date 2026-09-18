@@ -30,12 +30,21 @@ work on any machine regardless of which Pythons it already has. See
   MCP registration instead of a bare `harness_unavailable` (#766, #768).
 - The first-run detection screen no longer prints each Codex version twice, and the header names
   the foreign Codex MCP entry when the `yoetz` server name is already taken (#766, #768).
+- Public errors on the MCP and CLI surfaces carry a typed `continuation` token that each surface
+  renders as a concrete next step, guidance pointer, and nudge, so an agent that hits an error such
+  as `vault_initialization_required` is told what to do rather than only that something failed
+  (ADR-030; #739, #740, #669, #743).
 
 ### Changed
 
 - The install documentation states the Python 3.14 requirement, that `uv` downloads it on demand
   whatever other Pythons are installed, that `pip` and `pipx` on an older Python cannot install
   Yoetz, and which two `uv` settings block the download (#766, #768).
+- Product wording says "local checks" and "AI-powered review" everywhere people read it: rendered
+  receipts, the terminal interface, CLI and MCP descriptions, guidance, skills, and docs. Wire
+  identifiers, schema bytes, and storage are unchanged; `docs/INTERFACES.md` maps the product words
+  to their wire names (#769, #773).
+- The website's hero shows the Product Hunt featured badge.
 
 ## 0.2.1 — 2026-09-14
 
