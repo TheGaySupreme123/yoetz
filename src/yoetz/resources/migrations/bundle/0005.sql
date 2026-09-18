@@ -1,6 +1,6 @@
 PRAGMA application_id = 0x594F4554;
 
--- Migration 0005 owns the durable suspension record for an AI-powered review attempt that is
+-- Migration 0005 owns the durable suspension record for a semantic attempt that is
 -- waiting on one local disclosure decision. Migrations 0001-0004 remain immutable;
 -- existing ledger/object/observation rows stay readable.
 --

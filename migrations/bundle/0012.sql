@@ -1,10 +1,10 @@
 PRAGMA application_id = 0x594F4554;
 
--- Migration 0012 records durable observation-advice AI-powered review attempts (issue #619).
+-- Migration 0012 records durable observation-advice semantic attempts (issue #619).
 -- Hook ingest only enqueues a bounded, minimized packet here; a background worker
 -- resolves repository-scoped provider authority at dispatch time and records the
 -- outcome. A row that was never attempted, or whose lease was interrupted, is never
--- an AI-powered review success: only 'succeeded' with validated output may add advice.
+-- a semantic success: only 'succeeded' with validated output may add advice.
 CREATE TABLE observation_advice_semantic_attempts (
     attempt_id TEXT PRIMARY KEY,
     workspace_commitment TEXT NOT NULL,
