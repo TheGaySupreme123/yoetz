@@ -11,6 +11,10 @@
 </p>
 
 <p align="center">
+  <a href="https://www.producthunt.com/products/yoetz?embed=true&utm_source=badge-featured&utm_medium=badge&utm_campaign=badge-yoetz"><img src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1254021&theme=light&t=1789716006971" alt="Yoetz - Check to see if AI really completed a task or if it had gaps | Product Hunt" width="250" height="54"></a>
+</p>
+
+<p align="center">
   <a href="https://yoetz.dev">yoetz.dev</a> ·
   <a href="https://github.com/TheGaySupreme123/yoetz/tree/main/docs/usage">Docs</a> ·
   <a href="https://github.com/TheGaySupreme123/yoetz/releases">Releases</a> ·
