@@ -152,6 +152,8 @@ img { max-width: 100%; }
 }
 .hero-license .l { background: #475569; color: #f1f5f9; padding: 6px 9px; }
 .hero-license .r { background: var(--brand-teal-600); color: #fff; padding: 6px 9px; }
+.hero-ph { display: inline-flex; line-height: 0; }
+.hero-ph img { width: 250px; height: 54px; max-width: 100%; }
 
 /* Host pills under the lead */
 .hero-hosts { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; margin-top: 40px; }
