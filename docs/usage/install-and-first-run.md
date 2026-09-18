@@ -49,8 +49,9 @@ run lives in `uv`'s cache, and connecting an agent binds the agent to that exact
 are a coding agent installing Yoetz on a user's behalf, follow [Agent start](agent-start.md)
 instead — setup's questions require the human's own terminal. With `uv` already installed,
 `npx yoetz` makes the same persistent `uv tool install` (a no-op when it is already there) and
-then runs that exact version, so the `yoetz` command is on your `PATH` afterwards and agents
-connected from `npx yoetz` keep working after `uv cache clean`. The launcher passes arguments
+then runs that exact version, so the `yoetz` command lands in `~/.local/bin` (see above if a new
+terminal cannot find it) and agents connected from `npx yoetz` keep working after
+`uv cache clean`. The launcher passes arguments
 through unchanged, inherits stdio so the child sees your real terminal, and propagates exit codes
 — including `128+n` for a signal. It bundles and downloads nothing itself: when `uv` is missing it
 prints the install command and stops.
