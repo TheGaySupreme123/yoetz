@@ -92,3 +92,29 @@ def test_hook_and_stream_same_pair_share_one_parent_scoped_observation_key() -> 
     stream_batch = materialize_observation_envelope(stream, task_id=_TASK)
     assert hook_batch.drafts[0].draft.event_id == stream_batch.drafts[0].draft.event_id
     assert hook_batch.drafts[0].draft.payload == stream_batch.drafts[0].draft.payload
+
+
+def test_v2_child_header_and_parent_activity_are_one_delegation_identity() -> None:
+    """Issue #754: a multi-agent v2 delegation seen from both sides is one annotation.
+
+    The parent's ``SubAgentActivity`` spawn item and the child's own ``session_meta`` header name
+    the same child thread and neither carries a parent call, so they reconcile through one
+    parent-scoped key instead of minting a second host annotation per delegation.
+    """
+
+    parent_side = _envelope(
+        ObservationSource.CODEX_SESSION_STREAM, "SubagentStart", parent_tool_call_id=None
+    )
+    child_side = replace(
+        parent_side,
+        source_identity="codex_session_stream:child-header-1",
+        structural_payload=JsonObject(
+            {"stream_kind": "session_meta", "subagent_id": "host-child-1"}
+        ),
+    )
+
+    assert canonical_logical_identity(parent_side) == canonical_logical_identity(child_side)
+    parent_batch = materialize_observation_envelope(parent_side, task_id=_TASK)
+    child_batch = materialize_observation_envelope(child_side, task_id=_TASK)
+    assert parent_batch.skip_reason is None and child_batch.skip_reason is None
+    assert parent_batch.drafts[0].draft.event_id == child_batch.drafts[0].draft.event_id

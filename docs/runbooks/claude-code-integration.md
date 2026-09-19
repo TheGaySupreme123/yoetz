@@ -395,7 +395,10 @@ them.
 The #499 lifecycle repair applies to cooperative Claude children: successful routed activity
 renews session health, abandonment is a service-stamped ledger event, and an unused expired handle
 leaves an abandoned reservation. The #507 native start-callback correlation bridge is Codex-only;
-it does not establish new Claude host support. Existing Claude cooperative identity and native
+it does not establish new Claude host support. The #754 multi-agent v2 child identity source is
+Codex-only for the same reason: it reads a Codex rollout `session_meta` header, a stream family
+Claude Code does not have. Claude keeps its native `SubagentStart`/`SubagentStop` hook identity
+unchanged, and no Claude capability cell moves. Existing Claude cooperative identity and native
 evidence boundaries below remain in force.
 
 The exact pinned capability cell remains `claude-code-cli-local-project-2.1.241`. The earlier

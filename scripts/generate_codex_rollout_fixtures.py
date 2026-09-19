@@ -553,7 +553,12 @@ def _additive_0_153_4() -> bytes:
 
 
 def _unknown_event_0_153_4() -> bytes:
-    """Relabeled header, one unknown wrapper, one unknown nested item, then a known call."""
+    """Relabeled header, one unknown wrapper, one unknown nested item, then a known call.
+
+    The unknown wrapper is a token no observed Codex release emits. It was
+    ``token_usage_record`` until that family was admitted as structurally ignored (issue #754);
+    an admitted family can no longer prove that an unknown one stays a bounded per-line gap.
+    """
 
     return encode_lines(
         session_meta(cli_version=_COMPATIBLE_VERSION, history_mode="paginated", ordinal=1),
@@ -561,7 +566,7 @@ def _unknown_event_0_153_4() -> bytes:
             "ordinal": 2,
             "payload": {"tokens": 1, "text": "CANARY_0153_UNKNOWN_WRAPPER"},
             "timestamp": _TS,
-            "type": "token_usage_record",
+            "type": "future_usage_record",
         },
         item_completed(
             {"id": "item_future", "type": "FutureItem", "text": "CANARY_0153_UNKNOWN_ITEM"},
@@ -605,6 +610,212 @@ def _truncated_0_153_4() -> bytes:
     ) + encode_lines(
         item_completed({"id": "item_partial", "type": "AgentMessage"}, ordinal=3),
         terminated=False,
+    )
+
+
+# Multi-agent v2 (issue #754). Key shapes are transcribed from a real Codex 0.153.4 v2 run on
+# the maintainer machine; every value here is a canary, so the fixture proves the grammar and
+# never carries transcript content. Established by that transcript: the parent emits
+# ``SubAgentActivity`` nested in ``event_msg.item_completed`` (never as a ``response_item``), its
+# ``kind`` is ``started`` once per delegation and ``interacted`` thereafter, the child thread is
+# in ``agent_thread_id``, and the delegated child's own header carries ``thread_source``,
+# ``parent_thread_id`` and ``agent_path`` while its ``session_id`` is the *parent* thread.
+_V2_PARENT_THREAD = "019f8b27-b98e-7061-bbb5-d0b897594de6"
+_V2_CHILD_THREAD = "019f8b27-b98e-7061-bbb5-d0b897594de7"
+_V2_AGENT_PATH = "/root/canary_review"
+
+
+def _v2_token_usage() -> dict[str, Any]:
+    return {
+        "cache_write_input_tokens": 1,
+        "cached_input_tokens": 1,
+        "input_tokens": 1,
+        "output_tokens": 1,
+        "reasoning_output_tokens": 1,
+        "total_tokens": 1,
+    }
+
+
+def _v2_subagent_activity(
+    *, kind: str, call_id: str, agent_thread_id: str, agent_path: str
+) -> dict[str, Any]:
+    return {
+        "agent_path": agent_path,
+        "agent_thread_id": agent_thread_id,
+        "id": call_id,
+        "kind": kind,
+        "type": "SubAgentActivity",
+    }
+
+
+def _v2_child_header(
+    *,
+    ordinal: int,
+    child_thread_id: str = _V2_CHILD_THREAD,
+    parent_thread_id: str | None = _V2_PARENT_THREAD,
+    agent_path: str = _V2_AGENT_PATH,
+) -> dict[str, Any]:
+    """One delegated child's own rollout header, in the observed v2 shape."""
+
+    payload: dict[str, Any] = {
+        "agent_nickname": "CANARY_0153_NICKNAME",
+        "agent_path": agent_path,
+        "cli_version": _COMPATIBLE_VERSION,
+        "cwd": "/canary/cwd/CANARY_0153_CWD",
+        "history_mode": "paginated",
+        "id": child_thread_id,
+        "multi_agent_version": "v2",
+        "originator": "user",
+        # v2 sets ``session_id`` to the parent thread; only ``id`` is the child.
+        "session_id": _V2_PARENT_THREAD,
+        "thread_source": "subagent",
+    }
+    if parent_thread_id is not None:
+        payload["parent_thread_id"] = parent_thread_id
+        payload["source"] = {
+            "subagent": {
+                "thread_spawn": {
+                    "agent_nickname": "CANARY_0153_NICKNAME",
+                    "agent_path": agent_path,
+                    "agent_role": None,
+                    "depth": 1,
+                    "parent_thread_id": parent_thread_id,
+                }
+            }
+        }
+    return {"ordinal": ordinal, "payload": payload, "timestamp": _TS, "type": "session_meta"}
+
+
+def _multi_agent_v2_parent() -> bytes:
+    """A v2 parent turn: spawn, inter-agent message, accounting, and a later interaction."""
+
+    return encode_lines(
+        session_meta(
+            cli_version=_COMPATIBLE_VERSION,
+            history_mode="paginated",
+            session_id=_V2_PARENT_THREAD,
+            ordinal=1,
+            cwd="/canary/cwd/CANARY_0153_CWD",
+            extra={"session_id": _V2_PARENT_THREAD, "thread_source": "user"},
+        ),
+        {
+            "ordinal": 2,
+            "payload": {
+                "approval_policy": "never",
+                "cwd": "/canary/cwd/CANARY_0153_CWD",
+                "model": "synthetic",
+                "multi_agent_version": "v2",
+                "turn_id": "turn_1",
+            },
+            "timestamp": _TS,
+            "type": "turn_context",
+        },
+        item_completed(
+            _v2_subagent_activity(
+                kind="started",
+                call_id="call_CANARY0153SPAWN",
+                agent_thread_id=_V2_CHILD_THREAD,
+                agent_path=_V2_AGENT_PATH,
+            ),
+            ordinal=3,
+        ),
+        response_item(
+            {
+                "author": _V2_AGENT_PATH,
+                "content": [{"text": "CANARY_0153_AGENT_MESSAGE", "type": "output_text"}],
+                "id": "amsg_CANARY0153",
+                # 0.153.4 adds a fractional ``create_time`` to every response item.
+                "internal_chat_message_metadata_passthrough": {
+                    "create_time": 1_800_000_000.5,
+                    "turn_id": "turn_1",
+                },
+                "recipient": "/root",
+                "type": "agent_message",
+            },
+            ordinal=4,
+        ),
+        {
+            "ordinal": 5,
+            "payload": {"trigger_turn": True},
+            "timestamp": _TS,
+            "type": "inter_agent_communication_metadata",
+        },
+        {
+            "ordinal": 6,
+            "payload": {
+                "response_id": "resp_CANARY0153",
+                "root_turn_id": "turn_1",
+                "session_id": _V2_PARENT_THREAD,
+                "thread_id": _V2_PARENT_THREAD,
+                "thread_token_usage": _v2_token_usage(),
+                "turn_id": "turn_1",
+                "turn_token_usage": _v2_token_usage(),
+                "usage": _v2_token_usage(),
+            },
+            "timestamp": _TS,
+            "type": "token_usage_record",
+        },
+        item_completed(
+            _v2_subagent_activity(
+                kind="interacted",
+                call_id="call_CANARY0153INTERACT",
+                agent_thread_id=_V2_CHILD_THREAD,
+                agent_path=_V2_AGENT_PATH,
+            ),
+            ordinal=7,
+        ),
+        event_msg(
+            {
+                "info": {
+                    "last_token_usage": _v2_token_usage(),
+                    "model_context_window": 1,
+                    "total_token_usage": _v2_token_usage(),
+                },
+                # 0.153.4 adds a fractional ``used_percent`` to every token_count row.
+                "rate_limits": {
+                    "limit_id": "CANARY_0153_LIMIT",
+                    "primary": {"resets_at": 1, "used_percent": 12.5, "window_minutes": 1},
+                },
+                "type": "token_count",
+            },
+            ordinal=8,
+        ),
+    )
+
+
+def _multi_agent_v2_child() -> bytes:
+    """A delegated child's own rollout: its header is the only place v2 names the delegation."""
+
+    return encode_lines(
+        _v2_child_header(ordinal=1),
+        response_item(
+            {
+                "content": [{"text": "CANARY_0153_CHILD_ASSISTANT", "type": "output_text"}],
+                "role": "assistant",
+                "type": "message",
+            },
+            ordinal=2,
+        ),
+        # A child reports its exchanges with the root the same way, with the counterpart in
+        # ``agent_thread_id``. Only ``started`` opens a delegation, so this reversed row never
+        # publishes the parent thread as somebody's child.
+        item_completed(
+            _v2_subagent_activity(
+                kind="interacted",
+                call_id="call_CANARY0153CHILDBACK",
+                agent_thread_id=_V2_PARENT_THREAD,
+                agent_path="/root",
+            ),
+            ordinal=3,
+        ),
+    )
+
+
+def _multi_agent_v2_child_without_identity() -> bytes:
+    """A header that declares itself a child but names no distinct spawning thread."""
+
+    return encode_lines(
+        _v2_child_header(ordinal=1, child_thread_id=_V2_PARENT_THREAD, parent_thread_id=None),
     )
 
 
@@ -720,6 +931,7 @@ def _refresh_manifest() -> None:
         ("IMP-013", "imports/codex/rollout-unsupported-0.152.1.case.json"),
         ("LINEAGE-001", "replay/lineage-event-families.case.json"),
         ("IMP-014", "imports/codex/rollout-compatible-0.153.4.case.json"),
+        ("IMP-015", "imports/codex/rollout-multi-agent-v2-0.153.4.case.json"),
     ]
     by_path = {item["path"]: item for item in members}
     for fixture_id, rel in extra:
@@ -935,6 +1147,66 @@ def main() -> None:
             requirements=(
                 "ADR-005/structural-admission",
                 "ISSUE-656/compatible-release-admitted",
+            ),
+        ),
+    )
+    _write_case(
+        "rollout-multi-agent-v2-0.153.4.case.json",
+        _case(
+            fixture_id="IMP-015",
+            cli_version=_COMPATIBLE_VERSION,
+            profile_id=CODEX_ROLLOUT_COMPATIBLE_PROFILE_ID,
+            purpose=(
+                "Codex 0.153.4 multi-agent v2 record families, transcribed from a real v2 run's "
+                "key shapes with canary values only (issue #754). The parent variant carries the "
+                "spawn and a later interaction as event_msg.item_completed SubAgentActivity "
+                "items, an agent_message with author/recipient paths, "
+                "inter_agent_communication_metadata, token_usage_record, and the fractional "
+                "leaves 0.153.4 added to agent_message and token_count. The child variants are "
+                "the delegated child's own header: v2 names the delegation only there, and a "
+                "header that declares a child without a distinct spawning thread is the one "
+                "shape that earns missing_subagent_identity."
+            ),
+            variants={
+                "parent": _multi_agent_v2_parent(),
+                "child": _multi_agent_v2_child(),
+                "child_without_identity": _multi_agent_v2_child_without_identity(),
+            },
+            expected={
+                "parent": {
+                    "admitted": True,
+                    "provenance": "structural",
+                    "stream_gaps": [],
+                    "unknown_count": 0,
+                    "unsupported_count": 0,
+                    "subagent_start_count": 1,
+                    "subagent_id": _V2_CHILD_THREAD,
+                    "parent_tool_call_id": None,
+                },
+                "child": {
+                    "admitted": True,
+                    "provenance": "structural",
+                    "stream_gaps": [],
+                    "unknown_count": 0,
+                    "unsupported_count": 0,
+                    "subagent_start_count": 1,
+                    "subagent_id": _V2_CHILD_THREAD,
+                    "parent_tool_call_id": None,
+                },
+                "child_without_identity": {
+                    "admitted": True,
+                    "provenance": "structural",
+                    "stream_gaps": [],
+                    "unknown_count": 0,
+                    "unsupported_count": 0,
+                    "subagent_start_count": 1,
+                    "subagent_id": None,
+                    "gap_codes": ["missing_subagent_identity"],
+                },
+            },
+            requirements=(
+                "ADR-005/structural-admission",
+                "ISSUE-754/multi-agent-v2-child-identity",
             ),
         ),
     )

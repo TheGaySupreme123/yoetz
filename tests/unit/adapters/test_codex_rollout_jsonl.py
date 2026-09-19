@@ -296,7 +296,7 @@ def test_rollout_fixture_cell_does_not_promote_harness_support() -> None:
     assert rollout_parser_proof("0.152.1") is None
     assert rollout_parser_proof("0.153.4") is None
     assert CODEX_ROLLOUT_UNSUPPORTED_EVIDENCE_CASE_IDS == ("IMP-013",)
-    assert CODEX_ROLLOUT_COMPATIBLE_EVIDENCE_CASE_IDS == ("IMP-014",)
+    assert CODEX_ROLLOUT_COMPATIBLE_EVIDENCE_CASE_IDS == ("IMP-014", "IMP-015")
 
 
 def test_parser_proofs_and_supported_profiles_name_the_same_exact_versions() -> None:
@@ -460,8 +460,13 @@ def test_compatible_profile_is_the_union_and_not_a_certified_version() -> None:
         wrapper for p in SUPPORTED_ROLLOUT_PROFILES.values() for wrapper in p.wrapper_types
     }
     union_items = {item for p in SUPPORTED_ROLLOUT_PROFILES.values() for item in p.item_types}
-    assert set(COMPATIBLE_ROLLOUT_PROFILE.wrapper_types) == union_wrappers
+    # The compatibility vocabulary is the union plus the families admitted as structurally
+    # ignored from a real transcript (issue #754). Neither addition reaches an exact profile.
+    assert set(COMPATIBLE_ROLLOUT_PROFILE.wrapper_types) == union_wrappers | {"token_usage_record"}
     assert set(COMPATIBLE_ROLLOUT_PROFILE.item_types) == union_items
+    assert all(
+        "token_usage_record" not in p.wrapper_types for p in SUPPORTED_ROLLOUT_PROFILES.values()
+    )
     # Certification surfaces never grow because the compatibility profile exists.
     assert "compatible" not in SUPPORTED_ROLLOUT_PROFILES
     assert rollout_parser_proof("compatible") is None
@@ -501,6 +506,56 @@ def test_compatible_0_153_4_fixture_matrix_matches_expectations(variant: str) ->
     meta = cast(dict[str, object], parsed.records[0].value["payload"])
     assert meta["cli_version"] == "0.153.4"
     assert parsed.statuses[0] is ImportLineStatus.MAPPED
+
+
+_MULTI_AGENT_V2_0153 = "imports/codex/rollout-multi-agent-v2-0.153.4.case.json"
+
+
+@pytest.mark.parametrize("variant", ["parent", "child", "child_without_identity"])
+def test_multi_agent_v2_families_are_understood(variant: str) -> None:
+    """Issue #754: every record family a real 0.153.4 multi-agent v2 run emits is understood.
+
+    ``token_usage_record`` is admitted as a structurally ignored family and the fractional leaves
+    0.153.4 added to ``agent_message`` and ``token_count`` no longer refuse their lines, so no
+    line of a v2 rollout is left an unknown or unsupported per-line gap.
+    """
+
+    raw = _variant_bytes(_MULTI_AGENT_V2_0153, variant)
+    expected = _expected(_MULTI_AGENT_V2_0153, variant)
+
+    parsed = parse_codex_rollout_jsonl(raw, None, require_admission=True)
+
+    assert parsed.profile is COMPATIBLE_ROLLOUT_PROFILE
+    assert parsed.profile is not None
+    assert rollout_admission_provenance(parsed.profile) == expected["provenance"]
+    assert list(parsed.stream_gaps) == expected["stream_gaps"]
+    assert (
+        sum(status is ImportLineStatus.UNKNOWN for status in parsed.statuses)
+        == expected["unknown_count"]
+    )
+    assert (
+        sum(status is ImportLineStatus.UNSUPPORTED for status in parsed.statuses)
+        == expected["unsupported_count"]
+    )
+    assert [code for code in parsed.reason_codes if code is not None] == []
+    assert len(parsed.records) == len(parsed.statuses)
+
+
+def test_fractional_leaves_are_normalized_instead_of_refusing_the_line() -> None:
+    """A float has no canonical value, so the leaf becomes null and the line still maps."""
+
+    raw = _variant_bytes(_MULTI_AGENT_V2_0153, "parent")
+    parsed = parse_codex_rollout_jsonl(raw, None, require_admission=True)
+
+    message = next(record for record in parsed.records if record.item_type == "agent_message")
+    payload = cast(dict[str, object], message.value["payload"])
+    passthrough = cast(dict[str, object], payload["internal_chat_message_metadata_passthrough"])
+    assert "create_time" in passthrough
+    assert passthrough["create_time"] is None
+    assert passthrough["turn_id"] == "turn_1"
+    # Author and recipient survive as ordinary payload strings; they are agent-definition
+    # paths, not delegation identities, so no structural mapping consumes them.
+    assert payload["author"] == "/root/canary_review"
 
 
 def test_relabeled_release_maps_every_line_the_exact_profile_maps() -> None:
