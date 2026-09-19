@@ -2218,6 +2218,20 @@ never a socket path. Unsafe and untrusted endpoint copy forbids retry before loc
 preserves same-`request_id` replay. The CLI control-failure helper is unchanged: it still projects
 the public code and does not add a separate unsafe-endpoint guidance line.
 
+**Write-side classification (issue #678).** `frame_invalid` names a frame that failed validation,
+encoding, parsing, or correlation. A control frame is encoded before it is written, so a failure
+raised by the stream during the write states something about the connection, not about the frame:
+the bounded transport reason travels unchanged and the ordinary client classifies it exactly as it
+classifies a failed connect (`endpoint_unsafe` and `peer_untrusted` preserved, everything else
+retryable `service_unavailable`). A send failure the transport itself did not classify becomes the
+bounded protocol reason `transport_failed`, whose public code is `SERVICE_UNAVAILABLE` and which
+never carries raw exception text, a path, or peer data. Both peers share the one write helper, so a
+failed response write is classified the same way; the daemon records it as a bounded
+`control_response_write` diagnostic and ends that call rather than reporting a malformed frame. A
+caller whose valid request could not be written is therefore never told `INVALID_REQUEST`, and every
+pending future failed by the resulting connection teardown — including the future of the call whose
+own write failed — is consumed, so a failed send emits no unhandled-future report.
+
 The MCP bridge maps every typed `ControlError` reason onto a public error through the public-error
 recorder (`{tool}_public_error`) with sink `reason` equal to the control-reason token (or
 `accepted_but_unresponsive` for an accepted-but-silent listener). `exception_control_error` and
