@@ -483,6 +483,81 @@ class PrivacyCoordinator:
             finally:
                 self._semantic_dispatch_guard = prior_guard
 
+    async def recover_started_request(self, request_id: str) -> SemanticEgressAttemptUnknown | None:
+        """Report the terminal state of one started attempt by its request identity alone.
+
+        A cancelled background advisory dispatch never observes the prepared case digest, but it
+        owns the exact request identity it minted. ``None`` means no durable disclosure
+        reservation reached the consume CAS for that request, so no authority was spent. A
+        consumed reservation is terminally unknown: this never resumes, redispatches, mints an
+        authorization, or converts the attempt into a success.
+        """
+
+        if type(request_id) is not str:
+            raise TypeError("semantic_egress_recovery_invalid")
+        async with self._admission_lock:
+            state = await self._load_started_disclosure_attempt(request_id)
+            if state is None or state.status not in {
+                "receipt_pending",
+                "attempt_completed",
+                "local_disclosure_pending",
+                "local_disclosure_completed",
+            }:
+                return None
+            return SemanticEgressAttemptUnknown(
+                request_id,
+                state.reservation.privacy_proposal_id,
+                state.receipt_id,
+            )
+
+    async def reconcile_started_attempts(
+        self, consumed_before: datetime, *, limit: int = 64
+    ) -> int:
+        """Terminalize attempts left nonterminal by an earlier service generation.
+
+        Bounded and idempotent startup reconciliation. The audit records the exact
+        ``transport_failed/outcome_unknown`` receipt the admitted attempt already owed; no
+        provider is re-entered and no authority is minted or restored.
+        """
+
+        if type(consumed_before) is not datetime or type(limit) is not int or limit < 1:
+            raise TypeError("semantic_egress_reconcile_invalid")
+        reconciler = getattr(self._audit, "reconcile_started_attempts", None)
+        if not callable(reconciler):
+            return 0
+        typed_reconciler = cast(
+            Callable[[datetime, int], Awaitable[int]],
+            reconciler,
+        )
+        try:
+            return await typed_reconciler(consumed_before, limit)
+        except Exception as exc:  # noqa: BLE001 - startup reconciliation is never fatal
+            record_unexpected_exception_without_raising(
+                exc,
+                component="privacy_egress",
+                operation="audit_reconcile_started_attempts_failed",
+            )
+            return 0
+
+    async def _load_started_disclosure_attempt(self, request_id: str) -> PrivacyAuditState | None:
+        loader = getattr(self._audit, "load_started_disclosure_attempt", None)
+        if not callable(loader):
+            return None
+        typed_loader = cast(
+            Callable[[str], Awaitable[PrivacyAuditState | None]],
+            loader,
+        )
+        try:
+            return await typed_loader(request_id)
+        except Exception as exc:  # noqa: BLE001 - an unreadable row is not a spent authorization
+            record_unexpected_exception_without_raising(
+                exc,
+                component="privacy_egress",
+                operation="audit_started_attempt_lookup_failed",
+                request_id=request_id,
+            )
+            return None
+
     async def _load_disclosure_attempt(
         self, request_id: str, case_digest: str
     ) -> PrivacyAuditState | None:

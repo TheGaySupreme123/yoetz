@@ -9,6 +9,7 @@ from typing import Literal, Protocol, cast
 
 from yoetz.application.unit_of_work import (
     CatalogCompletion,
+    CatalogLeaseYield,
     CatalogPhaseAdvance,
     CatalogQuarantine,
     PreparedMutation,
@@ -800,6 +801,27 @@ async def execute_start(
     except _StartContradiction as exc:
         await _quarantine(app.start_catalog, allocation, exc)
         raise _storage_corrupt(exc.code) from exc
+    except PublicOperationError as exc:
+        if exc.code is not PublicErrorCode.BUNDLE_BUSY or not exc.retryable:
+            raise
+        # A returned busy error is a definite stopped attempt, unlike cancellation or a
+        # lost response. Preserve every durable milestone and only relinquish this lease.
+        # A stale owner, expired lease, or a busy catalog cannot promise immediate replay.
+        try:
+            await run_catalog_transition(app.start_catalog, CatalogLeaseYield(allocation))
+        except PublicOperationError:
+            raise exc
+        producer = exc.safe_details.get("reason_code")
+        reason = {
+            "runtime_rebind_busy": "start_runtime_rebind_retry_ready",
+            "catalog_busy": "start_catalog_retry_ready",
+        }.get(producer if isinstance(producer, str) else "", "start_busy_retry_ready")
+        raise _error(
+            PublicErrorCode.BUNDLE_BUSY,
+            "The start attempt yielded its lease; replay the identical request after contention clears.",
+            retryable=True,
+            safe_details={"reason_code": reason},
+        ) from exc
     finally:
         if task is not None:
             await app.runtime.release(task)

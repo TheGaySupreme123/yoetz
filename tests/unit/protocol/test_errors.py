@@ -34,6 +34,8 @@ accepted_record_shape_invalid
 actor_id_malformed
 actor_id_not_generated
 byte_order_mark_forbidden
+catalog_busy
+catalog_maintenance_busy
 claim_revision_invalid
 claim_revision_mismatch
 commitment_only_object_kind
@@ -162,6 +164,7 @@ request_timeout
 response_fields_invalid
 response_projection_failed
 runtime_attempt_evidence_json_shape_invalid
+runtime_rebind_busy
 schema_artifact_role_invalid
 schema_artifact_role_mismatch
 schema_bytes_invalid
@@ -188,6 +191,10 @@ service_incompatible
 service_unavailable
 session_superseded
 set_member_not_ascii
+start_busy_retry_ready
+start_catalog_retry_ready
+start_lease_pending
+start_runtime_rebind_retry_ready
 timestamp_not_utc
 timestamp_out_of_range
 timestamp_submillisecond_precision
@@ -366,7 +373,7 @@ def test_public_error_code_membership() -> None:
 def test_protocol_reason_registry_is_exact_and_import_order_independent() -> None:
     source_values = cast(tuple[str, ...], getattr(errors_module, "_PROTOCOL_REASON_CODE_VALUES"))
     assert source_values == _EXPECTED_REASON_CODES
-    assert len(source_values) == 169
+    assert len(source_values) == 176
     assert source_values == tuple(sorted(source_values, key=str.encode))
     assert len(source_values) == len(set(source_values))
     assert PROTOCOL_REASON_CODES == frozenset(_EXPECTED_REASON_CODES)

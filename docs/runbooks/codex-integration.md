@@ -1033,3 +1033,9 @@ null, while the record commitment still identifies the original bytes. Its token
 is a known telemetry family from which no work evidence is inferred. Exact certified profiles
 are unchanged. This repair does not add multi-agent lineage or promote a newer host capability
 cell; unsupported shapes still report their coverage gaps.
+
+For a returned start error with `start_busy_same_identity`, the reservation remains durable and
+only its fenced lease was yielded. Replay the exact start body and request ID once, without
+inventing session or writer IDs. `start_pending_same_identity` instead means a live lease remains:
+wait up to 60 seconds before the one exact replay. If still busy or pending, retain the original
+request and report the unresolved start. These continuations do not authorize a new task.

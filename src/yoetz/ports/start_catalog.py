@@ -402,6 +402,10 @@ class StartCatalogPort(Protocol):
 
     async def reserve_or_resume(self, request: StartCommand) -> StartAllocation: ...
 
+    async def yield_lease(self, allocation: StartAllocation) -> None:
+        """Expire only the held pending lease; preserve identity, phase and durable results."""
+        ...
+
     async def complete(
         self,
         allocation: StartAllocation,

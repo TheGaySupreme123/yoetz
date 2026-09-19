@@ -230,3 +230,9 @@ record. It only works while that identity is buffered. After delivery the result
 `promotion_window_closed` with `content_availability: not_retained`; it cannot recover omitted or
 expired bytes. Rerun or reacquire the current state when needed and record it as new evidence with
 its new time and subject state. Do not use that rerun to prove the historical state.
+
+For a returned start error with `start_busy_same_identity`, the reservation remains durable and
+only its fenced lease was yielded. Replay the exact start body and request ID once, without
+inventing session or writer IDs. `start_pending_same_identity` instead means a live lease remains:
+wait up to 60 seconds before the one exact replay. If still busy or pending, retain the original
+request and report the unresolved start. These continuations do not authorize a new task.

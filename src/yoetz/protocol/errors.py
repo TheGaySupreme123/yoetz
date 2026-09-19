@@ -59,6 +59,8 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "actor_id_malformed",
     "actor_id_not_generated",
     "byte_order_mark_forbidden",
+    "catalog_busy",
+    "catalog_maintenance_busy",
     "claim_revision_invalid",
     "claim_revision_mismatch",
     "commitment_only_object_kind",
@@ -187,6 +189,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "response_fields_invalid",
     "response_projection_failed",
     "runtime_attempt_evidence_json_shape_invalid",
+    "runtime_rebind_busy",
     "schema_artifact_role_invalid",
     "schema_artifact_role_mismatch",
     "schema_bytes_invalid",
@@ -213,6 +216,10 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "service_unavailable",
     "session_superseded",
     "set_member_not_ascii",
+    "start_busy_retry_ready",
+    "start_catalog_retry_ready",
+    "start_lease_pending",
+    "start_runtime_rebind_retry_ready",
     "timestamp_not_utc",
     "timestamp_out_of_range",
     "timestamp_submillisecond_precision",
@@ -226,7 +233,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 169
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 176
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)
@@ -320,6 +327,8 @@ ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
         "session_rebind_required",
         "sorted_set_required",
         "start_timeout_same_identity",
+        "start_busy_same_identity",
+        "start_pending_same_identity",
         "storage_root_unsafe",
         "vault_initialization_required",
         "write_timeout_same_identity",
@@ -344,6 +353,10 @@ REASON_CODE_CONTINUATIONS: Mapping[str, str] = MappingProxyType(
         "schema_digest_mismatch": "resource_integrity_repair",
         "session_superseded": "session_rebind_required",
         "unsorted_set_field": "sorted_set_required",
+        "start_busy_retry_ready": "start_busy_same_identity",
+        "start_catalog_retry_ready": "start_busy_same_identity",
+        "start_runtime_rebind_retry_ready": "start_busy_same_identity",
+        "start_lease_pending": "start_pending_same_identity",
     }
 )
 if set(REASON_CODE_CONTINUATIONS.values()) - ADMITTED_CONTINUATION_TOKENS:

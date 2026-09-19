@@ -1075,3 +1075,9 @@ Use `--project-binding mcp-roots` in a new accepted preview/install to return th
 root binding. Omitting the option preserves the mode of an owned entry. `status`, `preview-remove`
 and accepted `remove` remain supported. Moving/replacing the project or editing/replacing its
 MCP registration retires the serving process and requires a new connection.
+
+For a returned start error with `start_busy_same_identity`, the reservation remains durable and
+only its fenced lease was yielded. Replay the exact start body and request ID once, without
+inventing session or writer IDs. `start_pending_same_identity` instead means a live lease remains:
+wait up to 60 seconds before the one exact replay. If still busy or pending, retain the original
+request and report the unresolved start. These continuations do not authorize a new task.

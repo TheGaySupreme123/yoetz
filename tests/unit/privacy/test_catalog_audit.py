@@ -28,10 +28,19 @@ from yoetz.adapters.privacy.catalog import (  # pyright: ignore[reportPrivateUsa
     _mac,  # pyright: ignore[reportPrivateUsage]
 )
 from yoetz.adapters.privacy.local_enforcer import LocalPrivacyEnforcer
+from yoetz.adapters.sqlite.migrations import initialize_bundle
+from yoetz.adapters.sqlite.observation_advice_semantic import (
+    SqliteObservationAdviceSemanticRepository,
+)
 from yoetz.application.egress import (
     PrivacyCoordinator,
     SemanticEgressAttemptUnknown,
     SemanticEgressAwaitingHuman,
+)
+from yoetz.application.observation_advice_semantic import (
+    ObservationAdviceSemanticAttempt,
+    ObservationAdviceSemanticOutcome,
+    ObservationAdviceSemanticWorker,
 )
 from yoetz.domain.privacy import (
     AuthorizationScope,
@@ -49,6 +58,7 @@ from yoetz.domain.privacy import (
     PrivacyOutcome,
     PrivacyPolicy,
     PrivacyProfile,
+    PrivacyReason,
     ProjectionAuditContext,
     ProviderBinding,
     ReceiptCounts,
@@ -1133,6 +1143,279 @@ def test_catalog_consumed_disclosure_attempt_is_durable_and_one_use() -> None:
     assert recovered.request_id == _REQUEST
     assert recovered.privacy_proposal_id == _PROPOSAL
     assert asyncio.run(audit.load(_REQUEST, _DIGEST)) is None
+
+
+def _unknown_attempt_receipt(authorization: EgressAuthorization) -> EgressReceipt:
+    """The ``outcome_unknown`` receipt an admitted physical attempt owes when its result is lost."""
+
+    return EgressReceipt(
+        "1.0.0",
+        _RECEIPT,
+        _REQUEST,
+        authorization.privacy_proposal_id,
+        EgressChannel.LLM_INFERENCE,
+        PrivacyOutcome.TRANSPORT_FAILED,
+        _NOW,
+        authorization.scope,
+        authorization.purpose,
+        authorization.provider_binding,
+        ReceiptPolicyBinding(_POLICY, authorization.policy_version, _DIGEST, _DIGEST),
+        authorization.consent_source,
+        (DataCategory.BOUNDED_STRUCTURAL_METADATA,),
+        (),
+        ReceiptCounts(1, 1, 0, 1, 0, 32, 32, 8, 96),
+        ReceiptTransformations(0, 0, 0),
+        ReceiptSecretScan("scanner-v1", _DIGEST, 0, True),
+        PrivacyReason.OUTCOME_UNKNOWN,
+        1,
+        authorization_id=authorization.authorization_id,
+        dispatch_id=_DISPATCH,
+        dispatch_started_at=_NOW - timedelta(seconds=5),
+        request_commitment=RequestCommitment(
+            "hmac-sha256/yoetz-privacy-egress-request-v1", _WORKSPACE
+        ),
+    )
+
+
+def _advice_repository() -> tuple[apsw.Connection, SqliteObservationAdviceSemanticRepository, str]:
+    advice_db = apsw.Connection(":memory:")
+    initialize_bundle(advice_db, {"task_id": _TASK, "owner_generation": "1"})
+    repository = SqliteObservationAdviceSemanticRepository(advice_db)
+    basis = f"sha256:{'9' * 64}"
+    repository.schedule(
+        workspace=_WORKSPACE,
+        yoetz_session_id=_SESSION,
+        basis_digest=basis,
+        subject_digest=basis,
+        coverage_gaps=(),
+        packet_json=b"{}",
+        enqueued_at=format_rfc3339_millis(_NOW),
+        max_pending=16,
+    )
+    return advice_db, repository, basis
+
+
+def _coordinator(audit: CatalogPrivacyAudit) -> PrivacyCoordinator:
+    return PrivacyCoordinator(
+        cast(PrivacyPolicyStorePort, object()),
+        cast(PrivacyClassifierPort, object()),
+        audit,
+        cast(OutboundGatewayPort, _Gateway()),
+        _Clock(),
+        _Ids(),
+    )
+
+
+def _audit_row_state(db: apsw.Connection) -> tuple[object, ...]:
+    row = db.execute(
+        "SELECT state, receipt_outcome, receipt_reason, receipt_id FROM privacy_audit_records"
+    ).fetchone()
+    assert row is not None
+    return tuple(row)
+
+
+def test_cancelled_advice_attempt_reconciles_consumed_egress_to_unknown() -> None:
+    """Foreground preemption owes the consumed attempt exactly one terminal receipt (#755).
+
+    The cancelled advice row is never a semantic success, and it is not proof that no physical
+    provider call started. When the privacy audit consumed the disclosure authorization before
+    the yield landed, the gateway parks the owed ``outcome_unknown`` receipt, the worker records
+    that provenance on the cancelled row, and the reconciliation stays idempotent: the provider
+    is never re-entered.
+    """
+
+    catalog_db = _database()
+    _insert_task_route(catalog_db)
+    audit = CatalogPrivacyAudit(catalog_db, _StoredObjects(), _Key(), _Clock())  # type: ignore[arg-type]
+    advice_db, repository, basis = _advice_repository()
+    coordinator = _coordinator(audit)
+    prepared_case_digest: list[str] = []
+    dispatch_calls = 0
+
+    async def dispatch(
+        _attempt: ObservationAdviceSemanticAttempt,
+    ) -> ObservationAdviceSemanticOutcome:
+        nonlocal dispatch_calls
+        dispatch_calls += 1
+        prepared = await audit.prepare_disclosure_proposal(_external_disclosure_request())
+        prepared_case_digest.append(prepared.proposal.prepared_case_digest)
+        authorization = await audit.authorize(
+            prepared.proposal.privacy_proposal_id,
+            prepared.proposal.prepared_case_digest,
+            _NOW,
+        )
+        await audit.consume(authorization.authorization_id, _DISPATCH, _NOW)
+        # The gateway parks the receipt it owes before the provider call; cancellation lands in
+        # that admitted window. Recording it here is what the shielded finalizer does in
+        # production, so this test exercises the recovery contract, not the transport.
+        await audit.park_attempt_reconciliation(_DISPATCH, _unknown_attempt_receipt(authorization))
+        raise asyncio.CancelledError
+
+    async def reconcile(
+        _attempt: ObservationAdviceSemanticAttempt,
+    ) -> ObservationAdviceSemanticOutcome | None:
+        recovered = await coordinator.recover_started_request(_REQUEST)
+        if recovered is None:
+            return None
+        return ObservationAdviceSemanticOutcome(
+            status="cancelled",
+            failure_reason="cancelled",
+            attempt_receipt=recovered.receipt_id or recovered.privacy_proposal_id,
+            provider_identity="provider-under-test",
+        )
+
+    worker = ObservationAdviceSemanticWorker(
+        repository=repository,
+        dispatch=dispatch,
+        service_generation=1,
+        lease_owner="svc-advice",
+        now=lambda: format_rfc3339_millis(_NOW),
+        lease_expires_at=lambda: format_rfc3339_millis(_NOW + timedelta(minutes=2)),
+        reconcile_cancelled=reconcile,
+    )
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(worker.run_once())
+
+    row = repository.lookup(yoetz_session_id=_SESSION, basis_digest=basis)
+    assert row is not None
+    assert (row.status, row.failure_reason) == ("cancelled", "cancelled")
+    # Cancellation provenance: this row names the consumed egress reservation it reconciled and
+    # the provider whose outcome is unknown, so the coverage gap is not silently anonymous.
+    assert (row.attempt_receipt, row.provider_identity) == (_PROPOSAL, "provider-under-test")
+    assert dispatch_calls == 1
+    assert len(prepared_case_digest) == 1
+
+    # Before the reconciliation sweep the consumed authorization is nonterminal but recoverable.
+    assert _audit_row_state(catalog_db) == ("receipt_pending", None, None, None)
+    recovered = asyncio.run(
+        coordinator.recover_started_attempt(
+            _REQUEST,
+            prepared_case_digest[0],
+            Deadline(_NOW + timedelta(minutes=5), 301.0),
+        )
+    )
+    assert isinstance(recovered, SemanticEgressAttemptUnknown)
+    assert recovered.privacy_proposal_id == _PROPOSAL
+
+    # The bounded startup sweep terminalizes it as transport_failed/outcome_unknown, exactly once.
+    reconciled = asyncio.run(coordinator.reconcile_started_attempts(_NOW + timedelta(minutes=1)))
+    assert reconciled == 1
+    assert _audit_row_state(catalog_db) == (
+        "attempt_completed",
+        "transport_failed",
+        "outcome_unknown",
+        _RECEIPT,
+    )
+    assert asyncio.run(coordinator.reconcile_started_attempts(_NOW + timedelta(minutes=1))) == 0
+    again = asyncio.run(
+        coordinator.recover_started_attempt(
+            _REQUEST,
+            prepared_case_digest[0],
+            Deadline(_NOW + timedelta(minutes=5), 301.0),
+        )
+    )
+    assert isinstance(again, SemanticEgressAttemptUnknown)
+    assert again.receipt_id == _RECEIPT
+    assert dispatch_calls == 1
+    advice_db.close()
+
+
+def test_startup_reconciliation_closes_a_receipt_pending_row_left_by_a_restart() -> None:
+    """No parked attempt may stay ``receipt_pending`` past a service restart (#755).
+
+    The sweep is bounded by the current service start: an attempt consumed after that instant is
+    still live and must never be closed, while one consumed before it is reconciled exactly once
+    with no second provider dispatch.
+    """
+
+    db = _database()
+    _insert_task_route(db)
+    audit = CatalogPrivacyAudit(db, _StoredObjects(), _Key(), _Clock())  # type: ignore[arg-type]
+    coordinator = _coordinator(audit)
+
+    async def seed() -> None:
+        prepared = await audit.prepare_disclosure_proposal(_external_disclosure_request())
+        authorization = await audit.authorize(
+            prepared.proposal.privacy_proposal_id,
+            prepared.proposal.prepared_case_digest,
+            _NOW,
+        )
+        await audit.consume(authorization.authorization_id, _DISPATCH, _NOW)
+        await audit.park_attempt_reconciliation(_DISPATCH, _unknown_attempt_receipt(authorization))
+
+    asyncio.run(seed())
+    assert _audit_row_state(db) == ("receipt_pending", None, None, None)
+
+    # A sweep whose boundary predates the consume leaves the live attempt alone.
+    assert asyncio.run(coordinator.reconcile_started_attempts(_NOW - timedelta(minutes=1))) == 0
+    assert _audit_row_state(db) == ("receipt_pending", None, None, None)
+
+    # A restart sweep terminalizes it, and a second pass is a no-op.
+    assert asyncio.run(coordinator.reconcile_started_attempts(_NOW + timedelta(minutes=1))) == 1
+    assert asyncio.run(coordinator.reconcile_started_attempts(_NOW + timedelta(minutes=1))) == 0
+    assert _audit_row_state(db) == (
+        "attempt_completed",
+        "transport_failed",
+        "outcome_unknown",
+        _RECEIPT,
+    )
+    view = asyncio.run(audit.get_receipt(_RECEIPT, PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL))
+    assert view is not None
+    assert view.receipt.outcome is PrivacyOutcome.TRANSPORT_FAILED
+    assert view.receipt.safe_failure_reason is PrivacyReason.OUTCOME_UNKNOWN
+
+
+def test_advice_cancellation_before_consume_leaves_authority_unspent() -> None:
+    """Cancelling before the consume CAS spends nothing and invents no reconciliation (#755)."""
+
+    catalog_db = _database()
+    _insert_task_route(catalog_db)
+    audit = CatalogPrivacyAudit(catalog_db, _StoredObjects(), _Key(), _Clock())  # type: ignore[arg-type]
+    advice_db, repository, basis = _advice_repository()
+    coordinator = _coordinator(audit)
+    reconcile_calls = 0
+
+    async def dispatch(
+        _attempt: ObservationAdviceSemanticAttempt,
+    ) -> ObservationAdviceSemanticOutcome:
+        prepared = await audit.prepare_disclosure_proposal(_external_disclosure_request())
+        await audit.authorize(
+            prepared.proposal.privacy_proposal_id,
+            prepared.proposal.prepared_case_digest,
+            _NOW,
+        )
+        raise asyncio.CancelledError
+
+    async def reconcile(
+        _attempt: ObservationAdviceSemanticAttempt,
+    ) -> ObservationAdviceSemanticOutcome | None:
+        nonlocal reconcile_calls
+        reconcile_calls += 1
+        recovered = await coordinator.recover_started_request(_REQUEST)
+        if recovered is None:
+            return None
+        raise AssertionError("an unconsumed authorization must not report a started attempt")
+
+    worker = ObservationAdviceSemanticWorker(
+        repository=repository,
+        dispatch=dispatch,
+        service_generation=1,
+        lease_owner="svc-advice",
+        now=lambda: format_rfc3339_millis(_NOW),
+        lease_expires_at=lambda: format_rfc3339_millis(_NOW + timedelta(minutes=2)),
+        reconcile_cancelled=reconcile,
+    )
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(worker.run_once())
+
+    row = repository.lookup(yoetz_session_id=_SESSION, basis_digest=basis)
+    assert row is not None
+    assert (row.status, row.failure_reason) == ("cancelled", "cancelled")
+    assert (row.attempt_receipt, row.provider_identity) == (None, None)
+    assert reconcile_calls == 1
+    assert _audit_row_state(catalog_db) == ("authorized", None, None, None)
+    assert asyncio.run(coordinator.reconcile_started_attempts(_NOW + timedelta(minutes=1))) == 0
+    advice_db.close()
 
 
 def _network_receipt(authorization: EgressAuthorization) -> EgressReceipt:

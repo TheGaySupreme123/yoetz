@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import cast
 
 import pytest
 
 from yoetz.adapters.runtime import (
+    LocalBundleRuntime,
     RuntimeAdapterFactories,
     RuntimeCachePolicy,
     open_local_bundle_runtime,
@@ -25,6 +27,7 @@ from yoetz.ports.keys import BundleKeys
 from yoetz.ports.ledger import LedgerPort
 from yoetz.ports.objects import ObjectStorePort
 from yoetz.ports.runtime import (
+    BundleProvisionMode,
     OwnershipFence,
     RouteAccess,
     RouteCommand,
@@ -38,6 +41,232 @@ from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 from yoetz.service.lifecycle import SessionSecurityEvent
+
+
+@pytest.mark.anyio
+async def test_start_waits_for_pending_fence_validation_and_wakes_on_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route, writer = _route()
+    harness = _Harness(1, route, writer)
+    runtime = await open_local_bundle_runtime(
+        _context(frozenset(RuntimeCapability)),
+        _Catalog(route),
+        _Vault(),
+        harness.factories(),
+        _Diagnostics(),
+        object(),
+    )
+    assert isinstance(runtime, LocalBundleRuntime)
+    command = RouteCommand(
+        route.session_id, writer, RouteAccess.WRITE, frozenset({RuntimeCapability.WRITE})
+    )
+    held = await runtime.route(command)
+    await runtime.release(held)
+    validating = asyncio.Event()
+    waiting = asyncio.Event()
+    gate = asyncio.Event()
+    factories = runtime._factories  # pyright: ignore[reportPrivateUsage]
+
+    async def validate(inspection: object, fence: OwnershipFence) -> None:
+        if cast(_Inspection, inspection).route.session_id == route.session_id:
+            validating.set()
+            await gate.wait()
+        await factories.validate_fence(inspection, fence)
+
+    monkeypatch.setattr(runtime, "_factories", replace(factories, validate_fence=validate))
+    condition = runtime._idle  # pyright: ignore[reportPrivateUsage]
+    original_wait = condition.wait_for
+
+    async def wait(predicate: Callable[[], bool]) -> bool:
+        waiting.set()
+        return await original_wait(predicate)
+
+    monkeypatch.setattr(condition, "wait_for", wait)
+    old_attempt = asyncio.create_task(runtime.route(command))
+    await asyncio.wait_for(validating.wait(), 5)
+    entry = runtime._entries[route.task_id]  # pyright: ignore[reportPrivateUsage]
+    assert entry.usages == 0 and entry.pending == 1
+    new_route = replace(route, session_id=_id(IdKind.SESSION, 745))
+    attach = asyncio.create_task(
+        runtime._entry_for(  # pyright: ignore[reportPrivateUsage]
+            _Inspection(new_route, frozenset({writer})),
+            RouteAccess.WRITE,
+            provision_mode=BundleProvisionMode.ATTACHED,
+        )
+    )
+    await asyncio.wait_for(waiting.wait(), 5)
+    old_attempt.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await old_attempt
+    rebound = await asyncio.wait_for(attach, 5)
+    assert rebound is entry and entry.rebind_waiters == 0
+    assert entry.pending == 1 and entry.inspection.route.session_id == new_route.session_id
+    leased = await runtime._lease(  # pyright: ignore[reportPrivateUsage]
+        entry, frozenset({RuntimeCapability.WRITE}), RouteAccess.WRITE, writer
+    )
+    await runtime.release(leased)
+    await runtime.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("boundary", ["cancel", "generation", "close"])
+async def test_start_rebind_wait_cancellation_generation_and_shutdown(
+    boundary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    route, writer = _route()
+    harness = _Harness(1, route, writer)
+    runtime = await open_local_bundle_runtime(
+        _context(frozenset(RuntimeCapability)),
+        _Catalog(route),
+        _Vault(),
+        harness.factories(),
+        _Diagnostics(),
+        object(),
+    )
+    assert isinstance(runtime, LocalBundleRuntime)
+    command = RouteCommand(
+        route.session_id, writer, RouteAccess.WRITE, frozenset({RuntimeCapability.WRITE})
+    )
+    held = await runtime.route(command)
+    new_route = replace(route, session_id=_id(IdKind.SESSION, 744))
+    entered = asyncio.Event()
+    condition = runtime._idle  # pyright: ignore[reportPrivateUsage]
+    wait = condition.wait_for
+
+    async def observed_wait(predicate: Callable[[], bool]) -> bool:
+        entered.set()
+        return await wait(predicate)
+
+    monkeypatch.setattr(condition, "wait_for", observed_wait)
+    attempt = asyncio.create_task(
+        runtime._entry_for(  # pyright: ignore[reportPrivateUsage]
+            _Inspection(new_route, frozenset({writer})),
+            RouteAccess.WRITE,
+            provision_mode=BundleProvisionMode.ATTACHED,
+        )
+    )
+    await asyncio.wait_for(entered.wait(), 5)
+    entry = runtime._entries[route.task_id]  # pyright: ignore[reportPrivateUsage]
+    assert entry.rebind_waiters == 1
+    # An ongoing background producer cannot starve the waiting start with fresh leases.
+    with pytest.raises(PublicOperationError) as busy:
+        await runtime.route(command)
+    assert busy.value.code is PublicErrorCode.BUNDLE_BUSY
+    if boundary == "cancel":
+        attempt.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await attempt
+    else:
+        if boundary == "generation":
+            harness.service_generation = 2
+            await runtime.release(held)
+        else:
+            await runtime.close()
+        with pytest.raises(PublicOperationError) as stale:
+            await asyncio.wait_for(attempt, 5)
+        assert stale.value.code is PublicErrorCode.SERVICE_UNAVAILABLE
+    assert entry.rebind_waiters == 0
+    assert entry.inspection.route.session_id == route.session_id
+    await runtime.release(held)
+    await runtime.close()
+
+
+@pytest.mark.anyio
+async def test_start_rebind_notifies_background_owner_before_waiting() -> None:
+    """A foreground attach gives a cooperative background owner a chance to release its lease."""
+
+    route, writer = _route()
+    harness = _Harness(1, route, writer)
+    runtime = await open_local_bundle_runtime(
+        _context(frozenset(RuntimeCapability)),
+        _Catalog(route),
+        _Vault(),
+        harness.factories(),
+        _Diagnostics(),
+        object(),
+    )
+    assert isinstance(runtime, LocalBundleRuntime)
+    command = RouteCommand(
+        route.session_id, writer, RouteAccess.WRITE, frozenset({RuntimeCapability.WRITE})
+    )
+    held = await runtime.route(command)
+    callback_called = asyncio.Event()
+
+    def yield_background_owner() -> None:
+        callback_called.set()
+        asyncio.create_task(runtime.release(held))
+
+    assert runtime.register_rebind_callback(held, yield_background_owner)
+    new_route = replace(route, session_id=_id(IdKind.SESSION, 746))
+    attach = asyncio.create_task(
+        runtime._entry_for(  # pyright: ignore[reportPrivateUsage]
+            _Inspection(new_route, frozenset({writer})),
+            RouteAccess.WRITE,
+            provision_mode=BundleProvisionMode.ATTACHED,
+        )
+    )
+    await asyncio.wait_for(callback_called.wait(), 5)
+    entry = await asyncio.wait_for(attach, 5)
+    assert entry.inspection.route.session_id == new_route.session_id
+    assert entry.rebind_waiters == 0
+    rebound = await runtime._lease(  # pyright: ignore[reportPrivateUsage]
+        entry, frozenset({RuntimeCapability.WRITE}), RouteAccess.WRITE, writer
+    )
+    await runtime.release(rebound)
+    await runtime.close()
+
+
+@pytest.mark.anyio
+async def test_rebind_callback_lifetime_is_scoped_to_each_runtime_lease() -> None:
+    """Releasing one shared entry user cannot erase another owner's yield callback."""
+
+    route, writer = _route()
+    harness = _Harness(1, route, writer)
+    runtime = await open_local_bundle_runtime(
+        _context(frozenset(RuntimeCapability)),
+        _Catalog(route),
+        _Vault(),
+        harness.factories(),
+        _Diagnostics(),
+        object(),
+    )
+    assert isinstance(runtime, LocalBundleRuntime)
+    command = RouteCommand(
+        route.session_id, writer, RouteAccess.WRITE, frozenset({RuntimeCapability.WRITE})
+    )
+    first = await runtime.route(command)
+    second = await runtime.route(command)
+    first_called = asyncio.Event()
+    second_called = asyncio.Event()
+
+    def first_callback() -> None:
+        first_called.set()
+
+    def second_callback() -> None:
+        second_called.set()
+        asyncio.create_task(runtime.release(second))
+
+    assert runtime.register_rebind_callback(first, first_callback)
+    assert runtime.register_rebind_callback(second, second_callback)
+    await runtime.release(first)
+
+    new_route = replace(route, session_id=_id(IdKind.SESSION, 747))
+    attach = asyncio.create_task(
+        runtime._entry_for(  # pyright: ignore[reportPrivateUsage]
+            _Inspection(new_route, frozenset({writer})),
+            RouteAccess.WRITE,
+            provision_mode=BundleProvisionMode.ATTACHED,
+        )
+    )
+    await asyncio.wait_for(second_called.wait(), 5)
+    rebound = await asyncio.wait_for(attach, 5)
+    assert not first_called.is_set()
+    leased = await runtime._lease(  # pyright: ignore[reportPrivateUsage]
+        rebound, frozenset({RuntimeCapability.WRITE}), RouteAccess.WRITE, writer
+    )
+    await runtime.release(leased)
+    await runtime.close()
 
 
 def _id(kind: IdKind, value: int) -> str:

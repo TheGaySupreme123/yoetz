@@ -263,3 +263,12 @@ not the same as it being useful); and `failed`/`coordinator_failure` is unconstr
 
 If you believe Yoetz disclosed, retained, or logged something these commitments forbid, treat it as
 a security report: [`SECURITY.md`](../../SECURITY.md), not a public issue.
+
+### Cancelled background review
+
+A foreground session attachment may cancel optional background review. Once disclosure authority
+is consumed, cancellation cannot prove that nothing was sent. The gateway records the owed
+`transport_failed` / `outcome_unknown` receipt through a shielded write. It also parks the bounded
+receipt before dispatch so a later service startup can reconcile an interrupted attempt, before
+admitting new attempts. Reconciliation never sends again or restores spent authority. The
+background result remains cancelled and retains available attempt and provider provenance.

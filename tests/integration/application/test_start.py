@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 from collections.abc import AsyncIterator, Callable
@@ -578,6 +579,74 @@ async def test_result_published_crash_resumes_pinned_object_and_releases_each_ru
     assert runtime.provisions[-1].phase == "result_published"
     republished = runtime.start_result_refs(first_task)
     assert republished == published
+
+
+@pytest.mark.parametrize("milestone", list(StartMilestone))
+async def test_busy_after_each_start_milestone_yields_for_immediate_exact_replay(
+    milestone: StartMilestone, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, runtime, _clock, _catalog = start_composition()
+    request = start_request(7440)
+    verify = runtime.verify_start
+    failed = False
+
+    async def busy_once(
+        task: TaskRuntime, expectation: StartMilestoneExpectation
+    ) -> StartCompletionEvidence:
+        nonlocal failed
+        result = await verify(task, expectation)
+        if expectation.milestone is milestone and not failed:
+            failed = True
+            raise PublicOperationError(PublicErrorCode.BUNDLE_BUSY, "Busy", True)
+        return result
+
+    monkeypatch.setattr(runtime, "verify_start", busy_once)
+    with pytest.raises(PublicOperationError) as busy:
+        await execute_start(app, request)
+    assert busy.value.safe_details == {
+        "reason_code": "start_busy_retry_ready",
+        "continuation": "start_busy_same_identity",
+    }
+    original = runtime.provisions[0]
+    recovered = await execute_start(app, request)
+    assert recovered.task_id == original.task_id
+    assert recovered.session_id == original.session_id
+    assert recovered.writer_id == original.writer_id
+    assert recovered.frontier.sequence == "1"
+    assert await execute_start(app, request) == recovered
+    assert len(runtime.start_result_refs(recovered.task_id)) == 1
+
+
+async def test_cancelled_provision_keeps_live_lease_until_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, runtime, clock, _catalog = start_composition()
+    request = start_request(7441)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    provision = runtime.provision_start
+
+    async def blocked(command: BundleProvisionCommand) -> TaskRuntime:
+        entered.set()
+        await release.wait()
+        return await provision(command)
+
+    monkeypatch.setattr(runtime, "provision_start", blocked)
+    attempt = asyncio.create_task(execute_start(app, request))
+    await asyncio.wait_for(entered.wait(), 5)
+    attempt.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await attempt
+    with pytest.raises(PublicOperationError) as pending:
+        await execute_start(app, request)
+    assert pending.value.safe_details == {
+        "reason_code": "start_lease_pending",
+        "continuation": "start_pending_same_identity",
+    }
+    clock.advance(61)
+    release.set()
+    recovered = await execute_start(app, request)
+    assert recovered.frontier.sequence == "1"
 
 
 async def test_sqlite_and_encrypted_files_resume_exact_catalog_pinned_object(

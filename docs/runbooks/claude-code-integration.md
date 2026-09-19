@@ -850,3 +850,9 @@ returned.
 
 No Claude-specific behavior is configured: the projection is host-neutral and lives in
 `yoetz.mcp.summaries`.
+
+For a returned start error with `start_busy_same_identity`, the reservation remains durable and
+only its fenced lease was yielded. Replay the exact start body and request ID once, without
+inventing session or writer IDs. `start_pending_same_identity` instead means a live lease remains:
+wait up to 60 seconds before the one exact replay. If still busy or pending, retain the original
+request and report the unresolved start. These continuations do not authorize a new task.
