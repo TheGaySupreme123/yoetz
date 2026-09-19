@@ -5346,3 +5346,11 @@ IDE and Agent CLI clients can start the same bridge. Existing `${workspaceFolder
 recognized for upgrade and IDE runtime verification. A registration naming another absolute
 project is foreign. The selector still must match the native client roots/list inventory and
 the exact owned project registration; no CWD or caller-authority fallback is added.
+
+### Selected observations across local control (issue #786)
+
+Control request 2.6.1 carries the existing ADR-029 selection route identifiers, authority
+generation, subject-state digest, and protected-read reference. Selection route fields are
+all present or all absent. Routine summaries use the existing closed summary schema; individual
+observations remain closed to unknown fields. Domain and service route/authority validation
+remain mandatory. Released request 2.6.0 bytes and the hello contract remain unchanged.

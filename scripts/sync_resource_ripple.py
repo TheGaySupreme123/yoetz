@@ -179,6 +179,8 @@ def _write_pass(repo_root: Path) -> bool:
             "generate_schemas.py",
             "--write",
             "--only",
+            "service/control-request-2.6.1.schema.json",
+            "--only",
             "service/control-result-2.6.1.schema.json",
             "--only",
             "privacy/privacy-policy-1.0.0.schema.json",

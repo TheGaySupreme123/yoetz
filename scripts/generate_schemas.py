@@ -1315,6 +1315,54 @@ def _simple_versioned_schema(
     return _load_versioned_template(entry, source, replacements=replacements)
 
 
+def _control_request_v2_6_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Carry the existing selected-observation contract over the local control boundary."""
+
+    document = _simple_versioned_schema(entry, "service/control-request-2.6.0.schema.json", {})
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    envelope = cast(dict[str, JsonValue], definitions["observation_envelope"])
+    envelope_properties = cast(dict[str, JsonValue], envelope["properties"])
+    structural = cast(dict[str, JsonValue], envelope_properties["structural_payload"])
+    properties = cast(dict[str, JsonValue], structural["properties"])
+    source = (
+        Path(__file__).resolve().parent.parent
+        / "schemas/observations/routine-read-summary-1.0.0.schema.json"
+    )
+    summary = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
+    summary_envelope_properties = cast(dict[str, JsonValue], summary["properties"])
+    summary_structural = cast(
+        dict[str, JsonValue], summary_envelope_properties["structural_payload"]
+    )
+    summary_properties = cast(dict[str, JsonValue], summary_structural["properties"])
+    route_fields = (
+        "selection_task_id",
+        "selection_session_id",
+        "selection_writer_id",
+        "selection_authority_generation",
+    )
+    for field in route_fields:
+        properties[field] = summary_properties[field]
+    structural["dependentRequired"] = {
+        field: [peer for peer in route_fields if peer != field] for field in route_fields
+    }
+    properties["subject_state_digest"] = dict(
+        cast(dict[str, JsonValue], properties["command_digest"])
+    )
+    properties["protection_reference"] = {
+        "type": "string",
+        "minLength": 40,
+        "maxLength": 40,
+        "pattern": "^(?:obl|clm|fnd)_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    }
+    definitions["observation_envelope"] = {
+        "oneOf": [
+            envelope,
+            {"$ref": SCHEMA_NAMESPACE + "observations/routine-read-summary-1.0.0.schema.json"},
+        ]
+    }
+    return document
+
+
 def _control_result_v2_6_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Repair local receipt purposes without changing released 2.6 bytes or egress rules."""
 
@@ -3595,6 +3643,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         None,
     ),
     _RegistryEntry(
+        "service/control-request-2.6.1.schema.json",
+        "control-request",
+        "2.6.1",
+        "request_result",
+        "local-control",
+        lambda: dict,
+    ),
+    _RegistryEntry(
         "service/control-result-2.6.1.schema.json",
         "control-result",
         "2.6.1",
@@ -4002,6 +4058,8 @@ def build_schema_documents(
             normalized = _frozen_version_manifest_schema(entry)
         elif entry.relative_path == "version/version-manifest-2.2.1.schema.json":
             normalized = _version_manifest_schema(entry)
+        elif entry.relative_path == "service/control-request-2.6.1.schema.json":
+            normalized = _control_request_v2_6_1_schema(entry)
         elif entry.relative_path == "service/control-result-2.6.1.schema.json":
             normalized = _control_result_v2_6_1_schema(entry)
         elif entry.relative_path == "privacy/privacy-policy-1.1.0.schema.json":

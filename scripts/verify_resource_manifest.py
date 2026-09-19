@@ -1100,6 +1100,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/service/control-request-2.6.1.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/service/control-result-2.6.1.schema.json",
         "json_schema",
         "application/schema+json",
