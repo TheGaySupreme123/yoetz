@@ -1024,3 +1024,12 @@ corrected body once under a new `request_id`. The regression case is
 Provider-side failures reaching Codex through the app-server path keep their existing stage-typed
 diagnostics (issue #529). Classifying those failures into typed recovery tokens is tracked
 separately on issue #742 and is not part of ADR-030's first implementation.
+
+### Compatible newer transcript metadata (0.2.3)
+
+The structural compatibility parser accepts fractional metadata introduced by Codex 0.153.4
+without dropping the surrounding message or tool record: unrepresentable numeric leaves become
+null, while the record commitment still identifies the original bytes. Its token-usage wrapper
+is a known telemetry family from which no work evidence is inferred. Exact certified profiles
+are unchanged. This repair does not add multi-agent lineage or promote a newer host capability
+cell; unsupported shapes still report their coverage gaps.
