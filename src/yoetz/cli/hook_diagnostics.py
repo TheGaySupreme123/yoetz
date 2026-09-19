@@ -73,6 +73,11 @@ _REASONS: Final = frozenset(
         "drain_budget_exhausted",
         "drain_lease_contended",
         "drain_preflight_failed",
+        # A structural defect in the buffered admission account refused this
+        # hook's pre-flush. Before this token the failure reached the outer
+        # handler as the bare `observe` reason, so a permanently wedged flush
+        # was indistinguishable from any other hook fault (issue #753).
+        "admission_flush_invalid",
         "auto_attach_retry_failed",
         # Why a consented SessionStart (or its turn-boundary retry) produced no
         # mapping (#459). Before these, every auto-attach failure collapsed to a
