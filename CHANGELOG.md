@@ -4,10 +4,10 @@ All notable user-visible changes to Yoetz are documented in this file. Format is
 project-native heading style that marks the pending version as unreleased above
 reverse-chronological released versions.
 
-## Unreleased — 0.2.3 stabilization candidate
+## 0.2.3 — 2026-09-19
 
-Repairs to existing 0.2 behavior; no 0.3 feature merge. Publication remains gated by the
-verification limits in [candidate notes](docs/releases/v0.2.3.md) and issue #786.
+Repairs to existing 0.2 behavior; no 0.3 feature merge. The verified scope and known limits are
+recorded in [release notes](docs/releases/v0.2.3.md) and issue #786.
 
 - Privacy receipt list/get render stored timestamps and local disclosure purposes correctly
   (#731, #732).
@@ -23,6 +23,10 @@ verification limits in [candidate notes](docs/releases/v0.2.3.md) and issue #786
   preserving route validation and rejecting unknown structural fields (#786).
 - Routine-read outcomes survive structural mapping; legacy unqualifiable summary buffers drain
   as original records instead of blocking later hook observations (#786).
+
+- Contended session attachment drains existing runtime users and preserves same-request recovery.
+  Optional review cancellation retains accounting, and observation feedback failures cannot skip
+  ingestion lease cleanup (#744, #755, #786).
 
 ## 0.2.2 — 2026-09-18
 
