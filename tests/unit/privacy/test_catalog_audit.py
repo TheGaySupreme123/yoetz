@@ -28,10 +28,19 @@ from yoetz.adapters.privacy.catalog import (  # pyright: ignore[reportPrivateUsa
     _mac,  # pyright: ignore[reportPrivateUsage]
 )
 from yoetz.adapters.privacy.local_enforcer import LocalPrivacyEnforcer
+from yoetz.adapters.sqlite.migrations import initialize_bundle
+from yoetz.adapters.sqlite.observation_advice_semantic import (
+    SqliteObservationAdviceSemanticRepository,
+)
 from yoetz.application.egress import (
     PrivacyCoordinator,
     SemanticEgressAttemptUnknown,
     SemanticEgressAwaitingHuman,
+)
+from yoetz.application.observation_advice_semantic import (
+    ObservationAdviceSemanticAttempt,
+    ObservationAdviceSemanticOutcome,
+    ObservationAdviceSemanticWorker,
 )
 from yoetz.domain.privacy import (
     AuthorizationScope,
@@ -1133,6 +1142,99 @@ def test_catalog_consumed_disclosure_attempt_is_durable_and_one_use() -> None:
     assert recovered.request_id == _REQUEST
     assert recovered.privacy_proposal_id == _PROPOSAL
     assert asyncio.run(audit.load(_REQUEST, _DIGEST)) is None
+
+
+def test_cancelled_advice_attempt_preserves_consumed_egress_as_unknown() -> None:
+    """Foreground preemption cannot turn a consumed provider attempt into a retryable success."""
+
+    catalog_db = _database()
+    _insert_task_route(catalog_db)
+    audit = CatalogPrivacyAudit(catalog_db, _StoredObjects(), _Key(), _Clock())  # type: ignore[arg-type]
+    advice_db = apsw.Connection(":memory:")
+    initialize_bundle(advice_db, {"task_id": _TASK, "owner_generation": "1"})
+    repository = SqliteObservationAdviceSemanticRepository(advice_db)
+    basis = f"sha256:{'9' * 64}"
+    repository.schedule(
+        workspace=_WORKSPACE,
+        yoetz_session_id=_SESSION,
+        basis_digest=basis,
+        subject_digest=basis,
+        coverage_gaps=(),
+        packet_json=b"{}",
+        enqueued_at=format_rfc3339_millis(_NOW),
+        max_pending=16,
+    )
+    prepared_case_digest: list[str] = []
+    dispatch_calls = 0
+
+    async def dispatch(
+        _attempt: ObservationAdviceSemanticAttempt,
+    ) -> ObservationAdviceSemanticOutcome:
+        nonlocal dispatch_calls
+        dispatch_calls += 1
+        prepared = await audit.prepare_disclosure_proposal(_external_disclosure_request())
+        prepared_case_digest.append(prepared.proposal.prepared_case_digest)
+        authorization = await audit.authorize(
+            prepared.proposal.privacy_proposal_id,
+            prepared.proposal.prepared_case_digest,
+            _NOW,
+        )
+        await audit.consume(authorization.authorization_id, _DISPATCH, _NOW)
+        # This is the provider boundary after the audit CAS. Cancellation must preserve the
+        # receipt-pending/attempt-unknown recovery contract instead of redispatching.
+        raise asyncio.CancelledError
+
+    worker = ObservationAdviceSemanticWorker(
+        repository=repository,
+        dispatch=dispatch,
+        service_generation=1,
+        lease_owner="svc-advice",
+        now=lambda: format_rfc3339_millis(_NOW),
+        lease_expires_at=lambda: format_rfc3339_millis(_NOW + timedelta(minutes=2)),
+    )
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(worker.run_once())
+
+    row = repository.lookup(yoetz_session_id=_SESSION, basis_digest=basis)
+    assert row is not None
+    assert (row.status, row.failure_reason) == ("cancelled", "cancelled")
+    assert dispatch_calls == 1
+    assert len(prepared_case_digest) == 1
+    attempt_state = asyncio.run(audit.load_disclosure_attempt(_REQUEST, prepared_case_digest[0]))
+    assert attempt_state is not None
+    assert (attempt_state.status, attempt_state.dispatch_id, attempt_state.receipt_id) == (
+        "receipt_pending",
+        _DISPATCH,
+        None,
+    )
+    coordinator = PrivacyCoordinator(
+        cast(PrivacyPolicyStorePort, object()),
+        cast(PrivacyClassifierPort, object()),
+        audit,
+        cast(OutboundGatewayPort, _Gateway()),
+        _Clock(),
+        _Ids(),
+    )
+    recovered = asyncio.run(
+        coordinator.recover_started_attempt(
+            _REQUEST,
+            prepared_case_digest[0],
+            Deadline(_NOW + timedelta(minutes=5), 301.0),
+        )
+    )
+    assert isinstance(recovered, SemanticEgressAttemptUnknown)
+    assert recovered.privacy_proposal_id == _PROPOSAL
+    assert (
+        asyncio.run(
+            coordinator.recover_started_attempt(
+                _REQUEST,
+                prepared_case_digest[0],
+                Deadline(_NOW + timedelta(minutes=5), 301.0),
+            )
+        )
+        == recovered
+    )
+    assert dispatch_calls == 1
 
 
 def _network_receipt(authorization: EgressAuthorization) -> EgressReceipt:

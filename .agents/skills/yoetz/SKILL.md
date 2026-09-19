@@ -56,6 +56,10 @@ mode=attach` with that handle and uses its own returned session and writer; the 
 its existing binding. Reuse the exact request and request ID after a timeout. Do not publish
 the handle or share it with another child.
 
+Do not guess host correlation IDs before spawning. On a supported observation path, the child's
+native successful start callback supplies its host identity for service validation. Read lineage
+after handoff: successful handle attach alone does not prove host correlation.
+
 Self-registration with `parent_session_id` starts `self_registered` and `pending`. The parent
 can publish `child_accepted` or `child_rejected`; acceptance preserves origin, and accepted
 children cannot later be rejected. Read `status view=lineage` after handoff. A provisional host
@@ -64,6 +68,9 @@ annotation is not a cooperative child ledger or evidence that it published or ch
 Work state, session health, and receipts are independent. Publish `work_closed` to close work;
 a receipt never closes it. Cancellation revokes a Yoetz capability without stopping a host
 process. Write-off and cancellation retain an accepted dependency and its incomplete outcome.
+Successful activity renews session health without reopening terminal work; an unused expired
+handle leaves an abandoned child reservation. Exact consumed-handle request replay remains
+available after expiry, subject to cancellation.
 Parent checks and receipts use recorded child manifests; receipt generation never refreshes
 children. A later recorded manifest needs a qualifying recheck for an updated conclusion.
 Keep parent obligations for incorporating child work and verifying the combined result.

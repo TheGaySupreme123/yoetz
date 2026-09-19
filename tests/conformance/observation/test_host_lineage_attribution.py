@@ -76,14 +76,15 @@ def test_missing_child_identity_is_one_explicit_gap_without_an_annotation() -> N
 
     assert batch.drafts == ()
     assert batch.skip_reason == "missing_subagent_identity"
+    assert batch.gaps == ("missing_subagent_identity",)
+    assert "missing_subagent_identity" in batch.coverage.known_gaps
 
 
-def test_hook_and_stream_partial_context_share_one_parent_scoped_observation_key() -> None:
+def test_hook_and_stream_same_pair_share_one_parent_scoped_observation_key() -> None:
     hook = _envelope(ObservationSource.CODEX_HOOK, "SubagentStop")
     stream = _envelope(
         ObservationSource.CODEX_SESSION_STREAM,
         "SubagentStop",
-        parent_tool_call_id=None,
     )
 
     assert canonical_logical_identity(hook) == canonical_logical_identity(stream)

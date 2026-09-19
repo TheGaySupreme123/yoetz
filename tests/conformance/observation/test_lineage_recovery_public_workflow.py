@@ -9,14 +9,24 @@ from pathlib import Path
 import pytest
 
 import yoetz.application.start as start_module
-from builders.multi_agent import multi_agent_service
-from yoetz.application.lineage import DelegationOperationState, DelegationPhase
+from builders.multi_agent import (
+    MultiAgentService,
+    multi_agent_service,
+    relock_and_reopen_multi_agent_service,
+)
+from yoetz.adapters.sqlite.lineage_catalog import SqliteLineageStore
+from yoetz.application.lineage import DelegationOperationState, DelegationPhase, LineageSnapshot
+from yoetz.application.lineage_recovery import lineage_recovery_runtime
 from yoetz.application.service import Application
-from yoetz.domain.coordination import WorkState
+from yoetz.application.start import StartInternalResult
+from yoetz.config.models import LineageSettings, YoetzConfig
+from yoetz.domain.coordination import SessionHealth, WorkState
+from yoetz.domain.events import AcceptedEvent, WorkAbandonedPayload
 from yoetz.ports.control import RepositoryPrivacyContext
+from yoetz.protocol.coverage import PublicationChannel
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id
-from yoetz.protocol.models import PublishWorkRequest, StartRequest
+from yoetz.protocol.models import PublishWorkRequest, StartRequest, StatusRequest
 
 pytestmark = pytest.mark.anyio
 
@@ -192,3 +202,198 @@ async def test_reclaimed_delegation_finishes_after_parent_event_crash(
         assert recovered.state is DelegationOperationState.COMPLETE
         replayed = await app.start(request, repository_privacy_context=_REPOSITORY)
         assert replayed.task_id == recovered.child_task_id
+
+
+async def _abandonment_events(app: Application, task: str) -> tuple[AcceptedEvent, ...]:
+    route = await app.start_catalog.task_route(task)
+    assert route is not None
+    runtime = await lineage_recovery_runtime(app, task)
+    try:
+        events: dict[str, AcceptedEvent] = {}
+        sessions = await app.start_catalog.task_session_states(task)
+        for session in {route.session_id, *(state.session_id for state in sessions)}:
+            async for record in runtime.ledger.load_events(session):
+                if isinstance(record, AcceptedEvent) and isinstance(
+                    record.payload, WorkAbandonedPayload
+                ):
+                    events[str(record.event_id)] = record
+        return tuple(events.values())
+    finally:
+        await app.runtime.release(runtime)
+
+
+async def _parent(service: MultiAgentService, workspace: Path) -> StartInternalResult:
+    return await service.app.start(
+        StartRequest.model_validate(
+            {
+                **_identity(),
+                "mode": "create",
+                "task_title": "Recovery parent",
+                "workspace_ref": str(workspace),
+                "external_ref": "recovery-parent",
+                "requested_view": "compact",
+            }
+        ),
+        repository_privacy_context=_REPOSITORY,
+    )
+
+
+async def _delegate(service: MultiAgentService, parent: StartInternalResult) -> StartInternalResult:
+    return await service.app.start(
+        StartRequest.model_validate(
+            {
+                **_identity(),
+                "mode": "delegate",
+                "task_title": "Recovery child",
+                "session_id": parent.session_id,
+                "requested_view": "compact",
+            }
+        ),
+        repository_privacy_context=_REPOSITORY,
+    )
+
+
+async def test_abandonment_append_survives_catalog_failure_and_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _workspace(tmp_path / "workspace")
+    async with multi_agent_service(tmp_path / "state") as service:
+        parent = await _parent(service, workspace)
+        service.clock.advance(seconds=61)
+        await service.app.recover_lineage()
+        service.clock.advance(seconds=301)
+        save = SqliteLineageStore.save_task
+
+        async def fail_abandonment(store: SqliteLineageStore, snapshot: LineageSnapshot) -> None:
+            if snapshot.work_state is WorkState.ABANDONED:
+                raise RuntimeError("catalog_after_append")
+            await save(store, snapshot)
+
+        monkeypatch.setattr(SqliteLineageStore, "save_task", fail_abandonment)
+        with pytest.raises(RuntimeError, match="catalog_after_append"):
+            await service.app.recover_lineage()
+        before = await service.app.start_catalog.task_lineage(parent.task_id)
+        assert before is not None and before.work_state is WorkState.OPEN
+        events = await _abandonment_events(service.app, parent.task_id)
+        assert len(events) == 1
+        payload = events[0].payload
+        assert isinstance(payload, WorkAbandonedPayload)
+        assert payload.service_stamped is True
+        assert payload.reason_code == "contact_lost"
+        assert events[0].publication_channel is PublicationChannel.ENGINE_DERIVED
+        monkeypatch.setattr(SqliteLineageStore, "save_task", save)
+        # Before the periodic sweep or restart, a late close must discover the accepted service
+        # event and refuse a second terminal outcome even though the catalog still says open.
+        with pytest.raises(PublicOperationError) as conflicting_close:
+            await service.app.publish_work(
+                PublishWorkRequest.model_validate(
+                    {
+                        **_identity(),
+                        "session_id": parent.session_id,
+                        "writer_id": parent.writer_id,
+                        "expected_frontier": parent.frontier.model_dump(mode="json"),
+                        "event_drafts": [
+                            {
+                                "event_id": new_id(IdKind.EVENT),
+                                "schema": {"name": "work_closed", "version": "1.0.0"},
+                                "occurred_at": "2026-09-05T12:10:00.000Z",
+                                "causal_parents": [],
+                                "payload": {},
+                                "artifact_refs": [],
+                                "evidence_refs": [],
+                            }
+                        ],
+                    }
+                ),
+                repository_privacy_context=_REPOSITORY,
+            )
+        assert conflicting_close.value.safe_details["reason_code"] == "lineage_work_transition"
+        await relock_and_reopen_multi_agent_service(service)
+        await service.app.recover_lineage()
+        repaired = await service.app.start_catalog.task_lineage(parent.task_id)
+        assert repaired is not None and repaired.work_state is WorkState.ABANDONED
+        assert await _abandonment_events(service.app, parent.task_id) == events
+        await service.app.recover_lineage()
+        assert await _abandonment_events(service.app, parent.task_id) == events
+
+
+async def test_expired_unclaimed_child_has_durable_outcome_without_lost_session(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path / "workspace")
+    config = YoetzConfig(lineage=LineageSettings(attach_handle_ttl_seconds=1))
+    async with multi_agent_service(tmp_path / "state", config=config) as service:
+        parent = await _parent(service, workspace)
+        delegated = await _delegate(service, parent)
+        service.clock.advance(seconds=2)
+        await service.app.recover_lineage()
+        lineage = service.app.lineage
+        assert lineage is not None
+        child = await lineage.store.get_task(delegated.task_id)
+        assert child is not None
+        assert child.work_state is WorkState.ABANDONED
+        assert child.session_health is SessionHealth.ENDED
+        assert child.contact_lost_at is None
+        events = await _abandonment_events(service.app, delegated.task_id)
+        assert len(events) == 1
+        assert isinstance(events[0].payload, WorkAbandonedPayload)
+        assert events[0].payload.reason_code == "attach_handle_expired"
+        status = await service.app.lineage_status(parent.task_id, parent.session_id)
+        assert (
+            next(row for row in status.children if row.task_id == delegated.task_id).work_state
+            is WorkState.ABANDONED
+        )
+        with pytest.raises(PublicOperationError) as refused:
+            await service.app.start(
+                StartRequest.model_validate(
+                    {
+                        **_identity(),
+                        "mode": "attach",
+                        "task_title": "Recovery child",
+                        "attach_handle": delegated.as_wire()["attach_handle"],
+                        "requested_view": "compact",
+                    }
+                ),
+                repository_privacy_context=_REPOSITORY,
+            )
+        assert refused.value.safe_details["reason_code"] == "attach_handle_revoked"
+        await relock_and_reopen_multi_agent_service(service)
+        await service.app.recover_lineage()
+        assert await _abandonment_events(service.app, delegated.task_id) == events
+
+
+async def test_activity_clears_old_deadline_and_grants_new_contact_loss_window(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path / "workspace")
+    async with multi_agent_service(tmp_path / "state") as service:
+        parent = await _parent(service, workspace)
+        service.clock.advance(seconds=61)
+        await service.app.recover_lineage()
+        service.clock.advance(seconds=200)
+        await service.app.status(
+            StatusRequest.model_validate(
+                {
+                    **_identity(),
+                    "session_id": parent.session_id,
+                    "writer_id": parent.writer_id,
+                    "view": "compact",
+                    "limit": "10",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        assert service.app.lineage is not None
+        renewed = await service.app.lineage.store.get_task(parent.task_id)
+        assert renewed is not None and renewed.session_health is SessionHealth.ACTIVE
+        assert renewed.contact_lost_at is None and renewed.abandonment_deadline is None
+        service.clock.advance(seconds=61)
+        await service.app.recover_lineage()
+        service.clock.advance(seconds=100)
+        await service.app.recover_lineage()
+        still_open = await service.app.lineage.store.get_task(parent.task_id)
+        assert still_open is not None and still_open.work_state is WorkState.OPEN
+        assert await _abandonment_events(service.app, parent.task_id) == ()
+        service.clock.advance(seconds=201)
+        await service.app.recover_lineage()
+        assert len(await _abandonment_events(service.app, parent.task_id)) == 1

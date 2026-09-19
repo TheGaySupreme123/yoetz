@@ -260,9 +260,9 @@ class AttachHandle:
     """One opaque child-attachment bearer value.
 
     The value is intentionally hidden from ``repr`` and from all structural snapshot methods.  A
-    catalog stores only ``digest``; the service keeps the value long enough to return it and to
-    replay an idempotent operation in the same process.  A persistent implementation can encrypt
-    the value in a private operation object or derive it from a vault-held key.
+    catalog uses ``digest`` for capability lookup and retains the service-owned replay value so
+    an interrupted delegation returns the same handle after restart. The SQLite adapter currently
+    stores that replay value in its private catalog; this type does not promise encryption at rest.
     """
 
     value: str = field(repr=False)
@@ -1575,7 +1575,9 @@ class LineageCoordinator:
             # Validate the capability before invoking the callback.  _attach_locked repeats the
             # checks after the callback because the callback may cross a process/restart boundary
             # and because the same-session replay path must remain idempotent.
-            handle = await self._validate_attach_locked(digest, commitment)
+            handle = await self._validate_attach_locked(
+                digest, commitment, replay_check=replay_check
+            )
             if handle.consumed_session_id is not None:
                 # A used capability may replay only the exact child-start operation that consumed
                 # it.  A fresh request id must fail before invoking the callback; otherwise the
@@ -1615,6 +1617,7 @@ class LineageCoordinator:
                 session_id=session,
                 repository_commitment=commitment,
                 digest=digest,
+                admitted_operation=True,
             )
             return result, attached
 
@@ -1622,8 +1625,11 @@ class LineageCoordinator:
         self,
         digest: str,
         commitment: str | None,
+        *,
+        replay_check: Callable[[AttachHandle], Awaitable[bool]] | None = None,
+        admitted_operation: bool = False,
     ) -> AttachHandle:
-        """Validate one handle while ``self._lock`` is held."""
+        """Validate a capability or recover an already committed exact start operation."""
 
         handle = await self._store.get_handle(digest)
         if handle is None:
@@ -1638,7 +1644,12 @@ class LineageCoordinator:
                 "The attach handle has been revoked.",
                 reason="attach_handle_revoked",
             )
-        if self._now() >= handle.expires_at:
+        if (
+            handle.consumed_session_id is None
+            and self._now() >= handle.expires_at
+            and not admitted_operation
+            and (replay_check is None or not await replay_check(handle))
+        ):
             raise _error(
                 PublicErrorCode.SESSION_CONFLICT,
                 "The attach handle has expired.",
@@ -1672,6 +1683,7 @@ class LineageCoordinator:
         session_id: str,
         repository_commitment: str | None,
         digest: str | None = None,
+        admitted_operation: bool = False,
     ) -> LineageSnapshot:
         """Consume a validated handle while ``self._lock`` is held."""
 
@@ -1679,7 +1691,9 @@ class LineageCoordinator:
         session = _id(IdKind.SESSION, session_id)
         commitment = _commitment(repository_commitment)
         handle_digest = self.handle_digest(value) if digest is None else _digest(digest)
-        handle = await self._validate_attach_locked(handle_digest, commitment)
+        handle = await self._validate_attach_locked(
+            handle_digest, commitment, admitted_operation=admitted_operation
+        )
         snapshot = await self._store.get_task(handle.task_id)
         if snapshot is None:  # guarded by _validate_attach_locked; keep the invariant explicit
             raise _error(
@@ -1726,58 +1740,19 @@ class LineageCoordinator:
         *,
         handle_value: str,
         repository_commitment: str | None = None,
+        replay_check: Callable[[AttachHandle], Awaitable[bool]] | None = None,
     ) -> AttachHandle:
-        """Validate a capability before a separate start reservation mutates the route.
+        """Validate before route mutation, allowing exact committed-operation recovery.
 
-        The check is deliberately read-only.  The consuming ``attach`` call remains the single
-        compare-and-set that binds a session, while callers can reject an expired, revoked, or
-        cross-repository handle before reserving a start operation.
+        Expiry refuses new starts. An existing completed start may still finish interrupted
+        capability consumption; its catalog replay must validate the full request digest.
         """
 
         value = _safe_handle(handle_value)
         commitment = _commitment(repository_commitment)
         digest = self.handle_digest(value)
-        now = self._now()
         async with self._lock:
-            handle = await self._store.get_handle(digest)
-            if handle is None:
-                raise _error(
-                    PublicErrorCode.SESSION_NOT_FOUND,
-                    "The attach handle was not found.",
-                    reason="attach_handle_invalid",
-                )
-            if handle.revoked:
-                raise _error(
-                    PublicErrorCode.SESSION_CONFLICT,
-                    "The attach handle has been revoked.",
-                    reason="attach_handle_revoked",
-                )
-            if now >= handle.expires_at:
-                raise _error(
-                    PublicErrorCode.SESSION_CONFLICT,
-                    "The attach handle has expired.",
-                    reason="attach_handle_expired",
-                )
-            snapshot = await self._store.get_task(handle.task_id)
-            if snapshot is None:
-                raise _error(
-                    PublicErrorCode.STORAGE_CORRUPT,
-                    "The child task is missing.",
-                    reason="lineage_child_missing",
-                )
-            if commitment is not None and snapshot.repository_commitment != commitment:
-                raise _error(
-                    PublicErrorCode.SESSION_CONFLICT,
-                    "The attach identity conflicts.",
-                    reason="selector_conflict",
-                )
-            if snapshot.work_state is not WorkState.OPEN:
-                raise _error(
-                    PublicErrorCode.SESSION_CONFLICT,
-                    "The child work is no longer attachable.",
-                    reason="lineage_work_terminal",
-                )
-            return handle
+            return await self._validate_attach_locked(digest, commitment, replay_check=replay_check)
 
     async def self_register(
         self,
@@ -1949,6 +1924,7 @@ class LineageCoordinator:
         parent_tool_call_id: str | None = None,
         correlation_id: str | None = None,
         phase: str = "start",
+        validate_only: bool = False,
     ) -> None:
         """Forward a validated host correlation to the host-owned annotation registry.
 
@@ -2018,6 +1994,7 @@ class LineageCoordinator:
                 "parent_tool_call_id": parent_tool_call_id,
                 "phase": phase,
                 "subagent_id": subagent_id,
+                "validate_only": validate_only,
             }
             await merger(MappingProxyType(values))
 
@@ -2125,7 +2102,11 @@ class LineageCoordinator:
         """Check an agent-owned lifecycle transition before its ledger append."""
 
         session = _id(IdKind.SESSION, session_id)
-        if target not in {WorkState.CLOSED, WorkState.CANCELLED, WorkState.WRITTEN_OFF}:
+        if target not in {
+            WorkState.CLOSED,
+            WorkState.CANCELLED,
+            WorkState.WRITTEN_OFF,
+        }:
             raise _error(
                 PublicErrorCode.INVALID_REQUEST,
                 "The work lifecycle transition is invalid.",
@@ -2303,7 +2284,12 @@ class LineageCoordinator:
         """Reconcile an agent-owned lifecycle event after append-before-catalog interruption."""
 
         task = _id(IdKind.TASK, task_id)
-        if target not in {WorkState.CLOSED, WorkState.CANCELLED, WorkState.WRITTEN_OFF}:
+        if target not in {
+            WorkState.CLOSED,
+            WorkState.CANCELLED,
+            WorkState.WRITTEN_OFF,
+            WorkState.ABANDONED,
+        }:
             raise _error(
                 PublicErrorCode.INVALID_REQUEST,
                 "The work lifecycle transition is invalid.",
@@ -2338,7 +2324,7 @@ class LineageCoordinator:
             lineage_authority_revision=snapshot.lineage_authority_revision + 1,
         )
         await self._store.save_task(updated)
-        if target in {WorkState.CANCELLED, WorkState.WRITTEN_OFF}:
+        if target in {WorkState.CANCELLED, WorkState.WRITTEN_OFF, WorkState.ABANDONED}:
             await self._store.revoke_handles(snapshot.task_id)
         return updated
 
@@ -2423,9 +2409,43 @@ class LineageCoordinator:
             lineage_authority_revision=snapshot.lineage_authority_revision + 1,
         )
         await self._store.save_task(updated)
-        if target in {WorkState.CANCELLED, WorkState.WRITTEN_OFF}:
+        if target in {WorkState.CANCELLED, WorkState.WRITTEN_OFF, WorkState.ABANDONED}:
             await self._store.revoke_handles(task_id)
         return updated
+
+    async def renew_observed_activity(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        renew_lease: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Renew authenticated current hook contact under the abandonment transition lock.
+
+        The adapter admits only fresh current-session hook activity. Explicitly ended sessions
+        remain ended; late evidence may renew contact without changing terminal work outcome.
+        """
+
+        task = _id(IdKind.TASK, task_id)
+        session = _id(IdKind.SESSION, session_id)
+        async with self._lock:
+            snapshot = await self._store.get_task(task)
+            if (
+                snapshot is None
+                or snapshot.active_session_id != session
+                or snapshot.session_health is SessionHealth.ENDED
+            ):
+                return
+            await renew_lease()
+            await self._store.save_task(
+                replace(
+                    snapshot,
+                    session_health=SessionHealth.ACTIVE,
+                    contact_lost_at=None,
+                    abandonment_deadline=None,
+                    lineage_authority_revision=snapshot.lineage_authority_revision + 1,
+                )
+            )
 
     async def mark_contact_lost(self, *, session_id: str) -> LineageSnapshot:
         session = _id(IdKind.SESSION, session_id)
@@ -2513,32 +2533,66 @@ class LineageCoordinator:
             await self._store.save_task(updated)
             return updated
 
-    async def recover_abandoned(self) -> tuple[LineageSnapshot, ...]:
-        """Stamp service-owned ``abandoned`` work after the recovery window."""
+    async def recover_abandoned(
+        self,
+        record_abandonment: Callable[[LineageSnapshot, str, datetime], Awaitable[None]],
+    ) -> tuple[LineageSnapshot, ...]:
+        """Commit service evidence before projecting a terminal recovery outcome.
+
+        An unused expired capability abandons its reservation without inventing a lost session.
+        Attached work instead receives the full contact-loss recovery window. The callback must
+        durably and idempotently append the service event; failure leaves work recoverable.
+        """
 
         now = self._now()
         async with self._lock:
+            list_operations = getattr(self._store, "list_operations", None)
+            if callable(list_operations):
+                operations = await cast(
+                    Callable[[], Awaitable[tuple[DelegationOperation, ...]]], list_operations
+                )()
+            else:
+                rows = cast(
+                    Mapping[str, DelegationOperation], getattr(self._store, "operations", {})
+                )
+                operations = tuple(rows.values())
+            unclaimed: dict[str, datetime] = {}
+            for operation in operations:
+                if operation.phase is not DelegationPhase.TERMINAL:
+                    continue
+                handle = await self._store.get_handle(operation.handle_digest)
+                if handle is not None and handle.consumed_session_id is None and not handle.revoked:
+                    unclaimed[operation.child_task_id] = handle.expires_at
             values = await self._store.list_tasks()
             recovered: list[LineageSnapshot] = []
+            retryable_failure: Exception | None = None
             for snapshot in values:
-                if (
-                    type(snapshot) is not LineageSnapshot
-                    or snapshot.work_state is not WorkState.OPEN
-                ):
+                if snapshot.work_state is not WorkState.OPEN:
                     continue
-                if (
-                    snapshot.session_health is not SessionHealth.CONTACT_LOST
-                    or snapshot.abandonment_deadline is None
-                    or snapshot.abandonment_deadline > now
-                ):
+                deadline = snapshot.abandonment_deadline
+                reason = "contact_lost"
+                if snapshot.active_session_id is None and snapshot.task_id in unclaimed:
+                    deadline = unclaimed[snapshot.task_id]
+                    reason = "attach_handle_expired"
+                elif snapshot.session_health is not SessionHealth.CONTACT_LOST:
                     continue
-                updated = replace(
-                    snapshot,
-                    work_state=WorkState.ABANDONED,
-                    lineage_authority_revision=snapshot.lineage_authority_revision + 1,
-                )
-                await self._store.save_task(updated)
-                recovered.append(updated)
+                if deadline is None or deadline > now:
+                    continue
+                try:
+                    await record_abandonment(snapshot, reason, deadline)
+                except PublicOperationError as exc:
+                    if not exc.retryable:
+                        raise
+                    retryable_failure = retryable_failure or exc
+                    continue
+                except (OSError, TimeoutError) as exc:
+                    retryable_failure = retryable_failure or exc
+                    continue
+                recovered.append(await self._reconcile_work_locked(snapshot, WorkState.ABANDONED))
+            if retryable_failure is not None:
+                # Complete independent tasks but retain the daemon's failure diagnostic. The
+                # failed task remains open and its next sweep retries the same event identity.
+                raise retryable_failure
             return tuple(recovered)
 
     async def record_child_dependencies(

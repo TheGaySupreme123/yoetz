@@ -22,6 +22,7 @@ from yoetz.application.observation_advice import (
     minimized_semantic_evidence_packet,
 )
 from yoetz.domain.findings import FindingId
+from yoetz.observability.logging import record_unexpected_exception_without_raising
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 
 __all__ = [
@@ -285,7 +286,35 @@ class ObservationAdviceSemanticWorker:
     now: NowProvider
     lease_expires_at: NowProvider
 
+    def __post_init__(self) -> None:
+        self._active_task: asyncio.Task[object] | None = None
+        self._rebind_requested = False
+
+    def begin_rebind_scope(self) -> None:
+        """Bind foreground-yield cancellation to the whole supervisor drain turn."""
+
+        self._active_task = asyncio.current_task()
+
+    def end_rebind_scope(self) -> None:
+        if self._active_task is asyncio.current_task():
+            self._active_task = None
+
+    def request_rebind(self) -> None:
+        """Ask the current provider attempt to yield for an explicit foreground start.
+
+        The provider outcome is not converted into success. ``run_once`` records the normal
+        ``cancelled`` terminal outcome before propagating cancellation so the supervisor can
+        release its task runtime and let the foreground session rebind.
+        """
+
+        self._rebind_requested = True
+        active = self._active_task
+        if active is not None and active is not asyncio.current_task():
+            active.cancel()
+
     async def run_once(self) -> ObservationAdviceSemanticAttempt | None:
+        if self._rebind_requested:
+            return None
         attempt = self.repository.claim_next(
             service_generation=self.service_generation,
             lease_owner=self.lease_owner,
@@ -294,6 +323,12 @@ class ObservationAdviceSemanticWorker:
         )
         if attempt is None:
             return None
+        if self._rebind_requested:
+            self._complete(
+                attempt,
+                ObservationAdviceSemanticOutcome(status="cancelled", failure_reason="cancelled"),
+            )
+            return attempt
         try:
             outcome = await self.dispatch(attempt)
         except asyncio.CancelledError:
@@ -352,6 +387,7 @@ class ObservationAdviceSemanticSupervisor:
         self._closed = False
         self._loop_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
+        self._active_handle: AdviceSemanticDrainHandle | None = None
 
     def register(self, handle: AdviceSemanticDrainHandle) -> bool:
         if self._closed:
@@ -377,6 +413,27 @@ class ObservationAdviceSemanticSupervisor:
         del workspace_commitment
         if not self._closed:
             self._wake.set()
+
+    def request_rebind(self, workspace_commitment: str) -> None:
+        """Yield one advisory handle for an explicit foreground runtime rebind.
+
+        The supervisor keeps provider work serialized. A handle that is waiting behind another
+        provider attempt can be retired immediately; the active handle is cancelled through its
+        whole drain turn and lets the normal loop perform the release. This callback is called
+        synchronously by the runtime admission lock, so queued retirement is scheduled and never
+        awaits while the runtime lock is held.
+        """
+
+        handle = self._handles.get(workspace_commitment)
+        if handle is None:
+            return
+        handle.worker.request_rebind()
+        if self._active_handle is handle:
+            return
+        asyncio.create_task(
+            self._retire_handle(handle),
+            name=f"observation-advice-rebind-{workspace_commitment[:16]}",
+        )
 
     async def start(self) -> None:
         if self._loop_task is not None:
@@ -439,12 +496,38 @@ class ObservationAdviceSemanticSupervisor:
             if handle.worker.service_generation != self.service_generation:
                 continue
             while not self._closed:
-                attempt = await handle.worker.run_once()
-                if attempt is None:
-                    if self._handles.get(handle.workspace_commitment) is handle:
-                        self.unregister(handle.workspace_commitment)
-                        if handle.on_idle is not None:
-                            await handle.on_idle()
+                self._active_handle = handle
+                handle.worker.begin_rebind_scope()
+                try:
+                    attempt = await handle.worker.run_once()
+                    if attempt is None:
+                        await self._retire_handle(handle)
+                        break
+                    if handle.after_complete is not None:
+                        await handle.after_complete()
+                except asyncio.CancelledError:
+                    # A foreground start may cooperatively cancel one in-flight provider attempt
+                    # or its post-attempt advice rebuild so its runtime lease can yield. The
+                    # worker already recorded ``cancelled`` when dispatch was active; retire this
+                    # handle and release the runtime without rerunning the packet.
+                    await self._retire_handle(handle)
                     break
-                if handle.after_complete is not None:
-                    await handle.after_complete()
+                except Exception as exc:
+                    record_unexpected_exception_without_raising(
+                        exc,
+                        component="application.observation_advice_semantic",
+                        operation="drain_failed",
+                    )
+                    await self._retire_handle(handle)
+                    break
+                finally:
+                    handle.worker.end_rebind_scope()
+                    if self._active_handle is handle:
+                        self._active_handle = None
+
+    async def _retire_handle(self, handle: AdviceSemanticDrainHandle) -> None:
+        if self._handles.get(handle.workspace_commitment) is not handle:
+            return
+        self.unregister(handle.workspace_commitment)
+        if handle.on_idle is not None:
+            await handle.on_idle()

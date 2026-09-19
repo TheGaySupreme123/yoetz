@@ -372,6 +372,10 @@ class SqliteHostLineageRegistry(HostLineageRegistryPort):
     def _compatible(row: tuple[object, ...], commitments: _Commitments) -> bool:
         if len(row) != 14 or row[3] != commitments.subagent_id:
             return False
+        if row[12] is not None and row[4] is None and commitments.parent_tool_call_id is not None:
+            # Binding fixes the child attribution. A later strong pair cannot prove that a
+            # bound child-only observation belonged to that call, even with the same worker.
+            return False
         for index, incoming in (
             (4, commitments.parent_tool_call_id),
             (5, commitments.parent_conversation_id),
@@ -424,7 +428,7 @@ class SqliteHostLineageRegistry(HostLineageRegistryPort):
             alias_kind="strong",
         )
         # A full pair wins over a child-only alias. This also resolves a partial first row that
-        # later receives its stronger parent-tool alias without changing its public correlation.
+        # later receives its stronger parent-tool alias before binding to a cooperative child.
         compatible = [row for row in candidate_rows if self._compatible(row, commitments)]
         if exact_rows:
             if len(exact_rows) > 1:
@@ -692,55 +696,70 @@ class SqliteHostLineageRegistry(HostLineageRegistryPort):
         subagent_id: str | None = None,
         parent_tool_call_id: str | None = None,
         correlation_id: str | None = None,
+        validate_only: bool = False,
     ) -> HostLineageAnnotation | None:
         parent = _id(IdKind.TASK, parent_task_id)
         child = _id(IdKind.TASK, child_task_id)
         if host is not None and (type(host) is not str or host not in _HOSTS):
             raise HostLineageRegistryError(HostLineageRegistryReason.IDENTITY_CONFLICT)
+        if parent_tool_call_id is not None and subagent_id is None:
+            # Parent-call commitments are scoped to the raw child token. Without it this
+            # independent selector cannot be verified, even with a direct correlation id.
+            raise HostLineageRegistryError(HostLineageRegistryReason.IDENTITY_CONFLICT)
+
+        async def finish(annotation: HostLineageAnnotation) -> HostLineageAnnotation:
+            if validate_only:
+                if annotation.bound_child_task_id not in {None, child}:
+                    raise HostLineageRegistryError(HostLineageRegistryReason.BINDING_CONFLICT)
+                if not self._child_belongs_to_parent(parent, child):
+                    raise HostLineageRegistryError(HostLineageRegistryReason.CHILD_NOT_FOUND)
+                return annotation
+            return await self.bind_provisional_annotation(parent, annotation.correlation_id, child)
+
         if correlation_id is not None:
             try:
                 direct = _commitment(correlation_id)
-            except HostLineageRegistryError:
-                direct = None
-            if direct is not None:
-                try:
-                    row = self._row_for_correlation_locked(parent, direct)
-                    if row is not None:
-                        annotation = self._annotation_from_row(row)
-                        if host is not None and host != annotation.host_profile:
+            except HostLineageRegistryError as exc:
+                raise HostLineageRegistryError(HostLineageRegistryReason.IDENTITY_CONFLICT) from exc
+            try:
+                row = self._row_for_correlation_locked(parent, direct)
+                if row is not None:
+                    annotation = self._annotation_from_row(row)
+                    if host is not None and host != annotation.host_profile:
+                        raise HostLineageRegistryError(HostLineageRegistryReason.IDENTITY_CONFLICT)
+                    if subagent_id is not None:
+                        normalized = host_lineage_from_payload(
+                            annotation.host_profile,
+                            "SubagentStart",
+                            {
+                                "subagent_id": subagent_id,
+                                **(
+                                    {}
+                                    if parent_tool_call_id is None
+                                    else {"parent_tool_call_id": parent_tool_call_id}
+                                ),
+                            },
+                        )
+                        if normalized is None:
                             raise HostLineageRegistryError(
                                 HostLineageRegistryReason.IDENTITY_CONFLICT
                             )
-                        if subagent_id is not None:
-                            normalized = host_lineage_from_payload(
-                                annotation.host_profile,
-                                "SubagentStart",
-                                {
-                                    "subagent_id": subagent_id,
-                                    **(
-                                        {}
-                                        if parent_tool_call_id is None
-                                        else {"parent_tool_call_id": parent_tool_call_id}
-                                    ),
-                                },
+                        commitments = self._commitments(parent, normalized)
+                        if annotation.subagent_id != commitments.subagent_id or (
+                            parent_tool_call_id is not None
+                            and annotation.parent_tool_call_id != commitments.parent_tool_call_id
+                        ):
+                            raise HostLineageRegistryError(
+                                HostLineageRegistryReason.IDENTITY_CONFLICT
                             )
-                            if normalized is None:
-                                raise HostLineageRegistryError(
-                                    HostLineageRegistryReason.IDENTITY_CONFLICT
-                                )
-                            commitments = self._commitments(parent, normalized)
-                            if annotation.subagent_id != commitments.subagent_id or (
-                                parent_tool_call_id is not None
-                                and annotation.parent_tool_call_id
-                                != commitments.parent_tool_call_id
-                            ):
-                                raise HostLineageRegistryError(
-                                    HostLineageRegistryReason.IDENTITY_CONFLICT
-                                )
-                    return await self.bind_provisional_annotation(parent, direct, child)
-                except HostLineageRegistryError as exc:
-                    if exc.reason is not HostLineageRegistryReason.ANNOTATION_NOT_FOUND:
-                        raise
+                    return await finish(annotation)
+                raise HostLineageRegistryError(HostLineageRegistryReason.ANNOTATION_NOT_FOUND)
+            except HostLineageRegistryError as exc:
+                if exc.reason is not HostLineageRegistryReason.ANNOTATION_NOT_FOUND:
+                    raise
+                # A supplied correlation commitment is a selector, never a hint that
+                # permits falling back to a different raw-identity annotation.
+                return None
         if subagent_id is None:
             return None
         hosts = (
@@ -779,4 +798,4 @@ class SqliteHostLineageRegistry(HostLineageRegistryPort):
         if not unique:
             return None
         selected = next(iter(unique.values()))
-        return await self.bind_provisional_annotation(parent, selected.correlation_id, child)
+        return await finish(selected)

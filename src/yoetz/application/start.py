@@ -55,6 +55,7 @@ from yoetz.domain.values import (
 )
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.diagnostics import RuntimeCapability
+from yoetz.ports.host_lineage import HostLineageRegistryError, HostLineageRegistryReason
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
     AppendCommand,
@@ -1173,6 +1174,7 @@ async def _merge_host_annotation(
     child: LineageSnapshot,
     *,
     parent_session_id: str | None = None,
+    validate_only: bool = False,
 ) -> None:
     """Hand host correlation fields to the service-owned annotation seam after binding.
 
@@ -1210,16 +1212,35 @@ async def _merge_host_annotation(
     merger = getattr(lineage, "merge_host_annotation", None)
     if not callable(merger):
         return
-    await cast(Callable[..., Awaitable[None]], merger)(
-        parent_task_id=parent_task_id,
-        child_task_id=child.task_id,
-        parent_session_id=selected_parent_session,
-        host=None,
-        subagent_id=request.subagent_id,
-        parent_tool_call_id=request.parent_tool_call_id,
-        correlation_id=request.correlation_id,
-        phase="start",
-    )
+    try:
+        await cast(Callable[..., Awaitable[None]], merger)(
+            parent_task_id=parent_task_id,
+            child_task_id=child.task_id,
+            parent_session_id=selected_parent_session,
+            host=None,
+            subagent_id=request.subagent_id,
+            parent_tool_call_id=request.parent_tool_call_id,
+            correlation_id=request.correlation_id,
+            phase="start",
+            validate_only=validate_only,
+        )
+    except HostLineageRegistryError as exc:
+        code = PublicErrorCode.SESSION_CONFLICT
+        reason = "host_lineage_annotation_invalid"
+        if exc.reason is HostLineageRegistryReason.STORAGE_BUSY:
+            code = PublicErrorCode.BUNDLE_BUSY
+            reason = "catalog_busy"
+        elif exc.reason in {
+            HostLineageRegistryReason.STORAGE_CORRUPT,
+            HostLineageRegistryReason.MIGRATION_REQUIRED,
+        }:
+            code = PublicErrorCode.STORAGE_CORRUPT
+        raise _error(
+            code,
+            "The host lineage annotation could not be bound.",
+            retryable=exc.retryable,
+            safe_details={"reason_code": reason},
+        ) from exc
 
 
 async def _validate_handle_identity(
@@ -1274,9 +1295,41 @@ async def _execute_handle_attach(
     if attach_model is None:
         raise _invalid_request()
     token = attach_model.handle
+
+    async def _replay_check(current_handle: AttachHandle) -> bool:
+        """Allow only a completed child-start operation to recover its capability.
+
+        The handle row intentionally stores no public request identity.  The start catalog does
+        store that identity, so consult its private operation lookup before a consumed capability
+        can invoke the callback.  This keeps a second request from rotating the child route and
+        then failing the single-use compare-and-set.  The durable start operation still performs
+        the full request-digest check when the callback runs.
+        """
+
+        lookup = getattr(app.start_catalog, "_operation_by_key", None)
+        if callable(lookup):
+            try:
+                record = cast(Callable[[str], object], lookup)(request.request_id)
+            except PublicOperationError, TypeError, ValueError:
+                return False
+            return (
+                getattr(record, "task_id", None) == current_handle.task_id
+                and getattr(record, "state", None) == "complete"
+            )
+        state = getattr(app.start_catalog, "_state", None)
+        operations = getattr(state, "operations", None)
+        if isinstance(operations, Mapping):
+            record = cast(Mapping[str, object], operations).get(request.request_id)
+            return (
+                getattr(record, "task_id", None) == current_handle.task_id
+                and getattr(record, "state", None) == "complete"
+            )
+        return False
+
     handle = await lineage.validate_attach(
         handle_value=token,
         repository_commitment=repository_privacy_commitment,
+        replay_check=_replay_check,
     )
     # The model repeats service-returned structural facts so a caller cannot swap a valid bearer
     # token into a request naming another child or expiry.  The token itself remains opaque and
@@ -1291,6 +1344,17 @@ async def _execute_handle_attach(
             safe_details={"reason_code": "selector_conflict"},
         )
     await _validate_handle_identity(app, request, handle)
+    child = await lineage.store.get_task(handle.task_id)
+    if child is None:
+        raise _error(
+            PublicErrorCode.STORAGE_CORRUPT,
+            "The child task is missing.",
+            safe_details={"reason_code": "lineage_child_missing"},
+        )
+    # Reject contradictory or ambiguous host selectors before rotating the child session or
+    # consuming its capability. The final merge remains replayable if a concurrent observation
+    # or transient registry failure changes the answer after this read-only preflight.
+    await _merge_host_annotation(app, request, child, validate_only=True)
     route_lookup = getattr(app.start_catalog, "task_route", None)
     if not callable(route_lookup):
         raise _lineage_unavailable()
@@ -1341,30 +1405,6 @@ async def _execute_handle_attach(
             # coordinator lock and would also create a split window between route and handle.
             sync_lineage=False,
         )
-
-    async def _replay_check(current_handle: AttachHandle) -> bool:
-        """Allow a consumed handle to replay only its existing child-start operation.
-
-        The handle row intentionally stores no public request identity.  The start catalog does
-        store that identity, so consult its private operation lookup before a consumed capability
-        can invoke the callback.  This keeps a second request from rotating the child route and
-        then failing the single-use compare-and-set.  The durable start operation still performs
-        the full request-digest check when the callback runs.
-        """
-
-        lookup = getattr(app.start_catalog, "_operation_by_key", None)
-        if callable(lookup):
-            try:
-                record = cast(Callable[[str], object], lookup)(request.request_id)
-            except PublicOperationError, TypeError, ValueError:
-                return False
-            return getattr(record, "task_id", None) == current_handle.task_id
-        state = getattr(app.start_catalog, "_state", None)
-        operations = getattr(state, "operations", None)
-        if isinstance(operations, Mapping):
-            record = cast(Mapping[str, object], operations).get(request.request_id)
-            return getattr(record, "task_id", None) == current_handle.task_id
-        return False
 
     result, snapshot = await lineage.attach_with_operation(
         handle_value=token,
@@ -1510,6 +1550,32 @@ async def _provision_delegated_child(
     finally:
         if task is not None:
             await app.runtime.release(task)
+
+
+async def provision_lineage_recovery(
+    app: _StartApplication, operation: DelegationOperation
+) -> TaskRuntime:
+    """Open a completed delegation's inert bundle for service-owned recovery evidence.
+
+    This does not activate a route, open an agent session, or consume its handle. The caller owns
+    the returned runtime lease and must release it.
+    """
+
+    route = await app.start_catalog.task_route(operation.child_task_id)
+    if (
+        route is None
+        or route.state is not TaskRouteState.INITIALIZING
+        or operation.phase is not DelegationPhase.TERMINAL
+    ):
+        raise _error(
+            PublicErrorCode.SESSION_CONFLICT,
+            "The delegated recovery route is inconsistent.",
+            safe_details={"reason_code": "lineage_child_missing"},
+        )
+    allocation = _synthetic_child_allocation(
+        app, operation, route, operation_id=operation.operation_id
+    )
+    return await app.runtime.provision_start(_provision_command(app, allocation, route=route))
 
 
 async def _append_delegation_event(

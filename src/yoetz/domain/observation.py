@@ -265,6 +265,10 @@ _STRUCTURAL_KEYS: Final = frozenset(
         "bytes_touched",
         "tool_call_id",
         "parent_tool_call_id",
+        "lineage_child_task_id",
+        "lineage_child_session_id",
+        "lineage_child_writer_id",
+        "lineage_parent_task_id",
         "permission_kind",
         "decision_reason_code",
         "mapping_hint",
@@ -386,6 +390,7 @@ class ObservationGapCode(str, Enum):  # noqa: UP042 - exact durable wire enum
     CONSENT_REVOKED = "consent_revoked"
     SOURCE_LAG = "source_lag"
     MAPPING_MISSING = "mapping_missing"
+    MISSING_SUBAGENT_IDENTITY = "missing_subagent_identity"
     SESSION_SUPERSEDED = "session_superseded"
     OUTBOX_OVERFLOW = "outbox_overflow"
     OBSERVATION_INPUT_LOSS = "observation_input_loss"

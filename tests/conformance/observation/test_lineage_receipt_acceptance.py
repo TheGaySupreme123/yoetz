@@ -778,6 +778,10 @@ async def test_contact_lost_abandoned_child_late_evidence_is_incomplete_gap(
                 ),
             ),
         )
+        renewed_session = await service.app.start_catalog.task_session_state(child.session_id)
+        terminal_work = await service.app.start_catalog.task_lineage(child.task_id)
+        assert renewed_session is not None and renewed_session.health is SessionHealth.ACTIVE
+        assert terminal_work is not None and terminal_work.work_state is WorkState.ABANDONED
         await _drain_lineage(service)
         parent_check = await _check(service, parent)
         assert parent_check.children is not None

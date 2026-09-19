@@ -5893,3 +5893,267 @@ async def test_successor_route_cache_preserves_concurrent_lifecycle_changes(
             assert persisted is None
         else:
             assert persisted == (successor if concurrent_change == "none" else expected)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("event_kind", ["SubagentStop", "PostToolUse"])
+async def test_missing_subagent_identity_is_durable_without_annotation(
+    tmp_path: Path,
+    event_kind: str,
+) -> None:
+    from types import SimpleNamespace
+
+    from builders.ledger_adapters import FixedClock
+
+    local, workspace, session, mapping = _mapped_local(tmp_path, "missing-subagent")
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": mapping.yoetz_task_id, "owner_generation": "1"})
+    task_store = SqliteObservationStore(db)
+    runtime = SimpleNamespace(
+        task_id=mapping.yoetz_task_id,
+        session_id=mapping.yoetz_session_id,
+        writer_id=observation_writer_id(mapping.yoetz_task_id, mapping.yoetz_session_id),
+        observation=task_store,
+    )
+
+    class RuntimePort:
+        async def route(self, command: object) -> object:
+            del command
+            return runtime
+
+        async def release(self, released: object) -> None:
+            del released
+
+    class Registry:
+        async def record_host_lineage_observation(self, *args: object, **kwargs: object) -> None:
+            raise AssertionError("missing identity must not create an annotation")
+
+    append_request_id = PREFIX_BY_KIND[IdKind.REQUEST] + str(uuid.uuid4())
+
+    class Coordinator(ObservationCoordinator):
+        async def _append_materialized(self, *args: object, **kwargs: object) -> tuple[object, ...]:  # type: ignore[override]
+            batch = cast(MaterializedObservationBatch, args[2])
+            return (
+                append_request_id,
+                canonical_digest({"missing_identity_test": True}),
+                None,
+                MATERIALIZATION_MAPPING_VERSION,
+                tuple(item.role for item in batch.drafts),
+            )
+
+        async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            pass
+
+        async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            pass
+
+    coordinator = Coordinator(
+        runtime=RuntimePort(),  # type: ignore[arg-type]
+        local=local,
+        clock=FixedClock(),
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        host_lineage_registry=Registry(),  # type: ignore[arg-type]
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
+    envelope = replace(
+        _envelope(session=session, kind=event_kind, identity="hook:missing-subagent"),
+        structural_payload=JsonObject(
+            {"lineage_child_task_id": mapping.yoetz_task_id} if event_kind == "PostToolUse" else {}
+        ),
+    )
+    try:
+        for expected in (
+            ObservationIngestDisposition.ACCEPTED,
+            ObservationIngestDisposition.DUPLICATE,
+        ):
+            result = await coordinator.ingest_request(
+                ObservationIngestRequest(codex_session_id="missing-subagent", envelope=envelope)
+            )
+            assert result.disposition is expected, result.reason
+        reloaded = LocalObservationStore(_state=tmp_path)
+        status = reloaded.status(ObservationStatusQuery(workspace))
+        assert ObservationGapCode.MISSING_SUBAGENT_IDENTITY.value in status.gaps
+        retained = task_store.list_envelopes(workspace)
+        assert len(retained) == 1
+        assert retained[0].gap_codes == (ObservationGapCode.MISSING_SUBAGENT_IDENTITY.value,)
+    finally:
+        db.close(force=True)
+
+
+@pytest.mark.anyio
+async def test_strong_subagent_pair_never_replays_a_legacy_child_only_operation(
+    tmp_path: Path,
+) -> None:
+    from types import SimpleNamespace
+
+    from builders.ledger_adapters import FixedClock
+
+    task = _task_id()
+    writer = PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4())
+    envelope = replace(
+        _envelope(session="hmac-sha256:" + "ab" * 32, kind="SubagentStart"),
+        structural_payload=JsonObject({"subagent_id": "worker", "parent_tool_call_id": "call-b"}),
+    )
+    batch = materialize_observation_envelope(envelope, task_id=task)
+    roles = tuple(item.role for item in batch.drafts)
+    legacy_digest = observation_operation_digest(
+        task_id=task,
+        logical_identity=canonical_logical_identity(envelope, mapping_version="obs-ledger/1.6.0"),
+        draft_roles=roles,
+        mapping_version="obs-ledger/1.6.0",
+    )
+    coordinator = ObservationCoordinator(
+        runtime=object(),  # type: ignore[arg-type]
+        local=LocalObservationStore(_state=tmp_path),
+        clock=FixedClock(),
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+    )
+    legacy_id = coordinator._stable_operation_id(legacy_digest)  # pyright: ignore[reportPrivateUsage]
+    looked_up: list[str] = []
+
+    class Ledger:
+        async def lookup_task_operation(self, writer_id: str, operation_id: str) -> object | None:
+            del writer_id
+            looked_up.append(operation_id)
+            return (
+                SimpleNamespace(request_digest=legacy_digest) if operation_id == legacy_id else None
+            )
+
+        async def lookup_operation(self, writer_id: str, operation_id: str) -> None:
+            del writer_id
+            looked_up.append(operation_id)
+            return None
+
+    runtime = SimpleNamespace(
+        task_id=task,
+        session_id=PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4()),
+        writer_id=writer,
+        ledger=Ledger(),
+    )
+    # If only old replay is authorized, ambiguity fails closed instead of returning an
+    # unrelated invocation. Normal ingestion may append the current stronger identity.
+    with pytest.raises(PublicOperationError) as error:
+        await coordinator._append_materialized(  # pyright: ignore[reportPrivateUsage]
+            cast(TaskRuntime, runtime),
+            envelope,
+            batch,
+            replay_required=True,
+            replay_claims=(((legacy_digest, legacy_id, "obs-ledger/1.6.0"), roles),),
+        )
+    assert error.value.code is PublicErrorCode.SESSION_NOT_FOUND
+    assert legacy_id not in looked_up
+
+
+@pytest.mark.anyio
+async def test_subagent_advice_references_annotation_then_bound_child(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from builders.ledger_adapters import FixedClock
+
+    parent = _task_id()
+    child = _task_id()
+    correlation = "hmac-sha256:" + "cd" * 32
+    envelope = replace(
+        _envelope(session="hmac-sha256:" + "ab" * 32, kind="SubagentStop"),
+        structural_payload=JsonObject({"subagent_id": "worker", "parent_tool_call_id": "call-a"}),
+    )
+    annotation = SimpleNamespace(correlation_id=correlation, bound_child_task_id=None)
+
+    class Registry:
+        async def find_host_lineage_observation(
+            self, parent_task_id: str, observation: object
+        ) -> object:
+            del observation
+            assert parent_task_id == parent
+            return annotation
+
+    coordinator = ObservationCoordinator(
+        runtime=object(),  # type: ignore[arg-type]
+        local=LocalObservationStore(_state=tmp_path),
+        clock=FixedClock(),
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        host_lineage_registry=Registry(),  # type: ignore[arg-type]
+    )
+    assert await coordinator._lineage_refs_for_advice(  # pyright: ignore[reportPrivateUsage]
+        parent, (envelope,)
+    ) == ((envelope.source_identity, correlation),)
+    annotation.bound_child_task_id = child
+    assert await coordinator._lineage_refs_for_advice(  # pyright: ignore[reportPrivateUsage]
+        parent, (envelope,)
+    ) == ((envelope.source_identity, child),)
+
+
+@pytest.mark.anyio
+async def test_native_activity_releases_runtime_before_lineage_callback(tmp_path: Path) -> None:
+    """A callback waiting on lineage cannot retain the runtime that attach needs to rebind."""
+
+    import asyncio
+    from types import SimpleNamespace
+
+    from builders.ledger_adapters import FixedClock
+
+    local, _workspace, session, mapping = _mapped_local(tmp_path, "native-activity-release")
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": mapping.yoetz_task_id, "owner_generation": "1"})
+    store = SqliteObservationStore(db)
+    clock = FixedClock()
+    runtime = SimpleNamespace(
+        task_id=mapping.yoetz_task_id,
+        session_id=mapping.yoetz_session_id,
+        writer_id=observation_writer_id(mapping.yoetz_task_id, mapping.yoetz_session_id),
+        observation=store,
+    )
+    released = asyncio.Event()
+    calls: list[tuple[str, str, str]] = []
+
+    class RuntimePort:
+        async def route(self, command: object) -> object:
+            del command
+            return runtime
+
+        async def release(self, value: object) -> None:
+            assert value is runtime
+            released.set()
+
+    async def renew(task_id: str, session_id: str, writer_id: str) -> None:
+        # This event stands for attach's runtime-drained condition. Awaiting it while
+        # retaining the ingest runtime would deterministically deadlock until the deadline.
+        async with asyncio.timeout(1):
+            await released.wait()
+        calls.append((task_id, session_id, writer_id))
+
+    class Coordinator(ObservationCoordinator):
+        async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            pass
+
+    coordinator = Coordinator(
+        runtime=RuntimePort(),  # type: ignore[arg-type]
+        local=local,
+        clock=clock,
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        observed_activity_hook=renew,
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
+    from yoetz.domain.values import timestamp_from_datetime
+
+    envelope = replace(
+        _envelope(session=session, kind="SubagentStart", identity="hook:activity-release"),
+        structural_payload=JsonObject({}),
+        receipt_time=timestamp_from_datetime(clock.now_utc()),
+    )
+    request = ObservationIngestRequest(
+        codex_session_id="native-activity-release", envelope=envelope
+    )
+    try:
+        accepted = await coordinator.ingest_request(request)
+        assert accepted.disposition is ObservationIngestDisposition.ACCEPTED
+        assert calls == [(mapping.yoetz_task_id, mapping.yoetz_session_id, mapping.yoetz_writer_id)]
+        duplicate = await coordinator.ingest_request(request)
+        assert duplicate.disposition is ObservationIngestDisposition.DUPLICATE
+        assert len(calls) == 1
+    finally:
+        db.close(force=True)

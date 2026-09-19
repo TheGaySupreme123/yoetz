@@ -603,6 +603,12 @@ Do not combine the handle with another attach selector. After timeout, replay th
 and request ID; a fresh attach request cannot reuse a consumed handle. Use the child's returned
 session and writer for its subsequent operations.
 
+The original request can recover a successful attach after the handle expiry; this does not
+authorize a fresh attach. A Codex native callback can supply the child host identity once it
+exists. Do not guess `subagent_id` or `parent_tool_call_id` before spawning. If you supply explicit
+correlation selectors, they must agree; a conflict is refused before the handle is consumed.
+Use `status view=lineage` after handoff to distinguish a bound child from provisional host evidence.
+
 ```json
 {
   "protocol_version": "0.1",

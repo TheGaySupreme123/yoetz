@@ -863,11 +863,16 @@ def structural_from_stream_record(
         if subagent_id is not None:
             fields["subagent_id"] = subagent_id
         if item_type == "SubAgentActivity":
-            parent_tool_call_id, _parent_aliases_supplied = _consistent_alias_token(
+            parent_tool_call_id, parent_aliases_supplied = _consistent_alias_token(
                 body, ("parent_tool_call_id", "tool_call_id", "tool_use_id")
             )
             if parent_tool_call_id is not None:
                 fields["parent_tool_call_id"] = parent_tool_call_id
+            elif parent_aliases_supplied:
+                # Invalid or conflicting supplied aliases cannot become a weaker child-only
+                # identity. Retain the same durable gap as native subagent hook ingress.
+                fields.pop("subagent_id", None)
+                gaps.add(ObservationGapCode.MISSING_SUBAGENT_IDENTITY.value)
             # The generic ``tool_call_id`` spelling is accepted above only as
             # an explicit parent alias for this item family.  Never leave a
             # conflicting/invalid value in the generic field where the domain

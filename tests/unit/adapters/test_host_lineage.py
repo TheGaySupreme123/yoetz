@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import cast
+
+import pytest
 
 from yoetz.application.observation_materialize import (
     canonical_logical_identity,
@@ -161,7 +164,6 @@ def test_materialization_is_source_stable_and_keeps_host_observed_pending() -> N
         source=ObservationSource.CODEX_SESSION_STREAM,
         event_kind="SubagentStart",
         identity="stream:subagent-1",
-        parent_tool_call_id=None,
     )
 
     assert canonical_logical_identity(hook) == canonical_logical_identity(replay)
@@ -206,6 +208,8 @@ def test_materialization_keeps_missing_identity_as_one_gap() -> None:
     )
     assert batch.drafts == ()
     assert batch.skip_reason == "missing_subagent_identity"
+    assert "missing_subagent_identity" in batch.gaps
+    assert "missing_subagent_identity" in batch.coverage.known_gaps
 
 
 def test_envelope_source_selects_host_normalizer() -> None:
@@ -217,3 +221,44 @@ def test_envelope_source_selects_host_normalizer() -> None:
     signal = host_lineage_from_envelope(envelope)
     assert signal is not None
     assert signal.correlation.host == "cursor"
+
+
+@pytest.mark.parametrize("field", ["conversation_id", "parent_conversation_id"])
+@pytest.mark.parametrize("invalid", ["/private/transcript.jsonl", "private text", 42])
+def test_invalid_optional_identity_never_degrades_to_child_only(
+    field: str, invalid: object
+) -> None:
+    assert (
+        host_lineage_from_payload(
+            "codex", "SubagentStart", JsonObject({"subagent_id": "agent-1", field: invalid})
+        )
+        is None
+    )
+
+
+def test_distinct_parent_calls_cannot_collapse_materialized_evidence() -> None:
+    first = _envelope(
+        source=ObservationSource.CODEX_HOOK,
+        event_kind="SubagentStart",
+        identity="hook:call-a",
+        parent_tool_call_id="call-a",
+    )
+    second = replace(
+        first,
+        structural_payload=JsonObject(
+            {
+                "subagent_id": "agent-1",
+                "parent_tool_call_id": "call-b",
+            }
+        ),
+    )
+    assert canonical_logical_identity(first) != canonical_logical_identity(second)
+    batches = [
+        materialize_observation_envelope(item, task_id="tsk_00000000-0000-4000-8000-000000000001")
+        for item in (first, second)
+    ]
+    assert batches[0].drafts[0].draft.event_id != batches[1].drafts[0].draft.event_id
+    # Explicit historical interpretation keeps its original identity and bytes.
+    assert canonical_logical_identity(
+        first, mapping_version="obs-ledger/1.6.0"
+    ) == canonical_logical_identity(second, mapping_version="obs-ledger/1.6.0")

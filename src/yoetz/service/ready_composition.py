@@ -158,6 +158,7 @@ from yoetz.domain.coordination import (
     LineageOrigin,
     ProjectTextRef,
     ProjectTextStore,
+    SessionHealth,
     WorkState,
 )
 from yoetz.domain.events import RuntimeProfile, SessionOpenedPayload
@@ -4786,6 +4787,7 @@ async def provide_service_ready_context(
             subagent_id=(subagent_value if type(subagent_value) is str else None),
             parent_tool_call_id=(parent_tool_value if type(parent_tool_value) is str else None),
             correlation_id=(correlation_value if type(correlation_value) is str else None),
+            validate_only=values.get("validate_only") is True,
         )
 
     # The resolver is installed before ProjectApplication is composed because the lineage
@@ -5707,6 +5709,29 @@ async def provide_service_ready_context(
     # config snapshot owned by this fresh READY generation before it can receive
     # observation RPCs; malformed/unsafe markers fail closed in hook processes.
     local_observation.set_runtime_enabled(config.observation.enabled)
+
+    async def renew_observed_activity(task_id: str, session_id: str, writer_id: str) -> None:
+        binding = await catalog.session_binding(session_id)
+        if (
+            binding is None
+            or binding.task_id != task_id
+            or binding.session_id != session_id
+            or binding.writer_id != writer_id
+        ):
+            return
+
+        async def renew_lease() -> None:
+            await catalog.record_session_state(
+                task_id,
+                session_id,
+                health=SessionHealth.ACTIVE,
+                changed_at=clock.now_utc(),
+            )
+
+        await lineage.renew_observed_activity(
+            task_id=task_id, session_id=session_id, renew_lease=renew_lease
+        )
+
     observation_coordinator = ObservationCoordinator(
         runtime=runtime,
         local=local_observation,
@@ -5724,6 +5749,7 @@ async def provide_service_ready_context(
         observation_enabled=config.observation.enabled,
         lineage_coordinator=lineage_manifest_coordinator,
         host_lineage_registry=host_lineage_registry,
+        observed_activity_hook=renew_observed_activity,
         capture_budget_bootstrap=bootstrap_capture_reservations,
     )
     observation_sweeper = ObservationOutboxSweeper(
