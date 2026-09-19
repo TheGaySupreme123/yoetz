@@ -765,6 +765,10 @@ Codex home used for plugin activation. Both `CODEX_HOME` and testing-wrapper
 `CODEX_TESTING_HOME` are passed to those subprocesses; the parent environment is unchanged.
 Registration and removal preview digests include the selected home, so approval for one home
 cannot be replayed against another. An unresolvable explicit home fails before registration.
+When activation first exposes the plugin-bundled MCP entry, the interactive wizard shows a fresh
+MCP preview and asks for confirmation once before registering the selected launcher. Declining,
+a foreign entry, or another intervening change stops the write. Noninteractive callers retain
+`preview_stale` and must obtain a fresh preview; old approval is never silently reused.
 
 ## 11. Security, privacy, and prohibited actions
 

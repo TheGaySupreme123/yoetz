@@ -2743,3 +2743,38 @@ def test_set_reports_the_underlying_privacy_reason_rather_than_a_generic_block(
 
     assert result.exit_code == 20
     assert "Reason: privacy_setup_grant_missing" in _plain(result.output)
+
+
+@pytest.mark.parametrize("approved", [True, False])
+def test_interactive_setup_reconfirms_mcp_entry_exposed_by_plugin_activation(
+    wizard_env: dict[str, object], monkeypatch: pytest.MonkeyPatch, approved: bool
+) -> None:
+    import yoetz.cli.setup as setup_module
+
+    wizard_env["outputs"] = [
+        *_absent_mcp(),
+        _yoetz_entry("policy"),  # Activation exposes the bundled entry after the first preview.
+        _yoetz_entry("policy"),  # The replacement preview must describe that actual entry.
+        *(
+            [_yoetz_entry("policy"), CommandOutput(0, b""), _yoetz_entry("strict")]
+            if approved
+            else []
+        ),
+    ]
+    monkeypatch.setattr(setup_module, "_is_interactive_terminal", lambda: True)
+    answer = "Y" if approved else "N"
+    result = _RUNNER.invoke(
+        cli.app,
+        ["setup", "run"],
+        input=f"1\n{wizard_env['codex_home']}\n2\nY\nY\n{answer}\n",
+    )
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert "Plugin activation changed the effective MCP entry" in result.stdout
+    assert "Confirm updated MCP registration?" in result.stdout
+    calls = [
+        call for group in cast(list[list[tuple[str, ...]]], wizard_env["calls"]) for call in group
+    ]
+    assert any(call[1:3] == ("mcp", "add") for call in calls) is approved
+    assert (
+        "MCP registration: reregistered" if approved else "confirmation_required"
+    ) in result.stdout

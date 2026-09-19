@@ -5332,3 +5332,9 @@ explicit Codex home is selected. The commitment includes that home, and all corr
 host subprocesses receive matching `CODEX_HOME` and `CODEX_TESTING_HOME`. Plugin activation
 and MCP registration therefore address the same host configuration. This adds no control-wire
 method or protocol schema; unbound legacy adapter calls retain their existing commitments.
+
+The interactive setup wizard may refresh an MCP preview once after its own plugin activation
+changes the effective entry. It displays the new target, command and digest and requires a new
+confirmation. Foreign entries and subsequent drift still refuse. Noninteractive exact-preview
+callers retain the stale-preview failure. The terminal UI prepares its MCP preview with the same
+resolved Codex home as its activation preview.
