@@ -480,3 +480,126 @@ async def test_project_registration_removal_retires_an_existing_binding(
     assert error is not None
     assert session.calls == 1
     assert runtime._slot.workspace_binding_state == "failed"
+
+
+def _write_cli_registration(project: Path) -> Path:
+    config = _write_project_registration(project)
+    document = json.loads(config.read_text())
+    entry = document["mcpServers"]["yoetz"]
+    entry["args"][-1] = str(project)
+    entry["args"].extend(["--project-binding", "registered-project"])
+    config.write_text(json.dumps(document))
+    return config
+
+
+@pytest.mark.anyio
+async def test_explicit_cli_binding_uses_only_approved_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _directory(tmp_path / "project")
+    unrelated = _directory(tmp_path / "unrelated")
+    _write_cli_registration(project)
+    monkeypatch.chdir(unrelated)
+    runtime = server.build_bridge_runtime(
+        host_profile="cursor",
+        project_root=project,
+        launcher=_LAUNCHER,
+        project_binding="registered-project",
+    )
+    # The Agent CLI has no roots capability. CWD and client claims cannot select a root.
+    assert await server._ensure_cursor_workspace_binding(runtime, None, None, "start") is None
+    assert runtime._slot.workspace_locator == WorkspaceLocator(str(project))
+    assert runtime._slot.workspace_binding_source == "registered_project"
+    desktop = server.build_bridge_runtime(
+        host_profile="cursor", project_root=project, launcher=_LAUNCHER
+    )
+    assert await server._ensure_cursor_workspace_binding(desktop, None, None, "start") is not None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "mutation",
+    ["missing", "foreign_launcher", "mode_removed", "root_mismatch", "symlink", "replacement"],
+)
+async def test_cli_binding_retires_on_registration_or_directory_changes(
+    tmp_path: Path, mutation: str
+) -> None:
+    project = _directory(tmp_path / "project")
+    config = _write_cli_registration(project)
+    runtime = server.build_bridge_runtime(
+        host_profile="cursor",
+        project_root=project,
+        launcher=_LAUNCHER,
+        project_binding="registered-project",
+    )
+    assert await server._ensure_cursor_workspace_binding(runtime, None, None, "start") is None
+    document = json.loads(config.read_text())
+    if mutation == "missing":
+        config.unlink()
+    elif mutation == "foreign_launcher":
+        document["mcpServers"]["yoetz"]["command"] = "/foreign/yoetz"
+        config.write_text(json.dumps(document))
+    elif mutation == "mode_removed":
+        document["mcpServers"]["yoetz"]["args"] = document["mcpServers"]["yoetz"]["args"][:-2]
+        config.write_text(json.dumps(document))
+    elif mutation == "root_mismatch":
+        document["mcpServers"]["yoetz"]["args"][-3] = str(tmp_path)
+        config.write_text(json.dumps(document))
+    elif mutation == "symlink":
+        moved = tmp_path / "moved"
+        project.rename(moved)
+        project.symlink_to(moved, target_is_directory=True)
+    else:
+        new_file = config.with_suffix(".new")
+        new_file.write_bytes(config.read_bytes())
+        new_file.replace(config)
+    error = await server._ensure_cursor_workspace_binding(runtime, None, None, "check")
+    assert error is not None
+    assert runtime._slot.workspace_binding_state == "failed"
+    assert runtime._slot.workspace_locator is None
+
+
+@pytest.mark.parametrize(
+    "host,project", [("generic", True), ("codex", True), ("claude", True), ("cursor", False)]
+)
+def test_cli_binding_requires_an_explicit_cursor_project(
+    tmp_path: Path, host: str, project: bool
+) -> None:
+    from typing import cast
+
+    from yoetz.ports.control import McpHostProfile
+
+    root = _directory(tmp_path / "project")
+    with pytest.raises(ValueError, match="mcp_project_binding_invalid"):
+        server.build_bridge_runtime(
+            host_profile=cast(McpHostProfile, host),
+            project_root=root if project else None,
+            launcher=_LAUNCHER,
+            project_binding="registered-project",
+        )
+
+
+@pytest.mark.anyio
+async def test_cli_registration_is_rechecked_before_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _directory(tmp_path / "project")
+    config = _write_cli_registration(project)
+    runtime = server.build_bridge_runtime(
+        host_profile="cursor",
+        project_root=project,
+        launcher=_LAUNCHER,
+        project_binding="registered-project",
+    )
+    identity = server._cursor_workspace_identity
+
+    def replace_registration(path: str) -> tuple[int, int] | None:
+        result = identity(path)
+        config.write_text('{"mcpServers":{}}')
+        return result
+
+    monkeypatch.setattr(server, "_cursor_workspace_identity", replace_registration)
+    error = await server._ensure_cursor_workspace_binding(runtime, None, None, "start")
+    assert error is not None
+    assert runtime._slot.workspace_locator is None
+    assert runtime._slot.workspace_binding_state == "failed"

@@ -16,6 +16,8 @@ verification limits in [candidate notes](docs/releases/v0.2.3.md) and issue #786
 - Newer Codex fractional metadata no longer discards the surrounding transcript record (#754).
 - Cursor project registration uses the exact project path so Agent CLI can initialize the same
   bridge as the IDE; existing placeholder registrations remain upgradeable (#786).
+- Explicit Cursor CLI project binding uses the project selected in the accepted registration,
+  revalidating its identities on each call; desktop still requires native roots (#786).
 - Local transport preserves retryable send failures and consumes pending request errors (#678).
 - Local control accepts the existing selected-observation envelopes and bounded routine summaries,
   preserving route validation and rejecting unknown structural fields (#786).

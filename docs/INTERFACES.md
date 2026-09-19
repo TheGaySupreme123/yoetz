@@ -4712,11 +4712,11 @@ The selected locator retains its exact filesystem-encoded spelling through looku
 Unicode normalization never aliases distinct directories. A grant created under a differently
 normalized spelling does not authorize its sibling and requires an explicit regrant.
 
-The native Cursor MCP bridge has an additional session binding: on the first workflow call it asks
+The default desktop Cursor MCP bridge has an additional session binding: on the first workflow call it asks
 the MCP client for the standard `roots/list` result. The Cursor-specific adapter accepts local file
 URIs and the strict absolute local path shape emitted by the reviewed host, then safely canonicalizes
 every root. Without a validated project selector, the roots must canonicalize to one repository.
-An owned project registration renders `--project-root ${workspaceFolder}` and binds that startup
+An owned project registration renders the exact absolute `--project-root` and binds that startup
 selector to the exact project entry, launcher, route, and directory/configuration identity. The
 selected repository must occur in the active client's validated root inventory. Registration
 identity is revalidated before each workflow call; a changed registration retires the bridge.
@@ -5344,7 +5344,7 @@ resolved Codex home as its activation preview.
 Project MCP registration emits the validated absolute project path for `--project-root` so both
 IDE and Agent CLI clients can start the same bridge. Existing `${workspaceFolder}` entries remain
 recognized for upgrade and IDE runtime verification. A registration naming another absolute
-project is foreign. The selector still must match the native client roots/list inventory and
+project is foreign. In default desktop mode the selector must match the native client roots/list inventory and
 the exact owned project registration; no CWD or caller-authority fallback is added.
 
 ### Selected observations across local control (issue #786)
@@ -5359,3 +5359,19 @@ Routine-read classification persists its proven success bit when the native outc
 Summary construction still revalidates that bit. A legacy buffered group that cannot prove a
 summary is delivered as its original individual observations, in source order, without inventing
 success or dropping accepted records. One invalid summary no longer blocks later hook ingestion.
+
+### Explicit Cursor Agent CLI project binding (issue #786)
+
+The maintainer approved this separate CLI binding design on 2026-09-19 after the native Agent
+CLI connected but could not supply MCP roots/list. `integrate cursor project-mcp` accepts
+`--project-binding registered-project`. The local preview names the project, launcher, instance,
+route and binding mode; its digest binds all of them. Omission preserves an owned entry's mode,
+or uses `mcp-roots` for a new entry. Explicit `mcp-roots` reverses the CLI selection.
+
+The rendered bridge command carries the same mode. It requires an absolute project and exact
+owned registration with that flag, revalidates the symlink-free project/configuration identities,
+canonical repository root and directory identity before every workflow operation, and retires on
+any drift. It binds only the configured project; CWD, hook payloads, workflow arguments and MCP
+clientInfo cannot select or switch it. There is no automatic fallback when desktop roots fail.
+No content-capture permission, privacy grant, egress ceiling or service-instance boundary changes.
+Removal is the existing accepted project-registration removal lifecycle.

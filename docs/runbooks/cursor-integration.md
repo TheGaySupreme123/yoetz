@@ -1054,3 +1054,24 @@ before the bridge can initialize. Existing placeholder entries remain recognizab
 for IDE clients that expand them; an accepted install preview upgrades them in place. Moving
 a project requires a new registration preview. The absolute selector only chooses among the
 native client roots: it never replaces roots/list or relaxes the ownership and session fences.
+
+
+### Explicit Agent CLI registration
+
+Agent CLI clients that do not supply MCP roots/list use an explicit project binding. Preview it
+with the intended installed launcher:
+
+```text
+yoetz integrate cursor project-mcp preview --project-root /absolute/project --cursor-config-root /absolute/cursor-config --project-binding registered-project
+```
+
+Review the named project, launcher, instance and route. Apply with the same arguments, replacing
+`preview` with `install` and adding `--accept --preview-digest <exact-preview-digest>`. Preserve or
+explicitly choose the existing policy/strict route; this mode grants no content or review egress.
+Restart the CLI MCP connection, enable the project source if the host requires it, and verify a
+native `start`, not just `mcp list`. Model-provided paths and hook CWD do not select the repository.
+
+Use `--project-binding mcp-roots` in a new accepted preview/install to return the entry to desktop
+root binding. Omitting the option preserves the mode of an owned entry. `status`, `preview-remove`
+and accepted `remove` remain supported. Moving/replacing the project or editing/replacing its
+MCP registration retires the serving process and requires a new connection.

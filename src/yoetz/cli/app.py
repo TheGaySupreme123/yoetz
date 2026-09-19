@@ -2035,18 +2035,24 @@ def mcp_serve(
         Path | None,
         typer.Option(
             "--project-root",
-            help=(
-                "Cursor only: expanded project selector from the host's ${workspaceFolder}; "
-                "it must also be present in MCP roots/list."
-            ),
+            help=("Cursor only: exact project containing the approved MCP registration."),
         ),
     ] = None,
+    project_binding: Annotated[
+        Literal["mcp-roots", "registered-project"],
+        typer.Option(
+            "--project-binding",
+            help="Cursor binding: desktop host roots, or explicit registered project for Agent CLI.",
+        ),
+    ] = "mcp-roots",
 ) -> None:
     """Run the MCP stdio bridge."""
 
     module = importlib.import_module("yoetz.mcp.server")
     mcp_main = cast(Callable[..., None], getattr(module, "main"))
-    mcp_main(semantic=semantic, host=host, project_root=project_root)
+    mcp_main(
+        semantic=semantic, host=host, project_root=project_root, project_binding=project_binding
+    )
 
 
 @state_app.command("capture")
@@ -2231,6 +2237,13 @@ def _cursor_project_mcp_command(action: str) -> Callable[..., None]:
             str | None,
             typer.Option("--preview-digest", help="Exact reviewed project MCP preview digest."),
         ] = None,
+        project_binding: Annotated[
+            Literal["mcp-roots", "registered-project"] | None,
+            typer.Option(
+                "--project-binding",
+                help="Explicit Agent CLI binding; omitted preserves an owned entry, otherwise uses desktop roots.",
+            ),
+        ] = None,
         json_output: _JSON = False,
     ) -> None:
         harness = cast(str, context.find_root().find_object(str) or context.obj)
@@ -2246,6 +2259,7 @@ def _cursor_project_mcp_command(action: str) -> Callable[..., None]:
                 accept=accept,
                 preview_digest=preview_digest,
                 json_output=json_output,
+                project_binding=project_binding,
             )
         )
 

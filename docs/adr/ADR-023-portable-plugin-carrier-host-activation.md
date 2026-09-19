@@ -346,3 +346,15 @@ The dogfood's third failure was not a carrier fact: an upgraded bridge could not
 previous installation's still-running service, and could not ask it to stop. That is resolved in
 the local-control client (`service_incompatible`, supersede-on-upgrade, `yoetz service restart`);
 see `docs/INTERFACES.md` under the trusted local service contract.
+
+
+### Cursor Agent CLI project binding compatibility (issue #786, 2026-09-19)
+
+Maintainer-approved: Agent CLI can explicitly register `project_binding=registered-project` where
+that native client lacks MCP roots/list. The accepted registration preview binds the exact local
+project, launcher, isolated instance, route, and mode. The bridge requires that exact owned entry
+and revalidates configuration and repository directory identities for every workflow call; drift
+retires it. This is a distinct operator-selected CLI path, never a CWD, hook, public argument, or
+clientInfo fallback. Default desktop registrations retain their mandatory native-root exchange.
+Existing privacy, capture, disclosure and authenticated plugin-install ceremonies are unchanged.
+See `docs/INTERFACES.md` and the Cursor integration runbook for commands and failure boundaries.
