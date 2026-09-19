@@ -2898,6 +2898,24 @@ different query is the same non-retryable rejection. Both audit adapters project
 egress receipts as well as local disclosure receipts, so a completed subscription review is
 retrievable by its recorded receipt ID and listable by `channel`, `provider_id`, or
 `endpoint_profile_id`.
+
+A receipt's `purpose` has two owners, and they are deliberately not the same grammar. Anything
+crossing the privacy-policy boundary — every network egress receipt, every
+`ChannelPolicy.allowed_purposes` entry, the `privacy/egress-receipt-1.0.0` and
+`privacy/privacy-policy-1.0.0` schemas — uses the external vocabulary
+`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$` (hyphenated, no underscores): `semantic-review`,
+`credential-probe`, `package-update-check`. Local disclosure receipts additionally carry the
+product's own sink-local purposes, which never reach a provider, are never policy-admitted, and
+whose canonical owner is `yoetz.domain.privacy`'s wider `^[a-z][a-z0-9_-]{0,127}$`. The
+agent-projection purpose `client_result_projection` is one of these: it is fixed by the
+`agent_projection` CHECK in `migrations/catalog/0001.sql` and is part of every stored receipt's
+canonical bytes and digest, so it cannot be renamed. Control result `2.7.0` therefore validates
+`local_disclosure_receipt.purpose` against its own `local_disclosure_purpose` definition,
+mirroring that domain grammar, while network egress keeps the stricter external reference. Before
+`2.7.0` the local branch reused the external grammar, so every ordinary local receipt failed the
+result envelope and `privacy receipts list`/`get` answered `read_projection_failed` (issue #732);
+the frozen `2.6.0` and earlier envelopes keep their released bytes.
+
 `PrivacyAuditPort.list_pending_disclosures(audience) -> PendingDisclosurePage` projects only
 `PendingDisclosureEntry(pending_id, task_id, expires_at)` for proposals in `awaiting_human` or
 `reserved` whose `expires_at` has not passed, over the ordinary CLI/UI control method
