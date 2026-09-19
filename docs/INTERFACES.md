@@ -3602,6 +3602,14 @@ Shared closed types:
   evidence refs; a post-only profile reports its single observed phase, two calls remain two
   conditions, and a call id reused across a source, session, or generation boundary stays
   separate.
+  The deterministic verification baseline is typed: only a current `passed` approved-check fact,
+  or an explicit success from a dedicated verification tool (`test`, `pytest`, `cargo_test`,
+  `npm_test`, `uv_run_pytest`), establishes or advances it. A successful generic host shell
+  (`shell`, `Bash`, `bash`) and any routine read prove a tool outcome, never a check, so they
+  neither create a baseline, nor move one past a later edit, nor satisfy
+  `completion_without_verification` or the live arm of `static_test_for_live_claim`. Check
+  identity is never inferred from command text or a host-supplied `action` label. The failed and
+  unresolved-command rules continue to read every command-bearing tool including generic shells.
   Snapshot construction is session-scoped: a mapped session's snapshot is built from that
   session's own retained envelopes and session-scoped lifecycle/gap health (resolved from the
   ingest envelope's session commitment or the durable workspace session route), never from every

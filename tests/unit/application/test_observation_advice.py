@@ -119,7 +119,7 @@ def test_paired_edit_mints_one_stable_advice_finding_id() -> None:
 
     check = _envelope(
         "hook:check",
-        {"tool_name": "shell", "exit_status": 0, "correlation_id": "check-1"},
+        {"tool_name": "pytest", "exit_status": 0, "correlation_id": "check-1"},
         pos=1,
     )
     pre = replace(

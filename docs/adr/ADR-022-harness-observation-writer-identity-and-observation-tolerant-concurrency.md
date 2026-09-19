@@ -153,6 +153,19 @@ unsupported claims and unbounded duplicate findings.
     individual. The materializer accepts an explicit summary account and does not silently
     coalesce an individual delivery again. Detailed mode retains individual routine records
     within the same content and disclosure authority.
+    Routine reads are never promoted to checks, and deterministic observation advice moves its
+    verification baseline only on typed check evidence: a current `passed` approved-check fact, or
+    an explicit success reported by a dedicated verification tool whose tool identity names the
+    check (`test`, `pytest`, `cargo_test`, `npm_test`, `uv_run_pytest`). A successful generic host
+    shell (`shell`, `Bash`, `bash`) proves that the tool returned, not that anything was verified,
+    so it neither establishes a baseline, nor carries one past a later edit, nor supports a
+    completion claim or a live-wire claim. Check identity is never inferred from command text or
+    from a host-supplied `action` label, and a non-current, failed, stale or unknown check fact
+    establishes no baseline. Consequently `edit_after_successful_check` reports staleness only
+    against a real check: a session that never ran one is covered by
+    `completion_without_verification` and by the check coverage vector instead (issue #681). The
+    failed and unresolved-command rules still read every command-bearing tool, including generic
+    shells: narrowing what proves a check does not narrow what reports an outcome.
 
 11. Every newly accepted observation-authored append records one bounded pending frontier-motion
     notice for the originating Codex session. A retry of a completed append whose local notice

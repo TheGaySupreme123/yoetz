@@ -316,6 +316,14 @@ normalized `tool_call_id` (Claude's `tool_use_id`) — and the pair reports one
 Where only the result is observed, that single phase is the whole condition; no pre-event is
 fabricated.
 
+A successful `Bash` result on this profile is an explicit host-tool success fact and nothing more.
+Deterministic advice never promotes it to a verification check: only a current `passed`
+approved-check fact, or an explicit success from a dedicated verification tool, establishes or
+advances the verification baseline, and a routine read never does. A Claude session that edits and
+claims completion after successful `Bash` commands alone therefore keeps
+`completion_without_verification` rather than silently counting those commands as a check
+(issue #681). Failed-command advice is unchanged and still reads every `Bash` outcome.
+
 Select these hooks with `--observation-profile ordinary` on the existing Claude plugin
 preview/install/update/status commands, or on `yoetz integrate claude plugin export` for a
 development directory. Repeat the same profile when applying an exact preview. To return to
