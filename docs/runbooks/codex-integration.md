@@ -760,6 +760,12 @@ the new runtime, then restart the service and all Codex integrations before writ
 Mixed old and new writers are unsupported because a `/10` writer ignores the new pairing fields and
 can erase a deferred intent when it saves.
 
+Setup binds every MCP lookup, registration, verification, and removal to the same explicit
+Codex home used for plugin activation. Both `CODEX_HOME` and testing-wrapper
+`CODEX_TESTING_HOME` are passed to those subprocesses; the parent environment is unchanged.
+Registration and removal preview digests include the selected home, so approval for one home
+cannot be replayed against another. An unresolvable explicit home fails before registration.
+
 ## 11. Security, privacy, and prohibited actions
 
 Codex is the v0.1 allowlisted first-party client for exact current-chat consent attestation.

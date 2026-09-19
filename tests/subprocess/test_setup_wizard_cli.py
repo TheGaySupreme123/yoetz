@@ -105,6 +105,7 @@ def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, obj
         "outputs": _absent_mcp(),
         "calls": [],
         "activation_apply_calls": 0,
+        "mcp_homes": [],
     }
     marker = tmp_path / "setup-wizard.json"
     codex_home = tmp_path / "codex-home"
@@ -116,10 +117,12 @@ def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, obj
     def fake_adapter(
         *,
         route_profile: Literal["policy", "strict"] = "policy",
+        codex_home: Path | None = None,
     ) -> CodexMcpAdapter:
+        cast(list[Path | None], state["mcp_homes"]).append(codex_home)
         runner = _ScriptedRunner(cast(list[CommandOutput], state["outputs"]))
         cast(list[list[tuple[str, ...]]], state["calls"]).append(runner.calls)
-        return CodexMcpAdapter(runner, route_profile=route_profile)
+        return CodexMcpAdapter(runner, route_profile=route_profile, codex_home=codex_home)
 
     async def unreachable_client() -> object:
         raise ControlError("service_unavailable")
@@ -660,7 +663,9 @@ async def test_tui_apply_refuses_a_skill_preview_digest_not_shown_to_the_user(
 
     preview_runner = _ScriptedRunner([_yoetz_entry()])
     mcp_preview = await HarnessMcpService(
-        CodexMcpAdapter(preview_runner, route_profile="strict")
+        CodexMcpAdapter(
+            preview_runner, route_profile="strict", codex_home=cast(Path, wizard_env["codex_home"])
+        )
     ).preview(_binary())
     workspace = cast(Path, wizard_env["marker"]).parent
     wizard_env["outputs"] = [_yoetz_entry()]
@@ -704,7 +709,9 @@ async def test_a_preview_and_apply_that_disagree_on_the_route_refuse_as_stale(
 
     # Exactly what the TUI does today: no route_profile, so the class default (policy) applies.
     preview_runner = _ScriptedRunner(_absent_mcp())
-    mcp_preview = await HarnessMcpService(CodexMcpAdapter(preview_runner)).preview(_binary())
+    mcp_preview = await HarnessMcpService(
+        CodexMcpAdapter(preview_runner, codex_home=cast(Path, wizard_env["codex_home"]))
+    ).preview(_binary())
 
     # And exactly what apply does today: the configured route, strict with no provider bound.
     wizard_env["outputs"] = _absent_mcp()
@@ -741,7 +748,11 @@ async def test_a_preview_and_apply_on_the_same_route_register(
 
     preview_runner = _ScriptedRunner(_absent_mcp())
     mcp_preview = await HarnessMcpService(
-        CodexMcpAdapter(preview_runner, route_profile="strict")
+        CodexMcpAdapter(
+            preview_runner,
+            route_profile="strict",
+            codex_home=cast(Path, wizard_env["codex_home"]),
+        )
     ).preview(_binary())
 
     wizard_env["outputs"] = [
@@ -761,6 +772,7 @@ async def test_a_preview_and_apply_on_the_same_route_register(
         _state=cast(Path, wizard_env["isolated_state"]),
     )
 
+    assert wizard_env["mcp_homes"] == [wizard_env["codex_home"]]
     assert report["reason"] is None
     assert report["outcome"] == "registered"
     # The successful apply durably records the strict route it verified post-write.

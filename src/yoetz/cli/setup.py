@@ -982,9 +982,12 @@ def configured_mcp_route_profile() -> Literal["policy", "strict"]:
 
 def _mcp_adapter(
     route_profile: Literal["policy", "strict"] | None = None,
+    *,
+    codex_home: Path | None = None,
 ) -> CodexMcpAdapter:
     return CodexMcpAdapter(
-        route_profile=_configured_mcp_route_profile() if route_profile is None else route_profile
+        route_profile=_configured_mcp_route_profile() if route_profile is None else route_profile,
+        codex_home=codex_home,
     )
 
 
@@ -1163,9 +1166,6 @@ async def _codex_integration_step(
     silently rewrite a previously chosen route (#389 / ADR-018).
     """
 
-    mcp_service = HarnessMcpService(
-        _mcp_adapter("strict" if route_profile is None else route_profile)
-    )
     plugin_service = CodexPluginService()
     project = _integration_target(workspace)
     selected_codex_home: Path | None = None
@@ -1186,7 +1186,7 @@ async def _codex_integration_step(
             # A caller echoing an activation digest explicitly requested that exact mutation.
             # Without a usable explicit home, fail closed instead of silently applying only the
             # other integration surfaces.
-            if approved_activation_digest is not None:
+            if selected_codex_home is None or approved_activation_digest is not None:
                 return {
                     "outcome": "failed",
                     "reason": "activation_preview_failed",
@@ -1237,6 +1237,12 @@ async def _codex_integration_step(
             "skill": {"outcome": "skipped", "presence": None},
             "observation_consent": {"outcome": "absent", "workspace_commitment": None},
         }
+    mcp_service = HarnessMcpService(
+        _mcp_adapter(
+            "strict" if route_profile is None else route_profile,
+            codex_home=bound_home,
+        )
+    )
     try:
         mcp_preview = await mcp_service.preview(binary)
     except McpRegistrationError as error:
@@ -1267,7 +1273,7 @@ async def _codex_integration_step(
     ):
         # No explicit route input: preserve the observed profile of the existing
         # yoetz-owned registration instead of rewriting it (#389).
-        mcp_service = HarnessMcpService(_mcp_adapter(route_profile_before))
+        mcp_service = HarnessMcpService(_mcp_adapter(route_profile_before, codex_home=bound_home))
         try:
             mcp_preview = await mcp_service.preview(binary)
         except McpRegistrationError as error:

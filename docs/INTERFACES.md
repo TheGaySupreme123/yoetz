@@ -5324,3 +5324,11 @@ and transport outcomes retain exact replay identity within the bounded attempt p
 stage is unknown unless independently evidenced; local encode/decode stages are named explicitly.
 The CLI's bounded diagnostic projection uses opaque session/source commitments and cursor
 positions, with null absent correlation and explicit incomplete-history coverage.
+
+### Explicit Codex home in setup (issue #786)
+
+The local MCP registration and unregistration preview commitments use revision 4 when an
+explicit Codex home is selected. The commitment includes that home, and all corresponding
+host subprocesses receive matching `CODEX_HOME` and `CODEX_TESTING_HOME`. Plugin activation
+and MCP registration therefore address the same host configuration. This adds no control-wire
+method or protocol schema; unbound legacy adapter calls retain their existing commitments.

@@ -254,3 +254,11 @@ def test_secret_rejected_names_the_credential_and_the_retry() -> None:
     assert message is not None
     assert "not accepted" in message
     assert "yoetz provider credential set" in message
+
+
+def test_reauthentication_recovery_includes_repository_privacy_and_rotation() -> None:
+    message = remediation_message("chat_user_reauthentication_unavailable")
+    assert message is not None
+    assert "yoetz --privacy" in message
+    assert "yoetz service rotate-passphrase" in message
+    assert "yoetz provider credential set" in message

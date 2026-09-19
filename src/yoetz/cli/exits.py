@@ -208,9 +208,10 @@ REMEDIATION_MESSAGES: Final = MappingProxyType(
             "danger text to the person instructing you"
         ),
         "chat_user_reauthentication_unavailable": (
-            "this installation has no keyring auto-unlock secret, so the credential cannot be "
-            "stored from an agent session; run the ceremony on a local terminal with "
-            "'yoetz provider credential set'"
+            "this installation has no keyring auto-unlock secret, so this action requires "
+            "reauthentication on a local terminal; use 'yoetz --privacy' for repository "
+            "privacy, 'yoetz provider credential set' for a provider credential, or "
+            "'yoetz service rotate-passphrase' for passphrase rotation"
         ),
         "repository_privacy_scope_unavailable": (
             "this repository is not bound to privacy authority yet; run 'yoetz --privacy' "
