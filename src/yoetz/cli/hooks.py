@@ -28,10 +28,11 @@ from yoetz.adapters.integrations.codex_lifecycle import (
 )
 from yoetz.adapters.workspace_binding import canonical_workspace_locator
 from yoetz.cli.hook_io import (
-    context_output as _context_output,
+    MAX_HOOK_STDIN_BYTES,
+    read_hook_payload,
 )
 from yoetz.cli.hook_io import (
-    read_hook_payload,
+    context_output as _context_output,
 )
 from yoetz.cli.hook_io import (
     stderr_line as _stderr_line,
@@ -127,7 +128,6 @@ class _PendingMappingSnapshot:
     conflicting: bool = False
 
 
-_MAX_STDIN_BYTES: Final = 262_144
 _STATUS_DEADLINE_MS: Final = 5_000
 _INTAKE_CUE_BYTES: Final = 512
 _MAX_PENDING_MAPPING_REPLAYS: Final = 8
@@ -387,7 +387,9 @@ def handle_user_prompt_submit(
 
     try:
         raw = (
-            stdin_bytes if stdin_bytes is not None else sys.stdin.buffer.read(_MAX_STDIN_BYTES + 1)
+            stdin_bytes
+            if stdin_bytes is not None
+            else sys.stdin.buffer.read(MAX_HOOK_STDIN_BYTES + 1)
         )
         _ = read_hook_payload(raw)
         cue = intake_cue_text(resource_root=resource_root)
@@ -405,7 +407,8 @@ def handle_user_prompt_submit(
         )
         _stdout_json(_context_output("UserPromptSubmit", cue), stdout)
         return 0
-    except Exception:
+    except Exception as exc:
+        _note_oversize_hook_ingress(exc, "UserPromptSubmit", workspace=workspace, _state=_state)
         _stderr_line("hook_degraded: user-prompt-submit")
         try:
             cue = intake_cue_text(resource_root=resource_root)
@@ -413,6 +416,35 @@ def handle_user_prompt_submit(
         except Exception:
             _stdout_json(_context_output("UserPromptSubmit", INACTIVE_CONTEXT), stdout)
         return 0
+
+
+def _note_oversize_hook_ingress(
+    exc: BaseException,
+    event: str,
+    *,
+    workspace: str | None,
+    _state: Path | None,
+) -> None:
+    """Route a Codex hook body refused for size into observation accounting.
+
+    These entry points parse the host body themselves before handing the same
+    bytes to the observation ingress, so an oversized event never reaches
+    ``handle_observe`` and their degraded branch could only say that the hook
+    had failed — not that an event's worth of work went unobserved (#667).
+    """
+
+    if not isinstance(exc, ProtocolValueError) or exc.reason_code != "payload_too_large":
+        return
+    with contextlib.suppress(Exception):
+        from yoetz.cli.observe_hooks import note_payload_too_large
+        from yoetz.domain.observation import ObservationSource
+
+        note_payload_too_large(
+            event,
+            source=ObservationSource.CODEX_HOOK,
+            workspace=workspace,
+            _state=_state,
+        )
 
 
 def _as_mapping(value: object) -> Mapping[str, JsonValue] | None:
@@ -427,7 +459,7 @@ def _parse_bounded_result_text(text: object) -> Mapping[str, JsonValue] | None:
     if type(text) is not str:
         return None
     encoded = text.encode("utf-8")
-    if not encoded or len(encoded) > _MAX_STDIN_BYTES:
+    if not encoded or len(encoded) > MAX_HOOK_STDIN_BYTES:
         return None
     try:
         candidate = _as_mapping(strict_json_parse(encoded))
@@ -1079,7 +1111,9 @@ def handle_post_tool_use(
 
     try:
         raw = (
-            stdin_bytes if stdin_bytes is not None else sys.stdin.buffer.read(_MAX_STDIN_BYTES + 1)
+            stdin_bytes
+            if stdin_bytes is not None
+            else sys.stdin.buffer.read(MAX_HOOK_STDIN_BYTES + 1)
         )
         payload = read_hook_payload(raw)
         record_start_bind_diagnostic(
@@ -1094,7 +1128,8 @@ def handle_post_tool_use(
             workspace=workspace,
             _state=_state,
         )
-    except Exception:
+    except Exception as exc:
+        _note_oversize_hook_ingress(exc, "PostToolUse", workspace=workspace, _state=_state)
         _stderr_line("hook_degraded: post-tool-use")
         _stdout_json({}, stdout)
         return 0
@@ -1348,7 +1383,9 @@ def handle_session_start(
     runner: AsyncRunner = cast(AsyncRunner, anyio.run if run_async is None else run_async)
     try:
         raw = (
-            stdin_bytes if stdin_bytes is not None else sys.stdin.buffer.read(_MAX_STDIN_BYTES + 1)
+            stdin_bytes
+            if stdin_bytes is not None
+            else sys.stdin.buffer.read(MAX_HOOK_STDIN_BYTES + 1)
         )
         payload = read_hook_payload(raw)
         source = payload.get("source")
@@ -1585,7 +1622,8 @@ def handle_session_start(
                 return 0
             _stdout_json(_context_output("SessionStart", _UNAVAILABLE_CONTEXT), stdout)
             return 0
-    except Exception:
+    except Exception as exc:
+        _note_oversize_hook_ingress(exc, "SessionStart", workspace=workspace, _state=_state)
         _stderr_line("hook_degraded: session-start")
         _stdout_json(_context_output("SessionStart", INACTIVE_CONTEXT), stdout)
         return 0

@@ -410,6 +410,13 @@ class ObservationGapCode(str, Enum):  # noqa: UP042 - exact durable wire enum
     # buffered lane, so its members were admitted individually instead of being
     # represented by a bounded summary account (issue #753).
     ROUTINE_SUMMARY_INVALID = "routine_summary_invalid"
+    # One host hook event whose body exceeded the fixed stdin ingress bound and
+    # was therefore never parsed. Distinct from ``truncated_payload``, which is
+    # a payload that was admitted and then clipped after parsing: nothing about
+    # this event is known beyond the hook name the host named on the command
+    # line, so no structural row, session, or path identity exists for it. The
+    # work itself still happened, and the gap is how coverage says so (#667).
+    PAYLOAD_TOO_LARGE = "payload_too_large"
     SELECTION_ROUTE_CHANGED = "selection_route_changed"
     POLICY_UNTRUSTED = "policy_untrusted"
     VERIFICATION_STALE = "verification_stale"

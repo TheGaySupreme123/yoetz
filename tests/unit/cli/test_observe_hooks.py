@@ -27,6 +27,7 @@ from yoetz.adapters.integrations.hook_spool import HookSpool
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.application.recommendations import RecommendationState, store_recommendation_state
 from yoetz.cli import observe_hooks as observe_hooks_module
+from yoetz.cli.hook_io import MAX_HOOK_STDIN_BYTES
 from yoetz.cli.observe_hooks import (
     SUPPORTED_HOOK_EVENTS,
     handle_claude_observe,
@@ -6709,3 +6710,162 @@ def test_session_start_update_advice_without_observation_consent(
     assert "Update Yoetz to 0.3.0" in context
     assert "decline package-update --release-version 0.3.0" in context
     assert not store.pending_workspaces()
+
+
+def _oversize_hook_body(session_id: str) -> bytes:
+    """Return a valid hook object one byte past the shared stdin cap."""
+
+    body = (
+        b'{"session_id":"'
+        + session_id.encode()
+        + b'","tool_name":"shell","command":"COMMAND_CANARY '
+        + b"x" * MAX_HOOK_STDIN_BYTES
+        + b'"}'
+    )
+    assert len(body) > MAX_HOOK_STDIN_BYTES
+    return body
+
+
+def _diagnostic_rows(state: Path) -> list[dict[str, str]]:
+    raw = (state / "observation/hook-diagnostics.jsonl").read_text(encoding="utf-8")
+    return [cast(dict[str, str], json.loads(line)) for line in raw.splitlines()]
+
+
+def test_oversized_codex_payload_names_its_size_and_scopes_the_gap(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    stdout = io.BytesIO()
+
+    assert (
+        handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=_oversize_hook_body("codex-oversize"),
+            stdout=stdout,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+
+    assert json.loads(stdout.getvalue()) == {}
+    rows = _diagnostic_rows(tmp_path)
+    # Before this the refusal reached the outer handler as the bare `observe`
+    # reason, which named neither the cause nor the affected event (#667).
+    assert rows == [
+        {"event": "PostToolUse", "reason": "codex_payload_too_large", "ts": rows[0]["ts"]}
+    ]
+    status = store.status(ObservationStatusQuery(workspace))
+    assert ObservationGapCode.PAYLOAD_TOO_LARGE.value in status.gaps
+    assert store.list_envelopes(workspace) == ()
+    errors = capsys.readouterr().err
+    assert "payload_too_large" in errors
+    assert str(MAX_HOOK_STDIN_BYTES) in errors
+    assert "COMMAND_CANARY" not in errors
+
+
+def test_oversized_event_does_not_block_the_next_ordinary_event(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+
+    assert (
+        handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=_oversize_hook_body("codex-oversize-then-normal"),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    assert (
+        handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=json.dumps(
+                {
+                    "session_id": "codex-oversize-then-normal",
+                    "tool_name": "shell",
+                    "tool_call_id": "tool-after-oversize",
+                    "exit_status": 0,
+                }
+            ).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+
+    # The refused event costs exactly itself: the gap stands and the next
+    # ordinary event still reaches the structural store.
+    envelopes = store.list_envelopes(workspace)
+    assert len(envelopes) == 1
+    status = store.status(ObservationStatusQuery(workspace))
+    assert ObservationGapCode.PAYLOAD_TOO_LARGE.value in status.gaps
+
+
+def test_oversized_claude_payload_names_its_host_instead_of_recording_nothing(
+    tmp_path: Path,
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    stdout = io.BytesIO()
+
+    assert (
+        handle_claude_observe(
+            event_name="PostToolUse",
+            stdin_bytes=_oversize_hook_body("claude-oversize"),
+            stdout=stdout,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+
+    assert json.loads(stdout.getvalue()) == {}
+    rows = _diagnostic_rows(tmp_path)
+    # This ingress previously swallowed every refusal into a bare `{}` with no
+    # record at all (issue #667).
+    assert [row["reason"] for row in rows] == ["claude_payload_too_large"]
+    assert (
+        ObservationGapCode.PAYLOAD_TOO_LARGE.value
+        in store.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+
+def test_codex_post_tool_use_entry_point_routes_an_oversized_body_to_the_gap(
+    tmp_path: Path,
+) -> None:
+    from yoetz.cli import hooks
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+
+    # This entry point parses the body itself before handing the same bytes to
+    # the observation ingress, so its degraded branch is the only place the
+    # loss can be named.
+    assert (
+        hooks.handle_post_tool_use(
+            stdin_bytes=_oversize_hook_body("codex-entry-oversize"),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+        )
+        == 0
+    )
+
+    assert [row["reason"] for row in _diagnostic_rows(tmp_path)] == ["codex_payload_too_large"]
+    assert (
+        ObservationGapCode.PAYLOAD_TOO_LARGE.value
+        in store.status(ObservationStatusQuery(workspace)).gaps
+    )

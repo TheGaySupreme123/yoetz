@@ -45,6 +45,11 @@ from yoetz.adapters.workspace_binding import canonical_workspace_locator, resolv
 from yoetz.cli import hook_io
 from yoetz.cli.hook_diagnostics import record_hook_diagnostic, record_hook_timing
 from yoetz.cli.hook_io import (
+    MAX_HOOK_STDIN_BYTES,
+    read_cursor_hook_payload,
+    read_hook_payload,
+)
+from yoetz.cli.hook_io import (
     claude_context_output as _claude_context_output,
 )
 from yoetz.cli.hook_io import (
@@ -52,10 +57,6 @@ from yoetz.cli.hook_io import (
 )
 from yoetz.cli.hook_io import (
     cursor_context_output as _cursor_context_output,
-)
-from yoetz.cli.hook_io import (
-    read_cursor_hook_payload,
-    read_hook_payload,
 )
 from yoetz.cli.hook_io import (
     stderr_line as _stderr_line,
@@ -125,6 +126,7 @@ __all__ = [
     "handle_observe",
     "handle_spool",
     "map_hook_payload_to_envelope",
+    "note_payload_too_large",
 ]
 
 SUPPORTED_HOOK_EVENTS: Final = frozenset(
@@ -2681,6 +2683,87 @@ def _note_dropped_event_gap(
     store.note_coverage_gap(commitment, ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value)
 
 
+_PAYLOAD_TOO_LARGE_REASONS: Final[Mapping[ObservationSource, str]] = MappingProxyType(
+    {
+        ObservationSource.CLAUDE_HOOK: "claude_payload_too_large",
+        ObservationSource.CODEX_HOOK: "codex_payload_too_large",
+        ObservationSource.CURSOR_HOOK: "cursor_payload_too_large",
+    }
+)
+
+
+def _note_payload_too_large_gap(
+    *,
+    source: ObservationSource,
+    workspace: str | None,
+    _state: Path | None,
+) -> None:
+    """Bind the oversize loss to a consented workspace without reading the body.
+
+    The command-line locator is the only binding available: the session id,
+    tool name, and changed paths all live inside the bytes this pass refused to
+    parse. Cursor resolves its locator through the host resolver with an empty
+    payload, which keeps ``CURSOR_PROJECT_DIR`` and the explicit argument in
+    their usual precedence while forwarding no host field at all.
+    """
+
+    locator = (
+        resolve_workspace_locator(explicit=workspace, payload={}, env=os.environ)
+        if source is ObservationSource.CURSOR_HOOK
+        else (None if workspace is None else canonical_workspace_locator(workspace))
+    )
+    if type(locator) is not str or not locator:
+        return
+    store = LocalObservationStore(_state=_state)
+    commitment = store.workspace_commitment(locator)
+    consent = store.consent_for(commitment)
+    if consent is None or not consent.active:
+        return
+    store.note_coverage_gap(commitment, ObservationGapCode.PAYLOAD_TOO_LARGE.value)
+
+
+def note_payload_too_large(
+    event: str,
+    *,
+    source: ObservationSource,
+    workspace: str | None,
+    _state: Path | None = None,
+) -> None:
+    """Name one hook event refused at stdin ingress for exceeding the byte cap.
+
+    The body was never parsed, so the only identity this pass can honestly
+    claim is the host that ran it, the hook name that host named on its own
+    command line, and the bound itself. Even the true size is unknown by
+    construction: the ingress reads at most cap-plus-one bytes and stops.
+    Nothing is inferred from the unread bytes, and no structural row is minted.
+
+    Two records, because there are two audiences. The bounded owner-only
+    diagnostic tells an operator which host lost which event; the workspace
+    coverage gap makes the same loss reach ``observe status`` and receipt
+    coverage wording, so an edit that was dropped at the door can never read as
+    captured work (issue #667).
+    """
+
+    prefix = (
+        "hook_cursor_observe_degraded"
+        if source is ObservationSource.CURSOR_HOOK
+        else "hook_observe_degraded"
+    )
+    with contextlib.suppress(BaseException):
+        _stderr_line(
+            f"{prefix}: payload_too_large; host event over the "
+            f"{MAX_HOOK_STDIN_BYTES}-byte hook ingress cap; not observed; see observe status"
+        )
+    with contextlib.suppress(BaseException):
+        record_hook_diagnostic(
+            _PAYLOAD_TOO_LARGE_REASONS.get(source, "codex_payload_too_large"),
+            event,
+            _state=_state,
+        )
+    with contextlib.suppress(BaseException):
+        _note_payload_too_large_gap(source=source, workspace=workspace, _state=_state)
+
+
 def _consent_binding_diagnostic(consent: LocalObservationConsent | None) -> str:
     """Name why a resolved workspace admits no ingest: paused, or no active consent.
 
@@ -2828,7 +2911,20 @@ def handle_observe(
                 )
             return _context_output(resolved_event, additional_context)
 
-        payload = read_hook_payload(stdin_bytes)
+        try:
+            payload = read_hook_payload(stdin_bytes)
+        except ProtocolValueError as exc:
+            if exc.reason_code != "payload_too_large":
+                raise
+            # An oversized host body is a coverage loss for exactly this event,
+            # not an unexplained hook fault. Letting it fall through to the
+            # outer handler recorded the bare `observe` reason, which named
+            # neither the cause nor the affected event (issue #667).
+            note_payload_too_large(
+                event_name or "observe", source=source, workspace=workspace, _state=_state
+            )
+            _stdout_json({}, stdout)
+            return 0
         harness_id: Literal["claude", "codex", "cursor"] = (
             "claude"
             if source is ObservationSource.CLAUDE_HOOK
@@ -4469,7 +4565,22 @@ def handle_claude_observe(
         "fork": "claude_session_fork",
     }
     try:
-        payload = read_hook_payload(stdin_bytes)
+        try:
+            payload = read_hook_payload(stdin_bytes)
+        except ProtocolValueError as exc:
+            if exc.reason_code != "payload_too_large":
+                raise
+            # This host ingress swallowed every refusal into a bare `{}` with no
+            # record at all, so an oversized Claude Code event left no trace of
+            # the work it dropped (issue #667).
+            note_payload_too_large(
+                event_map.get(event_name or "", "unknown_event"),
+                source=ObservationSource.CLAUDE_HOOK,
+                workspace=workspace,
+                _state=_state,
+            )
+            hook_io.stdout_json({}, stdout)
+            return 0
         raw_event = event_name or payload.get("hook_event_name")
         if raw_event == "PermissionDenied" and not ordinary_profile:
             # Not an observation of work: the host refused the call before Yoetz saw it. Retain
@@ -4883,10 +4994,23 @@ def handle_cursor_observe(
     try:
         try:
             payload = read_cursor_hook_payload(stdin_bytes)
-        except ProtocolValueError:
+        except ProtocolValueError as exc:
             # Cursor emits vendor-shaped decimal durations. Keep malformed host
             # ingress fail-open, but make the dropped event visible through the
-            # bounded owner-only diagnostic stream.
+            # bounded owner-only diagnostic stream. An ordinary edit to a large
+            # file is rejected here too, and reporting it as a malformed
+            # envelope hid a real coverage loss behind a vendor-shape
+            # complaint (issue #667).
+            if exc.reason_code == "payload_too_large":
+                note_payload_too_large(
+                    event_map.get(event_name or "", "unknown_event"),
+                    source=ObservationSource.CURSOR_HOOK,
+                    workspace=workspace,
+                    _state=_state,
+                )
+                with contextlib.suppress(BaseException):
+                    hook_io.stdout_json({}, stdout)
+                return 0
             with contextlib.suppress(BaseException):
                 record_hook_diagnostic(
                     "cursor_payload_invalid",

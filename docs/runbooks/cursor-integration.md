@@ -558,6 +558,27 @@ Native semantic selection uses the accepted tool event's durable session route a
 require an approved-check policy. Local capture consent and repository disclosure permission
 remain separate requirements.
 
+### Oversized hook payloads (issue #667)
+
+A Cursor hook body over the 256 KiB ingress cap (`MAX_HOOK_STDIN_BYTES`) is refused at stdin,
+before the NUL scan, the UTF-8 decode, and the vendor-decimal parse. An ordinary write to a
+large file reaches this bound: Cursor's native tool input carries the whole file content, and
+the dogfood writes that opened this issue were roughly 389,000 bytes each. The hook stays
+fail-open and Cursor continues. Yoetz records the bounded `cursor_payload_too_large` reason
+against that event in `yoetz observe status` hook diagnostics, and notes the
+`payload_too_large` coverage gap on the consented workspace so receipts and coverage wording
+carry the loss. Before this the same event recorded the generic `cursor_payload_invalid`, which
+reported a real coverage loss as a malformed vendor envelope.
+The cap is fixed and shared by every host; raising it is not an operator control. Each reader
+consumes at most cap-plus-one bytes, so the true size of a refused body is never measured and
+never recorded — the bound itself is the whole fact. Nothing about the event is parsed, so the
+hook name the host supplied on the command line is the only identity the record can carry: no
+tool name, session, or path. The refusal costs exactly that one event; the next ordinary event
+still ingests.
+Retaining a bounded structural envelope for the refused edit, with content explicitly omitted,
+is a separate design-gated change and is not implemented; today an oversized edit is an honest
+gap, not a partial observation.
+
 ### Smart observation selection (issue #687)
 
 Cursor's shared hook ingress applies the selector to the generic tool stream only when the exact
