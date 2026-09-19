@@ -435,9 +435,10 @@ def test_released_version_manifest_2_2_retains_the_0_2_2_inventory() -> None:
 
     assert document["properties"]["schema_version"]["const"] == "2.2.0"
     assert int(_version_manifest_consts(document, "resource_counts")["total"]) == 199
-    assert _version_manifest_consts(document, "request_result_schema_versions")[
-        "control-result"
-    ] == "2.6.0"
+    assert (
+        _version_manifest_consts(document, "request_result_schema_versions")["control-result"]
+        == "2.6.0"
+    )
 
 
 def test_live_version_manifest_2_2_1_tracks_the_current_inventory() -> None:
