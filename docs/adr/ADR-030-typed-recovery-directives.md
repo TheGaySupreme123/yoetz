@@ -3,7 +3,8 @@
 **Status:** Proposed for issue #739; the maintainer requested this scoped work on 2026-09-15,
 including the four-tier classification, the evidence-driven subset plus ratchet, and the
 pointer-with-directive decision. Surface coverage beyond MCP and CLI remains a review decision on
-that issue.
+that issue. Amended for issue #741 (the CLI's own reason vocabulary ratchets too); the maintainer
+requested that scoped work. Surface coverage beyond MCP and CLI remains a review decision on #739.
 
 **Relates to:** ADR-002, ADR-009, ADR-015, ADR-018, and issues #739, #740, #669, #741, #742.
 
@@ -124,6 +125,45 @@ Protocol reason codes (`PROTOCOL_REASON_CODES`) and local lifecycle, instance, a
 import-time failure. Conflating them is a real hazard: three CLI lifecycle reasons were nearly
 registered as protocol reasons while the registry was first written, and the gate is what caught it.
 
+One reason is a genuine member of both namespaces. `service_draining` is a protocol reason code the
+CLI also raises locally; it resolves through the protocol vocabulary, where its disposition is
+already recorded, and is therefore absent from the local map rather than duplicated into it.
+
+### Both reason vocabularies ratchet (issue #741)
+
+The first ratchet covered protocol reason codes only, so the CLI's own vocabulary could still grow
+a reason with nothing for an agent to do — and had: forty of the fifty-four reasons `yoetz.cli.exits`
+could put in front of an operator carried a remediation sentence and no typed directive, so a
+condition explained over MCP was unexplained in a shell. The local vocabulary now carries the same
+obligation. A second import-time gate, in `yoetz.cli.exits` rather than `yoetz.protocol.recovery`
+because that is where the vocabulary lives and layering forbids the protocol package importing the
+CLI, requires every reason in the module's tables to resolve to a directive — through the local map,
+or through the protocol vocabulary for the one reason that belongs to both.
+
+A local reason is keyed to a continuation token like any other, so directive text stays keyed by
+recovery *shape* rather than by reason: the thirteen tokens minted for these reasons cover
+forty-five of them, because "correct the named configuration value and run this again" is one
+instruction whatever field violated it. Only one family is matched by prefix rather than
+enumerated, `vault_result_*`, because its members are generated from service conditions and
+pretending it is a closed set would be a lie about a closed set.
+
+`REMEDIATION_MESSAGES` is **not** retired into the registry, which the issue proposed. It stays as
+the per-reason remedy half beneath the directive, for three reasons recorded here so the question
+is not reopened without them:
+
+- The registry is keyed by continuation token, and `yoetz.protocol.recovery` requires its token set
+  to equal the set the protocol normalizer admits onto the wire. Moving fifty-two per-reason
+  remedies into it would admit fifty-two local-only tokens to the wire vocabulary for reasons that
+  never cross it — the opposite of the narrow-wire decision above.
+- Directives are bounded at 232 ASCII bytes so identity, reason, directive, and pointer fit the
+  512-byte text channel. Five shipped remedies already exceed that bound, and the longest is 344
+  bytes.
+- Several remedy sentences are asserted byte-for-byte by CLI tests that lock what an operator sees.
+
+The two layers say different things and both are kept: the remedy names *which* condition was hit
+and the exact local command for it, the directive names the recovery rule that holds for the shape.
+Where they overlap, the CLI wording is the better-developed one and stays first on the line.
+
 ### Coverage grows by ratchet
 
 Directives are populated for reason codes with demonstrated agent impact rather than by one
@@ -144,6 +184,14 @@ never sacrificed to fit advice.
 
 ## Consequences
 
+- Every human-rendered CLI error path renders directives from one helper: the public-error
+  renderer, the bounded lifecycle line, the trusted-ceremony mapper, the interactive menu, the
+  instance and path refusal line, the observe verbs, and the resource-integrity branch of
+  `version`. A remedy visible on one of seven surfaces is the defect issue #741 reported.
+- JSON renderings carry the continuation token where they already carry `safe_details`, and gain no
+  directive prose. Issue #741 asked for the resolved directive in JSON output; that would make
+  directive text data, which the first decision above exists to prevent, so it is recorded as an
+  open question on that issue rather than implemented.
 - Recovery rules now exist in two places — `guidance/*.md` and this registry — and must move
   together. The guidance-anchor test couples them; a directive that contradicts its own guidance
   section is a documentation bug, not a rendering one.

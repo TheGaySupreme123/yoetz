@@ -26,12 +26,14 @@ from yoetz.protocol.models import PublicErrorModel
 from yoetz.protocol.recovery import (
     CLAIM_REVISION_CORRECTIONS,
     CONTINUATION_TOKENS,
+    LOCAL_REASON_CONTINUATION_PREFIXES,
     RECOVERY_DIRECTIVES,
     continuation_for_local_reason,
     continuation_for_reason,
     correction_for_invariant,
     covered_reason_codes,
     directive_for,
+    local_reason_has_disposition,
     timeout_operation_kind,
 )
 
@@ -394,3 +396,89 @@ def test_lineage_reasons_attach_a_directive_without_weakening_the_ratchet(
     projected = summary_for_public_error(_error(**dict(error.safe_details)))
     assert token in projected
     assert RECOVERY_DIRECTIVES[token].directive in projected
+
+
+class TestLocalReasonRatchet:
+    """The second ratchet (issue #741): the CLI's own reason vocabulary.
+
+    #743 shipped the renderer and registered fourteen local reasons. The other forty carried a
+    ``REMEDIATION_MESSAGES`` sentence and no typed directive, so the same condition that got a
+    directive over MCP got none in a shell. These tests hold the closed set closed.
+    """
+
+    def test_every_remediation_and_refusal_reason_resolves_to_a_directive(self) -> None:
+        from yoetz.cli.exits import CEREMONY_REFUSAL_MESSAGES, REMEDIATION_MESSAGES
+
+        for reason in sorted(set(REMEDIATION_MESSAGES) | set(CEREMONY_REFUSAL_MESSAGES)):
+            assert local_reason_has_disposition(reason), reason
+
+    def test_every_reason_the_cli_can_print_resolves_to_a_directive(self) -> None:
+        """Lifecycle and instance public-code tables reach an operator too."""
+
+        from yoetz.cli.exits import LOCAL_REASONS
+
+        for reason in sorted(LOCAL_REASONS):
+            assert local_reason_has_disposition(reason), reason
+
+    def test_one_reason_is_answered_only_through_the_protocol_vocabulary(self) -> None:
+        """``service_draining`` is a protocol reason code the CLI also raises.
+
+        Its disposition was recorded on the protocol side as owned by a later sub-issue of #739,
+        so it must resolve there and stay out of the local map, which the disjointness gate
+        enforces.
+        """
+
+        from yoetz.cli.exits import LOCAL_REASONS
+
+        through_protocol = {
+            reason
+            for reason in LOCAL_REASONS
+            if continuation_for_local_reason(reason) is None
+            and local_reason_has_disposition(reason)
+        }
+        assert through_protocol == {"service_draining"}
+
+    def test_a_new_local_reason_without_a_directive_fails_at_import(self) -> None:
+        import yoetz.cli.exits as exits
+
+        original = exits.LOCAL_REASONS
+        exits.LOCAL_REASONS = frozenset(original | {"a_reason_nobody_dispositioned"})
+        try:
+            with pytest.raises(RuntimeError, match="local_reason_without_recovery_disposition"):
+                exits._check_local_reason_coverage()  # pyright: ignore[reportPrivateUsage]
+        finally:
+            exits.LOCAL_REASONS = original
+
+    def test_the_vault_result_family_resolves_through_its_prefix(self) -> None:
+        """The one generated family: enumerating it would be a lie about a closed set."""
+
+        assert LOCAL_REASON_CONTINUATION_PREFIXES == (("vault_result_", "ceremony_result_invalid"),)
+        for reason in ("vault_result_throttle_record_exists", "vault_result_keyring_unavailable"):
+            assert continuation_for_local_reason(reason) == "ceremony_result_invalid"
+        assert continuation_for_local_reason("vault_result_") is None
+        assert continuation_for_local_reason("vault_result") is None
+
+    def test_local_tokens_are_never_attached_by_a_protocol_reason(self) -> None:
+        """The two vocabularies stay disjoint at the value end as well as the key end."""
+
+        local_only = {
+            "ceremony_refusal_terminal",
+            "ceremony_result_invalid",
+            "config_correction_required",
+            "consent_outcome_unconfirmed",
+            "consent_relay_correction",
+            "instance_identity_repair",
+            "instance_request_correction",
+            "local_service_unavailable",
+            "local_state_repair",
+            "pending_decision_in_flight",
+            "pending_decision_refresh",
+            "provider_setup_required",
+            "vault_unlock_required",
+        }
+        assert local_only <= CONTINUATION_TOKENS
+        assert local_only & set(REASON_CODE_CONTINUATIONS.values()) == set()
+
+    def test_non_string_input_is_refused(self) -> None:
+        assert local_reason_has_disposition(None) is False
+        assert local_reason_has_disposition("not_a_reason_at_all") is False

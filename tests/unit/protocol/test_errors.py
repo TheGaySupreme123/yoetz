@@ -958,7 +958,9 @@ def test_initialization_continuation_details_are_closed_literals() -> None:
         "review_command": "yoetz consent review",
     }
     hostile = (
-        ("continuation", "vault_unlock_required"),
+        # A plausible near-miss of the admitted token, chosen so it stays unregistered: issue
+        # #741 minted a real ``vault_unlock_required``, which is no longer hostile.
+        ("continuation", "vault_initialization_optional"),
         ("continuation", "vault_initialization_required "),
         ("prepare_command", "yoetz consent prepare vault_passphrase_rotate"),
         ("prepare_command", "rm -rf /; yoetz consent prepare vault_initialize"),

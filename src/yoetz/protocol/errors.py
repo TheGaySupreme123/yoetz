@@ -455,6 +455,24 @@ ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
         "lineage_service_review",
         "lineage_state_refresh",
         "lineage_terminal_review",
+        # Local CLI lifecycle, instance, and ceremony continuations (issue #741). These are
+        # reached through ``continuation_for_local_reason`` rather than a reason code, so no
+        # producer attaches them to a public error today; they are admitted here because
+        # ``yoetz.protocol.recovery`` requires the registry and this set to be equal, which is
+        # what keeps a token from ever being admitted onto the wire without a directive behind it.
+        "ceremony_refusal_terminal",
+        "ceremony_result_invalid",
+        "config_correction_required",
+        "consent_outcome_unconfirmed",
+        "consent_relay_correction",
+        "instance_identity_repair",
+        "instance_request_correction",
+        "local_service_unavailable",
+        "local_state_repair",
+        "pending_decision_in_flight",
+        "pending_decision_refresh",
+        "provider_setup_required",
+        "vault_unlock_required",
     }
 )
 

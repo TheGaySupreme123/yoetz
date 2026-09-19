@@ -36,13 +36,14 @@ from yoetz.cli.bootstrap import (
     stdout_json as _shared_stdout_json,
 )
 from yoetz.cli.exits import (
-    ceremony_refusal_message,
     exit_code_for,
     lifecycle_public_code,
     remediation_message,
 )
 from yoetz.cli.project import project_app
 from yoetz.cli.render import (
+    bounded_failure_line,
+    ceremony_refusal_line,
     render_human_awaiting_human,
     render_human_check,
     render_human_error,
@@ -559,16 +560,14 @@ def _machine_scope_request_or_none() -> JsonObject | None:
 
 
 def _bounded_failure_line(reason: str, *, prefix: str | None = None) -> str:
-    """Render one bounded token with its remediation; the token itself stays first.
+    """Render one bounded token with its remediation and its recovery directive.
 
-    When the reason has a registered recovery directive (ADR-030), the directive lines follow on
-    their own lines, so a lifecycle refusal the MCP bridge would explain is explained here too.
+    One shape for every human-rendered CLI refusal, shared with ``menu``, ``instance``, and
+    ``observe`` so a lifecycle refusal the MCP bridge would explain is explained here too
+    (issue #741).
     """
 
-    head = reason if prefix is None else f"{prefix}: {reason}"
-    remediation = remediation_message(reason)
-    line = head if remediation is None else f"{head}: {remediation}"
-    return "\n".join([line, *render_local_recovery_lines(reason)])
+    return bounded_failure_line(reason, prefix=prefix)
 
 
 def _codex_subscription_cli_failure(error: BaseException) -> None:
@@ -2589,8 +2588,9 @@ def _trusted_exception_failure(error: Exception) -> int | None:
             return exit_code_for(PublicErrorCode.INTERNAL_ERROR)
         # A ceremony that could not find a console it owns is not malformed input. Reporting it
         # as invalid_request sent operators looking for a bad flag they never typed.
-        if remediation_message(reason) is not None:
-            _stderr(_bounded_failure_line(reason))
+        line = _bounded_failure_line(reason)
+        if line != reason:
+            _stderr(line)
             return exit_code_for(PublicErrorCode.INVALID_REQUEST)
         return _usage_failure()
     if isinstance(error, client_error):
@@ -2598,7 +2598,7 @@ def _trusted_exception_failure(error: Exception) -> int | None:
         if reason == "cancelled":
             _stderr("cancelled")
             return exit_code_for("cancelled")
-        ceremony_refusal = ceremony_refusal_message(reason)
+        ceremony_refusal = ceremony_refusal_line(reason)
         if ceremony_refusal is not None:
             _stderr(ceremony_refusal)
             return exit_code_for(PublicErrorCode.INVALID_REQUEST)
@@ -4046,6 +4046,8 @@ def version_command(
         remediation = remediation_message(error.reason)
         if remediation is not None:
             _stderr(f"version: remediation: {remediation}")
+        for line in render_local_recovery_lines(error.reason):
+            _stderr(f"version: {line}")
         raise typer.Exit(1) from None
     except ImportError:
         _stdout_json({"package_name": "yoetz", "package_version": __version__})
