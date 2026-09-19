@@ -14,6 +14,7 @@ from yoetz.domain.observation import (
 )
 from yoetz.domain.values import JsonObject, Timestamp
 from yoetz.kernel.policies.observation_advice import (
+    ObservationAdviceCandidate,
     ObservationAdviceContext,
     ObservationCheckFact,
     ObservationCompositionFact,
@@ -167,12 +168,14 @@ def test_conflicting_stream_output_uses_originating_tool_name() -> None:
 
 
 def test_completion_uses_originating_tool_for_successful_stream_output() -> None:
+    """The output row inherits the originating call's verification tool."""
+
     envelopes = (
         _envelope(
             "response_item",
             pos=1,
             identity="stream:call-success",
-            payload={"action": "function_call", "tool_name": "shell", "tool_call_id": "call-3"},
+            payload={"action": "function_call", "tool_name": "pytest", "tool_call_id": "call-3"},
         ),
         _envelope(
             "response_item",
@@ -264,7 +267,7 @@ def test_edit_after_successful_check() -> None:
             "PostToolUse",
             pos=1,
             identity="hook:check",
-            payload={"tool_name": "shell", "exit_status": 0},
+            payload={"tool_name": "pytest", "exit_status": 0},
         ),
         _envelope(
             "PostToolUse",
@@ -286,6 +289,305 @@ def test_edit_after_successful_check() -> None:
     )
     assert any(item.rule_code == "edit_after_successful_check" for item in findings)
     assert any(item.kind is FindingKind.STALE_EVIDENCE_FOR_CHANGED_STATE for item in findings)
+
+
+def _passed_check(*, at: int = 1) -> ObservationCheckFact:
+    """One current passed approved-check fact: the typed verification baseline."""
+
+    return ObservationCheckFact(
+        approval_commitment=_DIGEST,
+        subject_state_digest=_DIGEST,
+        status="passed",
+        cursor_event_position=at,
+    )
+
+
+def _stale_candidates(
+    envelopes: tuple[ObservationEnvelope, ...],
+    checks: tuple[ObservationCheckFact, ...] = (),
+) -> tuple[ObservationAdviceCandidate, ...]:
+    return tuple(
+        item
+        for item in observation_advice_findings(
+            ObservationAdviceContext(
+                envelopes=envelopes,
+                lifecycle=ObservationLifecycle.ACTIVE,
+                gaps=(),
+                check_facts=checks,
+            )
+        )
+        if item.rule_code == "edit_after_successful_check"
+    )
+
+
+def _paired_edit(
+    *,
+    call_id: str,
+    pre_pos: int,
+    post_pos: int,
+    prefix: str = "hook",
+) -> tuple[ObservationEnvelope, ObservationEnvelope]:
+    """One logical host edit observed as a PreToolUse/PostToolUse pair."""
+
+    return (
+        _envelope(
+            "PreToolUse",
+            pos=pre_pos,
+            identity=f"{prefix}:{call_id}-pre",
+            payload={
+                "tool_name": "Write",
+                "tool_call_id": call_id,
+                "action": "claude_tool_pending",
+                "changed_paths_digest": _DIGEST,
+            },
+        ),
+        _envelope(
+            "PostToolUse",
+            pos=post_pos,
+            identity=f"{prefix}:{call_id}-post",
+            payload={
+                "tool_name": "Write",
+                "tool_call_id": call_id,
+                "action": "claude_tool_success",
+                "success": True,
+                "changed_paths_digest": _DIGEST,
+            },
+        ),
+    )
+
+
+def test_paired_edit_phases_yield_one_stale_candidate() -> None:
+    """Issue #680: pre/post phases of one host edit are one condition."""
+
+    candidates = _stale_candidates(
+        _paired_edit(call_id="call-1", pre_pos=2, post_pos=3), (_passed_check(),)
+    )
+    assert len(candidates) == 1
+    # Both mapped phases prove the one condition without identifying it.
+    assert candidates[0].evidence_refs == ("hook:call-1-post", "hook:call-1-pre")
+
+
+def test_stale_candidate_identity_survives_a_growing_evidence_window() -> None:
+    pre, post = _paired_edit(call_id="call-1", pre_pos=2, post_pos=3)
+    pre_only = _stale_candidates((pre,), (_passed_check(),))
+    paired = _stale_candidates((pre, post), (_passed_check(),))
+    assert len(pre_only) == 1
+    assert len(paired) == 1
+    assert pre_only[0].detail_token == paired[0].detail_token
+
+
+def test_distinct_tool_calls_remain_distinct_stale_candidates() -> None:
+    candidates = _stale_candidates(
+        (
+            *_paired_edit(call_id="call-1", pre_pos=2, post_pos=3),
+            *_paired_edit(call_id="call-2", pre_pos=4, post_pos=5),
+        ),
+        (_passed_check(),),
+    )
+    assert len({item.detail_token for item in candidates}) == 2
+
+
+def test_reused_call_id_across_generations_does_not_coalesce() -> None:
+    first_pre, first_post = _paired_edit(call_id="call-1", pre_pos=2, post_pos=3)
+    later_pre, later_post = _paired_edit(call_id="call-1", pre_pos=4, post_pos=5, prefix="gen2")
+    later_pre = replace(later_pre, cursor=replace(later_pre.cursor, source_generation=2))
+    later_post = replace(later_post, cursor=replace(later_post.cursor, source_generation=2))
+    candidates = _stale_candidates(
+        (first_pre, first_post, later_pre, later_post), (_passed_check(),)
+    )
+    assert len({item.detail_token for item in candidates}) == 2
+
+
+def test_post_only_profile_emits_one_candidate_for_its_one_phase() -> None:
+    """Cursor's current post-only profile needs no fabricated pre-event."""
+
+    edit = _envelope(
+        "PostToolUse",
+        pos=2,
+        identity="cursor:edit",
+        payload={
+            "tool_name": "Write",
+            "action": "claude_tool_success",
+            "success": True,
+            "changed_paths_digest": _DIGEST,
+        },
+    )
+    candidates = _stale_candidates((edit,), (_passed_check(),))
+    assert len(candidates) == 1
+    assert candidates[0].evidence_refs == ("cursor:edit",)
+
+
+def _shell(*, pos: int, identity: str, routine: bool, tool: str = "Bash") -> ObservationEnvelope:
+    payload: dict[str, object] = {
+        "tool_name": tool,
+        "success": True,
+        "correlation_id": identity,
+    }
+    if routine:
+        payload["action"] = "routine_read"
+    return _envelope("PostToolUse", pos=pos, identity=identity, payload=payload)
+
+
+def _edit(*, pos: int, identity: str) -> ObservationEnvelope:
+    return _envelope(
+        "PostToolUse",
+        pos=pos,
+        identity=identity,
+        payload={
+            "tool_name": "Write",
+            "action": "claude_tool_success",
+            "success": True,
+            "changed_paths_digest": _DIGEST,
+            "correlation_id": identity,
+        },
+    )
+
+
+def test_routine_read_does_not_establish_a_verification_baseline() -> None:
+    """Issue #681: a successful routine read is not a check."""
+
+    envelopes = (
+        _shell(pos=1, identity="read-1", routine=True),
+        _edit(pos=2, identity="write-1"),
+    )
+    assert _stale_candidates(envelopes) == ()
+
+
+def test_successful_shell_command_does_not_establish_a_verification_baseline() -> None:
+    """A generic host shell returning zero proves an exit code, not a check."""
+
+    envelopes = (
+        _shell(pos=1, identity="cmd-1", routine=False),
+        _edit(pos=2, identity="write-1"),
+    )
+    assert _stale_candidates(envelopes) == ()
+
+
+def test_detailed_mode_routine_read_without_the_marker_is_still_not_a_check() -> None:
+    """Detailed mode keeps ``function_call_output``; the tool identity still governs."""
+
+    envelopes = (
+        _envelope(
+            "PostToolUse",
+            pos=1,
+            identity="stream:read-1",
+            payload={
+                "action": "function_call_output",
+                "tool_name": "shell",
+                "tool_call_id": "call-1",
+                "exit_status": 0,
+            },
+        ),
+        _edit(pos=2, identity="write-1"),
+    )
+    assert _stale_candidates(envelopes) == ()
+
+
+def test_verification_tool_success_still_establishes_a_baseline() -> None:
+    envelopes = (
+        _shell(pos=1, identity="check-1", routine=False, tool="pytest"),
+        _edit(pos=2, identity="write-1"),
+    )
+    assert len(_stale_candidates(envelopes)) == 1
+
+
+def test_routine_read_does_not_move_a_check_fact_baseline() -> None:
+    """A later routine read neither clears nor carries the baseline past an edit."""
+
+    envelopes = (
+        _edit(pos=2, identity="write-1"),
+        _shell(pos=3, identity="read-1", routine=True),
+    )
+    assert len(_stale_candidates(envelopes, (_passed_check(),))) == 1
+
+
+def test_only_a_current_passed_check_fact_establishes_a_baseline() -> None:
+    edit = _edit(pos=5, identity="write-1")
+    for status in ("passed_not_current", "failed", "stale", "unknown"):
+        assert (
+            _stale_candidates(
+                (edit,),
+                (
+                    ObservationCheckFact(
+                        approval_commitment=_DIGEST,
+                        subject_state_digest=_DIGEST,
+                        status=status,
+                        cursor_event_position=1,
+                    ),
+                ),
+            )
+            == ()
+        )
+    assert (
+        _stale_candidates(
+            (edit,),
+            (
+                ObservationCheckFact(
+                    approval_commitment=_DIGEST,
+                    subject_state_digest=_DIGEST,
+                    status="passed",
+                    cursor_event_position=1,
+                    is_current=False,
+                ),
+            ),
+        )
+        == ()
+    )
+    assert len(_stale_candidates((edit,), (_passed_check(),))) == 1
+
+
+def test_completion_after_only_a_routine_read_remains_unverified() -> None:
+    """Issue #681: a routine read cannot support a completion claim."""
+
+    envelopes = (
+        _shell(pos=1, identity="read-1", routine=True),
+        _envelope(
+            "PostToolUse", pos=2, identity="hook:claim", payload={"claim_kind": "completion"}
+        ),
+    )
+    assert "completion_without_verification" in _rules(
+        ObservationAdviceContext(
+            envelopes=envelopes,
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+        )
+    )
+
+
+def test_completion_after_only_a_successful_shell_command_remains_unverified() -> None:
+    envelopes = (
+        _shell(pos=1, identity="cmd-1", routine=False),
+        _envelope(
+            "PostToolUse", pos=2, identity="hook:claim", payload={"claim_kind": "completion"}
+        ),
+    )
+    assert "completion_without_verification" in _rules(
+        ObservationAdviceContext(
+            envelopes=envelopes,
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+        )
+    )
+
+
+def test_failed_shell_command_advice_is_unchanged_by_check_qualification() -> None:
+    """#681 narrows what proves a check, not which commands report outcomes."""
+
+    rules = _rules(
+        ObservationAdviceContext(
+            envelopes=(
+                _envelope(
+                    "PostToolUse",
+                    pos=1,
+                    identity="hook:fail-bash",
+                    payload={"tool_name": "bash", "exit_status": 1, "correlation_id": "c9"},
+                ),
+            ),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+        )
+    )
+    assert "failed_command_unresolved" in rules
 
 
 def test_completion_without_verification() -> None:

@@ -453,6 +453,17 @@ or session ownership. The original observation reference remains attached as evi
 unambiguous annotation is available, advice retains that observation reference without inventing
 a lineage identity.
 
+Stale-verification advice is scoped to the logical tool call, not to the observed phase. A Codex
+`function_call`/`function_call_output` pair, and the hook pre/post pair, share one correlation
+identity, so one edit reports one `edit_after_successful_check` finding whose evidence refs name
+each observed phase; the originating call's tool name resolves the pair exactly as it already does
+for unresolved-command advice (issue #680).
+A successful Codex `shell` call is a command outcome, not a check. Deterministic advice moves its
+verification baseline only on a current `passed` approved-check fact or an explicit success from a
+dedicated verification tool, and a routine read never moves it — including in Detailed mode, where
+a routine read keeps its `function_call_output` action and carries no routine marker (issue #681).
+Unresolved-command advice still reads every `shell` outcome.
+
 Native child tool callbacks can carry the parent's host session ID together with a child
 `agent_id`. A successful delegated `start` preserves the parent mapping: its task result names the
 reserved child, but its session and writer still belong to `parent_task_id`. A successful child
