@@ -23,6 +23,13 @@ yoetz provider endpoint --provider openai            # or: fireworks, anthropic,
 
 Shorthands: `--official`, `--fireworks`, and `--grok` (Grok / xAI).
 
+The Grok / xAI preset binds xAI's OpenAI-compatible Chat Completions endpoint. xAI documents that
+endpoint as legacy and says new features reach its Responses API first; it publishes no sunset
+date. Yoetz keeps the preset on Chat Completions: the route is still documented and served, and it
+is the route whose data-use posture Yoetz reviewed. Giving the preset a Responses route would
+change the endpoint it binds, so that is a separate change with its own review — refreshing the
+suggested models does not depend on it.
+
 Reviewed presets use each provider's documented compatible wire style where applicable. **Every
 reviewed preset resolves to a real runtime factory** — a preset you can select is a preset Yoetz can
 dispatch.
@@ -199,6 +206,11 @@ The catalog was reviewed on 2026-08-10 against the provider-owned model sources:
 [model catalog contract](https://openrouter.ai/docs/guides/overview/models), xAI's
 [model list](https://docs.x.ai/developers/models), and Vercel's
 [AI Gateway model catalog](https://vercel.com/ai-gateway/models).
+The Grok / xAI entry was re-reviewed on 2026-09-17 against the same xAI model list: `grok-4.6` is
+the model xAI now recommends, so it is the preset default and heads the list, and the older Grok
+models stay listed while xAI lists them. The Grok entries inside the OpenRouter and Vercel AI
+Gateway lists were re-reviewed against those gateways' own published catalogs on the same day and
+follow the identifier each gateway publishes today, which is not always the identifier xAI uses.
 The Fireworks list also retains `accounts/fireworks/models/minimax-m3`, which has prior
 repository-recorded live semantic provenance. The lists are static so setup stays deterministic
 and opens no new network or credential channel; they can age, may not match account entitlements,
