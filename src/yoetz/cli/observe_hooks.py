@@ -612,6 +612,11 @@ def _extract_structural(
         flag = _bool_or_none(payload.get(key))
         if flag is not None:
             fields[key] = flag
+    # Classification can prove success from nested host result aliases (for example
+    # tool_response.exit_code). Preserve that bounded fact beside the routine marker:
+    # summary construction revalidates the persisted envelope after process restart.
+    if selected.proven_routine_success:
+        fields["success"] = True
     # Permission outcome aliases commonly seen in host payloads.
     decision = _token_or_none(payload.get("decision"))
     if decision is not None and "permission_decision" not in fields:

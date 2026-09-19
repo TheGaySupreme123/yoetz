@@ -5354,3 +5354,8 @@ generation, subject-state digest, and protected-read reference. Selection route 
 all present or all absent. Routine summaries use the existing closed summary schema; individual
 observations remain closed to unknown fields. Domain and service route/authority validation
 remain mandatory. Released request 2.6.0 bytes and the hello contract remain unchanged.
+
+Routine-read classification persists its proven success bit when the native outcome was nested.
+Summary construction still revalidates that bit. A legacy buffered group that cannot prove a
+summary is delivered as its original individual observations, in source order, without inventing
+success or dropping accepted records. One invalid summary no longer blocks later hook ingestion.
