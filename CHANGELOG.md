@@ -4,7 +4,23 @@ All notable user-visible changes to Yoetz are documented in this file. Format is
 project-native heading style that marks the pending version as unreleased above
 reverse-chronological released versions.
 
-## Unreleased
+## Unreleased — 0.2.3 stabilization candidate
+
+Repairs to existing 0.2 behavior; no 0.3 feature merge. Publication remains gated by the
+verification limits in [candidate notes](docs/releases/v0.2.3.md) and issue #786.
+
+- Privacy receipt list/get render stored timestamps and local disclosure purposes correctly
+  (#731, #732).
+- Codex setup registers MCP in the selected home and reconfirms a refreshed preview when plugin
+  activation changes the effective entry (#759, #786).
+- Newer Codex fractional metadata no longer discards the surrounding transcript record (#754).
+- Cursor project registration uses the exact project path so Agent CLI can initialize the same
+  bridge as the IDE; existing placeholder registrations remain upgradeable (#786).
+- Local transport preserves retryable send failures and consumes pending request errors (#678).
+- Local control accepts the existing selected-observation envelopes and bounded routine summaries,
+  preserving route validation and rejecting unknown structural fields (#786).
+- Routine-read outcomes survive structural mapping; legacy unqualifiable summary buffers drain
+  as original records instead of blocking later hook observations (#786).
 
 ## 0.2.2 — 2026-09-18
 
