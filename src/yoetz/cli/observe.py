@@ -7,7 +7,7 @@ import errno
 import functools
 import os
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal, ParamSpec, Protocol, cast
@@ -47,6 +47,7 @@ from yoetz.application.observation_drain import (
 from yoetz.application.observation_verification import run_bound_approved_check
 from yoetz.cli.exits import exit_code_for, remediation_message
 from yoetz.cli.hook_diagnostics import hook_diagnostic_summary
+from yoetz.cli.render import render_error_recovery_lines, render_local_recovery_lines
 from yoetz.config.paths import PathSafetyError
 from yoetz.domain.observation import (
     ObservationControlCommand,
@@ -195,11 +196,15 @@ def _typed_failure(
     message: str,
     retryable: bool,
     json_output: bool,
+    recovery_lines: Sequence[str] = (),
 ) -> int:
     """Report one bounded failure that names its layer, never `internal_error` (#428).
 
     The token comes first so existing machine-readable expectations hold; the
-    remediation follows it. JSON callers get the same facts as one object.
+    remediation follows it, and the typed recovery directive follows that on its
+    own lines (ADR-030, issue #741). JSON callers get the same facts as one
+    object: the directive is text a renderer reconstructs from a token, so it is
+    not copied into the structured body.
     """
 
     if json_output:
@@ -216,7 +221,8 @@ def _typed_failure(
             json_output=True,
         )
     else:
-        typer.echo(f"observation_{operation}_failed:{reason}: {message}", err=True)
+        lines = [f"observation_{operation}_failed:{reason}: {message}", *recovery_lines]
+        typer.echo("\n".join(lines), err=True)
     return exit_code_for(code)
 
 
@@ -245,6 +251,7 @@ def _bounded_operation(operation: str) -> Callable[[Callable[_P, int]], Callable
                     message=remediation_message("workspace_unresolvable") or "",
                     retryable=False,
                     json_output=json_output,
+                    recovery_lines=render_local_recovery_lines("workspace_unresolvable"),
                 )
             except PathSafetyError:
                 return _typed_failure(
@@ -254,6 +261,7 @@ def _bounded_operation(operation: str) -> Callable[[Callable[_P, int]], Callable
                     message=remediation_message("storage_unsafe") or "",
                     retryable=False,
                     json_output=json_output,
+                    recovery_lines=render_local_recovery_lines("storage_unsafe"),
                 )
             except PublicOperationError as error:
                 return _typed_failure(
@@ -263,6 +271,7 @@ def _bounded_operation(operation: str) -> Callable[[Callable[_P, int]], Callable
                     message=error.message,
                     retryable=error.retryable,
                     json_output=json_output,
+                    recovery_lines=render_error_recovery_lines(error.safe_details),
                 )
             except BrokenPipeError:
                 # A closed output consumer is not an observation-store failure.
@@ -276,6 +285,7 @@ def _bounded_operation(operation: str) -> Callable[[Callable[_P, int]], Callable
                         message=remediation_message("storage_unsafe") or "",
                         retryable=False,
                         json_output=json_output,
+                        recovery_lines=render_local_recovery_lines("storage_unsafe"),
                     )
                 return _typed_failure(
                     operation,
@@ -284,6 +294,7 @@ def _bounded_operation(operation: str) -> Callable[[Callable[_P, int]], Callable
                     message=remediation_message("storage_unavailable") or "",
                     retryable=True,
                     json_output=json_output,
+                    recovery_lines=render_local_recovery_lines("storage_unavailable"),
                 )
 
         return wrapped

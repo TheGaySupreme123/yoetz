@@ -10,7 +10,11 @@ correctly, and the one fact that explained what to do next never reached them.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
+import typer
 
 from yoetz.cli.app import _trusted_exception_failure
 from yoetz.cli.exits import ceremony_refusal_message, exit_code_for, remediation_message
@@ -254,3 +258,149 @@ def test_secret_rejected_names_the_credential_and_the_retry() -> None:
     assert message is not None
     assert "not accepted" in message
     assert "yoetz provider credential set" in message
+
+
+class TestEveryHumanCliErrorCarriesADirective:
+    """Issue #741: `REMEDIATION_MESSAGES` reached a subset of call sites and no directive.
+
+    #743 gave `render_human_error` and one lifecycle helper their directive lines. These are the
+    remaining human-rendered CLI surfaces: the trusted-ceremony mapper, the interactive menu, the
+    instance/path refusal line, the observe verbs, and `yoetz version`. A remedy an agent only
+    sees on one of five surfaces is the defect this class exists to catch.
+    """
+
+    def test_a_declined_ceremony_names_its_continuation(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        code = _trusted_exception_failure(ConfidentialClientError("kind_forbidden"))
+
+        captured = capsys.readouterr().err
+        assert "kind_forbidden: that ceremony is not permitted" in captured
+        assert "Continuation: ceremony_refusal_terminal" in captured
+        assert "Guidance: yoetz://guidance/request-templates.md#setup-and-consent" in captured
+        assert code == exit_code_for(PublicErrorCode.INVALID_REQUEST)
+
+    def test_a_console_refusal_names_its_continuation(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _trusted_exception_failure(HumanCeremonyCliError("trusted_console_required"))
+
+        captured = capsys.readouterr().err
+        assert captured.startswith("trusted_console_required: ")
+        assert "Continuation: consent_ceremony_required" in captured
+
+    def test_a_reason_with_only_a_directive_still_renders_one(self) -> None:
+        """A reason carries a remedy, a directive, or both; the line must not require the first.
+
+        The call sites used to gate on `remediation_message(...) is not None`, so a reason whose
+        only answer lives in the registry would have fallen through to a generic input complaint.
+        """
+
+        from yoetz.cli.exits import remediation_message
+        from yoetz.cli.render import bounded_failure_line
+
+        assert remediation_message("vault_locked") is None
+        line = bounded_failure_line("vault_locked")
+
+        assert line.splitlines()[0] == "vault_locked"
+        assert "Continuation: vault_unlock_required" in line
+
+    def test_a_reason_with_neither_is_returned_bare_so_a_caller_can_tell(self) -> None:
+        from yoetz.cli.render import bounded_failure_line
+
+        assert bounded_failure_line("confirmation_mismatch") == "confirmation_mismatch"
+
+    def test_the_menu_renders_the_same_refusal_as_the_command_tree(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from yoetz.cli import menu
+
+        async def refuse() -> object:
+            raise ConfidentialClientError("pending_unavailable")
+
+        menu._run_ceremony(refuse)
+
+        captured = capsys.readouterr().err
+        assert "pending_unavailable: that pending decision no longer exists" in captured
+        assert "Continuation: pending_decision_refresh" in captured
+
+    def test_the_menu_renders_a_bounded_setup_token_with_its_directive(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from yoetz.cli import menu
+
+        async def refuse() -> object:
+            raise ValueError("provider_not_configured")
+
+        menu._run_ceremony(refuse)
+
+        captured = capsys.readouterr().err
+        assert captured.startswith("provider_not_configured: ")
+        assert "yoetz --set" in captured
+        assert "Continuation: provider_setup_required" in captured
+
+    def test_the_menu_still_falls_back_for_a_token_nothing_is_known_about(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from yoetz.cli import menu
+
+        async def refuse() -> object:
+            raise ValueError("confirmation_mismatch")
+
+        menu._run_ceremony(refuse)
+
+        assert capsys.readouterr().err.strip() == "invalid_request: the ceremony input is invalid"
+
+    def test_an_instance_refusal_names_its_continuation(self) -> None:
+        from yoetz.cli.instance import instance_failure_line
+        from yoetz.config.paths import PathSafetyError
+
+        line = instance_failure_line(PathSafetyError("path_on_network_filesystem"))
+
+        assert line.startswith("path_on_network_filesystem: ")
+        assert "Continuation: local_state_repair" in line
+        assert "Next: Yoetz could not safely open local state" in line
+
+    def test_an_observe_refusal_names_its_continuation(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from yoetz.cli import observe as observe_cli
+
+        code = observe_cli.observe_status(workspace="", json_output=False, _state=tmp_path)
+
+        captured = capsys.readouterr().err
+        assert code == exit_code_for(PublicErrorCode.INVALID_REQUEST)
+        assert captured.startswith("observation_status_failed:workspace_unresolvable: ")
+        assert "Continuation: storage_root_unsafe" in captured
+
+    def test_an_observe_json_failure_carries_no_directive_prose(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """ADR-030: the token travels and the text does not, so JSON keeps its shape."""
+
+        from yoetz.cli import observe as observe_cli
+
+        observe_cli.observe_status(workspace="", json_output=True, _state=tmp_path)
+
+        body = json.loads(capsys.readouterr().out)["error"]
+        assert set(body) == {"code", "message", "operation", "reason", "retryable"}
+        assert "Continuation:" not in json.dumps(body)
+
+    def test_a_resource_integrity_version_failure_names_its_continuation(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import yoetz
+        from yoetz.cli.app import version_command
+        from yoetz.version import ResourceIntegrityError
+
+        def refuse() -> object:
+            raise ResourceIntegrityError("resource_missing")
+
+        monkeypatch.setattr(yoetz, "get_version_manifest", refuse)
+        with pytest.raises(typer.Exit):
+            version_command(json_output=True)
+
+        captured = capsys.readouterr().err
+        assert captured.startswith("version: FAIL (resource_missing)")
+        assert "version: remediation: a reviewed installed resource is absent" in captured
+        assert "version: Continuation: resource_integrity_repair" in captured

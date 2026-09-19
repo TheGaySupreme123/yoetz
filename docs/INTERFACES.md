@@ -232,12 +232,35 @@ A coverage ratchet requires every member of `PROTOCOL_REASON_CODES` to resolve t
 carry an explicit exemption, so a newly registered reason code cannot reach an agent as a bare
 token with nothing to do about it.
 
+The local vocabulary ratchets the same way (issue #741). `yoetz.cli.exits` fails at import unless
+every reason it can put in front of an operator — the keys of `REMEDIATION_MESSAGES`,
+`CEREMONY_REFUSAL_MESSAGES`, `LIFECYCLE_PUBLIC_CODES`, and `INSTANCE_PUBLIC_CODES`, plus the named
+configuration-constraint set — resolves to a directive. The gate lives there rather than in
+`yoetz.protocol.recovery` because the protocol package may not import the CLI. A local reason is
+answered through `continuation_for_local_reason`, or, for the one reason that belongs to both
+namespaces (`service_draining`), through the protocol disposition already recorded for it. The one
+generated family, `vault_result_*`, is matched by the prefix registered in
+`LOCAL_REASON_CONTINUATION_PREFIXES`; every other local reason is enumerated. Thirteen tokens are
+reachable only through the local vocabulary, and no reason code attaches them to a public error.
+
+`REMEDIATION_MESSAGES` remains the per-reason remedy half and is not folded into the registry: the
+registry is keyed by continuation token and its token set must equal the wire-admitted set, its
+directives are bounded at 232 ASCII bytes, and several remedy sentences are byte-locked by CLI
+tests. The remedy names which condition was hit and its exact local command; the directive names
+the recovery rule for that shape. Both render, remedy first.
+
 On the 512-byte MCP text channel the directive is budgeted after the identity and reason clauses,
 and optional parts are dropped from the least load-bearing end — nudge, then guidance pointer, then
 carried commands. The error identity is never dropped to fit advice. The CLI has no such ceiling
 and renders `Continuation:`, `Next:`, `Commands:`, `Guidance:`, and the nudge on separate lines
 beneath the existing `CODE: message` line, and appends the same lines to a bounded lifecycle,
-instance, or ceremony refusal line whose local reason has a registered directive. Frozen command
+instance, or ceremony refusal line whose local reason has a registered directive. Every
+human-rendered CLI error path goes through one of `render_human_error`, `bounded_failure_line`, or
+`ceremony_refusal_line` in `yoetz.cli.render`, so the public-error renderer, the trusted-ceremony
+mapper, the interactive menu, the instance and path refusal line, the observe verbs, and the
+resource-integrity branch of `version` all render the same directive for the same reason. JSON
+renderings carry the continuation token where they already carry `safe_details` and gain no
+directive prose. Frozen command
 literals already allowlisted on `safe_details` (`prepare_command`, `review_command`,
 `authorize_command`) are rendered in that fixed order; which of them travel is decided upstream, so
 the clause reports what is present.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from enum import Enum
+from typing import cast
 
 from yoetz.protocol.errors import normalize_safe_details
 from yoetz.protocol.models import (
@@ -29,6 +30,9 @@ from yoetz.protocol.recovery import (
 )
 
 __all__ = [
+    "bounded_failure_line",
+    "ceremony_refusal_line",
+    "render_error_recovery_lines",
     "render_human_awaiting_human",
     "render_human_check",
     "render_human_error",
@@ -322,7 +326,40 @@ def render_local_recovery_lines(reason: object) -> list[str]:
     return render_recovery_directive_lines(directive)
 
 
-def _error_recovery_lines(error: PublicErrorModel) -> list[str]:
+def bounded_failure_line(reason: str, *, prefix: str | None = None) -> str:
+    """Render one bounded local reason with its remediation and its recovery directive.
+
+    The single shape every human-rendered CLI refusal uses (issue #741): the bounded token stays
+    first so machine-readable expectations hold, the per-reason remediation follows it on the same
+    line, and the registry directive follows on its own lines. A reason with neither is returned
+    unchanged, so a caller can tell "nothing is known about this token" from the result.
+    """
+
+    from yoetz.cli.exits import remediation_message
+
+    head = reason if prefix is None else f"{prefix}: {reason}"
+    remediation = remediation_message(reason)
+    line = head if remediation is None else f"{head}: {remediation}"
+    return "\n".join([line, *render_local_recovery_lines(reason)])
+
+
+def ceremony_refusal_line(reason: str) -> str | None:
+    """Render a structural ceremony refusal with its directive, or None when unmapped.
+
+    A declined confidential ceremony already carries its own operator-facing sentence, token
+    first. Only the directive lines are added, so the refusal reads the same way it did while
+    gaining the continuation an agent needs to stop rather than restart a healthy service.
+    """
+
+    from yoetz.cli.exits import ceremony_refusal_message
+
+    message = ceremony_refusal_message(reason)
+    if message is None:
+        return None
+    return "\n".join([message, *render_local_recovery_lines(reason)])
+
+
+def render_error_recovery_lines(safe_details: object) -> list[str]:
     """Return the frozen recovery directive lines for a typed continuation, or an empty list.
 
     The directive is reconstructed locally from the continuation token (issue #739); nothing is
@@ -331,12 +368,9 @@ def _error_recovery_lines(error: PublicErrorModel) -> list[str]:
     whole directive, its guidance pointer, and its nudge on separate lines.
     """
 
-    details = error.safe_details
-    if details is None:
+    if not isinstance(safe_details, Mapping):
         return []
-    source = details if isinstance(details, Mapping) else None
-    if source is None:
-        return []
+    source = cast(Mapping[str, object], safe_details)
     lines: list[str] = []
     # A claim-revision rejection carries its correction on the invariant rather than a
     # continuation token. The CLI rendered nothing for it before ADR-030 moved the corrective
@@ -373,7 +407,7 @@ def render_human_error(error: PublicErrorModel) -> str:
         raise TypeError("public_error_invalid")
     suffix = " (retryable)" if error.retryable else ""
     head = f"{_token(error.code)}: {error.message}{suffix}"
-    return "\n".join([head, *_error_recovery_lines(error)])
+    return "\n".join([head, *render_error_recovery_lines(error.safe_details)])
 
 
 def render_human_awaiting_human(result: CheckAwaitingHumanModel) -> str:

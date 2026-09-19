@@ -23,7 +23,7 @@ import typer
 from pydantic import BaseModel
 
 from yoetz import __version__
-from yoetz.cli.exits import ceremony_refusal_message, remediation_message
+from yoetz.cli.render import bounded_failure_line, ceremony_refusal_line
 from yoetz.domain.values import JsonObject
 from yoetz.ports.control import ControlError
 from yoetz.protocol.canonical import JsonValue
@@ -113,11 +113,10 @@ def _run_ceremony(operation: Callable[[], Awaitable[object]]) -> None:
         except (OSError, ValueError) as error:
             # Bounded setup tokens the menu itself raises deserve their next step, not a
             # generic input complaint the operator cannot act on.
-            remediation = remediation_message(str(error))
+            reason = str(error)
+            line = bounded_failure_line(reason)
             typer.echo(
-                f"{error}: {remediation}"
-                if remediation is not None
-                else "invalid_request: the ceremony input is invalid",
+                line if line != reason else "invalid_request: the ceremony input is invalid",
                 err=True,
             )
         except HumanCeremonyCliError as error:
@@ -128,10 +127,10 @@ def _run_ceremony(operation: Callable[[], Awaitable[object]]) -> None:
                     "internal_error: the confidential ceremony could not be completed", err=True
                 )
             else:
-                remediation = remediation_message(error.reason)
+                line = bounded_failure_line(error.reason)
                 typer.echo(
-                    f"{error.reason}: {remediation}"
-                    if remediation is not None
+                    line
+                    if line != error.reason
                     else "invalid_request: the ceremony input is invalid",
                     err=True,
                 )
@@ -139,7 +138,7 @@ def _run_ceremony(operation: Callable[[], Awaitable[object]]) -> None:
             if error.reason == "cancelled":
                 typer.echo("cancelled", err=True)
             else:
-                refusal = ceremony_refusal_message(error.reason)
+                refusal = ceremony_refusal_line(error.reason)
                 typer.echo(
                     refusal
                     or "service_unavailable: the confidential ceremony could not be completed",
