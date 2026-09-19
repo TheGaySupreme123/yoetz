@@ -174,6 +174,16 @@ def _version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
             "version_schema_template_invalid", entries=(entry.relative_path,)
         ) from exc
 
+    # Bootstrap the new inventory from its frozen predecessor; the resource ripple
+    # then binds the enlarged inventory and regenerates the final cardinalities.
+    destination = source.parents[1] / entry.relative_path
+    if entry.schema_version == "2.2.1" and not destination.exists():
+        document = _load_versioned_template(entry, "version/version-manifest-2.2.0.schema.json")
+        cast(dict[str, JsonValue], document["properties"])["schema_version"] = {
+            "const": entry.schema_version
+        }
+        return document
+
     manifest = build_version_manifest()
     version_pairs = dict(manifest.request_result_schema_versions)
     request_versions.clear()
@@ -1303,6 +1313,25 @@ def _simple_versioned_schema(
     entry: _RegistryEntry, source: str, replacements: Mapping[str, str]
 ) -> dict[str, JsonValue]:
     return _load_versioned_template(entry, source, replacements=replacements)
+
+
+def _control_result_v2_6_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Repair local receipt purposes without changing released 2.6 bytes or egress rules."""
+
+    document = _simple_versioned_schema(entry, "service/control-result-2.6.0.schema.json", {})
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    local_receipt = cast(dict[str, JsonValue], definitions["local_disclosure_receipt"])
+    properties = cast(dict[str, JsonValue], local_receipt["properties"])
+    # This is the domain's local-purpose grammar. The stored agent-projection purpose
+    # contains underscores and cannot be renamed without changing canonical receipt bytes.
+    definitions["local_disclosure_purpose"] = {
+        "maxLength": 128,
+        "minLength": 1,
+        "pattern": "^[a-z][a-z0-9_-]{0,127}$",
+        "type": "string",
+    }
+    properties["purpose"] = {"$ref": "#/$defs/local_disclosure_purpose"}
+    return document
 
 
 def _receipt_document_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
@@ -3566,6 +3595,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         None,
     ),
     _RegistryEntry(
+        "service/control-result-2.6.1.schema.json",
+        "control-result",
+        "2.6.1",
+        "request_result",
+        "local-control",
+        lambda: dict,
+    ),
+    _RegistryEntry(
         "service/service-status-1.0.0.schema.json",
         "service-status",
         "1.0.0",
@@ -3601,6 +3638,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "version/version-manifest-2.2.0.schema.json",
         "version-manifest",
         "2.2.0",
+        "version_manifest",
+        "version-report",
+        lambda: __import__("yoetz.version", fromlist=["VersionManifest"]).VersionManifest,
+    ),
+    _RegistryEntry(
+        "version/version-manifest-2.2.1.schema.json",
+        "version-manifest",
+        "2.2.1",
         "version_manifest",
         "version-report",
         lambda: __import__("yoetz.version", fromlist=["VersionManifest"]).VersionManifest,
@@ -3952,10 +3997,13 @@ def build_schema_documents(
         elif entry.relative_path in {
             "version/version-manifest-2.0.0.schema.json",
             "version/version-manifest-2.1.0.schema.json",
+            "version/version-manifest-2.2.0.schema.json",
         }:
             normalized = _frozen_version_manifest_schema(entry)
-        elif entry.relative_path == "version/version-manifest-2.2.0.schema.json":
+        elif entry.relative_path == "version/version-manifest-2.2.1.schema.json":
             normalized = _version_manifest_schema(entry)
+        elif entry.relative_path == "service/control-result-2.6.1.schema.json":
+            normalized = _control_result_v2_6_1_schema(entry)
         elif entry.relative_path == "privacy/privacy-policy-1.1.0.schema.json":
             normalized = _privacy_policy_v1_1_schema(entry)
         elif entry.relative_path == "privacy/outbound-case-1.1.0.schema.json":

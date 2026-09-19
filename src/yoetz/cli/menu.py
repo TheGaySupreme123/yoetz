@@ -14,13 +14,11 @@ from __future__ import annotations
 import dataclasses
 import json
 import sys
-from collections.abc import Awaitable, Callable, Mapping
-from enum import Enum
+from collections.abc import Awaitable, Callable
 from typing import Final, Literal, cast
 
 import click
 import typer
-from pydantic import BaseModel
 
 from yoetz import __version__
 from yoetz.cli.exits import ceremony_refusal_message, remediation_message
@@ -61,24 +59,11 @@ def _control_guidance(error: ControlError) -> str:
 
 
 def _plain(value: object) -> JsonValue:
-    if value is None or type(value) in {bool, int, str}:
-        return cast(JsonValue, value)
-    if isinstance(value, Enum):
-        return cast(JsonValue, value.value)
-    if isinstance(value, BaseModel):
-        return cast(JsonValue, value.model_dump(mode="json", by_alias=True, exclude_none=False))
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return _plain(dataclasses.asdict(value))
-    if isinstance(value, Mapping):
-        source = cast(Mapping[object, object], value)
-        return {str(key): _plain(item) for key, item in source.items()}
-    if isinstance(value, (list, tuple)):
-        sequence = cast(list[object] | tuple[object, ...], value)
-        return [_plain(item) for item in sequence]
-    if isinstance(value, (set, frozenset)):
-        members = cast(set[object] | frozenset[object], value)
-        return [_plain(item) for item in sorted(members, key=str)]
-    raise TypeError("cli_result_not_json")
+    """Render the same decoded receipt values as the CLI, including UTC timestamps."""
+
+    from yoetz.cli.app import _plain_json  # pyright: ignore[reportPrivateUsage]
+
+    return _plain_json(value)
 
 
 def _show(value: object) -> None:

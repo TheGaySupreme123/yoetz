@@ -2607,6 +2607,15 @@ different query is the same non-retryable rejection. Both audit adapters project
 egress receipts as well as local disclosure receipts, so a completed subscription review is
 retrievable by its recorded receipt ID and listable by `channel`, `provider_id`, or
 `endpoint_profile_id`.
+Local disclosure purposes use the domain grammar `^[a-z][a-z0-9_-]{0,127}$`, including the
+stored `client_result_projection` value. Network egress and policy purposes retain their
+hyphen-only vocabulary. The 0.2.3 repair adds control-result `2.6.1` to admit the existing local
+receipt values without rewriting stored receipts or the released `2.6.0` envelope. Hello and
+request envelopes remain `2.6.0`; no new control method or 0.3 project contract is introduced.
+CLI JSON, terminal output and the prompt-loop menu render decoded UTC receipt timestamps in
+canonical millisecond RFC3339 form (issues #731 and #732). The added schema inventory is reported
+by version-manifest `2.2.1`; released `2.2.0` and earlier manifests retain their original bytes.
+
 `PrivacyAuditPort.list_pending_disclosures(audience) -> PendingDisclosurePage` projects only
 `PendingDisclosureEntry(pending_id, task_id, expires_at)` for proposals in `awaiting_human` or
 `reserved` whose `expires_at` has not passed, over the ordinary CLI/UI control method

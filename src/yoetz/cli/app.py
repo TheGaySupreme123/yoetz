@@ -8,6 +8,7 @@ import os
 import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from datetime import datetime
 from enum import Enum
 from functools import cache
 from pathlib import Path
@@ -35,7 +36,7 @@ from yoetz.cli.render import (
     render_local_recovery_lines,
     render_recovery_directive_lines,
 )
-from yoetz.domain.values import JsonObject
+from yoetz.domain.values import JsonObject, format_rfc3339_millis
 from yoetz.ports.control import (
     ControlClientKind,
     ControlError,
@@ -509,6 +510,8 @@ def _plain_json(value: object) -> JsonValue:
         return cast(JsonValue, value)
     if isinstance(value, Enum):
         return cast(JsonValue, value.value)
+    if type(value) is datetime:
+        return format_rfc3339_millis(value)
     if isinstance(value, BaseModel):
         return cast(JsonValue, value.model_dump(mode="json", by_alias=True, exclude_none=False))
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
