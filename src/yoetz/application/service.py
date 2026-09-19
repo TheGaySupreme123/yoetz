@@ -2857,6 +2857,9 @@ class ServiceReadyContext:
     rediscover_pending_verification: Callable[[], Awaitable[None]] | None = None
     advice_semantic_supervisor: ObservationAdviceSemanticSupervisor | None = None
     rediscover_pending_advice_semantic: Callable[[], Awaitable[None]] | None = None
+    # Bounded, idempotent startup sweep that terminalizes egress audit rows an earlier
+    # service generation left nonterminal after consuming a disclosure authorization.
+    reconcile_started_egress_attempts: Callable[[], Awaitable[int]] | None = None
     connected_provider_ids: tuple[str, ...] = ()
     provider_credential_connected: bool = False
     # Structural presence of the declared fallback endpoint's credential (#582); never readiness.
@@ -2982,6 +2985,10 @@ class ReadyApplicationFactory:
                 host_lineage_registry=context.host_lineage_registry,
                 advice_semantic_supervisor=context.advice_semantic_supervisor,
             )
+            if context.reconcile_started_egress_attempts is not None:
+                # Before any supervisor can admit a new physical attempt, so a live in-flight
+                # dispatch can never be mistaken for an abandoned one.
+                await context.reconcile_started_egress_attempts()
             if context.verification_supervisor is not None:
                 await context.verification_supervisor.start()
             if context.rediscover_pending_verification is not None:

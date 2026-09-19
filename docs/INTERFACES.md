@@ -2869,7 +2869,21 @@ exact-binding liveness query over that registry; it never probes or mints a cred
 awaiting transport closure, after which reconciliation/dispatch/revocation admit no new work, mint
 no credential, render no content-bearing request, and perform no new adapter I/O. Unconsumed work is
 fenced before I/O; a consumed attempt is only best-effort closed/nonselectable and still receives
-its actual or `outcome_unknown` durable receipt. `PrivacyCoordinator.close()` installs its own
+its actual or `outcome_unknown` durable receipt.
+A consumed authorization ends in exactly one terminal receipt, cancellation included. The gateway
+owns that receipt because only it holds the exact final request body, its keyed
+`request_commitment`, and the authorization/registry binding a dispatch receipt must carry.
+Immediately after the consume CAS it builds the `transport_failed/outcome_unknown` receipt the
+attempt would owe and parks it through
+`PrivacyAuditPort.park_attempt_reconciliation(dispatch_id, receipt)`; parking asserts no outcome and
+leaves the row `receipt_pending`. `asyncio.CancelledError` inside that admitted window (a foreground
+runtime rebind yielding an advisory attempt) records the parked receipt through a shielded
+`complete_egress` and then re-raises, so cancellation still propagates promptly and no provider is
+re-entered. `PrivacyAuditPort.reconcile_started_attempts(consumed_before, limit) -> int` is the
+bounded, idempotent startup sweep for rows whose dispatcher died before that write: it runs once
+before any supervisor may admit a new physical attempt and considers only attempts consumed
+strictly before the current service start, so a live dispatch is never closed. Local-sink
+`local_disclosure_pending` cancellation is outside this contract. `PrivacyCoordinator.close()` installs its own
 terminal admission fence first and closes the gateway exactly once; it neither returns credential or
 content nor erases durable policy/audit state, so pending durable work may resume only in a fresh
 ready coordinator.
@@ -3696,10 +3710,16 @@ Independent verification support (local control, not MCP):
   pending row is left pending; an in-flight provider dispatch is cancelled through the worker's
   ordinary cancellation path and recorded as `cancelled` before the drain releases its task
   runtime. That local row is not proof that a physical provider call did not start: if the privacy
-  audit consumed authorization, its `receipt_pending` state remains an independently recoverable
-  `SemanticEgressAttemptUnknown` and is never redispatched by this advisory lane. The cancelled
-  packet is never treated as successful, and the resulting `advice_semantic_unavailable` coverage
-  remains visible. This cooperative yield applies only to additive observation advice; an explicit
+  audit consumed authorization, the attempt is terminally `SemanticEgressAttemptUnknown` and is
+  never redispatched by this advisory lane. The worker reconciles that case from a shielded,
+  bounded finalizer before the cancellation propagates, so the rebind is not held open:
+  `PrivacyCoordinator.recover_started_request(request_id)` reports the started attempt for the
+  exact request identity the cancelled dispatch minted (a cancelled dispatch never observes the
+  prepared case digest), and the cancelled advice row records that provenance as
+  `attempt_receipt` (the reconciled egress receipt, else its privacy proposal) plus
+  `provider_identity`. A cancelled row carrying neither is proof that no disclosure authorization
+  was consumed. The cancelled packet is never treated as successful, and the resulting
+  `advice_semantic_unavailable` coverage remains visible. This cooperative yield applies only to additive observation advice; an explicit
   required semantic check keeps its own operation and recovery contract. The foreground start
   retains its request identity and continues through the existing bounded same-request recovery
   when the runtime becomes available.

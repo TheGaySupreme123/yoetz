@@ -40,6 +40,7 @@ from yoetz.application.observation_advice import (
     scoped_session_envelopes,
 )
 from yoetz.application.observation_advice_semantic import (
+    AdviceSemanticCancellationReconciler,
     AdviceSemanticDispatch,
     AdviceSemanticDrainHandle,
     ObservationAdviceSemanticRepository,
@@ -663,6 +664,9 @@ class ObservationCoordinator:
     # drains it through ``advice_semantic_dispatch`` and re-runs advice when it finishes.
     advice_semantic_supervisor: ObservationAdviceSemanticSupervisor | None = None
     advice_semantic_dispatch: AdviceSemanticDispatch | None = None
+    # Shielded post-cancellation reconciliation for a dispatch that already consumed a
+    # disclosure authorization; it reports the terminal unknown receipt and never redispatches.
+    advice_semantic_cancellation_reconciler: AdviceSemanticCancellationReconciler | None = None
     observation_enabled: bool = True
     capture_budget_bootstrap: CaptureBudgetBootstrapHook | None = None
     lineage_coordinator: LineageManifestCoordinator | None = None
@@ -5060,6 +5064,7 @@ class ObservationCoordinator:
                 lease_owner=owned.fence.service_instance_id,
                 now=now_wire,
                 lease_expires_at=lease_expiry,
+                reconcile_cancelled=self.advice_semantic_cancellation_reconciler,
             )
             bound_runtime = owned
 

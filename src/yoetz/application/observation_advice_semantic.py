@@ -30,6 +30,7 @@ __all__ = [
     "ADVICE_SEMANTIC_PENDING_REASON",
     "DEFAULT_ADVICE_SEMANTIC_MAX_PENDING",
     "MAX_ADVICE_SEMANTIC_ATTEMPTS",
+    "AdviceSemanticCancellationReconciler",
     "AdviceSemanticDispatch",
     "AdviceSemanticDrainHandle",
     "ObservationAdviceSemanticAttempt",
@@ -159,6 +160,11 @@ class ObservationAdviceSemanticRepository(Protocol):
 type AdviceSemanticDispatch = Callable[
     [ObservationAdviceSemanticAttempt], Awaitable[ObservationAdviceSemanticOutcome]
 ]
+# Shielded, bounded post-cancellation reconciliation for one claimed row. ``None`` means the
+# attempt never consumed a disclosure authorization, so the ordinary ``cancelled`` outcome stands.
+type AdviceSemanticCancellationReconciler = Callable[
+    [ObservationAdviceSemanticAttempt], Awaitable[ObservationAdviceSemanticOutcome | None]
+]
 type NowProvider = Callable[[], str]
 
 
@@ -285,6 +291,8 @@ class ObservationAdviceSemanticWorker:
     lease_owner: str
     now: NowProvider
     lease_expires_at: NowProvider
+    reconcile_cancelled: AdviceSemanticCancellationReconciler | None = None
+    reconcile_timeout_seconds: float = 5.0
 
     def __post_init__(self) -> None:
         self._active_task: asyncio.Task[object] | None = None
@@ -332,10 +340,7 @@ class ObservationAdviceSemanticWorker:
         try:
             outcome = await self.dispatch(attempt)
         except asyncio.CancelledError:
-            self._complete(
-                attempt,
-                ObservationAdviceSemanticOutcome(status="cancelled", failure_reason="cancelled"),
-            )
+            self._complete(attempt, await self._cancelled_outcome(attempt))
             raise
         except Exception:
             outcome = ObservationAdviceSemanticOutcome(
@@ -343,6 +348,38 @@ class ObservationAdviceSemanticWorker:
             )
         self._complete(attempt, outcome)
         return attempt
+
+    async def _cancelled_outcome(
+        self, attempt: ObservationAdviceSemanticAttempt
+    ) -> ObservationAdviceSemanticOutcome:
+        """Record cancellation, plus the reconciled egress provenance when authority was spent.
+
+        A cancelled row is never a semantic success. It is also not proof that no physical
+        provider call started: if the privacy audit consumed the disclosure authorization before
+        the yield landed, the reconciliation reports the terminal ``outcome_unknown`` receipt for
+        that consumed attempt and this row carries it as provenance. The reconciliation is
+        shielded and bounded so it cannot be cancelled away and cannot hold the foreground rebind
+        open; it never redispatches.
+        """
+
+        cancelled = ObservationAdviceSemanticOutcome(status="cancelled", failure_reason="cancelled")
+        reconcile = self.reconcile_cancelled
+        if reconcile is None:
+            return cancelled
+        try:
+            reconciled = await asyncio.wait_for(
+                asyncio.shield(reconcile(attempt)), self.reconcile_timeout_seconds
+            )
+        except asyncio.CancelledError:
+            return cancelled
+        except Exception as exc:  # noqa: BLE001 - a bounded reconciliation never blocks the rebind
+            record_unexpected_exception_without_raising(
+                exc,
+                component="application.observation_advice_semantic",
+                operation="cancelled_egress_reconciliation_failed",
+            )
+            return cancelled
+        return cancelled if reconciled is None else reconciled
 
     def _complete(
         self,
