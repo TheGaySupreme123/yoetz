@@ -4242,6 +4242,18 @@ schema tokens are `yoetz.setup-wizard-marker/1`, `yoetz.setup-wizard-report/1`,
 `yoetz setup run|status` and
 `yoetz integrate <harness> mcp status|preview|preview-remove|install|remove` (ADR-012).
 
+The #767 desktop entrypoints are `setup run|status|disconnect --host
+codex|claude|cursor-ide|cursor-cli`, with `--host-path`, `--host-config-root`, and `--project`
+overrides. `setup-status/1` adds the executable-backed `hosts` inventory alongside its legacy
+Codex `discovered` rows. Inventory is not connection proof. `yoetz.host-connection-plan/1` binds
+the request, installation, project, route, adapter previews and changes to `preview_digest`.
+`yoetz.host-connection-report/1` names `preview`, `completed`, `unchanged`, `status` or `incomplete`,
+with the plan, layer-specific status, reason and continuation where applicable.
+`connection_observed: false` means setup did not observe a native session. An agent repeats the
+preview's exact `--request-id` and `--preview-digest` with `--accept`; generic acceptance cannot
+bind unseen changes. Human and agent surfaces share that application path. ADR-012 specifies
+compound-review consumption and the separate observation/provider/disclosure authority.
+
 For issue #654, `mcp_command_profile` validates the shape of a bare or absolute console-script
 command with the exact current or legacy Codex serving suffix; it establishes no ownership.
 `adapters/integrations/codex_launcher.installed_launcher` supplies the adapter's ownership proof:

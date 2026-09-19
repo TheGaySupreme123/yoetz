@@ -1,5 +1,27 @@
 # Cursor local integration runbook
 
+## Guided desktop connection (issue #767)
+
+Use `yoetz setup run --host cursor-ide` or `--host cursor-cli`. These are distinct installations:
+IDE uses MCP roots, while Agent CLI receives the explicit `registered-project` binding. Setup
+composes the native user plugin and an external MCP entry for the selected project in one exact
+review. The user-wide plugin scope is disclosed; regular Cursor and testing profiles are never
+silently interchanged. `--host-path`, `--host-config-root`, and `--project` override discovery.
+Agents first request `--non-interactive --json`, present the plan, and repeat its exact request ID
+and digest with `--accept`. OS-authenticated artifact presence still applies.
+
+`setup status|disconnect --host cursor-ide|cursor-cli` uses the same target options. Disconnect
+removes the owned user plugin and selected project's separately managed MCP entry; it preserves
+other projects, unrelated configuration and Yoetz data. A changed or foreign source is refused.
+A repeated exact connection is a no-op; a partial connection is re-previewed from its actual state.
+
+macOS uses LocalAuthentication; Linux and Windows through WSL 2 use the trusted PAM console path.
+Windows-side IDE discovery/configuration is not inferred from a Linux executable or directory.
+An IDE available only outside the selected WSL environment needs an explicit capability disposition.
+Track each OS and each IDE/CLI cell's exact-head native installation, fresh-session discovery/start,
+disconnect and reconnect in #767. CLI proof does not establish IDE proof. Existing evidence below
+remains limited to its named cells; configuration success never claims session activation.
+
 ## Conditional agent guidance
 
 The skill keeps its activation boundary, core workflow, and safety floor in the entrypoint.

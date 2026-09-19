@@ -413,8 +413,10 @@ def _inspect(
     identities: list[JsonValue] = []
     project_identity: tuple[int, int] | None = None
     for path in (target.project_root, target.cursor_config_root):
-        with _directory(path) as descriptor:
-            assert descriptor is not None
+        with _directory(path, optional=path == target.cursor_config_root) as descriptor:
+            if descriptor is None:
+                identities.append([str(path), None])
+                continue
             identity = _identity(os.fstat(descriptor))
             identities.append([str(path), *_canonical_identity(identity)])
             if path == target.project_root:

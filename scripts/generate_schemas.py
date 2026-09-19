@@ -3363,6 +3363,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         None,
     ),
     _RegistryEntry(
+        "integrations/host-connection-1.0.0.schema.json",
+        "host-connection",
+        "1.0.0",
+        "request_result",
+        "setup-contract",
+        lambda: (
+            __import__(
+                "yoetz.protocol.host_connection", fromlist=["HostConnectionContract"]
+            ).HostConnectionContract
+        ),
+    ),
+    _RegistryEntry(
         "receipts/receipt-document-1.0.0.schema.json",
         "receipt-document",
         "1.0.0",

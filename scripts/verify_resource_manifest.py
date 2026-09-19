@@ -147,6 +147,12 @@ _CODEX_SKILL_MEMBERS: Final = (
 # is deliberately listed here; nothing is discovered by scanning the repository.
 _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     (
+        "schemas/integrations/host-connection-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "fixtures/agent-plugins/codex-project-plugin-managed-mcp.case.json",
         "compatibility_manifest",
         "application/json",

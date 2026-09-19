@@ -185,6 +185,85 @@ class _ClaudeFixture:
         return ClaudeCodeCommandResult(1, b"", b"unexpected")
 
 
+def test_connect_installs_and_enables_with_one_review_and_replays_without_review(
+    tmp_path: Path,
+) -> None:
+    target = _target(tmp_path)
+    artifact = render_claude_code_plugin(
+        mcp_ownership=McpOwnership.PLUGIN_MANAGED, route_profile="strict"
+    )
+    commands = _ClaudeFixture(artifact)
+    review = _Review()
+    preview = preview_claude_code_plugin(
+        _REQUEST, target, ClaudeCodePluginAction.CONNECT, artifact, commands=commands
+    )
+    result = apply_claude_code_plugin(
+        _REQUEST,
+        target,
+        ClaudeCodePluginAction.CONNECT,
+        artifact,
+        accepted_preview_digest=preview.preview_digest,
+        authority=_authority(preview.preview_digest),
+        review=review,
+        commands=commands,
+    )
+    assert result.operation_state is PluginOperationState.COMPLETED
+    assert result.enabled is True
+    assert review.consumed == [preview.preview_digest]
+    replay = preview_claude_code_plugin(
+        _REQUEST, target, ClaudeCodePluginAction.CONNECT, artifact, commands=commands
+    )
+    assert replay.action is ClaudeCodePluginAction.NOOP
+    apply_claude_code_plugin(
+        _REQUEST,
+        target,
+        ClaudeCodePluginAction.CONNECT,
+        artifact,
+        accepted_preview_digest=replay.preview_digest,
+        authority=None,
+        review=review,
+        commands=commands,
+    )
+    assert review.consumed == [preview.preview_digest]
+
+
+def test_connect_resumes_installed_disabled_without_reinstall(tmp_path: Path) -> None:
+    target = _target(tmp_path)
+    artifact = render_claude_code_plugin(
+        mcp_ownership=McpOwnership.PLUGIN_MANAGED, route_profile="strict"
+    )
+    commands = _ClaudeFixture(artifact)
+    preview = preview_claude_code_plugin(
+        _REQUEST, target, ClaudeCodePluginAction.INSTALL, artifact, commands=commands
+    )
+    apply_claude_code_plugin(
+        _REQUEST,
+        target,
+        ClaudeCodePluginAction.INSTALL,
+        artifact,
+        accepted_preview_digest=preview.preview_digest,
+        authority=_authority(preview.preview_digest),
+        review=_Review(),
+        commands=commands,
+    )
+    commands.calls.clear()
+    preview = preview_claude_code_plugin(
+        _REQUEST, target, ClaudeCodePluginAction.CONNECT, artifact, commands=commands
+    )
+    result = apply_claude_code_plugin(
+        _REQUEST,
+        target,
+        ClaudeCodePluginAction.CONNECT,
+        artifact,
+        accepted_preview_digest=preview.preview_digest,
+        authority=_authority(preview.preview_digest),
+        review=_Review(),
+        commands=commands,
+    )
+    assert result.enabled is True
+    assert not any(call[:2] == ("plugin", "install") for call in commands.calls)
+
+
 def test_native_projection_uses_claude_skill_and_shared_guidance_components() -> None:
     external = render_claude_code_plugin()
     managed = render_claude_code_plugin(

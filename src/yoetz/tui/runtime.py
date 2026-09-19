@@ -334,12 +334,28 @@ class YoetzRuntime:
         return default_codex_home()
 
     def discover_harnesses(self) -> tuple[HarnessOption, ...]:
-        from yoetz.adapters.integrations.codex_discovery import discover_codex_binaries
+        from yoetz.adapters.integrations.host_discovery import discover_hosts
+        from yoetz.ports.harness_mcp import HarnessBinary
+        from yoetz.ports.integrations import HarnessId
 
-        binaries = discover_codex_binaries()
+        installations = discover_hosts()
         return tuple(
-            _harness_option(binary, index=index, total=len(binaries))
-            for index, binary in enumerate(binaries)
+            _harness_option(
+                HarnessBinary(HarnessId.CODEX, str(item.executable), item.version, "untested"),
+                index=index,
+                total=len(installations),
+            )
+            if item.host == "codex"
+            else HarnessOption(
+                str(item.executable),
+                item.version,
+                item.label,
+                "Installed agent",
+                index == 0,
+                item.host,
+                str(item.config_root),
+            )
+            for index, item in enumerate(installations)
         )
 
     async def detect(self) -> Detection:
@@ -375,6 +391,35 @@ class YoetzRuntime:
         )
 
     async def mcp_state(self, option: HarnessOption) -> str:
+        if option.host != "codex":
+            from anyio.to_thread import run_sync
+
+            from yoetz.cli.host_connection import (
+                CONNECTION_ERRORS,
+                prepare_selected,
+                select_installation,
+            )
+            from yoetz.protocol.ids import IdKind, new_id
+
+            try:
+                selected = select_installation(
+                    option.host,
+                    Path(option.executable_path),
+                    None if option.config_root is None else Path(option.config_root),
+                )
+                plan = await run_sync(
+                    lambda: prepare_selected(
+                        selected,
+                        self.project_root(),
+                        action="connect",
+                        route="strict",
+                        request_value=new_id(IdKind.REQUEST),
+                    )
+                )
+                status = await run_sync(plan.status)
+                return "yoetz_owned" if status.get("configured") is True else "absent"
+            except CONNECTION_ERRORS:
+                return "unknown"
         from yoetz.adapters.integrations.codex_mcp import CodexMcpAdapter
         from yoetz.application.harness_mcp import HarnessMcpService
         from yoetz.ports.harness_mcp import McpRegistrationError
@@ -586,6 +631,7 @@ class YoetzRuntime:
             route_profile=plan.route_profile,
             workspace=self.project_root(),
             approved_preview_digest=plan.preview_digest,
+            approved_activation_mcp_command=plan.activation_mcp_command,
             approved_skill_preview_digest=plan.skill_preview_digest,
             approved_activation_digest=plan.activation_preview_digest,
             approved_policy_digest=plan.policy_digest,

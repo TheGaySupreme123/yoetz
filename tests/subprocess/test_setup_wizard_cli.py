@@ -94,6 +94,9 @@ def _absent_mcp() -> list[CommandOutput]:
 @pytest.fixture
 def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, object]:
     """Fake discovery, adapter subprocesses, service client, and marker path."""
+    # The legacy Codex wizard fixtures must not probe real Claude/Cursor installations.
+    # Shared multi-host discovery and explicit setup are exercised in their own tests.
+    monkeypatch.setattr("yoetz.adapters.integrations.host_discovery.discover_hosts", lambda: ())
 
     # These scripted entries model the legacy embedded/bare-launcher cell, not whichever
     # wheel happens to host pytest. Absolute installation proof is supplied explicitly in
@@ -2778,3 +2781,49 @@ def test_interactive_setup_reconfirms_mcp_entry_exposed_by_plugin_activation(
     assert (
         "MCP registration: reregistered" if approved else "confirmation_required"
     ) in result.stdout
+
+
+@pytest.mark.parametrize("expected_transition", [True, False])
+def test_complete_codex_plan_accepts_only_its_generated_activation_transition(
+    wizard_env: dict[str, object], expected_transition: bool
+) -> None:
+    import yoetz.cli.setup as setup_module
+
+    binary = _binary()
+    home = cast(Path, wizard_env["codex_home"])
+
+    async def prepare():
+        adapter = setup_module._mcp_adapter("strict", codex_home=home)  # pyright: ignore[reportPrivateUsage]
+        preview = await HarnessMcpService(adapter).preview(binary)
+        skill = await setup_module.project_skill_preview(Path.cwd())
+        return preview, skill
+
+    preview, skill = asyncio.run(prepare())
+    generated = _yoetz_entry("policy")
+    wizard_env["outputs"] = [
+        *_absent_mcp(),
+        generated,
+        generated if expected_transition else _yoetz_entry("strict"),
+        *(
+            [generated, generated, CommandOutput(0, b""), _yoetz_entry("strict")]
+            if expected_transition
+            else []
+        ),
+    ]
+    result = asyncio.run(
+        setup_module.apply_codex_integration(
+            binary,
+            route_profile="strict",
+            workspace=Path.cwd(),
+            codex_home=home,
+            approved_preview_digest=preview.preview_digest,
+            approved_skill_preview_digest=skill.preview_digest,
+            approved_activation_digest=cast(str, wizard_env["activation_digest"]),
+            approved_activation_mcp_command=MCP_SERVE_COMMAND,
+        )
+    )
+    calls = [
+        call for group in cast(list[list[tuple[str, ...]]], wizard_env["calls"]) for call in group
+    ]
+    assert any(call[1:3] == ("mcp", "add") for call in calls) is expected_transition
+    assert result["outcome"] == ("reregistered" if expected_transition else "failed")

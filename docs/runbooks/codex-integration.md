@@ -1,5 +1,21 @@
 # Codex integration runbook
 
+## Guided desktop connection (issue #767)
+
+`yoetz setup run --host codex` exposes the existing project-skill, plugin, activation and MCP
+composition through the common desktop connection plan. Discovery offers the installation;
+`--host-path`, `--host-config-root`, and `--project` select exact alternatives. An agent requests
+`--non-interactive --json`, presents the changes, then repeats the returned request ID and preview
+digest with `--accept`. The selected home remains bound through every Codex probe and mutation.
+The historical `--codex-path`/`--codex-home` wizard remains a compatibility path.
+
+`setup status|disconnect --host codex` uses the same target options. Disconnect removes activation,
+the owned MCP entry and exact project skill, retaining inactive plugin sources and Yoetz data.
+Modified or foreign integration state is refused. Record native installation, fresh-session
+discovery/start, disconnect and reconnect for macOS, Linux and WSL 2 separately in #767. Desktop
+app availability and CLI availability remain distinct; an untested version/platform does not
+inherit certification from executable discovery or unit tests.
+
 ## Conditional agent guidance
 
 The skill keeps its activation boundary, core workflow, and safety floor in the entrypoint.

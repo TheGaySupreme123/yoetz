@@ -1,16 +1,17 @@
 # Install and first run
 
-> Three harnesses have first-party integrations: Codex, Claude Code, and Cursor. The first-run
-> wizard detects and connects Codex. Claude Code and Cursor are configured explicitly, never by
-> ambient discovery: `yoetz integrate claude plugin preview` for Claude Code (then `install`,
-> `update`, `enable`, `disable`, `remove`, or `export` for a development plugin directory) and
-> `yoetz integrate cursor plugin preview` with an exact isolated Cursor configuration root and
-> project; see [the Claude Code integration runbook](../runbooks/claude-code-integration.md) and
-> [the Cursor integration runbook](../runbooks/cursor-integration.md). For both, the integration
-> ships but its support evidence is release-bound: each covers one exact local CLI cell, and no
-> cell is claimed beyond what its runbook records. Claude Desktop, remote, and web sessions are
-> untested, not claimed either way; Cursor Cloud is not supported. Any other agent can use Yoetz
-> over MCP with no integration at all.
+Choose an installed Codex, Claude Code, Cursor IDE or Cursor Agent CLI, select your project and
+review mode, then approve the connection preview. Yoetz handles each agent's installation steps
+and tells you when a fresh session or a local authentication prompt is needed. Exact installation
+details remain available when you need them. The desktop platforms are macOS, Linux, and Windows
+through WSL 2; this does not add native Windows or mobile support.
+
+Use `/connect` to connect or repair and `/disconnect` to remove an integration while retaining
+your Yoetz data. From a terminal, `yoetz setup run`, `yoetz setup status`, and
+`yoetz setup disconnect --host codex|claude|cursor-ide|cursor-cli` expose the same lifecycle.
+The [Codex](../runbooks/codex-integration.md), [Claude Code](../runbooks/claude-code-integration.md)
+and [Cursor](../runbooks/cursor-integration.md) runbooks retain version/platform evidence and
+operator details. Configuration success alone does not prove a fresh host session is connected.
 
 ## Install
 

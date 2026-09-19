@@ -701,7 +701,7 @@ async def test_connect_without_a_harness_points_at_local_verification(
         await pilot.pause()
         await run_command(pilot, app, "/connect")
         text = transcript(app)
-        assert "No Codex installation was found" in text
+        assert "No agent installation was found" in text
         assert "/check" in text
 
 

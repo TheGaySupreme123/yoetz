@@ -386,6 +386,51 @@ availability, structured-output interoperability, provider data use, or E-007 ca
 
 ## Consequences
 
+### Shared desktop onboarding (2026-09-20, issue #767, 0.2.4)
+
+The maintainer retargeted #767 from 0.3 to `main` for 0.2.4. First run may discover
+Codex, Claude Code, regular Cursor IDE, and Cursor Agent CLI through executable/version probes.
+A directory alone is not an installation. This supersedes the original Codex-only and explicit
+Cursor-selection restrictions. Desktop scope remains macOS, Linux, and Windows through WSL 2;
+native Windows and mobile are not added. Discovery never certifies an untested combination.
+
+Human and agent setup share installation/project selection, review posture, one complete preview
+and integration approval, remaining-stage application, status, and disconnect. Ordinary screens
+explain consequential choices; exact paths, digests and adapter details remain inspectable.
+The new explicit entrypoint is `setup run --host codex|claude|cursor-ide|cursor-cli`. An agent
+previews first, presents the changes, and repeats the exact paths, route, request ID and preview
+digest with `--accept`. Generic acceptance cannot approve an unseen connection plan. The old
+path-explicit Codex wizard remains a compatibility entrypoint.
+
+The connection digest binds the request, host/version/executable, configuration root, project,
+route, launcher/isolation identity, adapter previews and changes. Apply re-previews the whole
+composition before consuming authority. Claude's new `connect` action installs or updates its
+owned source/marketplace and plugin, then enables it under one action-bound review. Standalone
+`install` continues to leave the plugin disabled. Read-back determines the remaining stages after
+interruption; already enabled exact state is a no-op.
+
+Cursor composes a native plugin with an external project MCP entry. CLI uses
+`registered-project`; IDE uses `mcp-roots`. One `plugin_artifact_apply` review covers the complete
+composition and retains OS-authenticated presence. Only after consuming it does the coordinator
+mint an in-process, single-use `setup_composition` capability for the exact child plugin digest.
+This is not reuse or a second consumption of the original consent. The MCP step retains its exact
+preimage/replacement checks. The external-registration plugin does not alter those MCP bytes.
+When it creates a missing private configuration directory, only that planned directory identity
+may change: the project inode, configuration identities/preimages and replacement must still
+match. Foreign/modified configuration and unrelated pending approvals are preserved and refused.
+
+Codex reuses its existing setup authority and skill/activation/MCP checks. Disconnect removes its
+activation, owned MCP entry and exact owned project skill, retaining inactive plugin sources and
+Yoetz data. Cursor disconnect removes the user plugin and the selected project's owned MCP entry;
+other projects are not swept. Its user-wide plugin scope is shown as a consequential choice.
+Claude disconnect uses its project-scoped uninstall/marketplace removal lifecycle.
+
+Partial or ambiguous outcomes remain incomplete. A new preview reports remaining stages without
+reusing a stale approval. No-op stages require no new review. Linux/WSL TUI approval hands control
+to the trusted terminal for OS authentication. Integration approval grants no observation,
+provider-credential or disclosure authority. Installed, enabled/configured, reload-required and
+connection-observed are separate facts; only a fresh native session can prove discovery and start.
+
 ### Cursor local selection amendment (2026-08-22, issue #153)
 
 Cursor does not enter ambient first-run discovery. It is selected explicitly with an exact local

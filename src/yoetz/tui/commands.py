@@ -38,6 +38,7 @@ SLASH_COMMANDS: Final[tuple[SlashCommand, ...]] = (
     SlashCommand("check", "run a verification check"),
     SlashCommand("receipt", "view or export an honest receipt"),
     SlashCommand("connect", "connect or repair an agent integration"),
+    SlashCommand("disconnect", "remove an agent integration and retain Yoetz data"),
     SlashCommand("privacy", "choose what may leave this computer"),
     SlashCommand("provider", "configure optional deeper review"),
     SlashCommand("service", "manage the protected local service"),

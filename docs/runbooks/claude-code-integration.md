@@ -1,5 +1,23 @@
 # Claude Code native integration
 
+## Guided desktop connection (issue #767)
+
+Prefer `yoetz setup run --host claude` for ordinary setup. It discovers the executable and
+configuration root, derives the cache and private marketplace paths, and previews installation
+plus enablement in one exact connection plan. Override the executable/configuration or project
+with `--host-path`, `--host-config-root`, and `--project`. Agent-driven setup uses
+`--non-interactive --json`, then repeats the preview's request ID and digest with `--accept`.
+The existing OS-authenticated artifact review still applies. Status and disconnect use
+`yoetz setup status|disconnect --host claude` with the same target options. Standalone `plugin
+install` below retains its disabled-by-default behavior.
+
+On macOS the presence step uses LocalAuthentication; Linux and WSL 2 use the trusted PAM console
+path. A missing mechanism is a reported local continuation, not permission to bypass it. The
+common connection code does not establish native acceptance on any OS. Track current exact-head
+macOS/Linux/WSL installation, fresh-session tool discovery, start, disconnect and reconnect evidence
+in #767. Existing capability records below remain bounded to their recorded cells. Ownership,
+configuration, enablement, session activation, observation and review remain separate proof layers.
+
 ## Conditional agent guidance
 
 The skill keeps its activation boundary, core workflow, and safety floor in the entrypoint.
