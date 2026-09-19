@@ -160,3 +160,23 @@ def test_linux_and_wsl_host_facts_are_stated_before_they_bite() -> None:
     assert "keyring.backends.SecretService.Keyring" in facts
     assert "keyring.backends.kwallet.DBusKeyring" in facts
     assert "virtiofs" in facts and "drvfs" in facts and "9p" in facts
+
+
+def test_sandbox_readiness_is_recorded_as_a_client_surface_fact() -> None:
+    """Issue #720's second acceptance branch: the revised contract, not a new status field."""
+
+    facts = _collapsed("docs/runbooks/linux-and-wsl.md")
+    assert "`yoetz service status` does not report sandbox availability" in facts
+    assert "`service-status-1.0.0`" in facts
+    for surface in (
+        "`yoetz observe checks status --json`",
+        "`yoetz setup status --json`",
+        "`/doctor`",
+    ):
+        assert surface in facts, surface
+
+    interfaces = _collapsed("docs/INTERFACES.md")
+    assert "carries no approved-check sandbox field" in interfaces
+
+    page = _collapsed("docs/usage/install-and-first-run.md")
+    assert "`yoetz service status` reports the local service itself" in page
