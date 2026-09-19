@@ -778,6 +778,20 @@ async def test_blocking_task_metadata_read_leaves_control_loop_responsive(
         world.coordinator.close()
 
 
+async def _observe_outbox_drain(world: _World, sweeper: ObservationOutboxSweeper) -> None:
+    """Drive the sweeper until the local outbox is empty, or fail on a deadline.
+
+    A hook pass drains its own rows within a bounded budget. On a loaded runner
+    that budget can expire with rows still pending, and the next pass then
+    counts a real admission loss against the stalled, ageing rows (issue #775).
+    Observe the drain instead of assuming each pass landed before the next write.
+    """
+
+    async with asyncio.timeout(10):
+        while world.local.pending_outbox_count(world.workspace) > 0:
+            await sweeper.sweep()
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("host", ("claude", "cursor", "codex"))
 async def test_parent_worker_routes_recover_and_keep_encrypted_content_task_scoped(
@@ -847,6 +861,7 @@ async def test_parent_worker_routes_recover_and_keep_encrypted_content_task_scop
                     )
                     == 0
                 )
+                await _observe_outbox_drain(world, sweeper)
         after = world.local.selection_accounting(world.workspace)
         assert after["unrecoverable_input_count"] == 2
         assert after["loss_identity_commitment"] == before["loss_identity_commitment"]
