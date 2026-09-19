@@ -5708,3 +5708,120 @@ async def test_successor_route_cache_preserves_concurrent_lifecycle_changes(
             assert persisted is None
         else:
             assert persisted == (successor if concurrent_change == "none" else expected)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_ingest_releases_runtime_when_final_backlog_feedback_fails(
+    tmp_path: Path, cancelled: bool
+) -> None:
+    """Final feedback failure or repeated cancellation cannot strand an ingestion lease."""
+    import asyncio
+    from types import SimpleNamespace
+
+    local, _workspace, session, mapping = _mapped_local(tmp_path, "backlog-release")
+
+    class _Store:
+        def load_capture_ticket(self, *, workspace: str, logical_identity: str) -> None:
+            # This structural-only fixture has no staged native capture to recover.
+            del workspace, logical_identity
+            return None
+
+        def grant_consent(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        def bind_session(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        async def ingest(self, envelope: ObservationEnvelope) -> ObservationIngestResult:
+            return ObservationIngestResult(
+                ObservationIngestDisposition.ACCEPTED,
+                None,
+                envelope.cursor,
+            )
+
+    runtime = SimpleNamespace(
+        task_id=mapping.yoetz_task_id,
+        session_id=mapping.yoetz_session_id,
+        writer_id=observation_writer_id(mapping.yoetz_task_id, mapping.yoetz_session_id),
+        observation=_Store(),
+    )
+
+    released_runtimes: list[object] = []
+    feedback_entered = asyncio.Event()
+    release_entered = asyncio.Event()
+    release_gate = asyncio.Event()
+    release_finished = asyncio.Event()
+
+    class _RuntimePort:
+        async def route(self, command: object) -> object:
+            del command
+            return runtime
+
+        async def release(self, released: object) -> None:
+            assert released is runtime
+            release_entered.set()
+            if cancelled:
+                await release_gate.wait()
+            released_runtimes.append(released)
+            release_finished.set()
+
+    class _Coordinator(ObservationCoordinator):
+        async def _publish_capture_backlog(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+            if cancelled:
+                feedback_entered.set()
+                await asyncio.Event().wait()
+            raise RuntimeError("feedback unavailable")
+
+        async def _capture_content(  # type: ignore[override]
+            self, runtime: object, store: object, **kwargs: object
+        ) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...], bool, bool]:
+            del runtime, store, kwargs
+            return (), (), False, False
+
+        async def _append_materialized(  # type: ignore[override]
+            self, *args: object, **kwargs: object
+        ) -> tuple[str, str, None, str, tuple[str, ...]]:
+            del args, kwargs
+            raise PublicOperationError(
+                PublicErrorCode.EVENT_INVALID,
+                "Observation event was rejected.",
+                retryable=False,
+            )
+
+    coordinator = _Coordinator(
+        runtime=_RuntimePort(),  # type: ignore[arg-type]
+        local=local,
+        clock=object(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
+
+    ingest = asyncio.create_task(
+        coordinator.ingest_request(
+            ObservationIngestRequest(
+                codex_session_id=mapping.codex_session_id,
+                envelope=_envelope(
+                    session=session,
+                    kind="PostToolUse",
+                    identity="hook:event-invalid",
+                    exit_status=1,
+                ),
+            )
+        )
+    )
+    if cancelled:
+        await asyncio.wait_for(feedback_entered.wait(), timeout=5)
+        ingest.cancel()
+        await asyncio.wait_for(release_entered.wait(), timeout=5)
+        ingest.cancel()
+    with pytest.raises(asyncio.CancelledError if cancelled else RuntimeError):
+        await ingest
+    if cancelled:
+        # Repeated cancellation unwinds the caller; the retained release still finishes.
+        assert len(coordinator._pending_releases) == 1  # pyright: ignore[reportPrivateUsage]
+    release_gate.set()
+    await asyncio.wait_for(release_finished.wait(), timeout=5)
+    assert released_runtimes == [runtime]

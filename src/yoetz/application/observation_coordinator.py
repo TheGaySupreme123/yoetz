@@ -639,6 +639,9 @@ class ObservationCoordinator:
         default_factory=_empty_storage_corrupt_sessions, init=False, repr=False
     )
     _local_executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
+    _pending_releases: set[asyncio.Future[None]] = field(
+        default_factory=lambda: set[asyncio.Future[None]](), init=False, repr=False
+    )
     _capture_budget_exhausted: bool = field(default=False, init=False, repr=False)
     # A persisted root proof belongs to an older service generation until the
     # current coordinator has revalidated its route scope under the capture
@@ -1071,6 +1074,18 @@ class ObservationCoordinator:
             # Preserve ``needs_reconcile`` or unknown scope on any read error;
             # this path never weakens capture admission.
             return
+
+    def _release_finished(self, pending: asyncio.Future[None]) -> None:
+        self._pending_releases.discard(pending)
+        if pending.cancelled():
+            return
+        error = pending.exception()
+        if isinstance(error, Exception):
+            record_unexpected_exception_without_raising(
+                error,
+                component="application.observation_coordinator",
+                operation="observation_runtime_release_failed",
+            )
 
     def close(self) -> None:
         """Stop accepting local-store work; bounded lock waits let running workers retire."""
@@ -2440,11 +2455,20 @@ class ObservationCoordinator:
                 return _reject(ObservationGapCode.SERVICE_UNAVAILABLE.value)
             finally:
                 if runtime is not None:
-                    if store is not None:
-                        await self._publish_capture_backlog(workspace, runtime, store)
-                    with_context = getattr(self.runtime, "release", None)
-                    if with_context is not None:
-                        await with_context(runtime)
+                    try:
+                        if store is not None:
+                            await self._publish_capture_backlog(workspace, runtime, store)
+                    finally:
+                        # Feedback may be cancelled or fail. It never owns the runtime lease,
+                        # so that failure must not strand the bundle and block the next attach.
+                        with_context = getattr(self.runtime, "release", None)
+                        if with_context is not None:
+                            # A second disconnect cancellation must not interrupt release
+                            # while it waits for the runtime registry lock.
+                            pending = asyncio.ensure_future(with_context(runtime))
+                            self._pending_releases.add(pending)
+                            pending.add_done_callback(self._release_finished)
+                            await asyncio.shield(pending)
 
     async def ingest(self, envelope: ObservationEnvelope) -> ObservationIngestResult:
         """ObservationPort-shaped ingest without Codex session id → reject closed."""
