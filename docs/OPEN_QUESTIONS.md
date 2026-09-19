@@ -5,10 +5,14 @@
 
 ## Purpose
 
-The current product release line is **0.2**, with Linux/WSL compatibility fixes released as
-**0.2.1** and install-path fixes as **0.2.2**. The dated v0.1 decisions below remain history; the 0.2 re-dispositions govern the
-current line. Real WSL 2 and native Linux Claude/Cursor acceptance remain untested, and
-privacy-receipt CLI bugs #731 and #732 remain open (release tracking: #733). This version
+The next product release candidate is **0.3.0** (release tracking: #785); **0.2.2** remains
+published until the candidate's gates pass. The candidate carries Linux/WSL compatibility fixes
+(**0.2.1**) and install-path fixes (**0.2.2**). The dated v0.1 decisions below remain history;
+the 0.2 re-dispositions govern the current line. Real WSL 2 and native Linux Claude/Cursor
+acceptance remain untested, native Codex
+multi-agent acceptance (#499, #507) remains open, and first run still connects Codex only (#767).
+Issue #767 remains a release gate until implemented or explicitly deferred by the maintainer.
+The privacy-receipt CLI bugs #731 and #732 are fixed in this candidate (#783). This version
 update does not close a gate or add a supported capability cell.
 
 This file is the one canonical ledger of the decisions taken for v0.1 and the dated dispositions
