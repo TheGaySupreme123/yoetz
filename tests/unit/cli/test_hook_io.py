@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import io
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import pytest
 
+from yoetz.cli import hook_io as hook_io_module
 from yoetz.cli.hook_io import (
+    MAX_HOOK_STDIN_BYTES,
     claude_context_output,
     context_output,
     cursor_context_output,
     read_cursor_hook_payload,
+    read_hook_payload,
     stdout_json,
 )
 from yoetz.protocol.canonical import strict_json_parse
@@ -216,3 +220,61 @@ def test_cursor_hook_payload_discards_nested_vendor_floats() -> None:
 
     assert parsed["model_params"] == [{"id": "temperature", "value": None}]
     assert parsed["tool_input"] == {"ratio": None}
+
+
+def _at_cap_payload() -> bytes:
+    """Return a valid hook object whose encoded length is exactly the cap."""
+
+    prefix = b'{"hook_event_name":"PostToolUse","pad":"'
+    suffix = b'"}'
+    return prefix + b"x" * (MAX_HOOK_STDIN_BYTES - len(prefix) - len(suffix)) + suffix
+
+
+@pytest.mark.parametrize("reader", [read_hook_payload, read_cursor_hook_payload])
+def test_hook_ingress_admits_the_exact_cap_and_names_only_the_byte_bound_above_it(
+    reader: Callable[[bytes], Mapping[str, object]],
+) -> None:
+    admitted = _at_cap_payload()
+    assert len(admitted) == MAX_HOOK_STDIN_BYTES
+    assert reader(admitted)["hook_event_name"] == "PostToolUse"
+
+    with pytest.raises(ProtocolValueError) as oversized:
+        reader(admitted[:-1] + b'x"}')
+
+    # An ordinary edit that outgrew the cap and a host that sent nothing shared
+    # one reason, so neither the operator nor the observation ingress could tell
+    # a size refusal from a malformed envelope (issue #667).
+    assert oversized.value.reason_code == "payload_too_large"
+
+    with pytest.raises(ProtocolValueError) as empty:
+        reader(b"")
+
+    assert empty.value.reason_code == "invalid_event_value_type"
+
+    with pytest.raises(ProtocolValueError) as malformed:
+        reader(b'{"hook_event_name":')
+
+    assert malformed.value.reason_code == "malformed_json"
+
+
+def test_oversize_refusal_precedes_every_body_inspecting_rejection() -> None:
+    # The size branch runs before the NUL scan, the UTF-8 decode and the parse,
+    # so an oversized body is named for its size even when its bytes would also
+    # have failed one of those checks.
+    unsafe = b'{"value":"\x00' + b"x" * MAX_HOOK_STDIN_BYTES + b'"}'
+
+    for reader in (read_hook_payload, read_cursor_hook_payload):
+        with pytest.raises(ProtocolValueError) as refusal:
+            reader(unsafe)
+        assert refusal.value.reason_code == "payload_too_large"
+
+
+def test_hook_stdin_cap_is_one_shared_definition() -> None:
+    from yoetz.cli import hooks
+
+    assert hooks.MAX_HOOK_STDIN_BYTES == MAX_HOOK_STDIN_BYTES
+    assert MAX_HOOK_STDIN_BYTES == 262_144
+    # A second private copy of this number is how the documented 256 KiB cap
+    # could drift on one side only.
+    assert not hasattr(hooks, "_MAX_STDIN_BYTES")
+    assert not hasattr(hook_io_module, "_MAX_STDIN_BYTES")

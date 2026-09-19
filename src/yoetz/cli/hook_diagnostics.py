@@ -78,6 +78,17 @@ _REASONS: Final = frozenset(
         # handler as the bare `observe` reason, so a permanently wedged flush
         # was indistinguishable from any other hook fault (issue #753).
         "admission_flush_invalid",
+        # One host event refused at stdin ingress for exceeding
+        # ``MAX_HOOK_STDIN_BYTES``, named per host because the reading process
+        # is the only thing that still knows which host it was: the body was
+        # never parsed, so hook payload identity (tool name, session, paths) is
+        # unavailable. Before these, an oversized Cursor write was recorded as
+        # the generic `cursor_payload_invalid`, a Codex one degraded to the bare
+        # `observe` token, and a Claude Code one recorded nothing at all
+        # (issue #667).
+        "codex_payload_too_large",
+        "claude_payload_too_large",
+        "cursor_payload_too_large",
         "auto_attach_retry_failed",
         # Why a consented SessionStart (or its turn-boundary retry) produced no
         # mapping (#459). Before these, every auto-attach failure collapsed to a

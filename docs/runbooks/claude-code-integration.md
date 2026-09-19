@@ -626,6 +626,21 @@ none of the response bytes or prose. Confirm `mapping_present: true`, then drain
 rows before claiming hook coverage. Pause, resume, revoke, deduplication, restart, and gap behavior
 require their own evidence.
 
+### Oversized hook payloads (issue #667)
+
+A Claude Code hook body over the 256 KiB ingress cap (`MAX_HOOK_STDIN_BYTES`) is refused at
+stdin, before any parse. The hook stays fail-open and the host continues. Yoetz records the
+bounded `claude_payload_too_large` reason against that event in `yoetz observe status` hook
+diagnostics, and notes the `payload_too_large` coverage gap on the consented workspace so
+receipts and coverage wording carry the loss. This host ingress previously swallowed every
+refusal into a bare `{}` with no record at all, so a dropped large edit left no trace.
+The cap is fixed and shared by every host; raising it is not an operator control. Each reader
+consumes at most cap-plus-one bytes, so the true size of a refused body is never measured and
+never recorded — the bound itself is the whole fact. Nothing about the event is parsed, so the
+hook name the host supplied on the command line is the only identity the record can carry: no
+tool name, session, or path. The refusal costs exactly that one event; the next ordinary event
+still ingests.
+
 ### Smart observation selection (issue #687)
 
 Claude's shared hook ingress applies the selector only to the generic tool stream exposed by the

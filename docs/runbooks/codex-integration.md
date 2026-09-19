@@ -856,6 +856,23 @@ budget. Failures, mutations, and ambiguous shell are never suppressed. This is a
 boundary for local CLI self-reads; use the explicit MCP status or receipt route where available or
 account for the CLI read in coverage and capacity.
 
+### Oversized hook payloads (issue #667)
+
+A Codex hook body over the 256 KiB ingress cap (`MAX_HOOK_STDIN_BYTES`) is refused at stdin,
+before any parse. The hook stays fail-open and the host continues. Yoetz records the bounded
+`codex_payload_too_large` reason against that event in `yoetz observe status` hook diagnostics,
+and notes the `payload_too_large` coverage gap on the consented workspace so receipts and
+coverage wording carry the loss. Before this, the refusal reached the outer handler as the bare
+`observe` reason, which named neither the cause nor the affected event, and the native
+`post-tool-use`, `user-prompt-submit`, and `session-start` entry points recorded nothing at all
+because they parse the body before handing the same bytes to the observation ingress.
+The cap is fixed and shared by every host; raising it is not an operator control. Each reader
+consumes at most cap-plus-one bytes, so the true size of a refused body is never measured and
+never recorded — the bound itself is the whole fact. Nothing about the event is parsed, so the
+hook name the host supplied on the command line is the only identity the record can carry: no
+tool name, session, or path. The refusal costs exactly that one event; the next ordinary event
+still ingests.
+
 ## 8. Remove
 
 Skill removal and activation/MCP removal are separate, consent-gated operations. Skill removal
