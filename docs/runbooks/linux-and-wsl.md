@@ -104,8 +104,9 @@ Inside WSL, Yoetz state must stay on the distribution's own ext4 disk — the WS
 
 Evidence state: in the 2026-09-19 WSL 2 run recorded in #786, the installed candidate initialized
 and restarted/unlocked on the Linux filesystem. `yoetz instance create` with a `/mnt/c` root
-refused with `path_on_network_filesystem` and exit 20. Full WSL terminate/restart and native
-agent acceptance remain separate, incomplete cells.
+refused with `path_on_network_filesystem` and exit 20. A full `wsl --terminate` followed by
+distribution startup preserved the installed instance: the service started locked and returned
+ready after passphrase unlock. Native agent acceptance remains a separate, incomplete cell.
 
 ## Host integrations on Linux and WSL
 
