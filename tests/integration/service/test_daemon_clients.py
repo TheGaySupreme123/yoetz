@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 from collections.abc import Buffer, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -12,6 +13,7 @@ import pytest
 
 import yoetz.service.daemon as daemon_module
 from builders.privacy_policies import INSTALLATION_ID, local_only_policy
+from yoetz.adapters.control.unix_socket import LocalControlTransportError
 from yoetz.adapters.privacy.catalog import encode_privacy_policy_json
 from yoetz.application.observation_drain import ObservationDrainSummary
 from yoetz.application.publish_work import PublishWorkInternalResult
@@ -3380,3 +3382,76 @@ async def test_connected_check_wait_timeout_and_disconnect_preserve_admitted_han
         server_task.cancel()
         await asyncio.gather(server_task, return_exceptions=True)
         await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_failed_response_write_is_a_recorded_transport_fact_not_frame_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #678: the same write wrapper serves the daemon, so the same mislabelling was here.
+
+    A peer that stops reading between dispatch and delivery is a transport fact about one
+    connection. The daemon records the bounded reason, ends that call, and leaves no exception
+    for the loop to report; the operation itself already ran.
+    """
+
+    import yoetz.observability.diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    recorded: list[tuple[str, str, str, str]] = []
+    written = asyncio.Event()
+    record_bounded = daemon_module.record_bounded_event_without_raising
+
+    def capture(
+        *, component: str, operation: str, reason: str, request_id: str | None = None
+    ) -> str:
+        correlation_id = record_bounded(
+            component=component, operation=operation, reason=reason, request_id=request_id
+        )
+        recorded.append((component, operation, reason, correlation_id))
+        written.set()
+        return correlation_id
+
+    monkeypatch.setattr(daemon_module, "record_bounded_event_without_raising", capture)
+
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    client, server = _connected_control_pair()
+    loop = asyncio.get_running_loop()
+    contexts: list[dict[str, object]] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: contexts.append(context))
+    server_task = asyncio.create_task(daemon._serve_control_connection(server))  # pyright: ignore[reportPrivateUsage]
+    try:
+        session = await client_handshake(client, ControlClientKind.CLI, "0.3.0")
+
+        async def refuse(data: Buffer) -> None:
+            del data
+            raise LocalControlTransportError("connection_failed")
+
+        # The peer is gone only after its handshake was answered, so the failing write is the
+        # response to a request the daemon already dispatched.
+        monkeypatch.setattr(server, "send_all", refuse)
+        request = _request(daemon, ControlMethod.START, _start_body())
+        session.admit(request)
+        await write_control_frame(client, request)
+        async with asyncio.timeout(5):
+            await written.wait()
+    finally:
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        await daemon.close()
+        gc.collect()
+        loop.set_exception_handler(previous)
+
+    assert application.start_calls == 1
+    assert len(recorded) == 1
+    component, operation, reason, correlation_id = recorded[0]
+    assert (component, operation, reason) == (
+        "service.daemon",
+        "control_response_write",
+        "connection_failed",
+    )
+    found = lookup_diagnostic_records(correlation_id, root=tmp_path)
+    assert [entry["reason"] for entry in found] == ["connection_failed"]
+    assert [context.get("message") for context in contexts] == []
