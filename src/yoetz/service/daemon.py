@@ -1464,9 +1464,25 @@ class ServiceDaemon:
                 _defer_stop=True,
             )
         session.correlate(result)
-        async with write_lock:
-            async with asyncio.timeout(_CONTROL_RESPONSE_WRITE_DEADLINE_SECONDS):
-                await write_control_frame(stream, result)
+        try:
+            async with write_lock:
+                async with asyncio.timeout(_CONTROL_RESPONSE_WRITE_DEADLINE_SECONDS):
+                    await write_control_frame(stream, result)
+        except (LocalControlTransportError, ControlProtocolError) as exc:
+            if isinstance(exc, ControlProtocolError) and exc.reason != "transport_failed":
+                # A response this service could not encode is its own defect; keep it loud.
+                raise
+            # The peer went away between dispatch and delivery. That is a transport fact about
+            # this connection, not a malformed response, and this task is the only holder of the
+            # failure: record the bounded reason and end the call so the daemon reports neither
+            # `frame_invalid` nor an unretrieved task exception (issue #678). The read side sees
+            # the same dead stream and finalizes the connection.
+            record_bounded_event_without_raising(
+                component="service.daemon",
+                operation="control_response_write",
+                reason=exc.reason,
+            )
+            return
         if request.method is ControlMethod.SERVICE_STOP and result.outcome == "ok":
             # The connection owns only response delivery. If it awaits teardown here, peer EOF
             # makes the connection finalizer cancel this call while singleton release is in flight.

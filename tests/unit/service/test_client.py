@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import os
 import stat
 import time
-from collections.abc import Buffer
+from collections.abc import Buffer, Generator
+from contextlib import contextmanager
 from inspect import signature
 from pathlib import Path
 from typing import BinaryIO, cast
 
 import pytest
 
-from yoetz.adapters.control.unix_socket import AuthenticatedUnixStream
+from yoetz.adapters.control.unix_socket import (
+    AuthenticatedUnixStream,
+    LocalControlTransportError,
+)
 from yoetz.domain.values import JsonObject
 from yoetz.ports.control import (
     ControlClientKind,
@@ -26,6 +31,7 @@ from yoetz.ports.control import (
     WorkspaceLocator,
 )
 from yoetz.ports.privacy import LocalDisclosureReceiptView, PrivacyReceiptPage
+from yoetz.protocol.errors import PublicErrorCode
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import ReceiptRequest
 from yoetz.service.client import (
@@ -41,6 +47,7 @@ from yoetz.service.control_protocol import (
     decode_control_frame,
     encode_control_frame,
     parse_control_result,
+    public_error_code_for_control_reason,
 )
 
 _SERVICE_ID = "svc_00000000-0000-4000-8000-000000000001"
@@ -58,6 +65,9 @@ class _FakeStream:
         self._incoming = bytearray()
         self._ready = asyncio.Condition()
         self.closed = False
+        # Armed by the transport regressions: the exact failure this stream raises instead of
+        # accepting the next write.
+        self.send_failure: BaseException | None = None
 
     async def receive(self, max_bytes: int) -> bytes:
         async with self._ready:
@@ -70,6 +80,8 @@ class _FakeStream:
             return result
 
     async def send_all(self, data: Buffer) -> None:
+        if self.send_failure is not None:
+            raise self.send_failure
         self.sent.append(bytes(data))
 
     async def aclose(self) -> None:
@@ -136,6 +148,28 @@ def _client(stream: _FakeStream, kind: ControlClientKind = ControlClientKind.CLI
             kind,
         ),
     )
+
+
+@contextmanager
+def _captured_loop_exceptions() -> Generator[list[dict[str, object]]]:
+    """Collect every context the running loop would otherwise report as an unhandled failure."""
+
+    loop = asyncio.get_running_loop()
+    contexts: list[dict[str, object]] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: contexts.append(context))
+    try:
+        yield contexts
+    finally:
+        loop.set_exception_handler(previous)
+
+
+async def _settle_loop_callbacks() -> None:
+    """Run every callback already queued on the loop, waiting on that fact and not on a clock."""
+
+    flushed = asyncio.Event()
+    asyncio.get_running_loop().call_soon(flushed.set)
+    await flushed.wait()
 
 
 async def _wait_for_sent(stream: _FakeStream, count: int) -> None:
@@ -1158,3 +1192,89 @@ async def test_supersede_signals_only_a_live_foreign_identity_holder(
         if holder.poll() is None:
             holder.kill()
             holder.wait(timeout=5)
+
+
+@pytest.mark.anyio
+async def test_failed_send_reports_the_retryable_transport_mapping() -> None:
+    """Issue #678: a request that validated and encoded is not the caller's malformed frame."""
+
+    stream = _FakeStream()
+    stream.send_failure = LocalControlTransportError("connection_failed")
+    client = _client(stream)
+
+    with pytest.raises(ControlError) as caught:
+        await client.service_status()
+
+    assert caught.value.reason == "service_unavailable"
+    assert caught.value.retryable is True
+    assert (
+        public_error_code_for_control_reason(caught.value.reason)
+        is PublicErrorCode.SERVICE_UNAVAILABLE
+    )
+    assert stream.sent == []
+    await client.close()
+
+
+@pytest.mark.anyio
+async def test_failed_send_leaves_no_unretrieved_future_for_the_event_loop() -> None:
+    """Issue #678: the call's own future is failed by teardown and must still be consumed."""
+
+    stream = _FakeStream()
+    stream.send_failure = LocalControlTransportError("connection_failed")
+    client = _client(stream)
+
+    with _captured_loop_exceptions() as contexts:
+        with pytest.raises(ControlError, match="service_unavailable"):
+            await client.service_status()
+        await client.close()
+        gc.collect()
+        await _settle_loop_callbacks()
+
+        assert [context.get("message") for context in contexts] == []
+
+
+@pytest.mark.anyio
+async def test_send_cancellation_stays_cancellation() -> None:
+    """A cancelled write is never reclassified, and it strands no future either."""
+
+    stream = _FakeStream()
+    stream.send_failure = asyncio.CancelledError()
+    client = _client(stream)
+
+    with _captured_loop_exceptions() as contexts:
+        with pytest.raises(asyncio.CancelledError):
+            await client.service_status()
+        await client.close()
+        gc.collect()
+        await _settle_loop_callbacks()
+
+        assert [context.get("message") for context in contexts] == []
+
+
+@pytest.mark.anyio
+async def test_failed_send_bounds_every_concurrent_pending_caller() -> None:
+    """One failed write retires the connection; every pending caller ends consumed and bounded."""
+
+    stream = _FakeStream()
+    client = _client(stream)
+
+    with _captured_loop_exceptions() as contexts:
+        awaiting_answer = asyncio.create_task(client.service_status())
+        await _wait_for_sent(stream, 1)
+        stream.send_failure = LocalControlTransportError("connection_failed")
+
+        with pytest.raises(ControlError) as failed_write:
+            await client.service_status()
+        assert failed_write.value.reason == "service_unavailable"
+        assert failed_write.value.retryable is True
+
+        with pytest.raises(ControlError) as stranded:
+            await awaiting_answer
+        assert stranded.value.reason == "service_unavailable"
+        assert stranded.value.retryable is True
+
+        await client.close()
+        gc.collect()
+        await _settle_loop_callbacks()
+
+        assert [context.get("message") for context in contexts] == []
