@@ -1,4 +1,4 @@
-"""Issue #479: the policy-route initialize instructions name the semantic review destination.
+"""Issue #479: the policy-route initialize instructions name the AI-powered review destination.
 
 Every rendered value must be a closed catalog token, a ``Literal`` configuration field, or an
 already-validated hostname; absent or invalid configuration must stay unknown; a fallback must be
@@ -385,13 +385,13 @@ def test_policy_instructions_append_the_disclosure_and_strict_ignores_it() -> No
     )
     policy = server_instructions("policy", semantic_destination=disclosure)
     assert policy == server_instructions("policy").rstrip("\n") + " " + disclosure.sentence + "\n"
-    assert "Route profile: policy. External semantic review follows the configured policy. " in (
+    assert "Route profile: policy. External AI-powered review follows the configured policy. " in (
         policy
     )
     strict = server_instructions("strict")
     assert server_instructions("strict", semantic_destination=disclosure) == strict
     assert DISCLOSURE_PREFIX not in strict
-    assert "This route will not request external semantic review" in strict
+    assert "This route will not request external AI-powered review" in strict
 
 
 def test_bridge_runtime_carries_the_disclosure_on_the_policy_route_only() -> None:

@@ -1,6 +1,6 @@
-"""The sole authorization-fenced outbound and local-model semantic gateway.
+"""The sole authorization-fenced outbound and local-model AI-powered review gateway.
 
-``PolicyEnforcingOutboundGateway`` is the only component permitted to own semantic provider
+``PolicyEnforcingOutboundGateway`` is the only component permitted to own AI-powered review provider
 transports. It revalidates and atomically consumes privacy authority immediately before dispatch,
 renders and scans the exact final application request body before any credential is minted, and
 never exposes a provider client, credential, or raw response to application code. ``ProviderRegistry``
@@ -240,7 +240,7 @@ async def _best_effort_close(target: object) -> None:
 
 
 class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
-    """The sole gateway allowed to own semantic provider transports.
+    """The sole gateway allowed to own AI-powered review provider transports.
 
     Construction receives only verified credential-free factory builders, the privacy audit
     authority needed for atomic consumption, the exact same :class:`PrivacyClassifierPort` instance
@@ -1108,7 +1108,7 @@ def _bounded_policy_binding(authorization: EgressAuthorization) -> ReceiptPolicy
 
 
 def _with_request_commitment(result: SemanticResult, commitment: str) -> SemanticResult:
-    """Carry the gateway-bound request commitment into the receipt-bound semantic outcome."""
+    """Carry the gateway-bound request commitment into the receipt-bound AI-powered review outcome."""
 
     return replace(result, provenance=replace(result.provenance, request_commitment=commitment))
 

@@ -2005,9 +2005,9 @@ class CatalogPrivacyAudit:
     async def load_disclosure_attempt(
         self, request_id: str, case_digest: str
     ) -> PrivacyAuditState | None:
-        """Find the audit row for one physical semantic request and frozen case.
+        """Find the audit row for one physical AI-powered review request and frozen case.
 
-        ``load`` intentionally keys on the private HMAC subject identity.  Semantic replay only
+        ``load`` intentionally keys on the private HMAC subject identity.  AI-powered review replay only
         has the public case digest, so this bounded internal lookup authenticates the match from
         the non-secret structural canonical stored with the disclosure row and returns the real
         subject identity for subsequent resume operations.  Absence is distinct from malformed,

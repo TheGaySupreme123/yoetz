@@ -133,7 +133,7 @@ async def _semantic_forbidden(
     lineage_evaluation: object | None = None,
 ) -> object:
     del frozen, findings, runtime, lineage_evaluation
-    raise AssertionError("resume capability cell must never invoke the semantic evaluator")
+    raise AssertionError("resume capability cell must never invoke the AI-powered evaluator")
 
 
 @pytest.fixture

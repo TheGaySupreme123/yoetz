@@ -1,4 +1,4 @@
-"""Build observation AdviceSnapshot from envelopes, optional inspect, and semantic add-ons."""
+"""Build observation AdviceSnapshot from envelopes, optional inspect, and AI-powered add-ons."""
 
 from __future__ import annotations
 
@@ -78,13 +78,13 @@ _ADVICE_RANKED_FINDINGS_TRUNCATED_GAP: Final = "advice_ranked_findings_truncated
 _ADVICE_SEMANTIC_OUTPUT_INVALID_GAP: Final = "advice_semantic_output_invalid"
 _ADVICE_SEMANTIC_TEXT_TRUNCATED_GAP: Final = "advice_semantic_text_truncated"
 _ADVICE_COVERAGE_GAPS_TRUNCATED_GAP: Final = "advice_coverage_gaps_truncated"
-# Asynchronous semantic advice (#619): a durable attempt exists but has not reached a terminal
-# state, or it terminated without validated output. Neither ever adds semantic coverage.
+# Asynchronous AI-powered advice (#619): a durable attempt exists but has not reached a terminal
+# state, or it terminated without validated output. Neither ever adds AI-powered review coverage.
 ADVICE_SEMANTIC_PENDING_GAP: Final = "advice_semantic_pending"
 ADVICE_SEMANTIC_UNAVAILABLE_GAP: Final = "advice_semantic_unavailable"
 _ADVICE_SEMANTIC_PENDING_REASON: Final = "pending"
 _SEMANTIC_SUMMARY_FALLBACK: Final = "Model-derived observation note"
-_SEMANTIC_DETAIL_FALLBACK: Final = "Additive semantic advice over minimized evidence"
+_SEMANTIC_DETAIL_FALLBACK: Final = "Additive AI-powered advice over minimized evidence"
 _VALID_ADVICE_NEXT_ACTIONS: Final[frozenset[str]] = frozenset(
     {
         "resolve_failed_command",
@@ -109,7 +109,7 @@ _RULE_SUMMARIES: Final[Mapping[str, str]] = {
     "change_outside_plan": "Observed change outside declared plan scope",
     "observation_gap_or_stale": "Observation coverage is incomplete or stale",
     "provider_not_ready": "Configured provider is not ready",
-    "semantic_claim_without_attempt": "Semantic claim lacks a recorded attempt",
+    "semantic_claim_without_attempt": "AI-powered review claim lacks a recorded attempt",
 }
 
 _RULE_DETAILS: Final[Mapping[str, str]] = {
@@ -120,8 +120,8 @@ _RULE_DETAILS: Final[Mapping[str, str]] = {
     "subagent_finding_unaddressed": "A subagent reported a finding that parent work has not addressed",
     "change_outside_plan": "Changed-path evidence falls outside the declared plan digests",
     "observation_gap_or_stale": "Source lag, mapping, or drain gaps prevent complete observation",
-    "provider_not_ready": "Semantic or provider binding is configured but not ready",
-    "semantic_claim_without_attempt": "A semantic claim was observed without a matching attempt receipt",
+    "provider_not_ready": "AI-powered review or provider binding is configured but not ready",
+    "semantic_claim_without_attempt": "An AI-powered review claim was observed without a matching attempt receipt",
 }
 
 _REFRESH_OBSERVATION_HOOK_NEXT: Final = (
@@ -132,7 +132,7 @@ _REFRESH_OBSERVATION_HOOK_NEXT: Final = (
 
 @dataclass(frozen=True, slots=True)
 class ObservationAdviceSemanticAddon:
-    """Additive semantic advice identities already privacy-gated upstream."""
+    """Additive AI-powered advice identities already privacy-gated upstream."""
 
     finding_ids: tuple[FindingId, ...]
     evidence_digest: str | None
@@ -145,7 +145,7 @@ class ObservationAdviceSemanticAddon:
 
 
 class SemanticAdvicePort(Protocol):
-    """Optional semantic advisor; never required for deterministic correctness guidance."""
+    """Optional AI-powered advisor; never required for local correctness guidance."""
 
     def review(
         self,
@@ -218,7 +218,7 @@ type CallableComposition = Callable[
 
 
 class SemanticAdviceScheduler(Protocol):
-    """Durable, store-aware semantic review that never dispatches on the hook path (#619)."""
+    """Durable, store-aware AI-powered review that never dispatches on the hook path (#619)."""
 
     async def review(
         self,
@@ -329,7 +329,7 @@ class ObservationAdviceContextBuilder:
                 },
             )
             if self.semantic_scheduler is not None:
-                # Durable, off-hook semantic advice (#619): look up or enqueue only. The scoped
+                # Durable, off-hook AI-powered advice (#619): look up or enqueue only. The scoped
                 # status gaps travel with the row so the provider packet keeps them exactly.
                 semantic = await self.semantic_scheduler.review(
                     store=store,
@@ -450,7 +450,7 @@ def _bounded_coverage_gaps(gaps: Sequence[str], additional_gaps: Sequence[str]) 
 def _sorted_coverage_gaps(
     gaps: Sequence[str], additional_gaps: Sequence[str] = ()
 ) -> tuple[str, ...]:
-    """Return the complete deterministic gap set before the wire bound."""
+    """Return the complete local gap set before the wire bound."""
 
     return tuple(sorted({gap for gap in (*gaps, *additional_gaps) if gap}, key=str.encode))
 
@@ -594,7 +594,7 @@ def _semantic_item(
     coverage: Coverage,
     freshness_frontier: str,
 ) -> tuple[AdviceItem | None, bool]:
-    """Build one fenced semantic item, falling back on invalid provider text."""
+    """Build one fenced AI-powered item, falling back on invalid provider text."""
 
     raw_summary = summary if type(summary) is str else _SEMANTIC_SUMMARY_FALLBACK
     raw_detail = detail if type(detail) is str else _SEMANTIC_DETAIL_FALLBACK
@@ -667,7 +667,7 @@ def _semantic_items(
 def _candidate_projection(
     candidates: Sequence[ObservationAdviceCandidate],
 ) -> tuple[tuple[ObservationAdviceCandidate, ...], tuple[FindingId, ...], bool, bool]:
-    """Select the bounded deterministic surface while retaining overflow facts."""
+    """Select the bounded local surface while retaining overflow facts."""
 
     candidate_overflow = len(candidates) > _MAX_ADVICE_RANKED_FINDINGS
     selected = tuple(candidates[:_MAX_ADVICE_RANKED_FINDINGS])
@@ -682,7 +682,7 @@ def _candidate_projection(
 
 
 def _semantic_invalid_fallback_candidate() -> ObservationAdviceCandidate:
-    """Represent an invalid semantic-only result as bounded engine advice."""
+    """Represent an invalid result carrying only AI-powered advice as bounded engine advice."""
 
     kind = FindingKind.LEDGER_STALE_OR_INCOMPLETE
     priority, _ = FINDING_KIND_TRAITS[kind]
@@ -732,7 +732,7 @@ def build_observation_advice_snapshot(
     semantic_details: tuple[object, ...] = ()
     semantic_evidence_digest: str | None = None
     # A durable attempt that has not finished, or finished without validated output, is a
-    # coverage gap and never a semantic check type (#619). The addon carries no finding ids in
+    # coverage gap and never an AI-powered review check type (#619). The addon carries no finding ids in
     # either case, so the structural validation below cannot mistake it for provider output.
     semantic_pending = (
         semantic is not None and semantic.failure_reason == _ADVICE_SEMANTIC_PENDING_REASON
@@ -778,7 +778,7 @@ def build_observation_advice_snapshot(
             else:
                 semantic_evidence_digest = semantic.evidence_digest
     if semantic is not None and type(semantic.finding_ids) is tuple and semantic.finding_ids:
-        # Semantic add-ons are provider data rather than policy output, so
+        # AI-powered add-ons are provider data rather than policy output, so
         # defensively deduplicate and fit them into the remaining ranked
         # surface.  A malformed oversized add-on must not turn a hook update
         # into a ProtocolValueError at AdviceSnapshot construction.
@@ -790,8 +790,8 @@ def build_observation_advice_snapshot(
         semantic_indexes = tuple(index for index, _ in selected_semantic)
         semantic_ids = tuple(finding for _, finding in selected_semantic)
     if semantic is not None and semantic_invalid and not candidates and not semantic_ids:
-        # A malformed semantic-only response cannot mint an additive finding.
-        # Keep the actual lifecycle unchanged and use the existing deterministic
+        # A malformed response carrying only AI-powered advice cannot mint an additive finding.
+        # Keep the actual lifecycle unchanged and use the existing local
         # gap rendering machinery for one actionable engine record.
         candidates = (_semantic_invalid_fallback_candidate(),)
         selected_candidates, finding_ids, candidate_overflow, evidence_ref_overflow = (
@@ -806,7 +806,7 @@ def build_observation_advice_snapshot(
         if semantic is not None and semantic.next_action is not None and not candidates
         else _next_action(candidates)
     )
-    # Semantic output uses the same closed action vocabulary as deterministic advice. Validate
+    # AI-powered output uses the same closed action vocabulary as local advice. Validate
     # before building the snapshot: item-level fallback alone cannot protect the snapshot's
     # top-level recommended_next_action field.
     if type(next_action) is not str or next_action not in _VALID_ADVICE_NEXT_ACTIONS:
@@ -890,7 +890,7 @@ def build_observation_advice_snapshot(
         freshness_frontier=frontier,
     )
     if semantic_item_invalid and not semantic_invalid:
-        # AdviceItem is the single source of truth for safe semantic text and
+        # AdviceItem is the single source of truth for safe AI-powered text and
         # action tokens. Rebuild coverage and items after it rejects provider
         # output so the rejection remains visible as a bounded gap.
         semantic_invalid = True
@@ -1061,7 +1061,7 @@ def hook_advice_context(snapshot: AdviceSnapshot, *, item: AdviceItem | None = N
 
 
 def advice_items_for_ledger(snapshot: AdviceSnapshot) -> tuple[AdviceItem, ...]:
-    """Deterministic items for task-ledger materialization (Agent A coordinator hook)."""
+    """Local items for task-ledger materialization (Agent A coordinator hook)."""
 
     return tuple(item for item in snapshot.ranked_items if item.origin == "deterministic")
 
@@ -1073,7 +1073,7 @@ def minimized_semantic_evidence_packet(
     coverage_gaps: Sequence[str] = (),
     finding_summaries: Sequence[str] = (),
 ) -> dict[str, object]:
-    """Build a minimized packet for optional semantic review (no repo/transcript/logs)."""
+    """Build a minimized packet for optional AI-powered review (no repo/transcript/logs)."""
 
     return {
         "format": "yoetz.observation-advice-semantic/1",

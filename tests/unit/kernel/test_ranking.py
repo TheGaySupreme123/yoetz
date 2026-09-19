@@ -265,7 +265,7 @@ def test_reviewer_challenge_slots_scale_with_the_cap() -> None:
     The rescue used to be exactly one challenge, so a reviewer that raised two or three material
     discrepancies had all but the best folded into ``suppressed_count`` — invisible, and
     indistinguishable from a reviewer that only found one. Up to half the cap is reservable now,
-    which keeps deterministic findings in the majority without discarding the rest of the review.
+    which keeps local findings in the majority without discarding the rest of the review.
     """
 
     deterministic = tuple(_finding(index) for index in range(1, 7))
@@ -311,7 +311,7 @@ def test_reviewer_challenge_slots_scale_with_the_cap() -> None:
     )
     assert len(at_four.findings) == 4
 
-    # Deterministic findings still hold the majority of every selection.
+    # Local findings still hold the majority of every selection.
     for ranked in (at_six, at_four):
         deterministic_selected = [
             finding for finding in ranked.findings if finding.origin is FindingOrigin.DETERMINISTIC

@@ -383,14 +383,14 @@ class ProviderPosture:
     transport_tested: bool = False
     blockers: tuple[tuple[str, str], ...] = ()
     # The Codex agent route is a separate verdict from installation readiness: a strict
-    # registration ceilings semantic review for that process while CLI and TUI checks can still
+    # registration ceilings AI-powered review for that process while CLI and TUI checks can still
     # dispatch. ``None`` means the registration could not be read, never that it is absent.
     agent_route_semantic_ready: bool | None = None
     registered_route_profile: str | None = None
     # True when the durable applied-route record disagrees with the live Codex registration
     # (issue #537): the serving process may be stale rather than intentionally strict.
     route_drift_since_install: bool = False
-    # Each host's own project-scoped rule admitting the semantic check past its automatic
+    # Each host's own project-scoped rule admitting the AI-powered check past its automatic
     # reviewer (issue #467): ``absent|present|partial|foreign|unknown`` per host. Host tool-call
     # authorization only; never a claim that a check dispatched.
     host_admission: tuple[tuple[str, str], ...] = ()
@@ -415,7 +415,7 @@ class CheckMode(Enum):
 _CHECK_LABELS: Final[dict[CheckMode, str]] = {
     CheckMode.SEMANTIC_IF_CONFIGURED: "Use deeper review when available",
     CheckMode.SEMANTIC_REQUIRED: "Require deeper review",
-    CheckMode.DETERMINISTIC_ONLY: "Local deterministic checks only",
+    CheckMode.DETERMINISTIC_ONLY: "Local checks only",
 }
 
 _CHECK_DESCRIPTIONS: Final[dict[CheckMode, str]] = {

@@ -1,4 +1,4 @@
-"""Deterministic case construction, rendering, and dispatch conformance."""
+"""Local case construction, rendering, and dispatch conformance."""
 
 from __future__ import annotations
 

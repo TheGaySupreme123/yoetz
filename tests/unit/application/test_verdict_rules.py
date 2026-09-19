@@ -380,7 +380,7 @@ def test_deterministic_only_marks_semantic_not_requested_gap_without_verdict_cha
         RankingContext(coverage, CheckCompleteness.COVERAGE_INCOMPLETE),
         3,
     )
-    # Verdict still driven by findings, not by the semantic gap alone.
+    # Verdict still driven by findings, not by the AI-powered review gap alone.
     assert ranked.verdict is CheckVerdict.ACTION_REQUIRED
     assert SEMANTIC_REVIEW_NOT_REQUESTED_GAP in coverage.known_gaps
     assert coverage.ledger_freshness is LF.PARTIAL
@@ -437,9 +437,9 @@ def _case_after_check(*gaps: str) -> DeterministicCase:
 
 
 def test_deterministic_fallback_carries_a_blocked_semantic_attempt_forward() -> None:
-    """A blocked review stays disclosed after the stop-rule deterministic re-check (issue #185).
+    """A blocked review stays disclosed after the stop-rule local re-check (issue #185).
 
-    A host or policy gate that refuses a semantic check is a coverage gap, not a retry problem, so
+    A host or policy gate that refuses an AI-powered check is a coverage gap, not a retry problem, so
     the agent re-checks with ``deterministic_only``. That successor replaces
     ``latest_tested_state`` wholesale, leaving ``semantic_review_not_requested`` as the receipt's
     only account — which blames the agent for never asking, when the environment refused.
@@ -479,7 +479,7 @@ def test_registration_drift_never_carries_forward() -> None:
     """Issue #537: drift is re-read live on the strict-ceiling path, never inherited.
 
     After a ``mcp remove`` clears the applied-route record (or a strict reinstall
-    overwrites it), a later deterministic-only successor must not inherit the stale
+    overwrites it), a later local-only successor must not inherit the stale
     drift claim — while the ceiling gap beside it still carries.
     """
 

@@ -91,18 +91,18 @@ def _selected_with_diversity(
     semantic: tuple[Finding, ...],
     max_findings: int,
 ) -> tuple[Finding, ...]:
-    """Reserve part of the cap for material semantic challenges the kind order would evict.
+    """Reserve part of the cap for material AI-powered challenges the kind order would evict.
 
-    ``rank_key`` puts origin ninth of ten, so finding kind dominates and enough deterministic
-    findings out-rank every semantic one. That ordering is deliberate and is left alone. What
+    ``rank_key`` puts origin ninth of ten, so finding kind dominates and enough local
+    findings out-rank every AI-powered one. That ordering is deliberate and is left alone. What
     changes here is how many reserved seats survive it: the rescue used to be exactly one, so a
     reviewer that raised two or three material challenges had all but the best silently folded
-    into ``suppressed_count``. Up to half the cap is now reservable, which keeps deterministic
+    into ``suppressed_count``. Up to half the cap is now reservable, which keeps local
     findings in the majority while letting more than one challenge be seen.
 
-    ``max_findings == 1`` reserves nothing and stays deterministic-only, unchanged from before:
+    ``max_findings == 1`` reserves nothing and stays local-only, unchanged from before:
     the single seat goes to the highest-ranked finding, because reserving it would mean returning
-    a semantic challenge in place of every deterministic finding rather than alongside them.
+    an AI-powered challenge in place of every local finding rather than alongside them.
     """
 
     selected = ordered[:max_findings]

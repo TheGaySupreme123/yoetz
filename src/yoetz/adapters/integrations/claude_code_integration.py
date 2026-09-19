@@ -179,7 +179,7 @@ _SKILL_PATH: Final = "skills/claude-code/yoetz/SKILL.md"
 _YOETZ_SCOPED_TOOL_MATCHER: Final = (
     "^mcp__plugin_yoetz_yoetz__(" + "|".join(YOETZ_WORKFLOW_TOOL_NAMES) + ")$"
 )
-# Only the semantic ``check`` is routed through a host's automatic reviewer (issue #467); the
+# Only the AI-powered ``check`` is routed through a host's automatic reviewer (issue #467); the
 # denial hook is scoped to its external and plugin-owned callable names so a held check is the only
 # thing it can ever report.
 _YOETZ_CHECK_TOOL_MATCHER: Final = "^mcp__(yoetz|plugin_yoetz_yoetz)__check$"

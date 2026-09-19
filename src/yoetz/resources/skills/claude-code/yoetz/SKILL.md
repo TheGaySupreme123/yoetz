@@ -88,7 +88,7 @@ Start or attach once, publish a bounded plan and material transitions, and keep 
 claim separate from the implementation result. Publish per material transition, not per tool call.
 
 Select `semantic_required` when the user, effective policy, or named acceptance criterion requires
-independent semantic review. Omit `mode` when relying on the configured default. Use
+independent AI-powered review. Omit `mode` when relying on the configured default. Use
 `semantic_if_configured` only when review is known optional, and never downgrade a required review
 because Claude's host approval is pending or unavailable.
 
@@ -102,5 +102,5 @@ route there without handling secrets or substituting chat assent.
 For closure, follow [coverage-and-receipts.md](references/coverage-and-receipts.md): ground status
 and evidence, publish the actual result, check, respond to returned findings at the result frontier,
 read findings including resolved history, recheck after material changes, and request `receipt` last.
-Report the closure counts and checked frontier, the check's semantic status/reason, and the
-receipt's coverage limits.
+Report the closure counts and checked frontier, the check's AI-powered review status/reason, and
+the receipt's coverage limits.

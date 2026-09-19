@@ -301,7 +301,7 @@ def test_policy_failed_semantic_is_indeterminate_not_poor_quality() -> None:
             "semantic_status": "failed",
             "semantic_provenance_present": True,
             "ops_completed_honestly": True,
-            "final_prose": "semantic attempt indeterminate",
+            "final_prose": "AI-powered review attempt indeterminate",
         }
     )
     assert report["stream_c"] == "indeterminate"

@@ -119,7 +119,7 @@ not become a bundled consent switch.
    acceptance runs an upgrade.
 
 8. **This is a support surface, not a seventh protocol operation.** Recommendations add no MCP
-   operation, work event, receipt claim, semantic-review permission, or general observation
+   operation, work event, receipt claim, AI-powered review permission, or general observation
    payload. They are local advisory/configuration ergonomics. Guidance instructs agents to preserve
    the current-chat approval boundary and to word any result as a recommendation decision, not as
    verification of the recommended behavior.

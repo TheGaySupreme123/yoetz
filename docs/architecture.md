@@ -60,10 +60,10 @@ or any snapshot of it ([ADR-017](adr/ADR-017-full-screen-terminal-interface.md) 
 |---|---|
 | `protocol/` | Canonical wire form: IDs, request/result models, canonical JSON, digests. Pure. |
 | `domain/` | Values and events — the vocabulary of what happened. Pure. |
-| `kernel/` | Deterministic truth: reducers, projections, the check engine, ranking, proof-based finding resolution, receipt building, and the versioned policy packs under `kernel/policies/`. Pure — no IO, no clock, no network. |
+| `kernel/` | Local-check truth: reducers, projections, the check engine, ranking, proof-based finding resolution, receipt building, and the versioned policy packs under `kernel/policies/`. Pure — no IO, no clock, no network. |
 | `ports/` | The interfaces the application depends on. First-class boundaries: `ledger`, `objects`, `keys`, `runtime`, `semantic`, `privacy`, `importer`, `integrations`, `subject_state`, `observation` ([ADR-010](adr/ADR-010-harness-integration-port.md)), `plugin_artifacts` ([ADR-023](adr/ADR-023-portable-plugin-carrier-host-activation.md)), `control`, `harness_mcp`, `maintenance`, `check_sandbox`, `workspace_inspect`, `secret_memory`; the rest are small effect ports (`clock`, `ids`, `diagnostics`) and read-only catalogs (`start_catalog`, `publish_response_catalog`). |
 | `adapters/` | Concrete implementations of those ports: `sqlite/`, `objects/`, `keys/`, `memory/` (the in-memory reference used for conformance parity), `providers/`, `privacy/`, `importers/`, `integrations/`, `control/`, plus the single-module adapters at the package root — `mcp_stdio.py`, `git_subject_state.py`, `repository_identity.py`, `workspace_inspect.py`, `session_events.py`, `runtime.py`, `approved_checks.py`, `check_sandbox.py`, and `observation_semantic_advice.py`. |
-| `application/` | Use cases. One module per public operation (`start`, `publish_work`, `check`, `respond`, `status`, `receipt`), plus egress, privacy policy and privacy control, maintenance, package update, import review, recommendations, harness integration (`harness_mcp`, `applied_mcp_route`, `codex_plugin`, `integrations`), the semantic case and attempt builders, and the observation family (`observation_coordinator` with its `drain`, `health`, `verification`, `materialize`, `check_policy`, `advice`, and `control` modules). |
+| `application/` | Use cases. One module per public operation (`start`, `publish_work`, `check`, `respond`, `status`, `receipt`), plus egress, privacy policy and privacy control, maintenance, package update, import review, recommendations, harness integration (`harness_mcp`, `applied_mcp_route`, `codex_plugin`, `integrations`), the AI-powered review case and attempt builders, and the observation family (`observation_coordinator` with its `drain`, `health`, `verification`, `materialize`, `check_policy`, `advice`, and `control` modules). |
 | `service/` | The persistent trusted process: lifecycle, vault, unlock, control protocol, composition. |
 | `cli/`, `mcp/` | Client surfaces. Thin — they translate, they do not decide. |
 | `tui/` | The full-screen terminal interface. Presentation only. `runtime.py` is the sole bridge to application services and originates no decision; `render.py` is pure text with no rendering-framework import, so safety-relevant wording is snapshot-tested; `widgets/` holds no security logic. |
@@ -104,8 +104,8 @@ Flow for a typical task:
 2. **`publish_work`** records bounded, participant-published facts: plan, obligations, claims,
    actions, results, evidence. On this cooperative path the participant publishes; Yoetz does not
    infer observation or verification from those assertions.
-3. **`check`** runs the deterministic policy packs over the recorded state, producing findings with
-   an exact coverage vector. If semantic review is configured and requested, an advisory
+3. **`check`** runs the local policy packs over the recorded state, producing findings with
+   an exact coverage vector. If AI-powered review is configured and requested, an advisory
    provenance-labeled pass runs inside the privacy policy and is deterministically fenced.
 4. **`respond`** answers a finding: act, supply evidence, revise the claim, dispute, or state an
    unresolved limitation. A response never erases a finding.
@@ -118,7 +118,7 @@ output, changed-file, diff, and bounded inspection objects as `observation_captu
 evidence. That path proves retention and byte identity, not correctness, reproduction, or egress
 authority; ordinary `publish_work` cannot self-award it.
 
-## External semantic evaluator authorities
+## External AI-powered evaluator authorities
 
 External review has two closed runtime shapes behind the same privacy gateway. HTTP profiles use a
 one-attempt credential handle minted from the Yoetz vault. The Codex subscription profile instead
@@ -139,11 +139,11 @@ does not invent HTTP-level evidence.
 These are enforced in code and locked by tests; they are the reason the system is worth trusting.
 
 - **Coverage-bounded language.** "No issue detected at coverage X" is never rendered as "verified".
-- **Deterministic results depend only on canonical recorded inputs** plus the versioned policy and
+- **Local-check results depend only on canonical recorded inputs** plus the versioned policy and
   engine identity. Same inputs, same version, same findings.
-- **Semantic output is advisory**, provenance-labeled, and fenced. `semantic_required` never erases
-  a completed deterministic result: unavailability returns that result as `incomplete_check` with an
-  exact gap, not a failure.
+- **AI-powered output is advisory**, provenance-labeled, and fenced. `semantic_required` never
+  erases a completed local-check result: unavailability returns that result as `incomplete_check`
+  with an exact gap, not a failure.
 - **Nothing user-controlled** — payloads, titles, paths, prompts, model output — reaches SQLite
   structural tables, logs, errors, or MCP text summaries.
 - **Every retryable write has an idempotency identity.** A timeout never proves failure.
@@ -238,5 +238,6 @@ and bounded structural lifecycle facts survive; raw Claude prompt/transcript/pat
 content is discarded before storage. The `claude_hook` source is carried on local-control schema
 `2.2.0`. The initial capability fixture covers only local CLI `2.1.241`, macOS arm64, project scope,
 and private marketplace install. Desktop, remote, web/cloud, synced, managed/user/local scope,
-Agent SDK, loaded-session/model-use, semantic, privacy-receipt, and workflow-receipt cells require
+Agent SDK, loaded-session/model-use, AI-powered review, privacy-receipt, and workflow-receipt cells
+require
 their own evidence.

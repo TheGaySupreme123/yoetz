@@ -7,9 +7,10 @@ metadata:
 
 # Yoetz for Codex
 
-Yoetz is a local work ledger and deterministic checker of participant-published facts. It is not an
-enforcement system, observer, authorship proof, transcript recorder, or orchestrator. A clean
-check does not prove the underlying work correct.
+Yoetz is a local work ledger and checker: its local checks run on your machine, and AI-powered
+review is optional. It records only participant-published facts. It is not an enforcement system,
+observer, authorship proof, transcript recorder, or orchestrator. A clean check does not prove the
+underlying work correct.
 
 A new session's first workflow operation is `start` (create or attach), after guidance reads,
 tool/schema discovery, and necessary bootstrap clarification. This includes `read_guidance`
@@ -130,10 +131,10 @@ until a later qualifying check of the repaired record resolves the finding. Rech
 changes, never unchanged state. Publication is per material transition, never per file/tool/message.
 
 Select `semantic_required` when the user, effective policy, or named acceptance criterion requires
-independent semantic review. If relying on the configured default, omit `mode`; use
+independent AI-powered review. If relying on the configured default, omit `mode`; use
 `semantic_if_configured` only when review is known to be optional. Reserve `deterministic_only` for
 explicit local/structural work or a deliberate no-egress choice, and disclose the unmet required
-review when applicable. Never use deterministic-only merely to shorten a follow-up check.
+review when applicable. Never use local-only merely to shorten a follow-up check.
 
 ## Boundaries
 
@@ -171,16 +172,16 @@ For a material repair, follow the shared ledger sequence:
    obligation is in effective scope only after a supported plan revision or exact next-version
    restatement includes it. Do not infer scope or success from the prompt.
 3. Disposition older findings before the final check. Then run `semantic_required` for an explicit
-   semantic requirement, or omit `mode` when relying on the configured default.
+   AI-powered review requirement, or omit `mode` when relying on the configured default.
 4. Respond to findings returned by that check at its result frontier, then read
    `status view=findings` with `filter.include_resolved: true` and actual `resolved` state. “Not
    returned” is not “resolved”; a response
    records disposition but does not prove repair.
 5. Request `receipt` last. Read `closure_readiness.unanswered_finding_count` and
-   `closure_readiness.receipt_blocking_finding_count`, and report those actual counts plus the checked
-   frontier, semantic status/reason, and coverage limits. If a response to an older finding or any other
-   material record follows the check, recheck before the receipt. Stop repeating an unchanged check
-   when proof still cannot qualify and disclose the blocker.
+   `closure_readiness.receipt_blocking_finding_count`, and report those actual counts plus the
+   checked frontier, AI-powered review status/reason, and coverage limits. If a response to an older
+   finding or any other material record follows the check, recheck before the receipt. Stop
+   repeating an unchanged check when proof still cannot qualify and disclose the blocker.
 
 ## Compatibility
 

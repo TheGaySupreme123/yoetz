@@ -1,7 +1,7 @@
-"""Unit tests for the read-only semantic readiness report.
+"""Unit tests for the read-only AI-powered review readiness report.
 
 The r4 dogfood spent four runs against an installation that structurally could not dispatch
-semantic review, because nothing surfaced readiness before a check returned
+AI-powered review, because nothing surfaced readiness before a check returned
 ``provider_not_configured``. These tests pin the two ways such a report can lie: reporting a
 condition it never actually read, and counting a credential that belongs to a different provider
 than the bound endpoint.
@@ -402,7 +402,7 @@ async def test_absent_service_names_the_probed_lifecycle_and_the_mcp_path(
 ) -> None:
     """An absent service must not read as a contradiction of a working MCP session.
 
-    The 2026-07-26 dogfood saw `service_unavailable` here while MCP-local work and live semantic
+    The 2026-07-26 dogfood saw `service_unavailable` here while MCP-local work and live AI-powered review
     dispatch succeeded, because the bridge starts the service on demand and this surface never
     does. The report has to say which lifecycle it probed.
     """
@@ -468,7 +468,7 @@ async def test_strict_registered_route_is_not_ready_for_the_agent_but_leaves_the
 ) -> None:
     """The exact conflation #132 names: registration is not activation.
 
-    A strict Codex registration cannot dispatch semantic review, but ADR-018 decision 2 makes
+    A strict Codex registration cannot dispatch AI-powered review, but ADR-018 decision 2 makes
     that ceiling process-local — CLI and terminal checks on the same installation still can. So
     the agent-route verdict flips and ``semantic_ready`` must not.
     """

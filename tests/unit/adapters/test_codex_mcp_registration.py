@@ -195,7 +195,7 @@ def test_status_foreign_on_different_or_unreadable_command() -> None:
 
 
 def test_observe_reports_which_route_is_registered() -> None:
-    """`yoetz_owned` alone cannot answer "can the agent get semantic review".
+    """`yoetz_owned` alone cannot answer "can the agent get AI-powered review".
 
     Both serve commands classify as owned, so an operator reading only registration state sees a
     strict route and a policy route as the same thing. The observation carries the difference.

@@ -1637,34 +1637,33 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
     _descriptor(
         "publish_work",
         "Publish recorded work",
-        "Before evidence or a completion claim, paginate status view=evidence at one frontier "
-        "and reuse matching available IDs. Include feedback and requested delivery in the "
-        "effective plan via a supported revision. Accepted records are assertions, not repair proof. "
+        "Before evidence or a completion claim, read status view=evidence at one frontier and "
+        "reuse matching IDs. Put feedback and requested delivery in the effective "
+        "plan via a revision. Accepted records are assertions, not repair proof. "
         "Records a bounded batch of agent-published work events and returns the accepted event "
         "range and coverage. When dry_run is false, this appends records to the local Yoetz ledger; "
-        "it does not publish to GitHub or run a semantic evaluation, and it has no information "
-        "about work outside that batch. Every set-valued reference list is admitted only when its "
-        "members are unique and already in ascending ASCII order; uniqueItems does not express "
-        "order, and rejection names unsorted_set_field. attempted_items belongs only on the "
+        "it does not publish to GitHub or run an AI-powered evaluation; it knows nothing outside "
+        "that batch. Every set-valued reference list must be unique and already in "
+        "ascending ASCII order; rejection names unsorted_set_field. attempted_items belongs only on the "
         "action_recorded payload; copy each requested_items value exactly and never place it on "
         "claim_recorded. decision_recorded.authority is a structural actor id, not approval prose; "
-        "action_kind is exactly command, edit, research, review, or other, with command also "
-        "requiring command. claim_recorded at schema 1.1.0 separates supporting_refs from "
+        "action_kind is one of command, edit, research, review, or other; command also requires "
+        "command. claim_recorded at schema 1.1.0 separates supporting_refs from "
         "limitation_refs and corrections name exact prior effective claims in supersedes_claim_refs. "
-        "Dry-run checks references, outcome, scope, replacement, and limitation linkage; use "
-        "candidate_findings, history, and results to author corrections. Each occurred_at is a "
-        "caller-asserted RFC 3339 UTC time with milliseconds; use the best real time and do not "
-        "copy the illustrative example timestamp. Ledger order follows ingestion "
-        "sequence, Service accepted_at is independent metadata, and receipt freshness is "
+        "Dry-run checks references, outcome, scope, replacement, and limitation linkage; author "
+        "corrections from candidate_findings, history, and results. Each occurred_at is a "
+        "caller-asserted RFC 3339 UTC time with milliseconds; use the real time and do not copy "
+        "the illustrative example timestamp. Ledger order follows ingestion sequence, Service "
+        "accepted_at is independent metadata, and receipt freshness is "
         "frontier-bound. Dry-run previews are not evidential or citable. Read status "
         "view=obligations for exact unattempted_items before resolution; after publishing repair, "
         "claim and evidence, disposition older findings, call check, respond, then call receipt "
         "before claiming completion. Batch material transitions together, usually one to eight "
         "events and never one batch per file, tool call, or message; reading, searching, formatting, "
         "and unchanged state are not publishable. Lifecycle events record acceptance, cancellation, "
-        "write-off, or explicit work closure; receipts never close work. Coordination dispositions "
-        "link an existing obligation and evidence, and a later qualifying check resolves the "
-        "finding. Guidance: yoetz://guidance/publication-policy.md.",
+        "write-off, or explicit closure; receipts never close work. Coordination dispositions "
+        "link an existing obligation and evidence; a later qualifying check resolves the finding. "
+        "Guidance: yoetz://guidance/publication-policy.md.",
         read_only=False,
         idempotent=True,
     ),
@@ -1682,23 +1681,23 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "Read status view=findings with filter.include_resolved=true after repair: "
         "not returned is not resolved. "
         "This call cannot widen privacy "
-        "authority: an active semantic route was selected by the owner during setup as a bounded "
+        "authority: an active AI-powered review route was selected by the owner during setup as a bounded "
         "standing policy, and check cannot change its route, workspace, scope, categories, "
         "retention ceiling, or credential authority. Whether a case is dispatched stays enforced "
         "by the installed route binding and privacy policy. A pre-invocation approval refusal or "
         "hold is an invocation-authorization event, not a Yoetz result: Yoetz did not run, so "
-        "do not report a semantic status or outbound dispatch. When semantic review was "
+        "do not report an AI-powered review status or outbound dispatch. When AI-powered review was "
         "explicitly requested or mode is semantic_required, pause and present the manual approval "
         "request for the exact proposed check body and request_id. Approval authorizes that "
         "invocation only; it does not change Yoetz privacy policy, repository authority, "
         "disclosure decisions, credentials, or outbound-admission rules. Do not "
-        "publish a completion claim, request a receipt, create a fresh semantic check, or switch "
+        "publish a completion claim, request a receipt, create a fresh AI-powered check, or switch "
         "to deterministic_only while approval is pending. An unambiguous, still-applicable "
-        "first-party instruction for this exact semantic action may present the manual approval "
+        "first-party instruction for this exact AI-powered review action may present the manual approval "
         "request without redundant prose, but never bypasses that approval. After approval, "
         "invoke the exact same proposed check body and request_id; if Yoetz then returns "
         "awaiting_human, follow its separate continuation. After denial, cancellation, or expiry, "
-        "continue without semantic review only after the user explicitly chooses that fallback. "
+        "continue without AI-powered review only after the user explicitly chooses that fallback. "
         "Omit scope for the whole case, "
         "or send both claim_ids and obligation_ids as arrays of unique ids; two empty arrays also "
         "mean the whole case, and sending only one of the two keys is rejected. Call it after "
@@ -1715,7 +1714,7 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "It is distinct from a one-use decision; recover either handoff through operation status "
         "or replay this exact original request with the same request_id, never a fresh request. "
         "Denial, expiry, cancellation, stale authority, or incomplete review means no dispatch. "
-        "Semantic "
+        "AI-powered "
         "review that does not succeed is a coverage gap rather than a retry problem: "
         "not_configured, blocked_by_policy, and human_denied will not change without owner "
         "action; unavailable and timeout already spent that job's own attempt budget; "
@@ -1734,8 +1733,8 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "Respond to a finding",
         "Records an acknowledgement, provenance dispute, or rejection for one finding at the "
         "result frontier of the check that returned it, not its subject_frontier. This appends one "
-        "finding-response record to the local Yoetz ledger; it does not publish to GitHub or run a "
-        "semantic evaluation. It does not resolve other findings or establish that underlying work "
+        "finding-response record to the local Yoetz ledger; it does not publish to GitHub or run an "
+        "AI-powered evaluation. It does not resolve other findings or establish that underlying work "
         "changed. A provenance_disputed response contests the finding's authorship or provenance "
         "premise rather than its conclusion, requires a reason, and never resolves the finding. "
         "Bounded waiver is reserved for an authorized local-CLI human and is not an agent option. "
@@ -1786,7 +1785,7 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "markdown or text; json is an owner-export format that stricter agent-context policies may "
         "block. Call it once at the end, and again only if material state changed since the "
         "previous receipt, after the last material deliverable covered by the claim. Final prose "
-        "must state the actual actionable unresolved count, checked scope and frontier, semantic "
+        "must state the actual actionable unresolved count, checked scope and frontier, AI-powered "
         "review status and reason and material coverage gaps. Distinguish unanswered findings, "
         "unresolved blockers and coverage-only gaps. A receipt is not a pass. Guidance: "
         "yoetz://guidance/coverage-and-receipts.md.",
@@ -1806,7 +1805,7 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
 )
 
 _STRICT_CHECK_DESCRIPTION_SUFFIX: Final = (
-    " Under the strict route profile, this route will not request external semantic review."
+    " Under the strict route profile, this route will not request external AI-powered review."
 )
 _STRICT_TOOL_DESCRIPTORS: Final = tuple(
     replace(
@@ -1852,22 +1851,22 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "policy": MappingProxyType(
             {
                 "start": "sha256:79fa0597c5437e964addcd39324b836f846e5ccbe4b1c2673921342e44854e37",
-                "publish_work": "sha256:b3e05d018ddc9e74c01928af81959d310e47a1799f9a38ab4cde1f510dde9b59",
-                "check": "sha256:4987c51a617d8d54c872c998771ca34ad576d9700378c1807fd5ce75a8c07f3f",
-                "respond": "sha256:aae662c47d45abbbffcc8551d890a5fac798846fc7dd34ba526d54d0bf0bd989",
+                "publish_work": "sha256:8e5261e9d30677fe5741284a653b530d62acb08f3367a506f243523b131bd117",
+                "check": "sha256:9befe13b257acf10535009c1dd69d9a933f3d94f5cd2aaac1655d4867596f89e",
+                "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
                 "status": "sha256:15ac0adcdc93936a13daef933f2201e7d349fa4214290ae3723ea389fb436f1f",
-                "receipt": "sha256:5043471a774a8c5c42d9364bb80ede4af6cd6650c693dff69462dc6d5f0cd98f",
+                "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
                 "read_guidance": "sha256:4198e5fd133f7b37cc25c0c1a63161657c5d4396a1718f1f4f1f3db7c302a13d",
             }
         ),
         "strict": MappingProxyType(
             {
                 "start": "sha256:79fa0597c5437e964addcd39324b836f846e5ccbe4b1c2673921342e44854e37",
-                "publish_work": "sha256:b3e05d018ddc9e74c01928af81959d310e47a1799f9a38ab4cde1f510dde9b59",
-                "check": "sha256:f8aca174d3f3450786c7a9b266f2aff4015af9d341d898833dc3bef0f733b68e",
-                "respond": "sha256:aae662c47d45abbbffcc8551d890a5fac798846fc7dd34ba526d54d0bf0bd989",
+                "publish_work": "sha256:8e5261e9d30677fe5741284a653b530d62acb08f3367a506f243523b131bd117",
+                "check": "sha256:2bd9947abc7b60564474840a73d99a80bfa528b98af1a725d11fdfde5dac9795",
+                "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
                 "status": "sha256:15ac0adcdc93936a13daef933f2201e7d349fa4214290ae3723ea389fb436f1f",
-                "receipt": "sha256:5043471a774a8c5c42d9364bb80ede4af6cd6650c693dff69462dc6d5f0cd98f",
+                "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
                 "read_guidance": "sha256:4198e5fd133f7b37cc25c0c1a63161657c5d4396a1718f1f4f1f3db7c302a13d",
             }
         ),
@@ -1875,8 +1874,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:8304e83f7dc7aa9e3c94aa3b5d817e2f0dde83d00f3c8779e4908f66c4e94beb",
-        "strict": "sha256:f18b8232073f7528ebc37a65e2f404fa40dc71f0cc6427c360aaa41779960d39",
+        "policy": "sha256:0c95c9a3d50da032f4f5529291b00df19df8e426a34570e2c280c7c2e4493995",
+        "strict": "sha256:ddda86591ee92edc172ea8da341a13c7b54f9e1e878e5ec8be4b3f7a82494b24",
     }
 )
 
@@ -1979,9 +1978,9 @@ def server_instructions(
     if profile != "policy":
         return (
             f"{base}\n\nRoute profile: {profile}. "
-            "This route will not request external semantic review for this process lifetime.\n"
+            "This route will not request external AI-powered review for this process lifetime.\n"
         )
-    tail = "External semantic review follows the configured policy."
+    tail = "External AI-powered review follows the configured policy."
     if semantic_destination is not None:
         tail += " " + semantic_destination.sentence
     return f"{base}\n\nRoute profile: {profile}. {tail}\n"

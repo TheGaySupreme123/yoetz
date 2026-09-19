@@ -351,7 +351,7 @@ class StatusVersionSliceFacts:
 
     Runtime-probed values come from the same producer as ``version --json``.
     Contract identities are package constants. ``provider_profiles`` is the
-    packaged support-catalog inventory, not live semantic-evaluator presence.
+    packaged support-catalog inventory, not live AI-powered evaluator presence.
     """
 
     protocol_version: str

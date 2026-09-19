@@ -517,7 +517,7 @@ class ExternalRuntimeProfileConfig(StrictConfigModel):
 
 
 class SemanticFallbackConfig(StrictConfigModel):
-    """Pair the two external semantic authorities: one primary, the other its fallback.
+    """Pair the two external AI-powered review authorities: one primary, the other its fallback.
 
     ``primary`` names which bound table serves first: ``api_provider`` is ``[provider]`` (vault
     API credential), ``codex_subscription`` is ``[external_runtime]`` (Codex-managed OAuth). The
@@ -729,7 +729,7 @@ type ExternalEndpointConfig = ProviderProfileConfig | ExternalRuntimeProfileConf
 
 
 def primary_external_endpoint(config: YoetzConfig) -> ExternalEndpointConfig | None:
-    """Return the bound external endpoint that serves semantic review first.
+    """Return the bound external endpoint that serves AI-powered review first.
 
     Without a ``[semantic_fallback]`` pairing this is the single bound table (at most one is
     bound). With a pairing it is the table the selector names as primary.

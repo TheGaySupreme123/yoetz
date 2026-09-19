@@ -1,7 +1,7 @@
-"""Builders for semantic cases large enough to exercise envelope bounding.
+"""Builders for AI-powered review cases large enough to exercise envelope bounding.
 
 The 2026-07-30 dogfood failure needed a case the repo could not construct: 24 frozen-history
-events, 13 deterministic assessments and 62 semantic items, producing a ~44 KiB structural
+events, 13 local assessments and 62 AI-powered review items, producing a ~44 KiB structural
 envelope. Every prior envelope test used a three-record case whose envelope was under 4 KiB, so
 the bounding ladder was never executed by a test at all. These builders close that gap.
 """
@@ -44,7 +44,7 @@ __all__ = ["large_case"]
 # metadata and digests per item, so item count — not item size — is what grows it.
 # Deliberately contains the non-ASCII characters agents actually type — an em dash and a curly
 # apostrophe. The case builder used to decode canonical UTF-8 as ASCII, so a single one of these
-# anywhere in the ledger killed the whole semantic review with coordinator_failure.
+# anywhere in the ledger killed the whole AI-powered review with coordinator_failure.
 _DETAIL = (
     "The reviewer needs enough surrounding context — including the author’s stated intent — to "
     "judge whether the claimed change is supported by recorded evidence rather than asserted."
@@ -59,7 +59,7 @@ def large_case(
 ) -> DeterministicCase:
     """A frozen case with enough distinct subjects to produce a multi-kilobyte envelope.
 
-    The defaults yield 13 deterministic assessments and a ~28 KiB structural envelope — the shape
+    The defaults yield 13 local assessments and a ~28 KiB structural envelope — the shape
     that failed in production against the old 16 KiB bound — while staying modest enough that the
     wider review profiles remain buildable. Counts are parameterised so a test can push past the
     selection limits deliberately.
@@ -69,7 +69,7 @@ def large_case(
     plan = plan_record(
         PlanPublishedPayload(
             1,
-            "Ship the semantic review pipeline end to end without silent truncation",
+            "Ship the AI-powered review pipeline end to end without silent truncation",
             tuple(obl(index) for index in range(1, obligation_count + 1)),
         ),
         sequence,
@@ -82,7 +82,7 @@ def large_case(
             ObligationPublishedPayload(
                 obl(index),
                 f"Obligation {index}: {_DETAIL}",
-                f"Acceptance {index}: the deterministic suite and the semantic review both pass.",
+                f"Acceptance {index}: the local check suite and the AI-powered review both pass.",
                 ObligationStatus.OPEN,
             ),
             sequence,
@@ -105,7 +105,7 @@ def large_case(
 
     claims: dict[ClaimId, ClaimProjectionRecord] = {}
     for index in range(1, claim_count + 1):
-        # Half the claims cite evidence and half do not, so the deterministic policies produce a
+        # Half the claims cite evidence and half do not, so the local policies produce a
         # realistic mix of assessments rather than one repeated finding.
         supports: Sequence[EvidenceId] = (
             (evd(index),) if index % 2 == 0 and index <= evidence_count else ()

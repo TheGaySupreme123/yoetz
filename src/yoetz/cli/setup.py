@@ -107,7 +107,9 @@ _NEXT_CREDENTIAL: Final = (
     "run 'yoetz provider credential set' from a local terminal to provision the "
     "provider credential through the confidential ceremony"
 )
-_NEXT_RESTART: Final = "restart the Yoetz service so the configured semantic evaluator is composed"
+_NEXT_RESTART: Final = (
+    "restart the Yoetz service so the configured AI-powered evaluator is composed"
+)
 _NEXT_AGENT_GUIDE: Final = AGENT_START_HANDOFF
 _PROVIDER_SETUP_DIRECT_REASONS: Final = frozenset(
     {
@@ -376,7 +378,7 @@ def _semantic_status_next_steps(status: Mapping[str, object]) -> tuple[str, ...]
                 steps.append(
                     "run 'yoetz integrate codex mcp preview' and explicitly accept "
                     "re-registration if you want the policy route to permit configured "
-                    "semantic review"
+                    "AI-powered review"
                 )
     else:
         if status.get("endpoint_bound") is False:
@@ -518,7 +520,7 @@ def _is_interactive_terminal() -> bool:
 def _choose_review_mode() -> Literal["local_only", "semantic"]:
     """Let first run choose its complete privacy posture before registration.
 
-    Semantic review is offered first and is the default answer. That is a choice about this
+    AI-powered review is offered first and is the default answer. That is a choice about this
     prompt, not about what an installation seeds: the durable policy is still ``local_only``,
     and this branch only leads to the provider binding, credential, and separately
     reauthenticated policy commit that egress actually requires. Accepting it here configures
@@ -527,9 +529,9 @@ def _choose_review_mode() -> Literal["local_only", "semantic"]:
 
     typer.echo("")
     typer.echo("Choose how Yoetz should review work:")
-    typer.echo("  1. Semantic review (recommended) — configure a provider, API key, and policy")
+    typer.echo("  1. AI-powered review (recommended) — configure a provider, API key, and policy")
     typer.echo(
-        "  2. Local only — deterministic checks; task content stays on this computer "
+        "  2. Local only — local checks, no AI-powered review; task content stays on this computer "
         "(the next prompt separately decides PyPI update checks)"
     )
     while True:
@@ -1785,7 +1787,7 @@ async def _restart_service_for_semantic_composition() -> dict[str, JsonValue]:
 
 
 async def restart_service_for_semantic_composition() -> dict[str, JsonValue]:
-    """Recompose the singleton after a semantic evaluator binding changes."""
+    """Recompose the singleton after an AI-powered evaluator binding changes."""
 
     return await _restart_service_for_semantic_composition()
 
@@ -2165,7 +2167,7 @@ def _semantic_openai_extra_state() -> str:
     """Report whether the optional ``semantic-openai`` import surface is present.
 
     Presence is a structural import fact only. It does not prove wire dispatch, auth, or a
-    successful semantic review.
+    successful AI-powered review.
     """
 
     if importlib.util.find_spec("openai") is None:
@@ -2180,14 +2182,14 @@ def _emit_provider_setup_layer_report(*, privacy_outcome: str) -> None:
     typer.echo("Other layers (ready vs not demonstrated by this path):")
     typer.echo(f"  SDK extra (semantic-openai): {_semantic_openai_extra_state()}")
     typer.echo(
-        "  Semantic evaluator: not composed "
+        "  AI-powered evaluator: not composed "
         "(_semantic_not_configured in ready composition; not demonstrated)"
     )
     typer.echo(f"  Privacy policy: {privacy_outcome}")
     typer.echo("  Transport probe: not demonstrated")
     typer.echo("  Installed artifact evidence: not demonstrated")
     typer.echo(
-        "Stored binding/credential is not proof of live provider dispatch or semantic review."
+        "Stored binding/credential is not proof of live provider dispatch or AI-powered review."
     )
 
 
@@ -2277,7 +2279,7 @@ async def run_provider_setup(
         return 20
     typer.echo(
         "Preview Codex MCP registration again to review the policy route command now that "
-        "semantic configuration changed."
+        "AI-powered review configuration changed."
     )
     return 0
 
@@ -2552,7 +2554,7 @@ async def run_setup_wizard(
                 from yoetz.ports.control import ControlError
 
                 # This is a read-only structural status read. It never probes the provider or
-                # dispatches semantic work, and it supplies authoritative blockers after a
+                # dispatches AI-powered review work, and it supplies authoritative blockers after a
                 # credential ceremony fails or returns an ambiguous result.
                 try:
                     semantic_status = await provider_status_report()
@@ -2636,7 +2638,7 @@ async def run_setup_wizard(
         _append_next_step(
             next_steps,
             "run 'yoetz integrate codex mcp preview' and explicitly accept re-registration "
-            "if you want the policy route to permit configured semantic review",
+            "if you want the policy route to permit configured AI-powered review",
         )
 
     mutating_run = interactive or accept
@@ -2838,7 +2840,7 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
             + ("ready to observe" if readiness.get("observation_ready") else "not ready")
         )
         typer.echo(
-            "  Semantic-advice readiness: "
+            "  AI-powered advice readiness: "
             + (
                 "ready"
                 if readiness.get("semantic_advice_ready")

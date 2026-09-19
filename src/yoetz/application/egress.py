@@ -164,7 +164,7 @@ class SemanticEgressAttemptUnknown:
 
 @dataclass(frozen=True, slots=True)
 class SemanticEgressBlocked:
-    """Terminal pre-dispatch or human denial/expiry; never invents semantic findings."""
+    """Terminal pre-dispatch or human denial/expiry; never invents AI-powered findings."""
 
     request_id: str
     outcome: PrivacyOutcome
@@ -283,7 +283,7 @@ class _LocalCeiling:
 
 
 class PrivacyCoordinator:
-    """One central admission path for local disclosure and semantic egress."""
+    """One central admission path for local disclosure and AI-powered review egress."""
 
     __slots__ = (
         "_audit",
@@ -356,7 +356,7 @@ class PrivacyCoordinator:
         """Classify and activate exact repository authority under the closure fence.
 
         This is the only API that may authorize the repository-setup continuation.  It shares the
-        coordinator admission lock with ``close`` and semantic dispatch, so a closed coordinator
+        coordinator admission lock with ``close`` and AI-powered review dispatch, so a closed coordinator
         or a close racing this lookup is never reported as an actionable missing-grant handoff.
         """
 
@@ -946,7 +946,7 @@ class PrivacyCoordinator:
             )
         binding = proposal.provider_binding
         if binding is None and proposal.local_sink is LocalDisclosureSink.LOCAL_MODEL:
-            # Local AF_UNIX semantic resume needs the standing local-model binding.
+            # Local AF_UNIX AI-powered review resume needs the standing local-model binding.
             binding = effective.policy.local_model_binding
         if binding is None:
             return SemanticEgressBlocked(

@@ -4,7 +4,7 @@ Use Yoetz for material multi-step, delegated, resumable, or verification-heavy w
 
 # What Yoetz is
 
-Yoetz records published work in a local ledger and checks it deterministically at a named frontier.
+Yoetz is a local work ledger and checker; AI-powered review is optional. It records only what participants publish and checks that record at a named frontier.
 
 # What Yoetz is not
 
@@ -129,10 +129,10 @@ claim completion, request a receipt, or downgrade required review while approval
 Read coverage guidance before checking or handling either boundary.
 
 Select `semantic_required` when the user, effective policy, or named acceptance criterion requires
-independent semantic review. If relying on the configured default, omit `mode`; use
+independent AI-powered review. If relying on the configured default, omit `mode`; use
 `semantic_if_configured` only when review is known to be optional. Reserve `deterministic_only` for
 explicit local/structural work or a deliberate no-egress choice and disclose the unmet required
-review when applicable. Never use deterministic-only merely to shorten a follow-up check.
+review when applicable. Never use local-only merely to shorten a follow-up check.
 
 Setup, imports, credential/vault operations, and recommendations require their exact authority
 procedure in request templates before acting. Recommendations are advisory. Generic task approval,
@@ -185,11 +185,10 @@ Before evidence publication, paginate `status view=evidence`; reuse matching IDs
 
 Read current status and evidence first. Publish the real repair results, corrected claim/evidence,
 and any required plan revision. Resolve older finding responses before the final check. Choose
-`semantic_required` for an explicit requirement, otherwise omit `mode` when relying on the configured
-default. After the check, read `status view=findings` with `filter.include_resolved: true` and
-actual `resolved` state; “not returned” is
-not “resolved.” If a response to an older finding or other material record follows the check,
-check again before the
-receipt. Request `receipt` last and report its actual actionable unresolved count, checked frontier,
-semantic status/reason, and coverage limits. Stop repeating an unchanged check when proof still
-cannot qualify, and disclose the blocker.
+`semantic_required` for an explicit requirement, otherwise omit `mode` when relying on the
+configured default. After the check, read `status view=findings` with `filter.include_resolved:
+true` and actual `resolved` state; “not returned” is not “resolved.” If a response to an older
+finding or other material record follows the check, check again before the receipt. Request
+`receipt` last and report its actual actionable unresolved count, checked frontier, AI-powered
+review status/reason, and coverage limits. Stop repeating an unchanged check when proof still cannot
+qualify, and disclose the blocker.

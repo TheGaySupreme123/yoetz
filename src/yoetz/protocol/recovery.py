@@ -746,7 +746,7 @@ REASON_CODE_DIRECTIVE_EXEMPTIONS: Final[frozenset[str]] = frozenset(
         "schema_path_unsafe",
         "schema_reference_unresolved",
         "schema_version_mismatch",
-        # Owned by later sub-issues of #739: provider and semantic classification (#742), and the
+        # Owned by later sub-issues of #739: provider and AI-powered review classification (#742), and the
         # observation-drain and privacy families whose directives depend on decisions not yet
         # made. Listed explicitly so the ratchet records them as pending, not as answered.
         "accepted_but_unresponsive",

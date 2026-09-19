@@ -11,6 +11,10 @@
 </p>
 
 <p align="center">
+  <a href="https://www.producthunt.com/products/yoetz?embed=true&utm_source=badge-featured&utm_medium=badge&utm_campaign=badge-yoetz"><img src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1254021&theme=light&t=1789716006971" alt="Yoetz - Check to see if AI really completed a task or if it had gaps | Product Hunt" width="250" height="54"></a>
+</p>
+
+<p align="center">
   <a href="https://yoetz.dev">yoetz.dev</a> ·
   <a href="https://github.com/TheGaySupreme123/yoetz/tree/main/docs/usage">Docs</a> ·
   <a href="https://github.com/TheGaySupreme123/yoetz/releases">Releases</a> ·
@@ -18,11 +22,11 @@
 </p>
 
 Yoetz is a local-first, open-source system for recording structured work evidence, checking it
-deterministically, and producing **honest receipts about what was and was not verified**.
+with local checks, and producing **honest receipts about what was and was not verified**.
 
 It is built for agent-assisted work. An agent publishes bounded facts about what it is doing — plan,
 claims, actions, results, evidence — into a local ledger; Yoetz checks that record with versioned
-deterministic policy packs, optionally adds advisory semantic review inside a privacy policy you
+local policy packs, optionally adds advisory AI-powered review inside a privacy policy you
 control, and issues a receipt whose wording never outruns its coverage.
 
 The thing Yoetz refuses to do is the point. It will not tell you work is correct. It will tell you
@@ -67,7 +71,7 @@ $ codex
 Done. The limiter is refactored, and the receipt still carries the two findings I hit on the way.
 ```
 
-Both findings map to real rules in the shipped deterministic policy pack, checked against nothing
+Both findings map to real rules in the shipped local policy pack, checked against nothing
 but the published record — no repository access, no model, no interpretation. And the receipt keeps
 carrying them after the fix: a later clean check never erases what was caught.
 
@@ -143,9 +147,9 @@ state for future sessions—not that a later session loaded a hook or delivered 
 | --- | --- |
 | **Six operations, two surfaces** | `start`, `publish_work`, `check`, `respond`, `status`, `receipt` — identical contracts on the CLI and over MCP. Everything else is a bounded support surface, not a seventh operation. |
 | **Works with any MCP agent** | No integration, no installed skill, no configuration. Codex, Claude Code, and Cursor have first-party integrations because each host's skill or plugin surface delivers the guidance natively — but integration buys ergonomics, never a stronger claim. |
-| **Honest receipts** | Coverage, provenance, freshness, findings, and limitations stay separate. A clean deterministic check is never presented as proof that work is correct. |
-| **Zero-egress by default** | A fresh installation is deterministic and fully useful offline; nothing leaves your machine before first-run setup commits a policy. |
-| **Privacy-gated semantic review** | An optional reviewer model reads a bounded, minimized packet built from the ledger — never your repository — behind explicit provider binding and reauthenticated policy authority. |
+| **Honest receipts** | Coverage, provenance, freshness, findings, and limitations stay separate. A clean local check is never presented as proof that work is correct. |
+| **Zero-egress by default** | A fresh installation runs local checks only and is fully useful offline; nothing leaves your machine before first-run setup commits a policy. |
+| **Privacy-gated AI-powered review** | An optional reviewer model reads a bounded, minimized packet built from the ledger — never your repository — behind explicit provider binding and reauthenticated policy authority. |
 | **A full-screen terminal interface** | First run, status, privacy, provider, integration, service, and receipt flows in one interface; no secret ever enters it. |
 | **Recoverable local durability** | Encrypted task bundles, generation-fenced single-writer storage, deterministic replay, backup/restore, and forward-only migrations. |
 
@@ -155,7 +159,7 @@ say.
 
 ## Private by default
 
-A fresh installation's unconfigured seed is **zero-egress and deterministic**: nothing leaves your
+A fresh installation's unconfigured seed is **zero-egress and local-only**: nothing leaves your
 machine before first-run setup commits a policy, and Yoetz is fully useful in that state. Setup's
 proposed privacy policy states whether Yoetz may check PyPI for package updates (default yes, with an
 opt-out). That bounded check carries only the `yoetz` package identity and version, never task or
@@ -163,15 +167,15 @@ user content, and it never upgrades the package for you; decline it for a zero-n
 Rerunning setup does not suspend or revoke an existing standing policy: ordinary activity remains
 governed by that policy until the user commits a replacement.
 
-External semantic review is a separate explicit decision. When you choose it, the CLI's recommended
-`assisted-review` recipe shows and confirms a standing policy that sends the reviewer a structured
-packet built from the ledger — goal, obligations, claims, timeline, deterministic findings and their
-bases, coverage gaps, and bounded problem-local excerpts already recorded in the case. Sensitive and
-confidential content is off, and the never-send set is absolute. Policy loosens only through a
-reauthenticated decision you make: the trusted local ceremony, or your explicit current-chat
-approval of one exact prepared, previewed, expiring consent target that a capable agent relays for
-you. That relay is the agent's assertion, which Yoetz cannot independently authenticate, so the
-local ceremony remains the stronger path.
+External AI-powered review is a separate explicit decision. When you choose it, the CLI's
+recommended `assisted-review` recipe shows and confirms a standing policy that sends the reviewer a
+structured packet built from the ledger — goal, obligations, claims, timeline, local findings and
+their bases, coverage gaps, and bounded problem-local excerpts already recorded in the case.
+Sensitive and confidential content is off, and the never-send set is absolute. Policy loosens only
+through a reauthenticated decision you make: the trusted local ceremony, or your explicit
+current-chat approval of one exact prepared, previewed, expiring consent target that a capable agent
+relays for you. That relay is the agent's assertion, which Yoetz cannot independently authenticate,
+so the local ceremony remains the stronger path.
 
 Provider setup distinguishes **OpenAI API / compatible API** from **Codex with ChatGPT
 subscription**. The subscription route binds one exact Codex app-server and dedicated home; Codex
@@ -182,7 +186,7 @@ Review then runs direct-to-agent: the reviewer returns a bounded challenge, the 
 evidence, revises, disputes, or states a limitation, and rechecks. No human prompt for routine
 retries.
 
-See [Privacy and semantic review](docs/usage/privacy-and-semantic-review.md) and
+See [Privacy and AI-powered review](docs/usage/privacy-and-semantic-review.md) and
 [`PRIVACY.md`](PRIVACY.md).
 
 ## How it is put together
@@ -224,9 +228,9 @@ does not claim" section, and the full changelog — and live versioned in
 
 ## Status
 
-Yoetz **0.2** is the current public-alpha release line. **0.2.1** fixes significant Linux and
-WSL compatibility bugs; see the [release notes](docs/releases/v0.2.1.md) for the fixes and
-remaining validation limits. Every public claim in
+Yoetz **0.2** is the current public-alpha release line. **0.2.2** makes the documented install
+paths work regardless of which Pythons a machine already has; see the
+[release notes](docs/releases/v0.2.2.md) for the fixes and remaining validation limits. Every public claim in
 [`docs/public-claims.json`](docs/public-claims.json) is bound to real checked-in evidence: a claim flagged `evidenced` has concrete test or fixture coverage, with its non-live
 suites exercised in per-PR CI; a claim whose own wording names still-missing capability or drill
 evidence stays `not_yet_evidenced` and is not asserted as release evidence. Every reviewed provider

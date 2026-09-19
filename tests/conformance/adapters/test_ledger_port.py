@@ -2143,7 +2143,7 @@ async def test_expired_started_attempt_rebinds_once_in_each_real_ledger() -> Non
 
 @pytest.mark.anyio
 async def test_semantic_lease_uses_persisted_deadline_and_rebinds_after_restart() -> None:
-    """A v2 semantic case extends one operation to its cap and preserves the started attempt."""
+    """A v2 AI-powered review case extends one operation to its cap and preserves the started attempt."""
 
     class _AdvancingClock:
         def __init__(self) -> None:
@@ -2173,7 +2173,7 @@ async def test_semantic_lease_uses_persisted_deadline_and_rebinds_after_restart(
         job = await adapter.enqueue_semantic_job(lease, case_digest, case_ref)
 
         # The old operation TTL is 60s; the persisted total execution deadline is 5 minutes,
-        # so the first semantic renewal must take the operation all the way to deadline + 5s.
+        # so the first AI-powered review renewal must take the operation all the way to deadline + 5s.
         renewed = await adapter.renew_leases(lease)
         expected_expiry = datetime(2026, 7, 19, 12, 5, 5, tzinfo=UTC)
         assert renewed.lease_expires_at == expected_expiry
@@ -2274,7 +2274,7 @@ async def test_short_semantic_execution_does_not_get_a_sixty_second_floor() -> N
 @pytest.mark.anyio
 @pytest.mark.parametrize("budget", [120, 900, 3600])
 async def test_real_attempt_loop_crosses_old_lease_without_duplicate_dispatch(budget: int) -> None:
-    """The shipped attempt loop dispatches once beyond 60s under the frozen semantic cap."""
+    """The shipped attempt loop dispatches once beyond 60s under the frozen AI-powered review cap."""
 
     from yoetz.application.semantic_attempts import run_durable_semantic_attempts
     from yoetz.ports.semantic import Deadline

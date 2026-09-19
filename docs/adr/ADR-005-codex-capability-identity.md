@@ -137,5 +137,5 @@ changes is admission:
   profile, no parser proof, and no `session_stream` facet, and its admission stays
   `partially_understood`.
 
-Parser compatibility grants no capture consent, no egress authority, and no semantic-evaluator
+Parser compatibility grants no capture consent, no egress authority, and no AI-powered evaluator
 authority.

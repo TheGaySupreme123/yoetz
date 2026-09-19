@@ -34,10 +34,10 @@ authorship assurance and an explicit publication channel; they are not independe
 facts. Imported records (the Codex JSONL importer) are bounded observations of a public transcript
 format, not a complete internal trace of what the harness did.
 
-Deterministic checks evaluate the published record and a named, versioned policy at one frozen
-`Frontier`. They are exact and reproducible from the same inputs. Optional semantic results are
+Local checks evaluate the published record and a named, versioned policy at one frozen
+`Frontier`. They are exact and reproducible from the same inputs. Optional AI-powered results are
 advisory: they are provenance-labeled, freshness-fenced against the frontier they were computed at,
-and can never take a check's deterministic result away. Coverage is a vector, not a score — the
+and can never take a check's local-check result away. Coverage is a vector, not a score — the
 weakest material dependency and any explicit gap bound what a receipt or final wording may say. A
 receipt records conclusions about captured work at a frontier; it is not a certificate and it is not
 cryptographic proof of correctness or authorship.
@@ -47,7 +47,7 @@ cryptographic proof of correctness or authorship.
 - "recorded", "published", "self-asserted" (or the exact stronger assurance the record carries);
 - "digest observed to match" (with the digest);
 - "captured bytes checked against policy X at coverage Y";
-- "deterministic policy found no issue at coverage X".
+- "local policy found no issue at coverage X".
 
 **Do not say** "verified", "proved", "authenticated", or "complete" unless the sentence also states
 the exact sufficient coverage that justifies it.
@@ -63,21 +63,21 @@ ledger operation:
 |---|---|---|
 | `start` | yes | Open or resume a task/session and obtain a writer identity. |
 | `publish_work` | yes | Append a bounded atomic batch of typed work events. |
-| `check` | yes (allocates findings) | Freeze a dependency/frontier case and run deterministic (and optionally semantic) policy. |
+| `check` | yes (allocates findings) | Freeze a dependency/frontier case and run local (and optionally AI-powered) policy. |
 | `respond` | yes | Record a disposition (`acknowledged`, `provenance_disputed`, `rejected`, `waived`) against a finding. |
 | `status` | no | Read bounded, paginated projection state at the current frontier. |
 | `receipt` | yes (allocates the receipt) | Produce a durable, current-state receipt. |
 
 Every mutating operation requires a stable `request_id` and returns the same result on retry with
-the same canonical request; a different request body under the same ID is a conflict, never a
-silent overwrite. `publish_work` accepts a bounded atomic batch of typed events — one invalid event
-rejects the whole batch. `check` freezes a dependency/frontier case and may complete
-deterministic-only or with an additional semantic status; the deterministic result is never
-discarded because semantic evaluation was unavailable. `respond` records disposition as history and
-never erases the finding it responds to. `status` is bounded and paginated and discloses the
-projection frontier and any lag behind the ledger. `receipt` is built from durable current state,
-excludes its own publication from the subject frontier where the schema specifies that, and never
-strengthens coverage beyond what the underlying record supports.
+the same canonical request; a different request body under the same ID is a conflict, never a silent
+overwrite. `publish_work` accepts a bounded atomic batch of typed events — one invalid event rejects
+the whole batch. `check` freezes a dependency/frontier case and may complete local-only or with an
+additional AI-powered review status; the local-check result is never discarded because AI-powered
+evaluation was unavailable. `respond` records disposition as history and never erases the finding it
+responds to. `status` is bounded and paginated and discloses the projection frontier and any lag
+behind the ledger. `receipt` is built from durable current state, excludes its own publication from
+the subject frontier where the schema specifies that, and never strengthens coverage beyond what the
+underlying record supports.
 
 Import, review, backup, restore, migrate, version, and harness integration are **CLI support
 surfaces**, not additional workflow operations — they are not exposed as MCP tools, and none of them
@@ -131,8 +131,8 @@ same* request, or inspect `status`/the operation result; a client must never min
 
 ## Findings, coverage and receipts
 
-Findings originate from one of two engines: `deterministic` policy evaluation or
-`semantic_model_derived` advisory review. Each carries `priority` 1–3, a bounded
+Findings originate from one of two engines: `deterministic` (local policy evaluation) or
+`semantic_model_derived` (AI-powered advisory review). Each carries `priority` 1–3, a bounded
 `summary`/`detail`, `subject_refs`, the policy ID/version that produced it, the frozen
 `subject_frontier` it was evaluated at, and a `Coverage` vector. `check` returns a sparse,
 capped, ranked set (`MAX_FINDINGS_DEFAULT = 3`, up to `MAX_FINDINGS_LIMIT = 10`). A finding is
@@ -216,7 +216,7 @@ schemas are retained and surfaced as an explicit coverage gap, never interpreted
 Structural SQLite tables, catalog rows, and log fields contain only bounded IDs, enums, digests,
 sizes, and timestamps. Payloads that carry user content are encrypted objects. No secret, key,
 passphrase, or payload ever appears in an error, log, trace, or MCP text summary. The strict-local
-default performs zero external provider egress; optional semantic evaluation is gated by an
+default performs zero external provider egress; optional AI-powered evaluation is gated by an
 explicit, human-authorized privacy policy that classifies, minimizes, redacts, and scans before any
 disclosure. This threat model protects against casual/at-rest disclosure — a stolen disk, another
 local user, accidental sharing — not a compromised active user account, root, or live process

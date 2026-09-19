@@ -125,9 +125,9 @@ These are not style preferences. They are why the product is worth using, and CI
 - Every retryable write has an idempotency identity; a timeout never proves failure.
 - Nothing user-controlled — payloads, titles, paths, prompts, model output — appears in SQLite
   structural tables, logs, errors, or MCP text summaries.
-- Deterministic behavior depends only on canonical recorded inputs plus versioned policy/engine.
-- Semantic output is advisory, provenance-labeled, and deterministically fenced.
-- `semantic_required` never erases a completed deterministic result: unavailability returns that
+- Local-check behavior depends only on canonical recorded inputs plus versioned policy/engine.
+- AI-powered output is advisory, provenance-labeled, and deterministically fenced.
+- `semantic_required` never erases a completed local-check result: unavailability returns that
   result as `incomplete_check` with an exact gap.
 - Every network channel is independently authorized. No profile overrides the never-send set, and
   effective policy loosens only through a reauthenticated decision the user makes: the trusted local

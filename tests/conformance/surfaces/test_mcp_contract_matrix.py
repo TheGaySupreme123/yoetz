@@ -297,8 +297,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:8304e83f7dc7aa9e3c94aa3b5d817e2f0dde83d00f3c8779e4908f66c4e94beb",
-        "strict": "sha256:f18b8232073f7528ebc37a65e2f404fa40dc71f0cc6427c360aaa41779960d39",
+        "policy": "sha256:0c95c9a3d50da032f4f5529291b00df19df8e426a34570e2c280c7c2e4493995",
+        "strict": "sha256:ddda86591ee92edc172ea8da341a13c7b54f9e1e878e5ec8be4b3f7a82494b24",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -318,7 +318,7 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     for local_description in (descriptor_for("publish_work").description, respond_description):
         assert "local Yoetz ledger" in local_description
         assert "does not publish to GitHub" in local_description
-        assert "run a semantic evaluation" in local_description
+        assert "run an AI-powered evaluation" in local_description
     assert descriptor_for("start").description.startswith(
         "First read yoetz://guidance/workflow.md."
     )
@@ -363,7 +363,7 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert descriptor_for("check", "policy").annotations.open_world is True
     assert descriptor_for("check", "strict").annotations.open_world is False
     assert (
-        "this route will not request external semantic review"
+        "this route will not request external AI-powered review"
         in descriptor_for("check", "strict").description
     )
     for name in set(_EXPECTED_TOOL_NAMES) - {"check"}:
@@ -386,7 +386,7 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert INITIALIZE_GUIDANCE_URIS == ("yoetz://guidance/agent-instructions.md",)
     assert server_instructions().startswith(base_instructions.rstrip())
     assert server_instructions() == f"{base_instructions.rstrip()}\n\nRoute profile: policy. " + (
-        "External semantic review follows the configured policy.\n"
+        "External AI-powered review follows the configured policy.\n"
     )
     # Inlining these two cost 24 KB on every advertised tool description (#300). They are fetched
     # on demand instead; the catalog paragraph below is what makes that reachable.
@@ -403,14 +403,14 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert "call `read_guidance` with the same URI" in server_instructions()
     strict_instructions = server_instructions("strict")
     assert "Route profile: strict." in strict_instructions
-    assert "This route will not request external semantic review" in strict_instructions
-    # #479: the bridge appends the startup-read semantic destination disclosure to the policy
+    assert "This route will not request external AI-powered review" in strict_instructions
+    # #479: the bridge appends the startup-read AI-powered destination disclosure to the policy
     # tail only; the strict tail is byte-identical with or without one, and the packaged text
     # never carries the passage on its own.
     disclosure = SemanticDestinationDisclosure("unknown", DISCLOSURE_PREFIX + "unknown.")
     assert server_instructions("policy", semantic_destination=disclosure) == (
         f"{base_instructions.rstrip()}\n\nRoute profile: policy. "
-        "External semantic review follows the configured policy. "
+        "External AI-powered review follows the configured policy. "
         f"{disclosure.sentence}\n"
     )
     assert server_instructions("strict", semantic_destination=disclosure) == strict_instructions
@@ -542,8 +542,8 @@ def _subscription_finding() -> dict[str, Any]:
         "kind": "material_limitation_omitted",
         "origin": "semantic_model_derived",
         "priority": 1,
-        "summary": "The synthetic semantic finding remains advisory.",
-        "detail": "The synthetic semantic finding remains advisory.",
+        "summary": "The synthetic AI-powered finding remains advisory.",
+        "detail": "The synthetic AI-powered finding remains advisory.",
         "subject_refs": [_subscription_id("clm_", 9)],
         "policy_id": "research-evidence",
         "policy_version": "0.1.0",

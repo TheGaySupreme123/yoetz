@@ -1,6 +1,6 @@
-"""Prove the scripted fake provider drives the application through the full semantic matrix.
+"""Prove the scripted fake provider drives the application through the full AI-powered review matrix.
 
-These tests exercise the real, production semantic post-validation fence
+These tests exercise the real, production AI-powered review post-validation fence
 (:func:`yoetz.application.check.validate_semantic_judgment`) against results produced by
 :class:`yoetz.adapters.providers.fake.ScriptedFakeSemanticEvaluator`, without any network access.
 The fake is never asked to interpret case content; it only proves that whatever it returns is

@@ -2756,7 +2756,7 @@ async def _semantic_not_configured(
     runtime: TaskRuntime | None = None,
     lineage_evaluation: LineageEvaluation | None = None,
 ) -> FinalSemanticEvaluation:
-    """Explicit path when semantic review is enabled but no provider endpoint is bound."""
+    """Explicit path when AI-powered review is enabled but no provider endpoint is bound."""
 
     del frozen, findings, runtime, lineage_evaluation
     return FinalSemanticEvaluation(
@@ -2770,7 +2770,7 @@ async def _semantic_provider_unbound(
     runtime: TaskRuntime | None = None,
     lineage_evaluation: LineageEvaluation | None = None,
 ) -> FinalSemanticEvaluation:
-    """Semantic is enabled, but no external provider endpoint is configured."""
+    """AI-powered review is enabled, but no external provider endpoint is configured."""
 
     record_bounded_event_without_raising(
         component="semantic_composition",
@@ -2782,7 +2782,7 @@ async def _semantic_provider_unbound(
 
 
 def _map_blocked(outcome: PrivacyOutcome, reason: object) -> FinalSemanticEvaluation:
-    """Map pre-dispatch privacy blocks to exact semantic status/reason pairs."""
+    """Map pre-dispatch privacy blocks to exact AI-powered review status/reason pairs."""
 
     if outcome is PrivacyOutcome.CHANNEL_UNAVAILABLE:
         # Distinct from missing credential/endpoint: the channel is present but policy forbids it.
@@ -3876,7 +3876,7 @@ def _privacy_gated_semantic_evaluator(
         # lease_generation; a return without the renewed token leaves the caller holding a stale
         # one, and there is no API to re-acquire your own live lease. The check then fails
         # OPERATION_PENDING and the whole operation is lost rather than recording an honest
-        # semantic failure. That is what stranded the 2026-07-30 dogfood run.
+        # AI-powered review failure. That is what stranded the 2026-07-30 dogfood run.
         current_lease: list[_OpLease] = [frozen.lease]
         # Bound here too: the catch-all below can be reached before the policy is resolved, and
         # an unbound name there would turn a reportable failure into a second one.
@@ -4135,7 +4135,7 @@ def _privacy_gated_semantic_evaluator(
                         captured_local_fence_required = captured_resolution.local_fence_required
                     except Exception as exc:
                         # Content is an additive evidence arm. A malformed or unavailable
-                        # retained object must leave the deterministic case usable while
+                        # retained object must leave the local case usable while
                         # carrying an explicit bounded coverage gap into the packet.
                         record_unexpected_exception_without_raising(
                             exc,
@@ -4241,7 +4241,7 @@ def _privacy_gated_semantic_evaluator(
 
             # Build the packet before anything durable exists. A packet that cannot be built is a
             # property of the case, not a transient fault, so it must not consume a job or an
-            # attempt: claiming first is what let one deterministic build failure strand a check
+            # attempt: claiming first is what let one local build failure strand a check
             # permanently, since claim resumes the same attempt on every replay.
             try:
                 semantic_case_to_candidate_context(
@@ -4267,7 +4267,7 @@ def _privacy_gated_semantic_evaluator(
                     case_content_gaps=content_gaps,
                 )
 
-            # One durable semantic job per check: create/recover after freeze, before dispatch.
+            # One durable AI-powered review job per check: create/recover after freeze, before dispatch.
             if job is None:
                 case_ref = await _publish_semantic_case_object(
                     runtime,
@@ -4408,7 +4408,7 @@ def _privacy_gated_semantic_evaluator(
                             and wait.state == "awaiting"
                         ):
                             # Exact replay after a trusted local decision resumes the
-                            # already-prepared proposal. Starting the semantic pipeline again would
+                            # already-prepared proposal. Starting the AI-powered review pipeline again would
                             # mint a replacement proposal and could never observe the decision
                             # bound to this attempt.
                             result = await _resume_with_fence(
@@ -4923,7 +4923,7 @@ async def provide_service_ready_context(
         )
 
     # Repository authority is session-specific, so ready-time composition cannot activate a
-    # provider binding or claim semantic readiness. Exact configured-credential presence is a
+    # provider binding or claim AI-powered review readiness. Exact configured-credential presence is a
     # separate structural vault fact: it neither decrypts the record nor grants dispatch authority.
     provider_credential_connected = await configured_provider_credential_present()
     fallback_credential_connected = await configured_fallback_credential_present()
@@ -5038,7 +5038,7 @@ async def provide_service_ready_context(
 
     versions = _receipt_versions(manifest)
     local_observation = LocalObservationStore(_state=paths.state)
-    # Publish the loaded config gate before semantic composition can resolve
+    # Publish the loaded config gate before AI-powered review composition can resolve
     # retained bytes. The owner-private store is also the authoritative consent
     # fence while task-bundle propagation is still catching up.
     local_observation.set_runtime_enabled(config.observation.enabled)
@@ -5239,10 +5239,10 @@ async def provide_service_ready_context(
             provider_identity=binding.provider_id,
             finding_ids=(finding,),
             evidence_digest=digest,
-            summaries=("Privacy-gated semantic observation review",),
+            summaries=("Privacy-gated AI-powered observation review",),
             details=(
-                "Additive semantic note recorded after authorized provider attempt; "
-                "deterministic findings unchanged.",
+                "Additive AI-powered note recorded after authorized provider attempt; "
+                "local findings unchanged.",
             ),
         )
 

@@ -111,7 +111,8 @@ case → single-use authorization → bounded gateway → bound sink/provider �
    requesting writer authored at the frozen frontier, and kernel prose derived solely from it,
    project at the policy's data classes without a category grant: that content is already in the
    host's context, so withholding it discloses nothing new and costs the loop. Other-writer
-   material, imports, and provider-derived semantic prose — including every reviewer challenge —
+   material, imports, and provider-derived AI-powered review prose — including every reviewer
+   challenge —
    still require the explicit `agent_context_categories` grant.
 
    ADR-022's derived observation writer is `engine_derived_from_self_authored` for this provenance
@@ -293,12 +294,12 @@ case → single-use authorization → bounded gateway → bound sink/provider �
     repository-privacy commitment, and immediately discards the raw path. Branches and linked
     worktrees therefore share authority; independent clones and unrelated repositories do not.
 12. **Safe failure:** policy block, human denial/expiry, classifier uncertainty, scanner finding,
-    provider refusal/timeout/invalid output, or audit failure cannot be treated as a semantic
-    success. For `semantic_required`, the check returns deterministic results with
-    `incomplete_check`; for optional semantic work, the result records the exact gap and follows its
-    deterministic verdict rules. A request is never dispatched unless the audit reservation is
-    durable, and success is never acknowledged unless its terminal receipt is durable. Waiting and
-    approval remain resumable state rather than fake completed receipts.
+    provider refusal/timeout/invalid output, or audit failure cannot be treated as an AI-powered
+    review success. For `semantic_required`, the check returns local-check results with
+    `incomplete_check`; for optional AI-powered review work, the result records the exact gap and
+    follows its local-check verdict rules. A request is never dispatched unless the audit
+    reservation is durable, and success is never acknowledged unless its terminal receipt is
+    durable. Waiting and approval remain resumable state rather than fake completed receipts.
 13. **Useful review context remains user-controlled:** a closed `ReviewContextProfile` is stored
     independently from the four LLM-disclosure profiles. `structural` selects only typed metadata;
     `goal_aware` adds category-separated detail from the bounded accepted-event history frozen with
@@ -313,30 +314,30 @@ case → single-use authorization → bounded gateway → bound sink/provider �
 14. **Two defaults are intentionally different:** an unconfigured installation's durable seed is
     `local_only`, structural `update_checks` on (opt-out), other network channels off, global
     ceiling true only because update checks are on, and no local model. Config.toml generation-1
-    remains fail-safe all-denied. When a technical user deliberately runs external semantic setup,
-    the upstream CLI recommends the inspectable `assisted` recipe for an exact endpoint profile
-    with a current data-use record that states customer-content training `prohibited`, retention
-    `none|bounded` with any bounded ceiling at most 30 days. Provider human-access posture and
-    documented safety, support, legal, and abuse-monitoring exceptions remain prominent disclosure
-    facts. Known-broad, unknown, or
-    stale posture removes the badge. The recipe sets the editable
-    `require_current_provider_data_use_evidence=true` runtime guard. A technical user may turn it
-    off only through a trusted loosening/custom transition, after which the policy carries no
-    upstream no-training recommendation. The user reviews and commits the expanded policy once.
-    Within that standing exact-repository policy, checks, retries, reviewer challenges, agent responses,
-    and rechecks run without per-request human prompts. `confirm_every_request` remains the
-    optional high-ceremony alternative. A new repository proposal may need both to widen the machine
-    ceiling and to insert the first repository row. Those changes are one transition bundle, one
-    complete trusted preview, and one authority-digest-bound CAS commit; no intermediate state may
-    authorize every repository.
+    remains fail-safe all-denied. When a technical user deliberately runs external AI-powered review
+    setup, the upstream CLI recommends the inspectable `assisted` recipe for an exact endpoint
+    profile with a current data-use record that states customer-content training `prohibited`,
+    retention `none|bounded` with any bounded ceiling at most 30 days. Provider human-access posture
+    and documented safety, support, legal, and abuse-monitoring exceptions remain prominent
+    disclosure facts. Known-broad, unknown, or stale posture removes the badge. The recipe sets the
+    editable `require_current_provider_data_use_evidence=true` runtime guard. A technical user may
+    turn it off only through a trusted loosening/custom transition, after which the policy carries
+    no upstream no-training recommendation. The user reviews and commits the expanded policy once.
+    Within that standing exact-repository policy, checks, retries, reviewer challenges, agent
+    responses, and rechecks run without per-request human prompts. `confirm_every_request` remains
+    the optional high-ceremony alternative. A new repository proposal may need both to widen the
+    machine ceiling and to insert the first repository row. Those changes are one transition bundle,
+    one complete trusted preview, and one authority-digest-bound CAS commit; no intermediate state
+    may authorize every repository.
 15. **Structural subject-state hashing is a local non-disclosure support effect:** ADR-011 permits
     one explicit trusted local CLI command to read bounded Git/worktree bytes only into streaming
     hashers and return a versioned `SubjectStateRef`. It returns no source, diff, filename, path,
     branch, remote, Git output, or component digest; writes no ledger/audit row; opens no network;
     and cannot be invoked through MCP with an arbitrary path. Intermediate bytes are discarded
     before rendering. This narrow content-withholding fingerprint is not a local disclosure sink,
-    does not authorize semantic/live artifact inspection, and does not weaken never-send. An
-    unsupported, partial, unsafe, changing, or over-limit capture returns no comparable state.
+    does not authorize AI-powered review or live artifact inspection, and does not weaken
+    never-send. An unsupported, partial, unsafe, changing, or over-limit capture returns no
+    comparable state.
 16. **Live harness observation retention (first-party Codex, ADR-010 amendment 2026-07-22):**
     Observation consent is independent of egress consent. One workspace-level confirmation records a
     private workspace commitment (never a raw path). The normalized workspace locator is an
@@ -377,18 +378,19 @@ case → single-use authorization → bounded gateway → bound sink/provider �
     sandbox prove the permission. Output bytes pass the same fail-closed secret scanner before
     encryption; compound environment assignments such as `AWS_SECRET_ACCESS_KEY` and bounded
     `*_TOKEN` forms are redacted, while near-miss non-secret identifiers are left unchanged.
-    semantic observation advice remains additive and passes only minimized approved packets through
+    AI-powered observation advice remains additive and passes only minimized approved packets
+    through
     the existing privacy gateway. Observation, trust, verification management, and local advice
     diagnostics are local control, not network-egress channels and not additional MCP tools.
 
     **Revised 2026-08-30 (issue #302).** Secret-scanned and encrypted observation bytes may be
     materialized as ledger evidence only for the narrow ADR-020 eligibility set. That records byte
     identity, retention, redaction, and observation provenance; it does not authorize disclosure.
-    Materialization never opens captured objects for semantic review. Any later description or
-    typed digest metadata selected for a semantic case still traverses this ADR's independent
-    classification, policy, minimization, secret scan, authorization, and receipt path. Raw
-    captured bytes remain unavailable to that path unless a separately designed, consented reader
-    is added. Observation intake therefore cannot become implicit local or network egress.
+    Materialization never opens captured objects for AI-powered review. Any later description or
+    typed digest metadata selected for an AI-powered review case still traverses this ADR's
+    independent classification, policy, minimization, secret scan, authorization, and receipt path.
+    Raw captured bytes remain unavailable to that path unless a separately designed, consented
+    reader is added. Observation intake therefore cannot become implicit local or network egress.
 
 17. **Repository authority migration is bounded narrowing, not package consent:** package upgrades
     preserve accepted machine-policy bytes. Catalog migration records only the pre-upgrade legacy
@@ -464,9 +466,9 @@ not only its digest. It freezes both current and candidate policy bytes, and the
 the repository commitment, authority snapshot, provider/model/endpoint, recipe, policy digests,
 diff, and expiry. Authorization uses the frozen candidate and rejects any live repository,
 authority-generation, or configured-route drift before policy mutation. The agent recommends
-Expanded when the user explicitly prioritizes semantic-review depth, explains Assisted as the
-lower-disclosure semantic option, and honors the selected supported outcome; the recommendation is
-never independent policy authority (issues #532/#533).
+Expanded when the user explicitly prioritizes AI-powered review depth, explains Assisted as the
+lower-disclosure AI-powered review option, and honors the selected supported outcome; the
+recommendation is never independent policy authority (issues #532/#533).
 
 ## Consequences and proof obligations
 
@@ -503,43 +505,42 @@ accepted evidence remain separate. Local-control schema `2.2.0` appends only the
 envelope/coverage row and retains `2.1.0` byte-for-byte for Cursor peers. Claude trust or plugin
 enablement grants no Yoetz observation/egress/provider authority.
 
-The privacy policy is more than a semantic-provider toggle and cannot be represented by one
-`network=true` capability. Releases must prove the global ceiling; policy-intersection behavior;
-valid `local_only` policies with one bounded but v0.1-unavailable non-LLM channel; channel independence;
-agent-context and local-model fences; exact approval binding/restart behavior; no secret-bearing
-   configuration/environment/arguments; reviewed bundled-adapter composition (without claiming OS
-   sandbox isolation); keyed terminal-receipt commitments; the initial-reservation no-receipt
-   exception; Yoetz-process local-only AF_UNIX behavior without
-overclaiming a separate model runtime; and no plaintext canaries across databases, objects, logs, traces, prompts,
-receipts, errors, or transports. Public copy must reserve “zero network egress” for the composite
-ceiling-plus-channel state, not infer it from `local_only` alone.
-The runtime plaintext release gate binds one per-run synthetic canary to the privacy integration
-suite and retains that suite's encrypted/structural state under the isolated XDG data tree. It then
-recursively scans only the explicitly selected XDG data, config, cache, and runtime trees under the
-same fixed file, aggregate-byte, member-count, and no-symlink caps as release evidence. A planted
-runtime-tree negative control must be detected without exposing the canary, and the subsequent clean
-scan must emit a nonempty canonical redacted report; a finding, missing surface, over-limit surface,
-or absent report fails the release gate.
-The setup/conformance matrix additionally proves every `ReviewContextProfile`, the recommended
-recipe expansion, problem-local selection, agent-context delivery of reviewer findings, current
-provider data-use recommendation metadata, and automatic no-prompt behavior after standing policy
-authorization. A data-use record is evidence for recommendation wording, not technical proof of a
-provider's downstream behavior. Repository-identity evidence additionally proves symlink
-normalization, Git-common-root sharing across branches and linked worktrees, non-transferability to
-independent clones, and non-Git resolved-directory behavior. Migration evidence proves bounded
-entitlement snapshot/consumption, the no-route one-time carry-forward, exact replay, stale CAS,
-crash rollback, no machine-byte rewrite, and no prompt for narrowing. A missing or mismatched grant
-must produce zero provider constructions, credential handles, authorizations, and dispatch attempts.
-Raw paths must remain absent from policy/catalog bytes, logs, receipts, errors, and agent projections.
+The privacy policy is more than an AI-powered review provider toggle and cannot be represented by
+one `network=true` capability. Releases must prove the global ceiling; policy-intersection behavior;
+valid `local_only` policies with one bounded but v0.1-unavailable non-LLM channel; channel
+independence; agent-context and local-model fences; exact approval binding/restart behavior; no
+secret-bearing configuration/environment/arguments; reviewed bundled-adapter composition (without
+claiming OS sandbox isolation); keyed terminal-receipt commitments; the initial-reservation
+no-receipt exception; Yoetz-process local-only AF_UNIX behavior without overclaiming a separate
+model runtime; and no plaintext canaries across databases, objects, logs, traces, prompts, receipts,
+errors, or transports. Public copy must reserve “zero network egress” for the composite
+ceiling-plus-channel state, not infer it from `local_only` alone. The runtime plaintext release gate
+binds one per-run synthetic canary to the privacy integration suite and retains that suite's
+encrypted/structural state under the isolated XDG data tree. It then recursively scans only the
+explicitly selected XDG data, config, cache, and runtime trees under the same fixed file,
+aggregate-byte, member-count, and no-symlink caps as release evidence. A planted runtime-tree
+negative control must be detected without exposing the canary, and the subsequent clean scan must
+emit a nonempty canonical redacted report; a finding, missing surface, over-limit surface, or absent
+report fails the release gate. The setup/conformance matrix additionally proves every
+`ReviewContextProfile`, the recommended recipe expansion, problem-local selection, agent-context
+delivery of reviewer findings, current provider data-use recommendation metadata, and automatic
+no-prompt behavior after standing policy authorization. A data-use record is evidence for
+recommendation wording, not technical proof of a provider's downstream behavior. Repository-identity
+evidence additionally proves symlink normalization, Git-common-root sharing across branches and
+linked worktrees, non-transferability to independent clones, and non-Git resolved-directory
+behavior. Migration evidence proves bounded entitlement snapshot/consumption, the no-route one-time
+carry-forward, exact replay, stale CAS, crash rollback, no machine-byte rewrite, and no prompt for
+narrowing. A missing or mismatched grant must produce zero provider constructions, credential
+handles, authorizations, and dispatch attempts. Raw paths must remain absent from policy/catalog
+bytes, logs, receipts, errors, and agent projections.
 
-Installed-wheel proof remains a separate acceptance gate: two consecutive real semantic checks in
+Installed-wheel proof remains a separate acceptance gate: two consecutive real AI-powered checks in
 one approved repository must show distinct one-use authorizations, credential handles, dispatch
-identities, semantic provenance, and terminal privacy receipts, while a second repository remains
-blocked. Router downstream/fallback authority and issue #141's foreground disclosure continuation
-remain out of scope for this decision.
-ADR-011 capability evidence additionally proves structural capture is read-only, bounded,
-network-free, path/content withholding, fail-closed on ambiguity, and incapable of strengthening
-publication/authorship/artifact-observation coverage.
+identities, AI-powered review provenance, and terminal privacy receipts, while a second repository
+remains blocked. Router downstream/fallback authority and issue #141's foreground disclosure
+continuation remain out of scope for this decision. ADR-011 capability evidence additionally proves
+structural capture is read-only, bounded, network-free, path/content withholding, fail-closed on
+ambiguity, and incapable of strengthening publication/authorship/artifact-observation coverage.
 
 ## Vendor-runtime egress amendment (2026-08-30, issue #404)
 
@@ -550,11 +551,11 @@ strict route and an unapproved repository both stop before runtime factory const
 launch.
 
 Codex composes its upstream OpenAI request internally, so the gateway commitment covers the exact
-final disclosed Yoetz case bytes at the boundary Yoetz controls. The terminal semantic provenance
-adds the exact runtime/launcher/config/instruction/schema/selection/output commitments and states
-`upstream_body_observability=unavailable`. Neither the case digest nor its HMAC may be labeled an
-upstream request-body digest. Receipt counts are zero when structural readiness fails before case
-disclosure, even if a content-free account/model probe launched.
+final disclosed Yoetz case bytes at the boundary Yoetz controls. The terminal AI-powered review
+provenance adds the exact runtime/launcher/config/instruction/schema/selection/output commitments
+and states `upstream_body_observability=unavailable`. Neither the case digest nor its HMAC may be
+labeled an upstream request-body digest. Receipt counts are zero when structural readiness fails
+before case disclosure, even if a content-free account/model probe launched.
 
 The external runtime receives a secret-free attempt authority, never a vault credential handle.
 Once `turn/start` is acknowledged, any ambiguous transport/crash/restart result or unverified

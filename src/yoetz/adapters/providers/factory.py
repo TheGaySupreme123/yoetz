@@ -2,7 +2,7 @@
 
 Every configurable endpoint profile resolves here to exactly one runtime factory. A profile the
 setup surface can write but this table cannot build is the failure this module exists to prevent:
-the gateway reports `factory_unavailable` and the agent's semantic review silently never runs.
+the gateway reports `factory_unavailable` and the agent's AI-powered review silently never runs.
 
 Responses-style profiles are built by the Responses factory and Chat Completions profiles by the
 Chat Completions factory, so neither adapter learns the other's protocol. Data-use facts are per

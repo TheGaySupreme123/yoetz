@@ -16,9 +16,9 @@ define that comparison, but the draft left production of those digests to cooper
 worked stale-evidence story therefore depended on a value with no deterministic capture owner.
 
 General live repository inspection remains too broad for v0.1: it would need source-selection,
-content-return, symlink/submodule, consent, redaction, and semantic-review contracts. Freshness does
-not require that breadth. It needs a local, content-withholding structural fingerprint that can say
-whether two material actions referred to the same repository state.
+content-return, symlink/submodule, consent, redaction, and AI-powered review contracts. Freshness
+does not require that breadth. It needs a local, content-withholding structural fingerprint that can
+say whether two material actions referred to the same repository state.
 
 ## Decisions
 
@@ -43,8 +43,8 @@ whether two material actions referred to the same repository state.
    local capture may justify `content_digest` evidence immutability, but never
    `harness_observed`, `artifact_verified`, or `independently_reproduced` by itself.
 6. **General artifact inspection stays deferred.** This ADR authorizes no content-returning read,
-   semantic fetch, repository browser, broad source capture, or ambient workspace search. A future
-   `ArtifactInspectionPort` still requires its own ADR.
+   AI-powered review fetch, repository browser, broad source capture, or ambient workspace search. A
+   future `ArtifactInspectionPort` still requires its own ADR.
 
 ## Consequences
 

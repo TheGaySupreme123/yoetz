@@ -1,4 +1,4 @@
-"""Envelope bounding for semantic cases large enough to exercise it (dogfood run 2026-07-30).
+"""Envelope bounding for AI-powered review cases large enough to exercise it (dogfood run 2026-07-30).
 
 The production failure was a 44 KiB structural envelope against a 16 KiB bound whose compaction
 ladder could not reach it: the "last resort" truncated the item catalog to 64 rows, and a
@@ -412,12 +412,12 @@ def test_irreducible_core_raises_a_typed_terminal(monkeypatch: pytest.MonkeyPatc
 
 
 def test_non_ascii_ledger_content_still_builds_a_case() -> None:
-    """An em dash must not stop the semantic review.
+    """An em dash must not stop the AI-powered review.
 
     ``canonical_encode`` emits UTF-8 without escaping non-ASCII, but the case builder decoded it
     as ASCII. One curly quote, em dash or accented character anywhere in a plan, obligation or
     claim therefore raised UnicodeDecodeError while building the case, which the coordinator
-    surfaced as ``coordinator_failure`` with no semantic review at all. A live dogfood run hit
+    surfaced as ``coordinator_failure`` with no AI-powered review at all. A live dogfood run hit
     this within minutes; agents write these characters constantly.
     """
 

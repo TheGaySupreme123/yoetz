@@ -10,7 +10,7 @@ ADR wins; when an ADR and the code disagree, that is a bug in one of them and wo
 | [003](ADR-003-storage-sqlite-durability.md) | Storage: SQLite durability |
 | [004](ADR-004-threat-crypto-key-recovery.md) | Threat model, crypto, key recovery |
 | [005](ADR-005-codex-capability-identity.md) | Codex capability identity |
-| [006](ADR-006-semantic-provider-profile.md) | Semantic provider profile |
+| [006](ADR-006-semantic-provider-profile.md) | AI-powered review provider profiles |
 | [007](ADR-007-packaging-platform-release.md) | Packaging, platform, release |
 | [008](ADR-008-local-service-vault-trust-boundary.md) | Local service and vault trust boundary |
 | [009](ADR-009-data-egress-privacy.md) | Data egress and privacy |

@@ -104,7 +104,17 @@ def test_npm_release_is_built_once_published_after_pypi_and_download_verified() 
 
     assert "npm-published.tgz" in verify
     assert "cmp -s" in verify
-    assert "yoetz==${{ needs.validate-release-source.outputs.version }} version --json" in verify
+    # Since #768 the launcher pins the version in `uv tool install` and runs the installed
+    # tool through a versionless `uvx`; the published-launcher check asserts both spawns
+    # (issue #776), matching tests/packaging/test_npm_launcher.py.
+    assert (
+        "tool install --quiet --python 3.14 "
+        "yoetz==${{ needs.validate-release-source.outputs.version }}"
+    ) in verify
+    assert '"--python 3.14 yoetz version --json"' in verify
+    assert (
+        "yoetz==${{ needs.validate-release-source.outputs.version }} version --json" not in verify
+    )
 
 
 def test_pypi_publisher_receives_only_distribution_files_and_supports_same_tag_recovery() -> None:

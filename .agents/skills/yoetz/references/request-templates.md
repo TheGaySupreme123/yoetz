@@ -472,11 +472,11 @@ and limit. Absence from the latest check's returned findings is not proof of res
 ## `check`: whole case
 
 Omit `scope` for the whole case. Two empty arrays are also whole-case semantics, but omission is
-clearer. When relying on the configured semantic default, omit `mode`; the runtime applies the
+clearer. When relying on the configured review default, omit `mode`; the runtime applies the
 effective policy. Select `semantic_required` when the user, policy, or named acceptance criterion
-requires semantic review. Use `semantic_if_configured` only when review is known to be optional, and
-reserve `deterministic_only` for explicitly local/structural work or a deliberate no-egress choice.
-The examples use the configured default and the accepted bounded finding cap of `10`.
+requires AI-powered review. Use `semantic_if_configured` only when review is known to be optional,
+and reserve `deterministic_only` for explicitly local/structural work or a deliberate no-egress
+choice. The examples use the configured default and the accepted bounded finding cap of `10`.
 
 ```json
 {
@@ -547,11 +547,11 @@ qualifying check resolves it, never another response. If the repaired record was
 issue still fires, or it did not re-fire but `status view=findings` with `filter.include_resolved:
 true` still reports `resolved=false`,
 do not recheck unchanged state again. Request the receipt and keep the final claim no stronger than
-its conclusion, coverage, freshness, receipt-blocking findings, and limitations. A deterministic
+its conclusion, coverage, freshness, receipt-blocking findings, and limitations. A local-check
 recheck can still qualify when only `captured_object_unavailable`, `content_unselected`,
 `host_outcome_unavailable`, or `unpaired_event` limits its case-wide host-observation coverage and
 the original finding coverage was readable; those gaps remain receipt limitations and the exception
-never applies to semantic findings.
+never applies to AI-powered findings.
 
 ```json
 {
@@ -1106,10 +1106,10 @@ Only a technical impossibility, unavailable authority channel, policy ceiling, e
 never-send/credential/destructive-action invariant, or honest evidence boundary may block; name it
 and give the shortest user-controlled continuation.
 
-When the user explicitly wants semantic review, recommend `expanded_review` first for maximum
+When the user explicitly wants AI-powered review, recommend `expanded_review` first for maximum
 useful in-scope context and explain its higher disclosure. Also explain `assisted_review` as the
-lower-disclosure semantic choice, `metadata_only` as structural-only review with confirmation per
-request, and `private` as no external semantic review. Ask which outcome the user wants before
+lower-disclosure AI-powered choice, `metadata_only` as structural-only review with confirmation
+per request, and `private` as no external AI-powered review. Ask which outcome the user wants before
 preparing a grant.
 
 For non-default setup, read `yoetz consent catalog` and `yoetz consent status`. Prepare only an
@@ -1181,7 +1181,7 @@ authorizes the relay. Send the exact pending fields through `yoetz consent autho
 uses warning acknowledgement. Denial publishes nothing. After approval, replay the identical
 import body and request ID. Never add an approval token/field, mint another request ID, or reuse the
 decision for a changed source, manifest, task/session/writer, profile/version, mapping, plan,
-semantic check, or reviewer egress.
+AI-powered check, or reviewer egress.
 
 ## Recommendations
 

@@ -1,4 +1,4 @@
-# Privacy and semantic review
+# Privacy and AI-powered review
 
 The full user-facing promise is [`PRIVACY.md`](../../PRIVACY.md). The enforceable technical contract
 is [`docs/protocol/data-egress-and-privacy.md`](../protocol/data-egress-and-privacy.md) and
@@ -7,17 +7,17 @@ defaults are, and what changes when you turn something on.
 
 ## Two defaults, deliberately separate
 
-An unconfigured installation is **external-LLM-egress-free and deterministic**. No task content
+An unconfigured installation is **external-LLM-egress-free and local-only**. No task content
 leaves for a provider. The independent structural package update channel may be on unless disabled;
-deterministic checks, findings, and receipts all work in this state.
+local checks, findings, and receipts all work in this state.
 
-Turning on external semantic review is a separate, explicit decision. It is not implied by
+Turning on external AI-powered review is a separate, explicit decision. It is not implied by
 installing, by binding a provider, or by having a credential.
 
-An MCP host can impose a stronger process-local ceiling with
-`yoetz mcp serve --semantic off`. That strict route cannot request external semantic review even if
-durable policy is widened later. It is separate from the policy profiles below; see
-[Auto-approving an MCP route](auto-approving-agents.md).
+An MCP host can impose a stronger process-local ceiling with `yoetz mcp serve --semantic off`. That
+strict route cannot request external AI-powered review even if durable policy is widened later. It
+is separate from the policy profiles below; see [Auto-approving an MCP
+route](auto-approving-agents.md).
 
 ## Native work evidence is a separate choice
 
@@ -41,9 +41,10 @@ the mapped task's consent grant. Local status does not establish that task-level
 it, ingress drops content chunks. Pausing observation or disabling the runtime gate preserves the
 configured choice but empties locally effective capture. Disabling a profile removes that choice.
 
-Native content capture and semantic review have separate authority. Enabling a host profile does not
-authorize external review, choose a provider, or permit any content to leave the computer. Semantic
-review still requires its own provider readiness and repository privacy decision described below.
+Native content capture and AI-powered review have separate authority. Enabling a host profile does
+not authorize external review, choose a provider, or permit any content to leave the computer.
+AI-powered review still requires its own provider readiness and repository privacy decision
+described below.
 
 ## The four LLM privacy profiles
 
@@ -97,9 +98,9 @@ yoetz privacy receipts          # inspect bounded structural egress receipts
 You can also ask a capable Yoetz agent to install, configure, or change Yoetz in ordinary
 conversation. The agent should explain each consequential choice, recommend an option and its
 trade-off, perform the mechanical steps, and leave the decision with you. If you explicitly ask
-for semantic review, it recommends **Expanded review** first for the deepest useful in-scope
+for AI-powered review, it recommends **Expanded review** first for the deepest useful in-scope
 review and explains that it permits broader problem-relevant context; **Assisted review** is the
-lower-disclosure semantic alternative. Metadata only and Private remain available. Choosing a
+lower-disclosure AI-powered alternative. Metadata only and Private remain available. Choosing a
 recipe is not yet approval: the agent prepares one exact combined change and shows it before asking
 you to approve or deny it.
 
@@ -182,11 +183,11 @@ Custom privacy setup asks separately whether to authorize the configured fallbac
 provider and model. Declining keeps the policy bound to the primary alone. Named review recipes
 include the configured pair in the review screen before approval.
 
-## What semantic review actually sends
+## What AI-powered review actually sends
 
 When you accept the CLI's recommended `assisted-review` recipe, it shows and confirms a standing
 exact-repository policy that sends the reviewer a structured packet: the goal, obligations, claims, the
-material timeline, deterministic findings and their exact bases, coverage gaps, and bounded
+material timeline, local findings and their exact bases, coverage gaps, and bounded
 problem-local excerpts of evidence, tests, diffs, or source **already recorded in the case**.
 
 Sensitive and confidential content is off. The never-send set remains absolute. The reviewer gets a
@@ -218,8 +219,8 @@ Inside that confirmed policy, review is direct-to-agent. The reviewer returns a 
 the main agent, which can act, supply evidence, revise its claim, dispute with evidence, or state an
 unresolved limitation — then recheck. Routine checks and retries need no human prompt.
 
-Semantic output is advisory, provenance-labeled, and deterministically fenced. It never silently
-becomes deterministic truth, and it never upgrades a coverage claim.
+AI-powered output is advisory, provenance-labeled, and deterministically fenced. It never silently
+becomes local-check truth, and it never upgrades a coverage claim.
 
 If a fallback endpoint is approved and the primary could not serve — repeated timeouts,
 connection failures, or rate limits, a quota exhaustion, or a missing credential — the same
@@ -240,11 +241,11 @@ catalog keeps encrypted proposal objects and their structural sidecars enumerabl
 No control surface is required to trust a summary — the receipts, catalog, and policy file are the
 evidence, and they are on your machine.
 
-Installed-wheel proof for issue #139 remains outstanding until two consecutive real semantic checks
-in one approved repository have distinct authorizations, credential handles, dispatch identities,
-semantic provenance, and terminal privacy receipts, and a second repository is shown blocked.
-Router downstream/fallback grants and issue #141's foreground disclosure continuation remain
-separate work.
+Installed-wheel proof for issue #139 remains outstanding until two consecutive real AI-powered
+checks in one approved repository have distinct authorizations, credential handles, dispatch
+identities, AI-powered review provenance, and terminal privacy receipts, and a second repository is
+shown blocked. Router downstream/fallback grants and issue #141's foreground disclosure continuation
+remain separate work.
 
 For an `external_runtime_oauth` profile, the equivalent attempt identity is the secret-free
 runtime authority plus exact runtime evidence, not a vault credential handle. Post-acknowledgement
@@ -260,7 +261,7 @@ attempt and provider it reconciled, so `yoetz privacy receipts` accounts for eve
 that was spent. A cancelled note that names neither means nothing was sent.
 
 When you are auditing a run rather than the installation, the
-[semantic dogfood runbook](../runbooks/semantic-dogfood.md) gives the preflight and the provenance
+[AI-powered review dogfood runbook](../runbooks/semantic-dogfood.md) gives the preflight and the provenance
 gate: which route the agent actually got, and how to read `semantic_provenance`.
 
 Read `semantic_provenance` together with `semantic_status` and `semantic_reason`, never on its own.

@@ -1,4 +1,4 @@
-"""Unit tests for deterministic observation-advice policies."""
+"""Unit tests for local observation-advice policies."""
 
 from __future__ import annotations
 
@@ -757,7 +757,7 @@ def test_registry_lag_alone_does_not_emit_provider_not_ready() -> None:
 
 
 def test_provider_not_ready_requires_semantic_to_be_configured() -> None:
-    """With semantic disabled, connect_provider advice has no action to recommend (#265)."""
+    """With AI-powered review disabled, connect_provider advice has no action to recommend (#265)."""
 
     rules = _rules(
         ObservationAdviceContext(

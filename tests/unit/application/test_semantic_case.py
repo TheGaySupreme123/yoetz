@@ -1,4 +1,4 @@
-"""Frozen privacy-selected semantic case construction (plan 03 / issue #69)."""
+"""Frozen privacy-selected AI-powered review case construction (plan 03 / issue #69)."""
 
 from __future__ import annotations
 

@@ -282,8 +282,8 @@ class _WorkflowRuntime(MemoryStartRuntime):
                     RuntimeCapability.WRITE,
                     RuntimeCapability.STRUCTURAL_READ,
                     RuntimeCapability.PAYLOAD_READ,
-                    # Granted unconditionally: a deterministic-only check never reaches the
-                    # capability gate, so this only opens the semantic path for the app built
+                    # Granted unconditionally: a local-only check never reaches the
+                    # capability gate, so this only opens the AI-powered review path for the app built
                     # with ``semantic="optional"``.
                     RuntimeCapability.SEMANTIC,
                 }
@@ -398,9 +398,9 @@ async def _semantic_succeeds(
     runtime: object | None = None,
     lineage_evaluation: object | None = None,
 ) -> object:
-    """Reach ``succeeded`` without raising a semantic challenge of its own.
+    """Reach ``succeeded`` without raising an AI-powered review challenge of its own.
 
-    Semantic delivery is exercised elsewhere; here the only thing that matters is that the check
+    AI-powered review delivery is exercised elsewhere; here the only thing that matters is that the check
     earns ``semantic_model_derived`` coverage, so the receipt has something to lose.
     """
 
@@ -1493,7 +1493,7 @@ async def test_material_work_after_check_produces_check_not_applicable() -> None
 
 async def test_receipt_after_respond_keeps_semantic_check_coverage() -> None:
     """Issue #172: the guidance-mandated check -> respond -> receipt sequence used to drop the
-    semantic half of a successful check's coverage, leaving the receipt claiming only the
+    AI-powered review half of a successful check's coverage, leaving the receipt claiming only the
     ``deterministic`` baseline it would have carried with no check at all."""
 
     app, _runtime, _ = _build_app(seed_offset=9, semantic="optional")
@@ -1750,7 +1750,7 @@ async def test_status_freshness_scalar_survives_immaterial_events() -> None:
     app, _runtime, _ = _build_app(seed_offset=27)
     started, checked, _obligation = await _bootstrap_finding(app, seed=1900)
 
-    # `deterministic_only` declines the semantic review, which is a declared coverage gap, so the
+    # `deterministic_only` declines the AI-powered review, which is a declared coverage gap, so the
     # check downgraded its own freshness. This is the precondition the bug needs.
     assert checked.coverage.ledger_freshness is LedgerFreshness.PARTIAL
     assert "semantic_review_not_requested" in checked.coverage.known_gaps
@@ -3205,7 +3205,7 @@ async def _findings_view(
 async def test_host_observation_gaps_do_not_keep_repaired_action_finding_current(
     ledger_backend: Literal["memory", "sqlite"],
 ) -> None:
-    """Issue #538: unrelated host gaps limit coverage, not deterministic resolution."""
+    """Issue #538: unrelated host gaps limit coverage, not local-finding resolution."""
 
     app, runtime, _ = _build_app(seed_offset=29, ledger_backend=ledger_backend)
     started = await app.start(start_request(5000, title="Host-gap finding resolution"))
@@ -3431,7 +3431,7 @@ async def test_host_observation_gaps_do_not_keep_repaired_action_finding_current
 async def test_repair_plus_later_qualifying_check_resolves_the_finding(
     ledger_backend: Literal["memory", "sqlite"],
 ) -> None:
-    """Issue #458: the record is repaired, a later whole-case deterministic check finds the
+    """Issue #458: the record is repaired, a later whole-case local check finds the
     same issue absent, and the finding stops blocking the receipt while staying visible.
 
     The response alone changes nothing (locked separately); the proof is the check.

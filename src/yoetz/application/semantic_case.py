@@ -1,7 +1,7 @@
-"""Pure frozen-authority builder for privacy-selected semantic review cases.
+"""Pure frozen-authority builder for privacy-selected AI-powered review cases.
 
 Constructs ``SemanticCase`` / ``ReviewPacket`` from the already-frozen check case,
-pinned deterministic findings/bases, and the active ``ReviewSelectionPolicy``.
+pinned local findings/bases, and the active ``ReviewSelectionPolicy``.
 
 This module is deliberately capability-free: no Git, filesystem, network, transcript,
 environment, database, or provider access. Captured bytes, when present, arrive as frozen
@@ -165,10 +165,10 @@ type _OmissionReason = Literal[
     "not_recorded", "not_selected", "withheld_by_policy", "redacted_never_send"
 ]
 
-# The observation ingest bound is intentionally larger than one semantic item. The service-side
+# The observation ingest bound is intentionally larger than one AI-powered review case item. The service-side
 # resolver authenticates a complete retained chunk here, after which the selection policy clips it
 # to its own excerpt/item/total limits. Keeping this bound below the ordinary object-store limit
-# prevents a malformed captured-content wrapper from becoming an unbounded semantic input.
+# prevents a malformed captured-content wrapper from becoming an unbounded AI-powered review input.
 MAX_CAPTURED_SEMANTIC_CONTENT_BYTES: Final = 512 * 1024
 _CAPTURED_CONTENT_MEDIA_TYPE: Final = "application/vnd.yoetz.observation-content+json"
 _CAPTURED_CONTENT_KINDS: Final = frozenset(
@@ -195,7 +195,7 @@ _CAPTURE_GAP_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)
 
 @dataclass(frozen=True, slots=True)
 class CapturedContentScope:
-    """Current service-authorized boundary for native captured semantic content.
+    """Current service-authorized boundary for native captured AI-powered review content.
 
     The scope is assembled by the service after it checks the active local consent arm. The pure
     case builder accepts it as a frozen assertion and still rechecks every excerpt against the
@@ -444,7 +444,7 @@ def _structural_json(value: Mapping[str, JsonValue]) -> str:
     # canonical_encode emits UTF-8 and does not escape non-ASCII, so these must be decoded as
     # UTF-8. Decoding as ASCII meant a single em dash, curly quote or accented character anywhere
     # in the ledger raised UnicodeDecodeError while building the case — surfacing as
-    # coordinator_failure with no semantic review at all. Agents write such characters constantly.
+    # coordinator_failure with no AI-powered review at all. Agents write such characters constantly.
     return canonical_encode(cast(JsonValue, dict(value))).decode("utf-8")
 
 
@@ -596,7 +596,7 @@ def _captured_content_groups(
     This is intentionally a pure check. The service has already decrypted and secret-scanned the
     object before constructing ``CapturedSemanticContent``; this function verifies that the bytes
     cannot be attached to another task, phase, profile, or evidence identity and that multipart
-    content is complete before it becomes a semantic excerpt.
+    content is complete before it becomes an AI-powered review excerpt.
     """
 
     # Importing the concrete projection type would make the public builder depend on the adapter
@@ -800,7 +800,7 @@ def build_semantic_case(
     captured_content_scope: CapturedContentScope | None = None,
     captured_content_gaps: Sequence[str] = (),
 ) -> SemanticCase:
-    """Build one pre-egress semantic case from frozen authority only."""
+    """Build one pre-egress AI-powered review case from frozen authority only."""
 
     if type(frozen_case) is not DeterministicCase:
         raise TypeError("deterministic_case_invalid")
@@ -1322,7 +1322,7 @@ def build_semantic_case(
             items.append(item)
             timeline_ids.append(item.item_id)
 
-    # --- Deterministic assessments + optional finding prose ---
+    # --- Local assessments + optional finding prose ---
     review_assessments: list[ReviewAssessment] = []
     if "deterministic_assessments" in sections:
         matched = _match_assessments(frozen_case, findings)
@@ -1333,7 +1333,7 @@ def build_semantic_case(
                 finding_ref = str(finding.finding_id)
                 linked = tuple(str(ref) for ref in finding.subject_refs)
                 # Prose requires exact-match allowlist on every subject_ref; otherwise keep the
-                # deterministic assessment without summary/detail content items.
+                # local assessment without summary/detail content items.
                 if linked and set(linked) <= allowed:
                     summary_id = f"finding-summary-{finding_ref}"
                     detail_id = f"finding-detail-{finding_ref}"
@@ -1436,7 +1436,7 @@ def build_semantic_case(
             assert type(payload) is EvidenceRecordedPayload
             leader = captured_group_leader.get(ref)
             if leader is not None and leader != ref:
-                # Multipart captured evidence is one semantic excerpt. Carrying each part as a
+                # Multipart captured evidence is one AI-powered review excerpt. Carrying each part as a
                 # separate excerpt would let an incomplete group look reviewable and would spend
                 # the selection budget on duplicate structural descriptions.
                 continue
@@ -1479,7 +1479,7 @@ def build_semantic_case(
             digest_provenance: ExcerptDigestProvenance | None = None
             if captured_group is not None:
                 # The service-authenticated inner bytes are the only source that may populate a
-                # captured semantic excerpt. Their digest provenance is retained separately from
+                # captured AI-powered review excerpt. Their digest provenance is retained separately from
                 # the digest of the selection-clipped item below.
                 text = captured_group.content.decode("utf-8")
                 digest_provenance = captured_group.digest_provenance
@@ -1958,7 +1958,7 @@ def build_semantic_case(
         omissions=tuple(omissions),
     )
 
-    # The deterministic case owns the complete frontier. The reviewer needs the dependency
+    # The local case owns the complete frontier. The reviewer needs the dependency
     # closure of its selected packet, not every unrelated logical/source ID in that frontier.
     required_refs: set[str] = set(local_check_refs) | {
         str(ref) for ref in projection.findings if str(ref) in allowed
@@ -2527,7 +2527,7 @@ class SemanticCaseTooLarge(ValueError):
     Raised only when the irreducible core alone exceeds ``MAX_EGRESS_ENVELOPE_BYTES``. Every
     droppable row has already been removed and accounted for by then, so this is a genuine
     "this case cannot be reviewed", not a transient coordinator fault. Callers must map it to a
-    terminal semantic outcome rather than swallowing it as an unexpected exception.
+    terminal AI-powered review outcome rather than swallowing it as an unexpected exception.
     """
 
 
@@ -2745,7 +2745,7 @@ def semantic_case_to_candidate_context(
     scope: AuthorizationScope,
     provider_binding: ProviderBinding,
 ) -> CandidateContext:
-    """Project a semantic case into separate privacy-classified candidate items."""
+    """Project an AI-powered review case into separate privacy-classified candidate items."""
 
     if type(case) is not SemanticCase:
         raise TypeError("semantic_case_invalid")

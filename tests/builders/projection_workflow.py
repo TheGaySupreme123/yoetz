@@ -220,7 +220,7 @@ async def _semantic_never(
     runtime: object | None = None,
     lineage_evaluation: object | None = None,
 ) -> object:
-    """Fail if a deterministic-only composition reaches semantic evaluation."""
+    """Fail if a local-only composition reaches AI-powered evaluation."""
 
     del frozen, findings, runtime, lineage_evaluation
     raise AssertionError("semantic_evaluator_called_in_deterministic_mode")
@@ -232,10 +232,10 @@ async def _semantic_succeeds(
     runtime: object | None = None,
     lineage_evaluation: object | None = None,
 ) -> object:
-    """Return a succeeded semantic outcome that raises no challenge of its own.
+    """Return a succeeded AI-powered review outcome that raises no challenge of its own.
 
-    Semantic *delivery* is a separate subject; these sweeps only need semantic to reach
-    ``succeeded`` so that the deterministic findings travel the semantic modes too.
+    AI-powered review *delivery* is a separate subject; these sweeps only need the review to reach
+    ``succeeded`` so that the local findings travel the AI-powered review modes too.
     """
 
     del frozen, findings, runtime, lineage_evaluation
@@ -422,7 +422,7 @@ def _event_drafts(seed: int, obligation_event_id: str, obligation_id: str) -> li
 
     An obligation with an unmet requested item, an assignment that owns it, and an
     action/result/evidence/claim chain whose claim rests on the obligation alone — so the
-    deterministic policies have real material and ``check`` produces real findings.
+    local policies have real material and ``check`` produces real findings.
     """
 
     action_id = protocol_id("act_", seed + 10)

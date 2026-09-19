@@ -1,4 +1,4 @@
-"""Approved bounded live semantic-provider capability probe (E-007).
+"""Approved bounded live AI-powered review provider capability probe (E-007).
 
 Marked ``live_provider`` / ``live``. Written for the release capability job; excluded from the
 default gate. Credentials must never enter this process — the cell exercises only an opaque

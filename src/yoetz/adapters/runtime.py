@@ -327,7 +327,7 @@ class _ReadLedger:
     async def load_disclosure_wait(
         self, writer_id: str, operation_id: str
     ) -> SemanticDisclosureWait | None:
-        """Read the structural continuation for one suspended semantic attempt."""
+        """Read the structural continuation for one suspended AI-powered review attempt."""
 
         return await self._value.load_disclosure_wait(writer_id, operation_id)
 

@@ -85,14 +85,14 @@ actual tool names. Call only the exposed Yoetz operations (`start`, `publish_wor
 `check`, `respond`, `receipt`, and read-only `read_guidance`); do not assume a server prefix.
 
 Start or attach once, publish the bounded plan before substantive work, and
-keep the returned session/task identity. For a required independent semantic judgment, select
+keep the returned session/task identity. For a required independent AI-powered judgment, select
 `semantic_required`; omit `mode` for the configured default, and use `semantic_if_configured`
-only when review is known to be optional. Keep a strict route's semantic ceiling.
+only when review is known to be optional. Keep a strict route's AI-powered review ceiling.
 
 ## Guardrails
 
 If Cursor asks for MCP approval, preserve the exact proposed request and request ID while it is
-held. Do not retry with a new request, switch to deterministic-only, or use `--approve-mcps` as a
+held. Do not retry with a new request, switch to local-only, or use `--approve-mcps` as a
 workaround. Do not change Cursor privacy, auto-run, or MCP settings without the user's decision.
 
 ## Cursor activation recovery
@@ -109,6 +109,6 @@ the current typed continuation and the shared recovery guidance.
 
 Follow the linked coverage and publication references for the repair, evidence, finding-response,
 and receipt sequence. Request a receipt last. Report the closure counts and checked frontier, the
-check's semantic status/reason, and the receipt's coverage limits. Keep completed product work
-separate from unresolved verification. Activation, registration, and hook delivery do not establish
-observation, semantic review, or completion.
+check's AI-powered review status/reason, and the receipt's coverage limits. Keep completed product
+work separate from unresolved verification. Activation, registration, and hook delivery do not
+establish observation, AI-powered review, or completion.

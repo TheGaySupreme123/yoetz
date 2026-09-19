@@ -28,6 +28,47 @@ reverse-chronological released versions.
 - The 0.3 functionality uses additive control contracts and migrations while retaining the
   released 0.2 schemas and migration bytes. Observation selection, runtime isolation, and
   recovery improvements from 0.2 remain in effect.
+
+## 0.2.2 — 2026-09-18
+
+Patch release in the **0.2** public-alpha line, focused on making the documented install paths
+work on any machine regardless of which Pythons it already has. See
+[release notes](docs/releases/v0.2.2.md).
+
+### Fixed
+
+- The website's PyPI button copied a version PyPI never had (`yoetz==0.2.0`), so every install
+  from it failed. The command is now unpinned, and both install popups say that `uv` is required
+  and that it fetches Python 3.14 itself (#766, #770).
+- `npx yoetz` now makes the exact version a persistent `uv tool install` before delegating, so
+  Codex, Claude Code, and Cursor connections made from `npx yoetz` no longer bind to `uv`'s
+  prunable cache and survive `uv cache clean` (#766, #768).
+- Bare `yoetz` on the prompt-loop fallback (`YOETZ_TUI=0`, or an install without the terminal
+  UI dependency) opens the setup wizard instead of exiting `internal_error` (#766, #768).
+- Setup offers the Codex home from `CODEX_HOME` or `~/.codex` for confirmation instead of asking
+  for a blank absolute path, and `yoetz setup run --codex-path` no longer refuses without
+  `--codex-home`; non-interactive runs bind and report the same default (#766, #768).
+- A `yoetz` console script that cannot prove itself (a group-writable prefix such as Homebrew's
+  `/opt/homebrew`, a symlink, or a modified install record) reports `launcher_unproven` on Codex
+  MCP registration instead of a bare `harness_unavailable` (#766, #768).
+- The first-run detection screen no longer prints each Codex version twice, and the header names
+  the foreign Codex MCP entry when the `yoetz` server name is already taken (#766, #768).
+- Public errors on the MCP and CLI surfaces carry a typed `continuation` token that each surface
+  renders as a concrete next step, guidance pointer, and nudge, so an agent that hits an error such
+  as `vault_initialization_required` is told what to do rather than only that something failed
+  (ADR-030; #739, #740, #669, #743).
+
+### Changed
+
+- The install documentation states the Python 3.14 requirement, that `uv` downloads it on demand
+  whatever other Pythons are installed, that `pip` and `pipx` on an older Python cannot install
+  Yoetz, and which two `uv` settings block the download (#766, #768).
+- Product wording says "local checks" and "AI-powered review" everywhere people read it: rendered
+  receipts, the terminal interface, CLI and MCP descriptions, guidance, skills, and docs. Wire
+  identifiers, schema bytes, and storage are unchanged; `docs/INTERFACES.md` maps the product words
+  to their wire names (#769, #773).
+- The website's hero shows the Product Hunt featured badge.
+
 ## 0.2.1 — 2026-09-14
 
 Patch release in the **0.2** public-alpha line, focused on significant Linux and WSL

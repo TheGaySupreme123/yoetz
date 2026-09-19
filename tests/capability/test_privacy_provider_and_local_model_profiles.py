@@ -2,7 +2,7 @@
 
 Offline cells prove closed privacy/review-context vocabularies, v0.1 non-LLM channel
 unavailability, empty local-model registry fail-closed behavior, ProviderDataUseProfile
-eligibility binding, and scripted fake-provider semantic success without network.
+eligibility binding, and scripted fake-provider AI-powered review success without network.
 """
 
 from __future__ import annotations

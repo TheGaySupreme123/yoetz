@@ -8,11 +8,11 @@ and receipts before `check`. Setup/consent, vault/credential operations, transcr
 recommendation decisions route to the corresponding sections of request templates only when
 needed. Already-read guidance need not be fetched again while present in context.
 
-Use `semantic_if_configured` only when semantic review is known to be optional; omit `mode` when
+Use `semantic_if_configured` only when AI-powered review is known to be optional; omit `mode` when
 relying on the configured default. Select `semantic_required` for an explicit user requirement,
-effective policy, or named acceptance criterion requiring independent semantic judgment. Preserve
+effective policy, or named acceptance criterion requiring independent AI-powered judgment. Preserve
 required review and all host/disclosure approval boundaries. Installed guidance bytes alone prove
-neither activation nor semantic dispatch.
+neither activation nor AI-powered review dispatch.
 
 The native plugin selects `skills/claude-code/yoetz/SKILL.md`. Its entrypoint names
 `/yoetz:yoetz`, uses the declared MCP namespace, reads installed references on demand, and refreshes
@@ -172,8 +172,9 @@ CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_ROOT" "$CLAUDE_PATH" --plugin-dir "$DEV_ROOT" 
 `--development-enabled` renders `defaultEnabled:true` (a disabled carrier does not load under
 `--plugin-dir`); the tree carries a `.yoetz-claude-plugin-export.json` marker naming that flag, so
 status never mistakes it for the marketplace-installed cell, and `preview` refuses it. A development
-session proves skill delivery, MCP binding/runtime, hooks, model use, semantic dispatch, and receipts
-for the exact bytes, but never marketplace installation, discovery, enablement, or host activation.
+session proves skill delivery, MCP binding/runtime, hooks, model use, AI-powered review dispatch,
+and receipts for the exact bytes, but never marketplace installation, discovery, enablement, or host
+activation.
 
 An isolated `CLAUDE_CONFIG_DIR` isolates only Claude Code. When the session's Yoetz must not touch
 the live install, also export `YOETZ_ISOLATED_ROOT` (ADR-026) into the session environment so the
@@ -344,40 +345,36 @@ yoetz observe content-disable --workspace /exact/project \
   --profile claude-code-ordinary-observation-v1
 ```
 
-The service accepts Claude chunks only when that exact profile is active in local consent and in
-the mapped task grant. A missing or mismatched profile drops plaintext chunks and records
-`content_capture_unavailable`; chunks are never retained in the structural outbox for later
-replay. An authorized native hook reserves the workspace drain before enqueueing its structural
-row, keeping a background sweep from consuming that row before the foreground content attempt.
-The reservation is nonblocking and is released on cancellation or after the bounded drain; a busy
-owner can still leave an explicit content gap. The hook commits its structural envelope, pairing,
-mapping, and outbox intent locally
-before attempting the bounded service drain. Teardown `SessionEnd` has no service drain:
-its local lifecycle and outbox intent are durable before the
-hook returns, and a later hook or the service sweeper retries delivery. With no later hook, a
-ready service's idle sweep interval is 60 seconds. Content-bearing
-ordinary-profile events retain a one-second drain window; contentless structural rows defer
-service delivery. When chunks exist, the pass prioritizes the current row after its same-session
-FIFO prefix, within that one-second drain
-and sixteen-row bound. Teardown keeps its host-clamped three-second hook and skips local advice
-construction because the closing host cannot receive it. A healthy accepted drain forwards the
-transient chunks and exact profile to the service; a bounded service failure or completed
-cancellation path leaves the
-structural record plus an explicit content gap.
-A hard process kill or service failure before authenticated service-side staging completes may
-lose transient content without a durable gap marker; there is no plaintext local spool or offline
-acceptance guarantee. For this ordinary Claude profile, the capture-only service request can commit
-encrypted objects, manifests, and a metadata-only capture ticket before the structural FIFO ingest.
-After that boundary, a retry revalidates the original host/source and content-authority generations,
-requires the complete expected group/part set, and reuses the ticket rather than reminting content.
-The bounded staging handoff can therefore survive a service restart, while a revoked or incomplete
-ticket remains an honest content gap. The current installed Claude `2.1.261` probe is a candidate
-host fact only; it does not certify this ordinary profile without an exact isolated fixture and a
-receipt that separately proves native hook delivery, accepted content, semantic selection, and any
-resulting influence.
-Native semantic selection uses the accepted tool event's durable session route and does not
-require an approved-check policy. Local capture consent and repository disclosure permission
-remain separate requirements.
+The service accepts Claude chunks only when that exact profile is active in local consent and in the
+mapped task grant. A missing or mismatched profile drops plaintext chunks and records
+`content_capture_unavailable`; chunks are never retained in the structural outbox for later replay.
+An authorized native hook reserves the workspace drain before enqueueing its structural row, keeping
+a background sweep from consuming that row before the foreground content attempt. The reservation is
+nonblocking and is released on cancellation or after the bounded drain; a busy owner can still leave
+an explicit content gap. The hook commits its structural envelope, pairing, mapping, and outbox
+intent locally before attempting the bounded service drain. Teardown `SessionEnd` has no service
+drain: its local lifecycle and outbox intent are durable before the hook returns, and a later hook
+or the service sweeper retries delivery. With no later hook, a ready service's idle sweep interval
+is 60 seconds. Content-bearing ordinary-profile events retain a one-second drain window; contentless
+structural rows defer service delivery. When chunks exist, the pass prioritizes the current row
+after its same-session FIFO prefix, within that one-second drain and sixteen-row bound. Teardown
+keeps its host-clamped three-second hook and skips local advice construction because the closing
+host cannot receive it. A healthy accepted drain forwards the transient chunks and exact profile to
+the service; a bounded service failure or completed cancellation path leaves the structural record
+plus an explicit content gap. A hard process kill or service failure before authenticated
+service-side staging completes may lose transient content without a durable gap marker; there is no
+plaintext local spool or offline acceptance guarantee. For this ordinary Claude profile, the
+capture-only service request can commit encrypted objects, manifests, and a metadata-only capture
+ticket before the structural FIFO ingest. After that boundary, a retry revalidates the original
+host/source and content-authority generations, requires the complete expected group/part set, and
+reuses the ticket rather than reminting content. The bounded staging handoff can therefore survive a
+service restart, while a revoked or incomplete ticket remains an honest content gap. The current
+installed Claude `2.1.261` probe is a candidate host fact only; it does not certify this ordinary
+profile without an exact isolated fixture and a receipt that separately proves native hook delivery,
+accepted content, AI-powered review selection, and any resulting influence. Native AI-powered review
+selection uses the accepted tool event's durable session route and does not require an
+approved-check policy. Local capture consent and repository disclosure permission remain separate
+requirements.
 
 Claude Code has no `codex exec --json` import surface. Issue #301's bounded import authorization
 therefore makes no Claude adapter change; Claude evidence continues through cooperative MCP and
@@ -695,7 +692,7 @@ content, independently of the structural capacity choice. The one-second native 
 window and the host hook deadlines still apply. A timeout, cancellation, incomplete content group,
 or service failure leaves partial/unknown coverage or `content_capture_unavailable` where the
 boundary permits; it is never silently converted to a successful routine summary. Capture status
-proves configuration only, not accepted bytes, semantic selection, or receipt coverage.
+proves configuration only, not accepted bytes, AI-powered review selection, or receipt coverage.
 
 Claude Code 2.1.251 passes an MCP tool's `tool_response` to `PostToolUse` as one bare JSON string
 of the structured result (captured live on 2026-09-04 with a probe MCP server that returned both a
@@ -768,13 +765,13 @@ shows as `host_admission_drift` in `provider status`. That report walks from the
 directory to the repository root, so a subdirectory cwd does not read as `absent`.
 
 The rendered `hooks/hooks.json` carries a sixth hook, `PermissionDenied`, matched to exactly the
-external and plugin-owned `check` names. It fires after auto mode (or a rule or another hook)
-denies the call and can allow nothing; the ingress keeps only a closed token and records one
-payload-free `hook_diagnostics` reason — `host_auto_review_denied` (`source: auto_mode` or
-absent) or `host_permission_rule_denied` (`permission_rule` / `hook`) — so `observe status`
-can show a held check as host authorization, never as a semantic status. Yoetz deliberately
-ships no `PermissionRequest` hook returning `decision: allow`, which would make the plugin the
-authority over the host's own review.
+external and plugin-owned `check` names. It fires after auto mode (or a rule or another hook) denies
+the call and can allow nothing; the ingress keeps only a closed token and records one payload-free
+`hook_diagnostics` reason — `host_auto_review_denied` (`source: auto_mode` or absent) or
+`host_permission_rule_denied` (`permission_rule` / `hook`) — so `observe status` can show a held
+check as host authorization, never as an AI-powered review status. Yoetz deliberately ships no
+`PermissionRequest` hook returning `decision: allow`, which would make the plugin the authority over
+the host's own review.
 
 Claude Code surfaces MCP initialize `instructions` as server instructions in the model's context.
 Whether the auto-mode classifier reads them is not documented, so the policy-route destination
@@ -815,8 +812,8 @@ Claude Code is not an allowlisted `yoetz consent authorize` attestation client i
 the agent-safe pending status and direct the user to a supported Codex attestation or local trusted
 command, but it must not emulate `vault_initialize` or `vault_passphrase_rotate` authorization.
 It still guides setup, installation, and settings choices in normal conversation and leaves each
-supported product choice with the user. When semantic review is the stated goal, it recommends
-Expanded first and explains Assisted as the lower-disclosure semantic option. It may show the full
+supported product choice with the user. When AI-powered review is the stated goal, it recommends
+Expanded first and explains Assisted as the lower-disclosure AI-powered option. It may show the full
 v6 repository privacy preview, but its missing chat-authority capability is a technical boundary:
 give the shortest exact trusted-local continuation and never silently downgrade the chosen recipe,
 provider, or model.
@@ -832,19 +829,19 @@ body once. On denial or expiry the agent states the boundary and continues witho
 
 Record source/render/marketplace/cache/executable digests, exact Claude version/OS/architecture,
 scope, settings state, component inventory, enabled state, loaded root and session boundary, MCP
-owner/source/runtime, scoped model call, hook consent/evidence, semantic/provider attempt and privacy
-receipt, and final workflow receipt as separate cells. Never summarize those cells as one “plugin
-works” flag.
+owner/source/runtime, scoped model call, hook consent/evidence, AI-powered review/provider attempt
+and privacy receipt, and final workflow receipt as separate cells. Never summarize those cells as
+one “plugin works” flag.
 
 ## Codex subscription evaluator from Claude Code
 
-A Claude Code policy route may request the same service-owned
-`codex-chatgpt-subscription@1` semantic evaluator. Claude never receives the Codex OAuth credential,
-dedicated home, app-server handle, or tool authority, and Claude activation/model use is not proof
-that the evaluator ran. A strict Claude route must produce `route_semantic_ceiling` with zero Codex
-child launch. Use the [subscription evaluator runbook](codex-subscription-evaluator.md) and record
-Claude host activation, semantic attempt/runtime evidence, privacy receipt, corrective influence,
-and workflow receipt as separate claims.
+A Claude Code policy route may request the same service-owned `codex-chatgpt-subscription@1`
+AI-powered evaluator. Claude never receives the Codex OAuth credential, dedicated home, app-server
+handle, or tool authority, and Claude activation/model use is not proof that the evaluator ran. A
+strict Claude route must produce `route_semantic_ceiling` with zero Codex child launch. Use the
+[subscription evaluator runbook](codex-subscription-evaluator.md) and record Claude host activation,
+AI-powered review attempt/runtime evidence, privacy receipt, corrective influence, and workflow
+receipt as separate claims.
 
 Fallback endpoint pairing (issue #582) is host-independent: whether the evaluator or a paired
 API provider serves a given attempt is a service-side dispatch decision recorded in provenance
@@ -852,13 +849,13 @@ API provider serves a given attempt is a service-side dispatch decision recorded
 ceiling applies to dispatch authority regardless of which endpoint serves.
 
 
-### Large tasks and semantic failure recovery (#674–#676)
+### Large tasks and AI-powered review failure recovery (#674–#676)
 
-This host uses the shared service status snapshot cache and bounded semantic reference selection.
-A reduced reference scope reports `semantic_reference_scope_reduced`; it is not full-task semantic
-coverage. `failed/case_capacity_exceeded` and `semantic_case_capacity_exceeded` mean the required
-packet could not fit before any provider attempt. Select a smaller claim/obligation scope for a new
-check. Shorter prose alone need not fix structural capacity.
+This host uses the shared service status snapshot cache and bounded AI-powered review reference
+selection. A reduced reference scope reports `semantic_reference_scope_reduced`; it is not full-task
+AI-powered review coverage. `failed/case_capacity_exceeded` and `semantic_case_capacity_exceeded`
+mean the required packet could not fit before any provider attempt. Select a smaller
+claim/obligation scope for a new check. Shorter prose alone need not fix structural capacity.
 
 For `coordinator_failure`, use the check's original request ID with
 `yoetz service diagnostics --request-id req_…` to read bounded failure stages. Dispatch entry can

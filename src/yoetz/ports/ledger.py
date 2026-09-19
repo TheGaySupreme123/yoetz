@@ -1031,7 +1031,7 @@ class SelectedAttempt:
 
 @dataclass(frozen=True, slots=True)
 class SemanticAttemptRecord:
-    """Bounded durable facts for one physical semantic dispatch attempt.
+    """Bounded durable facts for one physical AI-powered review dispatch attempt.
 
     No raw provider text, prompt, secret, path, or user-controlled diagnostic prose.
     """
@@ -1096,7 +1096,7 @@ class SemanticAttemptRecord:
 
 @dataclass(frozen=True, slots=True)
 class SemanticDisclosureWait:
-    """One suspended semantic attempt awaiting a local disclosure decision.
+    """One suspended AI-powered review attempt awaiting a local disclosure decision.
 
     Structural only: an opaque proposal identifier and its expiry. No proposal content,
     prepared bytes, destination, or credential material is durable here.

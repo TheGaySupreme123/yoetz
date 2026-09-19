@@ -1219,7 +1219,7 @@ def _visible_content_chunks(
         )
     elif event_name == "PreToolUse":
         # Codex input bytes have no capture consumer and are excluded from
-        # semantic selection. Keep the structural envelope/correlation, but
+        # AI-powered selection. Keep the structural envelope/correlation, but
         # avoid encrypting a second copy of command arguments. Ordinary native
         # profiles retain their explicitly selected capture contract.
         if envelope.source is not ObservationSource.CODEX_HOOK:
@@ -3643,7 +3643,7 @@ def handle_observe(
             )
             return 0
 
-        # Refresh deterministic advice only after the capture batch has
+        # Refresh local advice only after the capture batch has
         # closed.  The refresh can build and persist a comparatively large
         # snapshot; keeping it outside the batch means a host cancellation
         # cannot roll back the already-durable envelope, pairing, mapping, or
@@ -4482,7 +4482,7 @@ def _native_outcome_facts(
 def _record_claude_permission_denied(
     payload: Mapping[str, JsonValue], *, _state: Path | None
 ) -> None:
-    """Record that a host reviewer held a scoped semantic ``check`` (issue #467).
+    """Record that a host reviewer held a scoped AI-powered ``check`` (issue #467).
 
     ``source`` is Claude Code's closed origin token (``auto_mode`` | ``permission_rule`` |
     ``hook``). An absent source is attributed to auto mode, the only reviewer that produces a

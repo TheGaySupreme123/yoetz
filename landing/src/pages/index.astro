@@ -70,7 +70,7 @@ type TermLine = {
 type TermScript = { host: HostKey; title: string; lines: TermLine[]; hostName?: string; logo?: string; dark?: boolean };
 
 // Four replays, one per visit, one per host. Every finding shown maps to a
-// real deterministic rule (work-integrity/0.1.0) or a semantic reviewer
+// real local-check rule (work-integrity/0.1.0) or an AI-powered reviewer
 // challenge, and every receipt conclusion is a real one.
 const termScripts: TermScript[] = [
   {
@@ -154,20 +154,20 @@ const termScripts: TermScript[] = [
     ],
   },
   {
-    // semantic reviewer challenge; deterministically clean receipt
+    // AI-powered reviewer challenge; clean local-check receipt
     host: "claude",
     title: "~/authsvc",
     lines: [
       { pre: "$", preC: glow, rest: "claude", restC: bright, d: 260 },
       { pre: "›", preC: "#7dd3fc", rest: "Rotate the JWT signing key. No one gets logged out mid-session.", restC: light, ts: 8, d: 300 },
       { d: 90 },
-      { pre: "•", preC: faint, rest: "Recording the plan. This one deserves semantic review at the end.", restC: soft, ts: 9, d: 200 },
+      { pre: "•", preC: faint, rest: "Recording the plan. This one deserves AI-powered review at the end.", restC: soft, ts: 9, d: 200 },
       { pre: "⚙", preC: teal, op: "yoetz", rest: "start · publish_work · plan, 2 obligations", restC: dim, d: 300 },
       { pre: "⚡", preC: amber, rest: "Edited src/keys.py  (+88 −23)", restC: dim, d: 200 },
       { pre: "⚡", preC: amber, rest: "Ran pytest · 47 passed", restC: dim, d: 360 },
       { d: 90 },
       { pre: "•", preC: faint, rest: "Claiming done, and asking for the full check, reviewer included.", restC: soft, ts: 9, d: 220 },
-      { pre: "⚙", preC: teal, op: "yoetz", rest: "publish_work · claim_recorded · check · semantic review · ChatGPT plan", restC: dim, d: 300 },
+      { pre: "⚙", preC: teal, op: "yoetz", rest: "publish_work · claim_recorded · check · AI-powered review · ChatGPT plan", restC: dim, d: 300 },
       { pre: "✗", preC: amberDeep, rest: "reviewer: tokens signed by the old key are never verified during the grace window", restC: amberSoft, finding: true, d: 400 },
       { d: 90 },
       { pre: "•", preC: faint, rest: "The reviewer is right — I tested new-key issuance, not old-key acceptance.", restC: soft, ts: 9, d: 220 },
@@ -312,6 +312,7 @@ const next = [
                 <span class="l">open source</span>
                 <span class="r">Apache-2.0</span>
               </a>
+              <a class="hero-ph" href="https://www.producthunt.com/products/yoetz?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-yoetz" target="_blank" rel="noopener noreferrer"><img alt="Yoetz - Check to see if AI really completed a task or if it had gaps | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1254021&amp;theme=light&amp;t=1789716006971" /></a>
           </div>
         </div>
 
@@ -453,7 +454,7 @@ const next = [
           <path d="M106 247 H 116" class="art-line on" marker-end="url(#arr-on-m)" />
           <rect x="118" y="222" width="84" height="50" rx="10" class="art-box on" />
           <text x="160" y="243" class="art-txt strong" text-anchor="middle">rules</text>
-          <text x="160" y="259" class="art-tag" text-anchor="middle">deterministic</text>
+          <text x="160" y="259" class="art-tag" text-anchor="middle">local</text>
 
           <path d="M202 247 H 212" class="art-line on" marker-end="url(#arr-on-m)" />
           <rect x="214" y="222" width="84" height="50" rx="10" class="art-box on solid" />
@@ -523,7 +524,7 @@ const next = [
           <path d="M658 162 H 670" class="art-line on" marker-end="url(#arr-on)" />
           <rect x="672" y="134" width="118" height="56" rx="10" class="art-box on" />
           <text x="731" y="157" class="art-txt strong" text-anchor="middle">rules</text>
-          <text x="731" y="172" class="art-tag" text-anchor="middle">deterministic</text>
+          <text x="731" y="172" class="art-tag" text-anchor="middle">local</text>
 
           <path d="M790 162 H 802" class="art-line on" marker-end="url(#arr-on)" />
           <rect x="804" y="134" width="118" height="56" rx="10" class="art-box on solid" />
@@ -556,7 +557,7 @@ const next = [
         </div>
         <div>
           <div class="arch-k">in one local service</div>
-          <p><span class="d">Both records land in an append-only ledger. Deterministic rules compare them, and the receipt states exactly how far the check reached.</span><span class="m">Rules compare the two records. The receipt says how far the check reached.</span></p>
+          <p><span class="d">Both records land in an append-only ledger. Local rules compare them, and the receipt states exactly how far the check reached.</span><span class="m">Rules compare the two records. The receipt says how far the check reached.</span></p>
         </div>
       </div>
 

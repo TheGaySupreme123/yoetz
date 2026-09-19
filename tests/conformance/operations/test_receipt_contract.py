@@ -683,7 +683,7 @@ def test_wrapper_that_upgrades_receipt_conclusion_fails() -> None:
 
     upgraded = replace(document, conclusion=ReceiptConclusion.NO_UNRESOLVED_DETERMINISTIC_FINDINGS)
     assert render_receipt_compact(upgraded) != original
-    assert "no unresolved deterministic findings" in render_receipt_compact(upgraded)
+    assert "no unresolved local findings" in render_receipt_compact(upgraded)
 
 
 async def test_profile_include_matrix_changes_canonical_document() -> None:

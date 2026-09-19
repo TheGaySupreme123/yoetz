@@ -1,4 +1,4 @@
-"""Host auto-review admission for the owner-authorized semantic ``check`` (issue #467).
+"""Host auto-review admission for the owner-authorized AI-powered ``check`` (issue #467).
 
 Claude Code auto mode, Codex ``approvals_reviewer = "auto_review"``, and Cursor Auto-review each
 route Yoetz's policy-route ``check`` through a model reviewer that refuses "data to a destination

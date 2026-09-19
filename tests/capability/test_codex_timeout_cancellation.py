@@ -99,7 +99,7 @@ async def _semantic_forbidden(
     lineage_evaluation: object | None = None,
 ) -> object:
     del frozen, findings, runtime, lineage_evaluation
-    raise AssertionError("strict-local must never invoke the semantic evaluator")
+    raise AssertionError("strict-local must never invoke the AI-powered evaluator")
 
 
 def _versions() -> ReceiptVersionSlice:

@@ -1,10 +1,10 @@
 """Honesty conformance: strict-local performs zero network egress and reads no credentials.
 
-These tests exercise the real ``Application`` deterministic workflow (``start`` -> ``publish_work``
+These tests exercise the real ``Application`` local-check workflow (``start`` -> ``publish_work``
 -> ``check``) composed exactly the way ``RuntimeProfile.STRICT_LOCAL`` / ``profile="strict-local"``
-requires -- semantic review disabled, no provider adapter constructed -- with ``socket.socket``,
+requires -- AI-powered review disabled, no provider adapter constructed -- with ``socket.socket``,
 ``socket.create_connection``, and ``socket.getaddrinfo`` monkeypatched to raise. The workflow must
-still complete and return a real, useful deterministic finding: strict-local's zero-egress guarantee
+still complete and return a real, useful local finding: strict-local's zero-egress guarantee
 is not achieved by silently doing nothing. A companion test proves the config schema itself forbids
 attaching a provider (and therefore credentials) to the strict-local profile, and that fake
 credential-shaped environment values never leak into the produced findings or receipt.
@@ -98,7 +98,7 @@ class _NoDisclosurePrivacy:
     """A privacy coordinator that must never be asked to disclose anything in this test."""
 
     async def prepare_local_disclosure(self, candidate: CandidateContext) -> object:
-        raise AssertionError("no local disclosure is required for a deterministic-only check")
+        raise AssertionError("no local disclosure is required for a local-only check")
 
     async def close(self) -> None:
         return None
@@ -111,7 +111,9 @@ async def _semantic_forbidden(
     lineage_evaluation: object | None = None,
 ) -> object:
     del frozen, findings, runtime, lineage_evaluation
-    raise AssertionError("strict-local + disabled semantic review must never invoke the evaluator")
+    raise AssertionError(
+        "strict-local + disabled AI-powered review must never invoke the evaluator"
+    )
 
 
 def _versions() -> ReceiptVersionSlice:
@@ -169,7 +171,7 @@ def _build_strict_local_application() -> tuple[Application, _StrictLocalRuntime,
         waiver_policy_digest=_DIGEST,
         semantic_evaluator=_semantic_forbidden,
         disclosure_scope_for=lambda binding, source: (_ for _ in ()).throw(
-            AssertionError("disclosure scope is never resolved in a deterministic-only check")
+            AssertionError("disclosure scope is never resolved in a local-only check")
         ),
         receipt_version_resolver=lambda _: _versions(),
         waiver_authorizer=lambda _: False,
@@ -262,7 +264,7 @@ async def _run_route_ceiling_check(
                         "payload": {
                             "claim_id": protocol_id("clm_", seed + 3),
                             "claim_kind": "material",
-                            "statement": "This claim requests semantic review.",
+                            "statement": "This claim requests AI-powered review.",
                             "supporting_refs": (),
                             "obligation_refs": (),
                         },
@@ -323,7 +325,7 @@ async def test_zero_egress_in_strict_local(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 async def test_strict_local_still_supports_deterministic_operations() -> None:
-    """Deterministic checks remain fully useful (real findings/verdict) under strict-local."""
+    """Local checks remain fully useful (real findings/verdict) under strict-local."""
 
     app, _runtime, _clock, _catalog = _build_strict_local_application()
     checked = await _run_deterministic_check(app, seed=910)

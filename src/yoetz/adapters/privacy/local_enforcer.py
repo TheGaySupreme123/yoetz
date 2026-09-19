@@ -1,4 +1,4 @@
-"""Deterministic local privacy classification, minimization, and exact-byte scan."""
+"""Local privacy classification, minimization, and exact-byte scan."""
 
 from __future__ import annotations
 
@@ -183,7 +183,7 @@ def _assemble_semantic_review_payload(
 
 
 class LocalPrivacyEnforcer:
-    """Provider-free implementation of the deterministic privacy classifier port."""
+    """Provider-free implementation of the local privacy classifier port."""
 
     __slots__ = (
         "_classification",

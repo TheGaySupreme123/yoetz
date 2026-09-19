@@ -1,6 +1,6 @@
-"""Durable semantic-operation attempt budget, retry matrix, and accounting.
+"""Durable AI-powered review operation attempt budget, retry matrix, and accounting.
 
-ADR-006: one durable semantic operation, at most two retries (``max_retries``), one total
+ADR-006: one durable AI-powered review operation, at most two retries (``max_retries``), one total
 deadline (``timeout_seconds``), and one physical attempt identity per dispatch. The ledger's
 ``semantic_jobs`` / ``semantic_attempts`` tables are the recovery authority — never a
 memory-only coordinator object.
@@ -85,7 +85,7 @@ _REPAIRABLE_REASONS: Final[frozenset[SemanticReason]] = frozenset(
     {SemanticReason.RESPONSE_CONTENT_INVALID}
 )
 
-# At most one repair retry per durable semantic job, whatever ``max_retries`` allows.
+# At most one repair retry per durable AI-powered review job, whatever ``max_retries`` allows.
 _REPAIR_RETRY_LIMIT: Final = 1
 
 _RETRIABLE_STATUSES: Final[frozenset[SemanticStatus]] = frozenset(
@@ -257,7 +257,7 @@ class SemanticAttemptAccounting:
 
 @dataclass(frozen=True, slots=True)
 class SemanticAttemptUsage:
-    """Bounded per-attempt usage recovered from the semantic-attempt ledger row."""
+    """Bounded per-attempt usage recovered from the AI-powered review attempt ledger row."""
 
     attempt_id: str
     attempt_ordinal: int
@@ -1005,7 +1005,7 @@ async def run_durable_semantic_attempts(
     fallback_timeout_seconds: float | None = None,
     now_utc: Callable[[], datetime] | None = None,
 ) -> object:
-    """Run the physical attempt loop for one durable semantic job.
+    """Run the physical attempt loop for one durable AI-powered review job.
 
     Each iteration claims (or resumes) one attempt, dispatches once, and records a durable
     outcome. Retries the ADR-006 transient classes, plus at most one issue #348 repair retry
@@ -1019,7 +1019,7 @@ async def run_durable_semantic_attempts(
 
     Crash/replay after a terminal job row already exists recovers from durable state without
     re-claiming. The check operation lease is renewed before each claim and after each provider
-    result; its bounded expiry is derived by the ledger from the frozen semantic execution.
+    result; its bounded expiry is derived by the ledger from the frozen AI-powered review execution.
     """
 
     if fallback is not None:
@@ -1054,9 +1054,9 @@ async def run_durable_semantic_attempts(
             last_status, last_reason, codes=codes, max_retries=max_retries, fallback=fallback
         )
 
-    # Always refresh the check lease before recovery or the first claim so a long semantic
+    # Always refresh the check lease before recovery or the first claim so a long AI-powered review
     # deadline is not truncated by the 60-second operation-lease TTL. Once the authenticated
-    # semantic execution bound has passed, a reclaimed operation may still have a short local
+    # execution bound has passed, a reclaimed operation may still have a short local
     # lease for closing a started attempt. That lease is cleanup-only: the immutable provider
     # deadline below remains expired and the dispatch branch refuses to send anything.
     local_cleanup_only = False
@@ -1184,7 +1184,7 @@ async def run_durable_semantic_attempts(
                 if durable_response.result_object_ref is None:
                     raise PublicOperationError(
                         PublicErrorCode.STORAGE_CORRUPT,
-                        "semantic response durable row is missing its result object.",
+                        "AI-powered review response durable row is missing its result object.",
                         False,
                     )
                 # The provider response was already authenticated and published before the
@@ -1199,7 +1199,7 @@ async def run_durable_semantic_attempts(
                 if recovered_job is None:
                     raise PublicOperationError(
                         PublicErrorCode.STORAGE_CORRUPT,
-                        "semantic job disappeared during response recovery.",
+                        "AI-powered review job disappeared during response recovery.",
                         False,
                     )
                 return await _recover_terminal_job(

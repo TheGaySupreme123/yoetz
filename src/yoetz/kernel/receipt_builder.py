@@ -986,7 +986,7 @@ def _check_coverage_sentence(
 
 
 def _semantic_endpoint_sentence(check: CheckRecordedPayload | None) -> str:
-    """Name the endpoint that served semantic review when it was not the primary (#582).
+    """Name the endpoint that served AI-powered review when it was not the primary (#582).
 
     Single-endpoint reviews say nothing here: the provenance already names the one binding the
     policy allows. A fallback-served review is different — the reader approved two destinations
@@ -1001,7 +1001,7 @@ def _semantic_endpoint_sentence(check: CheckRecordedPayload | None) -> str:
     origin = provenance.fallback_from
     attempts = _count_phrase(origin.attempted_count, "attempt", "attempts")
     return (
-        f" Semantic review was served by the fallback endpoint {provenance.provider}/"
+        f" AI-powered review was served by the fallback endpoint {provenance.provider}/"
         f"{provenance.model} ({provenance.endpoint_profile_id}@"
         f"{provenance.endpoint_profile_version}) after the primary {origin.provider}/"
         f"{origin.model} ({origin.endpoint_profile_id}@{origin.endpoint_profile_version}) "
@@ -1010,12 +1010,12 @@ def _semantic_endpoint_sentence(check: CheckRecordedPayload | None) -> str:
 
 
 def _semantic_usage_sentence(provenance: SemanticProvenance | None) -> str:
-    """Render only bounded token counters retained by semantic provenance.
+    """Render only bounded token counters retained by AI-powered review provenance.
 
     Receipt text is a public projection of the canonical document.  Keep this projection useful
     for benchmark analysis while excluding provider response text, account identifiers, and any
     other runtime content.  Codex runtime evidence has the detailed counters (cached input and
-    reasoning output are subsets of their parent totals); ordinary semantic providers retain the
+    reasoning output are subsets of their parent totals); ordinary AI-powered review providers retain the
     aggregate input/output/total counters.
     """
 
@@ -1025,7 +1025,7 @@ def _semantic_usage_sentence(provenance: SemanticProvenance | None) -> str:
     usage = None if runtime is None else runtime.token_usage
     if usage is not None:
         return (
-            " Semantic attempt usage: "
+            " AI-powered review attempt usage: "
             f"input={usage.input_tokens}, cached_input={usage.cached_input_tokens}, "
             f"cache_write_input={usage.cache_write_input_tokens}, output={usage.output_tokens}, "
             f"reasoning_output={usage.reasoning_output_tokens}, total={usage.total_tokens} tokens."
@@ -1034,7 +1034,7 @@ def _semantic_usage_sentence(provenance: SemanticProvenance | None) -> str:
     if aggregate is None:
         return ""
     return (
-        " Semantic attempt usage: "
+        " AI-powered review attempt usage: "
         f"input={aggregate.input_tokens}, output={aggregate.output_tokens}, "
         f"total={aggregate.total_tokens} tokens."
     )
@@ -1072,7 +1072,7 @@ def _sections(
 
     if conclusion is ReceiptConclusion.NO_UNRESOLVED_DETERMINISTIC_FINDINGS:
         bodies[ReceiptSectionKey.SUMMARY] = (
-            f"No unresolved deterministic findings were recorded at frontier {frontier.sequence}."
+            f"No unresolved local findings were recorded at frontier {frontier.sequence}."
             + resolved_sentence
         )
     elif conclusion is ReceiptConclusion.INSUFFICIENT_COVERAGE:
@@ -1217,12 +1217,12 @@ def _sections(
             gap_body = f"{check_sentence} Coverage is limited by: {', '.join(gap_codes)}."
         elif not_requested:
             gap_body = (
-                "Semantic review was not requested (deterministic-only check). "
+                "AI-powered review was not requested (local-only check). "
                 f"Coverage is limited by: {', '.join(gap_codes)}."
             )
         elif not_run:
             gap_body = (
-                "Semantic relevance review was not run. "
+                "AI-powered relevance review was not run. "
                 f"Coverage is limited by: {', '.join(gap_codes)}."
             )
         elif OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP in gap_codes:
@@ -1233,7 +1233,7 @@ def _sections(
             # conditionally rather than asserted as a stale process. A ceiling with no
             # applied-policy record keeps the generic wording below.
             gap_body = (
-                "Semantic review was blocked by the strict route ceiling, but the last "
+                "AI-powered review was blocked by the strict route ceiling, but the last "
                 "install applied the policy route. If this strict route was not intended, "
                 "re-run `yoetz integrate codex mcp preview` and "
                 "`yoetz integrate codex mcp install --route-profile policy`, then start a "

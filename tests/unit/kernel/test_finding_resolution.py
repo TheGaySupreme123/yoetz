@@ -279,7 +279,7 @@ def test_a_non_semantic_gap_weakens_every_proof_class(gap: str) -> None:
     ),
 )
 def test_semantic_absence_does_not_weaken_a_deterministic_proof(gap: str) -> None:
-    """A deterministic finding is proven absent by the deterministic pack, not by the reviewer."""
+    """A local finding is proven absent by the local pack, not by the reviewer."""
 
     assert _resolves(_finding(), _check(coverage=_coverage(gaps=(gap,)))) is True
 
@@ -288,7 +288,7 @@ def test_registration_drift_check_resolves_deterministic_never_semantic() -> Non
     """Issue #537: a drift check resolves like a plain ceiling check.
 
     The drift gap rides alongside the ceiling gap, so the pair still tolerates
-    deterministic proof — and still proves nothing about a semantic finding.
+    local proof — and still proves nothing about an AI-powered finding.
     """
 
     from yoetz.domain.receipts import (
@@ -426,7 +426,7 @@ def test_host_observation_gaps_do_not_veto_clean_deterministic_proof() -> None:
 
 def test_a_semantic_finding_needs_a_completed_semantic_review() -> None:
     finding = _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
-    assert _resolves(finding, _check()) is False, "deterministic-only proof is the wrong class"
+    assert _resolves(finding, _check()) is False, "local-only proof is the wrong class"
     assert _resolves(finding, _check(semantic=_SEMANTIC_OK)) is True
 
 
@@ -438,7 +438,7 @@ def test_a_weakened_semantic_review_cannot_resolve_a_semantic_finding(gap: str) 
     finding = _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
     coverage = _coverage(gaps=(gap,), semantic=True)
     assert _resolves(finding, _check(semantic=_SEMANTIC_OK, coverage=coverage)) is False
-    # The same weakened review still proves a deterministic issue absent.
+    # The same weakened review still proves a local issue absent.
     assert _resolves(_finding(), _check(semantic=_SEMANTIC_OK, coverage=coverage)) is True
 
 

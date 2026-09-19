@@ -1,4 +1,4 @@
-"""Replay compatibility for persisted deterministic-result checkpoints (issue #340).
+"""Replay compatibility for persisted local-result checkpoints (issue #340).
 
 A checkpoint written before a finding-wording change must replay as "superseded — recompute"
 on the same request id, never as non-retryable ``STORAGE_CORRUPT``; a checkpoint whose content
@@ -123,7 +123,7 @@ class _WedgedCheck:
 
 
 async def _wedge_check_at_local_ready(monkeypatch: pytest.MonkeyPatch) -> _WedgedCheck:
-    """Drive one deterministic check to a durable LOCAL_READY checkpoint, then crash it."""
+    """Drive one local check to a durable LOCAL_READY checkpoint, then crash it."""
 
     start_app, start_runtime, clock, catalog = start_composition()
     runtime = _CheckRuntime(clock, start_runtime.ids)

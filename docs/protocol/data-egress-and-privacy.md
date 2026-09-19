@@ -77,7 +77,7 @@ widening of exactly that destination. Egress admits a candidate only when its bi
 the primary or that fallback, and each fallback attempt is its own authorization, dispatch, and
 receipt.
 
-`credential-probe` is a distinct `llm_inference` purpose, not an implication of enabling semantic
+`credential-probe` is a distinct `llm_inference` purpose, not an implication of enabling AI-powered
 review. During provider-credential setup, the local human separately decides whether one fixed,
 content-free request may verify the just-stored credential. The policy preview and its widening
 decision display the resulting allowed-purpose set, and a policy that omits `credential-probe`
@@ -146,7 +146,7 @@ instead; a client never selects its own sink. `agent_context` is further conditi
 `DisclosureProvenance` (`self_authored`, `engine_derived_from_self_authored`, `other_writer`,
 `imported`): material the requesting writer authored at the frozen frontier, and prose derived
 solely from it, project without an extra grant, because withholding a writer's own words discloses
-nothing new. Everything else — other-writer material, imports, and every provider-derived semantic
+nothing new. Everything else — other-writer material, imports, and every provider-derived AI-powered
 finding — requires the explicit `agent_context_categories` grant. No sink or provenance combination
 ever admits `sensitive_confidential` content or anything in the never-send set. Serving the static
 `guidance/` documents over MCP resources is not a disclosure sink at all — those bytes carry no
@@ -160,8 +160,8 @@ confirmation records a private workspace commitment (never a raw path). Revocati
 ingestion and retains already-kept evidence. Never retain hidden reasoning or complete transcript
 prose. Sensitive bounded observation evidence lives only in encrypted objects; plaintext state is
 allowlisted structural fields plus commitments. Never create an unencrypted transcript spool on
-vault/service outage. Semantic review receives only minimized approved packets. Secret-like command
-output never appears in status, logs, hook advice, or semantic packets.
+vault/service outage. AI-powered review receives only minimized approved packets. Secret-like
+command output never appears in status, logs, hook advice, or AI-powered review packets.
 
 ## Outbound pipeline and state machine
 
@@ -264,7 +264,7 @@ decoder leaves external LLM admission blocked.
 
 Classification, minimization, redaction, schema, secret-scan, or receipt-persistence uncertainty
 fails closed before dispatch. Service lock, policy unavailability, unknown scope, stale
-authorization, or an unbound provider denies egress but never erases deterministic local work.
+authorization, or an unbound provider denies egress but never erases local-check work.
 Dispatch ambiguity (for example a connection drop mid-request) records `transport_failed` /
 `outcome_unknown` — never "unsent," and never a blind retry. Cancellation before any I/O leaves a
 proposal pending until an explicit denial or expiry; cancellation after possible I/O records
@@ -273,9 +273,9 @@ built before the provider call and parked beside the nonterminal row, so a cance
 records it through a shielded write and a dispatcher that died first is closed by one bounded,
 idempotent startup reconciliation — before any new physical attempt is admitted, and only over
 attempts consumed before the current service start. Neither path re-enters the provider. Provider
-refusal, timeout, or invalid output completes semantic review as `incomplete_check` while
-deterministic results remain fully available — semantic failure never discards a deterministic
-result.
+refusal, timeout, or invalid output completes AI-powered review as `incomplete_check` while
+local-check results remain fully available — AI-powered review failure never discards a
+local-check result.
 
 ## Extension and versioning
 
@@ -284,9 +284,9 @@ coordinated schema, ADR, and fixture update — none is added as a silent policy
 `audit_store_version=1` and the
 `hmac-sha256/yoetz-privacy-egress-request-v1` commitment format are frozen for v0.1.
 
-Installed-wheel two-repository semantic and receipt proof remains outstanding for issue #139.
-Router downstream/fallback authority and issue #141's foreground disclosure continuation are not
-part of this protocol change.
+Installed-wheel two-repository AI-powered review and receipt proof remains outstanding for issue
+#139. Router downstream/fallback authority and issue #141's foreground disclosure continuation are
+not part of this protocol change.
 
 ## See also
 

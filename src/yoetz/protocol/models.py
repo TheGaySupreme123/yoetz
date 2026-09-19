@@ -189,7 +189,7 @@ MAX_REVIEW_CHANGE_OBSERVATIONS: Final = 32
 MAX_REVIEW_EXCERPTS: Final = 16
 MAX_REVIEW_OMISSIONS: Final = 64
 MAX_REVIEW_CHALLENGES: Final = 3
-# JSON Schema ``maxLength`` counts Unicode code points, while the durable semantic contract
+# JSON Schema ``maxLength`` counts Unicode code points, while the durable AI-powered review contract
 # bounds review prose by UTF-8 bytes. Four bytes is the largest UTF-8 encoding of one valid
 # Unicode scalar value, so this conservative provider-facing limit guarantees that every string
 # admitted by the machine-enforced schema also fits the 4 KiB domain boundary.
@@ -456,7 +456,7 @@ _FORBIDDEN_UNAVAILABLE_PROVENANCE_REASONS: Final[frozenset[SemanticReason]] = fr
 
 
 def validate_semantic_outcome(status: SemanticStatus, reason: SemanticReason) -> None:
-    """Validate one exact semantic status/reason pair without coercion."""
+    """Validate one exact AI-powered review status/reason pair without coercion."""
 
     if type(status) is not SemanticStatus or type(reason) is not SemanticReason:
         raise ProtocolValueError("invalid_semantic_outcome_type")
@@ -2560,7 +2560,7 @@ class CheckContinuationModel(_ClosedModel):
 class CheckAwaitingHumanModel(_ClosedModel):
     """The nonterminal CHECK branch: suspended on a local disclosure decision.
 
-    Carries no verdict, findings, coverage, or semantic provenance. A completion-grade shape here
+    Carries no verdict, findings, coverage, or AI-powered review provenance. A completion-grade shape here
     would let a caller conclude from a check that never ran.
     """
 

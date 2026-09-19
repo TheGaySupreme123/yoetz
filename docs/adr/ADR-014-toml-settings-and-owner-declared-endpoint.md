@@ -1,15 +1,14 @@
 # ADR-014 — TOML as alternate settings surface and owner-declared OpenAI-compatible endpoints
 
-**Status:** Working decision — implementing against
-[issue #2](https://github.com/TheGaySupreme123/yoetz/issues/2) under explicit product authorization
-to ship the filed design (maintainer ack recorded as implement-now).
-**Implemented by:** `src/yoetz/config/models.py`,
-`src/yoetz/config/privacy.py`, `src/yoetz/config/load.py`,
+**Status:** Working decision — implementing against [issue
+#2](https://github.com/TheGaySupreme123/yoetz/issues/2) under explicit product authorization to ship
+the filed design (maintainer ack recorded as implement-now). **Implemented by:**
+`src/yoetz/config/models.py`, `src/yoetz/config/privacy.py`, `src/yoetz/config/load.py`,
 `src/yoetz/config/write.py`, `src/yoetz/config/privacy_desired.py`,
-`src/yoetz/adapters/providers/openai_responses.py`, privacy-setup wizard contract,
-CLI setup/menu specs, plus amendments to ADR-006 decision 2 and ADR-009 policy-authority text.
-**Relates to:** ADR-006 (semantic provider profiles), ADR-008 (vault), ADR-009 (egress/privacy),
-ADR-012 (setup wizard), ADR-013 (interactive menu).
+`src/yoetz/adapters/providers/openai_responses.py`, privacy-setup wizard contract, CLI setup/menu
+specs, plus amendments to ADR-006 decision 2 and ADR-009 policy-authority text. **Relates to:**
+ADR-006 (AI-powered review provider profiles), ADR-008 (vault), ADR-009 (egress/privacy), ADR-012
+(setup wizard), ADR-013 (interactive menu).
 
 ## Context
 

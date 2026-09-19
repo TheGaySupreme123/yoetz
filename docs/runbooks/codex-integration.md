@@ -8,11 +8,11 @@ and receipts before `check`. Setup/consent, vault/credential operations, transcr
 recommendation decisions route to the corresponding sections of request templates only when
 needed. Already-read guidance need not be fetched again while present in context.
 
-Use `semantic_if_configured` only when semantic review is known to be optional; omit `mode` when
+Use `semantic_if_configured` only when AI-powered review is known to be optional; omit `mode` when
 relying on the configured default. Select `semantic_required` for an explicit user requirement,
-effective policy, or named acceptance criterion requiring independent semantic judgment. Preserve
+effective policy, or named acceptance criterion requiring independent AI-powered judgment. Preserve
 required review and all host/disclosure approval boundaries. Installed guidance bytes alone prove
-neither activation nor semantic dispatch.
+neither activation nor AI-powered review dispatch.
 
 The Codex skill routes to the existing five MCP guidance URIs with installed reference fallbacks.
 The server initializes only the safety floor. Consumer source-inspection restrictions do not
@@ -225,12 +225,12 @@ whose bundled policy requires authorization for sensitive egress to name payload
 "from trusted user content" — no descriptor wording can satisfy it. `approval_mode = "approve"`
 for one tool means the reviewer is never invoked for it; `prompt` forces it every time.
 
-Codex copies the initialize `instructions` into every tool description, so the guardian reads
-them. Since issue #479 the policy-route instructions name the semantic destination read at bridge
+Codex copies the initialize `instructions` into every tool description, so the guardian reads them.
+Since issue #479 the policy-route instructions name the AI-powered review destination read at bridge
 startup (provider, endpoint profile, and host, or the Codex runtime class) and the payload bound.
 That gives the reviewer a named destination to score instead of nothing; it is still not trusted
-user content, admits nothing, and goes stale until Codex restarts the bridge. Admission remains
-the lever.
+user content, admits nothing, and goes stale until Codex restarts the bridge. Admission remains the
+lever.
 
 Host admission (issue #467) writes the per-tool override into the trusted project's
 `.codex/config.toml`, which Codex loads only when the project is trusted, deep-merges over the
@@ -364,18 +364,17 @@ those still require the owner to resolve the conflict by hand.
 
 Registration also decides *which* route the agent gets. Both owned serve commands classify as
 `yoetz_owned`, so the state alone cannot tell a strict registration from a policy one. Read the
-route from `yoetz integrate codex mcp status --json` (`route_profile`) or from
-`yoetz provider status --json` (`mcp_route.registered_profile`). The route is explicit input:
-pass `--route-profile strict|policy` to `yoetz setup run` or
-`yoetz integrate codex mcp preview|install` to choose it. Without that flag an existing
-yoetz-owned registration keeps its current route (non-interactive `--accept` never changes it),
-and a route transition is shown in the preview and reported as `route_profile_before` →
-`route_profile`. Before running a session that will
-report a finding about Yoetz's semantic behaviour, walk the
-[semantic dogfood runbook](semantic-dogfood.md) — it declares up front which claim the run is
-allowed to make, and refuses to score semantic quality when no provider attempt happened. To measure
-whether feedback **changed the work product** (not merely whether Yoetz was healthy or authorable),
-use the [influence dogfood runbook](influence-dogfood.md).
+route from `yoetz integrate codex mcp status --json` (`route_profile`) or from `yoetz provider
+status --json` (`mcp_route.registered_profile`). The route is explicit input: pass `--route-profile
+strict|policy` to `yoetz setup run` or `yoetz integrate codex mcp preview|install` to choose it.
+Without that flag an existing yoetz-owned registration keeps its current route (non-interactive
+`--accept` never changes it), and a route transition is shown in the preview and reported as
+`route_profile_before` → `route_profile`. Before running a session that will report a finding about
+Yoetz's AI-powered review behaviour, walk the [AI-powered review dogfood
+runbook](semantic-dogfood.md) — it declares up front which claim the run is allowed to make, and
+refuses to score AI-powered review quality when no provider attempt happened. To measure whether
+feedback **changed the work product** (not merely whether Yoetz was healthy or authorable), use the
+[influence dogfood runbook](influence-dogfood.md).
 
 ### Applied-route record and registration drift (issue #537)
 
@@ -407,7 +406,7 @@ A strict-ceiling check served while the applied record says `policy` carries the
 `optional_semantic_review_registration_drift` coverage gap so its receipt names the recovery
 (re-register the policy route, start a fresh Codex process). A genuinely applied strict route
 keeps the terminal ceiling wording. The drift gap is never carried onto a later
-deterministic-only check: it is re-added fresh on the strict-ceiling path only, after reading
+local-only check: it is re-added fresh on the strict-ceiling path only, after reading
 the live record.
 
 If the host is configured with Yoetz as an optional server and it is unavailable, Codex work
@@ -671,34 +670,33 @@ check, artifact verification, independent reproduction, or permission to send th
 Installation, an object header, a successful structural receipt, and a typed MCP response are
 separate evidence; none proves that the provider selected native Codex bytes.
 
-The Codex hook capture arm is eligible only for content explicitly linked to the hook event and
-its exact task, workspace, host/Yoetz session, source generation, tool-call correlation, multipart
-set, object kind, and digest. Codex session-stream records remain outside the native ticket lane
-and are excluded from semantic selection. Tool input and path/locator content are excluded from
-semantic selection too, although the current Codex hook path may still stage consented input/locator
-chunks locally in the bounded encrypted capture lane pending a follow-up staging filter. Encrypted
-capture and semantic disclosure have separate authority: selecting these bytes into a frozen
-semantic case still requires the effective repository privacy grant and the independently authorized
-provider attempt.
+The Codex hook capture arm is eligible only for content explicitly linked to the hook event and its
+exact task, workspace, host/Yoetz session, source generation, tool-call correlation, multipart set,
+object kind, and digest. Codex session-stream records remain outside the native ticket lane and are
+excluded from AI-powered review selection. Tool input and path/locator content are excluded from
+AI-powered review selection too, although the current Codex hook path may still stage consented
+input/locator chunks locally in the bounded encrypted capture lane pending a follow-up staging
+filter. Encrypted capture and AI-powered review disclosure have separate authority: selecting these
+bytes into a frozen AI-powered review case still requires the effective repository privacy grant and
+the independently authorized provider attempt.
 
 For the supported native `hooks observe` path, the hook first closes its local structural envelope,
 pairing, lifecycle intent, and outbox state, then presents eligible content to the service-owned
 capture lane before the structural FIFO advances. The capture acknowledgement follows durable
 encrypted object/manifest and metadata-ticket publication; native content is never copied into the
-structural spool. If authenticated staging cannot complete during the bounded pass, a completed
-hook records `content_capture_unavailable` alongside the structural record. A host process killed
-before that boundary may still leave the honest content gap; after the ticket is durable, a later
+structural spool. If authenticated staging cannot complete during the bounded pass, a completed hook
+records `content_capture_unavailable` alongside the structural record. A host process killed before
+that boundary may still leave the honest content gap; after the ticket is durable, a later
 structural retry can reuse its fenced manifests without rereading a plaintext spool. Advice
 selection remains after drain, and advice is committed only after the host output is emitted.
 `SessionEnd` records its lifecycle intent and defers service delivery without rebuilding local
 advice, because the closing host cannot receive it. A later hook or the service sweeper drains the
-end event and refreshes advice.
-The encrypted capture-ticket handoff does not change Codex's historical session-stream path.
-Session-stream reconciliation remains a separate source and cannot supply content to a `codex_hook`
-ticket; session-stream, input, and locator content remain excluded from semantic selection. The
-current hook path may still stage consented input/locator chunks locally pending the follow-up
-staging filter. Codex keeps its existing replay semantics; the shared operation-replay,
-source-generation fencing, and teardown repairs apply to all host adapters.
+end event and refreshes advice. The encrypted capture-ticket handoff does not change Codex's
+historical session-stream path. Session-stream reconciliation remains a separate source and cannot
+supply content to a `codex_hook` ticket; session-stream, input, and locator content remain excluded
+from AI-powered review selection. The current hook path may still stage consented input/locator
+chunks locally pending the follow-up staging filter. Codex keeps its existing replay semantics; the
+shared operation-replay, source-generation fencing, and teardown repairs apply to all host adapters.
 
 Legacy synchronous `hooks spool` is a separate structural fast path. It only appends the owner-only
 structural spool record and returns; it does not normalize or pair the event, open the service, drain
@@ -988,10 +986,10 @@ or deny instruction, then relay that exact pending item through `yoetz consent a
 identical import request; do not add an approval argument or mint a new request ID.
 
 The owner-only authorization survives a service restart only for the same stored plan. It is
-consumed after terminal completion. A source, manifest, target task/session/writer,
-profile/version, mapping, plan, or limit change must produce another preview. Denial, expiry, or a
-different pending consent publishes nothing. Import intake never authorizes semantic-provider or
-reviewer egress.
+consumed after terminal completion. A source, manifest, target task/session/writer, profile/version,
+mapping, plan, or limit change must produce another preview. Denial, expiry, or a different pending
+consent publishes nothing. Import intake never authorizes AI-powered review provider or reviewer
+egress.
 
 ## 10. Troubleshooting and recovery
 
@@ -1038,8 +1036,8 @@ can erase a deferred intent when it saves.
 Codex is the v0.1 allowlisted first-party client for exact current-chat consent attestation.
 It should guide Yoetz setup, installation, and settings changes in normal conversation: explain
 each consequential choice, recommend one outcome with its trade-off, and preserve the user's
-explicit selection. When the user explicitly wants semantic review, recommend Expanded first for
-review depth and explain Assisted as the lower-disclosure semantic option. Do not silently
+explicit selection. When the user explicitly wants AI-powered review, recommend Expanded first
+for review depth and explain Assisted as the lower-disclosure AI-powered option. Do not silently
 downgrade either choice.
 
 For `repository_privacy_grant`, run the catalog-advertised prepare command only after the recipe is
@@ -1075,14 +1073,14 @@ state, source/installed/preview digests, the bounded reason token, and file-stat
 - Never claim skill installation changed MCP configuration.
 - Never claim support for a Codex version outside the current tested set.
 
-For a disposable-worktree integration run, use the [Codex dogfood parity
-runbook](codex-dogfood.md). The ordinary setup/semantic checks above are necessary but do not prove
-exact-worktree activation, consent, host delivery, observation, rollback, or normal-target
-isolation. In particular, an isolated Codex home (`CODEX_TESTING_HOME`) does not isolate Yoetz:
-without `YOETZ_ISOLATED_ROOT` (ADR-026) exported to every tested process, the run's Yoetz clients
-and any service they spawn resolve the normal singleton, state directory, and storage. Prove the
-mode with `yoetz service isolation --json` before launch; the parity gate's `service_isolation`
-facet fails closed on shared, ambient, or unknown identity.
+For a disposable-worktree integration run, use the [Codex dogfood parity runbook](codex-dogfood.md).
+The ordinary setup/AI-powered review checks above are necessary but do not prove exact-worktree
+activation, consent, host delivery, observation, rollback, or normal-target isolation. In
+particular, an isolated Codex home (`CODEX_TESTING_HOME`) does not isolate Yoetz: without
+`YOETZ_ISOLATED_ROOT` (ADR-026) exported to every tested process, the run's Yoetz clients and any
+service they spawn resolve the normal singleton, state directory, and storage. Prove the mode with
+`yoetz service isolation --json` before launch; the parity gate's `service_isolation` facet fails
+closed on shared, ambient, or unknown identity.
 
 For the Yoetz-owned external registration, issue #561 makes this propagation a supported product
 contract: an isolated preview displays and digest-binds the exact root, apply uses Codex's native
@@ -1127,15 +1125,15 @@ existing native-carrier identity rules; this repair changes only Codex external 
 
 ## Subscription evaluator is a separate Codex role
 
-Codex may be both the host carrying Yoetz and the selected external semantic evaluator, but those
+Codex may be both the host carrying Yoetz and the selected external AI-powered evaluator, but those
 are independent cells. Host skill/plugin/MCP activation grants no ChatGPT evaluator login or
 privacy authority. Configure the evaluator only through
 `yoetz provider codex-subscription setup`; it binds a separate owner-private `CODEX_HOME` and exact
 native `0.150.1` app-server cell. Never reuse the host's ambient home, environment, session, tools,
 instructions, or repository cwd for the evaluator.
 
-The registered host route still decides whether this Codex process may request semantic work:
-`strict` proves zero evaluator launch, while `policy` only permits ADR-009 to decide. Read the
+The registered host route still decides whether this Codex process may request AI-powered review
+work: `strict` proves zero evaluator launch, while `policy` only permits ADR-009 to decide. Read the
 [subscription evaluator runbook](codex-subscription-evaluator.md) before claiming live model use,
 runtime isolation, privacy receipt, or cleanup.
 
@@ -1145,13 +1143,13 @@ API provider serves a given attempt is a service-side dispatch decision recorded
 strict/policy route ceiling applies to dispatch authority regardless of which endpoint serves.
 
 
-### Large tasks and semantic failure recovery (#674–#676)
+### Large tasks and AI-powered review failure recovery (#674–#676)
 
-Codex uses the shared service status snapshot cache and bounded semantic reference selection.
-A reduced reference scope reports `semantic_reference_scope_reduced`; it is not full-task semantic
-coverage. `failed/case_capacity_exceeded` and `semantic_case_capacity_exceeded` mean the required
-packet could not fit before any provider attempt. Select a smaller claim/obligation scope for a new
-check. Shorter prose alone need not fix structural capacity.
+Codex uses the shared service status snapshot cache and bounded AI-powered review reference
+selection. A reduced reference scope reports `semantic_reference_scope_reduced`; it is not full-task
+AI-powered review coverage. `failed/case_capacity_exceeded` and `semantic_case_capacity_exceeded`
+mean the required packet could not fit before any provider attempt. Select a smaller
+claim/obligation scope for a new check. Shorter prose alone need not fix structural capacity.
 
 For `coordinator_failure`, use the check's original request ID with
 `yoetz service diagnostics --request-id req_…` to read bounded failure stages. Dispatch entry can

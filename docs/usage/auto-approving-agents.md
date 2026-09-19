@@ -3,7 +3,7 @@
 Auto-approval should be based on the exact process a host launches, not on an assumption about the
 current provider or privacy configuration.
 
-For a Yoetz MCP process that must never request external semantic review, register:
+For a Yoetz MCP process that must never request external AI-powered review, register:
 
 ```text
 yoetz mcp serve --semantic off
@@ -11,9 +11,10 @@ yoetz mcp serve --semantic off
 
 This starts the **strict** route profile. For that process lifetime:
 
-- deterministic checks and all six Yoetz workflow operations remain available;
-- `check` never requests semantic runtime capability and never dispatches a semantic evaluator;
-- a semantic request is recorded as `blocked_by_policy` / `route_semantic_ceiling`;
+- local checks and all six Yoetz workflow operations remain available;
+- `check` never requests AI-powered review runtime capability and never dispatches an AI-powered
+  evaluator;
+- an AI-powered review request is recorded as `blocked_by_policy` / `route_semantic_ceiling`;
 - `semantic_required` is incomplete and the result and receipt retain the coverage gap;
 - `check.openWorldHint` is `false`, and initialize plus `status(view=versions)` disclose `strict`.
 
@@ -22,10 +23,10 @@ an inspectable hint; the application route constraint is the enforcement.
 
 ## What strict does not claim
 
-Strict is an external-semantic egress ceiling, not a general-purpose sandbox and not a promise that
-the process opens no communication channels. The MCP bridge still uses the approved local Yoetz
-service IPC. It does not constrain the host agent, the operating system, separately running local
-models, or unrelated processes.
+Strict is an egress ceiling for external AI-powered review, not a general-purpose sandbox and not a
+promise that the process opens no communication channels. The MCP bridge still uses the approved
+local Yoetz service IPC. It does not constrain the host agent, the operating system, separately
+running local models, or unrelated processes.
 
 The ordinary command remains:
 
@@ -33,30 +34,30 @@ The ordinary command remains:
 yoetz mcp serve
 ```
 
-That starts the **policy** route. Semantic review can occur only when the durable privacy policy,
+That starts the **policy** route. AI-powered review can occur only when the durable privacy policy,
 provider readiness, classification, minimization, and authorization gates all allow it. Its
 `check.openWorldHint` is therefore `true`.
 
 ## Host auto-review is a separate gate
 
-An auto-review host can hold or refuse a policy-route `check` before Yoetz receives it. That is
-host tool-call authorization, not a Yoetz semantic result: no semantic status, provider attempt,
+An auto-review host can hold or refuse a policy-route `check` before Yoetz receives it. That is host
+tool-call authorization, not a Yoetz AI-powered review result: no review status, provider attempt,
 or dispatch can be inferred from it.
 
-For an explicitly requested semantic review or `semantic_required` check, the agent must pause and
+For an explicitly requested AI-powered review or `semantic_required` check, the agent must pause and
 present manual approval for that exact proposed request. Approval permits the host to invoke the
 check only; it cannot alter Yoetz's provider, repository, privacy, disclosure, credential, or
 dispatch authority. Once approved, the agent uses the same body and `request_id`. If the host
-denies or the approval expires, the agent may use a deterministic-only fallback only after the user
-explicitly chooses it after seeing the semantic-review limitation. A later Yoetz
+denies or the approval expires, the agent may use a local-only fallback only after the user
+explicitly chooses it after seeing the AI-powered review limitation. A later Yoetz
 `awaiting_human` result remains a separate Yoetz decision flow.
 
 ## Local workflow calls and host holds
 
-`start`, `publish_work`, `respond`, and `receipt` append records to the local Yoetz
-ledger. They do not publish to GitHub or invoke a semantic provider. `status` and `read_guidance`
-read local or packaged state. These effects describe what Yoetz does after it receives a call; the
-host still decides whether to invoke an MCP tool.
+`start`, `publish_work`, `respond`, and `receipt` append records to the local Yoetz ledger. They do
+not publish to GitHub or invoke an AI-powered review provider. `status` and `read_guidance` read
+local or packaged state. These effects describe what Yoetz does after it receives a call; the host
+still decides whether to invoke an MCP tool.
 
 If an auto-review host holds one of these calls, treat the hold as a host authorization event, not
 as a Yoetz result. Use the host's visible approval control for that exact call when you want to
@@ -65,7 +66,7 @@ host requires resubmission or the response is unavailable, resend the same reque
 `request_id`. If a call may have started but its result is unclear, recover the operation through
 `status view=operation` or replay the same `request_id` according to the operation's recovery
 instructions; do not mint replacement requests or duplicate event identities. A host refusal
-before invocation creates no Yoetz operation, semantic status, provider attempt, or receipt.
+before invocation creates no Yoetz operation, review status, provider attempt, or receipt.
 
 ## Letting an auto-review host admit the authorized check
 
@@ -98,8 +99,8 @@ privacy grant permits external review. A grant is written only when all of these
 
 Host admission currently covers only `check`. The other operations remain local or read-only, but
 an auto-review host may still hold a non-allowlisted MCP call. Yoetz cannot guarantee that a host
-will admit any call, and no host hold should be described as a Yoetz privacy denial or semantic
-result.
+will admit any call, and no host hold should be described as a Yoetz privacy denial or AI-powered
+review result.
 
 What each host receives:
 
@@ -151,7 +152,7 @@ gate; `check` still cannot widen policy and still stops at `awaiting_human` when
 it should. Yoetz never ships a hook that approves its own tool calls, and never softens the
 `openWorldHint` a reviewer reads. When Claude Code auto mode denies a scoped `check` anyway,
 `yoetz observe status` records one payload-free `host_auto_review_denied` diagnostic so the hold
-is visible as what it is, not as a semantic result.
+is visible as what it is, not as an AI-powered review result.
 
 ## Codex registration
 
@@ -162,7 +163,7 @@ re-registration, not a silent mutation. A foreign entry named `yoetz` is never o
 
 Inspect the active route through MCP initialize instructions or `status(view=versions)`. Registration
 proves only the configured command; it does not prove that a host has launched it or that a provider
-is ready. On the policy route the initialize instructions also name the semantic review
+is ready. On the policy route the initialize instructions also name the AI-powered review
 destination Yoetz read when the bridge started — the provider, endpoint profile, and host, or the
 Codex runtime class — together with the payload bound; that passage is a disclosure for the host's
 reviewer, not an approval, and it changes only when the host restarts the bridge.

@@ -96,14 +96,14 @@ writable ledger.
    and authority generations and the complete expected group/part set; partial, conflicting, or
    unreadable sets remain unavailable and are never promoted by inference.
 
-   For the Codex hook arm, only explicitly linked tool output, selected changed-file/code bytes,
-   and workspace-diff bytes are eligible for captured-content evidence and semantic selection.
-   Session-stream records remain outside this native ticket lane and are excluded from semantic
-   selection. Tool input and path/locator content are excluded from semantic selection too, though
-   the current Codex hook path may still stage consented input/locator chunks in the bounded
-   encrypted local capture lane pending a follow-up staging filter. Encrypted staging does not
-   authorize disclosure: semantic-case selection still requires the effective repository privacy
-   authority and the independently authorized provider/attempt route.
+   For the Codex hook arm, only explicitly linked tool output, selected changed-file/code bytes, and
+   workspace-diff bytes are eligible for captured-content evidence and AI-powered review selection.
+   Session-stream records remain outside this native ticket lane and are excluded from AI-powered
+   review selection. Tool input and path/locator content are excluded from AI-powered review
+   selection too, though the current Codex hook path may still stage consented input/locator chunks
+   in the bounded encrypted local capture lane pending a follow-up staging filter. Encrypted staging
+   does not authorize disclosure: AI-powered review case selection still requires the effective
+   repository privacy authority and the independently authorized provider/attempt route.
 
    `staging` and `pending` tickets are bounded to 512 outstanding entries per workspace.
    Revoked tickets do not consume that quota, but their metadata-only tombstones remain so an

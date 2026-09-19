@@ -36,10 +36,10 @@ outcome: its minimum native identity must be durable before it can be paired wit
 Only a proven routine success can contribute to a summary. A later failure retains its original
 attempt and outcome identity, including the failure before a successful retry.
 
-Content permission, structural retention, and semantic disclosure are independent. No detail or
-capacity setting enables a content category, a provider, a credential, or network disclosure.
-The existing redaction, encryption, never-send exclusions, and authority generations remain
-mandatory in every mode.
+Content permission, structural retention, and AI-powered review disclosure are independent. No
+detail or capacity setting enables a content category, a provider, a credential, or network
+disclosure. The existing redaction, encryption, never-send exclusions, and authority generations
+remain mandatory in every mode.
 
 ### Summary identity and delivery
 
@@ -189,7 +189,7 @@ Where historical bytes are no longer retained, reacquisition is a new observatio
 and state. It cannot retroactively prove the earlier state. Unrecoverable history remains a
 coverage limitation. No universal raw-content cache is introduced.
 
-JSON, markdown and text receipts describe the same bounded coverage. Existing semantic-case
+JSON, markdown and text receipts describe the same bounded coverage. Existing AI-powered review case
 capacity refusals, exclusions, provenance and unresolved findings remain independent of queue
 depth and detail mode.
 

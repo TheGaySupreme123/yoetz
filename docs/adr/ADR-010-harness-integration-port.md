@@ -136,7 +136,7 @@ The through-line is that "Codex is first" had been encoded as "Codex is the only
    never transfer. `installed_not_activated` is a failed preflight with the exact-target
    recommendation recovery path; missing consent is blocked with the trusted local grant path.
    After launch, skill delivery, a correlated model-issued MCP call, advertised hook events,
-   mapping, accepted envelopes, drain, advertised session-stream reconciliation, semantic
+   mapping, accepted envelopes, drain, advertised session-stream reconciliation, AI-powered review
    provenance, receipt, influence scope, rollback, and unchanged normal state remain separate
    cells. Unsupported and not-run states stay explicit and cannot be aggregated into green. Any
    performed or failed cell must be placed in scope; an out-of-scope pass, failure, or block makes
@@ -188,25 +188,25 @@ policy-installed tree with a contradictory helper child reports `full_restart_re
 not be described as activated. Reload Window is not sufficient; a full application quit is the
 documented activation instruction. Agent guidance treats `route_semantic_ceiling` against
 installed `policy` as that mismatch, not an owner privacy decision, and does not mint a fresh
-semantic check against the stale process. A live installed strict route remains the ordinary
+AI-powered check against the stale process. A live installed strict route remains the ordinary
 terminal ceiling. Recovery never authorizes egress or changes privacy settings.
 
 **Amendment (2026-08-29, issue #468): the plugin-owned Cursor `mcp.json` binds the exact launcher
 the hooks bind, and status verifies executable, package identity, control schema, and route
-separately.** A bare `command: "yoetz"` let Cursor's sanitized desktop PATH resolve an older
-ambient runtime (control schema 2.1.0) behind a marker-valid then-current plugin (2.3.0); the model's
+separately.** A bare `command: "yoetz"` let Cursor's sanitized desktop PATH resolve an older ambient
+runtime (control schema 2.1.0) behind a marker-valid then-current plugin (2.3.0); the model's
 `start` then reached an incompatible bridge and no task, evidence, or receipt could exist. Cursor's
 MCP reference admits a full path in `command`, so the native entry is now `launcher[0]` plus
 `[*launcher[1:], "mcp", "serve", "--host", "cursor", …]` from the same `/3` marker launcher the
-hooks use; the entry is a managed member, so carrier bytes bind it. Route recognition accepts a
-bare `yoetz` or a known launcher (this artifact's or the installed marker's) with the exact serve
+hooks use; the entry is a managed member, so carrier bytes bind it. Route recognition accepts a bare
+`yoetz` or a known launcher (this artifact's or the installed marker's) with the exact serve
 arguments. `CursorPluginStatus.launcher` reports executable state (`matched|drifted|missing|
 unbound|unobserved`), the installed entry's `mcp_binding` (`exact_launcher|ambient_path|…`), and a
 bounded identity probed by running the installed launcher's read-only `version --json`; the live
 runtime observation compares helper-child argv prefixes with the installed launcher and reports
 `executable_activation`, forcing `full_restart_required` on a mismatch. Carrier-byte equality is
-never runtime proof; package, discovery, runtime, model-use, observation, semantic, and receipt
-facets stay separate. A tree rendered before this amendment stays marker-valid and reports
+never runtime proof; package, discovery, runtime, model-use, observation, AI-powered review, and
+receipt facets stay separate. A tree rendered before this amendment stays marker-valid and reports
 `modified` with `mcp_binding: ambient_path` until one exact previewed replace. The portable
 Agent-Plugins carrier is byte-identical by design and keeps the bare route; it is not a native
 activation claim.
@@ -244,14 +244,14 @@ Other URI schemes, malformed paths, unsafe roots, and invalid response shapes re
 
 An owned project MCP registration renders `--project-root ${workspaceFolder}`. This is a startup
 selector, validated against the exact project registration, launcher, route, and directory/config
-identity. It selects one canonical repository from the active client's validated root inventory;
-the selected repository must be present in that inventory. It cannot supply authority when the
-client has no usable roots. Without a validated selector, the one-canonical-repository rule still
-applies. Empty or unsupported responses, request failure or timeout, mismatches, and changed
-registrations fail before the service handshake. Registration and selected-root identity are
-revalidated before each workflow call, and a change retires the bridge's client slot. Public
-workflow fields, hook payloads, environment guesses, and process CWD remain outside this decision.
-This adds no privacy grant or semantic admission: those checks retain their independent scope.
+identity. It selects one canonical repository from the active client's validated root inventory; the
+selected repository must be present in that inventory. It cannot supply authority when the client
+has no usable roots. Without a validated selector, the one-canonical-repository rule still applies.
+Empty or unsupported responses, request failure or timeout, mismatches, and changed registrations
+fail before the service handshake. Registration and selected-root identity are revalidated before
+each workflow call, and a change retires the bridge's client slot. Public workflow fields, hook
+payloads, environment guesses, and process CWD remain outside this decision. This adds no privacy
+grant or AI-powered review admission: those checks retain their independent scope.
 
 **Amendment (ADR-012, 2026-07-21):** MCP server registration is added as a *sibling* port,
 `HarnessMcpPort` (`ports/harness_mcp.py`), with its own Codex adapters
@@ -374,7 +374,7 @@ private SQL.
 Observation consent is workspace-level and separate from egress consent. The plaintext local boundary
 records a private workspace commitment, structural outbox/quarantine evidence, and encrypted object
 identities—never raw task content or a raw path in logs/status/SQLite.
-Semantic composition keeps this observation workspace commitment separate from the
+AI-powered review composition keeps this observation workspace commitment separate from the
 `TaskRoute.repository_privacy_commitment`: it derives the observation key only through the durable
 workspace-to-Yoetz-session route, verifies the route is for the exact runtime task, and repeats that
 check before disclosure. Missing or contradictory route membership is an explicit content gap; the
@@ -417,7 +417,7 @@ one job runs per workspace through the enforcing sandbox, newer pending state co
 pending work, abandoned generation leases recover after restart, and a result becomes current only
 if post-run state still matches. Sandbox absence is an explicit unavailable result, never a pass.
 Bundle migration `0004` owns durable inspection snapshots, workspace→Yoetz-session routes, and
-session-scoped current advice; migration `0003` is immutable. Deterministic advice consumes this
+session-scoped current advice; migration `0003` is immutable. Local advice consumes this
 evidence offline and materializes through existing `finding_recorded`; ordinary
 `status(view="advice")` loads only the advice for the routed workspace and Yoetz session, and safe
 hook context surfaces the same bounded finding/evidence identities. The MCP registry remains the
@@ -501,10 +501,10 @@ request templates and load only for those operations; recovery details load on a
 error or continuation. They remain available through MCP and installed reference copies.
 
 This changes instruction placement and authoring guidance, not runtime authority or wire schemas.
-Required semantic review follows an explicit user requirement, effective verification policy,
-or a named acceptance criterion requiring independent semantic judgment. Qualitative work alone
+Required AI-powered review follows an explicit user requirement, effective verification policy,
+or a named acceptance criterion requiring independent AI-powered judgment. Qualitative work alone
 does not turn an optional review into a requirement. A required review cannot be silently
-replaced with deterministic coverage, and every host and Yoetz approval boundary still applies.
+replaced with local-check coverage, and every host and Yoetz approval boundary still applies.
 
 ## Compatible host upgrade amendment (2026-09-08, issue #656)
 

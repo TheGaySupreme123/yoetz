@@ -1,4 +1,4 @@
-"""Unit tests for durable semantic attempt budget, retry matrix, and accounting."""
+"""Unit tests for durable AI-powered review attempt budget, retry matrix, and accounting."""
 
 from __future__ import annotations
 

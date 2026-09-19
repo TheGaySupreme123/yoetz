@@ -172,8 +172,8 @@ Setup is a linear path inside the interface, each finished step collapsing into 
    trusted terminal: input is masked with `*`, must be 16–1024 UTF-8 bytes with no control
    characters, and the helper re-prompts after invalid or mismatched input. Later changes use
    `yoetz service rotate-passphrase` (or **Change the passphrase** under `/service`).
-7. **Review mode** — finish in complete local-only mode, or configure semantic review.
-8. **Semantic setup, when selected** — provider/model, hidden API-key entry, then one exact
+7. **Review mode** — finish in complete local-only mode, or configure AI-powered review.
+8. **AI-powered review setup, when selected** — provider/model, hidden API-key entry, then one exact
    recommended privacy policy. **Assisted review** is recommended only for an exact provider route
    with current reviewed no-training evidence and retention no longer than 30 days; it is bounded
    to the current repository and does not re-prompt for ordinary attempts after approval. Branches
@@ -241,10 +241,10 @@ Two different things are called a default here, and only one of them is a policy
 policy** is `local_only`: every installation starts with external LLM disclosure denied, and
 nothing moves it without a provider binding, a stored credential, and a separately reauthenticated
 policy commit. The
-**recommended answer** to first run's "How should Yoetz review work?" is semantic review, because
-an installation that never reaches it can only ever report deterministic coverage. Accepting the
+**recommended answer** to first run's "How should Yoetz review work?" is AI-powered review, because
+an installation that never reaches it can only ever report local-check coverage. Accepting the
 recommendation opens those steps; it does not perform them, and local-only needs no provider and
-stays one keystroke away. Setup is not marked complete if a chosen semantic path's provider
+stays one keystroke away. Setup is not marked complete if a chosen AI-powered review path's provider
 credential or privacy decision is incomplete.
 
 The official Codex App exists on macOS and Windows. Linux setup uses the same flow for the
@@ -286,12 +286,12 @@ flag, pipe, or the full-screen window.
 
 ## What a fresh installation does not do
 
-An unconfigured installation is **provider-egress-free and deterministic**. No task content is sent
+An unconfigured installation is **provider-egress-free and local-only**. No task content is sent
 to an external provider; the separately configurable structural package update check may still be
-enabled. No provider is bound, no credential exists, and semantic review is unavailable — checks
-run the deterministic packs only and say so in their coverage vector.
+enabled. No provider is bound, no credential exists, and AI-powered review is unavailable — checks
+run the local packs only and say so in their coverage vector.
 
-That state is fully useful: the ledger, deterministic checks, findings, and receipts all work. You
+That state is fully useful: the ledger, local checks, findings, and receipts all work. You
 opt into external review deliberately, or never.
 
 ## More than one Yoetz on one machine
@@ -330,7 +330,7 @@ From here:
 - [Agent start](agent-start.md) — this same setup from the installing agent's side.
 - [The terminal interface](terminal-interface.md) — the interface in detail.
 - [The six operations](six-operations.md) — the actual workflow.
-- [Privacy and semantic review](privacy-and-semantic-review.md) — before you enable any egress.
+- [Privacy and AI-powered review](privacy-and-semantic-review.md) — before you enable any egress.
 - [`docs/runbooks/codex-integration.md`](../runbooks/codex-integration.md) — integration detail and
   the exact tested Codex version set.
 - [`docs/runbooks/claude-code-integration.md`](../runbooks/claude-code-integration.md) and

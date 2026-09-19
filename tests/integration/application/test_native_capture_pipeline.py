@@ -2,7 +2,7 @@
 
 These tests deliberately start at the host normalizers.  A fake control client provides the
 in-process service transport, while the coordinator, SQLite ledger, encrypted object store, and
-semantic case builder remain production implementations.  The marker is supplied by the hook
+AI-powered review case builder remain production implementations.  The marker is supplied by the hook
 payload and is asserted in the prepared packet, so a manually fabricated evidence row cannot make
 the test pass.
 """
@@ -620,7 +620,7 @@ async def _native_claude_case(
     TaskRuntime,
     FrozenCase,
 ]:
-    """Build one real captured Claude case for composition-level semantic tests."""
+    """Build one real captured Claude case for composition-level AI-powered review tests."""
 
     profile = CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
     (
@@ -780,7 +780,7 @@ def _assisted_composition_evaluator(
         cast(PrivacyCoordinator, privacy),
         # Keep the composition clock in the same UTC domain as the task ledger. The production
         # service supplies one clock to both; using the generic July fixture clock here would
-        # make a freshly-created September semantic case appear expired before its first claim.
+        # make a freshly-created September AI-powered review case appear expired before its first claim.
         _Clock(),
         semantic_non_dispatch._INSTALLATION,  # pyright: ignore[reportPrivateUsage]
         resolve_provider,
