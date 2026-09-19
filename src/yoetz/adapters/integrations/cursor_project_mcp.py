@@ -249,7 +249,8 @@ def inspect_project_mcp_registration(
 
     if route_profile not in {"policy", "strict"}:
         raise _fail("command_invalid")
-    expected = _expected(launcher, isolation_root, route_profile)
+    expected = _expected(launcher, isolation_root, route_profile, project_root=project_root)
+    legacy_selector = _expected(launcher, isolation_root, route_profile)
     with _directory(project_root) as project_descriptor:
         assert project_descriptor is not None
         project_identity = _identity(os.fstat(project_descriptor))
@@ -262,7 +263,7 @@ def inspect_project_mcp_registration(
             raise _fail("config_invalid")
         raw, config_identity = observed
         document = _document(raw)
-        if not _present(document) or _entry(document) != expected:
+        if not _present(document) or _entry(document) not in (expected, legacy_selector):
             raise _fail("foreign_present")
         if _identity(os.fstat(config_directory)) != config_directory_identity:
             raise _fail("preview_stale")
@@ -311,7 +312,12 @@ def _present(document: Mapping[str, JsonValue]) -> bool:
 
 
 def _expected(
-    launcher: tuple[str, ...], root: str | None, route: Route, *, project_selector: bool = True
+    launcher: tuple[str, ...],
+    root: str | None,
+    route: Route,
+    *,
+    project_selector: bool = True,
+    project_root: Path | None = None,
 ) -> dict[str, JsonValue]:
     if not valid_launcher(launcher):
         raise _fail("launcher_invalid")
@@ -322,7 +328,14 @@ def _expected(
             pass
     args: list[JsonValue] = [*launcher[1:], "mcp", "serve", "--host", "cursor"]
     if project_selector:
-        args.extend(("--project-root", _CURSOR_PROJECT_SELECTOR))
+        if project_root is not None:
+            _path(project_root)
+        args.extend(
+            (
+                "--project-root",
+                _CURSOR_PROJECT_SELECTOR if project_root is None else str(project_root),
+            )
+        )
     if route == "strict":
         args.extend(("--semantic", "off"))
     entry: dict[str, JsonValue] = {"type": "stdio", "command": launcher[0], "args": args}
@@ -356,7 +369,10 @@ class _Inspection:
 def _inspect(
     target: CursorProjectMcpTarget, launcher: tuple[str, ...], root: str | None
 ) -> _Inspection:
-    policy, strict = _expected(launcher, root, "policy"), _expected(launcher, root, "strict")
+    policy = _expected(launcher, root, "policy", project_root=target.project_root)
+    strict = _expected(launcher, root, "strict", project_root=target.project_root)
+    placeholder_policy = _expected(launcher, root, "policy")
+    placeholder_strict = _expected(launcher, root, "strict")
     # Entries written before the explicit project selector remain safe to recognize as Yoetz's
     # own project source so the next preview can upgrade them in place.  They never get emitted
     # again, and foreign/user/plugin sources remain untouched.
@@ -415,9 +431,9 @@ def _inspect(
         entry = _entry(documents[0])
         route = (
             "policy"
-            if entry == policy or entry == legacy_policy
+            if entry in (policy, placeholder_policy, legacy_policy)
             else "strict"
-            if entry == strict or entry == legacy_strict
+            if entry in (strict, placeholder_strict, legacy_strict)
             else None
         )
         state = "yoetz_owned" if route is not None else "foreign_present"
@@ -475,7 +491,7 @@ def _plan(
             del servers["yoetz"]
             mutation = "unregister"
     else:
-        entry = _expected(launcher, isolation_root, route)
+        entry = _expected(launcher, isolation_root, route, project_root=target.project_root)
         if servers.get("yoetz") != entry:
             servers["yoetz"] = entry
             mutation = "register" if observed.state == "absent" else "reregister"

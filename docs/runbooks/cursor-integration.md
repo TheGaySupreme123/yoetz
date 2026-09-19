@@ -229,7 +229,7 @@ Then invoke the exact intended Yoetz launcher to preview and install the project
 Install the native plugin with `--mcp-ownership external-registration` through the authenticated
 plugin lifecycle. Its launcher and isolated root must match the project entry. The project entry is
 `.cursor/mcp.json`, has the pinned launcher plus `mcp serve --host cursor --project-root
-${workspaceFolder}`, and carries only the validated `YOETZ_ISOLATED_ROOT` environment binding when
+<exact-project-root>`, and carries only the validated `YOETZ_ISOLATED_ROOT` environment binding when
 isolated. Strict mode appends `--semantic off`; omitting `--route-profile` preserves an existing
 owned route. The project registration command never launches a service and never grants AI-powered
 review egress or host trust. The startup selector is validated against the exact owned project
@@ -1045,3 +1045,12 @@ One host-specific fact already applies and is unchanged by ADR-030: the bridge d
 `authorize_command` to Cursor, because Cursor is never an agent-chat attestation client. The
 canonical body carries only the commands admitted for that host, so it omits the authorize step
 rather than naming a command the host cannot use.
+
+### Project selectors in the Agent CLI (0.2.3)
+
+New project registrations store the exact validated absolute project path. Cursor Agent CLI
+2026.09.18-9a7762b passes the IDE placeholder literally, so a placeholder registration fails
+before the bridge can initialize. Existing placeholder entries remain recognizable and valid
+for IDE clients that expand them; an accepted install preview upgrades them in place. Moving
+a project requires a new registration preview. The absolute selector only chooses among the
+native client roots: it never replaces roots/list or relaxes the ownership and session fences.

@@ -5338,3 +5338,11 @@ changes the effective entry. It displays the new target, command and digest and 
 confirmation. Foreign entries and subsequent drift still refuse. Noninteractive exact-preview
 callers retain the stale-preview failure. The terminal UI prepares its MCP preview with the same
 resolved Codex home as its activation preview.
+
+### Cursor project registration selector compatibility (issue #786)
+
+Project MCP registration emits the validated absolute project path for `--project-root` so both
+IDE and Agent CLI clients can start the same bridge. Existing `${workspaceFolder}` entries remain
+recognized for upgrade and IDE runtime verification. A registration naming another absolute
+project is foreign. The selector still must match the native client roots/list inventory and
+the exact owned project registration; no CWD or caller-authority fallback is added.
